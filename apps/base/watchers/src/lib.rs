@@ -36,8 +36,8 @@ use bilibi_module_registry::{
     Catalog, Contribution, Layer, Module, Provenance, RegistryError, Service,
 };
 use bilibi_queue::{
-    EndingBinding, EndingService, HandlerBinding, HandlerService, Worker, ENDINGS, HANDLERS,
-    WORKERS,
+    EndingBinding, EndingService, HandlerBinding, HandlerService, TenantFifo, Worker, ENDINGS,
+    HANDLERS, TENANT_FIFO, WORKERS,
 };
 use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
 use serde_json::json;
@@ -64,10 +64,8 @@ pub const SETTLE: &str = "watchers.run.settle";
 pub const ACTIONS_PER_RUN: &str = "watchers.actions_per_run";
 /// Most watchers in a row one first change may start (the causal-chain budget).
 pub const CHAIN_DEPTH: &str = "watchers.chain_depth";
-/// Tokens refilled per minute for each watcher.
+/// Tokens refilled per minute and maximum tokens held per tenant.
 pub const RUNS_PER_MINUTE: &str = "watchers.runs_per_minute";
-/// Maximum tokens held by each watcher.
-pub const BURST_SIZE: &str = "watchers.burst_size";
 /// Most watchers switched on for one trigger in a tenant.
 pub const ACTIVE_PER_TRIGGER: &str = "watchers.active_per_trigger";
 
@@ -140,9 +138,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, ACTIONS_PER_RUN, provenance!
 inventory::submit! { Contribution::new(DEFINITIONS, CHAIN_DEPTH, provenance!(), &limit(
 "Watchers in a chain", "How many watchers in a row one change may start, when a watcher's action starts another watcher. The next one is refused, and its receipt says so.", || json!(3), 10.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, RUNS_PER_MINUTE, provenance!(), &limit(
-"Watcher refill per minute", "Tokens added per minute to each watcher’s bucket. Each new run consumes one token.", || json!(600), 10_000.0)) }
-inventory::submit! { Contribution::new(DEFINITIONS, BURST_SIZE, provenance!(), &limit(
-"Watcher burst size", "The most runs each watcher can start at once. Runs without a token are refused in their receipts.", || json!(600), 10_000.0)) }
+"Watcher runs per minute", "Tokens added per minute to this tenant's bucket, which holds up to one minute's worth. Each new run spends one token. When the bucket is empty, runs wait in order.", || json!(600), 10_000.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, ACTIVE_PER_TRIGGER, provenance!(), &limit(
 "Watchers per trigger", "The most watchers that may be switched on for one trigger.", || json!(20), 100.0)) }
 
@@ -160,6 +156,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, MAX_ATTEMPTS, provenance!(),
 "Attempts per watchers job", "The most attempts allowed for a watchers job, including its first attempt. Waiting runs are refused when this budget is exhausted.", || json!(ATTEMPT_CEILING), ATTEMPT_CEILING as f64)) }
 
 inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker { max_attempts: ATTEMPT_CEILING, validate: run::arguments }) }
+inventory::submit! { Contribution::new(TENANT_FIFO, WORKER, provenance!(), &TenantFifo) }
 inventory::submit! { Contribution::new(HANDLERS, WORKER, provenance!(), &HandlerBinding { service: RUNNER, capability: RUN }) }
 inventory::submit! { Contribution::new(ENDINGS, WORKER, provenance!(), &EndingBinding { service: SETTLED, principal: PRINCIPAL, capability: SETTLE }) }
 inventory::submit! { Contribution::new(bilibi_events::SUBSCRIBERS, SUBSCRIBER, provenance!(), &bilibi_events::Subscriber {

@@ -16,7 +16,7 @@
 //!    retry after a crash finds the receipt and does nothing twice.
 use crate::definition::Definition;
 use crate::store::Watchers;
-use crate::{BURST_SIZE, CHAIN_DEPTH, MAX_ATTEMPTS, RUNS_PER_MINUTE};
+use crate::{CHAIN_DEPTH, MAX_ATTEMPTS, RUNS_PER_MINUTE};
 use bilibi_authz::SystemScope;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_events::{Event, Handoff, On, Subscribe, SubscriberFuture};
@@ -26,6 +26,7 @@ use bilibi_queue::{Ended, Ending, EndingFuture, Execution, Handler, HandlerFutur
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
+use std::time::SystemTime;
 use tokio_postgres::Transaction;
 
 /// The service, bound once at boot, for the subscriber (a static) to reach.
@@ -172,7 +173,7 @@ impl Handler for Worker {
             let maximum = match maximum {
                 Ok(maximum) => maximum,
                 Err(Error::Unauthorized | Error::Forbidden) => {
-                    return Outcome::Cancel("actor_refused")
+                    return Outcome::Cancel("actor_refused");
                 }
                 Err(_) => return Outcome::Retry("watchers_unavailable"),
             };
@@ -215,11 +216,7 @@ impl Worker {
         let tenant = execution.tenant();
         let watchers = &self.watchers;
         let client = watchers.db.get().await?;
-        let (depth, per_minute, burst) = (
-            watchers.limit(&**client, &scope, CHAIN_DEPTH).await?,
-            watchers.limit(&**client, &scope, RUNS_PER_MINUTE).await?,
-            watchers.limit(&**client, &scope, BURST_SIZE).await?,
-        );
+        let depth = watchers.limit(&**client, &scope, CHAIN_DEPTH).await?;
         let runs: Vec<Run> = client.query(
             "SELECT id,watcher_id,version_id,event_id,subject,depth,state,logical_event FROM base_watcher_runs WHERE tenant_id=$1 AND event_id=$2 AND state IN ('queued','matched') ORDER BY id",
             &[&tenant, &event],
@@ -231,7 +228,7 @@ impl Worker {
         for mut run in runs {
             let mut client = watchers.db.get().await?;
             let mut tx = execution
-                .begin(&mut client, "watchers.run.admitted")
+                .begin(&mut client, "watchers.run.admission")
                 .await?;
             let current = tx.sql().query_one("SELECT started_at IS NOT NULL,state FROM base_watcher_runs WHERE tenant_id=$1 AND id=$2 FOR UPDATE", &[&tenant, &run.id]).await?;
             let admitted: bool = current.get(0);
@@ -241,31 +238,9 @@ impl Worker {
                 continue;
             }
             if !admitted {
-                let id = run.id;
-                let watcher = run.watcher;
-                let allowed = tx.mutate(move |sql| Box::pin(async move {
-                    // The row lock serializes this watcher's bucket across workers. Database
-                    // time and clamping protect it from clock jumps and setting reductions.
-                    let row = sql.query_one("SELECT bucket_tokens, bucket_at::text FROM base_watchers WHERE tenant_id=$1 AND id=$2 FOR UPDATE", &[&tenant, &watcher]).await?;
-                    let old_tokens: Option<f64> = row.get(0);
-                    let old_at: Option<String> = row.get(1);
-                    let available: f64 = sql.query_one("SELECT LEAST($3::bigint::double precision, COALESCE(bucket_tokens + GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp() - bucket_at)))::double precision * $4::bigint::double precision / 60.0, $3::bigint::double precision)) FROM base_watchers WHERE tenant_id=$1 AND id=$2", &[&tenant, &watcher, &burst, &per_minute]).await?.get(0);
-                    let allowed = available >= 1.0;
-                    let tokens = if allowed { available - 1.0 } else { available };
-                    let at: String = sql.query_one("UPDATE base_watchers SET bucket_tokens=$3,bucket_at=GREATEST(COALESCE(bucket_at, clock_timestamp()), clock_timestamp()) WHERE tenant_id=$1 AND id=$2 RETURNING bucket_at::text", &[&tenant, &watcher, &tokens]).await?.get(0);
-                    if allowed {
-                        sql.execute("UPDATE base_watcher_runs SET started_at=now() WHERE tenant_id=$1 AND id=$2", &[&tenant, &id]).await?;
-                    } else {
-                        sql.execute("UPDATE base_watcher_runs SET state='refused',reason='rate_limit',finished_at=now() WHERE tenant_id=$1 AND id=$2", &[&tenant, &id]).await?;
-                    }
-                    Ok((allowed, vec![
-                        Change { kind: "base/watchers.watcher".into(), id: watcher, old: json!({"bucket_tokens": old_tokens, "bucket_at": old_at}), new: json!({"bucket_tokens": tokens, "bucket_at": at}) },
-                        Change { kind: "base/watchers.run".into(), id, old: json!({"state": "queued"}), new: if allowed { json!({"started": true}) } else { json!({"state": "refused", "reason": "rate_limit"}) } },
-                    ]))
-                })).await?;
-                if !allowed {
-                    tx.commit().await?;
-                    continue;
+                if let Some(run_at) = self.admit(&mut tx, &scope, run.id).await? {
+                    execution.defer_until(&tx, run_at).await?;
+                    return tx.commit().await;
                 }
             }
             tx.commit().await?;
@@ -273,6 +248,62 @@ impl Worker {
             self.run(execution, &scope, run, depth).await?;
         }
         Ok(())
+    }
+
+    async fn admit(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+    ) -> Result<Option<SystemTime>> {
+        let tenant = scope.tenant();
+        self.watchers.lock_admission(tx.sql(), scope).await?;
+        let rate = self
+            .watchers
+            .limit(tx.sql(), scope, RUNS_PER_MINUTE)
+            .await?;
+        let row = tx.sql().query_one(
+            "WITH bucket AS MATERIALIZED (
+                SELECT b.tokens, b.refilled_at, GREATEST(b.refilled_at, clock_timestamp()) AS sampled_at
+                FROM (VALUES ($1::bigint)) AS tenant(id)
+                LEFT JOIN base_watcher_buckets b ON b.tenant_id=tenant.id
+            ), refill AS (
+                SELECT tokens, refilled_at, sampled_at,
+                    LEAST($2::bigint::double precision, COALESCE(tokens +
+                        EXTRACT(EPOCH FROM sampled_at - refilled_at)::double precision * $2::bigint / 60.0,
+                        $2::bigint::double precision)) AS available
+                FROM bucket
+            )
+            SELECT tokens, refilled_at::text, sampled_at, available,
+                sampled_at + make_interval(secs => ceil((1.0 - available) * 60000000.0 / $2::bigint) / 1000000.0)
+            FROM refill",
+            &[&tenant, &rate],
+        ).await?;
+        let available: f64 = row.get(3);
+        if available < 1.0 {
+            return Ok(Some(row.get(4)));
+        }
+        let old_tokens: Option<f64> = row.get(0);
+        let old_at: Option<String> = row.get(1);
+        let at: SystemTime = row.get(2);
+        let tokens = available - 1.0;
+        tx.mutate(move |sql| Box::pin(async move {
+            let refilled_at: String = sql.query_one(
+                "INSERT INTO base_watcher_buckets (tenant_id,tokens,refilled_at) VALUES ($1,$2,$3)
+                ON CONFLICT (tenant_id) DO UPDATE SET tokens=EXCLUDED.tokens,refilled_at=EXCLUDED.refilled_at
+                RETURNING refilled_at::text",
+                &[&tenant, &tokens, &at],
+            ).await?.get(0);
+            let started_at: String = sql.query_one(
+                "UPDATE base_watcher_runs SET started_at=$3 WHERE tenant_id=$1 AND id=$2 RETURNING started_at::text",
+                &[&tenant, &id, &at],
+            ).await?.get(0);
+            Ok(((), vec![
+                Change { kind: "base/watchers.bucket".into(), id: tenant, old: json!({"tokens": old_tokens, "refilled_at": old_at}), new: json!({"tokens": tokens, "refilled_at": refilled_at}) },
+                Change { kind: "base/watchers.run".into(), id, old: json!({"started_at": null}), new: json!({"started_at": started_at}) },
+            ]))
+        })).await?;
+        Ok(None)
     }
 
     async fn run(&self, execution: &Execution, scope: &Scope, run: Run, depth: i64) -> Result<()> {
@@ -378,7 +409,7 @@ impl Worker {
                 Err(code) => {
                     return self
                         .finish(execution, &mut client, &run, Stop::Refused(code), None)
-                        .await
+                        .await;
                 }
             };
             let subject_version = facts

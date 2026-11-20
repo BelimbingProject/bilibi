@@ -50,7 +50,6 @@ fn reason(code: &str) -> &'static str {
         "watcher_off" => "Not run: the watcher was switched off.",
         "stale_version" => "Not run: a newer version was approved after this event, so this one no longer runs.",
         "watcher_limit" => "Not run: the watcher exceeds a configured size or fact limit in System Settings.",
-        "rate_limit" => "Not run: this watcher reached its run limit. Tokens refill over time.",
         "attempt_limit" => "Not run: the watchers job reached its configured attempt limit.",
         "action_limit" => "Not run: it has more actions than allowed per run.",
         "read_refused" => "Not run: automation may not read these records yet. An administrator allows it in Automation access.",

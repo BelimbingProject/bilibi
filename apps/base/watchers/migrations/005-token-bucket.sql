@@ -1,4 +1,6 @@
-ALTER TABLE base_watchers ADD COLUMN bucket_tokens double precision;
-ALTER TABLE base_watchers ADD COLUMN bucket_at timestamptz;
-ALTER TABLE base_watchers ADD CONSTRAINT base_watchers_bucket_pair CHECK ((bucket_tokens IS NULL) = (bucket_at IS NULL));
+CREATE TABLE base_watcher_buckets (
+    tenant_id bigint PRIMARY KEY REFERENCES tenants(id),
+    tokens double precision NOT NULL CHECK (tokens >= 0 AND tokens <= 10000),
+    refilled_at timestamptz NOT NULL
+);
 DROP INDEX base_watcher_runs_started;

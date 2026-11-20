@@ -57,7 +57,6 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 | `subject_unavailable` | The record is gone or out of reach |
 | `action_limit` | The watcher is over the configured action count or actions-per-run limit |
 | `watcher_limit` | The watcher is over a configured size or fact limit |
-| `rate_limit` | This watcher had no token available; this run was refused |
 | `attempt_limit` | The job exhausted its configured attempt budget; waiting runs are refused |
 | `actor_refused` | Queue refused the principal (a suspended tenant, a withdrawn grant); told through Queue's `EndingBinding` |
 | `catalog_changed` | Installed fields, trigger bindings or action schemas changed, a condition's custom field was archived or withdrawn from watchers, or an owner was unmounted; draft and approve a new version |
@@ -83,8 +82,7 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 | --- | --- | --- | --- |
 | `watchers.actions_per_run` | 3 | 1–10 | Actions one run takes; a watcher with more is not approved |
 | `watchers.chain_depth` | 3 | 1–10 | Watchers in a row one first change may start (the causal-chain budget) |
-| `watchers.runs_per_minute` | 600 | 1–10,000 | Tokens refilled per minute for each watcher |
-| `watchers.burst_size` | 600 | 1–10,000 | Maximum tokens per watcher; a run consumes one, or is refused when empty |
+| `watchers.runs_per_minute` | 600 | 1–10,000 | Tokens refilled per minute and maximum tokens held by a tenant |
 | `watchers.active_per_trigger` | 20 | 1–100 | Watchers switched on for one trigger |
 | `watchers.conditions` | 20 | 1–20 | Conditions in a watcher |
 | `watchers.actions` | 10 | 1–10 | Actions in a watcher; `watchers.actions_per_run` also applies |
@@ -93,7 +91,7 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 | `watchers.facts_read` | 21 | 1–21 | Distinct condition field paths and the record version |
 | `watchers.max_attempts` | 25 | 1–25 | Attempts per watchers job, including the first |
 
-Each watcher starts with a full bucket, independent of other watchers and tenants. A new run consumes one token; a retry of an admitted run consumes no additional token. Tokens refill continuously up to the current burst size. At admission the current refill rate applies to elapsed time since the last bucket update; reducing the burst size clamps the balance. An empty bucket refuses the run immediately, with `rate_limit` in its receipt. Bucket state occupies two fields per watcher, regardless of run volume.
+Each tenant starts with a full bucket shared by its watchers. A new run spends one token. An admitted run keeps its token across retries. Tokens refill continuously up to one minute of the current rate, which also applies to the time elapsed since the last debit. When the bucket is empty, Queue keeps the same head job scheduled for the next token with its attempt budget intact. Jobs already queued for that tenant wait in enqueue order, with runs within each job ordered by run ID.
 
 The definition's hard ceilings stay fixed; settings can lower them. The facts budget counts distinct condition paths plus the bound record version (once). Draft review, approval, switch-on and execution apply the current size and fact limits, including before each outstanding action. Queue keeps a hard ceiling of 25 attempts; the watchers worker allows the configured number of attempts, including the first, and cancels with `attempt_limit` when exhausted. Queue's existing ending hook refuses any waiting runs.
 
@@ -131,11 +129,11 @@ Boot refuses a trigger that is not the contributor's own declared event or names
 
 ## Tables
 
-`base_watchers`, `base_watcher_versions`, `base_watcher_runs` and `base_watcher_effects` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events` and `base-watchers-004-watchers`, and `base-watchers-005-token-bucket`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
+`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects` and `base_watcher_buckets` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events` and `base-watchers-004-watchers`, and `base-watchers-005-token-bucket`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 
-`apps/web/examples/watchers-walkthrough.rs` on a fresh disposable database, migrated and seeded first (its header has the commands). It calls startup validation with a customer Extension in the supplied composition, proves refusal in Shared service and admission in Isolated installation, and calls the protected owner mutation to prove that switching to shared refuses and preserves the saved mode. A tenant administrator is refused by the same mutation. Unmounted, the engine offers no trigger and refuses a draft on an unknown one. With the reference owner `fixtures/containers/watcher_cases` mounted (never a Platform member), it runs the same approved watcher in both installation modes: an urgent 1500.00 case goes to the priority desk exactly once, and a normal case remains unchanged. It also proves two tenants with the same facts and different destinations, a restart and a crash-retry with one effect, an agent's draft approved by a person, a person's draft in the page's input shape and its next version, refusals for a denied capability, a restricted field, an archived company, a suspended tenant, a stale version and a switched-off watcher, a condition on a tenant custom field (refused until offered, then routed; refused when the field is restricted or archived), self-triggering and multi-watcher cycles refused at approval and a noncyclic chain stopped at the chain budget, a threshold change as a new version, and a burst refused at its watcher’s bound, with refill and another tenant running independently.
+`apps/web/examples/watchers-walkthrough.rs` on a fresh disposable database, migrated and seeded first (its header has the commands). It calls startup validation with a customer Extension in the supplied composition, proves refusal in Shared service and admission in Isolated installation, and calls the protected owner mutation to prove that switching to shared refuses and preserves the saved mode. A tenant administrator is refused by the same mutation. Unmounted, the engine offers no trigger and refuses a draft on an unknown one. With the reference owner `fixtures/containers/watcher_cases` mounted (never a Platform member), it runs the same approved watcher in both installation modes: an urgent 1500.00 case goes to the priority desk exactly once, and a normal case remains unchanged. It also proves two tenants with the same facts and different destinations, a restart and a crash-retry with one effect, an agent's draft approved by a person, a person's draft in the page's input shape and its next version, refusals for a denied capability, a restricted field, an archived company, a suspended tenant, a stale version and a switched-off watcher, a condition on a tenant custom field (refused until offered, then routed; refused when the field is restricted or archived), self-triggering and multi-watcher cycles refused at approval and a noncyclic chain stopped at the chain budget, a threshold change as a new version, and a burst that shares the tenant bucket across watchers and resumes in order as tokens refill while another tenant runs independently.
 
 The official Domain companion walkthrough is `apps/web/examples/watchers-domains-walkthrough.rs`. See the [companion handoff](../../../docs/watchers-logical-event-handoff.md) for mounts, source prerequisites and execution instructions.
 
