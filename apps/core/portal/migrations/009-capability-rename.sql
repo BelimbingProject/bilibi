@@ -10,3 +10,7 @@ UPDATE principal_capabilities SET capability = 'admin.portal.view'
  WHERE capability = 'admin.customer-access.view';
 UPDATE principal_capabilities SET capability = 'admin.portal.manage'
  WHERE capability = 'admin.customer-access.manage';
+UPDATE authz_system_grants SET capability = 'admin.portal.view'
+ WHERE capability = 'admin.customer-access.view';
+UPDATE authz_system_grants SET capability = 'admin.portal.manage'
+ WHERE capability = 'admin.customer-access.manage';
