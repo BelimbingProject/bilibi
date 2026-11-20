@@ -101,7 +101,7 @@ bilibi_menu::contribute!(
 
 inventory::submit! {
     Module { id: "base/settings_editor", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/agent_api", "base/settings", "base/step_up", "base/ui", "base/menu", "base/media"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/agent_api", "base/settings", "base/step_up", "base/ui", "base/menu", "base/media", "base/labels"],
         migrations: &[],
         services: &[Service { id: "base/settings_editor.agent", factory: |services| {
             if !agent::bind(

@@ -58,6 +58,11 @@ pub struct Subject {
     /// Where it sits, for telling same-named items apart (a menu item's
     /// parents); empty for a record type.
     pub trail: String,
+    /// The page a menu item opens, when it opens one.
+    pub page: Option<String>,
+    /// Every stable ID this kind of record is known by: its Grid table and
+    /// the record types that table holds. Empty for a menu item.
+    pub record_kinds: Vec<String>,
 }
 
 /// A tenant's overrides as one read of the table, to ask word by word.
@@ -233,6 +238,8 @@ impl Labels {
                 id: item.id.to_owned(),
                 default: item.label.to_owned(),
                 trail: trail.join(" › "),
+                page: item.route.map(str::to_owned),
+                record_kinds: Vec::new(),
             });
         }
         subjects.sort_by(|a, b| (&a.trail, &a.default, &a.id).cmp(&(&b.trail, &b.default, &b.id)));

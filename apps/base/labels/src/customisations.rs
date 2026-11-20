@@ -1,4 +1,6 @@
-//! Registered sections of the tenant customisations page.
+//! Registered sections of tenant customisation: the rows the Customisations
+//! page lists with their undo action, and what an agent may change
+//! (`base.labels.customisations.discover`). One contribution feeds both.
 use serde_json::Value;
 
 /// Registry key for customisation section contributions.
@@ -15,17 +17,105 @@ pub struct CustomisationRow {
     pub input: Value,
 }
 
-/// One owner's read and undo contracts, and its projection of the read result.
-/// The read and write contracts retain their own authorisation checks.
+/// One owner's kind of customisation. `undo` puts its rows on the
+/// Customisations page; `changes` tells agents what may be changed. A section
+/// declares at least one. Every operation keeps its own authorisation checks.
 pub struct CustomisationSection {
     pub title: &'static str,
+    pub undo: Option<Undo>,
+    pub changes: Option<Changes>,
+}
+
+/// The owner's read and undo contracts for the page, and its projection of
+/// the read result into rows.
+pub struct Undo {
     pub read: &'static str,
     pub read_input: fn() -> Value,
-    pub undo: &'static str,
+    /// The reviewed write a confirmed row calls with its `input`.
+    pub operation: &'static str,
     pub event: &'static str,
     pub action: &'static str,
     pub detail: &'static str,
     pub rows: fn(&Value) -> Vec<CustomisationRow>,
+}
+
+/// Whose data a change lands in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Target {
+    /// Everyone in the caller's tenant.
+    Tenant,
+    /// The caller's current company.
+    Company,
+    /// The caller only.
+    Person,
+}
+impl Target {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Tenant => "tenant",
+            Self::Company => "company",
+            Self::Person => "person",
+        }
+    }
+}
+
+/// What an agent may change in a section: the owner's read that lists every
+/// choice, with or without an override, and the operations that change,
+/// preview, verify and restore one.
+pub struct Changes {
+    /// One plain sentence saying what this lets a tenant change.
+    pub purpose: &'static str,
+    /// Words people use for this purpose, matched by the `purpose` filter.
+    pub keywords: &'static [&'static str],
+    pub target: Target,
+    /// The bounds a change must stay within, in plain words.
+    pub limits: &'static str,
+    /// The owner's guide key.
+    pub guide: &'static str,
+    /// The reads that together list what may be changed, including
+    /// untouched choices. None may need a transaction.
+    pub reads: &'static [Read],
+    /// Projects the results of `reads`, in their order, into choices.
+    pub choices: fn(&[Value]) -> Vec<Choice>,
+    /// The reviewed writes that make or edit a customisation. Their dry run
+    /// is the preview.
+    pub change: &'static [&'static str],
+    /// A read that shows the result before saving, when the owner has one.
+    pub preview: Option<&'static str>,
+    /// A read that shows the saved result.
+    pub verify: &'static str,
+    /// The reviewed write that returns a choice to its default.
+    pub restore: Option<&'static str>,
+}
+
+/// A read operation and the input to call it with.
+pub struct Read {
+    pub operation: &'static str,
+    pub input: fn() -> Value,
+}
+
+/// One thing that may be changed.
+#[derive(Clone, Debug, Default)]
+pub struct Choice {
+    /// Stable within its section.
+    pub subject: String,
+    pub title: String,
+    /// The page address this choice shows on, when it belongs to one page.
+    pub page: Option<String>,
+    /// Every stable ID the owner knows this choice's kind of record by.
+    pub record_kinds: Vec<String>,
+    /// The value in effect; `None` when it may not be read (a secret).
+    pub value: Option<Value>,
+    /// What a restore returns to, when the owner knows it.
+    pub default: Option<Value>,
+    /// Where the value in effect comes from: `default`, `tenant`, …
+    pub source: Option<String>,
+    /// Whether the tenant has changed it.
+    pub customised: bool,
+    /// The token the owner's writes ask for.
+    pub version: Option<Value>,
+    /// The input that names this choice to the owner's operations.
+    pub input: Value,
 }
 
 fn empty_input() -> Value {
@@ -46,6 +136,36 @@ fn label_rows(value: &Value) -> Vec<CustomisationRow> {
     }).collect()
 }
 
+fn label_choices(reads: &[Value]) -> Vec<Choice> {
+    reads[0].as_array().into_iter().flatten().filter_map(|row| {
+        let (kind, subject, default) = (row["kind"].as_str()?, row["subject"].as_str()?, row["default"].as_str()?);
+        let trail = row["trail"].as_str().unwrap_or_default();
+        let label = row["label"].as_str();
+        Some(Choice {
+            subject: format!("{kind}:{subject}"),
+            title: if trail.is_empty() { format!("{kind}: {default}") } else { format!("{kind}: {trail} › {default}") },
+            page: row["page"].as_str().map(str::to_owned),
+            record_kinds: row["record_kinds"].as_array().into_iter().flatten().filter_map(|kind| kind.as_str().map(str::to_owned)).collect(),
+            value: Some(serde_json::json!(label.unwrap_or(default))),
+            default: Some(serde_json::json!(default)),
+            source: Some(if label.is_some() { "tenant" } else { "default" }.into()),
+            customised: label.is_some(),
+            version: Some(row["version"].clone()),
+            input: serde_json::json!({"kind": kind, "subject": subject, "version": row["version"]}),
+        })
+    }).collect()
+}
+
 inventory::submit! { bilibi_module_registry::Contribution::new(SECTIONS, "base/labels.customisations", bilibi_module_registry::Provenance { module: "base/labels", source: file!(), line: line!() }, &CustomisationSection {
-    title: "Labels", read: "base.labels.list", read_input: empty_input, undo: "base.labels.clear", event: "customisation.labels", action: "Restore default", detail: "The module's original word will be shown again.", rows: label_rows,
+    title: "Labels",
+    undo: Some(Undo { read: "base.labels.list", read_input: empty_input, operation: "base.labels.clear", event: "customisation.labels", action: "Restore default", detail: "The module's original word will be shown again.", rows: label_rows }),
+    changes: Some(Changes {
+        purpose: "Show your own word for a menu item, a record type or a field.",
+        keywords: &["rename", "label", "word", "wording", "terminology", "menu", "field", "column", "heading"],
+        target: Target::Tenant,
+        limits: "1 to 60 characters of plain text. Operation keys, routes and permission keys never change.",
+        guide: "base.labels",
+        reads: &[Read { operation: "base.labels.list", input: empty_input }], choices: label_choices,
+        change: &["base.labels.set"], preview: None, verify: "base.labels.list", restore: Some("base.labels.clear"),
+    }),
 }) }

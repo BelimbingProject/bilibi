@@ -48,6 +48,138 @@ fn confirmation_event(html: &str, event: &str) -> Value {
     json!({"type":event, "key":key})
 }
 
+/// "What can I change here?" through the read contract, for both tenants.
+async fn discovery(
+    db: &bilibi_database::Db,
+    contracts: &PageContracts,
+    one: &Scope,
+    two: &Scope,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KEY: &str = "base.labels.customisations.discover";
+    let section_ids = |answer: &Value, list: &str| -> Vec<String> {
+        answer["result"][list]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|section| section["section"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let choice = |answer: &Value, subject: &str| -> Option<Value> {
+        answer["result"]["choices"]
+            .as_array()?
+            .iter()
+            .find(|choice| choice["subject"] == subject)
+            .cloned()
+    };
+
+    // Every section answers, on one bounded page, with choices nobody changed.
+    let all = contracts.read(one, KEY, &json!({})).await?;
+    let sections = section_ids(&all, "sections");
+    for id in [
+        "base/labels.customisations",
+        "base/custom_fields.customisations",
+        "base/grid.customisations",
+        "base/menu_order.customisations",
+    ] {
+        assert!(sections.iter().any(|section| section == id), "{id}");
+    }
+    assert!(section_ids(&all, "unavailable").is_empty());
+    let page = &all["meta"]["page"];
+    assert_eq!(page["page_size"], 25);
+    assert_eq!(all["result"]["choices"].as_array().map(Vec::len), Some(25));
+    assert!(page["total"].as_u64().is_some_and(|total| total > 25));
+    let untouched = contracts
+        .read(one, KEY, &json!({"customised": false, "page_size": 1}))
+        .await?;
+    assert_eq!(untouched["result"]["choices"][0]["source"], "default");
+    let last = contracts
+        .read(one, KEY, &json!({"page": 1000000, "page_size": 100}))
+        .await?;
+    assert_eq!(last["result"]["choices"], json!([]));
+    assert!(contracts
+        .read(one, KEY, &json!({"page_size": 101}))
+        .await
+        .is_err());
+
+    // By record kind: the label override, the custom field and the list's views.
+    let company = contracts
+        .read(
+            one,
+            KEY,
+            &json!({"record_kind": "company", "page_size": 100}),
+        )
+        .await?;
+    let word = choice(&company, "record:companies").ok_or("missing record label")?;
+    assert_eq!(word["value"], "Tenant one word");
+    assert_eq!(word["default"], "Companies");
+    assert_eq!(word["source"], "tenant");
+    assert_eq!(word["customised"], true);
+    assert_eq!(word["target"], "tenant");
+    assert_eq!(word["input"]["version"], word["version"]);
+    assert_ne!(word["version"], "0:0");
+    let field = choice(&company, "company.walkthrough_field").ok_or("missing field")?;
+    assert_eq!(field["value"]["label"], "Tenant one field");
+    let add = choice(&company, "company").ok_or("missing record type")?;
+    assert_eq!(add["value"], json!(["walkthrough_field"]));
+    let views = choice(&company, "companies").ok_or("missing list views")?;
+    assert_eq!(views["section"], "base/grid.customisations");
+    assert_eq!(views["customised"], false);
+    assert!(choice(&company, "admin.labels").is_none());
+    let labels = company["result"]["sections"]
+        .as_array()
+        .and_then(|sections| {
+            sections
+                .iter()
+                .find(|section| section["section"] == "base/labels.customisations")
+        })
+        .ok_or("missing labels section")?;
+    assert_eq!(labels["operations"]["change"][0]["key"], "base.labels.set");
+    assert_eq!(labels["operations"]["change"][0]["available"], true);
+    assert_eq!(labels["operations"]["restore"]["key"], "base.labels.clear");
+    assert_eq!(labels["operations"]["verify"]["key"], "base.labels.list");
+    assert!(labels["limits"]
+        .as_str()
+        .is_some_and(|limits| limits.contains("60")));
+
+    // By page, and by purpose.
+    let here = contracts
+        .read(one, KEY, &json!({"on_page": "/admin/labels/?page=2"}))
+        .await?;
+    assert_eq!(here["meta"]["page"]["total"], 1);
+    assert_eq!(here["result"]["choices"][0]["value"], "Second override");
+    assert_eq!(here["result"]["choices"][0]["on_page"], "/admin/labels");
+    let order = contracts
+        .read(one, KEY, &json!({"purpose": "Sidebar navigation"}))
+        .await?;
+    assert_eq!(
+        section_ids(&order, "sections"),
+        ["base/menu_order.customisations"]
+    );
+    let preview = &order["result"]["sections"][0]["operations"]["preview"];
+    assert_eq!(preview["key"], "base.menu_order.preview");
+
+    // Another tenant sees its own word only; a refused owner is named, not read.
+    let narrowed = json!({"section": "base/labels.customisations", "customised": true});
+    let mine = contracts.read(one, KEY, &narrowed).await?;
+    let theirs = contracts.read(two, KEY, &narrowed).await?;
+    assert_eq!(mine["meta"]["page"]["total"], 2);
+    assert_eq!(theirs["meta"]["page"]["total"], 1);
+    assert_eq!(theirs["result"]["choices"][0]["value"], "Tenant two word");
+    db.get().await?.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES(1,4,'base.custom-fields.view',false)", &[]).await?;
+    let denied = contracts.read(one, KEY, &json!({})).await?;
+    assert_eq!(
+        section_ids(&denied, "unavailable"),
+        ["base/custom_fields.customisations"]
+    );
+    assert!(!section_ids(&denied, "sections")
+        .iter()
+        .any(|section| section == "base/custom_fields.customisations"));
+    let logged: i64 = db.get().await?.query_one("SELECT count(*) FROM authz_decision_log WHERE tenant_id=1 AND user_id=4 AND capability='base.custom-fields.view' AND NOT allowed", &[]).await?.get(0);
+    assert_eq!(logged, 0);
+    db.get().await?.execute("DELETE FROM principal_capabilities WHERE tenant_id=1 AND user_id=4 AND capability='base.custom-fields.view'", &[]).await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("BILIBI_CUSTOMISATIONS_DEMO").as_deref() != Ok("disposable") {
@@ -114,6 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         json!({"kind":"menu", "subject":"admin.labels", "label":"Second override", "version":"0:0"}),
     ).await?;
     contracts.submit(&Call { scope: &one, credential: &token1, service: "base/custom_fields.pages", event: "create", contract: "base.custom_fields.define" }, json!({"record_type":"company", "key":"walkthrough_field", "label":"Tenant one field", "kind":"text"})).await?;
+    discovery(&db, &contracts, &one, &two).await?;
     let path = HashMap::new();
     let query = HashMap::new();
     let show = |scope| PageRequest {

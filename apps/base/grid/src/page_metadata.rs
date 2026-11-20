@@ -51,12 +51,11 @@ fn validate(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
 }
 inventory::submit! { Consumer::new::<PageMetadata>(PAGE_METADATA, "base/grid", validate) }
 
-pub(crate) fn metadata(
-    page: &str,
-) -> bilibi_module_registry::Result<Option<&'static PageMetadata>> {
+/// Every registered list page.
+pub(crate) fn pages() -> bilibi_module_registry::Result<&'static [&'static PageMetadata]> {
     static PAGES: OnceLock<bilibi_module_registry::Result<Vec<&'static PageMetadata>>> =
         OnceLock::new();
-    let pages = PAGES
+    PAGES
         .get_or_init(|| {
             let catalog =
                 bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
@@ -66,9 +65,14 @@ pub(crate) fn metadata(
                 .map(|entry| entry.get())
                 .collect()
         })
-        .as_ref()
-        .map_err(|e| RegistryError::Contribution(e.to_string()))?;
-    Ok(pages.iter().copied().find(|entry| entry.page == page))
+        .as_deref()
+        .map_err(|e| RegistryError::Contribution(e.to_string()))
+}
+
+pub(crate) fn metadata(
+    page: &str,
+) -> bilibi_module_registry::Result<Option<&'static PageMetadata>> {
+    Ok(pages()?.iter().copied().find(|entry| entry.page == page))
 }
 
 #[macro_export]

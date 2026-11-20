@@ -182,17 +182,25 @@ fn label_subjects() -> std::result::Result<Vec<bilibi_labels::Subject>, String> 
     let installed = installed().map_err(|error| error.to_string())?;
     let mut subjects = Vec::new();
     for table in installed.tables() {
+        let record_kinds: Vec<String> = std::iter::once(table.id())
+            .chain(table.decl.record_types.iter().copied())
+            .map(str::to_owned)
+            .collect();
         subjects.push(Subject {
             kind: Kind::Record,
             id: table.id().to_owned(),
             default: table.label().to_owned(),
             trail: String::new(),
+            page: None,
+            record_kinds: record_kinds.clone(),
         });
         subjects.extend(table.visible_fields().map(|field| Subject {
             kind: Kind::Field,
             id: subject_id(table.id(), field.id),
             default: field.label.to_owned(),
             trail: table.label().to_owned(),
+            page: None,
+            record_kinds: record_kinds.clone(),
         }));
     }
     Ok(subjects)

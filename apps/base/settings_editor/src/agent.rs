@@ -417,3 +417,48 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/settings_editor", Prov
     guides: &[Guide { key:"base.settings_editor", title:"Tenant settings", summary:"Read, set and restore settings their modules delegate to tenant administrators.", keywords:&["settings","configuration","customisation","tenant","inherit","restore","secret"], capability:TENANT_VIEW,
         body:"Use base.settings_editor.tenant.list first. It returns only settings their owning modules explicitly delegated and this person may manage. `source` is tenant, global or default; `set_for_tenant` says whether restoring will remove a tenant override. Secret values are always null and only `secret_is_set` is shown. Ask an operator to set encrypted values in System Settings (/system/settings). For other settings, plan base.settings_editor.tenant.set with its exact key and a string value: true or false for yes/no, a decimal for a number, JSON for an object or list, and plain text for text. Show the returned before/after source and value, then wait for approval. In the review card the person can edit the proposed value before running the dry run. To follow later installation changes again, plan base.settings_editor.tenant.restore; it removes only this tenant's override and asks for 2FA for encrypted settings. Never invent a key or a tenant ID: the credential supplies the tenant and the list supplies the keys." }],
 }) }
+
+/// What a tenant administrator may change: every delegated setting, whether
+/// or not this tenant overrides it. A secret's value is never readable.
+fn customisation_choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
+    let settings = reads[0]["settings"].as_array().into_iter().flatten();
+    settings
+        .filter_map(|setting| {
+            let key = setting["key"].as_str()?;
+            let secret = setting["secret"].as_bool().unwrap_or(false);
+            Some(bilibi_labels::Choice {
+                subject: key.to_owned(),
+                title: format!(
+                    "{}: {}",
+                    setting["group"].as_str().unwrap_or_default(),
+                    setting["label"].as_str()?
+                ),
+                value: (!secret).then(|| setting["value"].clone()),
+                source: setting["source"].as_str().map(str::to_owned),
+                customised: setting["set_for_tenant"].as_bool().unwrap_or(false),
+                input: json!({"key": key}),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+fn no_input() -> Value {
+    json!({})
+}
+inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/settings_editor.customisations", Provenance { module: "base/settings_editor", source: file!(), line: line!() }, &bilibi_labels::CustomisationSection {
+    title: "Tenant settings",
+    undo: None,
+    changes: Some(bilibi_labels::Changes {
+        purpose: "Set how a module behaves for this tenant, where its owner lets tenant administrators decide.",
+        keywords: &["setting", "settings", "configuration", "configure", "option", "preference", "default", "behaviour"],
+        target: bilibi_labels::Target::Tenant,
+        limits: "Only settings their modules delegate to tenant administrators, each within its declared type and range. An operator sets encrypted values in System Settings; their value is never shown.",
+        guide: "base.settings_editor",
+        reads: &[bilibi_labels::Read { operation: "base.settings_editor.tenant.list", input: no_input }],
+        choices: customisation_choices,
+        change: &["base.settings_editor.tenant.set"],
+        preview: None,
+        verify: "base.settings_editor.tenant.list",
+        restore: Some("base.settings_editor.tenant.restore"),
+    }),
+}) }

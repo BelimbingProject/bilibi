@@ -98,16 +98,17 @@ impl ReadHandler for Read {
     }
     fn call<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let bound = bound()?;
-            let client = bound.db.get().await.map_err(Error::from)?;
+            // The connection the caller handed over, never a second one.
+            let client = client.sql_client().await?;
             let value = match self {
                 Self::RecordTypes => {
-                    bilibi_authz::authorize_key(&**client, scope, VIEW).await?;
+                    bilibi_authz::authorize_key(client, scope, VIEW).await?;
                     json!({
                         "record_types": bound.fields.record_types().map(|record| json!({"id": record.id, "label": record.label})).collect::<Vec<_>>(),
                         "pick_lists": bound.fields.choice_lists().into_iter().map(|(key, label)| json!({"key": key, "label": label})).collect::<Vec<_>>(),
@@ -118,7 +119,7 @@ impl ReadHandler for Read {
                     bound
                         .fields
                         .definitions(
-                            &**client,
+                            client,
                             scope,
                             input["record_type"].as_str(),
                             input["include_archived"].as_bool().unwrap_or(false),

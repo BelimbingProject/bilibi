@@ -181,6 +181,21 @@ impl PageViews {
             .collect())
     }
 
+    /// The names of the shared views the reader may open on each of `pages`,
+    /// as `(page, name)`, under the same visibility rule.
+    pub(crate) async fn shared_names(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        pages: &[&str],
+    ) -> Result<Vec<(String, String)>> {
+        let rows = client.query(
+            &format!("SELECT v.page, v.name FROM base_grid_shared_views v WHERE {VISIBLE} AND v.page = ANY($3) ORDER BY v.page, lower(v.name), v.id"),
+            &[&scope.tenant(), &scope.user(), &pages, &scope.current_company().map(|company| company.get())],
+        ).await?;
+        Ok(rows.iter().map(|row| (row.get(0), row.get(1))).collect())
+    }
+
     /// The tenant's roles by name, for choosing whom to share with; `None`
     /// when the reader may not share (they see no role names).
     pub async fn share_roles(&self, scope: &Scope) -> Result<Option<Vec<(i64, String)>>> {
