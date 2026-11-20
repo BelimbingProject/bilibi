@@ -277,8 +277,11 @@ impl Proof {
         self.stop().await;
         let receipts = self.receipts(case).await?;
         check(
-            !receipts.is_empty()
-                && receipts.iter().all(|r| r.1 == "queued" && r.3.is_empty())
+            receipts.iter().any(|r| r.1 == "queued")
+                && receipts.iter().all(|r| {
+                    (r.1 == "queued" || (r.1 == "refused" && r.2.as_deref() == Some("watcher_off")))
+                        && r.3.is_empty()
+                })
                 && self.case(case).await? == (None, 0, 0),
             "the matching case has pinned runs and no effects before resuming the job",
         );
@@ -2018,10 +2021,13 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
     proof.settled().await?;
     let fact_receipts = proof.receipts(fact_limited).await?;
     check(
-        !fact_receipts.is_empty()
-            && fact_receipts
-                .iter()
-                .all(|run| run.1 == "refused" && run.2.as_deref() == Some("watcher_limit")),
+        fact_receipts
+            .iter()
+            .any(|run| run.2.as_deref() == Some("watcher_limit"))
+            && fact_receipts.iter().all(|run| {
+                run.1 == "refused"
+                    && matches!(run.2.as_deref(), Some("watcher_limit" | "watcher_off"))
+            }),
         "a lowered fact budget refuses already-approved watchers at runtime",
     );
     check(
@@ -2044,13 +2050,7 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
     proof.start()?;
     proof.settled().await?;
     let attempt_receipts = proof.receipts(attempt_limited).await?;
-    check(
-        !attempt_receipts.is_empty()
-            && attempt_receipts
-                .iter()
-                .all(|run| run.1 == "refused" && run.2.as_deref() == Some("attempt_limit")),
-        "the ending hook refuses waiting runs when the attempt budget is exhausted",
-    );
+    check(attempt_receipts.iter().any(|run| run.2.as_deref() == Some("attempt_limit")) && attempt_receipts.iter().all(|run| run.1 == "refused" && matches!(run.2.as_deref(), Some("attempt_limit" | "watcher_off"))), "the existing ending hook refuses waiting runs when the configured attempt budget is exhausted");
     check(
         proof.case(attempt_limited).await? == (None, 0, 0),
         "the attempt limit stops all effects on the matching case",

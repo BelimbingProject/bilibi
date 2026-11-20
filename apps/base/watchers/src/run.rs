@@ -114,9 +114,32 @@ impl Subscribe for Triggers {
                 None => None,
             };
             let (cause_id, depth) = (cause.map(|c| c.0), cause.map_or(1, |c| c.1 + 1));
+            // Approval and switch transitions take this same lock. A delivery
+            // that starts concurrently must see their committed activation.
+            let admission_key = format!("base/watchers:{}", event.tenant);
+            sql.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                &[&admission_key],
+            )
+            .await?;
             let rows = sql.query(
-                "INSERT INTO base_watcher_runs(tenant_id,watcher_id,version_id,event_id,event_name,subject,cause_run_id,depth,state,logical_event) SELECT tenant_id,id,active_version_id,$3,$2::varchar,$4,$5,$6,'queued',$7 FROM base_watchers WHERE tenant_id=$1 AND trigger=$2::varchar AND active_version_id IS NOT NULL AND disabled_at IS NULL ORDER BY id ON CONFLICT (tenant_id,version_id,event_id) DO NOTHING RETURNING id,watcher_id",
-                &[&event.tenant, &event.name, &event.id, &subject, &cause_id, &depth, &logical_event],
+                "WITH candidates AS (
+                    SELECT w.id,w.active_version_id,w.enabled_at,w.disabled_at IS NOT NULL AS off,
+                           w.disabled_at IS NULL AND $8::text::timestamptz > v.approved_at AND $8::text::timestamptz > w.enabled_at AS eligible,
+                           $8::text::timestamptz > v.approved_at AS after_approval
+                    FROM base_watchers w JOIN base_watcher_versions v
+                      ON v.tenant_id=w.tenant_id AND v.watcher_id=w.id AND v.id=w.active_version_id
+                    WHERE w.tenant_id=$1 AND w.trigger=$2::varchar
+                 )
+                 INSERT INTO base_watcher_runs(tenant_id,watcher_id,version_id,event_id,event_name,subject,cause_run_id,depth,state,logical_event,reason,finished_at,activation_at)
+                 SELECT $1,id,active_version_id,$3,$2::varchar,$4,$5,$6,
+                        CASE WHEN eligible THEN 'queued' ELSE 'refused' END,$7,
+                        CASE WHEN eligible THEN NULL WHEN off THEN 'watcher_off' WHEN NOT after_approval THEN 'event_before_approval' ELSE 'event_before_enabled' END,
+                        CASE WHEN eligible THEN NULL ELSE now() END,enabled_at
+                 FROM candidates ORDER BY id
+                 ON CONFLICT (tenant_id,version_id,event_id) DO NOTHING
+                 RETURNING id,watcher_id,state,reason",
+                &[&event.tenant, &event.name, &event.id, &subject, &cause_id, &depth, &logical_event, &event.recorded_at],
             ).await?;
             Ok(rows
                 .iter()
@@ -124,7 +147,7 @@ impl Subscribe for Triggers {
                     kind: "base/watchers.run".into(),
                     id: row.get(0),
                     old: Value::Null,
-                    new: json!({"watcher": row.get::<_, i64>(1), "event": event.id, "subject": subject, "depth": depth, "state": "queued"}),
+                    new: json!({"watcher": row.get::<_, i64>(1), "event": event.id, "subject": subject, "depth": depth, "state": row.get::<_, &str>(2), "reason": row.get::<_, Option<&str>>(3)}),
                 })
                 .collect())
         })
@@ -132,7 +155,7 @@ impl Subscribe for Triggers {
     fn handoff(&self, event: &Event, changes: &[Change]) -> Option<Handoff> {
         changes
             .iter()
-            .any(|c| c.kind == "base/watchers.run")
+            .any(|c| c.kind == "base/watchers.run" && c.new["state"] == "queued")
             .then(|| Handoff {
                 worker: crate::ADMISSION_WORKER,
                 principal: crate::PRINCIPAL,
@@ -371,8 +394,8 @@ impl Worker {
         let tenant = scope.tenant();
         let mut client = watchers.db.get().await?;
         let row = client.query_opt(
-            "SELECT r.trigger,r.active_version_id,r.disabled_at IS NOT NULL,v.definition,v.catalog_digest,r.needs_review,v.examples FROM base_watchers r JOIN base_watcher_versions v ON v.tenant_id=r.tenant_id AND v.id=$3 WHERE r.tenant_id=$1 AND r.id=$2",
-            &[&tenant, &run.watcher, &run.version],
+            "SELECT r.trigger,r.active_version_id,r.disabled_at IS NOT NULL,v.definition,v.catalog_digest,r.needs_review,v.examples,COALESCE(r.enabled_at=(SELECT activation_at FROM base_watcher_runs WHERE tenant_id=$1 AND id=$4),false) FROM base_watchers r JOIN base_watcher_versions v ON v.tenant_id=r.tenant_id AND v.id=$3 WHERE r.tenant_id=$1 AND r.id=$2",
+            &[&tenant, &run.watcher, &run.version, &run.id],
         ).await?.ok_or(Error::NotFound)?;
         let (trigger, active, off): (String, Option<i64>, bool) =
             (row.get(0), row.get(1), row.get(2));
@@ -414,6 +437,8 @@ impl Worker {
             Some(Stop::Refused("watcher_off"))
         } else if active != Some(run.version) {
             Some(Stop::Refused("stale_version"))
+        } else if !row.get::<_, bool>(7) {
+            Some(Stop::Refused("stale_activation"))
         } else {
             None
         };
@@ -619,12 +644,19 @@ impl Worker {
         let mut tx = execution.begin(client, "watchers.run.acted").await?;
         // Off or replaced since the run was decided: stop at the boundary.
         let current = tx.sql().query_opt(
-            "SELECT active_version_id=$3 AND disabled_at IS NULL FROM base_watchers WHERE tenant_id=$1 AND id=$2 FOR SHARE",
-            &[&tenant, &run.watcher, &run.version],
-        ).await?.and_then(|row| row.get::<_, Option<bool>>(0));
-        if current != Some(true) {
+            "SELECT active_version_id=$3,disabled_at IS NOT NULL,enabled_at=(SELECT activation_at FROM base_watcher_runs WHERE tenant_id=$1 AND id=$4) FROM base_watchers WHERE tenant_id=$1 AND id=$2 FOR SHARE",
+            &[&tenant, &run.watcher, &run.version, &run.id],
+        ).await?;
+        let reason = match current {
+            None => Some("stale_version"),
+            Some(row) if row.get::<_, bool>(1) => Some("watcher_off"),
+            Some(row) if row.get::<_, Option<bool>>(0) != Some(true) => Some("stale_version"),
+            Some(row) if row.get::<_, Option<bool>>(2) != Some(true) => Some("stale_activation"),
+            Some(_) => None,
+        };
+        if let Some(reason) = reason {
             tx.rollback().await?;
-            return Ok(Acted::Stopped("stale_version"));
+            return Ok(Acted::Stopped(reason));
         }
         let saved = tx.sql().query_one("SELECT subject_version FROM base_watcher_runs WHERE tenant_id=$1 AND id=$2 FOR UPDATE", &[&tenant, &run.id]).await?;
         if let Some(row) = tx.sql().query_opt(

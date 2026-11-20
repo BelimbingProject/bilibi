@@ -8,21 +8,23 @@ The trigger identity contract is in [Base Watchers](../apps/base/watchers/README
 
 | Companion | File | Trigger binding | Existing immutable identity |
 | --- | --- | --- | --- |
-| [Commerce PR 12](https://github.com/BelimbingProject/bilibi-dom-commerce/pull/12) | `sales/src/follow_up.rs` | `logical_event: Some("/revision")` | `sales/src/operations.rs` records the confirmation revision in every line payload; the task key also includes the source ID |
+| [Commerce Sales](https://github.com/BelimbingProject/bilibi-dom-commerce/pull/16) | `sales/src/follow_up.rs` | `logical_event: None` | One compact event per order creation or transition; the invoice-consumer events remain multipart |
 | [Supply Chain PR 28](https://github.com/BelimbingProject/bilibi-dom-supply-chain/pull/28) | `purchasing/src/follow_up.rs` | `logical_event: Some("/snapshot_key")` | `purchasing/src/order_events.rs` records one snapshot key across the approval's line parts |
 | [People PR 77](https://github.com/BelimbingProject/bilibi-dom-people/pull/77) | `claims/src/follow_up.rs` | `logical_event: None` | One recorded event per approval: its immutable Events ID identifies the occurrence; `claims/src/workflow.rs` publishes no multipart approval |
 
-The bindings above were inspected at Commerce `06a6596`, Supply Chain `ecc65c0`, and People `8487775`. Purchasing also supplies `fixtures/walkthrough/watchers-source-hook.sh`, which invokes real amendment and independent approval facades. No companion source is copied into Platform.
+The original multipart bindings were inspected at Commerce `06a6596`, Supply Chain `ecc65c0`, and People `8487775`; Commerce now offers compact single-occurrence events. Purchasing also supplies `fixtures/walkthrough/watchers-source-hook.sh`, which invokes real amendment and independent approval facades. No companion source is copied into Platform.
 
 ## Running the proof
 
 Mount the companion branches, discover modules, and run each companion's `fixtures/walkthrough/watchers-followup.sh` against its own fresh disposable database. Supply Chain's script sets `BILIBI_WATCHERS_SOURCE_HELPER` to the absolute hook path; the Platform walkthrough requires it and fails if either helper invocation fails. Pin companions to the final Platform head before delivery.
 
-The Supply Chain path holds the other existing event-delivery jobs under row locks, allowing only the first approval part to deliver and complete for both watchers. It stops its worker and confirms part two has neither delivered nor evaluated, invokes `amend-header`, releases the jobs, and processes part two. Assertions require one task and one immutable identity per watcher across two evaluated revisions.
+The Supply Chain path reapproves the fixture order after both watchers are approved. It holds the other event-delivery jobs under row locks so the worker can deliver through the first new approval part. It stops the worker and confirms the next part is still pending, invokes `amend-header`, releases the jobs, and processes the remaining parts. Assertions require one task and one immutable identity per watcher across two evaluated revisions.
 
 With the worker stopped again, the proof invokes `reapprove` twice and requires both snapshots' complete declared parts to remain undelivered and unevaluated (including retained line generations). It then processes both snapshots at the latest source state and requires two distinct tasks and identities per watcher at one evaluated revision, with all parts of each snapshot returning the same task. Aggregate counts include the first approval's tasks. Later manual writes re-read the live source revision.
 
 Every processing stage waits for all expected deliveries, successful terminal runs and completed Queue jobs before stopping its worker. The one-shot completion fault still requires a completed retry with at least two attempts and unchanged task/effect counts. The replay check remains explicitly a no-op. Independent watchers, manual requests, privacy, stale-version and foreign-recipient refusals, and creation after deletion remain covered.
+
+The People path submits a new claim using the source fixture's setup and approves it after both watchers are approved. The Commerce path checks the compact confirmation and cancellation events. It confirms a second order while delivery is stopped, then approves the creation watcher. The backlogged creation produces a refusal receipt and leaves that order confirmed. A later creation is cancelled once.
 
 These checks are implemented; this review does not claim they have run. The Test phase executes the mounted walkthroughs and records their results.
 
