@@ -36,14 +36,12 @@ type EndpointService = bilibi_ui::endpoint::EndpointService<Error>;
 pub struct BoundEndpoint {
     pub endpoint: &'static PublicEndpoint,
     service: Arc<EndpointService>,
+    throttle: Arc<Throttle>,
+    sender_admission: Option<Arc<SenderAdmission>>,
 }
 
-/// The bound endpoints and their own per-sender throttle, apart from the
-/// sign-in one, so a flood of pixel fetches never crowds out sign-in keys.
 pub struct Endpoints {
     pub bound: Vec<BoundEndpoint>,
-    throttle: Throttle,
-    sender_admission: SenderAdmission,
 }
 impl Endpoints {
     pub(crate) fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
@@ -73,13 +71,13 @@ pub fn bind(services: &Services, pages: &Pages, downloads: &Downloads) -> Result
         bound.push(BoundEndpoint {
             endpoint,
             service: services.get(endpoint.service)?,
+            throttle: Arc::default(),
+            sender_admission: endpoint
+                .post_sender_budget
+                .map(|budget| Arc::new(SenderAdmission::new(budget))),
         });
     }
-    Ok(Endpoints {
-        bound,
-        throttle: Throttle::default(),
-        sender_admission: SenderAdmission::default(),
-    })
+    Ok(Endpoints { bound })
 }
 
 pub fn install(mut router: Router<App>, endpoints: &Endpoints) -> Router<App> {
@@ -128,14 +126,12 @@ async fn answer(
         peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
         &headers,
     ));
-    let key = format!(
-        "{:?} {}:{sender}",
-        bound.endpoint.method, bound.endpoint.path
-    );
-    if let Some(budget) = bound.endpoint.sender_budget {
-        if !app.endpoints.sender_admission.allow(&key, budget) {
-            return Ok((StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response());
-        }
+    if bound
+        .sender_admission
+        .as_ref()
+        .is_some_and(|admission| !admission.allow(&sender))
+    {
+        return Ok((StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response());
     }
     let per_minute = {
         let client = app.db.get().await.map_err(Error::from)?;
@@ -149,7 +145,7 @@ async fn answer(
             .and_then(|limit| u32::try_from(limit).ok())
             .ok_or(Error::Internal)?
     };
-    if !app.endpoints.throttle.allow(&key, per_minute) {
+    if !bound.throttle.allow(&sender, per_minute) {
         return Ok((StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response());
     }
     if matches!(

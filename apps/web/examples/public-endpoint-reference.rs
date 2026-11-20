@@ -14,7 +14,7 @@
 //!   one-request-per-minute sender budget. `--sender-admission` proves refusal,
 //!   sender isolation and reset through the real HTTP host.
 //! - `GET` and `POST /reference/hourly-form/{token}`: a second pair whose
-//!   third request proves the hourly limit while its minute limit still fits.
+//!   hourly limit still refuses a sender after the minute resets.
 //!
 //! Tokens are held as SHA-256 digests and found by digest, never compared raw.
 //! `click-1` stores a valid address, `click-js` a `javascript:` URL and
@@ -232,23 +232,23 @@ inventory::submit! { Contribution::new(ROUTES, "endpoint_reference.hourly_form",
 }) }
 inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "endpoint_reference.open", provenance!(), &PublicEndpoint {
     method: Method::Get, path: OPEN, service: LINKS, operation: "open",
-    sender_budget: None,
+    post_sender_budget: None,
 }) }
 inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "endpoint_reference.click", provenance!(), &PublicEndpoint {
     method: Method::Get, path: CLICK, service: LINKS, operation: "click",
-    sender_budget: None,
+    post_sender_budget: None,
 }) }
 inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "endpoint_reference.unsubscribe", provenance!(), &PublicEndpoint {
     method: Method::Post, path: UNSUBSCRIBE, service: LINKS, operation: "unsubscribe",
-    sender_budget: None,
+    post_sender_budget: None,
 }) }
 inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "endpoint_reference.form", provenance!(), &PublicEndpoint {
     method: Method::Post, path: FORM, service: LINKS, operation: "submit",
-    sender_budget: Some(FORM_BUDGET),
+    post_sender_budget: Some(FORM_BUDGET),
 }) }
 inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "endpoint_reference.hourly_form", provenance!(), &PublicEndpoint {
     method: Method::Post, path: HOURLY_FORM, service: LINKS, operation: "submit",
-    sender_budget: Some(HOUR_BUDGET),
+    post_sender_budget: Some(HOUR_BUDGET),
 }) }
 
 /// Wrong shapes, each added alone to the real catalog.
@@ -261,7 +261,7 @@ static NO_CREDENTIAL: Contribution = Contribution::new(
         path: "/reference/mail/x/{token}",
         service: LINKS,
         operation: "open",
-        sender_budget: None,
+        post_sender_budget: None,
     },
 );
 static NO_TOKEN: Contribution = Contribution::new(
@@ -273,7 +273,7 @@ static NO_TOKEN: Contribution = Contribution::new(
         path: "/reference/mail/everyone",
         service: LINKS,
         operation: "unsubscribe",
-        sender_budget: None,
+        post_sender_budget: None,
     },
 );
 static WRONG_METHOD: Contribution = Contribution::new(
@@ -285,7 +285,7 @@ static WRONG_METHOD: Contribution = Contribution::new(
         path: UNSUBSCRIBE,
         service: LINKS,
         operation: "unsubscribe",
-        sender_budget: None,
+        post_sender_budget: None,
     },
 );
 static PORTAL: Contribution = Contribution::new(
@@ -297,7 +297,7 @@ static PORTAL: Contribution = Contribution::new(
         path: "/portal/mail/{token}",
         service: LINKS,
         operation: "open",
-        sender_budget: None,
+        post_sender_budget: None,
     },
 );
 static PORTAL_CREDENTIAL: Contribution = Contribution::new(
@@ -308,6 +308,25 @@ static PORTAL_CREDENTIAL: Contribution = Contribution::new(
         path: "/portal/mail/{token}",
     },
 );
+const BUDGETED_GET: &str = "/reference/mail/budgeted/{token}";
+static GET_WITH_POST_BUDGET: Contribution = Contribution::new(
+    PUBLIC_ENDPOINTS,
+    "endpoint_reference.budgeted_get",
+    provenance!(),
+    &PublicEndpoint {
+        method: Method::Get,
+        path: BUDGETED_GET,
+        service: LINKS,
+        operation: "open",
+        post_sender_budget: Some(FORM_BUDGET),
+    },
+);
+static BUDGETED_GET_CREDENTIAL: Contribution = Contribution::new(
+    CREDENTIAL_PATHS,
+    "endpoint_reference.budgeted_get",
+    provenance!(),
+    &CredentialPath { path: BUDGETED_GET },
+);
 
 fn refusals() -> std::process::ExitCode {
     let modules = match bilibi_web::modules() {
@@ -317,11 +336,15 @@ fn refusals() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let cases: [(&str, &[&Contribution]); 4] = [
+    let cases: [(&str, &[&Contribution]); 5] = [
         ("endpoint without a credential path", &[&NO_CREDENTIAL]),
         ("endpoint without {token}", &[&NO_TOKEN]),
         ("endpoint with DELETE", &[&WRONG_METHOD]),
         ("endpoint under /portal", &[&PORTAL, &PORTAL_CREDENTIAL]),
+        (
+            "GET endpoint with a POST sender budget",
+            &[&GET_WITH_POST_BUDGET, &BUDGETED_GET_CREDENTIAL],
+        ),
     ];
     let mut failed = false;
     for (case, extra) in cases {
@@ -411,23 +434,27 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
         .await
     });
 
-    let second = SystemTime::now()
+    let second_in_hour = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| Error::Internal)?
         .as_secs()
-        % 60;
-    if second > 50 {
+        % 3600;
+    let second = second_in_hour % 60;
+    if second_in_hour > 58 * 60 + 50 {
+        tokio::time::sleep(Duration::from_secs(3601 - second_in_hour)).await;
+    } else if second > 50 {
         tokio::time::sleep(Duration::from_secs(61 - second)).await;
     }
 
+    let sender = "198.51.100.10";
     expect(
         "GET first sender admitted",
-        request(&address, "GET", "/reference/form/form-1", "198.51.100.10").await?,
+        request(&address, "GET", "/reference/form/form-1", sender).await?,
         200,
     )?;
     expect(
         "GET first sender refused past budget",
-        request(&address, "GET", "/reference/form/form-1", "198.51.100.10").await?,
+        request(&address, "GET", "/reference/form/form-1", sender).await?,
         429,
     )?;
     expect(
@@ -437,12 +464,12 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
     )?;
     expect(
         "POST first sender admitted",
-        request(&address, "POST", "/reference/form/form-1", "198.51.100.10").await?,
+        request(&address, "POST", "/reference/form/form-1", sender).await?,
         204,
     )?;
     expect(
         "POST first sender refused past budget",
-        request(&address, "POST", "/reference/form/form-1", "198.51.100.10").await?,
+        request(&address, "POST", "/reference/form/form-1", sender).await?,
         429,
     )?;
     expect(
@@ -454,35 +481,17 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
     for (method, admitted) in [("GET", 200), ("POST", 204)] {
         expect(
             &format!("{method} hourly budget first request admitted"),
-            request(
-                &address,
-                method,
-                "/reference/hourly-form/form-1",
-                "198.51.100.20",
-            )
-            .await?,
+            request(&address, method, "/reference/hourly-form/form-1", sender).await?,
             admitted,
         )?;
         expect(
             &format!("{method} hourly budget second request admitted"),
-            request(
-                &address,
-                method,
-                "/reference/hourly-form/form-1",
-                "198.51.100.20",
-            )
-            .await?,
+            request(&address, method, "/reference/hourly-form/form-1", sender).await?,
             admitted,
         )?;
         expect(
             &format!("{method} refused by hourly budget before minute limit"),
-            request(
-                &address,
-                method,
-                "/reference/hourly-form/form-1",
-                "198.51.100.20",
-            )
-            .await?,
+            request(&address, method, "/reference/hourly-form/form-1", sender).await?,
             429,
         )?;
     }
@@ -493,16 +502,18 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
         .as_secs()
         % 60;
     tokio::time::sleep(Duration::from_secs(61 - second)).await;
-    expect(
-        "GET budget reset",
-        request(&address, "GET", "/reference/form/form-1", "198.51.100.10").await?,
-        200,
-    )?;
-    expect(
-        "POST budget reset",
-        request(&address, "POST", "/reference/form/form-1", "198.51.100.10").await?,
-        204,
-    )?;
+    for (method, admitted) in [("GET", 200), ("POST", 204)] {
+        expect(
+            &format!("{method} admitted after minute reset"),
+            request(&address, method, "/reference/form/form-1", sender).await?,
+            admitted,
+        )?;
+        expect(
+            &format!("{method} still refused by hourly budget after minute reset"),
+            request(&address, method, "/reference/hourly-form/form-1", sender).await?,
+            429,
+        )?;
+    }
 
     let _ = stop.send(());
     server

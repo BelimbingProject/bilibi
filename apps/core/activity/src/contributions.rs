@@ -175,7 +175,7 @@ inventory::submit! { Contribution::new(ROUTES, "core/activity.detail", provenanc
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/activity.feed", provenance!(), &CredentialPath { path: crate::FEED_PATH }) }
 inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "core/activity.feed", provenance!(), &PublicEndpoint {
     method: Method::Get, path: crate::FEED_PATH, service: crate::FEED_SERVICE, operation: "feed",
-    sender_budget: None,
+    post_sender_budget: None,
 }) }
 // The person's own page for it, among their settings.
 inventory::submit! { Contribution::new(ROUTES, "core/activity.feed_settings", provenance!(), &Route {

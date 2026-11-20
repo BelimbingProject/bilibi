@@ -537,9 +537,9 @@ pub struct PublicEndpoint {
     pub path: &'static str,
     pub service: &'static str,
     pub operation: &'static str,
-    /// An additional route-specific budget. `None` keeps only Web's global
+    /// An additional budget for POST. `None` keeps only Web's global
     /// public-endpoint per-minute limit.
-    pub sender_budget: Option<SenderBudget>,
+    pub post_sender_budget: Option<SenderBudget>,
 }
 /// A retired page path that answers a GET with a permanent redirect to the
 /// page that replaced it, so bookmarks, pins and saved workspace tiles keep
@@ -747,13 +747,10 @@ fn validate_public_endpoints(entries: &[Entry]) -> Result<()> {
             "public endpoint {} at {}:{}",
             entry.id, entry.provenance.source, entry.provenance.line
         );
-        if endpoint
-            .sender_budget
-            .is_some_and(|budget| budget.per_minute == 0 || budget.per_hour == 0)
-        {
-            return Err(invalid(format!(
-                "{at} needs positive sender limits per minute and per hour"
-            )));
+        if endpoint.post_sender_budget.is_some_and(|budget| {
+            endpoint.method != Method::Post || budget.per_minute == 0 || budget.per_hour == 0
+        }) {
+            return Err(invalid(format!("{at} needs a positive POST sender budget")));
         }
         if !path_valid(
             endpoint.path,

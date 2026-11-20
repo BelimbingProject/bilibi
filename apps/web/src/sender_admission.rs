@@ -3,14 +3,21 @@
 use bilibi_agent::Throttle;
 use bilibi_module_registry::contributions::SenderBudget;
 
-#[derive(Default)]
 pub(crate) struct SenderAdmission {
-    minutes: Throttle,
-    hours: Throttle,
+    budget: SenderBudget,
+    throttle: Throttle,
 }
 
 impl SenderAdmission {
-    pub(crate) fn allow(&self, key: &str, budget: SenderBudget) -> bool {
-        self.minutes.allow(key, budget.per_minute) && self.hours.allow_hour(key, budget.per_hour)
+    pub(crate) fn new(budget: SenderBudget) -> Self {
+        Self {
+            budget,
+            throttle: Throttle::default(),
+        }
+    }
+
+    pub(crate) fn allow(&self, sender: &str) -> bool {
+        self.throttle
+            .allow_minute_and_hour(sender, self.budget.per_minute, self.budget.per_hour)
     }
 }

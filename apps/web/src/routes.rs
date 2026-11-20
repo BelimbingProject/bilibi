@@ -31,6 +31,7 @@ pub struct BoundRoute {
     pub route: &'static Route,
     pub page: Arc<PageService>,
     pub sections: Vec<&'static PageSection>,
+    sender_admission: Option<Arc<SenderAdmission>>,
 }
 /// A `Download` contribution with its owner service. Downloads share the page
 /// routes' path rules and may not intersect a page or a host path.
@@ -57,7 +58,6 @@ pub struct BoundPortalDownload {
 pub struct Pages {
     pub staff: Vec<BoundRoute>,
     pub portal: Vec<BoundPortalRoute>,
-    sender_admission: SenderAdmission,
 }
 pub struct Downloads {
     pub staff: Vec<BoundDownload>,
@@ -121,7 +121,6 @@ pub fn bind(services: &Services) -> Result<Pages> {
     let mut bound = Pages {
         staff: Vec::new(),
         portal: Vec::new(),
-        sender_admission: SenderAdmission::default(),
     };
     for entry in services.catalog()?.entries::<Route>(ROUTES)? {
         let route = entry.get::<Route>()?;
@@ -140,6 +139,10 @@ pub fn bind(services: &Services) -> Result<Pages> {
                 route,
                 page: services.get(route.service)?,
                 sections: Vec::new(),
+                sender_admission: route
+                    .access
+                    .sender_budget()
+                    .map(|budget| Arc::new(SenderAdmission::new(budget))),
             });
         }
     }
@@ -617,13 +620,12 @@ async fn dispatch(
     query: HashMap<String, String>,
     body: Bytes,
 ) -> std::result::Result<Response, HttpError> {
-    if let Some(budget) = bound.route.access.sender_budget() {
+    if let Some(admission) = &bound.sender_admission {
         let sender = crate::api::sender_key(crate::api::client_address(
             peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
             &headers,
         ));
-        let key = format!("{:?} {}:{sender}", bound.route.method, bound.route.path);
-        if !app.routes.sender_admission.allow(&key, budget) {
+        if !admission.allow(&sender) {
             return Ok((StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response());
         }
     }
