@@ -91,6 +91,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert!(grants.contains("base.custom-fields.manage"));
         assert!(!grants.contains("admin.audit.log.list"));
     }
+    // The setup guide must reflect the live registry and configured plan limit.
+    {
+        let client = db.get().await?;
+        let registry = app
+            .services
+            .get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
+        let guide = registry
+            .guide(&**client, &one, "base.labels.customise")
+            .await?;
+        let body = guide["body"].as_str().expect("guide body");
+        let described = registry
+            .describe(&**client, &one, "base.custom_fields.define")
+            .await?;
+        let settings = app
+            .services
+            .get::<bilibi_base::settings::Settings>("base/settings.store")?;
+        let limit = settings
+            .get_global(&**client, "agent_api.plan_max_operations")
+            .await?;
+        assert!(body.contains(&described["input"].to_string()));
+        assert!(body.contains(&format!("one atomic plan: {limit}")));
+        assert!(!body.contains("{{contract:") && !body.contains("{{plan_limit}}"));
+        assert!(body.contains("uncertain") && body.contains("watchers"));
+    }
     let label_call = |scope, credential, contract| Call {
         scope,
         credential,

@@ -33,6 +33,10 @@ Editors carry the `identity:version` token returned by `base.labels.list` (`0:0`
 
 The Tenant Owner system role includes `base.labels.view`, `base.labels.manage` and `base.labels.customisations.view`.
 
+## Agent setup guide
+
+Search for **Customise my tenant** (`base.labels.customise`) for a worked setup, review, verification and recovery path. Its operation contracts and plan limit are generated at read time; watcher limits come from the installed automation vocabulary.
+
 ## Customisations page
 
 Open **Administration › Customisations** (`/admin/customisations`, `base.labels.customisations.view`) to see tenant label overrides and active and archived custom fields. Use **Restore default** on a label override, **Archive** on an active field or **Restore** on an archived field. Each action requires the owning module's write permission. A notice names any sections you lack permission to read.

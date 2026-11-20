@@ -427,6 +427,7 @@ pub struct Registry {
     /// Write contracts a named principal's job may call, with the principals
     /// their owners admit (`job::PRINCIPAL_WRITES`).
     pub principal_writes: BTreeMap<&'static str, &'static [&'static str]>,
+    settings: Option<Arc<bilibi_settings::Settings>>,
 }
 fn contribution_error(reason: impl Into<String>) -> RegistryError {
     RegistryError::Contribution(reason.into())
@@ -459,7 +460,7 @@ fn validate_common(
         || !text(title, 120)
         || !text(summary, 500)
         || keywords.iter().any(|word| word.trim().is_empty())
-        || !((!guide && cap == SIGNED_IN) || bilibi_authz::vocabulary::valid_key(cap))
+        || !(cap == SIGNED_IN || bilibi_authz::vocabulary::valid_key(cap))
         || reach::impersonation(cap)
     {
         return Err(contribution_error(format!(
@@ -736,6 +737,10 @@ impl Default for SearchOptions {
     }
 }
 impl Registry {
+    fn with_settings(mut self, settings: Arc<bilibi_settings::Settings>) -> Self {
+        self.settings = Some(settings);
+        self
+    }
     pub async fn search(
         &self,
         client: &impl GenericClient,
@@ -769,7 +774,7 @@ impl Registry {
         if options.kind.is_none() {
             for guide in self.guides.values() {
                 let guide = guide.definition;
-                let available = reach.contains(guide.capability);
+                let available = reach::allows(guide.capability, scope, &reach);
                 if !available && !options.include_unavailable {
                     continue;
                 }
@@ -813,7 +818,7 @@ impl Registry {
             .values()
             .filter(|g| {
                 key.starts_with(&format!("{}.", g.definition.key))
-                    && reach.contains(g.definition.capability)
+                    && reach::allows(g.definition.capability, scope, &reach)
             })
             .map(|g| json!({"key":g.definition.key,"title":g.definition.title}))
             .collect();
@@ -823,18 +828,52 @@ impl Registry {
     }
     pub async fn guide(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         key: &str,
     ) -> Result<Value> {
         let guide = self.guides.get(key).ok_or(Error::UnknownGuide)?.definition;
-        if !reach::capabilities(client, scope)
-            .await?
-            .contains(guide.capability)
-        {
+        if !reach::allows(
+            guide.capability,
+            scope,
+            &reach::capabilities(client, scope).await?,
+        ) {
             return Err(Error::Forbidden);
         }
-        Ok(json!({"key":guide.key,"title":guide.title,"summary":guide.summary,"body":guide.body}))
+        let mut body = guide.body.to_owned();
+        // Expand only explicitly requested contracts, using the same reach and
+        // channel checks as describe. Missing optional modules stay visible.
+        let capabilities = reach::capabilities(client, scope).await?;
+        let mut cursor = 0;
+        while let Some(relative) = body[cursor..].find("{{contract:") {
+            let start = cursor + relative;
+            let Some(end) = body[start..].find("}}") else {
+                break;
+            };
+            let end = start + end + 2;
+            let key = &body[start + "{{contract:".len()..end - 2];
+            let rendered = match self.operations.get(key) {
+                Some(op) if op.definition.channels.allows(scope.channel())
+                    && reach::allows(op.definition.capability, scope, &capabilities) => {
+                    json!({"key":key,"title":op.definition.title,"summary":op.definition.summary,
+                        "disposition":op.definition.disposition(),"input":op.input,"output":op.output}).to_string()
+                }
+                _ => format!("{key}: unavailable to this connection; search or request access"),
+            };
+            body.replace_range(start..end, &rendered);
+            cursor = start + rendered.len();
+        }
+        if body.contains("{{plan_limit}}") {
+            let limit = match &self.settings {
+                Some(settings) => settings
+                    .get_global(client, "agent_api.plan_max_operations")
+                    .await?
+                    .to_string(),
+                None => "unavailable; obtain the limit before review".to_owned(),
+            };
+            body = body.replace("{{plan_limit}}", &limit);
+        }
+        Ok(json!({"key":guide.key,"title":guide.title,"summary":guide.summary,"body":body}))
     }
     /// Runs read operation `key` for `scope` on the caller's connection, for
     /// a caller that already holds one (a walkthrough, a test fixture). Request
@@ -1033,7 +1072,7 @@ inventory::submit! { Consumer::new::<job::PrincipalWrite>(job::PRINCIPAL_WRITES,
 inventory::submit! { bilibi_module_registry::Module {
     id:"base/agent_api",layer:bilibi_module_registry::Layer::Base,
     dependencies:&["base/module_registry","base/authz","base/database","base/party_ids","base/settings","base/tenancy","base/step_up","base/session","base/system","base/queue","base/ui","base/notifications"], migrations:&[("agent-api-plans-v1",include_str!("../migrations/001-plans.sql")),("base-agent-api-002-plan-work-company",include_str!("../migrations/002-plan-work-company.sql")),("base-agent-api-003-reviews",include_str!("../migrations/003-reviews.sql")),("base-agent-api-004-drop-plans",include_str!("../migrations/004-drop-plans.sql"))],
-    services:&[bilibi_module_registry::Service {id:"base/agent_api.registry",factory:|_|Ok(Arc::new(Registry::from_inventory()?))},
+    services:&[bilibi_module_registry::Service {id:"base/agent_api.registry",factory:|services|Ok(Arc::new(Registry::from_inventory()?.with_settings(services.get("base/settings.store")?)))},
     bilibi_module_registry::Service {id:"base/agent_api.plans",factory:|services|Ok(Arc::new(plans::Plans::new(services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),services.get("base/database.mutations")?,services.get("base/agent_api.registry")?,services.get("base/settings.store")?,services.get("base/tenancy.authentication")?)))},
     bilibi_module_registry::Service {id:"base/agent_api.reviews",factory:|services|{
         let reviews = Arc::new(Reviews::new(services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone()));
