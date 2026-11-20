@@ -22,7 +22,7 @@ pub const KEY_MAX: usize = 40;
 pub const HELP_MAX: usize = 255;
 
 const COLUMNS: &str =
-    "id,record_type,key,label,help,kind,picklist,target,position,archived_on::text AS archived_on,version,rule_condition";
+    "id,record_type,key,label,help,kind,picklist,target,position,archived_on::text AS archived_on,version,watcher_condition";
 
 /// What a field holds. Fixed when the field is defined.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -101,9 +101,9 @@ impl Kind {
     pub fn takes_picklist(self) -> bool {
         matches!(self, Self::Choice | Self::Choices)
     }
-    /// Whether the field may be a Base Rules condition: one typed value a
+    /// Whether the field may be a Base Watchers condition: one typed value a
     /// condition compares exactly (#730).
-    pub fn rule_condition_kind(self) -> bool {
+    pub fn watcher_condition_kind(self) -> bool {
         matches!(
             self,
             Self::Text | Self::Number | Self::Date | Self::Choice | Self::Boolean
@@ -128,9 +128,9 @@ pub struct Definition {
     pub position: i32,
     pub archived_on: Option<String>,
     pub version: i64,
-    /// Whether the tenant opted it into Base Rules conditions; a rule never
+    /// Whether the tenant opted it into Base Watchers conditions; a watcher never
     /// reads a field that is not.
-    pub rule_condition: bool,
+    pub watcher_condition: bool,
 }
 impl Definition {
     fn from_row(row: &Row) -> Result<Self> {
@@ -146,7 +146,7 @@ impl Definition {
             position: row.get("position"),
             archived_on: row.get("archived_on"),
             version: row.get("version"),
-            rule_condition: row.get("rule_condition"),
+            watcher_condition: row.get("watcher_condition"),
         })
     }
     pub fn archived(&self) -> bool {
@@ -187,9 +187,9 @@ pub struct NewField {
     pub picklist: Option<String>,
     /// For a record field, the kind of record it points at.
     pub target: Option<String>,
-    /// Offer it to Base Rules conditions (text, number, date, pick-list and
+    /// Offer it to Base Watchers conditions (text, number, date, pick-list and
     /// yes/no fields only).
-    pub rule_condition: bool,
+    pub watcher_condition: bool,
 }
 /// Everything but the key and the kind.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -197,8 +197,8 @@ pub struct NewField {
 pub struct FieldUpdate {
     pub label: String,
     pub help: Option<String>,
-    /// Offer it to Base Rules conditions, or withdraw it; `None` keeps it.
-    pub rule_condition: Option<bool>,
+    /// Offer it to Base Watchers conditions, or withdraw it; `None` keeps it.
+    pub watcher_condition: Option<bool>,
     pub version: i64,
 }
 
@@ -553,10 +553,10 @@ impl CustomFields {
             )),
             _ => {}
         }
-        if input.rule_condition && kind.is_some_and(|kind| !kind.rule_condition_kind()) {
+        if input.watcher_condition && kind.is_some_and(|kind| !kind.watcher_condition_kind()) {
             errors.push(FieldError::new(
-                "rule_condition",
-                "only a text, number, date, pick-list or yes/no field can be a rule condition",
+                "watcher_condition",
+                "only a text, number, date, pick-list or yes/no field can be a watcher condition",
             ));
         }
         if write {
@@ -605,7 +605,7 @@ impl CustomFields {
                 .unwrap_or_default(),
             picklist: picklist.map(str::to_owned),
             target: target.map(str::to_owned),
-            rule_condition: input.rule_condition,
+            watcher_condition: input.watcher_condition,
         }))
     }
     /// The field a define would add, without adding it (the agent preview).
@@ -647,8 +647,8 @@ impl CustomFields {
                 Box::pin(async move {
                     let row = sql
                         .query_one(
-                            &format!("INSERT INTO base_custom_fields(tenant_id,record_type,key,label,help,kind,picklist,target,position,rule_condition) VALUES($1,$2,$3,$4,$5,$6,$7,$8,(SELECT coalesce(max(position),0)+10 FROM base_custom_fields WHERE tenant_id=$1 AND record_type=$2),$9) RETURNING {COLUMNS}"),
-                            &[&tenant, &field.record_type, &field.key, &field.label, &field.help, &field.kind, &field.picklist, &field.target, &field.rule_condition],
+                            &format!("INSERT INTO base_custom_fields(tenant_id,record_type,key,label,help,kind,picklist,target,position,watcher_condition) VALUES($1,$2,$3,$4,$5,$6,$7,$8,(SELECT coalesce(max(position),0)+10 FROM base_custom_fields WHERE tenant_id=$1 AND record_type=$2),$9) RETURNING {COLUMNS}"),
+                            &[&tenant, &field.record_type, &field.key, &field.label, &field.help, &field.kind, &field.picklist, &field.target, &field.watcher_condition],
                         )
                         .await?;
                     let created = Definition::from_row(&row)?;
@@ -687,11 +687,11 @@ impl CustomFields {
         };
         let mut errors = Vec::new();
         let (label, help) = text(&mut errors, &input.label, &input.help);
-        let rule_condition = input.rule_condition.unwrap_or(before.rule_condition);
-        if rule_condition && !before.kind.rule_condition_kind() {
+        let watcher_condition = input.watcher_condition.unwrap_or(before.watcher_condition);
+        if watcher_condition && !before.kind.watcher_condition_kind() {
             errors.push(FieldError::new(
-                "rule_condition",
-                "only a text, number, date, pick-list or yes/no field can be a rule condition",
+                "watcher_condition",
+                "only a text, number, date, pick-list or yes/no field can be a watcher condition",
             ));
         }
         if !errors.is_empty() {
@@ -702,7 +702,7 @@ impl CustomFields {
             FieldUpdate {
                 label,
                 help,
-                rule_condition: Some(rule_condition),
+                watcher_condition: Some(watcher_condition),
                 version: input.version,
             },
         )))
@@ -742,8 +742,8 @@ impl CustomFields {
                 Box::pin(async move {
                     let row = sql
                         .query_one(
-                            &format!("UPDATE base_custom_fields SET label=$3,help=$4,rule_condition=$5,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"),
-                            &[&tenant, &before.id, &update.label, &update.help, &update.rule_condition.unwrap_or(false)],
+                            &format!("UPDATE base_custom_fields SET label=$3,help=$4,watcher_condition=$5,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"),
+                            &[&tenant, &before.id, &update.label, &update.help, &update.watcher_condition.unwrap_or(false)],
                         )
                         .await?;
                     let saved = Definition::from_row(&row)?;

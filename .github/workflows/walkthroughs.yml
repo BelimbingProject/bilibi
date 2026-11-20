@@ -31,7 +31,7 @@
 # The `mounted` group mounts a reference container from fixtures/containers
 # under apps/domains, rebuilds (not --locked), runs events-reference (the
 # publisher alone, both, the subscriber alone, on one database),
-# ports-reference, rules-walkthrough and session-ended-walkthrough, then unmounts. That changes
+# ports-reference, watchers-walkthrough and session-ended-walkthrough, then unmounts. That changes
 # the checkout, so the script refuses to start unless nothing is mounted and no
 # tracked file is modified, and puts everything back after each walkthrough and
 # when it ends, however it ends. Bilibi is a public repository, so every group

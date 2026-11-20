@@ -121,7 +121,7 @@ async fn round_trip(source: &Person<'_>, target: &Person<'_>) -> Result<Value, F
     let field = json!({
         "record_type":"company", "key":"contract_stage", "label":"Contract stage",
         "help":"The stage of the contract", "kind":"choice",
-        "picklist":"core.document.status", "rule_condition":true
+        "picklist":"core.document.status", "watcher_condition":true
     });
     source
         .write(&[set_label(LABEL, "Vocabulary"), op(DEFINE, field.clone())])
@@ -132,9 +132,9 @@ async fn round_trip(source: &Person<'_>, target: &Person<'_>) -> Result<Value, F
     });
     let pack = source.read(EXPORT, &selection).await?;
     check(
-        "Tenant A exports the definition and override in version 1",
+        "Tenant A exports the definition and override in version 2",
         pack == json!({
-            "version":1,
+            "version":2,
             "labels":[{"kind":"menu","subject":LABEL,"label":"Vocabulary"}],
             "custom_fields":[field]
         }),
@@ -215,7 +215,7 @@ async fn refusals(target: &Person<'_>, mut request: Value) -> Result<(), Failure
         unavailable["pack"]["custom_fields"][0],
         {
             "record_type":"unmounted", "key":"related_item", "label":"Related item",
-            "kind":"reference", "target":"unmounted_item", "rule_condition":false
+            "kind":"reference", "target":"unmounted_item", "watcher_condition":false
         }
     ]);
     unavailable["picklist_map"][0]["to"] = json!("unmounted.status");
@@ -326,7 +326,7 @@ async fn main() -> Result<(), Failure> {
         staff
             .read(
                 PREVIEW,
-                &json!({"pack":{"version":1,"labels":[],"custom_fields":[]}}),
+                &json!({"pack":{"version":2,"labels":[],"custom_fields":[]}}),
             )
             .await?["ready"]
             == true

@@ -122,7 +122,7 @@ impl WriteHandler for FollowUp {
             let tenant = scope.tenant();
             let kind = self.kind.to_owned();
             let source = input["record_id"].as_i64().ok_or(Error::Invalid)?;
-            let key = bilibi_rules::Rules::action_identity(tx.sql(), scope)
+            let key = bilibi_watchers::Watchers::action_identity(tx.sql(), scope)
                 .await?
                 .map(|action| {
                     let binding = json!([action, kind, source]);
@@ -135,7 +135,7 @@ impl WriteHandler for FollowUp {
                 if let Some(row) = tx
                     .sql()
                     .query_opt(
-                        "SELECT id FROM core_activities WHERE tenant_id=$1 AND followup_rule_key=$2",
+                        "SELECT id FROM core_activities WHERE tenant_id=$1 AND followup_watcher_key=$2",
                         &[&tenant, key],
                     )
                     .await
@@ -165,7 +165,7 @@ impl WriteHandler for FollowUp {
                 tx.mutate(move |sql| {
                 Box::pin(async move {
                     sql.execute(
-                        "UPDATE core_activities SET followup_rule_key=$3 WHERE tenant_id=$1 AND id=$2",
+                        "UPDATE core_activities SET followup_watcher_key=$3 WHERE tenant_id=$1 AND id=$2",
                         &[&tenant, &activity_id, &key],
                     )
                     .await?;
@@ -174,8 +174,8 @@ impl WriteHandler for FollowUp {
                         vec![bilibi_database::Change {
                             kind: crate::RECORD.into(),
                             id: activity_id,
-                            old: json!({"followup_rule_key":null}),
-                            new: json!({"followup_rule_key":key}),
+                            old: json!({"followup_watcher_key":null}),
+                            new: json!({"followup_watcher_key":key}),
                         }],
                     ))
                 })

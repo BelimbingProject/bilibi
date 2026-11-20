@@ -12,8 +12,8 @@
 //! not callable: no person is present to give a code.
 //!
 //! A named system principal's job calls a contract only where the contract's
-//! owner admits that principal by name (`PRINCIPAL_WRITES`): Base Rules runs
-//! an approved rule's action as `rules`. The same schema, live capability
+//! owner admits that principal by name (`PRINCIPAL_WRITES`): Base Watchers runs
+//! an approved watcher's action as `watchers`. The same schema, live capability
 //! (the principal's own tenant grants), preview and commit apply; system
 //! scopes still cannot enter the other doors.
 use crate::{Error, Handler, RegisteredOperation, Registry, Result};
@@ -28,7 +28,7 @@ use tokio_postgres::GenericClient;
 pub const SERVICE: &str = "base/agent_api.jobs";
 /// The catalog a contract's owner admits named principals' jobs in:
 /// `Contribution::new(PRINCIPAL_WRITES, "<contract key>", provenance,
-/// &PrincipalWrite { principals: &["rules"] })`, from the contract's module.
+/// &PrincipalWrite { principals: &["watchers"] })`, from the contract's module.
 pub const PRINCIPAL_WRITES: &str = "base/agent_api.principal_writes";
 
 /// The named principals whose jobs may call one write contract. The contract
@@ -143,7 +143,7 @@ impl JobContracts {
     }
 
     /// Whether `input` passes the contract's input schema, for a caller that
-    /// stores an input to commit later (an approved rule's action).
+    /// stores an input to commit later (an approved watcher's action).
     pub fn validate(&self, key: &str, input: &Value) -> Result<()> {
         let registered = self.writable(key)?;
         crate::schema::validate(&registered.input, input).map_err(Error::InvalidInput)

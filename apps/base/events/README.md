@@ -140,7 +140,7 @@ You might be wondering why the handler doesn't get the publisher's user. **An ev
 
 ### Reading events another catalog names
 
-A Base subscriber that reacts to whatever owners offer it (Base Rules' `base/rules.triggers`) lists no events itself: its handler's `Subscribe::reads(catalog)` returns `Some` of the `On`s its own catalog holds (each owner's `Trigger`). They join `Subscriber::events` at boot and pass the same checks below. While its catalog names nothing (no owner mounted), it reads nothing and gets no deliveries.
+A Base subscriber that reacts to whatever owners offer it (Base Watchers' `base/watchers.triggers`) lists no events itself: its handler's `Subscribe::reads(catalog)` returns `Some` of the `On`s its own catalog holds (each owner's `Trigger`). They join `Subscriber::events` at boot and pass the same checks below. While its catalog names nothing (no owner mounted), it reads nothing and gets no deliveries.
 
 ### Handing work to your own worker
 
@@ -148,7 +148,7 @@ A handler that must do more than write its copy (run as its own principal, take 
 
 ### The cause of an event
 
-`Event::cause` says what a Platform edge named as the cause of the transaction that recorded the event, or `None` for an ordinary write. Base Rules names its run (`Events::cause(tx, "base/rules.run:42")`) before an action's commit, so the next run knows its chain; the cause lasts until that transaction ends (column `cause`, migration `base-events-005-cause`). It is evidence, never authority.
+`Event::cause` says what a Platform edge named as the cause of the transaction that recorded the event, or `None` for an ordinary write. Base Watchers names its run (`Events::cause(tx, "base/watchers.run:42")`) before an action's commit, so the next run knows its chain; the cause lasts until that transaction ends (column `cause`, migration `base-events-005-cause`). It is evidence, never authority.
 
 ### What boot checks
 

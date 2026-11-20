@@ -105,7 +105,7 @@ pub trait Subscribe: Send + Sync {
         event: &'a Event,
     ) -> SubscriberFuture<'a>;
     /// Events read beyond [`Subscriber::events`], named by another catalog
-    /// at boot (Base Rules reads the events its triggers name); `None` (the
+    /// at boot (Base Watchers reads the events its triggers name); `None` (the
     /// default) when the subscriber reads only what it lists. They pass the
     /// same boot checks as the listed ones. `Some` of nothing, with nothing
     /// listed, leaves the subscriber inert: no owner offers it an event yet.
@@ -137,7 +137,7 @@ pub struct Event {
     /// This subscriber's attempt at this event, from 1.
     pub attempt: i32,
     /// What a Platform edge named as the cause of the recording transaction
-    /// ([`Events::cause`]), such as `base/rules.run:42`; `None` for an
+    /// ([`Events::cause`]), such as `base/watchers.run:42`; `None` for an
     /// ordinary write. Evidence of causation, never authority.
     pub cause: Option<String>,
 }
@@ -184,7 +184,7 @@ const CAUSE: &str = "bilibi.events.cause";
 impl Events {
     /// Names `cause` (1–200 bytes, no control characters) as the cause of every
     /// event recorded later in `tx`: a Platform edge acting for a recorded
-    /// cause, such as Base Rules running a rule's action, so a subscriber can
+    /// cause, such as Base Watchers running a rule's action, so a subscriber can
     /// follow the chain (`Event::cause`). It lasts until `tx` ends.
     pub async fn cause(&self, tx: &mut MutationTransaction<'_>, cause: &str) -> Result<()> {
         if !text(cause) {

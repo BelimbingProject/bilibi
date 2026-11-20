@@ -42,7 +42,6 @@ bilibi-queue = { path = "queue" }
 bilibi-records = { path = "records" }
 bilibi-reports = { path = "reports" }
 bilibi-residents = { path = "residents" }
-bilibi-rules = { path = "rules" }
 bilibi-schedule = { path = "schedule" }
 bilibi-search = { path = "search" }
 bilibi-security = { path = "security" }
@@ -57,6 +56,7 @@ bilibi-tenancy = { path = "tenancy" }
 bilibi-tiling = { path = "tiling" }
 bilibi-ui = { path = "ui" }
 bilibi-visitor = { path = "visitor" }
+bilibi-watchers = { path = "watchers" }
 bilibi-workflow = { path = "workflow" }
 
 [lints]

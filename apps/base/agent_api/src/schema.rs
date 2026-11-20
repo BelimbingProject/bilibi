@@ -1,6 +1,6 @@
 //! This is the deliberately small
 //! input-schema dialect. Unknown keywords fail
-//! discovery; unknown input fields fail dispatch, including nested objects.
+//! discovery; unknown input fields fail dispatch unless explicitly permitted.
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -50,7 +50,7 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
         .and_then(Value::as_str)
         .ok_or("schema needs type")?;
     let keywords: &[&str] = match kind {
-        "object" => &["properties", "required"],
+        "object" => &["properties", "required", "additionalProperties"],
         "string" => &["enum", "maxLength", "format", "nullable"],
         "integer" | "number" => &["enum", "minimum", "maximum", "nullable"],
         "boolean" => &["nullable"],
@@ -148,6 +148,12 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
         return Err("nullable must be boolean".into());
     }
     if kind == "object" {
+        if node
+            .get("additionalProperties")
+            .is_some_and(|v| !v.is_boolean())
+        {
+            return Err("additionalProperties must be boolean".into());
+        }
         let properties = match node.get("properties") {
             Some(v) => v.as_object().ok_or("properties must be an object")?.clone(),
             None => Default::default(),
@@ -292,6 +298,9 @@ fn errors_at(
         for (key, value) in object {
             let child = &schema["properties"][key];
             let child_path = join(path, key);
+            if child.is_null() && schema["additionalProperties"] == true {
+                continue;
+            }
             if child.is_null() {
                 add(
                     errors,
@@ -321,16 +330,21 @@ fn errors_at(
             );
         }
     }
-    if schema
-        .get("enum")
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.contains(input))
-    {
-        add(
-            errors,
-            path,
-            "must be one of the declared enum values".into(),
-        );
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        if !values.contains(input) {
+            add(
+                errors,
+                path,
+                format!(
+                    "must be one of the declared values: {}",
+                    values
+                        .iter()
+                        .map(Value::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
     }
     for (key, holds, message) in [
         ("minimum", true, "must be at least"),

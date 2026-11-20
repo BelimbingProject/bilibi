@@ -550,7 +550,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .update(request(&one, &token1, LiveInput::Event(&restore)))
         .await?
         .html;
-    assert!(confirmation.contains("Rules already marked for review still need reapproval"));
+    assert!(confirmation.contains("Watchers already marked for review still need reapproval"));
     let refused = live
         .update(request(
             &one,

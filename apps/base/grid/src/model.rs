@@ -261,7 +261,7 @@ struct CustomField {
     sql: String,
     searchable: bool,
     reference: Option<&'static str>,
-    rule_condition: bool,
+    watcher_condition: bool,
 }
 impl Table {
     pub fn list_address(&self) -> Option<&'static str> {
@@ -321,11 +321,11 @@ impl Table {
     pub fn is_custom(&self, id: &str) -> bool {
         self.custom.contains_key(id)
     }
-    /// Whether `id` is a custom field the tenant offered to rule conditions.
-    pub fn custom_rule_condition(&self, id: &str) -> bool {
+    /// Whether `id` is a custom field the tenant offered to watcher conditions.
+    pub fn custom_watcher_condition(&self, id: &str) -> bool {
         self.custom
             .get(id)
-            .is_some_and(|custom| custom.rule_condition)
+            .is_some_and(|custom| custom.watcher_condition)
     }
     pub fn custom_reference(&self, id: &str) -> Option<&'static str> {
         self.custom.get(id).and_then(|custom| custom.reference)
@@ -360,7 +360,7 @@ impl Table {
         sql: String,
         searchable: bool,
         reference: Option<&'static str>,
-        rule_condition: bool,
+        watcher_condition: bool,
     ) {
         self.custom.insert(
             field.id,
@@ -369,7 +369,7 @@ impl Table {
                 sql,
                 searchable,
                 reference,
-                rule_condition,
+                watcher_condition,
             },
         );
         self.fields.push(field);

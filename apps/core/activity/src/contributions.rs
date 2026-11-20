@@ -250,7 +250,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/activity.pages", prove
     pending: Pending::None,
 }) }
 
-// Bounds only; each tenant explicitly grants the rules principal this key.
-inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "rules:core/activity", provenance!(), &bilibi_authz::OfferedCapabilities {
-    principal: "rules", capabilities: &[crate::SYSTEM_CREATE],
+// Bounds only; each tenant explicitly grants the watchers principal this key.
+inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "watchers:core/activity", provenance!(), &bilibi_authz::OfferedCapabilities {
+    principal: "watchers", capabilities: &[crate::SYSTEM_CREATE],
 }) }

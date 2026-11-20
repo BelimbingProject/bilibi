@@ -1,0 +1,2 @@
+ALTER TABLE core_activities RENAME COLUMN followup_rule_key TO followup_watcher_key;
+ALTER INDEX core_activity_rule_followup_once RENAME TO core_activity_watcher_followup_once;
