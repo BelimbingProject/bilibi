@@ -27,14 +27,27 @@ use std::{
 struct Bound {
     db: Db,
     fields: Arc<CustomFields>,
+    dependencies: Vec<&'static crate::ReceiptDependency>,
 }
 static BOUND: OnceLock<Bound> = OnceLock::new();
 pub(crate) fn bind(db: Db, fields: Arc<CustomFields>) -> bilibi_module_registry::Result<()> {
-    BOUND.set(Bound { db, fields }).map_err(|_| {
-        bilibi_module_registry::RegistryError::Service(
-            "duplicate custom-field agent binding".into(),
-        )
-    })
+    let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
+    let dependencies = catalog
+        .entries::<crate::ReceiptDependency>(crate::RECEIPT_DEPENDENCIES)?
+        .iter()
+        .map(|entry| entry.get::<crate::ReceiptDependency>())
+        .collect::<Result<Vec<_>, _>>()?;
+    BOUND
+        .set(Bound {
+            db,
+            fields,
+            dependencies,
+        })
+        .map_err(|_| {
+            bilibi_module_registry::RegistryError::Service(
+                "duplicate custom-field agent binding".into(),
+            )
+        })
 }
 fn bound() -> bilibi_agent_api::Result<&'static Bound> {
     BOUND.get().ok_or(Error::Internal.into())
@@ -150,6 +163,21 @@ impl ReadHandler for Read {
     }
 }
 
+pub(crate) fn receipt_fields<'a>(
+    client: &'a dyn OperationClient,
+    scope: &'a Scope,
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let sql = client.sql_client().await?;
+        let fields = bound()?
+            .fields
+            .definitions(sql, scope, None, true)
+            .await
+            .map_err(found)?;
+        Ok(Output::Data(record(to_json(fields))))
+    })
+}
+
 enum Write {
     Define,
     Update,
@@ -157,6 +185,60 @@ enum Write {
     Restore,
 }
 impl Write {
+    async fn receipt_dependencies(
+        &self,
+        sql: &tokio_postgres::Client,
+        scope: &Scope,
+        input: &Value,
+        write: bool,
+    ) -> bilibi_agent_api::Result<()> {
+        if input["receipt_undo"] != true {
+            return Ok(());
+        }
+        bilibi_authz::authorize_key(sql, scope, bilibi_labels::CUSTOMISATIONS_VIEW).await?;
+        bilibi_authz::authorize_key(sql, scope, VIEW).await?;
+        bilibi_authz::authorize_key(sql, scope, MANAGE).await?;
+        if !(matches!(self, Self::Archive)
+            || matches!(self, Self::Update) && input["watcher_condition"] == false)
+        {
+            return Ok(());
+        }
+        let bound = bound()?;
+        let record_type = input["record_type"].as_str().ok_or(Error::Invalid)?;
+        let Some(table) = bound
+            .fields
+            .sources
+            .iter()
+            .find(|source| source.record_type == record_type)
+        else {
+            return Ok(());
+        };
+        let key = input["key"].as_str().ok_or(Error::Invalid)?;
+        if !bound
+            .fields
+            .defined(sql, scope, record_type)
+            .await?
+            .iter()
+            .any(|field| field.key == key && field.watcher_condition)
+        {
+            return Ok(());
+        }
+        let mut affected = Vec::new();
+        for dependency in &bound.dependencies {
+            affected.extend((dependency.approved)(sql, scope, table.table, key, write).await?);
+        }
+        if !affected.is_empty() {
+            return Err(bilibi_agent_api::invalid(
+                "key",
+                format!(
+                    "Approved watchers depend on this field: {}.",
+                    affected.join(", ")
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     async fn preview_on(
         &self,
         client: &(impl tokio_postgres::GenericClient + Sync),
@@ -185,7 +267,11 @@ impl Write {
                         .await
                         .map_err(found)?,
                 )?;
-                json!({"summary":format!("Change {key} on {record_type}; its key and type stay"),"before":before,"after":after})
+                json!({"summary":if input["receipt_undo"] == true && !before.watcher_condition
+                    && after.watcher_condition == Some(true)
+                {
+                    format!("Offer {key} on {record_type} to watchers again. Watchers already marked for review still need reapproval.")
+                } else { format!("Change {key} on {record_type}; its key and type stay") },"before":before,"after":after})
             }
             Self::Archive => {
                 let key = key.ok_or(Error::Invalid)?;
@@ -205,7 +291,9 @@ impl Write {
                         .await
                         .map_err(found)?,
                 )?;
-                json!({"summary":format!("Restore {key} on {record_type}"),"before":before})
+                json!({"summary":if input["receipt_undo"] == true && before.watcher_condition {
+                    format!("Restore {key} on {record_type}. Watchers already marked for review still need reapproval.")
+                } else { format!("Restore {key} on {record_type}") },"before":before})
             }
         };
         Ok(value.into())
@@ -225,9 +313,15 @@ impl WriteHandler for Write {
             // The door's own transaction when it gives one: a preview never
             // asks the pool for a second connection.
             match client.transaction() {
-                Some(tx) => self.preview_on(tx, scope, input).await,
+                Some(tx) => {
+                    self.receipt_dependencies(tx.client(), scope, input, false)
+                        .await?;
+                    self.preview_on(tx, scope, input).await
+                }
                 None => {
                     let pooled = bound()?.db.get().await.map_err(Error::from)?;
+                    self.receipt_dependencies(&pooled, scope, input, false)
+                        .await?;
                     self.preview_on(&**pooled, scope, input).await
                 }
             }
@@ -240,6 +334,8 @@ impl WriteHandler for Write {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
+            self.receipt_dependencies(tx.sql().client(), scope, input, true)
+                .await?;
             let fields = &bound()?.fields;
             let record_type = input["record_type"].as_str().unwrap_or_default();
             let key = input["key"].as_str();
@@ -328,10 +424,11 @@ fn update_schema() -> Value {
     properties["record_type"] = record_type_schema();
     properties["key"] = key_schema();
     properties["version"] = version_schema();
+    properties["receipt_undo"] = json!({"type":"boolean"});
     json!({"type":"object","required":["record_type","key","label","version"],"properties":properties})
 }
 fn status_schema() -> Value {
-    json!({"type":"object","required":["record_type","key","version"],"properties":{"record_type":record_type_schema(),"key":key_schema(),"version":version_schema()}})
+    json!({"type":"object","required":["record_type","key","version"],"properties":{"record_type":record_type_schema(),"key":key_schema(),"version":version_schema(),"receipt_undo":{"type":"boolean"}}})
 }
 fn record_types_output() -> Value {
     json!({"type":"object","description":"record_types (id, label, path if registered and record_kinds) that offer custom fields, max_fields (active fields allowed per record type), pick_lists (key and label) a choice or choices field may use, and record_kinds (key and label) a reference field may point at."})

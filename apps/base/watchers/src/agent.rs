@@ -29,6 +29,28 @@ fn watchers() -> bilibi_agent_api::Result<&'static Arc<Watchers>> {
     WATCHERS.get().ok_or(Error::Internal.into())
 }
 
+fn approved_field_uses<'a>(
+    sql: &'a tokio_postgres::Client,
+    scope: &'a Scope,
+    table: &'a str,
+    key: &'a str,
+    write: bool,
+) -> bilibi_custom_fields::DependencyFuture<'a> {
+    Box::pin(async move {
+        let watchers = WATCHERS.get().ok_or(Error::Internal)?;
+        if write {
+            watchers.lock_admission(sql, scope).await?;
+        }
+        watchers.approved_field_uses(sql, scope, table, key).await
+    })
+}
+
+inventory::submit! {
+    Contribution::new(bilibi_custom_fields::RECEIPT_DEPENDENCIES, "base/watchers.custom_fields",
+        Provenance { module: "base/watchers", source: file!(), line: line!() },
+        &bilibi_custom_fields::ReceiptDependency { approved: approved_field_uses })
+}
+
 pub(crate) fn summary_json(watcher: &WatcherSummary) -> Value {
     json!({
         "watcher_id": watcher.id, "name": watcher.name, "watch": watcher.trigger, "watch_title": watcher.trigger_title,

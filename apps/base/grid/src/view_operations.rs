@@ -511,3 +511,64 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/grid.custo
 fn pages_input() -> Value {
     json!({})
 }
+
+fn project_receipt<'a>(
+    client: &'a dyn OperationClient,
+    scope: &'a Scope,
+    change: &'a mut Value,
+    _: &'a Value,
+) -> bilibi_labels::ReceiptFuture<'a> {
+    Box::pin(async move {
+        let side = if change["after"].is_null() {
+            &change["before"]
+        } else {
+            &change["after"]
+        };
+        let Some(page) = side["page"].as_str() else {
+            return Ok(false);
+        };
+        match authorized_page(client, scope, page).await {
+            Ok(Some(_)) => {}
+            Ok(None)
+            | Err(
+                bilibi_agent_api::Error::Forbidden
+                | bilibi_agent_api::Error::Backend(Error::Forbidden),
+            ) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        let Some(id) = change["id"].as_str().and_then(|id| id.parse().ok()) else {
+            return Ok(false);
+        };
+        let current = bound()?.shared_on(client, scope, page, Some(id)).await?;
+        if let Some(view) = current.first() {
+            let mut effective = shared_json(view, true);
+            effective["page"] = json!(page);
+            change["effective"] = effective;
+            change["changed_since"] = json!(false);
+            return Ok(true);
+        }
+
+        let owner = side["owner_id"].as_i64().or_else(|| {
+            (change["actor_type"] == "user" && change["after"].is_object())
+                .then(|| change["actor_id"].as_i64())
+                .flatten()
+        });
+        let roles: Vec<i64> = serde_json::from_value(side["roles"].clone()).unwrap_or_default();
+        let allowed = owner == Some(scope.user())
+            || side["shared_with_everyone"] == true
+            || crate::shared_views::has_audience_role(client, scope, &roles).await?;
+        if !allowed {
+            return Ok(false);
+        }
+        change["effective"] = Value::Null;
+        change["changed_since"] = json!(change["after"].is_object());
+        Ok(true)
+    })
+}
+
+inventory::submit! {
+    Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/grid.shared_view_receipts",
+        Provenance { module: "base/grid", source: file!(), line: line!() },
+        &bilibi_labels::ReceiptSource { kind: crate::shared_views::KIND, capability: SHARE_VIEWS, subject_filter: None,
+            undo: None, read: None, project: project_receipt })
+}

@@ -1123,6 +1123,8 @@ dependencies = [
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-principal-directory",
+ "bilibi-settings",
+ "bilibi-system",
  "bilibi-tenancy",
  "bilibi-ui",
  "inventory",
@@ -1246,6 +1248,7 @@ name = "bilibi-menu-order"
 version = "0.2.1"
 dependencies = [
  "bilibi-agent-api",
+ "bilibi-audit",
  "bilibi-authz",
  "bilibi-database",
  "bilibi-labels",
@@ -1255,6 +1258,7 @@ dependencies = [
  "inventory",
  "serde_json",
  "sha2 0.11.1",
+ "tokio-postgres",
 ]
 
 [[package]]
@@ -2078,6 +2082,7 @@ dependencies = [
  "askama",
  "bilibi-agent-api",
  "bilibi-authz",
+ "bilibi-custom-fields",
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-events",

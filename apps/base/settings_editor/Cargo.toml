@@ -6,12 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bilibi-labels.workspace = true
 askama.workspace = true
 bilibi-agent-api.workspace = true
 bilibi-audit.workspace = true
 bilibi-authz = { path = "../authz" }
 bilibi-database.workspace = true
-bilibi-labels.workspace = true
 bilibi-menu.workspace = true
 bilibi-media.workspace = true
 bilibi-module-registry.workspace = true

@@ -160,3 +160,112 @@ inventory::submit! { bilibi_module_registry::Contribution::new(SECTIONS, "base/l
         change: &["base.labels.set"], preview: None, verify: "base.labels.list", restore: Some("base.labels.clear"),
     }),
 }) }
+
+/// An owner's audit kind and read capability for customisation receipts.
+pub struct ReceiptSource {
+    pub kind: &'static str,
+    pub capability: &'static str,
+    pub subject_filter: Option<fn() -> Value>,
+    pub undo: Option<ReceiptUndo>,
+    pub read: Option<ReceiptRead>,
+    pub project: for<'a> fn(
+        &'a dyn bilibi_agent_api::OperationClient,
+        &'a bilibi_tenancy::Scope,
+        &'a mut Value,
+        &'a Value,
+    ) -> ReceiptFuture<'a>,
+}
+
+pub type ReceiptRead = for<'a> fn(
+    &'a dyn bilibi_agent_api::OperationClient,
+    &'a bilibi_tenancy::Scope,
+) -> bilibi_agent_api::OperationFuture<'a>;
+
+pub type ReceiptFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = bilibi_agent_api::Result<bool>> + Send + 'a>,
+>;
+
+pub struct ReceiptUndo {
+    pub capability: &'static str,
+    pub correction: fn(&Value, &Value) -> Option<ReceiptCorrection>,
+}
+/// Registry key for owner-authorized receipt sources.
+pub const RECEIPT_SOURCES: &str = "base/labels.receipt_sources";
+inventory::submit! { bilibi_module_registry::Contribution::new(RECEIPT_SOURCES, "base/labels.receipts", bilibi_module_registry::Provenance { module: "base/labels", source: file!(), line: line!() }, &ReceiptSource { kind: "label", capability: crate::VIEW, subject_filter: None, undo: Some(ReceiptUndo { capability: crate::MANAGE, correction: label_correction }), read: Some(crate::operations::receipt_labels), project: project_label }) }
+
+fn label_current(change: &Value, rows: &Value) -> Option<Value> {
+    let after = &change["after"];
+    let source = if after.is_object() {
+        after
+    } else {
+        &change["before"]
+    };
+    rows.as_array()?
+        .iter()
+        .find(|row| row["kind"] == source["kind"] && row["subject"] == source["subject"])
+        .cloned()
+}
+
+fn project_label<'a>(
+    client: &'a dyn bilibi_agent_api::OperationClient,
+    scope: &'a bilibi_tenancy::Scope,
+    change: &'a mut Value,
+    rows: &'a Value,
+) -> ReceiptFuture<'a> {
+    Box::pin(async move {
+        let current = label_current(change, rows);
+        let side = if change["after"].is_null() {
+            &change["before"]
+        } else {
+            &change["after"]
+        };
+        let version = current.as_ref().and_then(|row| row["version"].as_str());
+        let matches_version = if change["after"].is_null() {
+            version == Some("0:0")
+        } else {
+            version
+                .and_then(|version| version.split_once(':'))
+                .is_some_and(|(id, revision)| {
+                    Some(id) == change["id"].as_str()
+                        && revision.parse::<i64>().ok() == side["version"].as_i64()
+                })
+        };
+        let matches = matches_version
+            && bilibi_audit::is_current_customisation_mutation(
+                client.sql_client().await?,
+                scope,
+                crate::store::KIND,
+                &serde_json::json!({"kind": side["kind"], "subject": side["subject"]}),
+                change["mutation_id"]
+                    .as_i64()
+                    .ok_or(bilibi_database::Error::Invalid)?,
+            )
+            .await?;
+        change["changed_since"] = Value::Bool(!matches);
+        change["effective"] = current.unwrap_or(Value::Null);
+        Ok(true)
+    })
+}
+
+/// An owner's versioned inverse, reviewed and committed through its existing contract.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReceiptCorrection {
+    pub contract: &'static str,
+    pub event: &'static str,
+    pub input: Value,
+}
+fn label_correction(change: &Value, current: &Value) -> Option<ReceiptCorrection> {
+    let old = &change["before"];
+    let mut input = serde_json::json!({"kind": current["kind"], "subject": current["subject"], "version": current["version"], "receipt": change["mutation_id"]});
+    let (contract, event) = if let Some(label) = old["label"].as_str() {
+        input["label"] = Value::String(label.to_owned());
+        ("base.labels.set", "customisation.receipt_label_set")
+    } else {
+        ("base.labels.clear", "customisation.receipt_label_clear")
+    };
+    Some(ReceiptCorrection {
+        contract,
+        event,
+        input,
+    })
+}

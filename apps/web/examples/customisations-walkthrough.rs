@@ -427,6 +427,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ).await?;
     contracts.submit(&Call { scope: &one, credential: &token1, service: "base/custom_fields.pages", event: "create", contract: "base.custom_fields.define" }, json!({"record_type":"company", "key":"walkthrough_field", "label":"Tenant one field", "kind":"reference", "target":"company"})).await?;
     discovery(&db, &contracts, &one, &two, &token1).await?;
+    // Personal list arrangements must not crowd tenant customisations out of
+    // the first bounded history page. A separate Tenant Owner sees its own
+    // receipt values while attribution remains restricted.
+    let views = app
+        .services
+        .get::<bilibi_grid::PageViews>(bilibi_grid::PAGE_VIEWS)?;
+    for i in 0..30 {
+        let mut view = bilibi_grid::View::new("companies");
+        view.add_column(if i % 2 == 0 { "name" } else { "code" });
+        views.remember(&one, &view).await?;
+    }
+    let recent = contracts
+        .read(&one, "base.labels.receipts", &json!({"limit":1}))
+        .await?;
+    assert!(
+        !recent["result"]["receipts"]
+            .as_array()
+            .ok_or("missing receipts")?
+            .is_empty(),
+        "personal view state must not crowd out tenant history"
+    );
+    let mut cursor = None;
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..20 {
+        let input = cursor.map_or_else(
+            || json!({"limit":1}),
+            |before| json!({"limit":1,"before":before}),
+        );
+        let page = contracts.read(&one, "base.labels.receipts", &input).await?;
+        for group in page["result"]["receipts"]
+            .as_array()
+            .ok_or("missing receipts")?
+        {
+            for change in group["changes"].as_array().ok_or("missing changes")? {
+                assert!(
+                    ids.insert(
+                        change["mutation_id"]
+                            .as_i64()
+                            .ok_or("missing mutation id")?
+                    ),
+                    "cursor repeated a change"
+                );
+            }
+        }
+        cursor = page["result"]["next_before"].as_i64();
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert!(
+        cursor.is_none() && ids.len() >= 3,
+        "cursor must reach all tenant changes"
+    );
+    let owner_history = contracts
+        .read(&two, "base.labels.receipts", &json!({"limit":25}))
+        .await?;
+    let changes: Vec<_> = owner_history["result"]["receipts"]
+        .as_array()
+        .ok_or("missing owner receipts")?
+        .iter()
+        .flat_map(|group| group["changes"].as_array().into_iter().flatten())
+        .collect();
+    assert!(!changes.is_empty());
+    for change in changes {
+        assert_eq!(change["who"], "Restricted");
+        for key in [
+            "actor_type",
+            "actor_id",
+            "impersonator_id",
+            "system_principal",
+        ] {
+            assert!(change.get(key).is_none());
+        }
+    }
     let path = HashMap::new();
     let query = HashMap::new();
     let show = |scope| PageRequest {
@@ -528,7 +602,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .update(request(&one, &token1, LiveInput::Event(&shown[1])))
         .await?
         .html;
-    assert!(!cleared.contains("Second override") && cleared.contains("Tenant one word"));
+    assert!(cleared.contains("Tenant one word"));
+    let labels = contracts.read(&one, "base.labels.list", &json!({})).await?;
+    let restored = labels["result"]
+        .as_array()
+        .ok_or("missing labels")?
+        .iter()
+        .find(|row| row["subject"] == "admin.labels")
+        .ok_or("missing restored label")?;
+    assert!(
+        restored["label"].is_null(),
+        "the override must be removed even though its receipt remains visible"
+    );
     let fields = contracts
         .read(&one, "base.custom_fields.list", &json!({}))
         .await?;
@@ -543,7 +628,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .update(request(&one, &token1, LiveInput::Event(&archive)))
         .await?
         .html;
-    assert!(confirmation.contains("Approved rules that use this field may stop running"));
+    assert!(confirmation.contains("Approved watchers that use this field may stop running"));
     let commit = confirmation_event(&confirmation, "customisation.fields");
     contracts.submit(
         &Call { scope: &one, credential: &token1, service: "base/custom_fields.pages", event: "save_field", contract: "base.custom_fields.update" },
@@ -553,7 +638,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .update(request(&one, &token1, LiveInput::Event(&commit)))
         .await?
         .html;
-    assert!(rejected.contains("the field changed; reload before saving"));
+    assert!(rejected.contains("The customisation changed. Review again before trying."));
     assert!(!rejected.contains("Archived custom fields") && rejected.contains("Renamed field"));
     let fields = contracts
         .read(&one, "base.custom_fields.list", &json!({}))
@@ -602,20 +687,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .update(request(&one, &token1, LiveInput::Event(&restore)))
         .await?
         .html;
-    assert!(confirmation.contains("Watchers already marked for review still need reapproval"));
-    let refused = live
-        .update(request(
-            &one,
-            &token1,
-            LiveInput::Event(&confirmation_event(
-                &confirmation,
-                "customisation.fields_restore",
-            )),
-        ))
-        .await?
-        .html;
     assert!(
-        refused.contains("archive one first") && !refused.contains("customisations-confirm-title")
+        confirmation.contains("archive one first")
+            && !confirmation.contains("customisations-confirm-title")
     );
     println!(
         "PASS: tenant isolation, owner undo operations, section denials, picker refresh, revision-bound confirmations, actor disclosure and owner refusals"

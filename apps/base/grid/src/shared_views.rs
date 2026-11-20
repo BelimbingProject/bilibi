@@ -128,6 +128,29 @@ pub(crate) fn canonical_arrangement(view: &View) -> View {
     View::from_params(&view.to_params(), &view.table)
 }
 
+pub(crate) async fn has_audience_role(
+    client: &dyn bilibi_tenancy::ProofClient,
+    scope: &Scope,
+    roles: &[i64],
+) -> Result<bool> {
+    if roles.is_empty() {
+        return Ok(false);
+    }
+    Ok(client
+        .query_opt(
+            "SELECT 1 FROM effective_principal_roles WHERE tenant_id=$1 AND user_id=$2
+         AND (company_id IS NULL OR company_id=$3) AND role_id=ANY($4) LIMIT 1",
+            &[
+                &scope.tenant(),
+                &scope.user(),
+                &scope.current_company().map(|company| company.get()),
+                &roles,
+            ],
+        )
+        .await?
+        .is_some())
+}
+
 fn as_view(row: &tokio_postgres::Row, page: &str, reader: i64) -> SharedView {
     let stored: Value = row.get(3);
     let roles: Vec<i64> = row.get(5);
@@ -339,7 +362,7 @@ impl PageViews {
                         &[&tenant, &id, &roles],
                     )
                     .await?;
-                    let new = json!({"page": page, "name": name, "view": stored, "shared_with_everyone": everyone, "roles": roles});
+                    let new = json!({"owner_id": owner, "page": page, "name": name, "view": stored, "shared_with_everyone": everyone, "roles": roles});
                     Ok((id, vec![Change { kind: KIND.into(), id, old: Value::Null, new }]))
                 })
             })
@@ -367,7 +390,13 @@ impl PageViews {
         if row.get::<_, i64>(4) != owner {
             bilibi_authz::authorize_key(tx.sql(), scope, SHARE).await?;
         }
-        let old = json!({"page": row.get::<_, String>(0), "name": row.get::<_, String>(1), "view": row.get::<_, Value>(2), "shared_with_everyone": row.get::<_, bool>(3)});
+        let roles: Vec<i64> = tx.sql().query_one(
+            "SELECT ARRAY(SELECT role_id FROM base_grid_shared_view_roles WHERE tenant_id=$1 AND view_id=$2 ORDER BY role_id)",
+            &[&tenant, &id],
+        ).await?.get(0);
+        let old = json!({"page": row.get::<_, String>(0), "name": row.get::<_, String>(1),
+            "view": row.get::<_, Value>(2), "shared_with_everyone": row.get::<_, bool>(3),
+            "owner_id": row.get::<_, i64>(4), "roles": roles});
         tx.mutate(move |sql| {
             Box::pin(async move {
                 sql.execute(

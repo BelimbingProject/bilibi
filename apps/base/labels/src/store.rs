@@ -342,6 +342,48 @@ impl Labels {
         scope: &Scope,
         edit: Edit<'_>,
     ) -> Result<Plan> {
+        self.apply_guarded(tx, scope, edit, None).await
+    }
+
+    pub(crate) async fn check_receipt(
+        &self,
+        sql: &impl GenericClient,
+        scope: &Scope,
+        edit: Edit<'_>,
+        id: i64,
+    ) -> Result<()> {
+        bilibi_authz::authorize_key(sql, scope, crate::CUSTOMISATIONS_VIEW).await?;
+        bilibi_authz::authorize_key(sql, scope, crate::VIEW).await?;
+        let subject = json!({"kind": edit.kind.key(), "subject": edit.subject});
+        if !bilibi_audit::is_current_customisation_mutation(sql, scope, KIND, &subject, id).await? {
+            return Err(Error::Conflict);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn apply_guarded(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        edit: Edit<'_>,
+        receipt: Option<i64>,
+    ) -> Result<Plan> {
+        bilibi_authz::authorize_key(tx.sql(), scope, crate::MANAGE).await?;
+        let key = format!(
+            "base/labels:{}:{}:{}",
+            scope.tenant(),
+            edit.kind.key(),
+            edit.subject
+        );
+        tx.sql()
+            .execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                &[&key],
+            )
+            .await?;
+        if let Some(id) = receipt {
+            self.check_receipt(tx.sql(), scope, edit, id).await?;
+        }
         let plan = self.plan(tx.sql(), scope, edit, true).await?;
         let (tenant, kind_key, subject_id) =
             (scope.tenant(), edit.kind.key(), edit.subject.to_owned());

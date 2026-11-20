@@ -161,6 +161,47 @@ impl Watchers {
         ))
     }
 
+    pub(crate) async fn approved_field_uses(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        table: &str,
+        key: &str,
+    ) -> Result<Vec<String>> {
+        let rows = client
+            .query(
+                "SELECT r.name,r.trigger,v.definition FROM base_watchers r JOIN base_watcher_versions v
+             ON v.tenant_id=r.tenant_id AND v.id=r.active_version_id
+             WHERE r.tenant_id=$1 AND v.approved_at IS NOT NULL ORDER BY r.name,r.id",
+                &[&scope.tenant()],
+            )
+            .await?;
+        let may_name = bilibi_authz::holds_proof(client, scope, crate::VIEW).await?;
+        let mut affected = Vec::new();
+        for row in rows {
+            if !self
+                .trigger(row.get(1))
+                .is_some_and(|trigger| trigger.definition.table == table)
+            {
+                continue;
+            }
+            let definition =
+                Definition::parse(&row.get(2), &mut Vec::new()).ok_or(Error::Invalid)?;
+            if definition
+                .fields()
+                .iter()
+                .any(|path| bilibi_grid::custom_key(path) == Some(key))
+            {
+                affected.push(if may_name {
+                    row.get(0)
+                } else {
+                    "Restricted watcher".into()
+                });
+            }
+        }
+        Ok(affected)
+    }
+
     pub(crate) async fn lock_admission(
         &self,
         client: &(impl GenericClient + Sync),

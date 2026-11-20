@@ -15,18 +15,189 @@ use bilibi_module_registry::{Contribution, Provenance, RegistryError};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, OnceLock},
 };
 
-static BOUND: OnceLock<Arc<Labels>> = OnceLock::new();
-pub(crate) fn bind(labels: Arc<Labels>) -> bilibi_module_registry::Result<()> {
+struct Bound {
+    labels: Arc<Labels>,
+    directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
+    sources: Vec<&'static crate::ReceiptSource>,
+}
+static BOUND: OnceLock<Bound> = OnceLock::new();
+pub(crate) fn bind(
+    labels: Arc<Labels>,
+    directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
+) -> bilibi_module_registry::Result<()> {
+    let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
+    let sources = catalog
+        .entries::<crate::ReceiptSource>(crate::RECEIPT_SOURCES)?
+        .iter()
+        .map(|entry| entry.get::<crate::ReceiptSource>())
+        .collect::<Result<Vec<_>, _>>()?;
     BOUND
-        .set(labels)
+        .set(Bound {
+            labels,
+            directory,
+            sources,
+        })
         .map_err(|_| RegistryError::Service("duplicate labels binding".into()))
 }
-fn bound() -> bilibi_agent_api::Result<&'static Arc<Labels>> {
+fn bound() -> bilibi_agent_api::Result<&'static Bound> {
     BOUND.get().ok_or(Error::Internal.into())
+}
+
+fn actor(entry: &Value) -> Option<bilibi_principal_directory::PrincipalRef> {
+    use bilibi_principal_directory::{PrincipalKind, PrincipalRef};
+    let kind = match entry["actor_type"].as_str()? {
+        "user" => PrincipalKind::User,
+        "agent" => PrincipalKind::Agent,
+        _ => return None,
+    };
+    PrincipalRef::new(kind, entry["actor_id"].as_i64()?).ok()
+}
+
+fn impersonator(entry: &Value) -> Option<bilibi_principal_directory::PrincipalRef> {
+    use bilibi_principal_directory::{PrincipalKind, PrincipalRef};
+    PrincipalRef::new(PrincipalKind::User, entry["impersonator_id"].as_i64()?).ok()
+}
+
+async fn receipts(
+    client: &dyn OperationClient,
+    scope: &Scope,
+    input: &Value,
+) -> bilibi_agent_api::Result<Output> {
+    let bound = bound()?;
+    let sql = client.sql_client().await?;
+    let capabilities = bilibi_authz::effective_capabilities(sql, scope).await?;
+    if !capabilities.contains(crate::CUSTOMISATIONS_VIEW) {
+        return Err(Error::Forbidden.into());
+    }
+    let sources: Vec<_> = bound
+        .sources
+        .iter()
+        .copied()
+        .filter(|source| capabilities.contains(source.capability))
+        .collect();
+    let kinds: Vec<_> = sources.iter().map(|source| source.kind).collect();
+    let filters: Vec<_> = sources
+        .iter()
+        .map(|source| source.subject_filter.map(|filter| filter()))
+        .collect();
+    let limit = input["limit"].as_i64().unwrap_or(25);
+    let (entries, next) = bilibi_audit::customisation_receipts(
+        sql,
+        scope,
+        &kinds,
+        &filters,
+        input["before"].as_i64(),
+        limit,
+    )
+    .await?;
+    let mut by_kind: HashMap<String, Vec<Value>> = HashMap::new();
+    for entry in entries {
+        let kind = entry["kind"].as_str().ok_or(Error::Internal)?;
+        by_kind.entry(kind.to_owned()).or_default().push(entry);
+    }
+    let mut visible = Vec::new();
+    for source in sources {
+        let Some(changes) = by_kind.remove(source.kind) else {
+            continue;
+        };
+        let rows = match source.read {
+            Some(read) => read(client, scope).await?.envelope(source.kind),
+            None => Value::Null,
+        };
+        for mut change in changes {
+            if !(source.project)(client, scope, &mut change, &rows["result"]).await? {
+                continue;
+            }
+            let correction = source
+                .undo
+                .as_ref()
+                .filter(|undo| {
+                    change["changed_since"] == false && capabilities.contains(undo.capability)
+                })
+                .and_then(|undo| (undo.correction)(&change, &change["effective"]));
+            change["can_undo"] = json!(correction.is_some());
+            if let Some(correction) = correction {
+                change["undo"] = json!({"operation":correction.contract,"input":correction.input});
+            }
+            if let Some(object) = change.as_object_mut() {
+                object.remove("hidden_items");
+            }
+            visible.push(change);
+        }
+    }
+    let can_see_actor = capabilities.contains("admin.audit.log.list");
+    let candidates: HashSet<_> = visible
+        .iter()
+        .filter(|_| can_see_actor)
+        .flat_map(|entry| [actor(entry), impersonator(entry)])
+        .flatten()
+        .collect();
+    let candidates: Vec<_> = candidates.into_iter().collect();
+    let mut names = HashMap::new();
+    for batch in candidates.chunks(bilibi_principal_directory::MAX_CEILING) {
+        let query = bilibi_principal_directory::Query::default().ceiling(batch.len());
+        let ranked = bound
+            .directory
+            .rank(sql, scope, batch, &query)
+            .await
+            .map_err(|_| Error::Internal)?;
+        names.extend(
+            ranked
+                .named
+                .into_iter()
+                .map(|entry| (entry.principal, entry.name)),
+        );
+    }
+    let name_of = |principal: bilibi_principal_directory::PrincipalRef| {
+        names
+            .get(&principal)
+            .cloned()
+            .unwrap_or_else(|| principal.durable_label())
+    };
+    visible.sort_by_key(|entry| std::cmp::Reverse(entry["mutation_id"].as_i64()));
+    let mut indices = HashMap::new();
+    let mut groups: Vec<Value> = Vec::new();
+    for mut change in visible {
+        if can_see_actor {
+            let name = actor(&change).map(name_of).unwrap_or_else(|| {
+                change["system_principal"]
+                    .as_str()
+                    .or_else(|| change["actor_type"].as_str())
+                    .unwrap_or("Unavailable")
+                    .to_owned()
+            });
+            change["who"] = json!(impersonator(&change)
+                .map_or_else(|| name.clone(), |by| format!("{} as {name}", name_of(by))));
+        } else {
+            change["who"] = json!("Restricted");
+            if let Some(object) = change.as_object_mut() {
+                for field in [
+                    "actor_type",
+                    "actor_id",
+                    "impersonator_id",
+                    "system_principal",
+                ] {
+                    object.remove(field);
+                }
+            }
+        }
+        let trace = change["trace"].as_str().unwrap_or_default().to_owned();
+        let index = *indices.entry(trace.clone()).or_insert_with(|| {
+            groups.push(json!({"trace": trace, "changes": []}));
+            groups.len() - 1
+        });
+        groups[index]["changes"]
+            .as_array_mut()
+            .ok_or(Error::Internal)?
+            .push(change);
+    }
+    Ok(Output::Data(record(
+        json!({"receipts": groups, "next_before": next}),
+    )))
 }
 fn found(error: Error) -> bilibi_agent_api::Error {
     match error {
@@ -70,6 +241,7 @@ fn plan_json(plan: &Plan) -> Value {
 
 enum Read {
     List,
+    Receipts,
 }
 impl ReadHandler for Read {
     fn owner(&self) -> &'static str {
@@ -82,7 +254,10 @@ impl ReadHandler for Read {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let labels = bound()?;
+            if matches!(self, Self::Receipts) {
+                return receipts(client, scope, input).await;
+            }
+            let labels = &bound()?.labels;
             let wanted = input["kind"].as_str().and_then(Kind::from_key);
             let search = input["search"].as_str().unwrap_or_default().to_lowercase();
             let stored = Labels::stored(client, scope).await?;
@@ -107,6 +282,13 @@ impl ReadHandler for Read {
             Ok(Output::Data(record(Value::Array(rows))))
         })
     }
+}
+
+pub(crate) fn receipt_labels<'a>(
+    client: &'a dyn OperationClient,
+    scope: &'a Scope,
+) -> OperationFuture<'a> {
+    Box::pin(async move { Read::List.call(client, scope, &json!({})).await })
 }
 
 enum Write {
@@ -142,15 +324,21 @@ impl WriteHandler for Write {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let labels = bound()?;
+            let labels = &bound()?.labels;
             if matches!(self, Self::Set) && self.text(input).trim().is_empty() {
                 return Err(bilibi_agent_api::invalid(
                     "label",
                     "is required; clear the override to restore the module's word",
                 ));
             }
+            let edit = self.edit(input)?;
+            if let Some(id) = input["receipt"].as_i64() {
+                labels
+                    .check_receipt(client.sql_client().await?, scope, edit, id)
+                    .await?;
+            }
             let plan = labels
-                .plan(client, scope, self.edit(input)?, false)
+                .plan(client, scope, edit, false)
                 .await
                 .map_err(found)?;
             let summary = match &plan.after {
@@ -173,9 +361,9 @@ impl WriteHandler for Write {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let labels = bound()?;
+            let labels = &bound()?.labels;
             let plan = labels
-                .apply(tx, scope, self.edit(input)?)
+                .apply_guarded(tx, scope, self.edit(input)?, input["receipt"].as_i64())
                 .await
                 .map_err(found)?;
             Ok(Output::Data(record(plan_json(&plan))))
@@ -192,15 +380,21 @@ fn subject_schema() -> Value {
 fn version_schema() -> Value {
     json!({"type":"string","description":"The identity:version token you read (0:0 when there was no override); a replaced or changed label is refused."})
 }
+fn receipts_schema() -> Value {
+    json!({"type":"object", "properties":{"before":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":100}}})
+}
+fn receipts_output() -> Value {
+    json!({"type":"object", "description":"Receipts grouped by trace with actor, before, after and effective result. Pass next_before as before to continue. When can_undo is true, undo contains the owner operation and exact input to review."})
+}
 fn list_schema() -> Value {
     json!({"type":"object","properties":{"kind":kind_schema(),"search":{"type":"string","maxLength":120,"description":"Only words holding this text, in any case."}}})
 }
 fn set_schema() -> Value {
     json!({"type":"object","required":["kind","subject","label","version"],"properties":{"kind":kind_schema(),"subject":subject_schema(),
-        "label":{"type":"string","maxLength":MAX_LABEL,"description":"The plain text to show instead."},"version":version_schema()}})
+        "label":{"type":"string","maxLength":MAX_LABEL,"description":"The plain text to show instead."},"version":version_schema(),"receipt":{"type":"integer","minimum":1,"description":"For a receipt undo, the mutation ID."}}})
 }
 fn clear_schema() -> Value {
-    json!({"type":"object","required":["kind","subject","version"],"properties":{"kind":kind_schema(),"subject":subject_schema(),"version":version_schema()}})
+    json!({"type":"object","required":["kind","subject","version"],"properties":{"kind":kind_schema(),"subject":subject_schema(),"version":version_schema(),"receipt":{"type":"integer","minimum":1}}})
 }
 fn list_output() -> Value {
     json!({"type":"array","description":"Each word that may be renamed: kind, subject, default (the module's word), trail, page (the address a menu item opens, or null), record_kinds (the Grid table and record types a record or field belongs to), label (the tenant's, or null) and version."})
@@ -211,6 +405,7 @@ fn write_output() -> Value {
 
 inventory::submit! { Contribution::new(DEFINITIONS, "base/labels.agent", Provenance { module: "base/labels", source: file!(), line: line!() }, &Definitions {
     operations: &[
+        Operation { key: "base.labels.receipts", title: "Read customisation receipts", summary: "Recent audited customisation changes grouped by trace.", keywords: &["customisation", "history", "receipt"], capability: crate::CUSTOMISATIONS_VIEW, input: receipts_schema, output: receipts_output, handler: Handler::Read(&Read::Receipts), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.labels.list", title: "List labels", summary: "The menu items, record types and fields a tenant may rename, with the module's own word and the tenant's label.", keywords: &["rename", "label", "menu", "terminology"], capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.labels.set", title: "Rename a menu item, record type or field", summary: "Show your own word for a menu item, record type or field, such as Clients for Companies; operation keys, routes and permissions never change.", keywords: &["rename", "label", "menu", "terminology"], capability: MANAGE, input: set_schema, output: write_output, handler: Handler::SafeWrite(&Write::Set), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.labels.clear", title: "Restore a label", summary: "Remove the tenant's label so the module's own word shows again.", keywords: &["restore", "label", "menu"], capability: MANAGE, input: clear_schema, output: write_output, handler: Handler::SafeWrite(&Write::Clear), channels: Channels::Every, step_up: &[] },
