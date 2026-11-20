@@ -237,13 +237,13 @@ impl Proof {
                 .await?
                 .query_one(
                     "SELECT count(*) FROM base_queue_jobs q
-                 WHERE q.worker_id IN ('base/events-delivery','base/watchers-run')
+                 WHERE q.worker_id IN ('base/events-delivery','base/watchers-admit','base/watchers-run')
                      AND q.state IN ('available','executing','retryable','scheduled')
                      AND q.available_at <= now() + interval '2 seconds'
-                     AND NOT (q.worker_id='base/watchers-run' AND EXISTS (
+                     AND NOT (q.fifo_key IS NOT NULL AND EXISTS (
                          SELECT 1 FROM base_queue_jobs head
                          WHERE head.tenant_id=q.tenant_id AND head.worker_id=q.worker_id
-                             AND head.id<q.id AND head.state IN ('retryable','scheduled')
+                             AND head.fifo_key=q.fifo_key AND head.id<q.id AND head.state IN ('retryable','scheduled')
                              AND head.available_at > now() + interval '2 seconds'
                      ))",
                     &[],
@@ -294,7 +294,7 @@ impl Proof {
         ).await?;
         Ok(client.execute(
             "UPDATE base_queue_jobs SET available_at=clock_timestamp(),attempt=$2
-             WHERE tenant_id=$1 AND worker_id='base/watchers-run' AND state='scheduled' AND attempt=0",
+             WHERE tenant_id=$1 AND worker_id='base/watchers-admit' AND state='scheduled' AND attempt=0",
             &[&scope.tenant(), &spent_attempts],
         ).await?)
     }
@@ -981,13 +981,51 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
     );
     // The state a crash leaves after the effect committed and before the
     // job's completion was written: the run still matched, the job alive.
+    proof.stop().await;
     let client = proof.db.get().await?;
     client.execute("UPDATE base_watcher_runs SET state='matched',finished_at=NULL WHERE subject=$1 AND watcher_id=$2", &[&c.to_string(), &r1]).await?;
-    client.execute(
-        "UPDATE base_queue_jobs SET state='available',available_at=now(),attempt=1 WHERE worker_id='base/watchers-run' AND args->>'event_id'=(SELECT event_id::text FROM base_watcher_runs WHERE subject=$1 AND watcher_id=$2)",
+    let retry: i64 = client.query_one(
+        "UPDATE base_queue_jobs SET state='retryable',available_at=now() + interval '1 hour',
+            attempt=1,completed_at=NULL WHERE worker_id='base/watchers-run'
+            AND args->>'run_id'=(SELECT id::text FROM base_watcher_runs WHERE subject=$1 AND watcher_id=$2)
+            RETURNING id",
         &[&c.to_string(), &r1],
-    ).await?;
+    ).await?.get(0);
     drop(client);
+    let later = proof
+        .open(
+            &one,
+            1,
+            "Later event during action backoff",
+            "urgent",
+            "2500.00",
+        )
+        .await?;
+    proof.start()?;
+    proof.settled().await?;
+    let retry_waits: bool = proof
+        .db
+        .get()
+        .await?
+        .query_one(
+            "SELECT state='retryable' FROM base_queue_jobs WHERE tenant_id=$1 AND id=$2",
+            &[&one.tenant(), &retry],
+        )
+        .await?
+        .get(0);
+    check(
+        retry_waits && proof.case(later).await?.1 == 1,
+        "an admitted run's retry backoff leaves later events in the tenant free to act",
+    );
+    proof
+        .db
+        .get()
+        .await?
+        .execute(
+            "UPDATE base_queue_jobs SET available_at=now() WHERE tenant_id=$1 AND id=$2",
+            &[&one.tenant(), &retry],
+        )
+        .await?;
     proof.settled().await?;
     proof.show(c).await?;
     check(
@@ -1510,79 +1548,130 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
     println!("\n== Watchers share a tenant bucket and resume in order");
     proof.stop().await;
     proof
-        .setting(&one, "watchers.runs_per_minute", json!(1))
+        .setting(&one, "watchers.runs_per_minute", json!(12))
         .await?;
     proof
         .switch(&one, r3, true)
         .await
         .map_err(|_| Error::Internal)?;
-    proof
-        .db
-        .get()
-        .await?
-        .execute(
-            "DELETE FROM base_watcher_buckets WHERE tenant_id=$1",
-            &[&one.tenant()],
-        )
-        .await?;
     let first = proof
         .open(&one, 1, "First in the burst", "urgent", "12000.00")
         .await?;
+    let client = proof.db.get().await?;
+    client.execute(
+        "INSERT INTO base_watcher_buckets (tenant_id,tokens,refilled_at) VALUES ($1,1,clock_timestamp())
+            ON CONFLICT (tenant_id) DO UPDATE SET tokens=1,refilled_at=EXCLUDED.refilled_at",
+        &[&one.tenant()],
+    ).await?;
+    let token_due: std::time::SystemTime = client.query_one(
+        "SELECT refilled_at + interval '5 seconds' FROM base_watcher_buckets WHERE tenant_id=$1",
+        &[&one.tenant()],
+    ).await?.get(0);
+    drop(client);
     proof.start()?;
-    proof.settled().await?;
+    let first_subject = first.to_string();
+    let head = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let row = proof
+                .db
+                .get()
+                .await?
+                .query_opt(
+                    "SELECT q.id,q.available_at,q.attempt,clock_timestamp()
+                 FROM base_queue_jobs q JOIN base_watcher_runs r
+                    ON r.tenant_id=q.tenant_id AND r.event_id::text=q.args->>'event_id'
+                 WHERE q.tenant_id=$1 AND q.worker_id='base/watchers-admit' AND q.state='scheduled'
+                    AND r.subject=$2 AND r.watcher_id=$3 AND r.started_at IS NULL",
+                    &[&one.tenant(), &first_subject, &r3],
+                )
+                .await?;
+            if let Some(row) = row {
+                return Ok::<_, Error>(row);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| Error::Internal)??;
+    let head_id: i64 = head.get(0);
+    let wake: std::time::SystemTime = head.get(1);
+    let observed: std::time::SystemTime = head.get(3);
+    check(
+        head.get::<_, i32>(2) == 0 && observed < token_due
+            && wake.duration_since(token_due).is_ok_and(|delta| delta <= Duration::from_millis(10)),
+        "the original job waits without spending an attempt until one token refills at five seconds",
+    );
+
     let second = proof
         .open(&one, 1, "Second in the burst", "urgent", "12000.00")
         .await?;
     let other = proof
         .open(&two, 100, "Meanwhile in tenant 2", "urgent", "1500.00")
         .await?;
-    proof.settled().await?;
-    check(
-        proof.case(other).await?.0.as_deref() == Some("vip-line"),
-        "another tenant runs while the first tenant waits for a refill",
-    );
-    let subjects = [first.to_string(), second.to_string()];
+    let subjects = [first_subject, second.to_string()];
+    let starts = tokio::time::timeout(Duration::from_secs(19), async {
+        loop {
+            let starts = proof
+                .db
+                .get()
+                .await?
+                .query(
+                    "SELECT subject,watcher_id,started_at FROM base_watcher_runs
+                 WHERE tenant_id=$1 AND subject=ANY($2) AND state='done' ORDER BY started_at,id",
+                    &[&one.tenant(), &&subjects[..]],
+                )
+                .await?;
+            if starts.len() == 4 {
+                return Ok::<_, Error>(starts);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map_err(|_| Error::Internal)??;
     let order = [
         (&subjects[0], r1),
         (&subjects[0], r3),
         (&subjects[1], r1),
         (&subjects[1], r3),
     ];
-    for admitted in 1..=order.len() {
-        let client = proof.db.get().await?;
-        let starts = client.query(
-            "SELECT subject,watcher_id FROM base_watcher_runs
-             WHERE tenant_id=$1 AND subject=ANY($2) AND started_at IS NOT NULL ORDER BY started_at,id",
-            &[&one.tenant(), &&subjects[..]],
-        ).await?;
-        drop(client);
-        check(
-            starts.len() == admitted
-                && starts.iter().zip(&order).all(|(row, &(subject, watcher))| {
-                    row.get::<_, String>(0) == *subject && row.get::<_, i64>(1) == watcher
-                }),
-            "each token admits one run in event order across both watchers",
-        );
-        if admitted < order.len() {
-            let receipts = [proof.receipts(first).await?, proof.receipts(second).await?];
-            check(
-                receipts
-                    .iter()
-                    .flatten()
-                    .filter(|r| r.1 == "queued" && r.2.is_none())
-                    .count()
-                    == order.len() - admitted,
-                "runs without tokens remain queued in their original receipts",
-            );
-            proof.stop().await;
-            check(
-                proof.resume_watcher_jobs(&one, 0).await? == 1,
-                "only the head job waits for a token and keeps its attempt budget",
-            );
-            proof.start()?;
-            proof.settled().await?;
-        }
-    }
+    check(
+        starts.iter().zip(&order).all(|(row, &(subject, watcher))| {
+            row.get::<_, String>(0) == *subject && row.get::<_, i64>(1) == watcher
+        }),
+        "each refill admits the next run in event order across both watchers",
+    );
+    let started: std::time::SystemTime = starts[1].get(2);
+    let timings = proof
+        .db
+        .get()
+        .await?
+        .query_one(
+            "SELECT q.state='completed',q.attempt,
+            EXISTS(SELECT 1 FROM base_watcher_runs r WHERE r.tenant_id=$3 AND r.subject=$4
+                AND r.state='done' AND r.finished_at < $5)
+         FROM base_queue_jobs q WHERE q.tenant_id=$1 AND q.id=$2",
+            &[
+                &one.tenant(),
+                &head_id,
+                &two.tenant(),
+                &other.to_string(),
+                &token_due,
+            ],
+        )
+        .await?;
+    check(
+        timings.get::<_, bool>(0)
+            && timings.get::<_, i32>(1) == 1
+            && started
+                .duration_since(token_due)
+                .is_ok_and(|late| late <= Duration::from_secs(2)),
+        "the same job resumes on the next token within the polling tolerance",
+    );
+    check(
+        timings.get::<_, bool>(2) && proof.case(other).await?.0.as_deref() == Some("vip-line"),
+        "another tenant runs while the first tenant waits for a refill",
+    );
     for case in [first, second] {
         check(
             proof.case(case).await? == (Some("priority-desk".into()), 1, 1),

@@ -182,8 +182,9 @@ impl Queue {
         let args = (worker.definition.validate)(args)?;
         arguments::validate(&args)?;
         let trace = tx.context().trace_id.clone();
-        if self.workers.tenant_fifo().iter().any(|id| id == worker_id) {
-            let key = format!("base/queue.tenant-fifo:{worker_id}:{tenant}");
+        let fifo_key = self.workers.tenant_fifo(worker_id, &args)?;
+        if let Some(group) = fifo_key {
+            let key = format!("base/queue.tenant-fifo:{worker_id}:{tenant}:{group}");
             tx.sql()
                 .execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
@@ -196,7 +197,7 @@ impl Queue {
                 Actor::User { user, person, organisation, affiliation, company } => ("user", *user, None, *person, *organisation, *affiliation, *company),
                 Actor::System(principal) => ("system", 0, Some(principal.as_str()), None, None, None, None),
             };
-            let row = sql.query_one("INSERT INTO base_queue_jobs(tenant_id,worker_id,worker_module,args,actor_kind,actor_id,system_principal,person_id,organisation_id,affiliation_id,trace_id,max_attempts,work_company_id,available_at,state) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,clock_timestamp()),CASE WHEN $14::timestamptz > clock_timestamp() THEN 'scheduled' ELSE 'available' END) RETURNING id,state", &[&tenant,&worker.id,&worker.module,&args,&kind,&actor_id,&principal,&person,&organisation,&affiliation,&trace,&worker.definition.max_attempts,&company,&available_at]).await?;
+            let row = sql.query_one("INSERT INTO base_queue_jobs(tenant_id,worker_id,worker_module,args,actor_kind,actor_id,system_principal,person_id,organisation_id,affiliation_id,trace_id,max_attempts,work_company_id,available_at,state,fifo_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,clock_timestamp()),CASE WHEN $14::timestamptz > clock_timestamp() THEN 'scheduled' ELSE 'available' END,$15) RETURNING id,state", &[&tenant,&worker.id,&worker.module,&args,&kind,&actor_id,&principal,&person,&organisation,&affiliation,&trace,&worker.definition.max_attempts,&company,&available_at,&fifo_key]).await?;
             let id = row.get("id");
             let state: &str = row.get("state");
             // No args, names, email or credential material enters audit evidence.

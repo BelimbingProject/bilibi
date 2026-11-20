@@ -57,7 +57,7 @@ async fn wait_for_runs(db: &Db, events: &[i64], watchers: &[i64]) -> Result<()> 
     for _ in 0..300 {
         let client = db.get().await?;
         let row = client.query_one(
-            "SELECT count(*), count(*) FILTER (WHERE d.delivered_at IS NOT NULL AND r.state='done' AND EXISTS(SELECT 1 FROM base_queue_jobs j WHERE j.tenant_id=1 AND j.worker_id='base/watchers-run' AND j.args->>'event_id'=e.id::text AND j.state='completed')), count(*) FILTER (WHERE r.state NOT IN ('queued','matched','done')) FROM unnest($1::bigint[]) e(id) CROSS JOIN unnest($2::bigint[]) watcher(id) LEFT JOIN base_events_deliveries d ON d.event_id=e.id AND d.subscriber='base/watchers.triggers' LEFT JOIN base_watcher_runs r ON r.tenant_id=1 AND r.event_id=e.id AND r.watcher_id=watcher.id",
+            "SELECT count(*), count(*) FILTER (WHERE d.delivered_at IS NOT NULL AND r.state='done' AND EXISTS(SELECT 1 FROM base_queue_jobs j WHERE j.tenant_id=1 AND j.worker_id='base/watchers-run' AND j.args->>'event_id'=e.id::text AND j.args->>'run_id'=r.id::text AND j.state='completed')), count(*) FILTER (WHERE r.state NOT IN ('queued','matched','done')) FROM unnest($1::bigint[]) e(id) CROSS JOIN unnest($2::bigint[]) watcher(id) LEFT JOIN base_events_deliveries d ON d.event_id=e.id AND d.subscriber='base/watchers.triggers' LEFT JOIN base_watcher_runs r ON r.tenant_id=1 AND r.event_id=e.id AND r.watcher_id=watcher.id",
             &[&events, &watchers],
         ).await?;
         if row.get::<_, i64>(2) != 0 {

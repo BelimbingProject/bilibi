@@ -4,7 +4,7 @@
 //!    subscriber. In the delivery transaction it records one queued run per
 //!    watcher switched on for that event in the tenant, pinned to the watcher's
 //!    approved version, with the chain it belongs to (`Event::cause`), and
-//!    hands the event to the `base/watchers-run` worker (`Handoff`).
+//!    hands the event to the `base/watchers-admit` worker (`Handoff`).
 //! 2. The worker runs as the `watchers` principal under its own tenant grants.
 //!    For each queued run it checks the chain budget, the tenant's work
 //!    bound, that the pinned version is still the one switched on, reads the
@@ -134,29 +134,44 @@ impl Subscribe for Triggers {
             .iter()
             .any(|c| c.kind == "base/watchers.run")
             .then(|| Handoff {
-                worker: crate::WORKER,
+                worker: crate::ADMISSION_WORKER,
                 principal: crate::PRINCIPAL,
                 args: json!({"event_id": event.id}),
             })
     }
 }
 
-pub(crate) fn arguments(args: Value) -> Result<Value> {
-    match args.as_object() {
-        Some(o)
-            if o.len() == 1
-                && o.get("event_id")
-                    .and_then(Value::as_i64)
-                    .is_some_and(|id| id > 0) =>
-        {
-            Ok(args)
-        }
-        _ => Err(Error::Invalid),
+pub(crate) fn admission_arguments(args: Value) -> Result<Value> {
+    if args.as_object().is_some_and(|o| o.len() == 1) {
+        action_group(&args)?;
+        return Ok(args);
     }
+    Err(Error::Invalid)
+}
+
+pub(crate) fn arguments(args: Value) -> Result<Value> {
+    if args.as_object().is_some_and(|o| o.len() == 2)
+        && args
+            .get("run_id")
+            .and_then(Value::as_i64)
+            .is_some_and(|id| id > 0)
+    {
+        action_group(&args)?;
+        return Ok(args);
+    }
+    Err(Error::Invalid)
+}
+
+pub(crate) fn action_group(args: &Value) -> Result<i64> {
+    args.get("event_id")
+        .and_then(Value::as_i64)
+        .filter(|id| *id > 0)
+        .ok_or(Error::Invalid)
 }
 
 pub(crate) struct Worker {
     pub watchers: Arc<Watchers>,
+    pub admission: bool,
 }
 impl Handler for Worker {
     fn perform<'a>(&'a self, execution: &'a Execution, args: Value) -> HandlerFuture<'a> {
@@ -180,7 +195,14 @@ impl Handler for Worker {
             if i64::from(execution.attempt) > maximum {
                 return Outcome::Cancel("attempt_limit");
             }
-            match self.event(execution, event).await {
+            let result = if self.admission {
+                self.admit_event(execution, event).await
+            } else if let Some(run) = args.get("run_id").and_then(Value::as_i64) {
+                self.act_on_run(execution, event, run).await
+            } else {
+                return Outcome::Cancel("invalid_run_reference");
+            };
+            match result {
                 Ok(()) => Outcome::Completed,
                 Err(Error::Unauthorized | Error::Forbidden) => Outcome::Cancel("actor_refused"),
                 Err(_) if i64::from(execution.attempt) >= maximum => {
@@ -211,43 +233,81 @@ enum Stop {
 }
 
 impl Worker {
-    async fn event(&self, execution: &Execution, event: i64) -> Result<()> {
-        let scope = execution.scope().ok_or(Error::Forbidden)?.clone();
-        let tenant = execution.tenant();
-        let watchers = &self.watchers;
-        let client = watchers.db.get().await?;
-        let depth = watchers.limit(&**client, &scope, CHAIN_DEPTH).await?;
-        let runs: Vec<Run> = client.query(
-            "SELECT id,watcher_id,version_id,event_id,subject,depth,state,logical_event FROM base_watcher_runs WHERE tenant_id=$1 AND event_id=$2 AND state IN ('queued','matched') ORDER BY id",
-            &[&tenant, &event],
-        ).await?.iter().map(|row| Run {
-            id: row.get(0), watcher: row.get(1), version: row.get(2), event: row.get(3),
-            subject: row.get(4), depth: row.get(5), state: row.get(6), logical_event: row.get(7),
-        }).collect();
-        drop(client);
-        for mut run in runs {
-            let mut client = watchers.db.get().await?;
+    async fn admit_event(&self, execution: &Execution, event: i64) -> Result<()> {
+        let scope = execution.scope().ok_or(Error::Forbidden)?;
+        let bilibi_queue::Identity::System(system) = execution.identity() else {
+            return Err(Error::Forbidden);
+        };
+        let tenant = scope.tenant();
+        let mut client = self.watchers.db.get().await?;
+        let ids = client
+            .query(
+                "SELECT id FROM base_watcher_runs WHERE tenant_id=$1 AND event_id=$2
+                AND started_at IS NULL AND state='queued' ORDER BY id",
+                &[&tenant, &event],
+            )
+            .await?;
+        for row in ids {
+            let id: i64 = row.get(0);
             let mut tx = execution
                 .begin(&mut client, "watchers.run.admission")
                 .await?;
-            let current = tx.sql().query_one("SELECT started_at IS NOT NULL,state FROM base_watcher_runs WHERE tenant_id=$1 AND id=$2 FOR UPDATE", &[&tenant, &run.id]).await?;
-            let admitted: bool = current.get(0);
-            run.state = current.get(1);
-            if run.state != "queued" && run.state != "matched" {
+            if tx
+                .sql()
+                .query_opt(
+                    "SELECT id FROM base_watcher_runs WHERE tenant_id=$1 AND event_id=$2 AND id=$3
+                    AND started_at IS NULL AND state='queued' FOR UPDATE",
+                    &[&tenant, &event, &id],
+                )
+                .await?
+                .is_none()
+            {
                 tx.rollback().await?;
                 continue;
             }
-            if !admitted {
-                if let Some(run_at) = self.admit(&mut tx, &scope, run.id).await? {
-                    execution.defer_until(&tx, run_at).await?;
-                    return tx.commit().await;
-                }
+            if let Some(run_at) = self.admit(&mut tx, scope, id).await? {
+                execution.defer_until(&tx, run_at).await?;
+                return tx.commit().await;
             }
+            self.watchers
+                .queue
+                .enqueue_system(
+                    &mut tx,
+                    system,
+                    crate::WORKER,
+                    json!({"event_id": event, "run_id": id}),
+                )
+                .await?;
             tx.commit().await?;
-            drop(client);
-            self.run(execution, &scope, run, depth).await?;
         }
         Ok(())
+    }
+
+    async fn act_on_run(&self, execution: &Execution, event: i64, id: i64) -> Result<()> {
+        let scope = execution.scope().ok_or(Error::Forbidden)?;
+        let client = self.watchers.db.get().await?;
+        let row = client.query_opt(
+            "SELECT watcher_id,version_id,subject,depth,state,logical_event FROM base_watcher_runs
+                WHERE tenant_id=$1 AND event_id=$2 AND id=$3
+                    AND started_at IS NOT NULL AND state IN ('queued','matched')",
+            &[&scope.tenant(), &event, &id],
+        ).await?;
+        let Some(row) = row else {
+            return Ok(());
+        };
+        let depth = self.watchers.limit(&**client, scope, CHAIN_DEPTH).await?;
+        drop(client);
+        let run = Run {
+            id,
+            event,
+            watcher: row.get(0),
+            version: row.get(1),
+            subject: row.get(2),
+            depth: row.get(3),
+            state: row.get(4),
+            logical_event: row.get(5),
+        };
+        self.run(execution, scope, run, depth).await
     }
 
     async fn admit(
@@ -769,19 +829,57 @@ impl Ending for Settled {
             let Some(event) = job.args.get("event_id").and_then(Value::as_i64) else {
                 return Ok(());
             };
+            let run = if job.worker_id == crate::WORKER {
+                let Some(id) = job.args.get("run_id").and_then(Value::as_i64) else {
+                    return Ok(());
+                };
+                Some(id)
+            } else {
+                None
+            };
             let tenant = tx.context().tenant;
+            let ids: Vec<i64> = tx
+                .sql()
+                .query(
+                    "SELECT id FROM base_watcher_runs WHERE tenant_id=$1 AND event_id=$2
+                    AND state IN ('queued','matched')
+                    AND (id=$3 OR ($3::bigint IS NULL AND started_at IS NULL)) FOR UPDATE",
+                    &[&tenant, &event, &run],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            if ids.is_empty() {
+                return Ok(());
+            }
             let code = job
                 .failure_code
                 .clone()
                 .unwrap_or_else(|| "job_ended".into());
             let code: String = code.chars().take(64).collect();
-            tx.mutate(move |sql| Box::pin(async move {
-                let ids: Vec<i64> = sql.query(
-                    "UPDATE base_watcher_runs SET state='refused',reason=$3,finished_at=now() WHERE tenant_id=$1 AND event_id=$2 AND state IN ('queued','matched') RETURNING id",
-                    &[&tenant, &event, &code],
-                ).await?.iter().map(|row| row.get(0)).collect();
-                Ok(((), ids.into_iter().map(|id| Change { kind: "base/watchers.run".into(), id, old: Value::Null, new: json!({"state": "refused", "reason": code}) }).collect()))
-            })).await
+            tx.mutate(move |sql| {
+                Box::pin(async move {
+                    sql.execute(
+                        "UPDATE base_watcher_runs SET state='refused',reason=$3,finished_at=now()
+                        WHERE tenant_id=$1 AND id=ANY($2)",
+                        &[&tenant, &ids, &code],
+                    )
+                    .await?;
+                    Ok((
+                        (),
+                        ids.into_iter()
+                            .map(|id| Change {
+                                kind: "base/watchers.run".into(),
+                                id,
+                                old: Value::Null,
+                                new: json!({"state": "refused", "reason": code}),
+                            })
+                            .collect(),
+                    ))
+                })
+            })
+            .await
         })
     }
 }

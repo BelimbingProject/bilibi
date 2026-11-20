@@ -49,7 +49,7 @@ tried as one of several, and `Execution::begin` rechecks the same key. Without
 a policy the binding's `capability` decides everywhere. Schedule's
 `TENANT_POLICY` is the one user of this today (per-tenant scheduled work, ADR 17).
 
-Workers can contribute `TenantFifo` under `TENANT_FIFO` with their own worker ID. Each tenant's oldest pending job for that worker is the only one eligible to claim. Its scheduled time, lease or retry backoff leaves later jobs waiting. Other tenants and workers remain eligible.
+Workers can contribute `TenantFifo` under `TENANT_FIFO` with their own worker ID and a function that derives an order key from validated arguments. A constant key orders all of that worker's jobs in a tenant. Among jobs with the same tenant, worker and key, only the oldest pending job can be claimed. Its scheduled time, lease or retry backoff leaves followers in that group waiting.
 
 PostgreSQL `FOR UPDATE SKIP LOCKED` claims serialize across app processes.
 Claims increment the durable attempt before invoking owner code. An expired
@@ -75,8 +75,8 @@ one job a second per slot; it waits a poll interval only when it claimed nothing
 retry backoff), so claiming at once never runs it early.
 
 Every slot polls once a second when idle. A poll reads expired leases
-(`base_queue_expired_leases`) and due jobs (`base_queue_claim`), with an indexed
-check for earlier pending jobs for tenant FIFO workers (`base_queue_tenant_fifo`).
+(`base_queue_expired_leases`) and due ordinary jobs (`base_queue_claim_ordinary`), and seeks directly to the oldest job in each FIFO group (`base_queue_tenant_fifo`).
+It considers due times only for those heads and ordinary jobs.
 Both time searches compare with
 `now()`, the claim transaction's start, because a volatile `clock_timestamp()`
 cannot bound an index scan. Keep it that way when you change `store::claim`.

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 pub const WORKERS: &str = "base/queue.workers";
 pub const TENANT_FIFO: &str = "base/queue.tenant-fifo";
 
-pub struct TenantFifo;
+pub struct TenantFifo(pub fn(&Value) -> Result<i64>);
 
 inventory::submit! { Consumer::new::<TenantFifo>(TENANT_FIFO, "base/queue", |_| Ok(())) }
 
@@ -30,13 +30,13 @@ pub struct Workers {
     workers: BTreeMap<&'static str, RegisteredWorker>,
     /// Workers whose owner is told when a job ends without finishing.
     told: Vec<String>,
-    tenant_fifo: Vec<String>,
+    tenant_fifo: BTreeMap<&'static str, &'static TenantFifo>,
 }
 impl Workers {
     pub fn from_catalog(catalog: &Catalog) -> bilibi_module_registry::Result<Self> {
         let entries = catalog.entries::<Worker>(WORKERS)?;
         validate(entries)?;
-        let mut tenant_fifo = Vec::new();
+        let mut tenant_fifo = BTreeMap::new();
         for entry in catalog.entries::<TenantFifo>(TENANT_FIFO)? {
             if !entries.iter().any(|worker| {
                 worker.id == entry.id && worker.provenance.module == entry.provenance.module
@@ -46,7 +46,7 @@ impl Workers {
                     entry.id
                 )));
             }
-            tenant_fifo.push(entry.id.to_owned());
+            tenant_fifo.insert(entry.id, entry.get::<TenantFifo>()?);
         }
         Ok(Self {
             tenant_fifo,
@@ -76,8 +76,11 @@ impl Workers {
     pub fn iter(&self) -> impl Iterator<Item = RegisteredWorker> + '_ {
         self.workers.values().copied()
     }
-    pub(crate) fn tenant_fifo(&self) -> &[String] {
-        &self.tenant_fifo
+    pub(crate) fn tenant_fifo(&self, worker: &str, args: &Value) -> Result<Option<i64>> {
+        self.tenant_fifo
+            .get(worker)
+            .map(|policy| (policy.0)(args))
+            .transpose()
     }
     pub(crate) fn told(&self) -> &[String] {
         &self.told

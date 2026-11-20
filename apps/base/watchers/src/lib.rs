@@ -77,9 +77,11 @@ pub(crate) const FACTS_READ: &str = "watchers.facts_read";
 pub(crate) const MAX_ATTEMPTS: &str = "watchers.max_attempts";
 const ATTEMPT_CEILING: i32 = 25;
 
+pub(crate) const ADMISSION_WORKER: &str = "base/watchers-admit";
 pub(crate) const WORKER: &str = "base/watchers-run";
 pub(crate) const SUBSCRIBER: &str = "base/watchers.triggers";
 pub(crate) const PAGES: &str = "base/watchers.pages";
+const ADMISSION: &str = "base/watchers.admission";
 const RUNNER: &str = "base/watchers.runner";
 const SETTLED: &str = "base/watchers.settled";
 
@@ -156,7 +158,11 @@ inventory::submit! { Contribution::new(DEFINITIONS, MAX_ATTEMPTS, provenance!(),
 "Attempts per watchers job", "The most attempts allowed for a watchers job, including its first attempt. Waiting runs are refused when this budget is exhausted.", || json!(ATTEMPT_CEILING), ATTEMPT_CEILING as f64)) }
 
 inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker { max_attempts: ATTEMPT_CEILING, validate: run::arguments }) }
-inventory::submit! { Contribution::new(TENANT_FIFO, WORKER, provenance!(), &TenantFifo) }
+inventory::submit! { Contribution::new(WORKERS, ADMISSION_WORKER, provenance!(), &Worker { max_attempts: ATTEMPT_CEILING, validate: run::admission_arguments }) }
+inventory::submit! { Contribution::new(TENANT_FIFO, ADMISSION_WORKER, provenance!(), &TenantFifo(|_| Ok(0))) }
+inventory::submit! { Contribution::new(TENANT_FIFO, WORKER, provenance!(), &TenantFifo(run::action_group)) }
+inventory::submit! { Contribution::new(HANDLERS, ADMISSION_WORKER, provenance!(), &HandlerBinding { service: ADMISSION, capability: RUN }) }
+inventory::submit! { Contribution::new(ENDINGS, ADMISSION_WORKER, provenance!(), &EndingBinding { service: SETTLED, principal: PRINCIPAL, capability: SETTLE }) }
 inventory::submit! { Contribution::new(HANDLERS, WORKER, provenance!(), &HandlerBinding { service: RUNNER, capability: RUN }) }
 inventory::submit! { Contribution::new(ENDINGS, WORKER, provenance!(), &EndingBinding { service: SETTLED, principal: PRINCIPAL, capability: SETTLE }) }
 inventory::submit! { Contribution::new(bilibi_events::SUBSCRIBERS, SUBSCRIBER, provenance!(), &bilibi_events::Subscriber {
@@ -178,6 +184,7 @@ fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry:
             .clone(),
         jobs,
         events,
+        queue: services.get(bilibi_queue::SERVICE)?,
         settings: services.get("base/settings.store")?,
         authentication: services.get("base/tenancy.authentication")?,
         directory: services.get("base/principal_directory.directory")?,
@@ -198,8 +205,11 @@ inventory::submit! {
                 }
                 Ok(watchers)
             } },
+            Service { id: ADMISSION, factory: |services| {
+                Ok(Arc::new(HandlerService(Arc::new(run::Worker { watchers: services.get(SERVICE)?, admission: true }))))
+            } },
             Service { id: RUNNER, factory: |services| {
-                Ok(Arc::new(HandlerService(Arc::new(run::Worker { watchers: services.get(SERVICE)? }))))
+                Ok(Arc::new(HandlerService(Arc::new(run::Worker { watchers: services.get(SERVICE)?, admission: false }))))
             } },
             Service { id: SETTLED, factory: |_| Ok(Arc::new(EndingService(Arc::new(run::Settled)))) },
             Service { id: PAGES, factory: |services| {

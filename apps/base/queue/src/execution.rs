@@ -549,13 +549,7 @@ impl Executor {
             }
             // Infrastructure errors do not expose SQL/args or terminate the whole
             // executor; abandoned claims are reconciled by DB lease recovery.
-            match store::claim(
-                &self.db,
-                self.config.lease_seconds,
-                self.queue.workers().tenant_fifo(),
-            )
-            .await
-            {
+            match store::claim(&self.db, self.config.lease_seconds).await {
                 Ok(Some(claim)) => {
                     if self.execute(claim).await.is_ok() {
                         // More jobs may be waiting: claim the next at once. A

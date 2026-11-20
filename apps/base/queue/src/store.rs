@@ -156,31 +156,48 @@ pub(crate) struct Claim {
 /// poll would read every running or waiting job; with `now()` a poll reads
 /// only the expired leases and the due jobs (`base_queue_expired_leases`,
 /// `base_queue_claim`). The times written still come from the clock.
-pub(crate) async fn claim(
-    db: &Db,
-    lease_seconds: i32,
-    tenant_fifo: &[String],
-) -> Result<Option<Claim>> {
+pub(crate) async fn claim(db: &Db, lease_seconds: i32) -> Result<Option<Claim>> {
     let mut client = db.get().await?;
     let tx = client.transaction().await?;
     tx.execute("WITH expired AS (SELECT id FROM base_queue_jobs WHERE state='executing' AND lease_expires_at<=now() ORDER BY lease_expires_at,id FOR UPDATE SKIP LOCKED LIMIT 100) UPDATE base_queue_jobs j SET state=CASE WHEN attempt>=max_attempts THEN 'discarded' ELSE 'retryable' END,available_at=clock_timestamp()+make_interval(secs=>LEAST(3600, power(2,LEAST(attempt,12))::integer)),discarded_at=CASE WHEN attempt>=max_attempts THEN clock_timestamp() ELSE NULL END,lease_token=NULL,lease_expires_at=NULL,failure_code='lease_expired',updated_at=clock_timestamp() FROM expired e WHERE j.id=e.id", &[]).await?;
     let token = uuid::Uuid::new_v4().to_string();
     let row = tx.query_opt(
-        "WITH candidate AS (
-            SELECT q.id FROM base_queue_jobs q
-            WHERE q.state IN ('available','scheduled','retryable') AND q.available_at<=now()
-                AND q.attempt<q.max_attempts
-                AND (NOT (q.worker_id=ANY($2)) OR NOT EXISTS (
-                    SELECT 1 FROM base_queue_jobs earlier
-                    WHERE earlier.tenant_id=q.tenant_id AND earlier.worker_id=q.worker_id
-                        AND earlier.id<q.id AND earlier.state IN ('available','scheduled','retryable','executing')
-                ))
-            ORDER BY q.available_at,q.id FOR UPDATE OF q SKIP LOCKED LIMIT 1
+        "WITH RECURSIVE heads AS (
+            (SELECT tenant_id,worker_id,fifo_key,id,state,available_at,attempt,max_attempts FROM base_queue_jobs
+             WHERE fifo_key IS NOT NULL AND state IN ('available','scheduled','retryable','executing')
+             ORDER BY tenant_id,worker_id,fifo_key,id LIMIT 1)
+            UNION ALL
+            SELECT successor.* FROM heads h CROSS JOIN LATERAL (
+                SELECT tenant_id,worker_id,fifo_key,id,state,available_at,attempt,max_attempts FROM base_queue_jobs
+                WHERE (tenant_id,worker_id,fifo_key) > (h.tenant_id,h.worker_id,h.fifo_key)
+                    AND fifo_key IS NOT NULL AND state IN ('available','scheduled','retryable','executing')
+                ORDER BY tenant_id,worker_id,fifo_key,id LIMIT 1
+            ) successor
+        ), fifo AS (
+            SELECT locked.id,h.available_at FROM (
+                SELECT id,available_at FROM heads
+                WHERE state IN ('available','scheduled','retryable') AND available_at<=now()
+                    AND attempt<max_attempts
+                ORDER BY available_at,id
+            ) h CROSS JOIN LATERAL (
+                SELECT q.id FROM base_queue_jobs q WHERE q.id=h.id
+                    AND q.state IN ('available','scheduled','retryable') AND q.available_at<=now()
+                    AND q.attempt<q.max_attempts
+                FOR UPDATE SKIP LOCKED
+            ) locked ORDER BY h.available_at,h.id LIMIT 1
+        ), ordinary AS (
+            SELECT id,available_at FROM base_queue_jobs
+            WHERE fifo_key IS NULL AND state IN ('available','scheduled','retryable') AND available_at<=now()
+                AND attempt<max_attempts
+            ORDER BY available_at,id FOR UPDATE SKIP LOCKED LIMIT 1
+        ), candidate AS (
+            SELECT id,available_at FROM fifo UNION ALL SELECT id,available_at FROM ordinary
+            ORDER BY available_at,id LIMIT 1
         )
         UPDATE base_queue_jobs j SET state='executing',attempt=attempt+1,attempted_at=clock_timestamp(),
-            updated_at=clock_timestamp(),lease_token=$1,lease_expires_at=clock_timestamp()+make_interval(secs=>$3::integer)
+            updated_at=clock_timestamp(),lease_token=$1,lease_expires_at=clock_timestamp()+make_interval(secs=>$2::integer)
         FROM candidate c WHERE j.id=c.id RETURNING j.*",
-        &[&token, &tenant_fifo, &lease_seconds],
+        &[&token, &lease_seconds],
     ).await?;
     tx.commit().await?;
     Ok(row.map(|row| Claim { row, token }))
