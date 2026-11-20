@@ -2,7 +2,7 @@
 
 **Use it for:** fields a tenant administrator adds to your records without a release.
 
-**Not for:** a field-definitions table, page or operation of your own, or values your code branches on (keep those in code; a tenant's own routing on a field is a [rule condition](#rule-conditions)).
+**Not for:** a field-definitions table, page or operation of your own, or values your code branches on (keep those in code; a tenant's own routing on a field is a [watcher condition](#watcher-conditions)).
 
 Typed fields (text, number, date, pick-list, several choices, yes/no, long text, link, phone, email and record) a tenant administrator adds to the records of a module that opts in, without a release. The decision and the rejected alternatives are in [ADR 21](../../../docs/architecture/decisions/21-tenant-defined-custom-fields.md).
 
@@ -66,7 +66,7 @@ Four steps in the owning module.
 | Additional checks | Long text uses the tenant text length limit and a multiline editor. A link must be an absolute HTTP or HTTPS URL within that limit. Phone takes digits, spaces and `+ ( ) - . /` with at least one digit, then an optional extension (`x` or `ext` and its digits), up to 64 characters; email requires an address up to 254 bytes. Yes/no uses an on/off form switch and accepts only `"true"` or `"false"`. Several choices takes an array of codes (an empty array clears it) and refuses a single string; every other kind refuses an array. Null clears any field. |
 | Showing values | Owners use the facade's helpers so every page reads the same: `choice_text` (labels, retired ones marked), `choice_options` (what an editor offers, held retired codes included), `references` (names with the reader's access, for the `RelatedRecord` pill), `reference_hits` (for `RecordPicker`), `codes_value` and `picked` (posted editor values as stored values). A several-choices fact edits in place with a `MultiSelect` inside `InlineChoice` (`docs/inline-editing.md`). |
 | Limit | Active fields per record type: tenant setting `base.custom_fields.max_fields` (default 50, 1–200). Archived fields do not count, restoring one is refused at the limit. |
-| Rule condition | Off by default. `rule_condition` on define or update offers a text, number, date, pick-list or yes/no field to Base Rules conditions; other kinds are refused. See [Rule conditions](#rule-conditions). |
+| Watcher condition | Off by default. `watcher_condition` on define or update offers a text, number, date, pick-list or yes/no field to Base Watchers conditions; other kinds are refused. See [Watcher conditions](#watcher-conditions). |
 | Restriction | An operator withholds a field from roles on Field Restrictions as `cf_<key>` of the record type's Grid table (withhold only: none is personal). `active` then leaves it out for that reader, so pages hide it and writes refuse it, and Grid leaves it out of lists, reports and search. Audit views take it out of the `custom_fields` object an owner audits its values under, showing a change as a withheld `custom_fields.<key>`, so audit custom values under that one key. |
 | Audit | Each definition write is one `custom_field` change with before and after. |
 | Capabilities | `base.custom-fields.view` reads definitions and `base.custom-fields.manage` defines, edits, archives and restores them. The Tenant Owner system role includes both. |
@@ -82,20 +82,20 @@ Use **Administration › Custom fields** (`/admin/custom-fields`, `base.custom-f
 | `base.custom_fields.record_types` | `view` | The record types that take fields, the pick-lists a choice field may use and the kinds of record a record field may point at (`record_kinds`). |
 | `base.custom_fields.list` | `view` | The tenant's fields, optionally for one record type; archived ones with `include_archived`. |
 | `base.custom_fields.define` | `manage` | Add a field; a choice or several-choices field names its `picklist`, a record field its `target`. |
-| `base.custom_fields.update` | `manage` | Change label, help text or `rule_condition` (omitted keeps it); needs `version`. |
+| `base.custom_fields.update` | `manage` | Change label, help text or `watcher_condition` (omitted keeps it); needs `version`. |
 | `base.custom_fields.archive` / `.restore` | `manage` | Needs `version`. |
 
 Each write is a reviewed safe write: the preview runs the facade's checks without locking or writing, and the commit writes on the plan's audited transaction. The guide `base.custom_fields` explains keys, types and archiving to agents.
 
 Owner operations take values as `{key, value, values}` pairs: `value` (text or null) for every kind but several choices, `values` (an array of codes) for several choices.
 
-## Rule conditions
+## Watcher conditions
 
-**A tenant decides which of its fields its rules may read** (#730). A field is a Base Rules condition only while it is offered (`rule_condition`, the **Rule condition** switch on the page), on a record type with a `GridSource`, and only on the trigger's own record.
+**A tenant decides which of its fields its watchers may read** (#730). A field is a Base Watchers condition only while it is offered (`watcher_condition`, the **Watcher condition** switch on the page), on a record type with a `GridSource`, and only on the trigger's own record.
 
-- **Offered:** the field joins the rules vocabulary under its label, and a rule on it is drafted and approved like one on a declared field. Grid carries the flag (`Table::custom_rule_condition`).
+- **Offered:** the field joins the watcher vocabulary under its label, and a watcher on it is drafted and approved like one on a declared field. Grid carries the flag (`Table::custom_watcher_condition`).
 - **Withdrawn or archived:** an approved rule that reads it is refused at run time (`catalog_changed`) and marked Needs review; a new draft on it is refused. A missing field never reads as an empty value.
-- **Restricted:** the `rules` principal holds every restriction in its tenant, so a restricted field refuses approval ("hidden from automation") and each run (`restricted_field`).
+- **Restricted:** the `watchers` principal holds every restriction in its tenant, so a restricted field refuses approval ("hidden from automation") and each run (`restricted_field`).
 - Core invariants stay in the owner's code: a condition routes, it never validates a save.
 
 ## CSV import
@@ -117,7 +117,7 @@ Global search uses the owner's generated `custom_search_vector` for indexed cand
 
 ## Storage
 
-`base_custom_fields` (migrations `base-custom_fields-001-definitions`, `base-custom_fields-002-more-types`, `base-custom_fields-003-structured-values`, `base-custom_fields-004-rule-conditions`): one row per tenant, record type and key, with the pick-list or record kind a field takes. Every statement binds the tenant.
+`base_custom_fields` (migrations `base-custom_fields-001-definitions`, `base-custom_fields-002-more-types`, `base-custom_fields-003-structured-values`, `base-custom_fields-004-rule-conditions`, `base-custom_fields-005-watcher-conditions`): one row per tenant, record type and key, with the pick-list or record kind a field takes. Every statement binds the tenant.
 
 ## Runtime check
 

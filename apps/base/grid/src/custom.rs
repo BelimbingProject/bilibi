@@ -36,9 +36,9 @@ pub struct CustomColumn {
     /// Whether people find a record by this field's text in global search
     /// (free text, links, phone numbers and email addresses).
     pub searchable: bool,
-    /// Whether the tenant offered it to Base Rules conditions; Rules reads
+    /// Whether the tenant offered it to Base Watchers conditions; Watchers reads
     /// no other custom field (#730).
-    pub rule_condition: bool,
+    pub watcher_condition: bool,
 }
 
 /// The tenant-defined fields one Grid table takes, kept in its JSON field
@@ -73,7 +73,7 @@ pub(crate) fn hook() -> Option<&'static dyn CustomColumns> {
 
 /// The tenant's custom fields of every table that takes them, as the
 /// definitions module states them, whatever the reader's grants: for a caller
-/// that pins what the tenant defined (Base Rules' approval fingerprint).
+/// that pins what the tenant defined (Base Watchers' approval fingerprint).
 /// Empty when no module binds the hook.
 pub async fn custom_tables(client: &dyn ReadClient, scope: &Scope) -> Result<Vec<CustomTable>> {
     match hook() {

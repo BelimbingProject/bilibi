@@ -210,7 +210,7 @@ WALKTHROUGHS=(
   'web|events-unmounted|apps/web|events-reference|seed||-'
   'web|events-retention|apps/web|events-retention|seed|BILIBI_DISPOSABLE_EVENTS_DEMO=yes|-'
   # Only the composition with nothing mounted; the `mounted` group runs the other.
-  'web|rules-unmounted|apps/web|rules-walkthrough|seed||-'
+  'web|watchers-unmounted|apps/web|watchers-walkthrough|seed||-'
   'web|ports-unmounted|apps/web|ports-reference|none||-'
   'web|grid-catalog|apps/web|g1-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-projection|apps/web|g2-grid|seed|BILIBI_GRID_DEMO=disposable|-'
@@ -243,15 +243,15 @@ WALKTHROUGHS=(
   # later run also prints the event rows an earlier run left, which name the other.
   'mounted|events-mounted|apps/web|events-reference|seed||@mount:event_publisher;-;@expect:("event_publisher/receiving";@absent:("event_subscriber/payables";@mount:event_subscriber;-;@expect:("event_publisher/receiving";@expect:("event_subscriber/payables";@unmount:event_publisher;-;@expect:("event_subscriber/payables";@absent:("event_publisher/receiving"'
   'mounted|ports-mounted|apps/web|ports-reference|none||@mount:port_reference;-;@expect:port_reference/orders'
-  # The reference owner (rule_cases) mounted; the heading is printed only then.
-  'mounted|rules-mounted|apps/web|rules-walkthrough|seed||@mount:rule_cases;-;@expect:== Same facts, two tenants, two destinations'
+  # The reference owner (watcher_cases) mounted; the heading is printed only then.
+  'mounted|watchers-mounted|apps/web|watchers-walkthrough|seed||@mount:watcher_cases;-;@expect:== Same facts, two tenants, two destinations'
   # `end`, then `deliver` in a new process: the notices outlive the first one.
   'mounted|session-ended|apps/web|session-ended-walkthrough|none||@mount:session_listener;end;@expect:session_listener/presence.sessions;deliver;@expect:session_listener/presence.sessions'
 )
 
 # Examples no line above runs, each with the reason. `module folder|example|reason`.
 NOT_RUN=(
-  'apps/web|rules-domains-walkthrough|needs official Domain mounts; run each Domain source walkthrough first'
+  'apps/web|watchers-domains-walkthrough|needs official Domain mounts; run each Domain source walkthrough first'
   # They only serve the app, with a reference page, for a person to use in a browser.
   'apps/core/document|upload-resume-proof|serves the New document dialog for a browser upload'
   'apps/core/person|person-contact-panel|serves a reference page only'

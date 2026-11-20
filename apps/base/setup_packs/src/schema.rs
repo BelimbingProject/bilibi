@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 fn label_key() -> Value {
     json!({
@@ -40,7 +40,7 @@ pub fn pack() -> Value {
     label["required"] = json!(["kind", "subject", "label"]);
     label["properties"]["label"] = json!({"type": "string", "maxLength": bilibi_labels::MAX_LABEL});
     let mut field = field_key();
-    field["required"] = json!(["record_type", "key", "label", "kind", "rule_condition"]);
+    field["required"] = json!(["record_type", "key", "label", "kind", "watcher_condition"]);
     field["properties"]
         .as_object_mut()
         .expect("field properties")
@@ -50,13 +50,13 @@ pub fn pack() -> Value {
             ("kind".into(), json!({"type": "string", "enum": bilibi_custom_fields::Kind::ALL.map(bilibi_custom_fields::Kind::as_str)})),
             ("picklist".into(), list_key()),
             ("target".into(), list_key()),
-            ("rule_condition".into(), json!({"type": "boolean"})),
+            ("watcher_condition".into(), json!({"type": "boolean"})),
         ]);
     json!({
         "type": "object",
         "required": ["version", "labels", "custom_fields"],
         "properties": {
-            "version": {"type": "integer", "enum": [VERSION]},
+            "version": {"type": "integer", "enum": [VERSION], "description": "Only setup pack version 2 is supported; export a new pack instead of using version 1."},
             "labels": {"type": "array", "items": label},
             "custom_fields": {"type": "array", "items": field},
         }

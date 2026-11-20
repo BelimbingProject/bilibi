@@ -288,13 +288,13 @@ dependencies = [
  "bilibi-principal-directory",
  "bilibi-queue",
  "bilibi-records",
- "bilibi-rules",
  "bilibi-schedule",
  "bilibi-settings",
  "bilibi-step-up",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-user",
+ "bilibi-watchers",
  "bilibi-work-calendar",
  "getrandom 0.4.3",
  "inventory",
@@ -609,7 +609,6 @@ dependencies = [
  "bilibi-records",
  "bilibi-reports",
  "bilibi-residents",
- "bilibi-rules",
  "bilibi-schedule",
  "bilibi-search",
  "bilibi-security",
@@ -624,6 +623,7 @@ dependencies = [
  "bilibi-tiling",
  "bilibi-ui",
  "bilibi-visitor",
+ "bilibi-watchers",
  "bilibi-workflow",
 ]
 
@@ -1639,34 +1639,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bilibi-rules"
-version = "0.2.1"
-dependencies = [
- "askama",
- "bilibi-agent-api",
- "bilibi-authz",
- "bilibi-database",
- "bilibi-datetime",
- "bilibi-events",
- "bilibi-grid",
- "bilibi-locale",
- "bilibi-menu",
- "bilibi-module-registry",
- "bilibi-principal-directory",
- "bilibi-queue",
- "bilibi-settings",
- "bilibi-tenancy",
- "bilibi-ui",
- "inventory",
- "jiff",
- "rust_decimal",
- "serde_json",
- "sha2 0.11.1",
- "tokio",
- "tokio-postgres",
-]
-
-[[package]]
 name = "bilibi-schedule"
 version = "0.2.1"
 dependencies = [
@@ -2096,6 +2068,34 @@ dependencies = [
  "bilibi-module-registry",
  "inventory",
  "tokio",
+]
+
+[[package]]
+name = "bilibi-watchers"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-events",
+ "bilibi-grid",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-principal-directory",
+ "bilibi-queue",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "inventory",
+ "jiff",
+ "rust_decimal",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
+ "tokio-postgres",
 ]
 
 [[package]]

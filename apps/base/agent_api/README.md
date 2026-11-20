@@ -72,7 +72,7 @@ The [schema dialect](src/schema.rs) accepts object/properties/required,
 string/enum/maxLength/format, integer/number/enum/minimum/maximum, boolean and
 array/items, plus title/description and the editor annotations below. Scalar nodes may declare
 `nullable: true` to accept JSON `null`; null remains invalid everywhere else. Every node needs a type and
-root input must be an object. Input objects refuse unknown fields. Validation
+root input must be an object. Input objects refuse unknown fields unless their schema explicitly sets `additionalProperties: true`; the receiving contract must validate those fields before use. Validation
 returns dotted field paths, including array indexes. Null is never implicit.
 String formats are date, date-time with offset, and email. Nesting is bounded
 at discovery. Output schemas describe data without runtime enforcement.
@@ -303,10 +303,10 @@ A job a person started calls a write contract as that person through `base/agent
 | `read(&mut client, execution, key, input)` | A read contract, as `Registry::call` |
 
 - The scope is the job's person, re-sealed by Queue and marked `Scope::in_job` (`Channel::Job`). A system principal's job is refused, as system scopes are at the other doors, except where the contract's owner admits that principal by name.
-- **Principal callers.** A contract's owner contributes `PrincipalWrite { principals }` under `job::PRINCIPAL_WRITES`, keyed by its own contract key, to let a named principal's job call it (`principal_writable(key, principal)`). Boot refuses another module's contract, a read, a contract closed to the job door or asking step-up, and an undeclared principal. The commit's transaction must be the job's (`System · <principal>`); the capability is decided live on the principal's own grants. Base Rules is the first caller ([ADR 31](../../../docs/architecture/decisions/31-tenant-rules-run-after-commit-as-one-bounded-principal.md)). `validate(key, input)` checks an input against the contract's schema, for a caller that stores one to commit later.
-- No agent approval round-trip occurs during execution. A person reviews a job they start; principal callers arrange their own prior authorization ([Rules approval](../rules/README.md#versions-and-approval)). A contract that declares step-up is refused, since no one is present to give a code.
+- **Principal callers.** A contract's owner contributes `PrincipalWrite { principals }` under `job::PRINCIPAL_WRITES`, keyed by its own contract key, to let a named principal's job call it (`principal_writable(key, principal)`). Boot refuses another module's contract, a read, a contract closed to the job door or asking step-up, and an undeclared principal. The commit's transaction must be the job's (`System · <principal>`); the capability is decided live on the principal's own grants. Base Watchers is the first caller ([ADR 31](../../../docs/architecture/decisions/31-tenant-watchers-run-after-commit-as-one-bounded-principal.md)). `validate(key, input)` checks an input against the contract's schema, for a caller that stores one to commit later.
+- No agent approval round-trip occurs during execution. A person reviews a job they start; principal callers arrange their own prior authorization ([Watchers approval](../watchers/README.md#versions-and-approval)). A contract that declares step-up is refused, since no one is present to give a code.
 - Owner refusals come back typed as at the other doors; a database failure comes back as `Backend` so the job retries.
-- `base/bulk_data` (CSV import) is the first person's caller; `base/rules` the first principal's.
+- `base/bulk_data` (CSV import) is the first person's caller; `base/watchers` the first principal's.
 
 ## Page writes declaration and check
 

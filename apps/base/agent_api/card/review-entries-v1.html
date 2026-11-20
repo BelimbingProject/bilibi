@@ -276,7 +276,7 @@ function newRow(input={},operation=state.data.operation) {
        operation.input.properties.value['x-bilibi-review-requires-choice']!=='key')) {
     throw new Error('Reopen this review to load the available setting keys.');
   }
-  return {input:clone(editedInput(operation.input,{},input)),edited:new Set(),unresolved:new Map(),state:'draft',fields:{},preview:null,error:null};
+  return {input:clone(editedInput(operation.input,{},input)),edited:new Set(),unresolved:new Map(),jsonDrafts:new Map(),state:'draft',fields:{},preview:null,error:null};
 }
 function banner(instance) {
   state.data.instance=clone(instance);
@@ -402,6 +402,21 @@ function control(row,schema,path,required=false,position={}) {
     const source=state.rows[step-1],kind=source?.operation?.creates?.kind||'record';
     box.append(el('a',{href:'#entry-'+step,text:referenceName(value)||'the new '+kind+' (step '+step+')'}),errors);
     return box;
+  }
+  if(schema.type==='object'&&schema.additionalProperties===true) {
+    const draftKey=pathKey(path),draft=row.jsonDrafts.get(draftKey);
+    const nestedErrors=Object.entries(row.fields).filter(([field])=>field===key||field.startsWith(key+'.')).flatMap(([field,messages])=>messages.map(message=>field+': '+message));
+    const area=el('textarea',{id,rows:4,'aria-label':name+' · entry '+(state.rows.indexOf(row)+1),'aria-describedby':id+'-error','data-locked':locked,text:draft??JSON.stringify(value??{},null,2)});
+    errors.textContent=nestedErrors.join(' ');area.disabled=locked;
+    area.addEventListener('input',()=>{
+      const text=area.value;invalidate();row.jsonDrafts.set(draftKey,text);
+      try {
+        const parsed=JSON.parse(text);
+        if(!parsed||Array.isArray(parsed)||typeof parsed!=='object')throw new Error('Enter a JSON object.');
+        row.jsonDrafts.delete(draftKey);change(parsed);errors.textContent='';area.setAttribute('aria-invalid','false');
+      } catch(error) {errors.textContent='Enter a valid JSON object.';area.setAttribute('aria-invalid','true');}
+    });
+    box.append(area,errors);if(schema.description)box.append(el('span',{class:'muted',text:schema.description}));return box;
   }
   if(schema.type==='object') {
     box.classList.add('field-group');
@@ -699,6 +714,7 @@ function renderReviews() {
 }
 async function update() {
   if(state.busy||state.cancelled||state.uncertain)return;
+  if(state.rows.some(row=>row.state==='draft'&&row.jsonDrafts.size)){status('Enter a valid JSON object before updating the review.','warning');return;}
   const unresolved=state.rows.map((row,index)=>({row,index})).filter(({row})=>row.state==='draft'&&row.unresolved.size);
   if(unresolved.length){status((unresolved.length===1?'Entry ':'Entries ')+unresolved.map(({index})=>index+1).join(', ')+(unresolved.length===1?' has':' have')+' a reference search that must be selected or cleared.','warning');renderEditor();return;}
   invalidate();const revision=state.revision;

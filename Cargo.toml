@@ -110,7 +110,7 @@ bilibi-ports = { path = "apps/base/ports" }
 bilibi-queue = { path = "apps/base/queue" }
 bilibi-reports = { path = "apps/base/reports" }
 bilibi-residents = { path = "apps/base/residents" }
-bilibi-rules = { path = "apps/base/rules" }
+bilibi-watchers = { path = "apps/base/watchers" }
 bilibi-schedule = { path = "apps/base/schedule" }
 bilibi-search = { path = "apps/base/search" }
 bilibi-session = { path = "apps/base/session" }

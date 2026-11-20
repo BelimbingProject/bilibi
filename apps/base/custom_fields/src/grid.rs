@@ -107,8 +107,8 @@ impl CustomColumns for Columns {
                                     | Kind::Phone
                                     | Kind::Email
                             ),
-                            rule_condition: definition.rule_condition
-                                && definition.kind.rule_condition_kind(),
+                            watcher_condition: definition.watcher_condition
+                                && definition.kind.watcher_condition_kind(),
                         }
                     })
                     .collect();
