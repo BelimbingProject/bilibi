@@ -244,12 +244,10 @@ impl Instance {
         })
     }
     /// The name an AI app saves this Bilibi under: the host of the canonical
-    /// address with dots and port separators as hyphens, and existing hyphens
-    /// doubled (`try.bilibi.app` is `try-bilibi-app`,
-    /// `bilibi-app.example.com` is `bilibi--app-example-com`), plus the port
-    /// when the address names one
-    /// (`localhost:8443` is `localhost-8443`). The MCP server name, the
-    /// connection prompt and the plugin package all use it.
+    /// address with dots as hyphens and existing hyphens doubled
+    /// (`try.bilibi.app` is `try-bilibi-app`, `bilibi-app.example.com` is
+    /// `bilibi--app-example-com`). The MCP server name, the connection prompt
+    /// and the plugin package all use it.
     ///
     /// The address is unique per deployment; a label is not (two Productions
     /// would both be `production`, and one saved sign-in would then serve
@@ -258,10 +256,12 @@ impl Instance {
     /// safe in every app's server-name grammar; lower-case letters, digits
     /// and hyphens are.
     ///
-    /// At most 32 characters: apps name a tool
-    /// `mcp__<server>__<tool>` within 64 characters. A longer host keeps its
-    /// start and ends in eight hex digits of a hash of the whole name, so two
-    /// long hosts that share a start still differ.
+    /// Two different addresses never share a name. A plain host name maps
+    /// one to one. An address with a port or an IPv6 literal has punctuation
+    /// that hyphens alone cannot keep apart, so its name ends in eight hex
+    /// digits of a hash of the whole address (`localhost:8443` is
+    /// `localhost-8443-` and the hash). So does a name past 32 characters,
+    /// cut to fit: apps name a tool `mcp__<server>__<tool>` within 64.
     pub fn server_name(&self) -> String {
         let authority = self
             .origin
@@ -285,14 +285,21 @@ impl Instance {
         if name.is_empty() {
             return "bilibi".to_owned();
         }
-        if name.len() <= SERVER_NAME_LIMIT {
+        // A plain host name maps one to one: a label never starts or ends
+        // with a hyphen, so a dot's single hyphen never meets a doubled one.
+        // A port's colon or an IPv6 address's brackets and colons do not, so
+        // those names carry the hash of the whole address as well.
+        let plain = authority
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+        if plain && name.len() <= SERVER_NAME_LIMIT {
             return name.to_owned();
         }
         // FNV-1a, written out so the name never changes with a toolchain.
-        let hash = name.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
-            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+        let hash = authority.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+            (hash ^ u32::from(byte.to_ascii_lowercase())).wrapping_mul(0x0100_0193)
         });
-        let kept = name[..SERVER_NAME_LIMIT - 9].trim_end_matches('-');
+        let kept = name[..name.len().min(SERVER_NAME_LIMIT - 9)].trim_end_matches('-');
         format!("{kept}-{hash:08x}")
     }
     /// Whether an AI app on the internet (a chat website, a bot) can reach
