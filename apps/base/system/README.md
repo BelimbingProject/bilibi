@@ -91,6 +91,8 @@ Base Step-up binds an `Enforcement` policy supplied by `Instances`. It reads the
 
 `Instance::public_address` says whether an AI app on the internet can reach this Bilibi: false for a Dev copy and for an origin that is `localhost`, a loopback, private, carrier-grade NAT (`100.64.0.0/10`) or link-local IP (an IPv4-mapped IPv6 literal counts as its IPv4 address), a bare host name, or a name under `.localhost`, `.local`, `.internal`, `.lan`, `.home.arpa`, `.test` or `.ts.net`. It is decided from the stored role and `APP_ORIGIN`, never from the browser; the status bar's AI panel uses it to say when only an AI program on this computer can connect.
 
+`Instance::server_name` is the name an AI app saves this Bilibi under, on every door (MCP `serverInfo.name`, the connection prompt, the plugin package, `/.well-known/bilibi`): the host of `APP_ORIGIN` with every other character as a hyphen (`try.bilibi.app` is `try-bilibi-app`), plus the port when the address names one. The address is unique per deployment; a label is not, and two deployments sharing a name would share one saved sign-in. It changes only with the address, which ends a saved sign-in anyway. It is at most 32 characters, since apps name a tool `mcp__<server>__<tool>` within 64: a longer host keeps its first 23 and ends in eight hex digits of a hash of the whole name.
+
 Agent connection identity also includes `APP_ORIGIN` (the canonical public address, with the host's default when unset). `Instance::agent_notice` names the label, role and address; `agent_json` includes `role` and `origin` alongside the existing fields, so discovery and plan/commit results identify the same destination even when an operator gives two environments the same label.
 
 ## Database Tables (`src/database_tables/`)

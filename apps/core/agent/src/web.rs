@@ -5,8 +5,9 @@
 //! approval records a non-expiring connection. The host proves the session before any adapter call and
 //! `AgentAccess` keeps the self-service gate; this file owns only page state.
 use crate::{
-    setup_prompt, AgentAccess, AuthorizationRequest, AuthorizeParams, ConnectionSummary, Decision,
-    DeviceReview, OAuthError,
+    device_page::{DevicePage, DEVICE_TITLE},
+    setup_prompt, AgentAccess, AuthorizationRequest, AuthorizeParams, ConnectionSummary,
+    OAuthError,
 };
 use askama::Template;
 use bilibi_agent_api::{
@@ -25,9 +26,9 @@ use bilibi_ui::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
         PageChrome, PageFuture, PageRequest,
     },
-    params, ActionLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Choice, CodeInput,
-    EmptyState, FlashMap, FlexRow, FlexTable, Html, IconButton, ListColumns, RadioGroup,
-    StatusKind, TableEmpty, Toggle, NO_FLASH,
+    params, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Choice, EmptyState, FlashMap,
+    FlexRow, FlexTable, Html, IconButton, ListColumns, RadioGroup, StatusKind, TableEmpty, Toggle,
+    NO_FLASH,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -87,6 +88,9 @@ impl Page<Scope, Error> for Pages {
         match operation {
             "connections" => Some("My settings"),
             "review" => Some("Review entries"),
+            // Named so the shell's search finds it: a person holding a code
+            // gets here without the app's link.
+            "device" => Some(DEVICE_TITLE),
             _ => None,
         }
     }
@@ -95,7 +99,8 @@ impl Page<Scope, Error> for Pages {
             let scope = request.scope.ok_or(Error::Unauthorized)?;
             let html = match request.operation {
                 "device" => {
-                    DevicePage::new(self.clone(), request.query)?
+                    DevicePage::open(self.clone(), request.query, scope)
+                        .await?
                         .view(scope)
                         .await?
                 }
@@ -129,7 +134,7 @@ impl Page<Scope, Error> for Pages {
         Box::pin(async move {
             let scope = request.scope.ok_or(Error::Unauthorized)?;
             let state: State = match request.operation {
-                "device" => Box::new(DevicePage::new(self.clone(), request.query)?),
+                "device" => Box::new(DevicePage::open(self.clone(), request.query, scope).await?),
                 "authorize" => {
                     Box::new(AuthorizePage::new(self.clone(), request.query, scope).await?)
                 }
@@ -487,7 +492,7 @@ pub(crate) fn refusal(error: OAuthError) -> Result<OAuthError> {
     }
 }
 // Only the choice is accepted; the reviewed connection IDs stay on the server.
-fn replacement(fields: &BTreeMap<String, Value>, has_matches: bool) -> Option<bool> {
+pub(crate) fn replacement(fields: &BTreeMap<String, Value>, has_matches: bool) -> Option<bool> {
     if fields
         .keys()
         .any(|key| key != "type" && key != "replacement")
@@ -501,13 +506,17 @@ fn replacement(fields: &BTreeMap<String, Value>, has_matches: bool) -> Option<bo
         _ => None,
     }
 }
-struct DuplicateView {
-    name: String,
-    approved_from: String,
-    approved: Instant,
-    last_used: String,
+pub(crate) struct DuplicateView {
+    pub(crate) name: String,
+    pub(crate) approved_from: String,
+    pub(crate) approved: Instant,
+    pub(crate) last_used: String,
 }
-async fn duplicates(pages: &Pages, scope: &Scope, name: &str) -> Result<Vec<ConnectionSummary>> {
+pub(crate) async fn duplicates(
+    pages: &Pages,
+    scope: &Scope,
+    name: &str,
+) -> Result<Vec<ConnectionSummary>> {
     match pages.access.list_connections(scope).await {
         Ok(rows) => Ok(rows
             .into_iter()
@@ -519,7 +528,7 @@ async fn duplicates(pages: &Pages, scope: &Scope, name: &str) -> Result<Vec<Conn
         }
     }
 }
-async fn duplicate_views(
+pub(crate) async fn duplicate_views(
     pages: &Pages,
     scope: &Scope,
     rows: &[ConnectionSummary],
@@ -552,7 +561,7 @@ async fn duplicate_views(
         })
         .collect()
 }
-fn replacement_choice(_duplicates: &[DuplicateView]) -> RadioGroup {
+pub(crate) fn replacement_choice(_duplicates: &[DuplicateView]) -> RadioGroup {
     RadioGroup::new(
         "replacement",
         "replacement",
@@ -567,238 +576,13 @@ fn replacement_choice(_duplicates: &[DuplicateView]) -> RadioGroup {
 pub(crate) fn html<T: Template>(template: T) -> Result<String> {
     template.render().map_err(|_| Error::Internal)
 }
-fn only(query: &HashMap<String, String>, allowed: &[&str]) -> Result<()> {
+pub(crate) fn only(query: &HashMap<String, String>, allowed: &[&str]) -> Result<()> {
     if query.keys().all(|key| allowed.contains(&key.as_str())) {
         Ok(())
     } else {
         Err(Error::Invalid)
     }
 }
-// ---- /oauth/device -----------------------------------------------------------
-
-struct Completed {
-    approved: bool,
-    agent_id: String,
-}
-struct DevicePage {
-    pages: Pages,
-    code: String,
-    device: Option<DeviceReview>,
-    duplicates: Vec<ConnectionSummary>,
-    completed: Option<Completed>,
-    error: Option<&'static str>,
-    flash: Option<Flash>,
-}
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum DeviceEvent {
-    Lookup {
-        #[serde(default)]
-        user_code: String,
-    },
-    Approve {
-        #[serde(flatten)]
-        fields: BTreeMap<String, Value>,
-    },
-    Deny,
-    Another,
-    Dismiss,
-    /// The flash outlet's own dismissal (`data-event="clear-flash"`).
-    #[serde(rename = "clear-flash")]
-    ClearFlash {
-        key: String,
-    },
-}
-pub struct CompletedView<'a> {
-    pub approved: bool,
-    pub agent_id: &'a str,
-}
-impl CompletedView<'_> {
-    pub fn title(&self) -> &'static str {
-        if self.approved {
-            "Connection approved"
-        } else {
-            "Connection refused"
-        }
-    }
-}
-#[derive(Template)]
-#[template(path = "device.html")]
-struct DeviceView<'a> {
-    flash: FlashMap<'static>,
-    error: Option<&'static str>,
-    code: &'a str,
-    code_input: CodeInput,
-    device: Option<&'a DeviceReview>,
-    duplicates: Vec<DuplicateView>,
-    replacement: RadioGroup,
-    completed: Option<CompletedView<'a>>,
-}
-fn device_message(error: &OAuthError) -> &'static str {
-    match error {
-        OAuthError::PersonRequired => {
-            "Connect from your own account. You cannot approve connections while viewing as someone else."
-        }
-        _ => "This code expired or has already been used. Request a new code from your agent.",
-    }
-}
-impl DevicePage {
-    /// `?user_code=` only fills the field.
-    fn new(pages: Pages, query: &HashMap<String, String>) -> Result<Self> {
-        only(query, &["user_code"])?;
-        let code = Self::code(query.get("user_code").map_or("", String::as_str))?;
-        Ok(Self {
-            pages,
-            code,
-            device: None,
-            duplicates: Vec::new(),
-            completed: None,
-            error: None,
-            flash: None,
-        })
-    }
-    fn code(raw: &str) -> Result<String> {
-        if raw.len() > 64 {
-            return Err(Error::Invalid);
-        }
-        Ok(crate::normalize_user_code(raw))
-    }
-    async fn view(&self, scope: &Scope) -> Result<String> {
-        let client = self.pages.db.get().await?;
-        let display = self.pages.display(&**client, scope).await?;
-        let completed = self.completed.as_ref().map(|done| CompletedView {
-            approved: done.approved,
-            agent_id: &done.agent_id,
-        });
-        let duplicates = duplicate_views(&self.pages, scope, &self.duplicates, &display).await?;
-        html(DeviceView {
-            flash: flash_map(self.flash),
-            error: self.error,
-            code: &self.code,
-            code_input: CodeInput::new(
-                "device_user_code",
-                "user_code",
-                "Code shown by your agent",
-                8,
-            )
-            .value(&self.code)
-            .group_size(4),
-            device: self.device.as_ref(),
-            replacement: replacement_choice(&duplicates),
-            duplicates,
-            completed,
-        })
-    }
-    async fn lookup(&mut self, scope: &Scope, raw: &str) -> Result<()> {
-        self.code = Self::code(raw)?;
-        match self.pages.access.device(scope, &self.code).await {
-            Ok(device) => {
-                self.duplicates = duplicates(&self.pages, scope, &device.agent_id).await?;
-                self.device = Some(device);
-                self.error = None;
-            }
-            Err(error) => {
-                self.device = None;
-                self.error = Some(device_message(&refusal(error)?));
-            }
-        }
-        Ok(())
-    }
-    async fn decide(&mut self, scope: &Scope, decision: Decision, replace: bool) -> Result<()> {
-        let Some(device) = &self.device else {
-            return Ok(());
-        };
-        match self
-            .pages
-            .access
-            .decide_replacing(
-                scope,
-                &self.code,
-                decision,
-                &if replace {
-                    self.duplicates.iter().map(|r| r.id).collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                },
-            )
-            .await
-        {
-            Ok(()) => {
-                let approved = decision == Decision::Approve;
-                self.completed = Some(Completed {
-                    approved,
-                    agent_id: device.agent_id.clone(),
-                });
-                self.device = None;
-                self.code = String::new();
-                self.error = None;
-                self.flash = Some(Flash {
-                    kind: StatusKind::Success,
-                    message: if approved {
-                        "Connection approved."
-                    } else {
-                        "Connection refused."
-                    },
-                });
-            }
-            Err(error) => self.error = Some(device_message(&refusal(error)?)),
-        }
-        Ok(())
-    }
-    fn reset(&mut self) {
-        self.device = None;
-        self.completed = None;
-        self.code = String::new();
-        self.error = None;
-    }
-}
-impl LiveState<Scope, Error> for DevicePage {
-    fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
-        Box::pin(async move {
-            match request.input {
-                LiveInput::Refresh => {}
-                LiveInput::Params(values) => {
-                    only(values, &["user_code"])?;
-                    self.code = Self::code(values.get("user_code").map_or("", String::as_str))?;
-                }
-                LiveInput::Event(value) => {
-                    match serde_json::from_value::<DeviceEvent>(value.clone())
-                        .map_err(|_| Error::Invalid)?
-                    {
-                        DeviceEvent::Lookup { user_code } => {
-                            self.lookup(request.scope, &user_code).await?
-                        }
-                        DeviceEvent::Approve { fields } => {
-                            if let Some(replace) = replacement(&fields, !self.duplicates.is_empty())
-                            {
-                                self.decide(request.scope, Decision::Approve, replace)
-                                    .await?
-                            } else {
-                                self.error = Some(device_message(&OAuthError::InvalidRequest));
-                            }
-                        }
-                        DeviceEvent::Deny => {
-                            self.decide(request.scope, Decision::Deny, false).await?
-                        }
-                        DeviceEvent::Another => self.reset(),
-                        DeviceEvent::Dismiss => self.error = None,
-                        DeviceEvent::ClearFlash { key } => clear_flash(&mut self.flash, &key),
-                    }
-                }
-            }
-            let mut query = HashMap::new();
-            if !self.code.is_empty() {
-                query.insert("user_code".into(), self.code.clone());
-            }
-            Ok(LiveBody {
-                html: self.view(request.scope).await?,
-                query,
-                ..LiveBody::default()
-            })
-        })
-    }
-}
-
 // ---- /oauth/authorize --------------------------------------------------------
 
 struct AuthorizePage {
@@ -901,15 +685,15 @@ impl AuthorizePage {
     async fn view(&self, scope: &Scope) -> Result<String> {
         let client = self.pages.db.get().await?;
         let display = self.pages.display(&**client, scope).await?;
+        drop(client);
         let duplicates = duplicate_views(&self.pages, scope, &self.duplicates, &display).await?;
         html(AuthorizeView {
             origin: &self.pages.origin,
-            connections: Html::render(&ActionLink {
+            connections: Html::render(&Button {
                 id: "oauth-connections",
-                title: "Your connections",
                 href: "/settings/ai-connections",
                 body: Html::text("Your connections"),
-                ..ActionLink::default()
+                ..Button::default()
             })
             .map_err(|_| Error::Internal)?,
             actions: {
@@ -1119,6 +903,8 @@ struct ConnectionsView {
     /// Offer the ChatGPT plugin ZIP; see `offers_plugin`.
     plugin: bool,
     plugin_href: &'static str,
+    /// Where a person types the code a device-flow app shows.
+    device_href: &'static str,
     /// The MCP address and the name a tool saves it under, for the manual steps.
     address: String,
     server_name: String,
@@ -1184,7 +970,6 @@ impl ConnectionsPage {
         }))
     }
     async fn view(&self, scope: &Scope) -> Result<String> {
-        let client = self.pages.db.get().await?;
         let (rows, error) = match self.pages.access.list_connections(scope).await {
             Ok(rows) => (rows, None),
             Err(error) => {
@@ -1195,6 +980,9 @@ impl ConnectionsPage {
                 )
             }
         };
+        // One pooled connection at a time: the facade calls before and after
+        // take their own.
+        let client = self.pages.db.get().await?;
         let display = self.pages.display(&**client, scope).await?;
         let last_use = if error.is_none() {
             self.pages
@@ -1204,6 +992,7 @@ impl ConnectionsPage {
         } else {
             Default::default()
         };
+        drop(client);
         let mut groups = HashSet::new();
         let mut has_earlier = false;
         let rows = rows
@@ -1376,6 +1165,7 @@ impl ConnectionsPage {
             local_help: setup.as_ref().is_some_and(|setup| setup.local_only),
             plugin: setup.as_ref().is_some_and(|setup| setup.plugin),
             plugin_href: super::PLUGIN_DOWNLOAD,
+            device_href: super::DEVICE_PAGE,
             address: setup
                 .as_ref()
                 .map(|setup| setup.address.clone())

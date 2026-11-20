@@ -107,6 +107,10 @@ live grant/revocation, cross-tenant denial, deny precedence and decision logs.
 Temporary grants and sessions are removed on successful completion. This is a
 manual runtime specimen, with no unit tests or assertions.
 
+## The connection check
+
+`hello(instance, message)` in [src/lib.rs](src/lib.rs) is what every agent door answers to its connection check: the caller's message (at most `HELLO_MESSAGE_LIMIT` characters), the server name and the instance. The MCP adapter lists it first among the generic tools; the host serves the same body at `GET /api/v1/hello` (`apps/web/README.md`). It is not an operation contract: it reads nothing and decides nothing, so it proves the transport and the session and leaves every permission answer to the operations.
+
 ## MCP agent and client labels
 
 A model can report itself directly through any generic tool, with no local client configuration:
@@ -115,7 +119,7 @@ A model can report itself directly through any generic tool, with no local clien
 {"name":"search","arguments":{"query":"companies","agent_self_report":"claude-code/sonnet-4.5-default"}}
 ```
 
-The optional `agent_self_report` argument is available on `search`, `describe`, `guide`, `read`, `plan`, `commit` and every app tool (`review_entries`, `open_software`): the host consumes it before the tool sees its input, and each tool's schema declares it. MCP connect instructions and tool descriptions ask agents to include it on every call, ask their user for unknown harness/model/version/effort parts, never guess, and omit parts nobody can give. The example is a shape example, not a value to copy.
+The optional `agent_self_report` argument is available on `hello`, `search`, `describe`, `guide`, `read`, `plan`, `commit` and every app tool (`review_entries`, `open_software`): the host consumes it before the tool sees its input, and each tool's schema declares it. MCP connect instructions and tool descriptions ask agents to include it on every call, ask their user for unknown harness/model/version/effort parts, never guess, and omit parts nobody can give. The example is a shape example, not a value to copy.
 
 - The host consumes the argument before operation dispatch; it is never business input.
 - The argument is the highest-precedence source of the report. Precedence, the shape check, what is recorded and the separate **Client identity** transport evidence are owned by the [host contract](../../web/README.md).
@@ -350,7 +354,7 @@ Each gap is a `Pending` declaration in the owning module, with its reason. Remov
 
 ## Agent connection context
 
-MCP initialization and generated plugin workflow skills use `BUSINESS_CONTEXT` from [src/lib.rs](src/lib.rs): Bilibi is the person's business system, and agents search its operations and guides before answering or claiming a field or action is missing. `REVIEW_INSTRUCTIONS` supplies the same review and approval rule to initialization, plan/commit descriptions and the plugin workflow. `INSTANCE_INSTRUCTIONS` tells agents to announce the label, role and canonical address in their first answer and every plan review and confirmation. MCP `serverInfo.title` names all three; plan and commit results carry them in `instance` through `bilibi_system::Instance::agent_json`.
+MCP initialization and generated plugin workflow skills use `BUSINESS_CONTEXT` from [src/lib.rs](src/lib.rs): Bilibi is the person's business system, and agents search its operations and guides before answering or claiming a field or action is missing. `REVIEW_INSTRUCTIONS` supplies the same review and approval rule to initialization, plan/commit descriptions and the plugin workflow. `INSTANCE_INSTRUCTIONS` tells agents to announce the label, role and canonical address in their first answer and every plan review and confirmation. MCP `serverInfo.name` is `Instance::server_name` (the address with hyphens, the name the connection prompt and the plugin use) and `serverInfo.title` names all three; plan and commit results carry them in `instance` through `bilibi_system::Instance::agent_json`.
 
 ## Tenant provisioning
 

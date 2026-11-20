@@ -133,6 +133,7 @@ const SENDER_KEYS: usize = 65_536;
 
 pub fn router(app: App) -> Router<App> {
     let api = Router::new()
+        .route("/api/v1/hello", get(hello))
         .route("/api/v1/search", get(search))
         .route("/api/v1/operations/{key}", get(describe))
         .route("/api/v1/guides/{key}", get(guide))
@@ -481,12 +482,6 @@ async fn descriptor(State(app): State<App>) -> Response {
         Err(error) => return unavailable(&error).into_response(),
     };
     let base = origin(&app);
-    let host = base
-        .split_once("://")
-        .map_or(base, |(_, rest)| rest)
-        .split(['/', ':'])
-        .next()
-        .unwrap_or_default();
     reply(
         StatusCode::OK,
         json!({
@@ -494,7 +489,10 @@ async fn descriptor(State(app): State<App>) -> Response {
             "api_version": "1",
             "plan_endpoint": format!("{base}/api/v1/plans"),
             "commit_endpoint": format!("{base}/api/v1/plans/commit"),
-            "server_name": host,
+            "server_name": instance.server_name(),
+            "mcp_endpoint": mcp_resource(&app),
+            "device_authorization_endpoint": format!("{base}/oauth/device_authorization"),
+            "verification_uri": format!("{base}{}", bilibi_agent::DEVICE_PAGE),
             "instance": instance.agent_json(),
             "client_id": CLIENT_ID,
         }),
@@ -644,13 +642,25 @@ async fn device(State(app): State<App>, request: Request) -> Response {
         return oauth(Err(OAuthError::InvalidRequest));
     };
     let field = |key: &str| fields.get(key).map(String::as_str).unwrap_or_default();
+    // An empty field is an absent one, as `field` reads the others.
+    let stated = |key: &str| {
+        fields
+            .get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+    };
     let started = app
         .api
         .access
-        .start_device(field("client_id"), field("agent_id"))
+        .start_device_for(
+            field("client_id"),
+            stated("agent_id"),
+            stated("resource"),
+            &mcp_resource(&app),
+        )
         .await;
     oauth(started.map(|start| {
-        let uri = format!("{}/oauth/device", origin(&app));
+        let uri = format!("{}{}", origin(&app), bilibi_agent::DEVICE_PAGE);
         json!({
             "device_code": start.device_code,
             "user_code": start.user_code,
@@ -974,6 +984,29 @@ async fn body(request: Request<Body>) -> Result<Map<String, Value>, Refusal> {
 }
 
 // --- /api/v1 -----------------------------------------------------------------
+
+/// The connection check (`bilibi_agent_api::hello`): the bearer edge proved
+/// the transport, the grant and the AI switch before this ran, and it reads
+/// nothing, so its answer never depends on a capability.
+async fn hello(State(app): State<App>, uri: Uri, request: Request) -> Response {
+    let trace = trace(&request);
+    let agent = match authenticate(&app, request.headers(), &trace, None).await {
+        Ok(agent) => agent,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let result = async {
+        let Query(query) =
+            Query::<HashMap<String, String>>::try_from_uri(&uri).map_err(|_| invalid_request())?;
+        if query.keys().any(|key| key != "message") {
+            return Err(invalid_request());
+        }
+        let instance = app.instance().await.map_err(|error| unavailable(&error))?;
+        bilibi_base::agent_api::hello(&instance, query.get("message").map(String::as_str))
+            .ok_or_else(invalid_request)
+    }
+    .await;
+    agent.answer(Some("agent_api.hello".into()), Vec::new(), result)
+}
 
 async fn search(State(app): State<App>, uri: Uri, request: Request) -> Response {
     let trace = trace(&request);

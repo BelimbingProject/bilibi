@@ -196,6 +196,9 @@ pub fn valid_instance_name(name: &str) -> bool {
         && !name.starts_with('-')
 }
 
+/// The longest [`Instance::server_name`].
+const SERVER_NAME_LIMIT: usize = 32;
+
 /// This instance as it should be announced.
 #[derive(Clone, Debug)]
 pub struct Instance {
@@ -240,30 +243,53 @@ impl Instance {
             colour,
         })
     }
-    /// The label as an identifier: lower-case letters, digits and hyphens,
-    /// at most 24 characters (`Dev (laptop)` is `dev-laptop`), or the role
-    /// when the label has none. The MCP server name (`bilibi-<slug>`) and the
-    /// plugin package name are built from it, so a person who connects Dev,
-    /// Staging and Production to one harness can tell the three apart.
-    pub fn slug(&self) -> String {
-        const LIMIT: usize = 24;
-        let mut slug = String::new();
-        for c in self.label.chars() {
+    /// The name an AI app saves this Bilibi under: the host of the canonical
+    /// address with every other character as a hyphen (`try.bilibi.app` is
+    /// `try-bilibi-app`), plus the port when the address names one
+    /// (`localhost:8443` is `localhost-8443`). The MCP server name, the
+    /// connection prompt and the plugin package all use it.
+    ///
+    /// The address is unique per deployment; a label is not (two Productions
+    /// would both be `production`, and one saved sign-in would then serve
+    /// both). It changes only when the address does, which ends a saved
+    /// sign-in anyway, so renaming the label never orphans one. Dots are not
+    /// safe in every app's server-name grammar; lower-case letters, digits
+    /// and hyphens are.
+    ///
+    /// At most 32 characters: apps name a tool
+    /// `mcp__<server>__<tool>` within 64 characters. A longer host keeps its
+    /// start and ends in eight hex digits of a hash of the whole name, so two
+    /// long hosts that share a start still differ.
+    pub fn server_name(&self) -> String {
+        let authority = self
+            .origin
+            .split_once("://")
+            .map_or(self.origin.as_str(), |(_, rest)| rest)
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default();
+        let authority = authority.rsplit('@').next().unwrap_or(authority);
+        let mut name = String::new();
+        for c in authority.chars() {
             if c.is_ascii_alphanumeric() {
-                slug.push(c.to_ascii_lowercase());
-            } else if !slug.is_empty() && !slug.ends_with('-') {
-                slug.push('-');
-            }
-            if slug.len() >= LIMIT {
-                break;
+                name.push(c.to_ascii_lowercase());
+            } else if !name.is_empty() && !name.ends_with('-') {
+                name.push('-');
             }
         }
-        let slug = slug.trim_end_matches('-');
-        if slug.is_empty() {
-            self.role.env_value().to_owned()
-        } else {
-            slug.to_owned()
+        let name = name.trim_end_matches('-');
+        if name.is_empty() {
+            return "bilibi".to_owned();
         }
+        if name.len() <= SERVER_NAME_LIMIT {
+            return name.to_owned();
+        }
+        // FNV-1a, written out so the name never changes with a toolchain.
+        let hash = name.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+        });
+        let kept = name[..SERVER_NAME_LIMIT - 9].trim_end_matches('-');
+        format!("{kept}-{hash:08x}")
     }
     /// Whether an AI app on the internet (a chat website, a bot) can reach
     /// this Bilibi at its configured address. Decided from what the server
