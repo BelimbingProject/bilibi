@@ -5,7 +5,9 @@ use bilibi_database::{Connection, Db, MutationBoundary};
 use bilibi_party_ids::OrganisationId;
 use bilibi_settings::Settings;
 use bilibi_system::Instance;
-use bilibi_tenancy::{reaches_work_company, Authentication, Channel, ProofFuture, ReadClient, Scope};
+use bilibi_tenancy::{
+    reaches_work_company, Authentication, Channel, ProofFuture, ReadClient, Scope,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{future::Future, sync::Arc};

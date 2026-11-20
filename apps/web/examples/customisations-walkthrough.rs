@@ -132,8 +132,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             example.contains("base.grid.view.delete using the ID from this setup's confirmed save")
         );
         assert!(example.contains("Archive the field only if this setup's confirmed save"));
-        assert!(example
-            .contains("If attribution remains uncertain, report it and stop before proposing cleanup."));
+        assert!(example.contains(
+            "If attribution remains uncertain, report it and stop before proposing cleanup."
+        ));
         assert!(!example.contains("base.rules.vocabulary"));
         assert!(watcher.contains("base.rules.vocabulary"));
         for limit in ["conditions", "examples", "facts_read", "values_per_list"] {
