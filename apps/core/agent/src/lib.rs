@@ -15,6 +15,7 @@ mod plugin;
 mod provider;
 use provider::prove_provider;
 mod registration;
+mod retention;
 mod secrets;
 mod setup_prompt;
 mod throttle;
@@ -1703,8 +1704,8 @@ impl bilibi_tenancy::AgentVerifier for GrantVerifier {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "core/agent", layer: bilibi_module_registry::Layer::Core,
-        dependencies: &["base/database", "base/settings", "base/session", "base/tenancy", "base/integration", "base/agent_api", "base/records", "base/audit", "base/authz", "base/party_ids", "base/ui", "base/datetime", "base/locale", "base/system", "base/step_up", "core/user", "core/company"],
-        migrations: &[MIGRATION, SELF_REPORT_MIGRATION, ("core-agent-access-003-client-identity", include_str!("../migrations/003-client-identity.sql")), ("core-agent-access-004-client-registration", include_str!("../migrations/004-client-registration.sql")), ("core-agent-access-005-provider-access", include_str!("../migrations/005-provider-access.sql")), ("core-agent-access-006-session-switch", include_str!("../migrations/006-session-switch.sql")), ("core-agent-access-007-session-holder-id", include_str!("../migrations/007-session-holder-id.sql")), ("core-agent-access-008-pending-authorization", include_str!("../migrations/008-pending-authorization.sql")), ("core-agent-access-009-connection-end-reason", include_str!("../migrations/009-connection-end-reason.sql")), ("core-agent-access-010-approved-session", include_str!("../migrations/010-approved-session.sql")), ("core-agent-access-011-device-resource", include_str!("../migrations/011-device-resource.sql"))],
+        dependencies: &["base/database", "base/settings", "base/session", "base/tenancy", "base/integration", "base/agent_api", "base/records", "base/audit", "base/authz", "base/party_ids", "base/ui", "base/datetime", "base/locale", "base/system", "base/step_up", "base/queue", "base/schedule", "core/user", "core/company"],
+        migrations: &[MIGRATION, SELF_REPORT_MIGRATION, ("core-agent-access-003-client-identity", include_str!("../migrations/003-client-identity.sql")), ("core-agent-access-004-client-registration", include_str!("../migrations/004-client-registration.sql")), ("core-agent-access-005-provider-access", include_str!("../migrations/005-provider-access.sql")), ("core-agent-access-006-session-switch", include_str!("../migrations/006-session-switch.sql")), ("core-agent-access-007-session-holder-id", include_str!("../migrations/007-session-holder-id.sql")), ("core-agent-access-008-pending-authorization", include_str!("../migrations/008-pending-authorization.sql")), ("core-agent-access-009-connection-end-reason", include_str!("../migrations/009-connection-end-reason.sql")), ("core-agent-access-010-approved-session", include_str!("../migrations/010-approved-session.sql")), ("core-agent-access-011-device-resource", include_str!("../migrations/011-device-resource.sql")), ("core-agent-access-012-device-expiry-index", include_str!("../migrations/012-device-expiry-index.sql"))],
         services: &[bilibi_module_registry::Service { id: "core/agent.grants", factory: |services| {
             let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
             let users = services.get::<bilibi_user::UserService>("core/user.accounts")?;
@@ -1739,6 +1740,10 @@ inventory::submit! {
             reviews: services.get("base/agent_api.reviews")?,
             step_up: services.get(bilibi_step_up::SERVICE)?,
             records: services.get(bilibi_records::SERVICE)?,
+        })))) },
+        bilibi_module_registry::Service { id: retention::SERVICE, factory: |services| Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(retention::DeviceRetention {
+            schedule: services.get("base/schedule.store")?,
+            access: services.get("core/agent.grants")?,
         })))) },
         bilibi_module_registry::Service { id: plugin::PLUGIN_SERVICE, factory: |services| Ok(Arc::new(AgentPlugins {
             registry: services.get("base/agent_api.registry")?,

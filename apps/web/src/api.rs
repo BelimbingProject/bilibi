@@ -606,12 +606,25 @@ fn oauth(result: Result<Value, OAuthError>) -> Response {
     response
 }
 
+/// A sender past its minute on an endpoint that starts something
+/// (registration, device authorization): `429` with `Retry-After`, as the
+/// gate answers. `slow_down` is RFC 8628's answer to a poll of the token
+/// endpoint, where it tells the client to keep polling at a longer interval;
+/// a client that has no device code yet has nothing to poll.
+fn rate_limited() -> Response {
+    let mut response = error(StatusCode::TOO_MANY_REQUESTS, "rate_limited").into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    response
+}
+
 /// RFC 7591 registration is intentionally unauthenticated. The same direct
 /// sender attribution and operator-set limiter as the token edge apply.
 async fn register(State(app): State<App>, request: Request) -> Response {
     match allowed(&app, "register", peer_address(&request)).await {
         Ok(true) => {}
-        Ok(false) => return oauth(Err(OAuthError::SlowDown)),
+        Ok(false) => return rate_limited(),
         Err(error) => return oauth(Err(error.into())),
     }
     let Ok(Json(value)) = Json::<Value>::from_request(request, &app).await else {
@@ -635,7 +648,7 @@ async fn register(State(app): State<App>, request: Request) -> Response {
 async fn device(State(app): State<App>, request: Request) -> Response {
     match allowed(&app, "device", peer_address(&request)).await {
         Ok(true) => {}
-        Ok(false) => return oauth(Err(OAuthError::SlowDown)),
+        Ok(false) => return rate_limited(),
         Err(error) => return oauth(Err(error.into())),
     }
     let Some(fields) = params(request).await else {

@@ -6,6 +6,7 @@ use bilibi_settings::{
 };
 use bilibi_ui::{Html, InstanceBadge, InstanceBanner, InstanceStatus, StatusKind};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio_postgres::GenericClient;
 
 pub const INSTANCE_ROLE_KEY: &str = "instance.role";
@@ -256,20 +257,21 @@ impl Instance {
     /// safe in every app's server-name grammar; lower-case letters, digits
     /// and hyphens are.
     ///
-    /// Two different addresses never share a name. A plain host name maps
-    /// one to one. An address with a port or an IPv6 literal has punctuation
-    /// that hyphens alone cannot keep apart, so its name ends in eight hex
-    /// digits of a hash of the whole address (`localhost:8443` is
-    /// `localhost-8443-` and the hash). So does a name past 32 characters,
-    /// cut to fit: apps name a tool `mcp__<server>__<tool>` within 64.
+    /// Two different addresses do not share a name. An HTTPS host name of up
+    /// to 32 characters maps one to one: a label never starts or ends with a
+    /// hyphen, so a dot's single hyphen never meets a doubled one. Any other
+    /// address (a port, an IPv6 literal, plain HTTP, or a name past 32
+    /// characters, since apps name a tool `mcp__<server>__<tool>` within 64)
+    /// keeps the start of that name and ends in three hyphens and the first
+    /// 64 bits of the SHA-256 of the whole origin, scheme and port included.
+    /// Three hyphens in a row never come from a host name, so the two kinds
+    /// cannot meet either.
     pub fn server_name(&self) -> String {
-        let authority = self
+        let (scheme, rest) = self
             .origin
             .split_once("://")
-            .map_or(self.origin.as_str(), |(_, rest)| rest)
-            .split(['/', '?', '#'])
-            .next()
-            .unwrap_or_default();
+            .unwrap_or(("", self.origin.as_str()));
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
         let authority = authority.rsplit('@').next().unwrap_or(authority);
         let mut name = String::new();
         for c in authority.chars() {
@@ -285,22 +287,26 @@ impl Instance {
         if name.is_empty() {
             return "bilibi".to_owned();
         }
-        // A plain host name maps one to one: a label never starts or ends
-        // with a hyphen, so a dot's single hyphen never meets a doubled one.
-        // A port's colon or an IPv6 address's brackets and colons do not, so
-        // those names carry the hash of the whole address as well.
-        let plain = authority
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
-        if plain && name.len() <= SERVER_NAME_LIMIT {
+        // A host name whose every label starts and ends with a letter or digit.
+        let host_name = authority.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        });
+        if host_name && scheme.eq_ignore_ascii_case("https") && name.len() <= SERVER_NAME_LIMIT {
             return name.to_owned();
         }
-        // FNV-1a, written out so the name never changes with a toolchain.
-        let hash = authority.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
-            (hash ^ u32::from(byte.to_ascii_lowercase())).wrapping_mul(0x0100_0193)
-        });
-        let kept = name[..name.len().min(SERVER_NAME_LIMIT - 9)].trim_end_matches('-');
-        format!("{kept}-{hash:08x}")
+        let origin = format!("{scheme}://{authority}").to_ascii_lowercase();
+        let digest = Sha256::digest(origin.as_bytes());
+        let tail: String = digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let kept = name[..name.len().min(SERVER_NAME_LIMIT - 19)].trim_end_matches('-');
+        format!("{kept}---{tail}")
     }
     /// Whether an AI app on the internet (a chat website, a bot) can reach
     /// this Bilibi at its configured address. Decided from what the server

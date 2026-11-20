@@ -392,7 +392,9 @@ dependencies = [
  "bilibi-locale",
  "bilibi-module-registry",
  "bilibi-party-ids",
+ "bilibi-queue",
  "bilibi-records",
+ "bilibi-schedule",
  "bilibi-session",
  "bilibi-settings",
  "bilibi-step-up",
@@ -1868,6 +1870,7 @@ dependencies = [
  "inventory",
  "libc",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
  "tokio-postgres",
 ]

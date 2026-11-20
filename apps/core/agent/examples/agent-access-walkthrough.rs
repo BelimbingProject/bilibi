@@ -1011,6 +1011,47 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Err("user-code lookups were not bounded per account".into());
     }
 
+    println!("\n== device receipt cleanup ==");
+    // The public endpoint writes a receipt per request; the scheduled worker
+    // deletes them a day after they expired. Time travel: every finished
+    // receipt of this run expired two days ago.
+    let waiting = grants.start_device(CLIENT_ID, "Still waiting").await?;
+    let aged = client
+        .execute(
+            "UPDATE core_agent_devices SET expires_at=now()-interval '2 days' WHERE status IN ('used','denied','approved')",
+            &[],
+        )
+        .await?;
+    let connections_before: i64 = client
+        .query_one("SELECT count(*) FROM core_agent_connections", &[])
+        .await?
+        .get(0);
+    let deleted = grants.prune_devices().await?;
+    let left: i64 = client
+        .query_one(
+            "SELECT count(*) FROM core_agent_devices WHERE expires_at < now()-interval '1 day'",
+            &[],
+        )
+        .await?
+        .get(0);
+    let connections_after: i64 = client
+        .query_one("SELECT count(*) FROM core_agent_connections", &[])
+        .await?
+        .get(0);
+    let still_waiting = grants.device(&actor, &waiting.user_code).await;
+    println!("receipts aged two days: {aged}; deleted: {deleted}; old ones left: {left}");
+    println!("a receipt still waiting: {}", outcome(&still_waiting));
+    println!("connections before and after: {connections_before} and {connections_after}");
+    if aged == 0
+        || deleted != aged
+        || left != 0
+        || still_waiting.is_err()
+        || connections_before != connections_after
+    {
+        return Err("the device receipt cleanup did not delete exactly the old receipts".into());
+    }
+    println!("second run deletes: {}", grants.prune_devices().await?);
+
     println!("\n== host throttle ==");
     let throttle = Throttle::default();
     let decisions: Vec<bool> = (0..4)

@@ -32,7 +32,7 @@
 {% endfor %}
 {% call forms::radio_group(group=replacement) %}{% endcall %}
 {% endif %}
-{% call ui::section_heading(title="What this app can do", description="This app works as you in the companies you may act in, naming the company on every call: it can read what you can read and make changes you approve in your AI app. You can revoke access at any time in Your connections.") %}{% endcall %}
+{% call ui::section_heading(title="What this app can do", description="This app works as you in the companies you may act in: it can read what you can read and make the changes you can make. Bilibi relies on the app to ask you before each change, so approve only an app you trust. You can revoke access at any time in Your connections.") %}{% endcall %}
 <p id="device-approval-caution" class="text-sm text-ink">Approve only a code you asked your app for. If someone else sent you this code or link, their app would get this access.</p>
 {% endcall %}
 <p id="device-approval-ai" class="mt-3 text-xs text-ink-muted">Approving also turns AI on in this browser.</p>

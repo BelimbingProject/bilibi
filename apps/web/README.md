@@ -183,7 +183,7 @@ The host owns the machine endpoints; discovered pages cannot claim them
   resource (`resource`, RFC 8707) so its tokens work at `/mcp`, and may leave
   `agent_id` out (`apps/core/agent/README.md`, Contract). Errors are `400 {"error":code}`;
   storage failure is `503 temporarily_unavailable`. Each endpoint has its own
-  per-sender bucket from `agent_access.oauth_requests_per_minute`. The sender
+  per-sender bucket from `agent_access.oauth_requests_per_minute`. A sender past it gets `429 {"error":"rate_limited"}` with `Retry-After: 60` at registration and device authorization, and RFC 8628's `slow_down` at the token endpoint, the one place a client polls. The sender
   is the client address (see "Client address" below), counted by its IPv6 /64.
   `main.rs` serves with `ConnectInfo` for this.
 - `/api/v1`: `GET hello` (optional `message`, at most 200 characters), `GET search` (`q`, `limit` 1–50, `kind` read|write,
