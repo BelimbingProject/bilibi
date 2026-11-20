@@ -965,7 +965,7 @@ impl PortalPage {
                 StatusKind::Info => flash.info = message,
             }
         }
-        View {
+        let html = render(View {
             flash,
             actions,
             site_form: self.site_form(),
@@ -987,15 +987,12 @@ impl PortalPage {
             revoke: self.revoke.is_some(),
             revoke_access: self.revoke_access.is_some(),
             reject: self.reject.is_some(),
-        }
-        .render()
-        .map_err(|_| Error::Internal)
-        .map(|html| match &zone {
-            Some(zone) => zone
-                .wrap("customer-portal-drop", Html::raw(html))
-                .to_string(),
+        })?;
+        Ok(match zone {
+            Some(zone) => zone.wrap("customer-portal-drop", html),
             None => html,
-        })
+        }
+        .to_string())
     }
 
     /// One submitted write through its contract. `Ok(Err(fields))` is a
