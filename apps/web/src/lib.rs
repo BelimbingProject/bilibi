@@ -22,6 +22,7 @@ mod provision;
 mod proxies;
 mod routes;
 mod scim;
+mod sender_admission;
 mod shell;
 mod two_factor_reset;
 mod visitor;

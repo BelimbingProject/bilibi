@@ -54,7 +54,9 @@ inventory::submit! { Contribution::new(ROUTES, "credential_reference.survey", pr
     path: "/survey/{token}",
     service: PAGES,
     operation: "answer",
-    access: Access::Public,
+    access: Access::Public {
+        sender_budget: None,
+    },
     framed: false,
 }) }
 
@@ -68,7 +70,9 @@ static FORGOTTEN: Contribution = Contribution::new(
         path: "/forgotten/{token}",
         service: PAGES,
         operation: "forgotten",
-        access: Access::Public,
+        access: Access::Public {
+            sender_budget: None,
+        },
         framed: false,
     },
 );

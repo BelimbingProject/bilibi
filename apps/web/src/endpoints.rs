@@ -9,6 +9,7 @@
 use crate::{
     api,
     routes::{validate_host_free, validate_pair, Downloads, Pages},
+    sender_admission::SenderAdmission,
     App, HttpError,
 };
 use axum::{
@@ -42,6 +43,7 @@ pub struct BoundEndpoint {
 pub struct Endpoints {
     pub bound: Vec<BoundEndpoint>,
     throttle: Throttle,
+    sender_admission: SenderAdmission,
 }
 impl Endpoints {
     pub(crate) fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
@@ -76,6 +78,7 @@ pub fn bind(services: &Services, pages: &Pages, downloads: &Downloads) -> Result
     Ok(Endpoints {
         bound,
         throttle: Throttle::default(),
+        sender_admission: SenderAdmission::default(),
     })
 }
 
@@ -125,6 +128,15 @@ async fn answer(
         peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
         &headers,
     ));
+    let key = format!(
+        "{:?} {}:{sender}",
+        bound.endpoint.method, bound.endpoint.path
+    );
+    if let Some(budget) = bound.endpoint.sender_budget {
+        if !app.endpoints.sender_admission.allow(&key, budget) {
+            return Ok((StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response());
+        }
+    }
     let per_minute = {
         let client = app.db.get().await.map_err(Error::from)?;
         app.settings
@@ -137,10 +149,6 @@ async fn answer(
             .and_then(|limit| u32::try_from(limit).ok())
             .ok_or(Error::Internal)?
     };
-    let key = format!(
-        "{:?} {}:{sender}",
-        bound.endpoint.method, bound.endpoint.path
-    );
     if !app.endpoints.throttle.allow(&key, per_minute) {
         return Ok((StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response());
     }
