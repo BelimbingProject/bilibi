@@ -51,9 +51,9 @@ const PAGES: &str = "core/portal.pages";
 const PORTAL_PAGES: &str = "core/portal.portal";
 
 /// See the portal site and the invitations.
-pub const VIEW: &str = "admin.customer-access.view";
+pub const VIEW: &str = "admin.portal.view";
 /// Set the portal site, invite customers and revoke invitations.
-pub const MANAGE: &str = "admin.customer-access.manage";
+pub const MANAGE: &str = "admin.portal.manage";
 /// A customer's own portal home and account.
 pub const PORTAL_ACCOUNT: &str = "portal.account.view";
 /// The portal role every invited customer is given.
@@ -65,7 +65,7 @@ pub const INVITATION_DAYS_KEY: &str = "customer_portal.invitation_days";
 /// confirmed (installation-wide: it is read before anyone is signed in).
 pub const REGISTRATION_DAYS_KEY: &str = "customer_portal.registration_days";
 
-pub const STAFF_PATH: &str = "/customer-access";
+pub const STAFF_PATH: &str = "/customer-portal";
 pub const HOME_PATH: &str = "/portal";
 pub const ACCOUNT_PATH: &str = "/portal/account";
 /// The customer's authenticator page and step-up prompt. Core User names
@@ -102,6 +102,10 @@ const INVITATION_PERSONAL_DATA_MIGRATION: (&str, &str) = (
     "core-portal-008-invitation-personal-data",
     include_str!("../migrations/008-invitation-personal-data.sql"),
 );
+const CAPABILITY_RENAME_MIGRATION: (&str, &str) = (
+    "core-portal-009-capability-rename",
+    include_str!("../migrations/009-capability-rename.sql"),
+);
 const REGISTRATION_MIGRATION: (&str, &str) = (
     "core-customer_access-003-registration",
     include_str!("../migrations/003-registration.sql"),
@@ -127,7 +131,7 @@ inventory::submit! {
     Module {
         id: "core/portal", layer: Layer::Core,
         dependencies: &["base/module_registry", "base/database", "base/events", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "base/personal_data", "base/privacy", "core/company", "core/person", "core/affiliation", "core/user"],
-        migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION, PERSONAL_DATA_MIGRATION, REGISTRATION_LIMITS_MIGRATION, INVITATION_PERSONAL_DATA_MIGRATION],
+        migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION, PERSONAL_DATA_MIGRATION, REGISTRATION_LIMITS_MIGRATION, INVITATION_PERSONAL_DATA_MIGRATION, CAPABILITY_RENAME_MIGRATION],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let desk = delivery::Desk {

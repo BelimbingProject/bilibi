@@ -527,7 +527,7 @@ impl ComponentsSpecimen {
             "Example contact",
             vec![crate::AddToItem {
                 label: "Invite as customer".into(),
-                href: "/customer-access?drop=person:example".into(),
+                href: "/customer-portal?drop=person:example".into(),
                 disabled: None,
             }],
         ))?);
