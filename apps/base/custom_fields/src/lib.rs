@@ -321,3 +321,5 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fie
     changes: None,
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.restore", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields_restore", contract: "base.custom_fields.restore" }) }
+
+inventory::submit! { Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/custom_fields.receipts", provenance!(), &bilibi_labels::ReceiptSource { kind: "custom_field", capability: VIEW }) }

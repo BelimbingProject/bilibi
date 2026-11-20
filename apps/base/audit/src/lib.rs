@@ -1,5 +1,7 @@
 //! Durable mutation and action evidence. Capture runs inside the owner's
 //! transaction and fails closed: a refused audit row refuses the business commit.
+mod receipts;
+pub use receipts::customisation_receipts;
 mod account_actions;
 pub mod console;
 mod erasure;

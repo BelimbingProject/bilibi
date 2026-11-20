@@ -70,6 +70,7 @@ fn plan_json(plan: &Plan) -> Value {
 
 enum Read {
     List,
+    Receipts,
 }
 impl ReadHandler for Read {
     fn owner(&self) -> &'static str {
@@ -82,6 +83,44 @@ impl ReadHandler for Read {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
+            if matches!(self, Self::Receipts) {
+                let sql = client.sql_client().await?;
+                let capabilities = bilibi_authz::effective_capabilities(sql, scope).await?;
+                if !capabilities.contains("admin.audit.log.list") {
+                    return Err(Error::Forbidden.into());
+                }
+                let catalog = bilibi_module_registry::Catalog::discover(
+                    &bilibi_module_registry::discover().map_err(|_| Error::Internal)?,
+                )
+                .map_err(|_| Error::Internal)?;
+                let mut kinds = Vec::new();
+                for entry in catalog
+                    .entries::<crate::ReceiptSource>(crate::RECEIPT_SOURCES)
+                    .map_err(|_| Error::Internal)?
+                {
+                    let source = entry
+                        .get::<crate::ReceiptSource>()
+                        .map_err(|_| Error::Internal)?;
+                    if capabilities.contains(source.capability) {
+                        kinds.push(source.kind);
+                    }
+                }
+                let entries = bilibi_audit::customisation_receipts(sql, scope, &kinds).await?;
+                let mut groups: Vec<Value> = Vec::new();
+                for entry in entries {
+                    let trace = entry["trace"].as_str().unwrap_or_default();
+                    if let Some(group) = groups.iter_mut().find(|group| group["trace"] == trace) {
+                        if let Some(changes) = group["changes"].as_array_mut() {
+                            changes.push(entry);
+                        }
+                    } else {
+                        groups.push(json!({"trace": trace, "changes": [entry]}));
+                    }
+                }
+                return Ok(Output::Data(record(
+                    json!({"receipts":groups, "limit":500}),
+                )));
+            }
             let labels = bound()?;
             let wanted = input["kind"].as_str().and_then(Kind::from_key);
             let search = input["search"].as_str().unwrap_or_default().to_lowercase();
@@ -211,6 +250,7 @@ fn write_output() -> Value {
 
 inventory::submit! { Contribution::new(DEFINITIONS, "base/labels.agent", Provenance { module: "base/labels", source: file!(), line: line!() }, &Definitions {
     operations: &[
+        Operation { key: "base.labels.receipts", title: "Read customisation receipts", summary: "Recent audited customisation changes grouped by trace.", keywords: &["customisation", "history", "receipt"], capability: crate::CUSTOMISATIONS_VIEW, input: list_schema, output: write_output, handler: Handler::Read(&Read::Receipts), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.labels.list", title: "List labels", summary: "The menu items, record types and fields a tenant may rename, with the module's own word and the tenant's label.", keywords: &["rename", "label", "menu", "terminology"], capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.labels.set", title: "Rename a menu item, record type or field", summary: "Show your own word for a menu item, record type or field, such as Clients for Companies; operation keys, routes and permissions never change.", keywords: &["rename", "label", "menu", "terminology"], capability: MANAGE, input: set_schema, output: write_output, handler: Handler::SafeWrite(&Write::Set), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.labels.clear", title: "Restore a label", summary: "Remove the tenant's label so the module's own word shows again.", keywords: &["restore", "label", "menu"], capability: MANAGE, input: clear_schema, output: write_output, handler: Handler::SafeWrite(&Write::Clear), channels: Channels::Every, step_up: &[] },

@@ -10,7 +10,8 @@ mod store;
 mod web;
 
 pub use customisations::{
-    Changes, Choice, CustomisationRow, CustomisationSection, Read, Undo, SECTIONS,
+    Changes, Choice, CustomisationRow, CustomisationSection, Read, ReceiptSource, Undo,
+    RECEIPT_SOURCES, SECTIONS,
 };
 
 pub use store::{
@@ -138,3 +139,5 @@ bilibi_menu::contribute!(
     .requires(bilibi_menu::Requirement::Capability(CUSTOMISATIONS_VIEW))
     .order(64)
 );
+
+inventory::submit! { bilibi_module_registry::Consumer::new::<ReceiptSource>(RECEIPT_SOURCES, "base/labels", |_| Ok(())) }

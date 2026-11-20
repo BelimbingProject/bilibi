@@ -62,13 +62,14 @@ impl Item {
 }
 #[derive(Template)]
 #[template(
-    source = r#"{% import "dialog.html" as dialog %}{% call dialog::confirm_dialog(id="customisations-confirm", consequence=title, detail=item.undo.detail, confirm=item.undo.action, working="Working…", confirm_event=item.undo.event, cancel_event="cancel_confirm", confirm_key=key) %}{% endcall %}"#,
+    source = r#"{% import "dialog.html" as dialog %}{% call dialog::confirm_dialog(id="customisations-confirm", consequence=title, detail=detail, confirm=item.undo.action, working="Working…", confirm_event=item.undo.event, cancel_event="cancel_confirm", confirm_key=key) %}{% endcall %}"#,
     ext = "html"
 )]
 struct UndoDialog<'a> {
     title: String,
     item: &'a Item,
     key: String,
+    detail: String,
 }
 #[derive(Template)]
 #[template(
@@ -90,7 +91,7 @@ struct Index {
     list: ListState,
     columns: ListColumns,
     items: Vec<Item>,
-    confirm: Option<Item>,
+    confirm: Option<(Item, String)>,
     flash: Option<(StatusKind, String)>,
     shown: usize,
 }
@@ -129,15 +130,33 @@ impl Index {
             }
             "request_undo" => {
                 let key = value["key"].as_str().ok_or(Error::Invalid)?;
-                self.confirm = self
+                if let Some(item) = self
                     .items
                     .iter()
                     .find(|item| item.action_key() == key)
-                    .cloned();
+                    .cloned()
+                {
+                    let call = Call {
+                        scope,
+                        credential,
+                        service: CUSTOMISATIONS,
+                        event: item.undo.event,
+                        contract: item.undo.operation,
+                    };
+                    match self.pages.contracts.preview(&call, item.row.input.clone()).await {
+                        Ok(reply) if reply["valid"] == true && reply["results"][0]["valid"] == true => {
+                            let preview = &reply["results"][0]["preview"];
+                            let facts = preview.get("result").unwrap_or(preview);
+                            self.confirm = Some((item, serde_json::to_string_pretty(facts).map_err(|_| Error::Internal)?));
+                        }
+                        Err(ContractError::Backend(error @ (Error::Unauthorized | Error::StepUpRequired { .. }))) => return Err(error),
+                        _ => self.flash = Some((StatusKind::Error, "The change cannot be reviewed. It may have changed or you may not have permission.".into())),
+                    }
+                }
             }
             "cancel_confirm" => self.confirm = None,
             event if event.starts_with("customisation.") => {
-                let Some(item) = self.confirm.take_if(|item| {
+                let Some((item, _)) = self.confirm.take_if(|(item, _)| {
                     event == item.undo.event
                         && value["key"].as_str() == Some(item.action_key().as_str())
                 }) else {
@@ -150,7 +169,7 @@ impl Index {
                     event: item.undo.event,
                     contract: item.undo.operation,
                 };
-                let message = match self.pages.contracts.submit(&call, item.row.input).await {
+                let message = match self.pages.contracts.commit(&call, item.row.input).await {
                     Ok(_) => {
                         self.flash =
                             Some((StatusKind::Success, "The customisation was changed.".into()));
@@ -211,7 +230,7 @@ impl Index {
                 if self
                     .confirm
                     .as_ref()
-                    .is_some_and(|item| std::ptr::eq(item.section, *section))
+                    .is_some_and(|(item, _)| std::ptr::eq(item.section, *section))
                 {
                     self.confirm = None;
                 }
@@ -351,11 +370,16 @@ impl Index {
             body,
             ..Card::default()
         })?;
-        let dialog = if let Some(item) = &self.confirm {
+        let dialog = if let Some((item, preview)) = &self.confirm {
             render(UndoDialog {
                 title: format!("{}: {}?", item.undo.action, item.row.description),
                 item,
                 key: item.action_key(),
+                detail: format!(
+                    "{}
+{}",
+                    item.section.detail, preview
+                ),
             })?
         } else {
             Html::EMPTY

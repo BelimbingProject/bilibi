@@ -160,3 +160,12 @@ inventory::submit! { bilibi_module_registry::Contribution::new(SECTIONS, "base/l
         change: &["base.labels.set"], preview: None, verify: "base.labels.list", restore: Some("base.labels.clear"),
     }),
 }) }
+
+/// An owner's audit kind and read capability for customisation receipts.
+pub struct ReceiptSource {
+    pub kind: &'static str,
+    pub capability: &'static str,
+}
+/// Registry key for owner-authorized receipt sources.
+pub const RECEIPT_SOURCES: &str = "base/labels.receipt_sources";
+inventory::submit! { bilibi_module_registry::Contribution::new(RECEIPT_SOURCES, "base/labels.receipts", bilibi_module_registry::Provenance { module: "base/labels", source: file!(), line: line!() }, &ReceiptSource { kind: "label", capability: crate::VIEW }) }
