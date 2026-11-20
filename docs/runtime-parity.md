@@ -11,6 +11,12 @@ Bilibi has no unit tests. Use this checklist to record real app evidence. The wa
 
 The walkthrough fixture (`fixtures/walkthrough`) creates tenants 1 and 2, five permission roles, seven accounts (three linked to Persons; two of those Persons have business affiliations and explicit desks), 62 tenant 1 companies and one tenant 2 company. Sign-in is by email alone; re-installing the fixture is idempotent. It is not product data: a real install creates its first operator with `create-owner`. The fixture's password is a fixture credential and must only be used against disposable local databases.
 
+## AXI and company page walkthrough
+
+Start an isolated development instance with the walkthrough fixture and sign in as the fixture operator (`ai@agent.my`). Open `/companies/1` and check the company name, legal name and status. The fixture defines these as Company 001, Company 001 Sdn. Bhd. and Active.
+
+From the Platform worktree run `./bilibi axi --origin <APP_ORIGIN> read core.company.get '{"company_id":1}'`. In the same signed-in browser open the verification URL, enter the displayed code and approve Bilibi AXI. Require exit status 0 and compare the TOON result with the open record. The CLI must return ID 1, the same name and legal name, and status `active`. A wrong company or an empty response fails the comparison.
+
 ## Walkthroughs in CI
 
 Every example under `apps/**/examples` that checks and exits runs on each pull request, each on its own fresh database: the **Walkthroughs** workflow (`.github/workflows/walkthroughs.yml`, stable check `Run the walkthroughs`).
