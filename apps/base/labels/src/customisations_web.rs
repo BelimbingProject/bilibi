@@ -1,6 +1,8 @@
 //! Read-only inventory of customisations contributed by their owners.
 use crate::receipt_display::{preview_text, receipt_columns, receipt_value, receipt_where};
-use crate::{CustomisationRow, CustomisationSection, ReceiptCorrection, ReceiptSource, Undo, CUSTOMISATIONS};
+use crate::{
+    CustomisationRow, CustomisationSection, ReceiptCorrection, ReceiptSource, Undo, CUSTOMISATIONS,
+};
 use askama::Template;
 use bilibi_agent_api::{
     page::{Call, PageContracts},
@@ -713,7 +715,7 @@ impl Index {
                 title: format!("{}: {}?", item.undo.action, item.row.description),
                 item,
                 key: item.action_key(),
-                detail: format!("{} {}", item.section.detail, preview),
+                detail: format!("{} {}", item.undo.detail, preview),
                 banner,
             })?
         } else {

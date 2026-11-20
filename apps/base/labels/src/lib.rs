@@ -11,7 +11,8 @@ mod store;
 mod web;
 
 pub use customisations::{
-    Changes, Choice, CustomisationRow, CustomisationSection, Read, ReceiptCorrection, ReceiptFuture, ReceiptSource, ReceiptUndo, Undo, RECEIPT_SOURCES, SECTIONS,
+    Changes, Choice, CustomisationRow, CustomisationSection, Read, ReceiptCorrection,
+    ReceiptFuture, ReceiptSource, ReceiptUndo, Undo, RECEIPT_SOURCES, SECTIONS,
 };
 
 pub use store::{
