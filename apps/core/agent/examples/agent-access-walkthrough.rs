@@ -946,6 +946,112 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         stored_plaintext(&client, "core_agent_authorization_codes", &code).await?
     );
 
+    println!("\n== device grant for the MCP resource ==");
+    // A cloud app has no browser callback: it asks the device grant for the
+    // MCP audience, and may not name itself.
+    let foreign = grants
+        .start_device_for(
+            CLIENT_ID,
+            Some("Cloud bot"),
+            Some("https://elsewhere/mcp"),
+            resource,
+        )
+        .await;
+    println!("foreign resource:     {}", outcome(&foreign));
+    let cloud = grants
+        .start_device_for(CLIENT_ID, None, Some(resource), resource)
+        .await?;
+    let review = grants.device(&actor, &cloud.user_code).await?;
+    println!("unnamed request:      reviewed as {:?}", review.agent_id);
+    grants
+        .decide(&actor, &cloud.user_code, Decision::Approve)
+        .await?;
+    client
+        .execute(
+            "UPDATE core_agent_devices SET next_poll_at=now() WHERE status='approved'",
+            &[],
+        )
+        .await?;
+    let cloud_tokens = grants.exchange(CLIENT_ID, &cloud.device_code).await?;
+    let at_mcp = grants
+        .authenticate(&cloud_tokens.access_token, Some(resource))
+        .await;
+    let at_api = grants.authenticate(&cloud_tokens.access_token, None).await;
+    println!("token scope:          {:?}", cloud_tokens.scope);
+    println!("bearer at /mcp:       {}", outcome(&at_mcp));
+    println!("bearer at /api/v1:    {}", outcome(&at_api));
+    let refreshed = grants
+        .refresh(CLIENT_ID, &cloud_tokens.refresh_token, Some(resource))
+        .await;
+    println!("refresh for resource: {}", outcome(&refreshed));
+    if !matches!(foreign, Err(OAuthError::InvalidTarget))
+        || review.agent_id != bilibi_agent::UNNAMED_APP
+        || cloud_tokens.scope.as_deref() != Some("bilibi")
+        || at_mcp.is_err()
+        || !matches!(at_api, Err(OAuthError::InvalidToken))
+        || refreshed.is_err()
+    {
+        return Err("the device grant did not bind its tokens to the MCP resource".into());
+    }
+
+    println!("\n== user-code guessing ==");
+    // One account's lookups in a minute are bounded, so a signed-in person
+    // cannot search for someone else's pending code.
+    let mut misses = 0u32;
+    let mut slowed = 0u32;
+    for _ in 0..=bilibi_agent::DEVICE_LOOKUPS_PER_MINUTE {
+        match grants.device(&other, "ZZZZ-ZZZZ").await {
+            Err(OAuthError::InvalidUserCode) => misses += 1,
+            Err(OAuthError::SlowDown) => slowed += 1,
+            answer => return Err(format!("unexpected lookup answer: {}", outcome(&answer)).into()),
+        }
+    }
+    println!("lookups by one account: {misses} missed, then {slowed} refused with slow_down");
+    if misses != bilibi_agent::DEVICE_LOOKUPS_PER_MINUTE || slowed != 1 {
+        return Err("user-code lookups were not bounded per account".into());
+    }
+
+    println!("\n== device receipt cleanup ==");
+    // The public endpoint writes a receipt per request; the scheduled worker
+    // deletes them a day after they expired. Time travel: every finished
+    // receipt of this run expired two days ago.
+    let waiting = grants.start_device(CLIENT_ID, "Still waiting").await?;
+    let aged = client
+        .execute(
+            "UPDATE core_agent_devices SET expires_at=now()-interval '2 days' WHERE status IN ('used','denied','approved')",
+            &[],
+        )
+        .await?;
+    let connections_before: i64 = client
+        .query_one("SELECT count(*) FROM core_agent_connections", &[])
+        .await?
+        .get(0);
+    let deleted = grants.prune_devices().await?;
+    let left: i64 = client
+        .query_one(
+            "SELECT count(*) FROM core_agent_devices WHERE expires_at < now()-interval '1 day'",
+            &[],
+        )
+        .await?
+        .get(0);
+    let connections_after: i64 = client
+        .query_one("SELECT count(*) FROM core_agent_connections", &[])
+        .await?
+        .get(0);
+    let still_waiting = grants.device(&actor, &waiting.user_code).await;
+    println!("receipts aged two days: {aged}; deleted: {deleted}; old ones left: {left}");
+    println!("a receipt still waiting: {}", outcome(&still_waiting));
+    println!("connections before and after: {connections_before} and {connections_after}");
+    if aged == 0
+        || deleted != aged
+        || left != 0
+        || still_waiting.is_err()
+        || connections_before != connections_after
+    {
+        return Err("the device receipt cleanup did not delete exactly the old receipts".into());
+    }
+    println!("second run deletes: {}", grants.prune_devices().await?);
+
     println!("\n== host throttle ==");
     let throttle = Throttle::default();
     let decisions: Vec<bool> = (0..4)

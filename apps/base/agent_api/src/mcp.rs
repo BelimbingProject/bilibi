@@ -25,7 +25,8 @@ pub const VERSIONS: [&str; 2] = ["2025-11-25", "2025-06-18"];
 pub const REQUESTS_PER_MINUTE: &str = "agent_api.mcp_requests_per_minute";
 const NOTIFICATIONS: [&str; 2] = ["notifications/initialized", "notifications/cancelled"];
 /// Generic tools; an [`App`] tool may not take one of these names.
-pub const GENERIC_TOOLS: [&str; 8] = [
+pub const GENERIC_TOOLS: [&str; 9] = [
+    "hello",
     "search",
     "describe",
     "guide",
@@ -240,9 +241,10 @@ fn initialize(id: Value, params: &Map<String, Value>, instance: &Instance) -> Ou
         json!({
             "protocolVersion": negotiated,
             "capabilities": {"tools": {"listChanged": false}, "resources": {"subscribe": false, "listChanged": false}},
-            // The name is the plugin package's (`core/agent`), so a
-            // host that lists servers by name tells Dev from Production.
-            "serverInfo": {"name": format!("bilibi-{}", instance.slug()), "title": format!("Bilibi {} ({}) at {}", instance.label, instance.role.label(), instance.origin), "version": env!("CARGO_PKG_VERSION")},
+            // The name every door gives this Bilibi (`Instance::server_name`):
+            // its address, so a host that lists servers by name never merges
+            // two deployments.
+            "serverInfo": {"name": instance.server_name(), "title": format!("Bilibi {} ({}) at {}", instance.label, instance.role.label(), instance.origin), "version": env!("CARGO_PKG_VERSION")},
             "instructions": format!("{} {INSTRUCTIONS} {SELF_REPORT_INSTRUCTION} {app_instruction} {} {} {}", crate::BUSINESS_CONTEXT, instance.agent_notice(), crate::INSTANCE_INSTRUCTIONS, crate::REVIEW_INSTRUCTIONS),
         }),
     )
@@ -295,6 +297,19 @@ async fn invoke(
         args.get(key).and_then(Value::as_str).map(str::to_owned)
     };
     match name {
+        // Reaching here proved the transport and the session; nothing is read.
+        "hello" if args.len() <= 1 => {
+            let message = match args.remove("message") {
+                None => None,
+                Some(Value::String(message)) => Some(message),
+                Some(_) => return Err(mismatch()),
+            };
+            if !args.is_empty() {
+                return Err(mismatch());
+            }
+            let instance = plans.instance().await.map_err(Error::Backend)?;
+            Ok(crate::hello(&instance, message.as_deref()).ok_or_else(mismatch)?)
+        }
         "search" if args.len() == 1 => {
             let query = string(&args, "query").ok_or_else(mismatch)?;
             let options = SearchOptions {
@@ -456,7 +471,7 @@ fn failure(error: Error) -> Value {
     }
 }
 
-/// The tools as this installation lists them: the six generic ones, `plan`
+/// The tools as this installation lists them: the generic ones, `plan`
 /// and `commit` naming the instance so a host's own review of either
 /// says where the change lands, then one tool per registered app.
 fn listed(registry: &Registry, instance: &Instance) -> Vec<Value> {
@@ -562,7 +577,7 @@ fn security_schemes() -> Value {
     json!([{"type": "oauth2", "scopes": ["bilibi"]}])
 }
 
-/// The six generic tools, naming no installation (the plugin package lists
+/// The generic tools, naming no installation (the plugin package lists
 /// these in its skill).
 pub fn tools() -> Vec<Value> {
     let operation = json!({
@@ -573,6 +588,12 @@ pub fn tools() -> Vec<Value> {
     });
     let operations = json!({"type": "array", "items": operation, "minItems": 1});
     vec![
+        tool(
+            "hello",
+            "Check the connection. It answers with your message and this Bilibi's name, so a working call proves the connection and the sign-in before any business operation.",
+            json!({"message": {"type": "string", "maxLength": crate::HELLO_MESSAGE_LIMIT, "description": "Optional text to get back."}}),
+            true,
+        ),
         tool(
             "search",
             "Find available Bilibi operations, guides, pages and page sections for a task.",
@@ -628,7 +649,7 @@ fn tool(name: &str, description: &str, mut properties: Value, read: bool) -> Val
         .as_object()
         .map(|p| {
             p.keys()
-                .filter(|key| !matches!(key.as_str(), "step_up_code" | "wait_seconds"))
+                .filter(|key| !matches!(key.as_str(), "step_up_code" | "wait_seconds" | "message"))
                 .cloned()
                 .collect()
         })

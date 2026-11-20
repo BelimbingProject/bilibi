@@ -9,11 +9,13 @@
 //! SQL against Core account, company or person tables.
 mod ai_status;
 mod contributions;
+mod device_page;
 mod oauth_client;
 mod plugin;
 mod provider;
 use provider::prove_provider;
 mod registration;
+mod retention;
 mod secrets;
 mod setup_prompt;
 mod throttle;
@@ -46,12 +48,29 @@ pub const CLIENT_ID: &str = "bilibi-native";
 /// The ChatGPT plugin ZIP, served by `core/agent`. It lives here so the
 /// AI connections page and the status bar link the address the download owns.
 pub const PLUGIN_DOWNLOAD: &str = "/settings/chatgpt-plugin/download";
+/// The page where a person types the code a device-flow app shows; the
+/// `verification_uri` of a device authorization.
+pub const DEVICE_PAGE: &str = "/oauth/device";
 pub const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 pub const OAUTH_SCOPE: &str = "bilibi";
 /// Protocol contracts, not operator settings.
 pub const DEVICE_SECONDS: i64 = 600;
 pub const POLL_INTERVAL_SECONDS: i32 = 5;
 pub const SLOW_DOWN_SECONDS: i32 = 5;
+/// User codes one account may look up in a minute on each node. A code has 40
+/// random bits and lasts ten minutes, so this bound makes guessing one
+/// hopeless while leaving room for mistyped codes.
+pub const DEVICE_LOOKUPS_PER_MINUTE: u32 = 30;
+/// The name shown for a device request that stated none, as for a
+/// registration without `client_name`.
+pub const UNNAMED_APP: &str = "Unnamed app";
+/// Base Step-up operation: approving an AI connection, on either consent
+/// page. Tenants turn it on; the policy decides, never this module.
+pub const STEP_UP_APPROVE: &str = "core.agent.connection.approve";
+bilibi_step_up::declare!(
+    "core/agent",
+    bilibi_step_up::Operation::new(STEP_UP_APPROVE, "Approve an AI connection").off_by_default()
+);
 pub const ACCESS_TOKEN_SECONDS: i64 = 3600;
 pub const SEEN_LIMIT: usize = 20;
 pub const UNSTATED: &str = "(not stated)";
@@ -232,7 +251,11 @@ pub struct AgentAccess {
     sessions: Arc<bilibi_session::Sessions>,
     users: Arc<bilibi_user::UserService>,
     reviews: Arc<bilibi_agent_api::Reviews>,
+    step_up: Arc<bilibi_step_up::StepUp>,
     metadata_throttle: Throttle,
+    /// User-code lookups per account, so a signed-in person cannot guess
+    /// another person's pending code.
+    device_lookups: Throttle,
     /// Wakes the person's own live panels (the status bar's AI tag) after a
     /// connection of theirs is approved or revoked, once that commit stands.
     connections: tokio::sync::broadcast::Sender<bilibi_ui::page::Change>,
@@ -454,6 +477,13 @@ impl AgentAccess {
         if reviewed.is_some_and(|reviewed| reviewed != &request) {
             return Err(OAuthError::InvalidRequest);
         }
+        self.step_up
+            .require(
+                scope,
+                STEP_UP_APPROVE,
+                &format!("oauth_client:{}", request.client_id),
+            )
+            .await?;
         let browser = {
             let client = self.db.get().await?;
             self.sessions.client(&**client, scope).await?
@@ -636,23 +666,43 @@ impl AgentAccess {
 
     /// Starts device authorization for the built-in client. The receipt knows
     /// no tenant yet; it is a pre-authentication credential like a reset token.
+    /// Its tokens are for `/api/v1`.
     pub async fn start_device(
         &self,
         client_id: &str,
         agent_id: &str,
     ) -> std::result::Result<DeviceStart, OAuthError> {
+        self.start_device_for(client_id, Some(agent_id), None, "")
+            .await
+    }
+    /// `start_device` as the host's endpoint takes it. `agent_id` is the name
+    /// the app states for itself; without one it is [`UNNAMED_APP`].
+    /// `resource` is the RFC 8707 audience the app asked for: none for
+    /// `/api/v1`, or exactly `mcp_resource` for `/mcp`, so a cloud app with no
+    /// browser callback can still reach the MCP edge.
+    pub async fn start_device_for(
+        &self,
+        client_id: &str,
+        agent_id: Option<&str>,
+        resource: Option<&str>,
+        mcp_resource: &str,
+    ) -> std::result::Result<DeviceStart, OAuthError> {
         if client_id != CLIENT_ID {
             return Err(OAuthError::InvalidClient);
         }
+        let agent_id = agent_id.unwrap_or(UNNAMED_APP);
         if !valid_label(agent_id) {
             return Err(OAuthError::InvalidRequest);
+        }
+        if resource.is_some_and(|resource| resource != mcp_resource) {
+            return Err(OAuthError::InvalidTarget);
         }
         let device_code = secrets::secret()?;
         let user_code = secrets::user_code()?;
         let client = self.db.get().await?;
         client.execute(
-            "INSERT INTO core_agent_devices(device_hash,user_hash,client_id,agent_id,expires_at,next_poll_at,interval,status) VALUES($1,$2,$3,$4,now()+make_interval(secs => $5::double precision),now(),$6,'pending')",
-            &[&secrets::digest(&device_code),&secrets::digest(&user_code),&CLIENT_ID,&agent_id,&(DEVICE_SECONDS as f64),&POLL_INTERVAL_SECONDS],
+            "INSERT INTO core_agent_devices(device_hash,user_hash,client_id,agent_id,resource,expires_at,next_poll_at,interval,status) VALUES($1,$2,$3,$4,$5,now()+make_interval(secs => $6::double precision),now(),$7,'pending')",
+            &[&secrets::digest(&device_code),&secrets::digest(&user_code),&CLIENT_ID,&agent_id,&resource,&(DEVICE_SECONDS as f64),&POLL_INTERVAL_SECONDS],
         ).await?;
         Ok(DeviceStart {
             device_code,
@@ -661,13 +711,22 @@ impl AgentAccess {
             interval: POLL_INTERVAL_SECONDS,
         })
     }
-    /// What a signed-in person reviews for a pending user code.
+    /// What a signed-in person reviews for a pending user code. Each account
+    /// may look up [`DEVICE_LOOKUPS_PER_MINUTE`] codes; past that the answer
+    /// is `slow_down` whatever the code.
     pub async fn device(
         &self,
         scope: &Scope,
         user_code: &str,
     ) -> std::result::Result<DeviceReview, OAuthError> {
         self_service(scope)?;
+        let account = format!("{}:{}", scope.tenant(), scope.user());
+        if !self
+            .device_lookups
+            .allow(&account, DEVICE_LOOKUPS_PER_MINUTE)
+        {
+            return Err(OAuthError::SlowDown);
+        }
         let client = self.db.get().await?;
         let row = client
             .query_opt(
@@ -700,6 +759,24 @@ impl AgentAccess {
         replace: &[i64],
     ) -> std::result::Result<(), OAuthError> {
         self_service(scope)?;
+        if decision == Decision::Approve {
+            // The tenant's 2FA policy for approving a connection, asked only
+            // for a code that is still waiting, and before any write. No
+            // pooled connection is held while Step-up takes its own.
+            let pending = {
+                let client = self.db.get().await?;
+                client
+                    .query_opt(
+                        "SELECT id FROM core_agent_devices WHERE user_hash=$1 AND status='pending' AND expires_at>now()",
+                        &[&secrets::digest(user_code)],
+                    )
+                    .await?
+            };
+            let device: i64 = pending.ok_or(OAuthError::InvalidUserCode)?.get(0);
+            self.step_up
+                .require(scope, STEP_UP_APPROVE, &format!("agent_device:{device}"))
+                .await?;
+        }
         let browser = {
             let client = self.db.get().await?;
             self.sessions.client(&**client, scope).await?
@@ -715,7 +792,7 @@ impl AgentAccess {
         let device = tx
             .sql()
             .query_opt(
-                "SELECT id,agent_id,expires_at>now() AS live FROM core_agent_devices WHERE user_hash=$1 AND status='pending' FOR UPDATE",
+                "SELECT id,agent_id,resource,expires_at>now() AS live FROM core_agent_devices WHERE user_hash=$1 AND status='pending' FOR UPDATE",
                 &[&secrets::digest(user_code)],
             )
             .await?;
@@ -724,6 +801,10 @@ impl AgentAccess {
             return Err(OAuthError::InvalidUserCode);
         };
         let (device_id, agent_id): (i64, String) = (device.get(0), device.get(1));
+        // A receipt bound to the MCP resource carries the scope its tokens
+        // state, as an authorization-code connection does.
+        let resource: Option<String> = device.get("resource");
+        let oauth_scope = resource.as_ref().map(|_| OAUTH_SCOPE);
         if !device.get::<_, bool>("live") {
             tx.rollback().await?;
             return Err(OAuthError::ExpiredToken);
@@ -753,8 +834,8 @@ impl AgentAccess {
                 }
                 let mut changes = replace_connections(sql, tenant, user, &agent_id, &replace).await?;
                 let row = sql.query_one(
-                    "INSERT INTO core_agent_connections(tenant_id,user_id,organisation_id,person_id,agent_id,expires_at,approved_client,enabled_session_id) VALUES($1,$2,$3,$4,$5,'infinity',$6,$7) RETURNING id,expires_at::text",
-                    &[&tenant,&user,&organisation,&person,&agent_id,&browser.name,&enabled_session],
+                    "INSERT INTO core_agent_connections(tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,expires_at,approved_client,enabled_session_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'infinity',$9,$10) RETURNING id,expires_at::text",
+                    &[&tenant,&user,&organisation,&person,&agent_id,&CLIENT_ID,&resource,&oauth_scope,&browser.name,&enabled_session],
                 ).await?;
                 let connection: i64 = row.get(0);
                 sql.execute(
@@ -763,7 +844,7 @@ impl AgentAccess {
                 )
                 .await?;
                 changes.extend(vec![
-                        change("agent_connection", connection, json!({}), json!({"agent_id":agent_id,"client_id":CLIENT_ID,"approved_client":browser.name,"enabled":true,"session_bound":true})),
+                        change("agent_connection", connection, json!({}), json!({"agent_id":agent_id,"client_id":CLIENT_ID,"resource":resource,"oauth_scope":oauth_scope,"approved_client":browser.name,"enabled":true,"session_bound":true})),
                         change("agent_device", device_id, json!({"status":"pending"}), json!({"status":"approved","connection_id":connection})),
                     ]);
                 Ok(((), changes))
@@ -1623,8 +1704,8 @@ impl bilibi_tenancy::AgentVerifier for GrantVerifier {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "core/agent", layer: bilibi_module_registry::Layer::Core,
-        dependencies: &["base/database", "base/settings", "base/session", "base/tenancy", "base/integration", "base/agent_api", "base/records", "base/audit", "base/authz", "base/party_ids", "base/ui", "base/datetime", "base/locale", "base/system", "base/step_up", "core/user", "core/company"],
-        migrations: &[MIGRATION, SELF_REPORT_MIGRATION, ("core-agent-access-003-client-identity", include_str!("../migrations/003-client-identity.sql")), ("core-agent-access-004-client-registration", include_str!("../migrations/004-client-registration.sql")), ("core-agent-access-005-provider-access", include_str!("../migrations/005-provider-access.sql")), ("core-agent-access-006-session-switch", include_str!("../migrations/006-session-switch.sql")), ("core-agent-access-007-session-holder-id", include_str!("../migrations/007-session-holder-id.sql")), ("core-agent-access-008-pending-authorization", include_str!("../migrations/008-pending-authorization.sql")), ("core-agent-access-009-connection-end-reason", include_str!("../migrations/009-connection-end-reason.sql")), ("core-agent-access-010-approved-session", include_str!("../migrations/010-approved-session.sql"))],
+        dependencies: &["base/database", "base/settings", "base/session", "base/tenancy", "base/integration", "base/agent_api", "base/records", "base/audit", "base/authz", "base/party_ids", "base/ui", "base/datetime", "base/locale", "base/system", "base/step_up", "base/queue", "base/schedule", "core/user", "core/company"],
+        migrations: &[MIGRATION, SELF_REPORT_MIGRATION, ("core-agent-access-003-client-identity", include_str!("../migrations/003-client-identity.sql")), ("core-agent-access-004-client-registration", include_str!("../migrations/004-client-registration.sql")), ("core-agent-access-005-provider-access", include_str!("../migrations/005-provider-access.sql")), ("core-agent-access-006-session-switch", include_str!("../migrations/006-session-switch.sql")), ("core-agent-access-007-session-holder-id", include_str!("../migrations/007-session-holder-id.sql")), ("core-agent-access-008-pending-authorization", include_str!("../migrations/008-pending-authorization.sql")), ("core-agent-access-009-connection-end-reason", include_str!("../migrations/009-connection-end-reason.sql")), ("core-agent-access-010-approved-session", include_str!("../migrations/010-approved-session.sql")), ("core-agent-access-011-device-resource", include_str!("../migrations/011-device-resource.sql")), ("core-agent-access-012-device-expiry-index", include_str!("../migrations/012-device-expiry-index.sql"))],
         services: &[bilibi_module_registry::Service { id: "core/agent.grants", factory: |services| {
             let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
             let users = services.get::<bilibi_user::UserService>("core/user.accounts")?;
@@ -1639,7 +1720,9 @@ inventory::submit! {
             parties: services.get("base/tenancy.parties")?,
             integration: services.get(bilibi_integration::SERVICE)?,
             sessions: services.get("base/session.sessions")?,
+            step_up: services.get(bilibi_step_up::SERVICE)?,
             metadata_throttle: Throttle::default(),
+            device_lookups: Throttle::default(),
             connections: tokio::sync::broadcast::channel(128).0,
             session_bridge: std::sync::Once::new(),
             });
@@ -1657,6 +1740,10 @@ inventory::submit! {
             reviews: services.get("base/agent_api.reviews")?,
             step_up: services.get(bilibi_step_up::SERVICE)?,
             records: services.get(bilibi_records::SERVICE)?,
+        })))) },
+        bilibi_module_registry::Service { id: retention::SERVICE, factory: |services| Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(retention::DeviceRetention {
+            schedule: services.get("base/schedule.store")?,
+            access: services.get("core/agent.grants")?,
         })))) },
         bilibi_module_registry::Service { id: plugin::PLUGIN_SERVICE, factory: |services| Ok(Arc::new(AgentPlugins {
             registry: services.get("base/agent_api.registry")?,

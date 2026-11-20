@@ -241,9 +241,10 @@ struct Reply {
     body: String,
 }
 impl Reply {
-    /// The OAuth limiter's refusal (RFC 8628 `slow_down`).
+    /// The OAuth limiter's refusal: `429` where a request starts something,
+    /// RFC 8628 `slow_down` at the token endpoint.
     fn slow_down(&self) -> bool {
-        self.body.contains("slow_down")
+        self.status == 429 || self.body.contains("slow_down")
     }
 }
 /// One form POST on a fresh connection, as a loopback proxy forwards it for

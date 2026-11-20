@@ -332,7 +332,7 @@ impl SelfReport {
     pub const LABEL: &'static str = "Model (as reported)";
     /// The request header the agent edge (`/api/v1`, `/mcp`) reads it from.
     pub const HEADER: &'static str = "x-bilibi-agent-self-report";
-    /// Model-accessible argument on the six generic MCP tools.
+    /// Model-accessible argument on the generic MCP tools.
     pub const MCP_ARGUMENT: &'static str = "agent_self_report";
     /// The MCP `params._meta` key, for clients that cannot set headers.
     pub const MCP_META: &'static str = "bilibi/agent-self-report";

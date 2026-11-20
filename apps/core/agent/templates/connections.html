@@ -16,6 +16,8 @@
 <div class="space-y-3" data-hook="ClipboardCopy">
 <p class="text-ink-muted">Give this prompt to your AI app, then approve the connection in your browser.</p>
 {% call ui::copy_box(id="ai-prompt", label="Prompt for your AI app", text=prompt_text, copy_label="Copy prompt") %}{% endcall %}
+<p class="text-ink-muted">A cloud app or bot shows you a code instead of opening your browser.</p>
+{% call ui::button(id="ai-device", href=device_href) %}Enter a code{% endcall %}
 </div>
 {% endcall %}
 {% call ui::fold(id="ai-trouble", title="Trouble connecting?") %}

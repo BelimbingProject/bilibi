@@ -5,6 +5,8 @@
 //! (ADR 10).
 mod audience_preview;
 pub use audience_preview::AudiencePreview;
+mod hello;
+pub use hello::{hello, HELLO_MESSAGE_LIMIT};
 mod input;
 pub mod job;
 pub mod json;
@@ -396,7 +398,7 @@ pub struct App {
     /// `resources/read`.
     pub uri: &'static str,
     /// The tool that opens the card, lower-case with underscores
-    /// (`open_software`); never one of the six generic tool names.
+    /// (`open_software`); never one of the generic tool names.
     pub tool: &'static str,
     pub title: &'static str,
     /// What the model reads to decide when to call the tool.

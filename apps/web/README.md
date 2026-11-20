@@ -179,12 +179,14 @@ The host owns the machine endpoints; discovered pages cannot claim them
   built from `APP_ORIGIN`, never the Host header.
 - `POST /oauth/device_authorization` and `POST /oauth/token` take urlencoded or
   JSON fields and delegate every decision to `core/agent.grants`
-  (device, refresh and PKCE code grants). Errors are `400 {"error":code}`;
+  (device, refresh and PKCE code grants). A device request may name the MCP
+  resource (`resource`, RFC 8707) so its tokens work at `/mcp`, and may leave
+  `agent_id` out (`apps/core/agent/README.md`, Contract). Errors are `400 {"error":code}`;
   storage failure is `503 temporarily_unavailable`. Each endpoint has its own
-  per-sender bucket from `agent_access.oauth_requests_per_minute`. The sender
+  per-sender bucket from `agent_access.oauth_requests_per_minute`. A sender past it gets `429 {"error":"rate_limited"}` with `Retry-After: 60` at registration and device authorization, and RFC 8628's `slow_down` at the token endpoint, the one place a client polls. The sender
   is the client address (see "Client address" below), counted by its IPv6 /64.
   `main.rs` serves with `ConnectInfo` for this.
-- `/api/v1`: `GET search` (`q`, `limit` 1–50, `kind` read|write,
+- `/api/v1`: `GET hello` (optional `message`, at most 200 characters), `GET search` (`q`, `limit` 1–50, `kind` read|write,
   `include_unavailable`), `GET operations/{key}`, `GET guides/{key}`,
   `POST operations/{key}/call` (`{"input":{…}}`), `POST plans`
   (`{"operations":[…]}`) and `POST plans/commit` (`{"operations":[…]}` with optional `step_up_code`),
@@ -201,6 +203,10 @@ mid-request therefore refuses the commit with 401. A missing, invalid or no-long
 resource, so an MCP-bound token is refused here, and an API token is refused
 at `/mcp`. `/mcp` uses the same `authenticate` and `Grant`; there is no second
 credential check anywhere in the host.
+
+**`hello` is the connection check** (`bilibi_agent_api::hello`; the `hello` tool at `/mcp`, `GET /api/v1/hello`). It answers `{"message", "server_name", "instance"}`: the caller's message (or `hello`), `Instance::server_name` and the instance object plans carry. It reads no business data and needs no capability, so each failure has one meaning: no answer at all is the transport, `401 invalid_token` is the sign-in, `403 ai_switched_off` is the connection's switch, and once `hello` works a refused `search` or operation is a permission answer. Its exchange row is `mcp.hello` or `agent_api.hello`.
+
+`GET /.well-known/bilibi` names what an app needs before it holds a credential: `api_base`, `mcp_endpoint`, `server_name` (`Instance::server_name`), `client_id` (the built-in device-grant client), `device_authorization_endpoint`, `verification_uri` (the `/oauth/device` page) and `instance`.
 
 At `/api/v1`, retryable lock contention during bearer sealing or plan reproof returns `422 {"error":"rejected","reason":"record_changed"}`. The caller can retry after the competing change finishes.
 
@@ -237,7 +243,7 @@ in. Every other message passes `api::authenticate` with the MCP resource
 (`APP_ORIGIN/mcp`) as audience; a missing, invalid or no-longer-eligible bearer gets `401 invalid_token` with
 `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp"`. An authenticated request refused because its connection switch is off returns `ai_switched_off`, a plain instruction, and the exact AI connections settings URL.
 The protocol adapter is `bilibi_base::agent_api::mcp`: generic tools
-(`search`, `describe`, `guide`, `read`, `plan`, `commit`, `review_entries` and
+(`hello`, `search`, `describe`, `guide`, `read`, `plan`, `commit`, `review_entries` and
 `review_status`) over the one Agent
 API, so permission and domain decisions happen exactly where `/api/v1` makes
 them, plus one tool per registered MCP App (`open_software`), which is that

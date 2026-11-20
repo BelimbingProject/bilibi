@@ -85,6 +85,7 @@ struct AiStatusView {
     /// Offer the ChatGPT plugin ZIP; see `offers_plugin`.
     plugin: bool,
     plugin_href: &'static str,
+    device_href: &'static str,
     /// `/settings/ai-connections`, for the manual steps under Connect.
     manage: &'static str,
     /// The link to `/settings/ai-connections`, at the foot of the panel in every state.
@@ -255,6 +256,7 @@ impl AiStatus {
             local_only: !instance.public_address(),
             plugin: own_account && crate::offers_plugin(scope, &instance.origin),
             plugin_href: crate::PLUGIN_DOWNLOAD,
+            device_href: crate::DEVICE_PAGE,
             address,
             manage: MANAGE,
         })
@@ -468,12 +470,13 @@ impl AiStatus {
     }
 }
 /// Whether the short list shows a request. The protocol's own rows
-/// (initialize, ping, listing the tools), looking an action up, reading how
+/// (initialize, ping, listing the tools, the `hello` check), looking an action up, reading how
 /// it works and opening an app card say nothing about what the AI did for the
 /// person, so they stay on the full activity page.
 fn listed(row: &Summary) -> bool {
     let operation = row.operation.as_str();
     !(operation.starts_with("mcp.") && !matches!(operation, "mcp.read" | "mcp.plan" | "mcp.commit")
+        || operation == "agent_api.hello"
         || operation == "/api/v1/search"
         || operation.starts_with("/api/v1/guides/")
         || operation.starts_with("/api/v1/operations/") && !operation.ends_with("/call"))
