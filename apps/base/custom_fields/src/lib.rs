@@ -301,7 +301,7 @@ fn customisation_choices(reads: &[serde_json::Value]) -> Vec<bilibi_labels::Choi
 }
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.customisations", provenance!(), &bilibi_labels::CustomisationSection {
     title: "Custom fields",
-    undo: Some(bilibi_labels::Undo { read: "base.custom_fields.list", read_input: customisation_input, operation: "base.custom_fields.archive", event: "customisation.fields", action: "Archive", detail: "The field is hidden and records keep their saved values. Approved rules that use this field may stop running and require review and reapproval.", rows: customisation_rows }),
+    undo: Some(bilibi_labels::Undo { read: "base.custom_fields.list", read_input: customisation_input, operation: "base.custom_fields.archive", event: "customisation.fields", action: "Archive", detail: "The field is hidden and records keep their saved values. Approved watchers that use this field may stop running and require review and reapproval.", rows: customisation_rows }),
     changes: Some(bilibi_labels::Changes {
         purpose: "Add your own typed fields to a kind of record, rename them, and archive or bring back the ones you no longer use.",
         limits: "A field's key and type never change and a key is never reused. Each kind of record takes a limited number of active fields (the base.custom_fields.max_fields setting). Archive a field to remove it; records keep their saved values.",
@@ -322,7 +322,7 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fie
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.restore", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields_restore", contract: "base.custom_fields.restore" }) }
 
-inventory::submit! { Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/custom_fields.receipts", provenance!(), &bilibi_labels::ReceiptSource { kind: "custom_field", capability: VIEW, undo: Some(bilibi_labels::ReceiptUndo { capability: MANAGE, correction: receipt_correction }), read: Some(operations::receipt_fields), project: project_receipt }) }
+inventory::submit! { Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/custom_fields.receipts", provenance!(), &bilibi_labels::ReceiptSource { kind: "custom_field", capability: VIEW, subject_filter: None, undo: Some(bilibi_labels::ReceiptUndo { capability: MANAGE, correction: receipt_correction }), read: Some(operations::receipt_fields), project: project_receipt }) }
 
 fn project_receipt<'a>(
     _: &'a dyn bilibi_agent_api::OperationClient,
@@ -388,9 +388,7 @@ fn receipt_correction(
         }
     } else {
         input["label"] = json!(old["label"].as_str()?);
-        if !old["help"].is_null() {
-            input["help"] = json!(old["help"].as_str()?);
-        }
+        input["help"] = json!(old["help"].as_str().unwrap_or(""));
         input["watcher_condition"] = json!(old["watcher_condition"].as_bool()?);
         (
             "base.custom_fields.update",

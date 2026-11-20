@@ -569,6 +569,6 @@ fn project_receipt<'a>(
 inventory::submit! {
     Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/grid.shared_view_receipts",
         Provenance { module: "base/grid", source: file!(), line: line!() },
-        &bilibi_labels::ReceiptSource { kind: crate::shared_views::KIND, capability: SHARE_VIEWS,
+        &bilibi_labels::ReceiptSource { kind: crate::shared_views::KIND, capability: SHARE_VIEWS, subject_filter: None,
             undo: None, read: None, project: project_receipt })
 }

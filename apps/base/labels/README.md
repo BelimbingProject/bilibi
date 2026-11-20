@@ -89,4 +89,6 @@ The Customisations page and `base.labels.receipts` show audited label, custom fi
 
 Pages hold whole trace groups. Pass `next_before` as `before` to continue through retained history. The page previews a single current correction through its owner's contract and rechecks access and freshness when you confirm. Undo is refused when it would withdraw a condition an approved watcher uses. Shared views and encrypted settings have history without an Undo action.
 
-An owner contributes a `ReceiptSource` under `RECEIPT_SOURCES` with the audit kind, required capability and authorized projection of current and historical values. Corrections use an existing reviewed owner operation. Bind the correction events through `PAGE_BINDINGS`.
+An owner contributes a `ReceiptSource` under `RECEIPT_SOURCES` with the audit kind, required capability, optional audit subject filter and authorized projection of current and historical values. The filter excludes unrelated records before paging. Corrections use an existing reviewed owner operation. Bind the correction events through `PAGE_BINDINGS`.
+
+Shared view changes appear only for lists that register page metadata.

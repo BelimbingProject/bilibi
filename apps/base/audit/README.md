@@ -252,4 +252,4 @@ console outcome recorded, and an HTTP/browser smoke of the running app.
 
 ### Customisation receipts
 
-`customisation_receipts` reads a bounded page of whole traces for caller-authorized kinds in the current tenant. The caller controls owner access, value disclosure and attribution. The cursor continues through retained evidence.
+`customisation_receipts` traverses a bounded page of mutation IDs for caller-authorized kinds in the current tenant, applying the owner's optional subject filter before selecting traces. It returns each selected trace in full and a cursor for older evidence. The caller controls owner access, value disclosure and attribution. `is_current_customisation_mutation` checks that a receipt matches its subject and that no newer mutation does; the owner rechecks it under its write lock.

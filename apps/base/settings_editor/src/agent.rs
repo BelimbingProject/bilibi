@@ -208,14 +208,15 @@ impl Change {
         if field.definition.encrypted {
             return Err(Error::Forbidden.into());
         }
-        let latest = bilibi_audit::latest_customisation_mutation(
+        let current = bilibi_audit::is_current_customisation_mutation(
             sql,
             scope,
             "base/settings",
             &json!({"scope":"tenant","key":field.key}),
+            id,
         )
         .await?;
-        if latest != Some(id) {
+        if !current {
             return Err(Error::Conflict.into());
         }
         Ok(())
@@ -558,14 +559,26 @@ fn project_receipt<'a>(
         else {
             return Ok(false);
         };
-        let latest = bilibi_audit::latest_customisation_mutation(
-            client.sql_client().await?,
-            scope,
-            "base/settings",
-            &json!({"scope":"tenant","key":current["key"]}),
-        )
-        .await?;
-        change["changed_since"] = json!(latest != change["mutation_id"].as_i64());
+        let after = &change["after"];
+        let matches = if after.is_null() {
+            current["set_for_tenant"] == false
+        } else {
+            current["set_for_tenant"] == true
+                && (current["secret"] == true || current["value"] == after["value"])
+        };
+        let fresh = if matches {
+            bilibi_audit::is_current_customisation_mutation(
+                client.sql_client().await?,
+                scope,
+                "base/settings",
+                &json!({"scope":"tenant","key":current["key"]}),
+                change["mutation_id"].as_i64().ok_or(Error::Invalid)?,
+            )
+            .await?
+        } else {
+            false
+        };
+        change["changed_since"] = json!(!fresh);
         for key in ["before", "after"] {
             let side = &mut change[key];
             if side.is_object() {
@@ -617,10 +630,14 @@ fn receipt_correction(change: &Value, current: &Value) -> Option<bilibi_labels::
     })
 }
 
+fn receipt_filter() -> Value {
+    json!({"scope":"tenant"})
+}
+
 inventory::submit! {
     Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/settings_editor.receipts",
         Provenance { module: "base/settings_editor", source: file!(), line: line!() },
-        &bilibi_labels::ReceiptSource { kind: "base/settings", capability: TENANT_VIEW,
+        &bilibi_labels::ReceiptSource { kind: "base/settings", capability: TENANT_VIEW, subject_filter: Some(receipt_filter),
             undo: Some(bilibi_labels::ReceiptUndo { capability: TENANT_MANAGE, correction: receipt_correction }), read: Some(receipt_settings), project: project_receipt })
 }
 inventory::submit! {

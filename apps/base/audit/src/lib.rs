@@ -1,7 +1,7 @@
 //! Durable mutation and action evidence. Capture runs inside the owner's
 //! transaction and fails closed: a refused audit row refuses the business commit.
 mod receipts;
-pub use receipts::{customisation_receipts, latest_customisation_mutation};
+pub use receipts::{customisation_receipts, is_current_customisation_mutation};
 mod account_actions;
 pub mod console;
 mod erasure;
@@ -627,7 +627,8 @@ inventory::submit! {
             ("base-audit-012-partitions", include_str!("../migrations/012-partitions.sql")),
             ("base-audit-013-partition-removal", include_str!("../migrations/013-partition-removal.sql")),
             ("base-audit-014-account-actions", include_str!("../migrations/014-account-actions.sql")),
-            ("base-audit-015-tenant-minimum", include_str!("../migrations/015-tenant-minimum.sql"))],
+            ("base-audit-015-tenant-minimum", include_str!("../migrations/015-tenant-minimum.sql")),
+            ("base-audit-016-customisation-receipts", include_str!("../migrations/016-customisation-receipts.sql"))],
         services: &[bilibi_module_registry::Service { id: "base/audit.capture", factory: |services| {
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
             let capture = Arc::new(AuditCapture::new(RedactionPolicy::from_inventory(), db));

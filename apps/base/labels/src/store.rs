@@ -355,9 +355,7 @@ impl Labels {
         bilibi_authz::authorize_key(sql, scope, crate::CUSTOMISATIONS_VIEW).await?;
         bilibi_authz::authorize_key(sql, scope, crate::VIEW).await?;
         let subject = json!({"kind": edit.kind.key(), "subject": edit.subject});
-        if bilibi_audit::latest_customisation_mutation(sql, scope, KIND, &subject).await?
-            != Some(id)
-        {
+        if !bilibi_audit::is_current_customisation_mutation(sql, scope, KIND, &subject, id).await? {
             return Err(Error::Conflict);
         }
         Ok(())

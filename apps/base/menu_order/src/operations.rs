@@ -321,19 +321,19 @@ fn project_receipt<'a>(
         else {
             return Ok(false);
         };
-        let latest = bilibi_audit::latest_customisation_mutation(
-            client.sql_client().await?,
-            scope,
-            "menu_order",
-            &json!({"parent": current["parent"]}),
-        )
-        .await?;
         let visible: HashSet<_> = current["product"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|item| item["id"].as_str())
             .collect();
+        let hidden = ["before", "after"].iter().any(|key| {
+            change[*key]["item_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|id| id.as_str().is_none_or(|id| !visible.contains(id)))
+        });
         for key in ["before", "after"] {
             if let Some(items) = change[key]
                 .get_mut("item_ids")
@@ -342,13 +342,35 @@ fn project_receipt<'a>(
                 items.retain(|id| id.as_str().is_some_and(|id| visible.contains(id)));
             }
         }
-        change["changed_since"] = json!(latest != change["mutation_id"].as_i64());
+        let after = &change["after"];
+        let matches = if after.is_null() {
+            current["item_ids"].is_null()
+        } else {
+            after["item_ids"] == current["item_ids"]
+        };
+        let fresh = if matches {
+            bilibi_audit::is_current_customisation_mutation(
+                client.sql_client().await?,
+                scope,
+                "menu_order",
+                &json!({"parent":current["parent"]}),
+                change["mutation_id"].as_i64().ok_or(Error::Invalid)?,
+            )
+            .await?
+        } else {
+            false
+        };
+        change["changed_since"] = json!(!fresh);
+        change["hidden_items"] = json!(hidden);
         change["effective"] = current.clone();
         Ok(true)
     })
 }
 
 fn receipt_correction(change: &Value, current: &Value) -> Option<bilibi_labels::ReceiptCorrection> {
+    if change["hidden_items"] == true {
+        return None;
+    }
     let old = &change["before"]["item_ids"];
     let items = old.as_array().filter(|items| !items.is_empty());
     let after = change["after"]["item_ids"]
@@ -382,14 +404,14 @@ async fn check_receipt(
 ) -> bilibi_database::Result<()> {
     bilibi_authz::authorize_key(sql, scope, bilibi_labels::CUSTOMISATIONS_VIEW).await?;
     bilibi_authz::authorize_key(sql, scope, VIEW).await?;
-    if bilibi_audit::latest_customisation_mutation(
+    if !bilibi_audit::is_current_customisation_mutation(
         sql,
         scope,
         "menu_order",
         &json!({"parent":parent}),
+        receipt,
     )
     .await?
-        != Some(receipt)
     {
         return Err(Error::Conflict);
     }
@@ -399,7 +421,7 @@ async fn check_receipt(
 inventory::submit! {
     Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/menu_order.receipts",
         Provenance { module: "base/menu_order", source: file!(), line: line!() },
-        &bilibi_labels::ReceiptSource { kind: "menu_order", capability: VIEW,
+        &bilibi_labels::ReceiptSource { kind: "menu_order", capability: VIEW, subject_filter: None,
             undo: Some(bilibi_labels::ReceiptUndo { capability: MANAGE, correction: receipt_correction }),
             read: Some(receipt_order), project: project_receipt })
 }

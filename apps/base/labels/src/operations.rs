@@ -80,10 +80,20 @@ async fn receipts(
         .filter(|source| capabilities.contains(source.capability))
         .collect();
     let kinds: Vec<_> = sources.iter().map(|source| source.kind).collect();
+    let filters: Vec<_> = sources
+        .iter()
+        .map(|source| source.subject_filter.map(|filter| filter()))
+        .collect();
     let limit = input["limit"].as_i64().unwrap_or(25);
-    let (entries, next) =
-        bilibi_audit::customisation_receipts(sql, scope, &kinds, input["before"].as_i64(), limit)
-            .await?;
+    let (entries, next) = bilibi_audit::customisation_receipts(
+        sql,
+        scope,
+        &kinds,
+        &filters,
+        input["before"].as_i64(),
+        limit,
+    )
+    .await?;
     let mut by_kind: HashMap<String, Vec<Value>> = HashMap::new();
     for entry in entries {
         let kind = entry["kind"].as_str().ok_or(Error::Internal)?;
@@ -113,11 +123,16 @@ async fn receipts(
             if let Some(correction) = correction {
                 change["undo"] = json!({"operation":correction.contract,"input":correction.input});
             }
+            if let Some(object) = change.as_object_mut() {
+                object.remove("hidden_items");
+            }
             visible.push(change);
         }
     }
+    let can_see_actor = capabilities.contains("admin.audit.log.list");
     let candidates: HashSet<_> = visible
         .iter()
+        .filter(|_| can_see_actor)
         .flat_map(|entry| [actor(entry), impersonator(entry)])
         .flatten()
         .collect();
@@ -147,15 +162,29 @@ async fn receipts(
     let mut indices = HashMap::new();
     let mut groups: Vec<Value> = Vec::new();
     for mut change in visible {
-        let name = actor(&change).map(name_of).unwrap_or_else(|| {
-            change["system_principal"]
-                .as_str()
-                .or_else(|| change["actor_type"].as_str())
-                .unwrap_or("Unavailable")
-                .to_owned()
-        });
-        change["who"] = json!(impersonator(&change)
-            .map_or_else(|| name.clone(), |by| format!("{} as {name}", name_of(by))));
+        if can_see_actor {
+            let name = actor(&change).map(name_of).unwrap_or_else(|| {
+                change["system_principal"]
+                    .as_str()
+                    .or_else(|| change["actor_type"].as_str())
+                    .unwrap_or("Unavailable")
+                    .to_owned()
+            });
+            change["who"] = json!(impersonator(&change)
+                .map_or_else(|| name.clone(), |by| format!("{} as {name}", name_of(by))));
+        } else {
+            change["who"] = json!("Restricted");
+            if let Some(object) = change.as_object_mut() {
+                for field in [
+                    "actor_type",
+                    "actor_id",
+                    "impersonator_id",
+                    "system_principal",
+                ] {
+                    object.remove(field);
+                }
+            }
+        }
         let trace = change["trace"].as_str().unwrap_or_default().to_owned();
         let index = *indices.entry(trace.clone()).or_insert_with(|| {
             groups.push(json!({"trace": trace, "changes": []}));

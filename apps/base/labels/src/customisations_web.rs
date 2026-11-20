@@ -195,6 +195,11 @@ impl Index {
                             let facts = preview.get("result").unwrap_or(preview);
                             self.confirm = Some((item, preview_text(facts)));
                         }
+                        Ok(reply) => {
+                            let detail = reply["results"][0]["error"]["fields"].as_object().into_iter().flat_map(|fields| fields.values()).filter_map(Value::as_array).flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
+                            let message = if detail.is_empty() { "The change cannot be reviewed. It may have changed or you may not have permission.".to_owned() } else { detail };
+                            self.flash = Some((StatusKind::Error, message));
+                        }
                         Err(ContractError::Backend(error @ (Error::Unauthorized | Error::StepUpRequired { .. }))) => return Err(error),
                         _ => self.flash = Some((StatusKind::Error, "The change cannot be reviewed. It may have changed or you may not have permission.".into())),
                     }
@@ -236,7 +241,7 @@ impl Index {
             }
             "cancel_receipt" => self.receipt_confirm = None,
             event if event.starts_with("customisation.receipt_") => {
-                let Some((item, _)) = self.receipt_confirm.take_if(|(item, _)| {
+                let Some((item, reviewed)) = self.receipt_confirm.take_if(|(item, _)| {
                     event == item.correction.event
                         && value["key"].as_str() == Some(item.key.as_str())
                 }) else {
@@ -260,6 +265,28 @@ impl Index {
                     event: item.correction.event,
                     contract: item.correction.contract,
                 };
+                let preview = self
+                    .pages
+                    .contracts
+                    .preview(&call, item.correction.input.clone())
+                    .await;
+                let same = match preview {
+                    Ok(reply) if reply["valid"] == true && reply["results"][0]["valid"] == true => {
+                        let preview = &reply["results"][0]["preview"];
+                        preview_text(preview.get("result").unwrap_or(preview)) == reviewed
+                    }
+                    Err(ContractError::Backend(
+                        error @ (Error::Unauthorized | Error::StepUpRequired { .. }),
+                    )) => return Err(error),
+                    _ => false,
+                };
+                if !same {
+                    self.flash = Some((
+                        StatusKind::Error,
+                        "The result changed. Review again before undoing.".into(),
+                    ));
+                    return Ok(());
+                }
                 match self
                     .pages
                     .contracts
@@ -298,6 +325,9 @@ impl Index {
                         self.flash =
                             Some((StatusKind::Success, "The customisation was changed.".into()));
                         return Ok(());
+                    }
+                    Err(ContractError::PlanRejected(_)) => {
+                        "The customisation changed. Review again before trying.".into()
                     }
                     Err(ContractError::InvalidInput(fields)) => fields
                         .into_values()

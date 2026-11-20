@@ -165,6 +165,7 @@ inventory::submit! { bilibi_module_registry::Contribution::new(SECTIONS, "base/l
 pub struct ReceiptSource {
     pub kind: &'static str,
     pub capability: &'static str,
+    pub subject_filter: Option<fn() -> Value>,
     pub undo: Option<ReceiptUndo>,
     pub read: Option<ReceiptRead>,
     pub project: for<'a> fn(
@@ -190,7 +191,7 @@ pub struct ReceiptUndo {
 }
 /// Registry key for owner-authorized receipt sources.
 pub const RECEIPT_SOURCES: &str = "base/labels.receipt_sources";
-inventory::submit! { bilibi_module_registry::Contribution::new(RECEIPT_SOURCES, "base/labels.receipts", bilibi_module_registry::Provenance { module: "base/labels", source: file!(), line: line!() }, &ReceiptSource { kind: "label", capability: crate::VIEW, undo: Some(ReceiptUndo { capability: crate::MANAGE, correction: label_correction }), read: Some(crate::operations::receipt_labels), project: project_label }) }
+inventory::submit! { bilibi_module_registry::Contribution::new(RECEIPT_SOURCES, "base/labels.receipts", bilibi_module_registry::Provenance { module: "base/labels", source: file!(), line: line!() }, &ReceiptSource { kind: "label", capability: crate::VIEW, subject_filter: None, undo: Some(ReceiptUndo { capability: crate::MANAGE, correction: label_correction }), read: Some(crate::operations::receipt_labels), project: project_label }) }
 
 fn label_current(change: &Value, rows: &Value) -> Option<Value> {
     let after = &change["after"];
@@ -230,14 +231,16 @@ fn project_label<'a>(
                 })
         };
         let matches = matches_version
-            && bilibi_audit::latest_customisation_mutation(
+            && bilibi_audit::is_current_customisation_mutation(
                 client.sql_client().await?,
                 scope,
                 crate::store::KIND,
                 &serde_json::json!({"kind": side["kind"], "subject": side["subject"]}),
+                change["mutation_id"]
+                    .as_i64()
+                    .ok_or(bilibi_database::Error::Invalid)?,
             )
-            .await?
-                == change["mutation_id"].as_i64();
+            .await?;
         change["changed_since"] = Value::Bool(!matches);
         change["effective"] = current.unwrap_or(Value::Null);
         Ok(true)
