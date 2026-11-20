@@ -3,7 +3,7 @@ mod arguments;
 mod execution;
 mod registry;
 mod store;
-pub use registry::{RegisteredWorker, Worker, Workers, WORKERS};
+pub use registry::{RegisteredWorker, TenantFifo, Worker, Workers, TENANT_FIFO, WORKERS};
 
 use bilibi_authz::SystemScope;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
@@ -182,12 +182,22 @@ impl Queue {
         let args = (worker.definition.validate)(args)?;
         arguments::validate(&args)?;
         let trace = tx.context().trace_id.clone();
+        let fifo_key = self.workers.tenant_fifo(worker_id, &args)?;
+        if let Some(group) = fifo_key {
+            let key = format!("base/queue.tenant-fifo:{worker_id}:{tenant}:{group}");
+            tx.sql()
+                .execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                    &[&key],
+                )
+                .await?;
+        }
         tx.mutate(move |sql|Box::pin(async move {
             let (kind, actor_id, principal, person, organisation, affiliation, company) = match &actor {
                 Actor::User { user, person, organisation, affiliation, company } => ("user", *user, None, *person, *organisation, *affiliation, *company),
                 Actor::System(principal) => ("system", 0, Some(principal.as_str()), None, None, None, None),
             };
-            let row = sql.query_one("INSERT INTO base_queue_jobs(tenant_id,worker_id,worker_module,args,actor_kind,actor_id,system_principal,person_id,organisation_id,affiliation_id,trace_id,max_attempts,work_company_id,available_at,state) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,clock_timestamp()),CASE WHEN $14::timestamptz > clock_timestamp() THEN 'scheduled' ELSE 'available' END) RETURNING id,state", &[&tenant,&worker.id,&worker.module,&args,&kind,&actor_id,&principal,&person,&organisation,&affiliation,&trace,&worker.definition.max_attempts,&company,&available_at]).await?;
+            let row = sql.query_one("INSERT INTO base_queue_jobs(tenant_id,worker_id,worker_module,args,actor_kind,actor_id,system_principal,person_id,organisation_id,affiliation_id,trace_id,max_attempts,work_company_id,available_at,state,fifo_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,clock_timestamp()),CASE WHEN $14::timestamptz > clock_timestamp() THEN 'scheduled' ELSE 'available' END,$15) RETURNING id,state", &[&tenant,&worker.id,&worker.module,&args,&kind,&actor_id,&principal,&person,&organisation,&affiliation,&trace,&worker.definition.max_attempts,&company,&available_at,&fifo_key]).await?;
             let id = row.get("id");
             let state: &str = row.get("state");
             // No args, names, email or credential material enters audit evidence.
@@ -209,7 +219,7 @@ enum Actor {
 inventory::submit! {
     Module {id:"base/queue",layer:bilibi_module_registry::Layer::Base,
         dependencies:&["base/module_registry","base/database","base/audit","base/tenancy","base/authz"],
-        migrations:&[("base-queue-001",include_str!("../migrations/001-queue.sql")),("base-queue-002",include_str!("../migrations/002-queue-system-actor.sql")),("base-queue-003-work-company",include_str!("../migrations/003-work-company.sql")),("base-queue-004-job-endings",include_str!("../migrations/004-job-endings.sql")),("base-queue-005-status-counts",include_str!("../migrations/005-status-counts.sql"))],
+        migrations:&[("base-queue-001",include_str!("../migrations/001-queue.sql")),("base-queue-002",include_str!("../migrations/002-queue-system-actor.sql")),("base-queue-003-work-company",include_str!("../migrations/003-work-company.sql")),("base-queue-004-job-endings",include_str!("../migrations/004-job-endings.sql")),("base-queue-005-status-counts",include_str!("../migrations/005-status-counts.sql")),("base-queue-006-tenant-fifo",include_str!("../migrations/006-tenant-fifo.sql"))],
         services:&[Service {id:"base/queue.store",factory:|_| {
             let catalog = Catalog::discover(&bilibi_module_registry::discover()?)?;
             Ok(Arc::new(Queue::new(Workers::from_catalog(&catalog)?)))

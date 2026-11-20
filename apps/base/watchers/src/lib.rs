@@ -36,8 +36,8 @@ use bilibi_module_registry::{
     Catalog, Contribution, Layer, Module, Provenance, RegistryError, Service,
 };
 use bilibi_queue::{
-    EndingBinding, EndingService, HandlerBinding, HandlerService, Worker, ENDINGS, HANDLERS,
-    WORKERS,
+    EndingBinding, EndingService, HandlerBinding, HandlerService, TenantFifo, Worker, ENDINGS,
+    HANDLERS, TENANT_FIFO, WORKERS,
 };
 use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
 use serde_json::json;
@@ -64,7 +64,7 @@ pub const SETTLE: &str = "watchers.run.settle";
 pub const ACTIONS_PER_RUN: &str = "watchers.actions_per_run";
 /// Most watchers in a row one first change may start (the causal-chain budget).
 pub const CHAIN_DEPTH: &str = "watchers.chain_depth";
-/// Most watcher runs one tenant starts in a minute; more wait for the next one.
+/// Tokens refilled per minute and maximum tokens held per tenant.
 pub const RUNS_PER_MINUTE: &str = "watchers.runs_per_minute";
 /// Most watchers switched on for one trigger in a tenant.
 pub const ACTIVE_PER_TRIGGER: &str = "watchers.active_per_trigger";
@@ -77,9 +77,11 @@ pub(crate) const FACTS_READ: &str = "watchers.facts_read";
 pub(crate) const MAX_ATTEMPTS: &str = "watchers.max_attempts";
 const ATTEMPT_CEILING: i32 = 25;
 
+pub(crate) const ADMISSION_WORKER: &str = "base/watchers-admit";
 pub(crate) const WORKER: &str = "base/watchers-run";
 pub(crate) const SUBSCRIBER: &str = "base/watchers.triggers";
 pub(crate) const PAGES: &str = "base/watchers.pages";
+const ADMISSION: &str = "base/watchers.admission";
 const RUNNER: &str = "base/watchers.runner";
 const SETTLED: &str = "base/watchers.settled";
 
@@ -138,7 +140,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, ACTIONS_PER_RUN, provenance!
 inventory::submit! { Contribution::new(DEFINITIONS, CHAIN_DEPTH, provenance!(), &limit(
 "Watchers in a chain", "How many watchers in a row one change may start, when a watcher's action starts another watcher. The next one is refused, and its receipt says so.", || json!(3), 10.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, RUNS_PER_MINUTE, provenance!(), &limit(
-"Watcher runs per minute", "The most watcher runs this tenant starts in a minute. More wait for the next minute, so a burst never holds up other work.", || json!(60), 10_000.0)) }
+"Watcher runs per minute", "Tokens added per minute to this tenant's bucket, which holds up to one minute's worth. Each new run spends one token. When the bucket is empty, runs wait in order.", || json!(600), 10_000.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, ACTIVE_PER_TRIGGER, provenance!(), &limit(
 "Watchers per trigger", "The most watchers that may be switched on for one trigger.", || json!(20), 100.0)) }
 
@@ -156,6 +158,11 @@ inventory::submit! { Contribution::new(DEFINITIONS, MAX_ATTEMPTS, provenance!(),
 "Attempts per watchers job", "The most attempts allowed for a watchers job, including its first attempt. Waiting runs are refused when this budget is exhausted.", || json!(ATTEMPT_CEILING), ATTEMPT_CEILING as f64)) }
 
 inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker { max_attempts: ATTEMPT_CEILING, validate: run::arguments }) }
+inventory::submit! { Contribution::new(WORKERS, ADMISSION_WORKER, provenance!(), &Worker { max_attempts: ATTEMPT_CEILING, validate: run::admission_arguments }) }
+inventory::submit! { Contribution::new(TENANT_FIFO, ADMISSION_WORKER, provenance!(), &TenantFifo(|_| Ok(0))) }
+inventory::submit! { Contribution::new(TENANT_FIFO, WORKER, provenance!(), &TenantFifo(run::action_group)) }
+inventory::submit! { Contribution::new(HANDLERS, ADMISSION_WORKER, provenance!(), &HandlerBinding { service: ADMISSION, capability: RUN }) }
+inventory::submit! { Contribution::new(ENDINGS, ADMISSION_WORKER, provenance!(), &EndingBinding { service: SETTLED, principal: PRINCIPAL, capability: SETTLE }) }
 inventory::submit! { Contribution::new(HANDLERS, WORKER, provenance!(), &HandlerBinding { service: RUNNER, capability: RUN }) }
 inventory::submit! { Contribution::new(ENDINGS, WORKER, provenance!(), &EndingBinding { service: SETTLED, principal: PRINCIPAL, capability: SETTLE }) }
 inventory::submit! { Contribution::new(bilibi_events::SUBSCRIBERS, SUBSCRIBER, provenance!(), &bilibi_events::Subscriber {
@@ -177,7 +184,7 @@ fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry:
             .clone(),
         jobs,
         events,
-        queue: services.get("base/queue.store")?,
+        queue: services.get(bilibi_queue::SERVICE)?,
         settings: services.get("base/settings.store")?,
         authentication: services.get("base/tenancy.authentication")?,
         directory: services.get("base/principal_directory.directory")?,
@@ -189,7 +196,7 @@ inventory::submit! {
     Module {
         id: "base/watchers", layer: Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/events", "base/grid", "base/settings", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql"))],
+        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql")), ("base-watchers-005-token-bucket", include_str!("../migrations/005-token-bucket.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let watchers = Arc::new(build(services)?);
@@ -198,8 +205,11 @@ inventory::submit! {
                 }
                 Ok(watchers)
             } },
+            Service { id: ADMISSION, factory: |services| {
+                Ok(Arc::new(HandlerService(Arc::new(run::Worker { watchers: services.get(SERVICE)?, admission: true }))))
+            } },
             Service { id: RUNNER, factory: |services| {
-                Ok(Arc::new(HandlerService(Arc::new(run::Worker { watchers: services.get(SERVICE)? }))))
+                Ok(Arc::new(HandlerService(Arc::new(run::Worker { watchers: services.get(SERVICE)?, admission: false }))))
             } },
             Service { id: SETTLED, factory: |_| Ok(Arc::new(EndingService(Arc::new(run::Settled)))) },
             Service { id: PAGES, factory: |services| {

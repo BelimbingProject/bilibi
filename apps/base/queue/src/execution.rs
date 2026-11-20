@@ -296,6 +296,27 @@ impl Execution {
         }
         Ok(tx)
     }
+
+    pub async fn defer_until(
+        &self,
+        tx: &MutationTransaction<'_>,
+        run_at: std::time::SystemTime,
+    ) -> Result<()> {
+        let tenant = self.tenant();
+        if tx.context().tenant != tenant {
+            return Err(Error::Forbidden);
+        }
+        let updated = tx.sql().execute(
+            "UPDATE base_queue_jobs SET state='scheduled',attempt=attempt-1,available_at=$4,
+                updated_at=clock_timestamp(),lease_token=NULL,lease_expires_at=NULL
+            WHERE tenant_id=$1 AND id=$2 AND state='executing' AND lease_token=$3 AND lease_expires_at>clock_timestamp()",
+            &[&tenant, &self.job_id, &self.token, &run_at],
+        ).await?;
+        if updated == 0 {
+            return Err(Error::Conflict);
+        }
+        Ok(())
+    }
 }
 fn same_actor(a: &Scope, b: &Scope) -> bool {
     a.tenant() == b.tenant()

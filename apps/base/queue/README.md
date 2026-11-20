@@ -49,6 +49,8 @@ tried as one of several, and `Execution::begin` rechecks the same key. Without
 a policy the binding's `capability` decides everywhere. Schedule's
 `TENANT_POLICY` is the one user of this today (per-tenant scheduled work, ADR 17).
 
+Workers can contribute `TenantFifo` under `TENANT_FIFO` with their own worker ID and a function that derives an order key from validated arguments. A constant key orders all of that worker's jobs in a tenant. Among jobs with the same tenant, worker and key, only the oldest pending job can be claimed. Its scheduled time, lease or retry backoff leaves followers in that group waiting.
+
 PostgreSQL `FOR UPDATE SKIP LOCKED` claims serialize across app processes.
 Claims increment the durable attempt before invoking owner code. An expired
 lease is recovered as retryable, or discarded at the attempt limit. Retry delay
@@ -58,6 +60,10 @@ are likewise fenced. A stale executor cannot overwrite a newer claim or a
 cancellation. Shutdown drops in-flight futures and leaves their leases for
 recovery. Handler/validator panics, timeouts and invalid results retry within
 the captured attempt budget; infrastructure errors preserve durable recovery.
+A handler that must wait uses `Execution::defer_until` inside the transaction
+from `Execution::begin`. Queue schedules the same job under its lease fence and
+restores the attempt used to claim it. After committing the deferral, the handler
+returns `Outcome::Completed` to release the worker slot.
 Only bounded safe failure codes are stored, never error payloads or arguments.
 One failed heartbeat (a database error) does not end the attempt if the next beat still falls inside its lease; otherwise the handler is dropped. A pending heartbeat (behind the row lock of an owner's fenced transaction, or waiting for a busy pool) stays in flight while the attempt runs, without a separate heartbeat timeout. An answer that the lease is gone stops the handler; the overall attempt timeout and shutdown still apply.
 
@@ -68,9 +74,10 @@ one job a second per slot; it waits a poll interval only when it claimed nothing
 (or hit an error). A job that failed waits in the database (`available_at`, the
 retry backoff), so claiming at once never runs it early.
 
-Every slot polls once a second when idle, so a poll reads only what it can act on: the
-expired leases (`base_queue_expired_leases`) and the due jobs
-(`base_queue_claim`), never the finished ones. Both searches compare with
+Every slot polls once a second when idle. A poll reads expired leases
+(`base_queue_expired_leases`) and due ordinary jobs (`base_queue_claim_ordinary`), and seeks directly to the oldest job in each FIFO group (`base_queue_tenant_fifo`).
+It considers due times only for those heads and ordinary jobs.
+Both time searches compare with
 `now()`, the claim transaction's start, because a volatile `clock_timestamp()`
 cannot bound an index scan. Keep it that way when you change `store::claim`.
 

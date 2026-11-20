@@ -6,6 +6,12 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const WORKERS: &str = "base/queue.workers";
+pub const TENANT_FIFO: &str = "base/queue.tenant-fifo";
+
+pub struct TenantFifo(pub fn(&Value) -> Result<i64>);
+
+inventory::submit! { Consumer::new::<TenantFifo>(TENANT_FIFO, "base/queue", |_| Ok(())) }
+
 /// Validator must enforce the owner's argument allowlist and business types.
 /// Arguments must contain references, never credentials or secret payloads.
 /// Execution is at least once; owners must make business effects idempotent.
@@ -24,12 +30,26 @@ pub struct Workers {
     workers: BTreeMap<&'static str, RegisteredWorker>,
     /// Workers whose owner is told when a job ends without finishing.
     told: Vec<String>,
+    tenant_fifo: BTreeMap<&'static str, &'static TenantFifo>,
 }
 impl Workers {
     pub fn from_catalog(catalog: &Catalog) -> bilibi_module_registry::Result<Self> {
         let entries = catalog.entries::<Worker>(WORKERS)?;
         validate(entries)?;
+        let mut tenant_fifo = BTreeMap::new();
+        for entry in catalog.entries::<TenantFifo>(TENANT_FIFO)? {
+            if !entries.iter().any(|worker| {
+                worker.id == entry.id && worker.provenance.module == entry.provenance.module
+            }) {
+                return Err(RegistryError::Contribution(format!(
+                    "invalid tenant FIFO worker {}",
+                    entry.id
+                )));
+            }
+            tenant_fifo.insert(entry.id, entry.get::<TenantFifo>()?);
+        }
         Ok(Self {
+            tenant_fifo,
             workers: entries
                 .iter()
                 .map(|entry| {
@@ -55,6 +75,12 @@ impl Workers {
     }
     pub fn iter(&self) -> impl Iterator<Item = RegisteredWorker> + '_ {
         self.workers.values().copied()
+    }
+    pub(crate) fn tenant_fifo(&self, worker: &str, args: &Value) -> Result<Option<i64>> {
+        self.tenant_fifo
+            .get(worker)
+            .map(|policy| (policy.0)(args))
+            .transpose()
     }
     pub(crate) fn told(&self) -> &[String] {
         &self.told
