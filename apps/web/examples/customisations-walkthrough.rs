@@ -91,6 +91,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert!(grants.contains("base.custom-fields.manage"));
         assert!(!grants.contains("admin.audit.log.list"));
     }
+    {
+        let client = db.get().await?;
+        client.execute("INSERT INTO base_settings(key, tenant_id, scope_type, scope_id, value, is_encrypted) VALUES('agent_api.plan_max_operations',0,'global',0,'7',false)", &[]).await?;
+        let registry = app
+            .services
+            .get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
+        let key = "base.labels.customise";
+        let viewer = auth.authenticate(&**client, 1, 2, String::new()).await?;
+        assert!(matches!(
+            registry.guide(&**client, &viewer, key).await,
+            Err(bilibi_agent_api::Error::Forbidden)
+        ));
+        for (scope, available) in [(&one, true), (&viewer, false)] {
+            let hits = registry
+                .search(&**client, scope, key, Default::default())
+                .await?;
+            assert_eq!(hits.iter().any(|hit| hit["key"] == key), available);
+        }
+        let guide = registry.guide(&**client, &one, key).await?;
+        let body = guide["body"].as_str().expect("guide body");
+        let (instructions, contracts) = body
+            .split_once("\n## Live contracts\n")
+            .expect("live contracts section");
+        let define = contracts
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|contract| contract["key"] == "base.custom_fields.define")
+            .expect("custom field definition contract");
+        assert_eq!(
+            define["input"]["required"],
+            json!(["record_type", "key", "label", "kind"])
+        );
+        let (example, watcher) = instructions
+            .split_once("\n## Watcher preflight\n")
+            .expect("watcher preflight section");
+        assert!(example.contains("one atomic plan: 7."));
+        assert!(example.contains("base.labels.clear"));
+        assert!(
+            example.contains("base.grid.view.delete using the ID from this setup's confirmed save")
+        );
+        assert!(example.contains("Archive the field only if this setup's confirmed save"));
+        assert!(example.contains(
+            "If attribution remains uncertain, report it and stop before proposing cleanup."
+        ));
+        assert!(!example.contains("base.rules.vocabulary"));
+        assert!(watcher.contains("base.rules.vocabulary"));
+        for limit in ["conditions", "examples", "facts_read", "values_per_list"] {
+            assert!(watcher.contains(limit), "missing watcher limit {limit}");
+        }
+        assert!(watcher.contains("lower of actions and actions_per_run"));
+        assert!(!body.contains("{{contract:") && !body.contains("{{plan_limit}}"));
+    }
     let label_call = |scope, credential, contract| Call {
         scope,
         credential,

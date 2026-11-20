@@ -418,7 +418,6 @@ pub struct RegisteredApp {
     pub definition: &'static App,
     pub provenance: Provenance,
 }
-#[derive(Default)]
 pub struct Registry {
     pub operations: BTreeMap<&'static str, RegisteredOperation>,
     pub guides: BTreeMap<&'static str, RegisteredGuide>,
@@ -427,6 +426,12 @@ pub struct Registry {
     /// Write contracts a named principal's job may call, with the principals
     /// their owners admit (`job::PRINCIPAL_WRITES`).
     pub principal_writes: BTreeMap<&'static str, &'static [&'static str]>,
+    settings: Arc<bilibi_settings::Settings>,
+}
+#[derive(Default)]
+struct RegisteredDefinitions {
+    operations: BTreeMap<&'static str, RegisteredOperation>,
+    guides: BTreeMap<&'static str, RegisteredGuide>,
 }
 fn contribution_error(reason: impl Into<String>) -> RegistryError {
     RegistryError::Contribution(reason.into())
@@ -468,8 +473,8 @@ fn validate_common(
     }
     Ok(())
 }
-impl Registry {
-    pub fn from_entries(entries: &[Entry]) -> bilibi_module_registry::Result<Self> {
+impl RegisteredDefinitions {
+    fn from_entries(entries: &[Entry]) -> bilibi_module_registry::Result<Self> {
         let mut result = Self::default();
         for entry in entries {
             let definitions = entry.get::<Definitions>()?;
@@ -593,6 +598,8 @@ impl Registry {
         }
         Ok(result)
     }
+}
+impl Registry {
     /// The app entries alone: shape and uniqueness. Whether each names a
     /// read operation of its own module is checked with the operations in
     /// `from_catalog`.
@@ -644,8 +651,19 @@ impl Registry {
         }
         Ok(())
     }
-    pub fn from_catalog(catalog: &Catalog) -> bilibi_module_registry::Result<Self> {
-        let mut registry = Self::from_entries(catalog.entries::<Definitions>(DEFINITIONS)?)?;
+    fn from_catalog(
+        catalog: &Catalog,
+        settings: Arc<bilibi_settings::Settings>,
+    ) -> bilibi_module_registry::Result<Self> {
+        let RegisteredDefinitions { operations, guides } =
+            RegisteredDefinitions::from_entries(catalog.entries::<Definitions>(DEFINITIONS)?)?;
+        let mut registry = Self {
+            operations,
+            guides,
+            apps: BTreeMap::new(),
+            principal_writes: BTreeMap::new(),
+            settings,
+        };
         let apps = catalog.entries::<App>(APPS)?;
         Self::validate_apps(apps)?;
         for entry in apps {
@@ -715,9 +733,6 @@ impl Registry {
             }
         }
         Ok(registry)
-    }
-    pub fn from_inventory() -> bilibi_module_registry::Result<Self> {
-        Self::from_catalog(&Catalog::discover(&bilibi_module_registry::discover()?)?)
     }
 }
 #[derive(Clone, Copy)]
@@ -823,18 +838,42 @@ impl Registry {
     }
     pub async fn guide(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         key: &str,
     ) -> Result<Value> {
         let guide = self.guides.get(key).ok_or(Error::UnknownGuide)?.definition;
-        if !reach::capabilities(client, scope)
-            .await?
-            .contains(guide.capability)
-        {
+        let capabilities = reach::capabilities(client, scope).await?;
+        if !capabilities.contains(guide.capability) {
             return Err(Error::Forbidden);
         }
-        Ok(json!({"key":guide.key,"title":guide.title,"summary":guide.summary,"body":guide.body}))
+        let mut body = guide.body.to_owned();
+        // Expand only explicitly requested contracts, using the same reach and
+        // channel checks as describe. Missing optional modules stay visible.
+        let mut cursor = 0;
+        while let Some(relative) = body[cursor..].find("{{contract:") {
+            let start = cursor + relative;
+            let Some(end) = body[start..].find("}}") else {
+                break;
+            };
+            let end = start + end + 2;
+            let key = &body[start + "{{contract:".len()..end - 2];
+            let rendered = match self.operations.get(key) {
+                Some(op) if op.definition.channels.allows(scope.channel())
+                    && reach::allows(op.definition.capability, scope, &capabilities) => {
+                    json!({"key":key,"title":op.definition.title,"summary":op.definition.summary,
+                        "disposition":op.definition.disposition(),"input":op.input,"output":op.output}).to_string()
+                }
+                _ => format!("{key}: unavailable to this connection; search or request access"),
+            };
+            body.replace_range(start..end, &rendered);
+            cursor = start + rendered.len();
+        }
+        if body.contains("{{plan_limit}}") {
+            let limit = plans::max_operations(&self.settings, client).await?;
+            body = body.replace("{{plan_limit}}", &limit.to_string());
+        }
+        Ok(json!({"key":guide.key,"title":guide.title,"summary":guide.summary,"body":body}))
     }
     /// Runs read operation `key` for `scope` on the caller's connection, for
     /// a caller that already holds one (a walkthrough, a test fixture). Request
@@ -1026,14 +1065,17 @@ async fn authorize_read(
             other => Error::Backend(other),
         })
 }
-inventory::submit! { Consumer::new::<Definitions>(DEFINITIONS,"base/agent_api",|entries|Registry::from_entries(entries).map(|_|())) }
+inventory::submit! { Consumer::new::<Definitions>(DEFINITIONS,"base/agent_api",|entries|RegisteredDefinitions::from_entries(entries).map(|_|())) }
 inventory::submit! { Consumer::new::<App>(APPS,"base/agent_api",Registry::validate_apps) }
 // The contract and principal checks need the whole registry; `from_catalog` runs them.
 inventory::submit! { Consumer::new::<job::PrincipalWrite>(job::PRINCIPAL_WRITES,"base/agent_api",|entries| entries.iter().try_for_each(|entry| entry.get::<job::PrincipalWrite>().map(|_| ()))) }
 inventory::submit! { bilibi_module_registry::Module {
     id:"base/agent_api",layer:bilibi_module_registry::Layer::Base,
     dependencies:&["base/module_registry","base/authz","base/database","base/party_ids","base/settings","base/tenancy","base/step_up","base/session","base/system","base/queue","base/ui","base/notifications"], migrations:&[("agent-api-plans-v1",include_str!("../migrations/001-plans.sql")),("base-agent-api-002-plan-work-company",include_str!("../migrations/002-plan-work-company.sql")),("base-agent-api-003-reviews",include_str!("../migrations/003-reviews.sql")),("base-agent-api-004-drop-plans",include_str!("../migrations/004-drop-plans.sql"))],
-    services:&[bilibi_module_registry::Service {id:"base/agent_api.registry",factory:|_|Ok(Arc::new(Registry::from_inventory()?))},
+    services:&[bilibi_module_registry::Service {id:"base/agent_api.registry",factory:|services|{
+        let catalog = Catalog::discover(&bilibi_module_registry::discover()?)?;
+        Ok(Arc::new(Registry::from_catalog(&catalog, services.get("base/settings.store")?)?))
+    }},
     bilibi_module_registry::Service {id:"base/agent_api.plans",factory:|services|Ok(Arc::new(plans::Plans::new(services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),services.get("base/database.mutations")?,services.get("base/agent_api.registry")?,services.get("base/settings.store")?,services.get("base/tenancy.authentication")?)))},
     bilibi_module_registry::Service {id:"base/agent_api.reviews",factory:|services|{
         let reviews = Arc::new(Reviews::new(services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone()));

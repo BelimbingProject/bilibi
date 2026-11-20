@@ -18,7 +18,7 @@ need an additional segment; guides may use the module prefix itself. Keys must
 be unique across operations and guides. Discovery rejects malformed metadata,
 foreign handler ownership, unsupported schema keywords, undeclared capabilities,
 read operations on write capabilities, and impersonation capabilities (`*.impersonate`).
-Titles have a 120-character limit, summaries 500, guide bodies 8 KiB. Registry
+Titles have a 120-character limit, summaries 500, guide bodies 8 KiB. A guide may include `{{contract:operation.key}}` to expand the current accessible operation metadata and schemas at read time, or `{{plan_limit}}` for the current installation plan limit. The guide marks inaccessible contracts as unavailable and returns an error if it cannot resolve the plan limit. Registry
 entries retain source provenance and materialized schemas.
 
 A read or safe-write operation may declare `capability: SIGNED_IN` for owner-authorized self-service. Reads must enforce their owner’s visibility and field restrictions in the handler. It is discoverable by authenticated accounts without a capability grant; its preview and commit must prove ownership of the target, or authorize the capability required for another owner's target. System principals are refused. Discovery, plans, page submissions and jobs apply the same admission. All other capability strings must name declared vocabulary keys.

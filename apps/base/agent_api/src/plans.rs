@@ -5,13 +5,23 @@ use bilibi_database::{Connection, Db, MutationBoundary};
 use bilibi_party_ids::OrganisationId;
 use bilibi_settings::Settings;
 use bilibi_system::Instance;
-use bilibi_tenancy::{reaches_work_company, Authentication, Channel, ProofFuture, Scope};
+use bilibi_tenancy::{
+    reaches_work_company, Authentication, Channel, ProofFuture, ReadClient, Scope,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{future::Future, sync::Arc};
 use tokio_postgres::Transaction;
 
 const WORKPLACE_PROOF_BOUNDS: &str = "SET LOCAL lock_timeout = '150ms'";
+
+pub(super) async fn max_operations(settings: &Settings, client: &dyn ReadClient) -> Result<u64> {
+    settings
+        .get_global(client, "agent_api.plan_max_operations")
+        .await?
+        .as_u64()
+        .ok_or(bilibi_database::Error::Invalid.into())
+}
 
 /// Wire input is bounded before handlers run. Ordering and exact JSON types are
 /// part of the contract; unknown keys and non-object inputs are refused.
@@ -126,12 +136,7 @@ impl Plans {
     }
     pub(crate) async fn review_settings(&self) -> Result<ReviewSettings> {
         let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
-        let max_operations = self
-            .settings
-            .get_global(&**client, "agent_api.plan_max_operations")
-            .await?
-            .as_u64()
-            .ok_or(bilibi_database::Error::Invalid)?;
+        let max_operations = max_operations(&self.settings, &**client).await?;
         let requests_per_minute = self
             .settings
             .get_global(&**client, crate::mcp::REQUESTS_PER_MINUTE)
@@ -144,12 +149,7 @@ impl Plans {
         })
     }
     async fn shape(&self, tx: &Transaction<'_>, operations: &[PlannedOperation]) -> Result<String> {
-        let max = self
-            .settings
-            .get_global(tx, "agent_api.plan_max_operations")
-            .await?
-            .as_u64()
-            .ok_or(bilibi_database::Error::Invalid)?;
+        let max = max_operations(&self.settings, tx).await?;
         if operations.is_empty()
             || operations.len() as u64 > max
             || operations
