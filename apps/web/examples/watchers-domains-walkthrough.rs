@@ -65,9 +65,12 @@ async fn wait_for_runs(
             "SELECT count(*), count(*) FILTER (WHERE d.delivered_at IS NOT NULL AND
                 CASE WHEN $3::text IS NULL THEN r.state='done' AND EXISTS(
                     SELECT 1 FROM base_queue_jobs j WHERE j.tenant_id=1 AND j.worker_id='base/watchers-run' AND j.args->>'event_id'=e.id::text AND j.args->>'run_id'=r.id::text AND j.state='completed'
-                ) ELSE r.state='refused' AND r.reason=$3 AND r.finished_at IS NOT NULL AND NOT EXISTS(
-                    SELECT 1 FROM base_queue_jobs j WHERE j.tenant_id=1 AND j.worker_id='base/watchers-run' AND j.args->>'event_id'=e.id::text
-                ) END),
+                ) ELSE r.state='refused' AND r.reason=$3 AND r.finished_at IS NOT NULL AND
+                    CASE WHEN $3='stale_activation' THEN EXISTS(
+                        SELECT 1 FROM base_queue_jobs j WHERE j.tenant_id=1 AND j.worker_id='base/watchers-run' AND j.args->>'event_id'=e.id::text AND j.args->>'run_id'=r.id::text AND j.state='completed'
+                    ) ELSE NOT EXISTS(
+                        SELECT 1 FROM base_queue_jobs j WHERE j.tenant_id=1 AND j.worker_id='base/watchers-run' AND j.args->>'event_id'=e.id::text AND j.args->>'run_id'=r.id::text
+                    ) END END),
                 count(*) FILTER (WHERE r.state NOT IN ('queued','matched') AND
                     CASE WHEN $3 IS NULL THEN r.state<>'done' ELSE r.state<>'refused' OR r.reason IS DISTINCT FROM $3 END)
              FROM unnest($1::bigint[]) e(id) CROSS JOIN unnest($2::bigint[]) watcher(id)
@@ -120,7 +123,10 @@ async fn commerce_event(
     status: &str,
     revision: i64,
 ) -> Result<i64> {
-    let events = source_events(db, event, "/order_id", order).await?;
+    let events: Vec<i64> = db.get().await?.query(
+        "SELECT id FROM base_events WHERE tenant_id=1 AND publisher='commerce/sales' AND name=$1 AND subject=$2 ORDER BY id",
+        &[&event, &format!("order:{order}")],
+    ).await?.iter().map(|row| row.get(0)).collect();
     check(
         events.len() == 1,
         "the two-line order recorded one compact occurrence",
@@ -710,6 +716,93 @@ async fn main() -> Result<()> {
             "the creation watcher cancelled the order once",
         )?;
         commerce_event(&db, event, 1, id, "cancelled", 2).await?;
+        write(
+            &plans,
+            &admin,
+            "base.watchers.switch",
+            json!({"watcher_id":watcher_id,"enabled":false}),
+        )
+        .await?;
+        let while_off = commerce_order(&plans, &admin).await?;
+        let off_event = commerce_event(&db, created, 1, while_off, "draft", 1).await?;
+        run_until(
+            &services,
+            wait_for_runs(&db, &[off_event], &[watcher_id], Some("watcher_off")),
+        )
+        .await?;
+        let delayed = commerce_order(&plans, &admin).await?;
+        let delayed_event = commerce_event(&db, created, 1, delayed, "draft", 1).await?;
+        write(
+            &plans,
+            &admin,
+            "base.watchers.switch",
+            json!({"watcher_id":watcher_id,"enabled":true}),
+        )
+        .await?;
+        run_until(
+            &services,
+            wait_for_runs(
+                &db,
+                &[delayed_event],
+                &[watcher_id],
+                Some("event_before_enabled"),
+            ),
+        )
+        .await?;
+        // Hold only the Watchers job, so Events can enqueue a real run before
+        // the off/on cycle. The disposable queue is released immediately after.
+        db.get().await?.batch_execute("CREATE FUNCTION watcher_activation_hold() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.worker_id='base/watchers-run' THEN NEW.available_at=clock_timestamp()+interval '1 hour'; NEW.state='scheduled'; END IF; RETURN NEW; END $$; CREATE TRIGGER watcher_activation_hold BEFORE INSERT ON base_queue_jobs FOR EACH ROW EXECUTE FUNCTION watcher_activation_hold();").await?;
+        let queued = commerce_order(&plans, &admin).await?;
+        let queued_event = commerce_event(&db, created, 1, queued, "draft", 1).await?;
+        run_until(&services, async {
+            for _ in 0..300 {
+                let exists: bool = db.get().await?.query_one("SELECT EXISTS(SELECT 1 FROM base_watcher_runs WHERE tenant_id=1 AND watcher_id=$1 AND event_id=$2 AND state='queued')", &[&watcher_id,&queued_event]).await?.get(0);
+                if exists { return Ok(()); }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            check(false, "the event queued its run before switching off")
+        }).await?;
+        write(
+            &plans,
+            &admin,
+            "base.watchers.switch",
+            json!({"watcher_id":watcher_id,"enabled":false}),
+        )
+        .await?;
+        write(
+            &plans,
+            &admin,
+            "base.watchers.switch",
+            json!({"watcher_id":watcher_id,"enabled":true}),
+        )
+        .await?;
+        let client = db.get().await?;
+        client.batch_execute("DROP TRIGGER watcher_activation_hold ON base_queue_jobs; DROP FUNCTION watcher_activation_hold();").await?;
+        client.execute("UPDATE base_queue_jobs SET state='available',available_at=clock_timestamp() WHERE tenant_id=1 AND worker_id='base/watchers-run' AND args->>'event_id'=$1", &[&queued_event.to_string()]).await?;
+        drop(client);
+        run_until(
+            &services,
+            wait_for_runs(
+                &db,
+                &[queued_event],
+                &[watcher_id],
+                Some("stale_activation"),
+            ),
+        )
+        .await?;
+        let after_on = commerce_order(&plans, &admin).await?;
+        let after_event = commerce_event(&db, created, 1, after_on, "draft", 1).await?;
+        run_until(
+            &services,
+            wait_for_runs(&db, &[after_event], &[watcher_id], None),
+        )
+        .await?;
+        let client = db.get().await?;
+        let row = client.query_one("SELECT count(*) FILTER (WHERE id=ANY($1) AND status='draft'), count(*) FILTER (WHERE id=$2 AND status='cancelled') FROM commerce_sales_documents WHERE tenant_id=1", &[&vec![while_off,delayed,queued],&after_on]).await?;
+        check(
+            row.get::<_, i64>(0) == 3 && row.get::<_, i64>(1) == 1,
+            "off-period events are skipped and a new event acts after switching on",
+        )?;
     }
     println!("every {domain} watcher follow-up check passed");
     Ok(())

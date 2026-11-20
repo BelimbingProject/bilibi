@@ -741,7 +741,7 @@ impl Watchers {
                 &[&tenant, &watcher],
             ).await?.get(0);
             sql.execute(
-                "UPDATE base_watchers SET active_version_id=$3,disabled_at=NULL,needs_review=false,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2",
+                "UPDATE base_watchers SET active_version_id=$3,disabled_at=NULL,enabled_at=clock_timestamp(),needs_review=false,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2",
                 &[&tenant, &watcher, &version],
             ).await?;
             let evidence = sql.query_one("SELECT approved_by,approved_at::text,catalog_digest FROM base_watcher_versions WHERE tenant_id=$1 AND id=$2", &[&tenant, &version]).await?;
@@ -797,7 +797,7 @@ impl Watchers {
         }
         tx.mutate(move |sql| Box::pin(async move {
             sql.execute(
-                "UPDATE base_watchers SET disabled_at=CASE WHEN $3 THEN NULL ELSE now() END,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2",
+                "UPDATE base_watchers SET disabled_at=CASE WHEN $3 THEN NULL ELSE clock_timestamp() END,enabled_at=CASE WHEN $3 THEN clock_timestamp() ELSE enabled_at END,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2",
                 &[&tenant, &watcher, &enabled],
             ).await?;
             Ok(((), vec![Change { kind: "base/watchers.watcher".into(), id: watcher, old: json!({"enabled": !enabled}), new: json!({"enabled": enabled}) }]))

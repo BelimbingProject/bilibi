@@ -46,6 +46,8 @@ fn reason(code: &str) -> &'static str {
     match code {
         "catalog_changed" => "Not run: the installed fields or actions changed. Draft a new version for review.",
         "record_changed" => "Skipped: the record changed after the watcher matched.",
+        "event_before_enabled" => "Skipped: this event was recorded before the watcher was switched on.",
+        "stale_activation" => "Skipped: the watcher was switched off and on after this run was queued.",
         "event_before_approval" => "Skipped: this event was recorded before the watcher version was approved.",
         "chain_budget" => "Stopped: another watcher started it, and the chain reached the limit of watchers in a row.",
         "watcher_off" => "Not run: the watcher was switched off.",

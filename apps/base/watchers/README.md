@@ -35,7 +35,7 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 
 - **Versions never change.** Each stores its definition, examples, the person's words, a SHA-256 fingerprint, how it was drafted (`person` or `agent`), who drafted it and who approved it.
 - **Drafting runs nothing.** A new version of a running watcher runs only once approved; until then the earlier version keeps running.
-- **A queued run keeps its pinned version.** If another version is approved or the watcher is switched off before the run acts, the run is refused (`stale_version`, `watcher_off`); nothing silently swaps in the new watcher.
+- **A queued run keeps its pinned version.** If another version is approved, the watcher is switched off, or it is switched off and on before the run acts, the run is refused (`stale_version`, `watcher_off`, `stale_activation`); nothing silently swaps in the new watcher or activation.
 - **Installed bindings are pinned.** Approval stores a fingerprint of the condition fields' types, choices and source mappings (for a custom field, its type and value SQL while it is offered to watchers), every linked table's join and key bindings, the trigger bindings and the action schemas. A changed catalog refuses execution (`catalog_changed`) and marks the watcher **Needs review** until a new version is approved.
 - **Approval never delegates more.** The approver must hold All reach for every capability the watcher reads or acts on, including linked tables; Own or Team reach cannot approve or switch on tenant-wide automation; a watcher cannot reach a field the principal may not read.
 
@@ -44,7 +44,7 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 **Recorded with the trigger's save, run after it commits, never inside it.**
 
 1. The owner records its event in its `MutationTransaction` (`base/events`).
-2. Events hands it to the `base/watchers.triggers` subscriber. In the delivery transaction it writes one run per watcher switched on for that event in the tenant, pinned to the approved version. Events recorded after approval hand queued work to the `base/watchers-admit` worker (`Subscribe::handoff`); older events write a refusal directly to the run log.
+2. Events hands it to the `base/watchers.triggers` subscriber. In the delivery transaction it writes one run per approved watcher for that event in the tenant, pinned to its version and current activation. An event recorded after both approval and the latest switch-on queues work for the `base/watchers-admit` worker (`Subscribe::handoff`). An event delivered while off, or recorded at or before approval or switch-on, writes a refusal directly to the run log.
 3. The worker runs as the `watchers` principal. Per run it checks the chain budget, the version and the switch, reads the conditions' fields through Grid, evaluates them and records `matched` (with the facts and each condition's outcome) or `no_match`.
 4. Before each outstanding action, including after a retry, the worker rechecks the principal's current record and field access. The evaluated record version is bound into the action; its owner checks it under the record lock and refuses a changed record (`record_changed`). Successful actions advance the next action's expected version in the same transaction; the original version remains in the saved facts. Each action calls the owner's contract through the job door (`JobContracts::commit`) in a transaction that also writes its receipt, keyed `(tenant, version, event, position)`. A retry after a crash finds the receipt and does nothing twice.
 5. The run ends `done`, `partial` or `refused`, with a bounded reason code.
@@ -53,6 +53,7 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 | --- | --- |
 | `chain_budget` | Another watcher's action started this run and the chain reached `watchers.chain_depth` |
 | `stale_version`, `watcher_off` | The watcher changed before the run acted |
+| `event_before_enabled`, `stale_activation` | The event predates switching on, or the watcher was switched off and on after the run was queued |
 | `event_before_approval` | The event was already recorded when this watcher version was approved |
 | `read_refused`, `restricted_field` | The principal may not read the record or a condition's field |
 | `subject_unavailable` | The record is gone or out of reach |
@@ -130,7 +131,7 @@ Boot refuses a trigger that is not the contributor's own declared event or names
 
 ## Tables
 
-`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects` and `base_watcher_buckets` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events` and `base-watchers-004-watchers`, and `base-watchers-005-token-bucket`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
+`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects` and `base_watcher_buckets` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events`, `base-watchers-004-watchers`, `base-watchers-005-token-bucket` and `base-watchers-006-activation`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 
