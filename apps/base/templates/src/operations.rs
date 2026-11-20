@@ -194,6 +194,9 @@ impl WriteHandler for Write {
 fn empty() -> Value {
     json!({"type":"object","properties":{}})
 }
+fn empty_input() -> Value {
+    json!({})
+}
 fn list_output() -> Value {
     json!({"type":"array","items":{"type":"object"}})
 }
@@ -326,13 +329,13 @@ fn choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
 
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/templates.customisations", crate::provenance!(), &bilibi_labels::CustomisationSection {
     title: "Templates",
-    undo: Some(bilibi_labels::Undo { read:OVERRIDES, read_input:empty, operation:RESTORE, event:UNDO_EVENT,
+    undo: Some(bilibi_labels::Undo { read:OVERRIDES, read_input:empty_input, operation:RESTORE, event:UNDO_EVENT,
         action:"Restore inherited wording", detail:"Future messages will use the inherited wording.", rows }),
     changes: Some(bilibi_labels::Changes {
         purpose:"Change the wording people receive from a workspace or company.",
         limits:"Plain text with the variables each template offers. The sending feature chooses the recipient and attachments.",
         guide:"base.templates",
-        reads:&[bilibi_labels::Read { operation:LIST, input:empty }, bilibi_labels::Read { operation:OVERRIDES, input:empty }],
+        reads:&[bilibi_labels::Read { operation:LIST, input:empty_input }, bilibi_labels::Read { operation:OVERRIDES, input:empty_input }],
         choices, change:&[PUBLISH], preview:None, verify:INSPECT, restore:Some(RESTORE),
     }),
 }) }
