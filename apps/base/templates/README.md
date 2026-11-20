@@ -4,7 +4,7 @@
 
 **Not for:** choosing recipients, building attachments or sending messages.
 
-Open **Administration → Templates** to read, preview and publish the wording that installed modules let you change. Choose the workspace or a company and the language. The page shows what that choice inherits and previews wording with sample details. **Restore inherited wording** removes that choice's override.
+Ask an AI assistant to draft and preview wording through the template operations, then review and approve the change. **Administration → Customisations** shows each override’s current text and sample preview and offers **Restore inherited wording**.
 
 ## Declare a template
 
@@ -21,7 +21,7 @@ For each language in order, the company override wins, then the workspace overri
 
 ## Publish through the operation
 
-Use `base.templates.catalogue.list` and `base.templates.template.get` to find slots, allowed variables, current wording and revision. Both the browser and an agent use `base.templates.template.publish` and `base.templates.template.restore`. They append audited revisions and require the exact revision the editor read. A restore appends a marker so an author holding a draft from before a restore cannot overwrite a later change.
+Use `base.templates.catalogue.list` and `base.templates.template.get` to find slots, allowed variables, current wording and revision. An agent uses `base.templates.template.publish` and `base.templates.template.restore`. They append audited revisions and require the exact revision the editor read. A restore appends a marker so an author holding a draft from before a restore cannot overwrite a later change.
 
 Company changes require access to that company. The shared Customisations page lists published overrides and can restore them through the same operation.
 

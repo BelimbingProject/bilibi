@@ -127,7 +127,6 @@ pub struct FormControls {
     pub optional_authenticator: CodeInput,
     pub invalid_authenticator: CodeInput,
     pub text: Field,
-    pub text_insertions: crate::forms::TextInsertions,
     pub search: Field,
     pub email: Field,
     pub tel: Field,
@@ -252,12 +251,6 @@ impl FormControls {
             )
             .numeric()
             .errors(vec!["That code was not accepted. Enter a new code.".into()]),
-            text_insertions: crate::forms::TextInsertions {
-                field: Field::named("sample-subject")
-                    .label("Message subject")
-                    .value("Statement for "),
-                choices: vec![Choice::new("Customer name", "{{customer_name}}")],
-            },
             text: sample("text_field", "Sample text value")
                 .label("Text")
                 .placeholder("Enter a value"),
@@ -534,7 +527,7 @@ impl ComponentsSpecimen {
             "Example contact",
             vec![crate::AddToItem {
                 label: "Invite as customer".into(),
-                href: "/customer-access?drop=person:example".into(),
+                href: "/customer-portal?drop=person:example".into(),
                 disabled: None,
             }],
         ))?);

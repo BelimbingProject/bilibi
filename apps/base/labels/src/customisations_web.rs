@@ -312,9 +312,32 @@ impl Index {
             } else {
                 Cell::text("Unavailable")
             };
+            let change = if let Some((title, details)) = item.row.description.split_once('\n') {
+                let id = format!("customisation-{}", item.key());
+                let body = render(bilibi_ui::inline::InlineLongText {
+                    field: bilibi_ui::inline::InlineField::new(
+                        format!("{id}-text"),
+                        "change",
+                        "Change",
+                        details,
+                    )
+                    .readonly(),
+                    rows: 4,
+                })?;
+                let mut change = Html::text(title);
+                change.push(&render(bilibi_ui::Fold {
+                    id: &id,
+                    title: "View wording and preview",
+                    body,
+                    ..Default::default()
+                })?);
+                change
+            } else {
+                Html::text(&item.row.description)
+            };
             let mut row = FlexRow::new(item.key())
                 .slot("section", Html::text(item.section.title))
-                .slot("change", Html::text(&item.row.description))
+                .slot("change", change)
                 .slot("actor", Html::text(&actor))
                 .cell("when", when);
             row.actions = render(IconButton {
@@ -353,7 +376,11 @@ impl Index {
         })?;
         let dialog = if let Some(item) = &self.confirm {
             render(UndoDialog {
-                title: format!("{}: {}?", item.undo.action, item.row.description),
+                title: format!(
+                    "{}: {}?",
+                    item.undo.action,
+                    item.row.description.lines().next().unwrap_or_default()
+                ),
                 item,
                 key: item.action_key(),
             })?

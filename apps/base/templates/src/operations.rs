@@ -247,8 +247,26 @@ fn rows(value: &Value) -> Vec<bilibi_labels::CustomisationRow> {
         .flatten()
         .filter_map(|row| {
             let revision = row["revision"].as_i64()?;
+            let text = |name: &str| -> String {
+                row[name]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(slot, value)| Some(format!("{slot}: {}", value.as_str()?)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             Some(bilibi_labels::CustomisationRow {
-                description: row["description"].as_str()?.into(),
+                description: format!(
+                    "{}\nCurrent text:\n{}\nPreview:\n{}",
+                    row["description"].as_str()?,
+                    text("slots"),
+                    if row["preview"].is_null() {
+                        "Preview unavailable".into()
+                    } else {
+                        text("preview")
+                    }
+                ),
                 audit_kind: "base/templates.revision",
                 audit_id: revision,
                 revision,
@@ -277,7 +295,7 @@ fn choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
                     subject,
                     title: format!("{label} · Workspace · {language}"),
                     keywords: "templates wording email language",
-                    page: Some(format!("/templates/{key}")),
+                    page: Some("/admin/customisations".into()),
                     record_kinds: vec!["template".into(), key.into()],
                     verify_input: json!({"key":key,"language":language}),
                     // Re-read the exact target before publishing to get its revision.
@@ -305,7 +323,7 @@ fn choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
                 subject,
                 title: title.into(),
                 keywords: "templates wording email language",
-                page: Some(format!("/templates/{key}")),
+                page: Some("/admin/customisations".into()),
                 record_kinds: vec!["template".into(), key.into()],
                 value: Some(row["slots"].clone()),
                 customised: true,

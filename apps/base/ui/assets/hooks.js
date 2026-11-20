@@ -41,26 +41,6 @@
     destroyed() { this.el.removeEventListener("keydown", this.keydown) },
   })
 
-  window.BilibiUI.registerHook("TextInsertions", {
-    mounted() {
-      this.click = event => {
-        const button = event.target.closest('button[name="insert-text"]')
-        if (!button) return
-        const field = this.el.querySelector('input[type="text"], textarea')
-        if (!field || field.readOnly || field.disabled) return
-        const start = field.selectionStart
-        const end = field.selectionEnd
-        const limit = field.maxLength
-        if (limit >= 0 && field.value.length - (end - start) + button.value.length > limit) return
-        field.focus()
-        field.setRangeText(button.value, start, end, 'end')
-        field.dispatchEvent(new Event('input', {bubbles: true}))
-      }
-      this.el.addEventListener('click', this.click)
-    },
-    destroyed() { this.el.removeEventListener('click', this.click) },
-  })
-
   // One native input is the keyboard and accessibility contract. Decorative
   // boxes follow its caret, so editing never adds eight tab stops or labels.
   // Methods own their code formats; the form still posts one credential to

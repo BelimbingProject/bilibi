@@ -2105,14 +2105,3 @@ impl LocationReport {
         }
     }
 }
-
-/// A text field followed by labelled buttons that insert text at its caret.
-#[derive(Template)]
-#[template(
-    source = r#"{% import "forms.html" as forms %}{% call forms::text_insertions(field=field, choices=choices) %}{% endcall %}"#,
-    ext = "html"
-)]
-pub struct TextInsertions {
-    pub field: Field,
-    pub choices: Vec<Choice>,
-}

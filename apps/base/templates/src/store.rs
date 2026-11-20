@@ -171,10 +171,12 @@ impl Templates {
                     .unwrap_or("Workspace");
                 let language: &str = row.get("language");
                 let description = format!("{} · {name} · {language}", entry.label);
+                let slots: crate::Text = serde_json::from_value(row.get("slots")).ok()?;
+                let preview = entry.preview(&slots).ok();
                 Some(json!({
                     "description": description, "key":key, "company_id":company,
                     "language":language,"revision":row.get::<_,i64>("id"),
-                    "slots":row.get::<_,serde_json::Value>("slots")
+                    "slots":slots, "preview":preview
                 }))
             })
             .collect())
