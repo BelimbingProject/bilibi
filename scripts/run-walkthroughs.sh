@@ -98,6 +98,7 @@ WALKTHROUGHS=(
   'base|setup-packs|apps/base/setup_packs|setup-packs-walkthrough|migrate|BILIBI_SETUP_PACKS_DEMO=disposable|-'
   'base|database-pool|apps/base/database|pool-walkthrough|none||-'
   'base|integration|apps/base/integration|integration-walkthrough|migrate|BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes|-'
+  'base|integration-connector-destinations|apps/base/integration|connector-destinations-walkthrough|migrate|BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes|-'
   'base|language-detection|apps/base/language_detection|language-detection-walkthrough|none|BILIBI_DISPOSABLE_LANGUAGE_WALKTHROUGH=yes|@model'
   'base|mail-inbound|apps/base/mail|inbound-walkthrough|none||@/parsed'
   'base|mail|apps/base/mail|mail-walkthrough|none||@/wire.eml'

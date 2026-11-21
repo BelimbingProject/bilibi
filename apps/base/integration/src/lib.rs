@@ -3,13 +3,15 @@
 //! authentication or mutation audit. Bodies and headers are omitted unless a
 //! caller opts into bounded, mandatory-redacted structured previews.
 //!
-//! `send`/`stream` are the only outgoing HTTP path; `record_incoming` and
+//! `send`/`stream` are the only outgoing HTTP path; `ConnectorPolicy` is the
+//! operator's check on where a connector's own socket may go; `record_incoming` and
 //! `record_incoming_system` are the API adapter seam, called once after
 //! dispatch. Recording is a machine measurement on its own pooled connection,
 //! outside the caller's transaction and outside mutation capture; manual
 //! deletion is an audited mutation. `web` is the API Exchanges list and
 //! detail (`/system/api-exchanges`).
 mod contributions;
+mod destination;
 mod privacy;
 mod redaction;
 mod redirect;
@@ -19,9 +21,11 @@ mod transport;
 mod web;
 pub mod webhooks;
 pub use contributions::{
-    WebhookLimits, DELETE, EXCHANGE_RETENTION_DAYS, LIST, PAYLOAD, PUBLIC_ENDPOINT_SENDER_LIMIT,
-    RETENTION_DAYS, WEBHOOK_SETTINGS,
+    WebhookLimits, CONNECTOR_ALLOWED_DESTINATIONS, CONNECTOR_PRIVATE_NETWORKS, DELETE,
+    EXCHANGE_RETENTION_DAYS, LIST, PAYLOAD, PUBLIC_ENDPOINT_SENDER_LIMIT, RETENTION_DAYS,
+    WEBHOOK_SETTINGS,
 };
+pub use destination::{ConnectorPolicy, Destination, Unusable, DESTINATION_REFUSED};
 pub use redirect::RedirectPolicy;
 pub use transport::{Failure, Outgoing, Reply, Streamed};
 
