@@ -168,6 +168,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Phone column order:** A list may name its most useful columns to show first on phones; the API and ordering contract are in [Shared UI](apps/base/ui/README.md#phone-lists-and-header-actions).
 - **Row links:** Below `sm` (640 px) or on a coarse pointer, every row link has a real tap target at least 44 × 44 px; targets never overlap.
 - **Rows:** `py-0.5`, `px-2`. Headers `py-1`, sunken background, `text-xs font-semibold`.
+- **Wide grids:** Scroll horizontally within their container, keeping headers aligned with their columns; never widen the page.
 - **Numbers:** tabular numerals for IDs, counts, dates and amounts.
 - **Dates:** one date format, "6 Nov 2026", and one date and time format, "6 Nov 2026, 09:13" plus the zone, on every page, in every field and in every display mode the top bar offers. Never ISO `2026-11-06`, `06/11/2026` or the browser's own order. A calendar heading or a day tile may name the weekday or spell the month out ("Wed 3 November 2026"); it keeps the day, month, year order. A time alone is "14:30" (24-hour). Show a date through `bilibi_datetime` (`render_date`, `render`, the `instant` markup) and take one with the shared date, date-and-time or time input, which reads "6 Nov 2026", "6/11/2026" (day first), "2026-11-06" or "2:30 pm" and shows what it understood.
 - **Corners:** table frames are square. A card is flat only where it frames the table.
