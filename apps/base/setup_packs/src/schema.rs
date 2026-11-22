@@ -107,7 +107,8 @@ pub fn pack() -> Value {
                 "properties":{
                     "name":{"type":"string","maxLength":120},
                     "watch":{"type":"string","maxLength":200},
-                    "definition":{"type":"object","additionalProperties":true}
+                    "definition":{"type":"object","additionalProperties":true},
+                    "warnings":{"type":"array","items":{"type":"string"},"description":"Export flags for free-text configuration. Destination preview recomputes the warnings."}
                 }
             }},
         }

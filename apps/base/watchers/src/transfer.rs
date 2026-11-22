@@ -11,12 +11,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_postgres::{Row, Transaction};
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WatcherSetup {
     pub name: String,
     pub watch: String,
     pub definition: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 pub enum WatcherTransfer {
@@ -37,6 +39,7 @@ fn setup(row: &Row) -> WatcherSetup {
         name: row.get(0),
         watch: row.get(1),
         definition: row.get(2),
+        warnings: Vec::new(),
     }
 }
 
@@ -90,10 +93,10 @@ impl Watchers {
                 "Select a watcher whose latest version is a draft.".into(),
             ));
         }
-        let setup = setup(&row);
+        let mut setup = setup(&row);
         let (draft, problems) = setup.parse(&row.get(4));
         let catalog = Catalog::for_scope(tx, scope).await.map_err(Error::from)?;
-        let (review, _) = self
+        let (review, warnings) = self
             .check_transfer(tx, scope, &catalog, &draft, problems)
             .await?;
         if !review.is_empty() {
@@ -101,6 +104,7 @@ impl Watchers {
                 "The draft contains unavailable, restricted or nonportable inputs.".into(),
             ));
         }
+        setup.warnings = warnings;
         Ok(setup)
     }
 
@@ -145,7 +149,14 @@ impl Watchers {
             .await?;
         match rows.as_slice() {
             [] => {}
-            [row] if &setup(row) == incoming => return Ok(WatcherTransfer::Same),
+            [row]
+                if {
+                    let current = setup(row);
+                    current.watch == incoming.watch && current.definition == incoming.definition
+                } =>
+            {
+                return Ok(WatcherTransfer::Same)
+            }
             _ => return Ok(WatcherTransfer::Collision),
         }
         let (draft, problems) = incoming.parse(examples);
@@ -173,7 +184,7 @@ impl Watchers {
         let trigger = self.trigger(&draft.trigger).ok_or(Error::Invalid)?;
         let definition = draft.definition.as_ref().ok_or(Error::Invalid)?;
         let mut warnings = Vec::new();
-        for condition in &definition.conditions {
+        for (index, condition) in definition.conditions.iter().enumerate() {
             let Some(column) = catalog
                 .table(trigger.definition.table)
                 .and_then(|table| catalog.resolve(table, &condition.field).ok())
@@ -197,26 +208,43 @@ impl Watchers {
                     "A condition on a record identifier or personal field cannot travel.".into(),
                 ));
             }
-            if column.ty == FieldType::String && !condition.value.is_null() {
-                warnings.push(format!(
-                    "Condition on {} contains free text. Review the literal and remove the condition if it contains source record data.",
-                    condition.field
-                ));
+            if column.ty == FieldType::String {
+                let values = condition
+                    .value
+                    .as_array()
+                    .map_or_else(|| std::slice::from_ref(&condition.value), Vec::as_slice);
+                for (item, value) in values.iter().enumerate() {
+                    if value.is_string() {
+                        let path = format!("/if/conditions/{index}/value");
+                        let path = if condition.value.is_array() {
+                            format!("{path}/{item}")
+                        } else {
+                            path
+                        };
+                        warnings.push(format!(
+                            "Condition on {} contains free text at {path}. Review the literal for source record data.",
+                            condition.field
+                        ));
+                    }
+                }
             }
         }
-        for action in &definition.actions {
+        for (index, action) in definition.actions.iter().enumerate() {
             if let Some(offered) = self.action(&action.operation) {
                 for (key, value) in &action.input {
-                    if !portable_input(&offered.input["properties"][key], key, value) {
+                    let schema = &offered.input["properties"][key];
+                    if !portable_input(schema, key, value) {
                         problems.push((
                             "do".into(),
                             "Use only declared action parameters that do not identify a record or hold a secret.".into(),
                         ));
-                    } else if contains_free_text(&offered.input["properties"][key], value) {
-                        warnings.push(format!(
-                            "Action {} parameter {key} contains free text. Review it for source record data.",
-                            action.operation
-                        ));
+                    } else {
+                        warn_action_text(
+                            schema,
+                            value,
+                            &format!("/do/{index}/input/{}", pointer_key(key)),
+                            &mut warnings,
+                        );
                     }
                 }
             }
@@ -260,15 +288,35 @@ fn portable_input(schema: &Value, key: &str, value: &Value) -> bool {
         })
 }
 
-fn contains_free_text(schema: &Value, value: &Value) -> bool {
+fn pointer_key(key: &str) -> String {
+    key.replace('~', "~0").replace('/', "~1")
+}
+
+fn warn_action_text(schema: &Value, value: &Value, path: &str, warnings: &mut Vec<String>) {
     match value {
-        Value::String(_) => schema.get("enum").is_none() && schema.get("const").is_none(),
-        Value::Object(fields) => fields
-            .iter()
-            .any(|(key, value)| contains_free_text(&schema["properties"][key], value)),
-        Value::Array(items) => items
-            .iter()
-            .any(|value| contains_free_text(&schema["items"], value)),
-        _ => false,
+        Value::String(_) if schema.get("enum").is_none() => {
+            warnings.push(format!("Action parameter at {path} contains free text. Review the literal for source record data."));
+        }
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                warn_action_text(
+                    &schema["properties"][key],
+                    value,
+                    &format!("{path}/{}", pointer_key(key)),
+                    warnings,
+                );
+            }
+        }
+        Value::Array(items) => {
+            for (index, value) in items.iter().enumerate() {
+                warn_action_text(
+                    &schema["items"],
+                    value,
+                    &format!("{path}/{index}"),
+                    warnings,
+                );
+            }
+        }
+        _ => {}
     }
 }

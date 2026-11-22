@@ -316,9 +316,25 @@ async fn watcher_draft(source: &Person<'_>, target: &Person<'_>) -> Result<(), F
     check(
         "Export contains the authored configuration without source evidence",
         pack["watchers"][0]["watch"] == OPENED
-            && pack["watchers"][0]
-                .as_object()
-                .is_some_and(|draft| draft.len() == 3 && draft.contains_key("definition")),
+            && pack["watchers"][0].as_object().is_some_and(|draft| {
+                draft.len() == 4
+                    && draft.contains_key("definition")
+                    && !draft.contains_key("examples")
+            }),
+    )?;
+    let condition_path = "/if/conditions/1/value";
+    let action_path = "/do/0/input/queue";
+    let flags = &pack["watchers"][0]["warnings"];
+    let has_path = |flags: &Value, path: &str| {
+        flags.as_array().is_some_and(|flags| {
+            flags
+                .iter()
+                .any(|flag| flag.as_str().is_some_and(|reason| reason.contains(path)))
+        })
+    };
+    check(
+        "Export flags the free-text condition and action parameter",
+        has_path(flags, condition_path) && has_path(flags, action_path),
     )?;
     let without_examples = json!({"pack":pack});
     let incomplete = target.read(PREVIEW, &without_examples).await?;
@@ -338,17 +354,24 @@ async fn watcher_draft(source: &Person<'_>, target: &Person<'_>) -> Result<(), F
                 .as_array()
                 .is_some_and(|entries| entries.len() == 1),
     )?;
+    let mut edited = request.clone();
+    edited["pack"]["watchers"][0]["warnings"] = json!([]);
+    let edited_preview = target.read(PREVIEW, &edited).await?;
+    let warnings = Value::Array(
+        edited_preview["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|issue| issue["reason"].clone())
+            .collect(),
+    );
     check(
-        "Preview warns about the title condition and keeps example facts local",
-        preview["warnings"].as_array().is_some_and(|warnings| {
-            warnings.iter().any(|issue| {
-                issue["reason"]
-                    .as_str()
-                    .is_some_and(|reason| reason.contains("Condition on title"))
-            })
-        }) && preview["additions"]["watchers"][0]
-            .get("examples")
-            .is_none(),
+        "Preview flags both literals even when source flags are removed",
+        has_path(&warnings, condition_path)
+            && has_path(&warnings, action_path)
+            && edited_preview["additions"]["watchers"][0]
+                .get("examples")
+                .is_none(),
     )?;
     let outcome = target.write(&[apply(&request, &preview)]).await?;
     let watchers = target

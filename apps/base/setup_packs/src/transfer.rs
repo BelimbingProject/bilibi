@@ -153,7 +153,7 @@ impl SetupPacks {
         (fields, lock): (&[CustomTable], bool),
         diff: &mut Difference,
     ) -> Result<()> {
-        for watcher in watchers {
+        for mut watcher in watchers {
             let entry = format!("watcher {}", watcher.name);
             let examples = examples.remove(&watcher.name).unwrap_or_default();
             let transfer = self
@@ -172,10 +172,13 @@ impl SetupPacks {
             }));
             match transfer {
                 WatcherTransfer::Same => {}
-                WatcherTransfer::Add(_) => diff.additions.watchers.push(SavedWatcher {
-                    setup: watcher,
-                    examples,
-                }),
+                WatcherTransfer::Add(_) => {
+                    watcher.warnings.clear();
+                    diff.additions.watchers.push(SavedWatcher {
+                        setup: watcher,
+                        examples,
+                    });
+                }
                 WatcherTransfer::Collision => diff.collisions.push(Issue {
                     entry,
                     reason: "The destination has a different or ambiguous watcher with this name."
