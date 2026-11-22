@@ -781,6 +781,7 @@ async fn main() -> Result<()> {
             .map_err(|_| Error::Invalid)?;
         check(
             limited["result"]["truncated"] == true
+                && limited["result"]["scan_notice"].is_null()
                 && limited["result"]["results"]
                     .as_array()
                     .is_some_and(|rows| rows.len() <= 1),
@@ -940,6 +941,46 @@ async fn main() -> Result<()> {
         check(
             row.get::<_, i64>(0) == 3 && row.get::<_, i64>(1) == 1,
             "off-period events are skipped and a new event acts after switching on",
+        )?;
+        drop(client);
+        // Retained events whose subjects are no longer available exercise the
+        // scan budget without revealing how many of those events exist.
+        let events = services.get::<bilibi_base::events::Events>(bilibi_base::events::SERVICE)?;
+        let boundary =
+            services.get::<bilibi_database::MutationBoundary>("base/database.mutations")?;
+        let mut client = db.get().await?;
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                admin.mutation_context("walkthrough.trial_budget"),
+            )
+            .await?;
+        for n in 0..5000 {
+            let key = format!("trial-budget:{n}");
+            events.record(&mut tx, bilibi_base::events::NewEvent {
+                name: created, subject: "order:900000000", key: &key,
+                payload: json!({"order_id":900000000,"company_id":1,"status":"draft","revision":1}),
+            }).await?;
+        }
+        tx.commit().await?;
+        drop(client);
+        let budget_draft = json!({"name":"Trial budget", "watch":created,
+            "do":[{"operation":"commerce.sales.order.transition","input":{"status":"cancelled","reason":"Trial"}}], "examples":[]});
+        let budget = registry
+            .read(
+                &db,
+                &admin,
+                "base.watchers.trial",
+                &json!({"draft":budget_draft}),
+            )
+            .await
+            .map_err(|_| Error::Invalid)?;
+        check(
+            budget["result"]["scan_notice"]
+                == "Scan stopped early; narrow the window to check for more events."
+                && budget["result"].get("examined").is_none()
+                && budget["result"].get("hidden").is_none(),
+            "the trial stops at its candidate budget without exposing a count",
         )?;
     }
     println!("every {domain} watcher follow-up check passed");

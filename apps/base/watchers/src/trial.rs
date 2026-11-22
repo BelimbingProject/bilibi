@@ -10,6 +10,10 @@ use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+// A hard work ceiling independent of how many events the reader can see.
+const MAX_CANDIDATES: usize = 5_000;
+const CANDIDATE_PAGE: usize = 128;
+
 impl Watchers {
     pub(crate) async fn trial(
         &self,
@@ -100,7 +104,14 @@ impl Watchers {
         let mut results = Vec::new();
         let mut bytes = 0usize;
         let mut truncated = false;
+        let mut stopped_early = false;
+        let mut candidates = 0usize;
         'scan: loop {
+            if candidates == MAX_CANDIDATES {
+                stopped_early = true;
+                break;
+            }
+            let page_size = (MAX_CANDIDATES - candidates).min(CANDIDATE_PAGE) as i64;
             let rows = client
                 .query(
                     "SELECT id,version,payload,recorded_at::text FROM base_events
@@ -108,7 +119,7 @@ impl Watchers {
                    AND recorded_at >= $3::text::timestamptz - make_interval(days => $4::int)
                    AND recorded_at <= $3::text::timestamptz
                    AND ($5::text IS NULL OR (recorded_at,id) > ($5::text::timestamptz,$6))
-                 ORDER BY recorded_at,id LIMIT 128",
+                 ORDER BY recorded_at,id LIMIT $7",
                     &[
                         &tenant,
                         &draft.trigger,
@@ -116,6 +127,7 @@ impl Watchers {
                         &(days as i32),
                         &cursor_at,
                         &cursor_id,
+                        &page_size,
                     ],
                 )
                 .await
@@ -124,6 +136,7 @@ impl Watchers {
                 break;
             }
             for row in rows {
+                candidates += 1;
                 let id: i64 = row.get(0);
                 let version: i32 = row.get(1);
                 let at: String = row.get(3);
@@ -254,7 +267,7 @@ impl Watchers {
             }
         }
         Ok(
-            json!({"trial_id":trial_id,"window_days":days,"truncated":truncated,"event_evidence":"event_id, recorded_at and subject identify the recorded event; record fields were read today", "coverage":"Retained, unerased events only; retention or erasure can leave gaps.", "effect_basis":"Owner previews use the current record independently.", "results":results}),
+            json!({"trial_id":trial_id,"window_days":days,"truncated":truncated,"event_evidence":"event_id, recorded_at and subject identify the recorded event; record fields were read today", "coverage":"Retained, unerased events only; retention or erasure can leave gaps.", "effect_basis":"Owner previews use the current record independently.", "scan_notice":if stopped_early { Some("Scan stopped early; narrow the window to check for more events.") } else { None }, "results":results}),
         )
     }
 }
