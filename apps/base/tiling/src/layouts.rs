@@ -46,11 +46,8 @@ impl Entry {
     fn read(value: &Value) -> Option<Self> {
         let slug = value.get("slug")?.as_str()?;
         let label = value.get("label")?.as_str()?;
-        let tree = value.get("tree")?.as_str()?;
-        if !valid_slug(slug)
-            || clean_label(label).is_err()
-            || clean_tree(tree).as_deref() != Ok(tree)
-        {
+        let tree = clean_tree(value.get("tree")?.as_str()?).ok()?;
+        if !valid_slug(slug) || clean_label(label).is_err() {
             return None;
         }
         let roles = match value.get("roles") {
@@ -67,7 +64,7 @@ impl Entry {
         Some(Self {
             slug: slug.to_owned(),
             label: label.to_owned(),
-            tree: tree.to_owned(),
+            tree,
             roles,
         })
     }
