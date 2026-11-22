@@ -301,17 +301,12 @@ impl EmailJob {
                 .await?;
             return Ok(Done::Settled);
         };
-        // Short enough that the subject holds both names.
-        let subject_sender = bilibi_templates::bounded(&scope.user_name, 60);
         let name: String = current.get(0);
-        let subject_document = bilibi_templates::bounded(&name, 100);
         let ends = current
             .get::<_, Option<std::time::SystemTime>>(1)
             .and_then(|t| jiff::Timestamp::try_from(t).ok())
             .map(|t| t.strftime("%Y-%m-%d %H:%M UTC").to_string());
         let mut values = vec![
-            ("subject_sender", Fact::Text(&subject_sender)),
-            ("subject_document", Fact::Text(&subject_document)),
             ("sender_name", Fact::Text(&scope.user_name)),
             ("document_name", Fact::Text(&name)),
         ];
@@ -472,7 +467,13 @@ impl Ending for EmailEnded {
 /// (`apps/base/templates/README.md`). The link and the order of the lines
 /// stay in code.
 const SHARE: &str = "core.document.share";
-const SHARE_BODY: &[&str] = &["intro", "access_ends_line", "link_label", "closing"];
+const SHARE_SLOTS: &[&str] = &[
+    "subject",
+    "intro",
+    "access_ends_line",
+    "link_label",
+    "closing",
+];
 inventory::submit! { Contribution::new(bilibi_templates::CATALOGUE, SHARE, Provenance {
     module: "core/document", source: file!(), line: line!(),
 }, &Template {
@@ -488,15 +489,13 @@ inventory::submit! { Contribution::new(bilibi_templates::CATALOGUE, SHARE, Prove
         Slot::text("closing", "Closing text"),
     ],
     variables: &[
-        Variable::text("subject_sender", "Sender name for the subject", "Ahmad Faiz", &["subject"]),
-        Variable::text("subject_document", "Document name for the subject", "Supply agreement 2026.pdf", &["subject"]),
-        Variable::text("sender_name", "Sender's name", "Ahmad Faiz", SHARE_BODY),
-        Variable::text("document_name", "Document name", "Supply agreement 2026.pdf", SHARE_BODY),
+        Variable::text("sender_name", "Sender's name", "Ahmad Faiz", SHARE_SLOTS),
+        Variable::text("document_name", "Document name", "Supply agreement 2026.pdf", SHARE_SLOTS),
         Variable::optional_text("access_ends", "When access ends", "2026-12-31 16:00 UTC", &["access_ends_line"]),
     ],
     base_language: "en",
     defaults: &[DefaultText { language: "en", version: "1", slots: &[
-        ("subject", "{{subject_sender}} shared a document with you: {{subject_document}}"),
+        ("subject", "{{sender_name}} shared a document with you: {{document_name}}"),
         ("intro", "{{sender_name}} shared “{{document_name}}” with you."),
         ("access_ends_line", "Your access ends {{access_ends}}."),
         ("link_label", "Open it, signed in:"),

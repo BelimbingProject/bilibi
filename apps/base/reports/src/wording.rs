@@ -13,12 +13,11 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_templates:
         bilibi_templates::Slot::text("intro", "Text before the download link"),
     ],
     variables: &[
-        bilibi_templates::Variable::text("report_name", "Report name", "Monthly sales", &["intro"]),
-        bilibi_templates::Variable::text("subject_name", "Report name for the subject", "Monthly sales", &["subject"]),
+        bilibi_templates::Variable::text("report_name", "Report name", "Monthly sales", &["subject", "intro"]),
     ],
     base_language: "en",
     defaults: &[bilibi_templates::DefaultText { language: "en", version: "1", slots: &[
-        ("subject", "Scheduled report: {{subject_name}}"),
+        ("subject", "Scheduled report: {{report_name}}"),
         ("intro", "Your scheduled report {{report_name}} is ready.\n\nDownload it, signed in, before it expires:"),
     ] }],
 }) }

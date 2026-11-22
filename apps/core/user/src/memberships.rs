@@ -204,16 +204,7 @@ impl UserService {
             }
             Err(error) => return Err(error),
         };
-        let message = self
-            .invitation_mail(
-                tx.sql(),
-                tenant,
-                (&name, &email),
-                &tenant_name,
-                None,
-                &new_token,
-            )
-            .await?;
+        let message = self.invitation_mail((&name, &email), &tenant_name, None, &new_token)?;
         let mailer = self.mailer.clone();
         let db = self.db.clone();
         let mutations = self.mutations.clone();
@@ -394,16 +385,8 @@ impl UserService {
                 .await?;
         }
         let tenant = scope.tenant();
-        let message = self
-            .invitation_mail(
-                tx.sql(),
-                tenant,
-                (&name, &email),
-                &tenant_name,
-                Some(days),
-                &raw_token,
-            )
-            .await?;
+        let message =
+            self.invitation_mail((&name, &email), &tenant_name, Some(days), &raw_token)?;
         let (mailer, id) = (self.mailer.clone(), invitation.id);
         tx.after_commit(move || {
             tokio::spawn(async move {

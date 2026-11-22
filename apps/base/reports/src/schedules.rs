@@ -982,7 +982,6 @@ impl Reports {
         let Ok(company) = bilibi_party_ids::OrganisationId::new(company) else {
             return JobOutcome::Retry("mail_not_written");
         };
-        let subject_name = bilibi_templates::bounded(&name, 150);
         let wording = match self.db.get().await {
             Ok(client) => {
                 let Ok(locale) = self.locales.resolve(&**client, scope, None).await else {
@@ -996,10 +995,7 @@ impl Reports {
                         Some(company),
                         locale.locale,
                         (
-                            &[
-                                ("report_name", bilibi_templates::Value::Text(&name)),
-                                ("subject_name", bilibi_templates::Value::Text(&subject_name)),
-                            ],
+                            &[("report_name", bilibi_templates::Value::Text(&name))],
                             &[],
                         ),
                     )

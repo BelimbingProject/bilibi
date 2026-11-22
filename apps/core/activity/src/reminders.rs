@@ -334,7 +334,6 @@ impl Sweep {
         else {
             return;
         };
-        let title = crate::wording::title(&reminder.title);
         let when = reminder
             .due
             .map(|t| t.strftime("%Y-%m-%d %H:%M UTC").to_string())
@@ -361,7 +360,6 @@ impl Sweep {
                 (
                     &[
                         ("what", bilibi_templates::Value::Text(what(reminder.kind))),
-                        ("subject_title", bilibi_templates::Value::Text(&title)),
                         ("title", bilibi_templates::Value::Text(&reminder.title)),
                         ("when", bilibi_templates::Value::Text(&when)),
                     ],

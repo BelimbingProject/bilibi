@@ -2,6 +2,7 @@ use bilibi_module_registry::{Consumer, Entry, RegistryError};
 use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 
 pub const PLATFORM_CATALOGUE: &str = "base/templates.platform_catalogue";
 
@@ -278,14 +279,24 @@ impl Template {
     /// Render declared slots without any lookups. Only named references use
     /// braces. A value is appended as data and is never parsed again.
     pub fn render(&self, text: &Text, values: &[(&str, Value<'_>)]) -> Checked<Text> {
-        self.render_except(text, values, &[])
+        self.render_slots(text, values, &[], false)
     }
 
-    pub(crate) fn render_except(
+    pub(crate) fn render_delivery(
         &self,
         text: &Text,
         values: &[(&str, Value<'_>)],
         omitted: &[&str],
+    ) -> Checked<Text> {
+        self.render_slots(text, values, omitted, true)
+    }
+
+    fn render_slots(
+        &self,
+        text: &Text,
+        values: &[(&str, Value<'_>)],
+        omitted: &[&str],
+        fit_subject: bool,
     ) -> Checked<Text> {
         for id in text.keys() {
             if !self.slots.iter().any(|slot| slot.id == id) {
@@ -298,7 +309,12 @@ impl Template {
             .filter(|slot| slot.required || text.contains_key(slot.id))
             .map(|slot| {
                 let source = text.get(slot.id).map(String::as_str).unwrap_or_default();
-                let output = self.render_slot(slot, source, values)?;
+                let output = self.render_slot(
+                    slot,
+                    source,
+                    values,
+                    fit_subject && slot.context == Context::Subject,
+                )?;
                 Ok((slot.id.into(), output))
             })
             .collect()
@@ -314,6 +330,7 @@ impl Template {
         slot: &Slot,
         source: &str,
         values: &[(&str, Value<'_>)],
+        fit_subject: bool,
     ) -> Checked<String> {
         check_text(slot, source)?;
         let syntax = || {
@@ -324,6 +341,7 @@ impl Template {
         };
         let mut remaining = source;
         let mut output = String::with_capacity(source.len());
+        let mut facts = Vec::new();
         while let Some((literal, reference)) = remaining.split_once("{{") {
             if literal.contains("}}") {
                 return Err(syntax());
@@ -363,12 +381,13 @@ impl Template {
                                 "Required template value is missing.",
                             ));
                         }
-                        if value.len() > slot.max_bytes {
+                        if !fit_subject && value.len() > slot.max_bytes {
                             return Err(Problem::new(
                                 variable.id,
                                 "Template value exceeds the field limit.",
                             ));
                         }
+                        let start = output.len();
                         output.extend(value.chars().map(|c| {
                             if forbidden_character(c)
                                 && !(slot.context == Context::PlainText
@@ -379,6 +398,9 @@ impl Template {
                                 c
                             }
                         }));
+                        if fit_subject && start != output.len() {
+                            facts.push(start..output.len());
+                        }
                     }
                     Value::Date(date) => output
                         .push_str(&bilibi_datetime::DisplayContext::anonymous().render_date(date)),
@@ -397,7 +419,7 @@ impl Template {
                     ))
                 }
             }
-            if output.len() > slot.max_bytes {
+            if !fit_subject && output.len() > slot.max_bytes {
                 return Err(Problem::new(
                     slot.id,
                     format!("{} exceeds the rendered field limit.", slot.label),
@@ -409,9 +431,30 @@ impl Template {
             return Err(syntax());
         }
         output.push_str(remaining);
+        if fit_subject && output.len() > slot.max_bytes {
+            output = fit_subject_facts(&output, &facts, slot.max_bytes).unwrap_or(output);
+        }
         check_text(slot, &output)?;
         Ok(output)
     }
+}
+
+fn fit_subject_facts(text: &str, facts: &[Range<usize>], limit: usize) -> Option<String> {
+    let mut remaining: usize = facts.iter().map(Range::len).sum();
+    let mut budget = limit.checked_sub(text.len() - remaining)?;
+    let mut result = String::with_capacity(limit);
+    let mut previous = 0;
+    for fact in facts {
+        result.push_str(&text[previous..fact.start]);
+        let allowance = budget.saturating_mul(fact.len()) / remaining;
+        let value = bounded(&text[fact.clone()], allowance);
+        budget -= value.len();
+        remaining -= fact.len();
+        result.push_str(&value);
+        previous = fact.end;
+    }
+    result.push_str(&text[previous..]);
+    Some(result)
 }
 
 fn validate(entries: &[Entry]) -> bilibi_module_registry::Result<()> {

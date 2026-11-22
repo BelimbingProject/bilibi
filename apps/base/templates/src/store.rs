@@ -117,13 +117,18 @@ impl Templates {
         Ok(select(entry, &languages, &heads, None))
     }
 
+    /// Render a platform-controlled template in its base language without a database read.
+    pub fn platform_wording(&self, key: &str, values: &[(&str, Value<'_>)]) -> Result<Text> {
+        let entry = self.platform.get(key).ok_or(Error::NotFound)?;
+        let language = entry.base_language;
+        let resolved = select(entry, &[language.to_owned()], &[], None);
+        render_wording(entry, language, resolved, values, &[])
+    }
+
     /// The rendered slots of a message a module sends for a workspace, in
     /// the template's base language. For mail with no business record's
-    /// company and often no session (a reset link or a workspace invitation),
-    /// `tenant` is one the caller
-    /// proved from its own record. A published override that cannot hold
-    /// these facts (a name longer than its field) gives way to the packaged
-    /// wording, so a message people wait for is still sent.
+    /// company, `tenant` is one the caller proved from its own record. A
+    /// published override that cannot render gives way to packaged wording.
     pub async fn tenant_wording(
         &self,
         client: &dyn ReadClient,
@@ -311,7 +316,7 @@ fn render_wording(
     values: &[(&str, Value<'_>)],
     omitted: &[&str],
 ) -> Result<Text> {
-    let problem = match entry.render_except(&resolved.slots, values, omitted) {
+    let problem = match entry.render_delivery(&resolved.slots, values, omitted) {
         Ok(text) => return Ok(text),
         Err(problem) => problem,
     };
@@ -319,7 +324,7 @@ fn render_wording(
         let languages = catalogue::languages(language, None, entry.base_language)
             .map_err(|problem| Error::refused(problem.to_string()))?;
         let packaged = select(entry, &languages, &[], None);
-        if let Ok(text) = entry.render_except(&packaged.slots, values, omitted) {
+        if let Ok(text) = entry.render_delivery(&packaged.slots, values, omitted) {
             eprintln!("templates: {} revision {revision} could not be filled in ({problem}); the packaged wording was used", entry.key);
             return Ok(text);
         }

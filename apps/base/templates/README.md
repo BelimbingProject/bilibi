@@ -21,14 +21,13 @@ Contribute a static `Template` through Module Registry. Use `bilibi_templates::C
 **No message text in code: declare a template and ask for its wording.**
 
 ```rust,ignore
-let text = templates
-    .tenant_wording(client, tenant, "core.user.password_reset", &[("person_name", Value::Text(&name))])
-    .await?;
+let text = templates.platform_wording("core.user.password_reset", &[])?;
 let message = Message::text(to, text["subject"].clone(), format!("{}\n\n{link}\n\n{}\n", text["intro"], text["closing"]));
 mailer.deliver_for(tenant, &message).await?;
 ```
 
-- `Templates::wording` renders scoped mail using the authorised record’s company and the message’s resolved locale. `Templates::tenant_wording` uses the template’s base language and a tenant the caller proved from its own record, such as a password reset without a session.
+- `Templates::wording` renders scoped mail using the authorised record’s company and the message’s resolved locale. `Templates::tenant_wording` uses the template’s base language and a tenant the caller proved from its own record. `Templates::platform_wording` renders packaged security mail without a database connection.
+- Supply full facts for mail. If the rendered subject exceeds its byte limit, delivery shortens the text facts in that slot and preserves body text.
 - A published override that cannot hold the real facts gives way to the packaged wording, with a log line, so the message is still sent.
 - **Links stay in code.** A slot is prose before or after a link; the sending module builds the link and fixes the order of the parts. Security messages use packaged wording. Publish and restore refuse those keys.
 - A line some messages lack (a place, an end date) is its own slot with an optional variable; Pass omitted slots to `Templates::wording` when the message leaves out those lines.

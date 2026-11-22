@@ -108,13 +108,7 @@ impl UserService {
         );
         let wording = self
             .templates
-            .tenant_wording(
-                &**client,
-                tenant,
-                crate::wording::EMAIL_VERIFICATION,
-                &[("person_name", bilibi_templates::Value::Text(&name))],
-            )
-            .await?;
+            .platform_wording(crate::wording::EMAIL_VERIFICATION, &[])?;
         let message = Message::text(
             Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
             wording["subject"].clone(),

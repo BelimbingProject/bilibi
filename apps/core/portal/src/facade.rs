@@ -771,25 +771,14 @@ impl PortalService {
                 })
             })
             .await?;
-        let subject_title = bilibi_templates::bounded(&site.title, 150);
         let days_text = days.to_string();
-        let wording = self
-            .templates
-            .tenant_wording(
-                tx.sql(),
-                tenant,
-                crate::wording::INVITATION,
-                &[
-                    ("person_name", bilibi_templates::Value::Text(&name)),
-                    (
-                        "subject_title",
-                        bilibi_templates::Value::Text(&subject_title),
-                    ),
-                    ("site_title", bilibi_templates::Value::Text(&site.title)),
-                    ("days", bilibi_templates::Value::Text(&days_text)),
-                ],
-            )
-            .await?;
+        let wording = self.templates.platform_wording(
+            crate::wording::INVITATION,
+            &[
+                ("site_title", bilibi_templates::Value::Text(&site.title)),
+                ("days", bilibi_templates::Value::Text(&days_text)),
+            ],
+        )?;
         let mut message = Message::text(
             Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
             wording["subject"].clone(),

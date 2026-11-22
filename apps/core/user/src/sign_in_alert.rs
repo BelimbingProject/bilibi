@@ -51,21 +51,15 @@ impl UserService {
         let at = display.render(at, Format::DateTime, Precision::Minute).text;
         let ip = device.ip_address.as_deref().unwrap_or("not recorded");
         let place = device.place.as_deref().unwrap_or("not recorded");
-        let wording = self
-            .templates
-            .tenant_wording(
-                &**client,
-                scope.tenant(),
-                crate::wording::NEW_DEVICE_SIGN_IN,
-                &[
-                    ("person_name", Value::Text(&name)),
-                    ("time", Value::Text(&at)),
-                    ("device", Value::Text(&device.device)),
-                    ("ip_address", Value::Text(ip)),
-                    ("place", Value::Text(place)),
-                ],
-            )
-            .await?;
+        let wording = self.templates.platform_wording(
+            crate::wording::NEW_DEVICE_SIGN_IN,
+            &[
+                ("time", Value::Text(&at)),
+                ("device", Value::Text(&device.device)),
+                ("ip_address", Value::Text(ip)),
+                ("place", Value::Text(place)),
+            ],
+        )?;
         let message = Message::text(
             Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
             wording["subject"].clone(),

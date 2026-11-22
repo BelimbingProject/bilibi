@@ -212,16 +212,6 @@ impl ResetMail {
         });
     }
 
-    /// This workspace's wording of one of the reset mails.
-    async fn wording(
-        &self,
-        tenant: i64,
-        key: &str,
-        values: &[(&str, Fact<'_>)],
-    ) -> Result<bilibi_templates::Text, Error> {
-        crate::wording::wording(&self.db, &self.templates, tenant, key, values).await
-    }
-
     async fn withdraw(&self, tenant: i64, user: i64, hash: Vec<u8>) -> Result<(), Error> {
         let mut client = self.db.get().await?;
         let mut tx = self
@@ -278,16 +268,10 @@ impl ResetMail {
         drop(client);
         let (name, address): (String, String) = (row.get(0), row.get(1));
         let duration = format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" });
-        let wording = self
-            .wording(
-                tenant,
-                crate::wording::SIGN_IN_LOCKED,
-                &[
-                    ("person_name", Fact::Text(&name)),
-                    ("duration", Fact::Text(&duration)),
-                ],
-            )
-            .await?;
+        let wording = self.templates.platform_wording(
+            crate::wording::SIGN_IN_LOCKED,
+            &[("duration", Fact::Text(&duration))],
+        )?;
         let token = self.issue_token(tenant, user).await?;
         let link = match &token {
             Some(token) => format!(
@@ -487,13 +471,9 @@ impl UserService {
         }
         drop(client);
         let mail = self.reset_mail();
-        let wording = mail
-            .wording(
-                tenant,
-                crate::wording::PASSWORD_RESET,
-                &[("person_name", Fact::Text(&name))],
-            )
-            .await?;
+        let wording = self
+            .templates
+            .platform_wording(crate::wording::PASSWORD_RESET, &[])?;
         let Some(token) = mail.issue_token(tenant, user).await? else {
             return finish_reset_request().await;
         };

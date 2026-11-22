@@ -2,12 +2,11 @@
 //! (`apps/base/templates/README.md`). Security wording is platform-controlled;
 //! this module builds the links and fixes the order of the parts.
 use crate::UserService;
-use bilibi_database::{Db, Error};
+use bilibi_database::Error;
 use bilibi_mail::{Address, Message};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_templates::{
-    Audience, DefaultText, Output, Slot, Template, Templates, Text, Value, Variable,
-    PLATFORM_CATALOGUE,
+    Audience, DefaultText, Output, Slot, Template, Text, Value, Variable, PLATFORM_CATALOGUE,
 };
 
 pub(crate) const PASSWORD_RESET: &str = "core.user.password_reset";
@@ -17,21 +16,6 @@ pub(crate) const EMAIL_VERIFICATION: &str = "core.user.email_verification";
 pub(crate) const NEW_DEVICE_SIGN_IN: &str = "core.user.new_device_sign_in";
 pub(crate) const TWO_FACTOR_RESET: &str = "core.user.two_factor_reset";
 
-/// The filled-in wording of one message for `tenant`, read on a connection
-/// of its own.
-pub(crate) async fn wording(
-    db: &Db,
-    templates: &Templates,
-    tenant: i64,
-    key: &str,
-    values: &[(&str, Value<'_>)],
-) -> Result<Text, Error> {
-    let client = db.get().await?;
-    templates
-        .tenant_wording(&**client, tenant, key, values)
-        .await
-}
-
 /// The text of a message whose link stands alone between two passages.
 pub(crate) fn around_link(text: &Text, link: &str) -> String {
     format!("{}\n\n{link}\n\n{}\n", text["intro"], text["closing"])
@@ -39,10 +23,8 @@ pub(crate) fn around_link(text: &Text, link: &str) -> String {
 
 impl UserService {
     /// The workspace invitation email around the one-time link.
-    pub(crate) async fn invitation_mail(
+    pub(crate) fn invitation_mail(
         &self,
-        client: &dyn bilibi_tenancy::ReadClient,
-        tenant: i64,
         (name, email): (&str, &str),
         tenant_name: &str,
         days: Option<i32>,
@@ -54,18 +36,11 @@ impl UserService {
             "reissue_closing"
         };
         let days = days.map(|days| days.to_string());
-        let subject_name = bilibi_templates::bounded(tenant_name, 150);
-        let mut values = vec![
-            ("workspace_name", Value::Text(tenant_name)),
-            ("subject_name", Value::Text(&subject_name)),
-        ];
+        let mut values = vec![("workspace_name", Value::Text(tenant_name))];
         if let Some(days) = &days {
             values.push(("days", Value::Text(days)));
         }
-        let wording = self
-            .templates
-            .tenant_wording(client, tenant, INVITATION, &values)
-            .await?;
+        let wording = self.templates.platform_wording(INVITATION, &values)?;
         Ok(Message::text(
             Address::new(Some(name), email).map_err(|_| Error::Invalid)?,
             wording["subject"].clone(),
@@ -82,9 +57,6 @@ const LINK_SLOTS: &[Slot] = &[
     Slot::text("intro", "Text before the link"),
     Slot::text("closing", "Text after the link"),
 ];
-const LINK_MAIL: &[&str] = &["subject", "intro", "closing"];
-const PERSON: Variable =
-    Variable::text("person_name", "Recipient's name", "Siti Aminah", LINK_MAIL);
 
 macro_rules! template {
     ($key:expr, $template:expr) => {
@@ -102,7 +74,7 @@ template!(
         audience: Audience::Anyone,
         outputs: &[Output::PlainText],
         slots: LINK_SLOTS,
-        variables: &[PERSON],
+        variables: &[],
         base_language: "en",
         defaults: &[DefaultText {
             language: "en",
@@ -133,12 +105,6 @@ template!(
             Slot::text("reset_without_link", "Text when no reset link can be sent"),
         ],
         variables: &[
-            Variable::text(
-                "person_name",
-                "Recipient's name",
-                "Siti Aminah",
-                &["subject", "intro"]
-            ),
             Variable::text(
                 "duration",
                 "How long sign-in is locked",
@@ -174,8 +140,7 @@ template!(
             Slot::text("reissue_closing", "Text after a reissued link"),
         ],
         variables: &[
-            Variable::text("workspace_name", "Workspace name", "Example Trading", &["intro"]),
-            Variable::text("subject_name", "Workspace name for the subject", "Example Trading", &["subject"]),
+            Variable::text("workspace_name", "Workspace name", "Example Trading", &["subject", "intro"]),
             Variable::optional_text("days", "Days the link works", "7", &["closing"]),
         ],
         base_language: "en",
@@ -183,7 +148,7 @@ template!(
             language: "en",
             version: "1",
             slots: &[
-                ("subject", "You're invited to {{subject_name}}"),
+                ("subject", "You're invited to {{workspace_name}}"),
                 ("intro", "You are invited to join {{workspace_name}}.\n\nOpen this link to accept:"),
                 ("closing", "The link works once and expires in {{days}} day(s). If you did not expect this, you can ignore this email."),
                 ("reissue_closing", "The link works once. If you did not expect this, you can ignore this email."),
@@ -200,7 +165,7 @@ template!(
         audience: Audience::Anyone,
         outputs: &[Output::PlainText],
         slots: LINK_SLOTS,
-        variables: &[PERSON],
+        variables: &[],
         base_language: "en",
         defaults: &[DefaultText {
             language: "en",
@@ -229,7 +194,6 @@ template!(
             Slot::text("closing", "Text before the link to Your sessions"),
         ],
         variables: &[
-            Variable::text("person_name", "Recipient's name", "Siti Aminah", DEVICE_MAIL),
             Variable::text("time", "When the sign-in happened", "2026-11-20 09:15", DEVICE_MAIL),
             Variable::text("device", "Device", "Chrome on Windows", DEVICE_MAIL),
             Variable::text("ip_address", "IP address", "203.0.113.7", DEVICE_MAIL),
@@ -249,7 +213,9 @@ template!(
     }
 );
 
-const RESET_MAIL: &[&str] = &["subject", "by_admin", "by_server_admin"];
+pub(crate) const TWO_FACTOR_SUBJECT: &str = "Your 2FA was reset";
+pub(crate) const TWO_FACTOR_ADMIN_BODY: &str = "An admin turned off your 2FA methods and disconnected your AI apps. Sign in and set up 2FA again in Settings.";
+pub(crate) const TWO_FACTOR_SYSTEM_BODY: &str = "A server administrator turned off your 2FA methods and disconnected your AI apps. Sign in and set up 2FA again in Settings.";
 template!(
     TWO_FACTOR_RESET,
     Template {
@@ -260,17 +226,20 @@ template!(
         slots: &[
             Slot::subject(),
             Slot::text("by_admin", "Message when a workspace admin reset it"),
-            Slot::text("by_server_admin", "Message when a server administrator reset it"),
+            Slot::text(
+                "by_server_admin",
+                "Message when a server administrator reset it"
+            ),
         ],
-        variables: &[Variable::text("person_name", "Recipient's name", "Siti Aminah", RESET_MAIL)],
+        variables: &[],
         base_language: "en",
         defaults: &[DefaultText {
             language: "en",
             version: "1",
             slots: &[
-                ("subject", "Your 2FA was reset"),
-                ("by_admin", "An admin turned off your 2FA methods and disconnected your AI apps. Sign in and set up 2FA again in Settings."),
-                ("by_server_admin", "A server administrator turned off your 2FA methods and disconnected your AI apps. Sign in and set up 2FA again in Settings."),
+                ("subject", TWO_FACTOR_SUBJECT),
+                ("by_admin", TWO_FACTOR_ADMIN_BODY),
+                ("by_server_admin", TWO_FACTOR_SYSTEM_BODY),
             ],
         }],
     }

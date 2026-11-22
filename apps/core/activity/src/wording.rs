@@ -7,18 +7,13 @@ use bilibi_database::Result;
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_party_ids::OrganisationId;
 use bilibi_templates::{
-    bounded, Audience, DefaultText, Output, Slot, Template, Templates, Value, Variable, CATALOGUE,
+    Audience, DefaultText, Output, Slot, Template, Templates, Value, Variable, CATALOGUE,
 };
 use bilibi_tenancy::{ReadClient, Scope};
 
 pub(crate) const INVITATION: &str = "core.activity.invitation";
 pub(crate) const GUEST_REMINDER: &str = "core.activity.guest_reminder";
 pub(crate) const REMINDER: &str = "core.activity.reminder";
-
-/// A title as a message shows it: short enough for a subject line.
-pub(crate) fn title(title: &str) -> String {
-    bounded(title, 150)
-}
 
 /// The subject and text of a guest's message about `activity`: what, when,
 /// where and the join link, the description when `described`, and who sent
@@ -32,11 +27,9 @@ pub(crate) async fn guest_mail(
     described: bool,
 ) -> Result<(String, String)> {
     let kind = activity.kind.label().to_lowercase();
-    let title = title(&activity.title);
     let mut values = vec![
         ("sender_name", Value::Text(sender)),
         ("kind", Value::Text(&kind)),
-        ("subject_title", Value::Text(&title)),
         ("title", Value::Text(&activity.title)),
         ("when", Value::Text(when)),
     ];
@@ -105,18 +98,7 @@ const GUEST_ALL: &[&str] = &[
 const GUEST_VARIABLES: &[Variable] = &[
     Variable::text("sender_name", "Sender's name", "Ahmad Faiz", GUEST_ALL),
     Variable::text("kind", "Kind of activity", "meeting", GUEST_ALL),
-    Variable::text(
-        "subject_title",
-        "Title for the subject",
-        "Quarterly review",
-        &["subject"],
-    ),
-    Variable::text(
-        "title",
-        "Title",
-        "Quarterly review",
-        &["intro", "when_line", "where_line", "join_label", "closing"],
-    ),
+    Variable::text("title", "Title", "Quarterly review", GUEST_ALL),
     Variable::text(
         "when",
         "Date and time",
@@ -135,7 +117,7 @@ inventory::submit! { Contribution::new(CATALOGUE, INVITATION, provenance!(), &Te
     variables: GUEST_VARIABLES,
     base_language: "en",
     defaults: &[DefaultText { language: "en", version: "1", slots: &[
-        ("subject", "Invitation: {{subject_title}}"),
+        ("subject", "Invitation: {{title}}"),
         ("intro", "{{sender_name}} invites you to a {{kind}}: {{title}}"),
         ("when_line", "When: {{when}}"),
         ("where_line", "Where: {{location}}"),
@@ -153,7 +135,7 @@ inventory::submit! { Contribution::new(CATALOGUE, GUEST_REMINDER, provenance!(),
     variables: GUEST_VARIABLES,
     base_language: "en",
     defaults: &[DefaultText { language: "en", version: "1", slots: &[
-        ("subject", "Reminder: {{subject_title}}"),
+        ("subject", "Reminder: {{title}}"),
         ("intro", "A reminder of the {{kind}} {{sender_name}} invited you to: {{title}}"),
         ("when_line", "When: {{when}}"),
         ("where_line", "Where: {{location}}"),
@@ -177,13 +159,12 @@ inventory::submit! { Contribution::new(CATALOGUE, REMINDER, provenance!(), &Temp
     ],
     variables: &[
         Variable::text("what", "What is due", "Meeting", OWN_ALL),
-        Variable::text("subject_title", "Title for the subject", "Quarterly review", &["subject"]),
-        Variable::text("title", "Title", "Quarterly review", &["intro", "due_line", "starts_line", "link_label"]),
+        Variable::text("title", "Title", "Quarterly review", OWN_ALL),
         Variable::optional_text("when", "Date and time", "2026-11-20 09:15 UTC", &["due_line", "starts_line"]),
     ],
     base_language: "en",
     defaults: &[DefaultText { language: "en", version: "1", slots: &[
-        ("subject", "Reminder: {{subject_title}}"),
+        ("subject", "Reminder: {{title}}"),
         ("intro", "{{what}}: {{title}}"),
         ("due_line", "Due {{when}}"),
         ("starts_line", "Starts {{when}}"),
