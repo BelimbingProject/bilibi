@@ -19,8 +19,8 @@ const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
 /// The blank border a scanner needs around the code, in modules.
 const QUIET_ZONE: usize = 4;
 
-/// The key URI for one account. `issuer` is the installation's public host
-/// and `account` the account's email, so the app lists `Issuer (email)`.
+/// The key URI for one account. `issuer` names the installation and
+/// `account` is the account's email, so the app lists `Issuer (email)`.
 pub fn key_uri(issuer: &str, account: &str, secret_base32: &str) -> String {
     let issuer = utf8_percent_encode(issuer, COMPONENT).to_string();
     let account = utf8_percent_encode(account, COMPONENT);

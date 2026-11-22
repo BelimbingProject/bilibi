@@ -471,7 +471,11 @@ impl UserService {
     /// The public installation host distinguishes entries in authenticator apps.
     fn issuer(&self) -> Result<String> {
         let origin = url::Url::parse(&self.origin).map_err(|_| Error::Invalid)?;
-        Ok(origin.host_str().ok_or(Error::Invalid)?.to_owned())
+        let issuer = match origin.host().ok_or(Error::Invalid)? {
+            url::Host::Domain(host) if !host.contains(':') => host,
+            _ => "Bilibi",
+        };
+        Ok(issuer.to_owned())
     }
 
     /// Checks a code against the confirmed authenticator without consuming
