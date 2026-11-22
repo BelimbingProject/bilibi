@@ -52,6 +52,14 @@ impl SavedView {
     }
 }
 
+#[derive(Serialize)]
+pub(crate) struct SavedWatcher {
+    #[serde(flatten)]
+    pub setup: WatcherSetup,
+    #[serde(skip)]
+    pub examples: serde_json::Value,
+}
+
 pub(crate) fn sort_pack(pack: &mut Pack) -> Result<()> {
     distinct(
         pack.views
@@ -60,9 +68,7 @@ pub(crate) fn sort_pack(pack: &mut Pack) -> Result<()> {
         "views",
     )?;
     distinct(
-        pack.watchers
-            .iter()
-            .map(|watcher| watcher.name.to_lowercase()),
+        pack.watchers.iter().map(|watcher| &watcher.name),
         "watchers",
     )?;
     pack.views
@@ -143,19 +149,33 @@ impl SetupPacks {
         tx: &Transaction<'_>,
         scope: &Scope,
         watchers: Vec<WatcherSetup>,
-        fields: &[CustomTable],
-        lock: bool,
+        mut examples: BTreeMap<String, serde_json::Value>,
+        (fields, lock): (&[CustomTable], bool),
         diff: &mut Difference,
     ) -> Result<()> {
         for watcher in watchers {
             let entry = format!("watcher {}", watcher.name);
-            match self
+            let examples = examples.remove(&watcher.name).unwrap_or_default();
+            let transfer = self
                 .watchers
-                .compare_draft(tx, scope, &watcher, fields, lock)
-                .await?
-            {
+                .compare_draft(tx, scope, &watcher, &examples, fields, lock)
+                .await?;
+            let warnings = match &transfer {
+                WatcherTransfer::Add(warnings) | WatcherTransfer::Invalid(_, warnings) => {
+                    warnings.as_slice()
+                }
+                _ => &[],
+            };
+            diff.warnings.extend(warnings.iter().map(|reason| Issue {
+                entry: entry.clone(),
+                reason: reason.clone(),
+            }));
+            match transfer {
                 WatcherTransfer::Same => {}
-                WatcherTransfer::Add => diff.additions.watchers.push(watcher),
+                WatcherTransfer::Add(_) => diff.additions.watchers.push(SavedWatcher {
+                    setup: watcher,
+                    examples,
+                }),
                 WatcherTransfer::Collision => diff.collisions.push(Issue {
                     entry,
                     reason: "The destination has a different or ambiguous watcher with this name."
@@ -167,7 +187,7 @@ impl SetupPacks {
                         reason,
                     }))
                 }
-                WatcherTransfer::Invalid(problems) => {
+                WatcherTransfer::Invalid(problems, _) => {
                     diff.invalid
                         .extend(problems.into_iter().map(|(field, problem)| Issue {
                             entry: entry.clone(),

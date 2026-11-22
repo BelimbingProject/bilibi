@@ -5,7 +5,7 @@ use crate::{
     Watchers, MANAGE, VIEW,
 };
 use bilibi_database::{Error, MutationTransaction, Result};
-use bilibi_grid::{Catalog, CustomTable};
+use bilibi_grid::{Catalog, CustomTable, FieldType};
 use bilibi_tenancy::Scope;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -17,20 +17,18 @@ pub struct WatcherSetup {
     pub name: String,
     pub watch: String,
     pub definition: Value,
-    pub examples: Value,
 }
 
 pub enum WatcherTransfer {
     Same,
-    Add,
+    Add(Vec<String>),
     Collision,
     Missing(Vec<String>),
-    Invalid(Vec<(String, String)>),
+    Invalid(Vec<(String, String)>, Vec<String>),
 }
 
-const LATEST: &str = "SELECT w.name,w.trigger,v.definition,v.examples,v.approved_at IS NOT NULL
-    FROM base_watchers w JOIN LATERAL (
-        SELECT definition,examples,approved_at FROM base_watcher_versions
+const LATEST: &str = "FROM base_watchers w JOIN LATERAL (
+        SELECT definition,approved_at,examples FROM base_watcher_versions
         WHERE tenant_id=w.tenant_id AND watcher_id=w.id ORDER BY number DESC LIMIT 1
     ) v ON true WHERE w.tenant_id=$1";
 
@@ -39,12 +37,11 @@ fn setup(row: &Row) -> WatcherSetup {
         name: row.get(0),
         watch: row.get(1),
         definition: row.get(2),
-        examples: row.get(3),
     }
 }
 
 impl WatcherSetup {
-    fn parse(&self) -> (Draft, Problems) {
+    fn parse(&self, examples: &Value) -> (Draft, Problems) {
         let mut input = self.definition.clone();
         if !input.is_object() {
             return (
@@ -54,7 +51,7 @@ impl WatcherSetup {
         }
         input["name"] = json!(self.name);
         input["watch"] = json!(self.watch);
-        input["examples"] = self.examples.clone();
+        input["examples"] = examples.clone();
         let mut problems = Vec::new();
         let mut draft = Draft::parse(&input, &mut problems);
         draft.watcher_id = None;
@@ -65,7 +62,7 @@ impl WatcherSetup {
                 .definition
                 .as_ref()
                 .is_some_and(|definition| definition.to_json() != self.definition)
-            || examples_json(&draft.examples) != self.examples
+            || (!examples.is_null() && examples_json(&draft.examples) != *examples)
         {
             problems.push((
                 "definition".into(),
@@ -85,18 +82,18 @@ impl Watchers {
     ) -> Result<WatcherSetup> {
         bilibi_authz::authorize_key(tx, scope, VIEW).await?;
         let row = tx
-            .query_opt(&format!("{LATEST} AND w.id=$2"), &[&scope.tenant(), &id])
+            .query_opt(&format!("SELECT w.name,w.trigger,v.definition,v.approved_at IS NOT NULL,v.examples {LATEST} AND w.id=$2"), &[&scope.tenant(), &id])
             .await?
             .ok_or(Error::NotFound)?;
-        if row.get::<_, bool>(4) {
+        if row.get::<_, bool>(3) {
             return Err(Error::Refused(
                 "Select a watcher whose latest version is a draft.".into(),
             ));
         }
         let setup = setup(&row);
-        let (draft, problems) = setup.parse();
+        let (draft, problems) = setup.parse(&row.get(4));
         let catalog = Catalog::for_scope(tx, scope).await.map_err(Error::from)?;
-        let review = self
+        let (review, _) = self
             .check_transfer(tx, scope, &catalog, &draft, problems)
             .await?;
         if !review.is_empty() {
@@ -112,13 +109,15 @@ impl Watchers {
         tx: &Transaction<'_>,
         scope: &Scope,
         incoming: &WatcherSetup,
+        examples: &Value,
         fields: &[CustomTable],
         lock: bool,
     ) -> Result<WatcherTransfer> {
         bilibi_authz::authorize_key(tx, scope, MANAGE).await?;
-        let (draft, problems) = incoming.parse();
+        bilibi_authz::authorize_key(tx, scope, VIEW).await?;
+        let (draft, problems) = incoming.parse(&Value::Null);
         let Some(definition) = &draft.definition else {
-            return Ok(WatcherTransfer::Invalid(problems));
+            return Ok(WatcherTransfer::Invalid(problems, Vec::new()));
         };
         let mut missing = Vec::new();
         if self.trigger(&draft.trigger).is_none() {
@@ -132,36 +131,34 @@ impl Watchers {
         if !missing.is_empty() {
             return Ok(WatcherTransfer::Missing(missing));
         }
-        let catalog = Catalog::for_setup_preview(tx, scope, fields)
-            .await
-            .map_err(Error::from)?;
-        let problems = self
-            .check_transfer(tx, scope, &catalog, &draft, problems)
-            .await?;
         if !problems.is_empty() {
-            return Ok(WatcherTransfer::Invalid(problems));
+            return Ok(WatcherTransfer::Invalid(problems, Vec::new()));
         }
         if lock {
             self.lock_admission(tx, scope).await?;
         }
         let rows = tx
             .query(
-                &format!("{LATEST} AND lower(w.name)=lower($2) ORDER BY w.id LIMIT 2"),
+                &format!("SELECT w.name,w.trigger,v.definition {LATEST} AND w.name=$2 ORDER BY w.id LIMIT 2"),
                 &[&scope.tenant(), &incoming.name],
             )
             .await?;
-        Ok(match rows.as_slice() {
-            [] => WatcherTransfer::Add,
-            [row]
-                if {
-                    let mut current = setup(row);
-                    current.name.clone_from(&incoming.name);
-                    &current == incoming
-                } =>
-            {
-                WatcherTransfer::Same
-            }
-            _ => WatcherTransfer::Collision,
+        match rows.as_slice() {
+            [] => {}
+            [row] if &setup(row) == incoming => return Ok(WatcherTransfer::Same),
+            _ => return Ok(WatcherTransfer::Collision),
+        }
+        let (draft, problems) = incoming.parse(examples);
+        let catalog = Catalog::for_setup_preview(tx, scope, fields)
+            .await
+            .map_err(Error::from)?;
+        let (problems, warnings) = self
+            .check_transfer(tx, scope, &catalog, &draft, problems)
+            .await?;
+        Ok(if problems.is_empty() {
+            WatcherTransfer::Add(warnings)
+        } else {
+            WatcherTransfer::Invalid(problems, warnings)
         })
     }
 
@@ -172,32 +169,38 @@ impl Watchers {
         catalog: &Catalog,
         draft: &Draft,
         mut problems: Problems,
-    ) -> Result<Problems> {
+    ) -> Result<(Problems, Vec<String>)> {
         let trigger = self.trigger(&draft.trigger).ok_or(Error::Invalid)?;
         let definition = draft.definition.as_ref().ok_or(Error::Invalid)?;
-        // The stored rule literals and authored examples are configuration.
-        // A record reference or an action parameter declared secret is not portable.
+        let mut warnings = Vec::new();
         for condition in &definition.conditions {
-            if catalog
+            let Some(column) = catalog
                 .table(trigger.definition.table)
                 .and_then(|table| catalog.resolve(table, &condition.field).ok())
-                .is_some_and(|column| {
-                    catalog.table(column.table).is_some_and(|table| {
-                        column.field.is_some_and(|field| {
-                            table.custom_reference(field.id).is_some()
-                                || field.id == table.key()
-                                || record_id(field.id)
-                                || field.personal.is_some()
-                                || table.record_fields().iter().any(|record| {
-                                    record.id == field.id && record.personal.is_some()
-                                })
-                        })
-                    })
+            else {
+                continue;
+            };
+            if catalog.table(column.table).is_some_and(|table| {
+                column.field.is_some_and(|field| {
+                    table.custom_reference(field.id).is_some()
+                        || field.id == table.key()
+                        || record_id(field.id)
+                        || field.personal.is_some()
+                        || table
+                            .record_fields()
+                            .iter()
+                            .any(|record| record.id == field.id && record.personal.is_some())
                 })
-            {
+            }) {
                 problems.push((
                     "if".into(),
                     "A condition on a record identifier or personal field cannot travel.".into(),
+                ));
+            }
+            if column.ty == FieldType::String && !condition.value.is_null() {
+                warnings.push(format!(
+                    "Condition on {} contains free text. Review the literal and remove the condition if it contains source record data.",
+                    condition.field
                 ));
             }
         }
@@ -209,14 +212,19 @@ impl Watchers {
                             "do".into(),
                             "Use only declared action parameters that do not identify a record or hold a secret.".into(),
                         ));
+                    } else if contains_free_text(&offered.input["properties"][key], value) {
+                        warnings.push(format!(
+                            "Action {} parameter {key} contains free text. Review it for source record data.",
+                            action.operation
+                        ));
                     }
                 }
             }
         }
-        Ok(self
+        let review = self
             .review_new_draft(tx, scope, draft, problems, catalog, trigger)
-            .await?
-            .problems)
+            .await?;
+        Ok((review.problems, warnings))
     }
 
     pub async fn import_draft(
@@ -224,8 +232,9 @@ impl Watchers {
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         incoming: &WatcherSetup,
+        examples: &Value,
     ) -> Result<()> {
-        let (draft, problems) = incoming.parse();
+        let (draft, problems) = incoming.parse(examples);
         self.draft(tx, scope, draft, problems).await?;
         Ok(())
     }
@@ -249,4 +258,17 @@ fn portable_input(schema: &Value, key: &str, value: &Value) -> bool {
                 .iter()
                 .all(|value| portable_input(&schema["items"], key, value))
         })
+}
+
+fn contains_free_text(schema: &Value, value: &Value) -> bool {
+    match value {
+        Value::String(_) => schema.get("enum").is_none() && schema.get("const").is_none(),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| contains_free_text(&schema["properties"][key], value)),
+        Value::Array(items) => items
+            .iter()
+            .any(|value| contains_free_text(&schema["items"], value)),
+        _ => false,
+    }
 }

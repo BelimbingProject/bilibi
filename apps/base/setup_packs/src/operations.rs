@@ -140,7 +140,9 @@ impl SetupPacks {
                 .await?;
         }
         for watcher in additions.watchers {
-            self.watchers.import_draft(tx, scope, &watcher).await?;
+            self.watchers
+                .import_draft(tx, scope, &watcher.setup, &watcher.examples)
+                .await?;
         }
         Ok(counts.into())
     }
@@ -193,6 +195,6 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/setup_packs.agent", Pr
         summary: "Copy selected labels, field definitions, shared views and watcher drafts between tenants.",
         capability: VIEW,
         keywords: &["setup", "customisation", "pack", "transfer"],
-        body: "Choose source entries with base.labels.list, base.custom_fields.list, base.grid.view.pages and base.watchers.list. Export up to 100 entries with base.setup_packs.export. In the destination, preview with base.setup_packs.preview. Use picklist_map (from and to keys) to map pick-lists. Use role_map (from exported role key, to destination role ID) to map audiences. System roles and pick-lists can use unchanged stable keys. Resolve all missing dependencies, collisions and invalid entries. Copy expected_additions into base.setup_packs.apply with the same pack and mappings, dry-run and obtain explicit approval before committing. All additions commit together through their owners. Watchers arrive as drafts and need separate destination approval. A repeat preview shows an empty difference.",
+        body: "Choose source entries with base.labels.list, base.custom_fields.list, base.grid.view.pages and base.watchers.list. Export up to 100 entries with base.setup_packs.export. In the destination, preview with base.setup_packs.preview. Use picklist_map (from and to keys) to map pick-lists. Use role_map (from exported role key, to destination role ID) to map audiences. System roles and pick-lists can use unchanged stable keys. Supply destination-local watcher_examples for new watchers with conditions. Review free-text warnings and remove source record values. Resolve all missing dependencies, collisions and invalid entries. Copy expected_additions into base.setup_packs.apply with the same pack, mappings and destination examples, dry-run and obtain explicit approval before committing. All additions commit together through their owners. Watchers arrive as drafts and need separate destination approval. A repeat preview shows an empty difference.",
     }],
 }) }

@@ -128,10 +128,7 @@ impl ReadHandler for Read {
                 Self::List => {
                     let search = bilibi_agent_api::text_field(input, "search");
                     let (rows, total) = watchers.list(&**client, scope, &search, 100, 0).await?;
-                    let can_discard = bilibi_authz::effective_capabilities(&**client, scope)
-                        .await?
-                        .contains(MANAGE);
-                    json!({"watchers": rows.iter().map(summary_json).collect::<Vec<_>>(), "total": total, "can_discard":can_discard})
+                    json!({"watchers": rows.iter().map(summary_json).collect::<Vec<_>>(), "total": total})
                 }
                 Self::Get => {
                     let view = watchers

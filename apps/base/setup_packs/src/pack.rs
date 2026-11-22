@@ -139,6 +139,8 @@ pub(crate) struct Import {
     picklist_map: Vec<PicklistMap>,
     #[serde(default)]
     role_map: Vec<RoleMap>,
+    #[serde(default)]
+    watcher_examples: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +164,8 @@ pub(crate) struct Difference {
     pub collisions: Vec<Issue>,
     pub missing: Vec<Issue>,
     pub invalid: Vec<Issue>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Issue>,
 }
 
 #[derive(Default, Serialize)]
@@ -169,7 +173,7 @@ pub(crate) struct Additions {
     pub labels: Vec<Label>,
     pub custom_fields: Vec<Field>,
     pub views: Vec<SavedView>,
-    pub watchers: Vec<bilibi_watchers::WatcherSetup>,
+    pub watchers: Vec<transfer::SavedWatcher>,
 }
 
 impl Difference {
@@ -389,6 +393,7 @@ impl SetupPacks {
             mut pack,
             picklist_map,
             role_map,
+            watcher_examples,
         } = request;
         count(
             pack.labels.len() + pack.custom_fields.len() + pack.views.len() + pack.watchers.len(),
@@ -439,8 +444,24 @@ impl SetupPacks {
             &mut diff,
         )
         .await?;
-        self.compare_watchers(tx, scope, pack.watchers, &fields, lock, &mut diff)
-            .await?;
+        if watcher_examples
+            .keys()
+            .any(|name| !pack.watchers.iter().any(|watcher| &watcher.name == name))
+        {
+            return Err(invalid(
+                "watcher_examples",
+                "Supply destination examples only for watchers named in the pack.",
+            ));
+        }
+        self.compare_watchers(
+            tx,
+            scope,
+            pack.watchers,
+            watcher_examples,
+            (&fields, lock),
+            &mut diff,
+        )
+        .await?;
         diff.ready =
             diff.collisions.is_empty() && diff.missing.is_empty() && diff.invalid.is_empty();
         diff.expected_additions = Selection {
@@ -464,7 +485,7 @@ impl SetupPacks {
                 .additions
                 .watchers
                 .iter()
-                .map(|watcher| watcher.name.clone())
+                .map(|watcher| watcher.setup.name.clone())
                 .collect(),
         };
         Ok(diff)

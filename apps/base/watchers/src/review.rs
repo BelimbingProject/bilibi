@@ -503,7 +503,7 @@ impl Watchers {
                 }
                 None => {
                     let id: i64 = sql.query_one("INSERT INTO base_watchers(tenant_id,name,trigger) VALUES($1,$2,$3) RETURNING id", &[&tenant, &name, &trigger]).await?.get(0);
-                    changes.push(Change { kind: "base/watchers.watcher".into(), id, old: Value::Null, new: json!({"name": name, "trigger": trigger, "version": 1, "state": "draft"}) });
+                    changes.push(Change { kind: "base/watchers.watcher".into(), id, old: Value::Null, new: json!({"name": name, "trigger": trigger, "version": 1, "state": "draft", "rule": crate::discard::draft_summary(&definition, &examples)}) });
                     id
                 }
             };

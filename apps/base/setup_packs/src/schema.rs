@@ -103,12 +103,11 @@ pub fn pack() -> Value {
                 }
             }},
             "watchers": {"type":"array","items":{
-                "type":"object","required":["name","watch","definition","examples"],
+                "type":"object","required":["name","watch","definition"],
                 "properties":{
                     "name":{"type":"string","maxLength":120},
                     "watch":{"type":"string","maxLength":200},
-                    "definition":{"type":"object","additionalProperties":true},
-                    "examples":{"type":"array","items":{"type":"object","additionalProperties":true}}
+                    "definition":{"type":"object","additionalProperties":true}
                 }
             }},
         }
@@ -125,6 +124,11 @@ pub fn import() -> Value {
         "required": ["pack"],
         "properties": {
             "pack": pack(),
+            "watcher_examples": {
+                "type":"object",
+                "description":"Destination-local examples keyed by exact watcher name. Required for new watchers with conditions. Each value is an array of {facts, expect} examples. Facts is a field-to-value object and expect is match or no_match.",
+                "additionalProperties":true
+            },
             "role_map": {
                 "type":"array",
                 "description":"Map a role key from the pack to the ID of an existing destination role.",
@@ -153,7 +157,7 @@ pub fn apply() -> Value {
 }
 
 pub fn preview() -> Value {
-    json!({"type": "object", "description": "The destination's ready flag, additions (labels, custom_fields, views and watchers), collisions, missing dependencies and invalid entries. Identical entries are omitted. Copy expected_additions into apply."})
+    json!({"type": "object", "description": "The destination's ready flag, additions (labels, custom_fields, views and watchers), collisions, missing dependencies, invalid entries and warnings about free-text watcher literals. Identical entries are omitted. Copy expected_additions into apply."})
 }
 
 pub fn applied() -> Value {

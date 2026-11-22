@@ -246,8 +246,7 @@ async fn shared_views(source: &Person<'_>, target: &Person<'_>) -> Result<(), Fa
     let mut unavailable = request.clone();
     unavailable["pack"]["watchers"] = json!([{
         "name":"Unavailable watcher","watch":"unmounted.opened",
-        "definition":{"do":[{"operation":"unmounted.route","input":{}}]},
-        "examples":[]
+        "definition":{"do":[{"operation":"unmounted.route","input":{}}]}
     }]);
     let missing = target.read(PREVIEW, &unavailable).await?;
     check(
@@ -303,9 +302,9 @@ async fn watcher_draft(source: &Person<'_>, target: &Person<'_>) -> Result<(), F
             "base.watchers.draft",
             json!({
                 "name":"Route high thresholds","watch":OPENED,
-                "if":{"conditions":[{"field":"cf_pack_threshold","op":"gt","value":"100"}]},
+                "if":{"conditions":[{"field":"cf_pack_threshold","op":"gt","value":"100"},{"field":"title","op":"eq","value":"Urgent"}]},
                 "do":[{"operation":"watcher_cases.cases.route","input":{"queue":"review"}}],
-                "examples":[{"facts":"{\"cf_pack_threshold\":\"150\"}","expect":"match"}],
+                "examples":[{"facts":"{\"cf_pack_threshold\":\"150\",\"title\":\"Urgent\"}","expect":"match"}],
                 "explanation":"Source-only request"
             }),
         )])
@@ -319,9 +318,18 @@ async fn watcher_draft(source: &Person<'_>, target: &Person<'_>) -> Result<(), F
         pack["watchers"][0]["watch"] == OPENED
             && pack["watchers"][0]
                 .as_object()
-                .is_some_and(|draft| draft.len() == 4),
+                .is_some_and(|draft| draft.len() == 3 && draft.contains_key("definition")),
     )?;
-    let request = json!({"pack":pack});
+    let without_examples = json!({"pack":pack});
+    let incomplete = target.read(PREVIEW, &without_examples).await?;
+    check(
+        "New filtered drafts need destination examples",
+        incomplete["ready"] == false,
+    )?;
+    let mut request = without_examples.clone();
+    request["watcher_examples"] = json!({"Route high thresholds":[
+        {"facts":{"cf_pack_threshold":"200","title":"Urgent"},"expect":"match"}
+    ]});
     let preview = target.read(PREVIEW, &request).await?;
     check(
         "Preview resolves the watcher condition against a field in the same pack",
@@ -329,6 +337,18 @@ async fn watcher_draft(source: &Person<'_>, target: &Person<'_>) -> Result<(), F
             && preview["additions"]["watchers"]
                 .as_array()
                 .is_some_and(|entries| entries.len() == 1),
+    )?;
+    check(
+        "Preview warns about the title condition and keeps example facts local",
+        preview["warnings"].as_array().is_some_and(|warnings| {
+            warnings.iter().any(|issue| {
+                issue["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("Condition on title"))
+            })
+        }) && preview["additions"]["watchers"][0]
+            .get("examples")
+            .is_none(),
     )?;
     let outcome = target.write(&[apply(&request, &preview)]).await?;
     let watchers = target
@@ -344,10 +364,40 @@ async fn watcher_draft(source: &Person<'_>, target: &Person<'_>) -> Result<(), F
             && imported["awaiting_approval"] == true
             && imported["running_version"].is_null(),
     )?;
-    let repeat = target.read(PREVIEW, &request).await?;
+    let repeat = target.read(PREVIEW, &without_examples).await?;
     check(
         "A repeat draft import is empty",
         repeat["ready"] == true && repeat["additions"]["watchers"] == json!([]),
+    )?;
+    let mut distinct = request.clone();
+    distinct["pack"]["watchers"][0]["name"] = json!("Route High Thresholds");
+    distinct["watcher_examples"]["Route High Thresholds"] =
+        distinct["watcher_examples"]["Route high thresholds"].clone();
+    distinct["watcher_examples"]
+        .as_object_mut()
+        .ok_or("missing examples")?
+        .remove("Route high thresholds");
+    let different_case = target.read(PREVIEW, &distinct).await?;
+    check(
+        "A differently capitalized watcher is a distinct addition",
+        different_case["ready"] == true
+            && different_case["additions"]["watchers"][0]["name"] == "Route High Thresholds",
+    )?;
+    let receipts = target.read("base.labels.receipts", &json!({})).await?;
+    let receipt = receipts["receipts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|group| group["changes"].as_array().into_iter().flatten())
+        .find(|change| change["kind"] == "base/watchers.watcher")
+        .ok_or("missing imported watcher receipt")?;
+    check(
+        "The import receipt offers discard and shows the rule without example facts",
+        receipt["undo"]["operation"] == "base.watchers.discard_draft"
+            && receipt["after"]["rule"]["conditions"][1]["field"] == "title"
+            && receipt["effective"]["rule"] == receipt["after"]["rule"]
+            && receipt["after"]["rule"]["example outcomes"] == json!(["match"])
+            && receipt["after"]["rule"].get("examples").is_none(),
     )?;
     let mut collision = request;
     collision["pack"]["watchers"][0]["definition"]["do"][0]["input"]["queue"] = json!("another");
@@ -486,7 +536,7 @@ async fn main() -> Result<(), Failure> {
             "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed)
          SELECT 2,5,capability,true FROM unnest(ARRAY[
              'base.setup-packs.view','base.setup-packs.manage','base.labels.view',
-             'base.labels.manage','base.custom-fields.view','base.custom-fields.manage',
+             'base.labels.manage','base.labels.customisations.view','base.custom-fields.view','base.custom-fields.manage',
              'grid.views.share','admin.watchers.view','admin.watchers.manage','watcher-cases.case.view'
          ]) capability ON CONFLICT DO NOTHING",
         )

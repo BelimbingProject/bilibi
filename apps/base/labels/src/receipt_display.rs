@@ -109,16 +109,38 @@ pub(crate) fn receipt_value(kind: &str, value: &Value) -> String {
                     Some(count) => format!("Shared with {count} roles"),
                 }
             };
-        return format!("{name} · {audience}");
+        let mut details = serde_json::json!({
+            "summary": format!("{name} · {audience}"),
+            "columns": value["view"]["columns"],
+            "lenses": value["view"]["lenses"],
+            "row height": value["view"]["zoom"],
+            "changed since": value["view"]["since"],
+            "filters and sort": value.get("params").unwrap_or(&value["view"]["params"]),
+        });
+        if let Some(roles) = value["roles"]
+            .as_array()
+            .or_else(|| value["audience"]["roles"].as_array())
+        {
+            details["role IDs"] = serde_json::json!(roles);
+        }
+        return preview_text(&details);
     }
     if kind == "base/watchers.watcher" {
         let name = value["name"].as_str().unwrap_or("Watcher");
-        return match value["state"].as_str() {
+        let summary = match value["state"].as_str() {
             Some("draft") => format!("{name} · Awaiting approval"),
             Some("approved") => format!("{name} · Approved"),
             Some("off") => format!("{name} · Off"),
             _ => name.to_owned(),
         };
+        let mut details = serde_json::json!({"summary":summary});
+        if let Some(trigger) = value.get("watch").or_else(|| value.get("trigger")) {
+            details["watch"] = trigger.clone();
+        }
+        if let Some(rule) = value.get("rule") {
+            details["rule"] = rule.clone();
+        }
+        return preview_text(&details);
     }
     let mut parts = Vec::new();
     for (key, label) in [
