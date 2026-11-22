@@ -345,6 +345,17 @@
         }
       }
     }
+    // The record's return address belongs to shared navigation, not the page's
+    // query state. Keep it when a live render canonicalizes that same page.
+    if (['page', 'fragment'].includes(message.type) && message.url) {
+      const current = new URL(location.href);
+      const next = new URL(message.url, location.href);
+      const returnTo = current.searchParams.get('return_to');
+      if (returnTo && next.origin === current.origin && next.pathname === current.pathname && !next.searchParams.has('return_to')) {
+        next.searchParams.set('return_to', returnTo);
+        message.url = next.pathname + next.search + next.hash;
+      }
+    }
     if (['page', 'fragment'].includes(message.type) && message.url && message.url !== address()) {
       // Framed pages and background/history corrections replace; a person's
       // action pushes unless the intent explicitly asks to replace.

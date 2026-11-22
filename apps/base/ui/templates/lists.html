@@ -84,5 +84,5 @@
 
 {# The same record link renders a real link alone and selection intent inside a workspace. #}
 {% macro record_link(workspace, kind, record_id, href, class="") %}
-{% if workspace %}<button type="button" data-event="workspace:select" data-kind="{{ kind }}" data-id="{{ record_id }}" data-path="{{ href }}" data-record-select class="{{ class }} text-left">{{ caller() }}</button>{% else %}<a href="{{ href }}" class="{{ class }}">{{ caller() }}</a>{% endif %}
+{% if workspace %}<button type="button" data-event="workspace:select" data-kind="{{ kind }}" data-id="{{ record_id }}" data-path="{{ href }}" data-record-select class="{{ class }} text-left">{{ caller() }}</button>{% else %}<a href="{{ href }}" data-hook="GridRecordLink" data-record-href="{{ href }}" class="{{ class }}">{{ caller() }}</a>{% endif %}
 {% endmacro %}

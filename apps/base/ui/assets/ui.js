@@ -371,6 +371,42 @@
     },
   };
 
+  // A grid address is the complete list state. Carry it on record links and
+  // accept it only for the Back link's own same-origin destination.
+  hooks.GridRecordLink = {
+    apply() {
+      const target = new URL(this.el.dataset.recordHref, location.href);
+      if (!this.el.closest('[data-table-frame]') || target.origin !== location.origin) return;
+      target.searchParams.set('return_to', location.pathname + location.search);
+      const href = target.pathname + target.search + target.hash;
+      if (this.el.getAttribute('href') !== href) this.el.setAttribute('href', href);
+    },
+    mounted() {
+      this.onLocation = () => this.apply();
+      window.addEventListener('bilibi:location', this.onLocation);
+      this.apply();
+    },
+    updated() { this.apply(); },
+    destroyed() { window.removeEventListener('bilibi:location', this.onLocation); },
+  };
+
+  hooks.RecordBackLink = {
+    apply() {
+      const fallback = new URL(this.el.dataset.backHref, location.href);
+      const value = new URL(location.href).searchParams.get('return_to');
+      let href = this.el.dataset.backHref;
+      if (value && value.startsWith('/') && !value.startsWith('//')) {
+        const target = new URL(value, location.origin);
+        if (target.origin === location.origin && fallback.origin === location.origin && target.pathname === fallback.pathname) {
+          href = target.pathname + target.search + target.hash;
+        }
+      }
+      if (this.el.getAttribute('href') !== href) this.el.setAttribute('href', href);
+    },
+    mounted() { this.apply(); },
+    updated() { this.apply(); },
+  };
+
   // ---- Hook lifecycle ------------------------------------------------------
   // `fresh` collects the hooks mounted in one pass so a patch that inserts a
   // control never follows its `mounted` with an `updated` for the same change.

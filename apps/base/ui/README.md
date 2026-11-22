@@ -18,6 +18,8 @@ List toolbars put search first and filter boxes to its right, and on a phone fol
 
 Page headers include a pin for the current address in signed-in pages, including workspace tiles. The shell keeps its state with the account. Dialogs do not show it.
 
+A `RecordLink` inside a `FlexTable` carries the current list address to the record. `BackLink` restores it only when it is a same-origin path to that Back link’s own destination; direct visits retain the ordinary destination.
+
 ## Phone lists and header actions
 
 Header action labels and row-link touch targets follow [DESIGN.md’s record-page](../../../DESIGN.md#record-pages) and [list rules](../../../DESIGN.md#lists).
