@@ -61,16 +61,17 @@
 <footer id="app-statusbar" class="relative flex h-6 shrink-0 items-center justify-between gap-3 border-t border-line bg-surface px-4 text-xs text-ink-subtle"><div class="flex min-w-0 flex-1 items-center gap-4 overflow-hidden"><a href="{{ context.home }}" id="app-brand" class="flex shrink-0 items-center transition hover:opacity-90" aria-label="Bilibi dashboard"><img src="{{ bilibi_ui::Assets::url("/favicon.svg") }}" alt="" class="shrink-0 object-contain size-4" width="16" height="16" decoding="async" loading="eager" aria-hidden="true"></a><span id="app-mode" data-live-ignore hidden role="status" aria-live="polite" class="shrink-0 rounded-sm bg-brand-surface px-1.5 font-medium text-brand-ink"></span>{{ context.instance_status|safe }}{% if let Some(address) = context.listen_address %}<span id="app-listen" class="shrink-0 tabular-nums">{{ address }}</span>{% endif %}{% if context.operator_company_missing %}<a href="/setup/platform-operator" id="app-operator-company-missing" class="inline-flex items-center gap-1 font-medium text-danger hover:underline">{% call ui::icon(name=bilibi_ui::Icons::shell("warning"), class="size-3.5") %}{% endcall %}<span>Operator company not set</span></a>{% endif %}</div>{{ context.ai|safe }}<div id="app-versions" class="flex min-w-max flex-1 items-center justify-end gap-3">
 {% if !context.components.is_empty() %}
 {% call feedback::statusbar_tag(tag=context.component_tag()) %}{% endcall %}
-<div class="absolute right-0 bottom-0 sm:w-96">
+<div class="absolute right-0 bottom-full sm:w-96">
 {% call feedback::statusbar_panel(id="app-components-panel", label="Installed Domains and Extensions") %}
 <dl class="max-h-[50vh] overflow-y-auto p-3">
 {% for component in context.components %}
 <div class="flex items-baseline justify-between gap-3 py-1">
 <dt class="break-all">{{ component.id }}</dt>
-<dd class="shrink-0 tabular-nums">{% if let Some(version) = component.version %}{{ version }}{% else %}No release{% endif %}</dd>
+<dd class="shrink-0 tabular-nums">{% if let Some(version) = component.version %}{{ version }}{% else if component.commit.is_some() %}No release{% else %}Version unavailable{% endif %}</dd>
 </div>
 {% endfor %}
 </dl>
+<div class="flex justify-end px-3 pb-2"><button type="button" data-statusbar-toggle aria-controls="app-components-panel" class="min-h-10 min-w-10 text-link hover:underline">Close</button></div>
 {% endcall %}
 </div>
 {% endif %}
