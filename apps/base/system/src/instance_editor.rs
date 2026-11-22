@@ -117,6 +117,9 @@ impl Instances {
             (INSTANCE_LABEL_KEY, input.label),
             (INSTANCE_COLOUR_KEY, input.colour),
         ] {
+            if key == INSTANCE_COLOUR_KEY && before.role == Role::Production {
+                continue;
+            }
             if value.trim().is_empty() {
                 self.settings
                     .delete(&mut tx, scope, Target::Global, key)
@@ -215,10 +218,13 @@ impl Editor {
             ),
             (
                 INSTANCE_COLOUR_KEY,
-                "Banner colour",
+                "Dev and Staging banner colour",
                 "Choose a colour, or follow the server role.",
             ),
         ] {
+            if key == INSTANCE_COLOUR_KEY && self.role == Role::Production {
+                continue;
+            }
             let value = self
                 .pages
                 .instances
@@ -254,7 +260,8 @@ impl Editor {
         })?;
         let mut content = render(Header {
             title: Html::text("Instance settings"),
-            subtitle: "Set this server's role, name and colour.",
+            subtitle:
+                "Set this server's role and name. Dev and Staging can use a custom banner colour.",
             ..Default::default()
         })?;
         content.push(
@@ -296,7 +303,7 @@ impl Editor {
             _ => return Err(Error::Invalid),
         };
         let colour = text(INSTANCE_COLOUR_KEY);
-        if !colour.is_empty() && Colour::parse(colour).is_none() {
+        if self.role != Role::Production && !colour.is_empty() && Colour::parse(colour).is_none() {
             return Err(Error::Invalid);
         }
         let scope = scope.clone().presenting_step_up(text("code"));

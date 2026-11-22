@@ -412,6 +412,7 @@ impl Instance {
             role: self.role.env_value(),
             label: &self.label,
             title: &title,
+            message: self.role.consequence(),
         })
     }
     /// The status bar always names the role, including Production.
@@ -469,8 +470,8 @@ inventory::submit! { Contribution::new(DEFINITIONS, INSTANCE_COLOUR_KEY, provena
     value_type: ValueType::String, scopes: GLOBAL, default: || json!(null), nullable: true, encrypted: false,
     minimum: None, maximum: None,
     validator: Some(Validator { accepts: |value: &Value| value.is_null() || value.as_str().is_some_and(|colour| Colour::parse(colour).is_some()), message: "The colour must be info (blue), success (green), warning (amber) or danger (red)." }),
-    editor: Some(Editor { group: "Instance", label: "Banner colour",
-        help: "info (blue), success (green), warning (amber) or danger (red). The default follows the role: Dev is info, Staging is warning, Production is danger (server owner only).",
+    editor: Some(Editor { group: "Instance", label: "Dev and Staging banner colour",
+        help: "info (blue), success (green), warning (amber) or danger (red). Shared Dev badges and banners default to blue and Staging defaults to amber. Shared Production badges are always neutral.",
         capability: Some(INSTANCE_MANAGE), reveal_duration_ms: 5_000 }),
 })) }
 // The dedicated Core Administrator page guards this setting; the generic editor cannot change it.
