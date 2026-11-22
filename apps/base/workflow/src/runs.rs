@@ -334,7 +334,7 @@ impl Engine {
         let (definition_key, kind) = (definition_key.to_owned(), kind.to_owned());
         tx.mutate(move |sql| Box::pin(async move {
             options.validate()?;
-            engine.writer(&context,&scope,id)?;
+            engine.writer_or_principal(&context,&scope,id)?;
             let scope=engine.live(sql,&scope).await?;
             let owner=engine.registry.owned_subject(&kind)?;
             let definition=engine.registry.process(&definition_key,options.version)?.clone();
