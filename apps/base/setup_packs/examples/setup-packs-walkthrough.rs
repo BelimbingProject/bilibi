@@ -582,6 +582,8 @@ async fn main() -> Result<(), Failure> {
         );
     }
     let db = pool(&std::env::var("DATABASE_URL")?)?;
+    // The mounted walkthrough links its fixture after the runner prepares the database.
+    bilibi_web::migrate(&db).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
     let app = bilibi_web::App::new(db.clone(), &std::env::var("APP_ORIGIN")?)?;
     // Fixture grants only. Both actors sign in through the ordinary boundary.
