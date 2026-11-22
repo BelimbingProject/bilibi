@@ -439,18 +439,27 @@ impl Template {
     }
 }
 
+/// Shortens only the longest facts, to one shared length, until the subject
+/// fits: a short fact (a name beside a long title) is never the one cut.
 fn fit_subject_facts(text: &str, facts: &[Range<usize>], limit: usize) -> Option<String> {
-    let mut remaining: usize = facts.iter().map(Range::len).sum();
-    let mut budget = limit.checked_sub(text.len() - remaining)?;
+    let total: usize = facts.iter().map(Range::len).sum();
+    let budget = limit.checked_sub(text.len() - total)?;
+    let fits = |cap: usize| facts.iter().map(|fact| fact.len().min(cap)).sum::<usize>() <= budget;
+    let longest = facts.iter().map(Range::len).max().unwrap_or(0);
+    let (mut low, mut high) = (0, longest);
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if fits(middle) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
     let mut result = String::with_capacity(limit);
     let mut previous = 0;
     for fact in facts {
         result.push_str(&text[previous..fact.start]);
-        let allowance = budget.saturating_mul(fact.len()) / remaining;
-        let value = bounded(&text[fact.clone()], allowance);
-        budget -= value.len();
-        remaining -= fact.len();
-        result.push_str(&value);
+        result.push_str(&bounded(&text[fact.clone()], low));
         previous = fact.end;
     }
     result.push_str(&text[previous..]);

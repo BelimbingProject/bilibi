@@ -117,12 +117,38 @@ impl Templates {
         Ok(select(entry, &languages, &heads, None))
     }
 
-    /// Render a platform-controlled template in its base language without a database read.
+    /// Render a platform-controlled template in its base language without a
+    /// database read. Every text fact is flattened to one line.
     pub fn platform_wording(&self, key: &str, values: &[(&str, Value<'_>)]) -> Result<Text> {
         let entry = self.platform.get(key).ok_or(Error::NotFound)?;
         let language = entry.base_language;
         let resolved = select(entry, &[language.to_owned()], &[], None);
-        render_wording(entry, language, resolved, values, &[])
+        // A name someone chose (a workspace, a portal) is one line of text
+        // here: a line break in it could set a second link apart from the
+        // message's own.
+        let flat: Vec<(&str, Option<String>)> = values
+            .iter()
+            .map(|(id, value)| match value {
+                Value::Text(text) => (
+                    *id,
+                    Some(
+                        text.chars()
+                            .map(|c| if c.is_control() { ' ' } else { c })
+                            .collect(),
+                    ),
+                ),
+                Value::Date(_) => (*id, None),
+            })
+            .collect();
+        let values: Vec<(&str, Value<'_>)> = values
+            .iter()
+            .zip(&flat)
+            .map(|((id, value), (_, text))| match text {
+                Some(text) => (*id, Value::Text(text)),
+                None => (*id, *value),
+            })
+            .collect();
+        render_wording(entry, language, resolved, &values, &[])
     }
 
     /// The rendered slots of a message a module sends for a workspace, in
