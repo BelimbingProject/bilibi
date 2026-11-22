@@ -403,12 +403,9 @@ impl Instance {
             "notice": self.agent_notice(),
         })
     }
-    /// The shared badge for sign-in and the shell. Production needs no extra badge;
-    /// the workspace shell also suppresses Dev because its status bar names it.
+    /// The shared badge for sign-in and the shell. The workspace shell shows
+    /// only Staging because its status bar already names the other roles.
     pub fn badge(&self) -> askama::Result<Html> {
-        if self.role == Role::Production {
-            return Ok(Html::default());
-        }
         let title = self.notice();
         Html::render(&InstanceBadge {
             tone: self.colour.status(),

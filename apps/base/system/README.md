@@ -85,7 +85,7 @@ The label and colour also remain in the generic settings editor behind `admin.sy
 
 The Banner colour field uses the shared `ColourInput`: Blue, Green, Amber and Red each show their name inside that banner colour. “Use role colour (Blue)” (or Green, Amber or Red for the stored role) shows the role's default colour and clears the override when saved. `src/instance.rs` owns the role-to-colour rule.
 
-`Instance::status` always names the role, including when the label differs. Staging keeps an extra top-bar badge. Dev and Staging show a badge on sign-in; Production shows none there. Reviews and confirmations use `Instance::banner` in every role. `Instance::agent_json` identifies plans, commits, MCP and `/.well-known/bilibi`. All use the same resolved identity.
+`Instance::status` always names the role, including when the label differs. Staging keeps an extra top-bar badge. Sign-in names every role with a badge, including Production. Reviews and confirmations use `Instance::banner` in every role. Production uses a neutral status-bar badge and banner, with its consequence in muted text; Dev and Staging retain their configured colours. `Instance::agent_json` identifies plans, commits, MCP and `/.well-known/bilibi`. All use the same resolved identity.
 
 Base Step-up binds an `Enforcement` policy supplied by `Instances`. It reads the saved role on every check across processes: ordinary operations skip 2FA on Dev; `.always()` operations never skip it. The policy holds no process-local role cache. The server layout is in [`docs/server-install.md`](../../../docs/server-install.md).
 

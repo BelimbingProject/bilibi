@@ -63,7 +63,7 @@ Both consent pages use the host's standalone review layout: the Bilibi mark, the
 
 1. **The code.** One field. An incomplete code in the address only fills it.
 2. **Approve this app?** A complete code (typed, or the app's `verification_uri_complete` link) opens the review: the app's self-declared name, the code to compare with the app, the Bilibi address and what the app can do. Opening it approves nothing; **Approve connection**, **Refuse** and **Use another code** decide.
-3. **The outcome,** with the app's name and **Connect another app**.
+3. **The outcome,** with the app's name and a prominent link to **Your connections**.
 
 A signed-out person is sent to sign in and returns to the same address with the code. When the tenant's Step-up policy asks for 2FA, the confirm step sits between 2 and 3 and returns to step 2. The AI connections page (**Enter a code**) and the status bar's AI panel link to it.
 

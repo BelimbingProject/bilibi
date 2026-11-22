@@ -46,13 +46,21 @@
 {#- Which installation this is (src/instance.rs): a small badge for the top
     bar. The label is always in words; the colour only repeats it. -#}
 {% macro instance_badge(badge) %}
+{% if badge.role == "production" %}
+<span data-instance="{{ badge.role }}" title="{{ badge.title }}" class="inline-flex h-5 min-w-0 shrink items-center rounded-sm border border-line px-1.5 text-xs font-semibold text-ink">Production{% if badge.label != "Production" %} · {{ badge.label }}{% endif %}</span>
+{% else %}
 <span data-instance="{{ badge.role }}" title="{{ badge.title }}" class="inline-flex h-5 min-w-0 shrink items-center gap-1 rounded-sm border px-1.5 text-xs font-semibold {{ badge.tone.surface_class() }}">{% call c::icon(name=badge.tone.icon(), class="size-3.5 shrink-0") %}{% endcall %}<span class="min-w-0 truncate uppercase tracking-wide">{{ badge.label }}</span></span>
+{% endif %}
 {% endmacro %}
 
 {#- Which installation a review or confirmation acts on, at its top
     (src/instance.rs). A note, not an alert: it is read in place, every time. -#}
 {% macro instance_banner(banner) %}
+{% if banner.role == "production" %}
+<div{% if !banner.id.is_empty() %} id="{{ banner.id }}"{% endif %} role="note" aria-label="Server identity" data-instance="{{ banner.role }}" class="flex flex-wrap items-center gap-2 text-sm{% if !banner.class.is_empty() %} {{ banner.class }}{% endif %}"><span class="inline-flex items-center rounded-sm border border-line px-1.5 text-xs font-semibold text-ink">Production{% if banner.label != "Production" %} · {{ banner.label }}{% endif %}</span><span class="text-ink-muted">{{ banner.message }}</span></div>
+{% else %}
 <div{% if !banner.id.is_empty() %} id="{{ banner.id }}"{% endif %} role="note" aria-label="Server identity" data-instance="{{ banner.role }}" class="flex items-start gap-3 rounded-lg border-2 px-3 py-2.5 text-sm {{ banner.tone.surface_class() }}{% if !banner.class.is_empty() %} {{ banner.class }}{% endif %}">{% call c::icon(name=banner.tone.icon(), class="mt-0.5 size-5 shrink-0") %}{% endcall %}<div class="min-w-0"><p class="break-words text-base font-semibold uppercase tracking-wide">{{ banner.label }}</p><p>{{ banner.message }}</p></div></div>
+{% endif %}
 {% endmacro %}
 
 {#- An inline status alert. -#}
@@ -83,7 +91,7 @@
 
 {# The stored server role, never the compiler's build mode. #}
 {% macro instance_status(status) %}
-{% if status.editable %}<a{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} href="/system/instance" title="Instance settings · {{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {{ status.tone.surface_class() }}">{% else %}<span{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} title="{{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {{ status.tone.surface_class() }}">{% endif %}{{ status.role_label }}{% if status.label != status.role_label %} · {{ status.label }}{% endif %}{% if status.editable %}</a>{% else %}</span>{% endif %}
+{% if status.editable %}<a{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} href="/system/instance" title="Instance settings · {{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {% if status.role == "production" %}border-line text-ink{% else %}{{ status.tone.surface_class() }}{% endif %}">{% else %}<span{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} title="{{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {% if status.role == "production" %}border-line text-ink{% else %}{{ status.tone.surface_class() }}{% endif %}">{% endif %}{{ status.role_label }}{% if status.label != status.role_label %} · {{ status.label }}{% endif %}{% if status.editable %}</a>{% else %}</span>{% endif %}
 {% endmacro %}
 
 {#- A tag in the status bar's centre that opens a panel (src/statusbar.rs):
