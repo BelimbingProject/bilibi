@@ -31,12 +31,14 @@ pub enum Sort {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Membership {
     Active,
+    Disabled,
     Invited,
 }
 impl Membership {
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "active" => Self::Active,
+            "disabled" => Self::Disabled,
             "invited" => Self::Invited,
             _ => return None,
         })
@@ -45,6 +47,7 @@ impl Membership {
     fn database_value(self) -> &'static str {
         match self {
             Self::Active => "active",
+            Self::Disabled => "disabled",
             Self::Invited => "invited",
         }
     }

@@ -115,7 +115,7 @@ async fn sign_in_session(client: &Client, tenant: i64, user: i64) -> Result<()> 
     let id = bilibi_base::session::session_id(&format!("walkthrough-{tenant}-{user}"));
     client
         .execute(
-            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,'walkthrough',now()+interval '24 hours') ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) VALUES($1,$2,$3,'walkthrough',now()+interval '24 hours','portable') ON CONFLICT (id) DO NOTHING",
             &[&id, &tenant, &user],
         )
         .await?;

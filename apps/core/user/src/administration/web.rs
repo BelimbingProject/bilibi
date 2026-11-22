@@ -607,6 +607,7 @@ impl Index {
             );
             let (membership, kind) = match user.membership {
                 Membership::Active => ("Active", BadgeKind::Neutral),
+                Membership::Disabled => ("Disabled", BadgeKind::Neutral),
                 Membership::Invited => ("Invited", BadgeKind::Success),
             };
             row.slots.insert(
@@ -682,6 +683,7 @@ impl Index {
                     vec![
                         bilibi_ui::Choice::new("All memberships", ""),
                         bilibi_ui::Choice::new("Active", "active"),
+                        bilibi_ui::Choice::new("Disabled", "disabled"),
                         bilibi_ui::Choice::new("Invited", "invited"),
                     ],
                 ),

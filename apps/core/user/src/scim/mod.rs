@@ -487,13 +487,7 @@ impl UserService {
         c: &Connection,
         doc: Value,
     ) -> ScimResult<()> {
-        let username = doc["userName"]
-            .as_str()
-            .ok_or_else(ScimError::invalid)?
-            .to_owned();
-        if crate::accounts::email_taken(tx.sql(), &username, None).await? {
-            return Err(Error::Conflict.into());
-        }
+        let identity_address = format!("{}@scim.invalid", uuid::Uuid::new_v4().simple());
         let name = doc["displayName"]
             .as_str()
             .ok_or_else(ScimError::invalid)?
@@ -542,7 +536,7 @@ impl UserService {
             .to_owned();
         let saved = doc.clone();
         let user=tx.mutate(move|sql|Box::pin(async move{
-            let created=crate::sign_in_identity::create(sql,tenant,AccountKind::Staff,&username,&password,false).await?;
+            let created=crate::sign_in_identity::create(sql,tenant,AccountKind::Staff,&identity_address,&password,false).await?;
             let user=created.user;
             sql.execute("INSERT INTO users(id,tenant_id,identity_id,name,person_id) VALUES($1,$2,$3,$4,$5)",&[&user,&tenant,&created.identity,&name,&person]).await?;
             let row:i64=sql.query_one("INSERT INTO user_scim_users(tenant_id,provider_id,resource_id,user_id,document,person_id,affiliation_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id",&[&tenant,&provider,&id,&user,&saved,&person,&affiliation]).await?.get(0);

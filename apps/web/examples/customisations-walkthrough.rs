@@ -337,7 +337,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = db.get().await?;
         client.execute("INSERT INTO principal_roles(tenant_id,user_id,role_id) SELECT 2,5,id FROM roles WHERE tenant_id=2 AND code='tenant_owner' ON CONFLICT DO NOTHING", &[]).await?;
         for (tenant, user, token) in [(1_i64, 4_i64, &token1), (2, 5, &token2)] {
-            client.execute("INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')", &[&session_id(token), &tenant, &user, &uuid::Uuid::new_v4().simple().to_string()]).await?;
+            client.execute("INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) VALUES($1,$2,$3,$4,now()+interval '1 hour','portable')", &[&session_id(token), &tenant, &user, &uuid::Uuid::new_v4().simple().to_string()]).await?;
         }
         (
             auth.authenticate(&**client, 1, 4, String::new()).await?,

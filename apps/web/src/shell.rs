@@ -803,19 +803,14 @@ pub async fn choose_tenant(
                 header::CACHE_CONTROL,
                 "no-store".parse().map_err(|_| Error::Internal)?,
             );
+            crate::auth::set_tenant_entry(&app, &mut response, form.tenant)?;
             Ok(response)
         }
-        Ok(bilibi_user::TenantEntry::Reauthenticate(target)) => {
-            let mut response = Redirect::to("/login").into_response();
-            response.headers_mut().append(
-                header::SET_COOKIE,
-                format!(
-                    "bilibi_tenant_entry={target}; HttpOnly; SameSite=Strict; Path=/; Max-Age=600{}",
-                    crate::auth::secure(&app)
-                )
-                .parse()
-                .map_err(|_| Error::Internal)?,
-            );
+        Ok(bilibi_user::TenantEntry::Reauthenticate { tenant, provider }) => {
+            let location =
+                provider.map_or_else(|| "/login".into(), |public| format!("/login?sso={public}"));
+            let mut response = Redirect::to(&location).into_response();
+            crate::auth::set_tenant_entry(&app, &mut response, tenant)?;
             Ok(response)
         }
         Err(bilibi_user::TenantChoiceRefusal::Unavailable) => {

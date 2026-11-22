@@ -47,11 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scope = app.security.guard(&login.token).await?;
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().map(String::as_str) == Some("inspect") {
-        let email = args
-            .get(1)
-            .ok_or("Provide the provisioned sign-in email.")?;
+        let email = args.get(1).ok_or("Provide the SCIM userName.")?;
         let client = db.get().await?;
-        let row = client.query_one("SELECT u.id,u.name,p.name,p.email,a.work_email FROM user_scim_users s JOIN users u ON u.tenant_id=s.tenant_id AND u.id=s.user_id JOIN user_identities i ON i.id=u.identity_id JOIN persons p ON p.tenant_id=u.tenant_id AND p.id=s.person_id JOIN person_affiliations a ON a.tenant_id=u.tenant_id AND a.id=s.affiliation_id WHERE s.tenant_id=$1 AND i.email=$2", &[&scope.tenant(),email]).await?;
+        let row = client.query_one("SELECT u.id,u.name,p.name,p.email,a.work_email FROM user_scim_users s JOIN users u ON u.tenant_id=s.tenant_id AND u.id=s.user_id JOIN persons p ON p.tenant_id=u.tenant_id AND p.id=s.person_id JOIN person_affiliations a ON a.tenant_id=u.tenant_id AND a.id=s.affiliation_id WHERE s.tenant_id=$1 AND s.document->>'userName'=$2", &[&scope.tenant(),email]).await?;
         let user: i64 = row.get(0);
         let roles = client.query("SELECT r.code FROM effective_principal_roles e JOIN roles r ON r.tenant_id=e.tenant_id AND r.id=e.role_id WHERE e.tenant_id=$1 AND e.user_id=$2 ORDER BY r.code", &[&scope.tenant(),&user]).await?.iter().map(|r|r.get::<_,String>(0)).collect::<Vec<_>>();
         println!(
@@ -61,14 +59,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("session") {
-        let email = args
-            .get(1)
-            .ok_or("Provide the provisioned sign-in email.")?;
+        let email = args.get(1).ok_or("Provide the SCIM userName.")?;
         let path = args
             .get(2)
             .ok_or("Provide a new private session scratch file.")?;
         let client = db.get().await?;
-        let user:i64=client.query_one("SELECT u.id FROM users u JOIN user_identities i ON i.id=u.identity_id JOIN user_scim_users s ON s.tenant_id=u.tenant_id AND s.user_id=u.id WHERE u.tenant_id=$1 AND i.email=$2 AND s.active",&[&scope.tenant(),email]).await?.get(0);
+        let row = client.query_one("SELECT u.id,i.email FROM users u JOIN user_identities i ON i.id=u.identity_id JOIN user_scim_users s ON s.tenant_id=u.tenant_id AND s.user_id=u.id WHERE u.tenant_id=$1 AND s.document->>'userName'=$2 AND s.active",&[&scope.tenant(),email]).await?;
+        let user = row.get(0);
+        let identity_address: String = row.get(1);
         drop(client);
         let password = format!(
             "{}{}",
@@ -78,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Fixture setup gives the provisioned identity a private password;
         // production administrators have no corresponding operation.
         set_fixture_password(&db, user, &password).await?;
-        let session = users.login(email, &password).await?;
+        let session = users.login(&identity_address, &password).await?;
         if session.pending {
             return Err("A real admitted session is required for the revocation proof.".into());
         }

@@ -26,7 +26,10 @@ pub enum TenantEntry {
     Sso(String),
     /// The current proof belongs to another tenant. The browser must prove
     /// the portable identity for this target before the old session is replaced.
-    Reauthenticate(i64),
+    Reauthenticate {
+        tenant: i64,
+        provider: Option<String>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -117,31 +120,26 @@ impl UserService {
             .authenticate_session(&**client, target, target_user, None, None, new_csrf.clone())
             .await
             .map_err(|_| TenantChoiceRefusal::Unavailable)?;
-        if !authority.admits_tenant(target) {
+        let password_allowed = self.password_sso_allowed(&**client, &target_scope).await?;
+        if !password_allowed || !authority.admits_tenant(target) {
             let company = target_scope.current_company().map(|id| id.get());
-            if let Some(row) = client
+            let provider = client
                 .query_opt(
-                    "SELECT public_id FROM user_identity_providers WHERE tenant_id=$1 AND company_id=$2 AND enabled ORDER BY enforce_sso DESC,id LIMIT 1",
-                    &[&target, &company],
+                    "SELECT public_id FROM user_identity_providers WHERE tenant_id=$1 AND company_id=$2 AND enabled AND ($3 OR enforce_sso) ORDER BY id LIMIT 1",
+                    &[&target, &company, &password_allowed],
                 )
                 .await
                 .map_err(Error::from)?
-            {
-                return Ok(TenantEntry::Sso(row.get(0)));
+                .map(|row| row.get(0));
+            if !password_allowed {
+                return provider
+                    .map(TenantEntry::Sso)
+                    .ok_or(TenantChoiceRefusal::EntryPolicy);
             }
-            return Ok(TenantEntry::Reauthenticate(target));
-        }
-        if !self.password_sso_allowed(&**client, &target_scope).await? {
-            let company = target_scope.current_company().map(|id| id.get());
-            return client
-                .query_opt(
-                    "SELECT public_id FROM user_identity_providers WHERE tenant_id=$1 AND company_id=$2 AND enabled AND enforce_sso ORDER BY id LIMIT 1",
-                    &[&target, &company],
-                )
-                .await
-                .map_err(Error::from)?
-                .map(|row| TenantEntry::Sso(row.get(0)))
-                .ok_or(TenantChoiceRefusal::EntryPolicy);
+            return Ok(TenantEntry::Reauthenticate {
+                tenant: target,
+                provider,
+            });
         }
         if self.step_up.required(&target_scope, SIGN_IN).await? {
             if self

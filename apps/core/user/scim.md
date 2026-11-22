@@ -18,7 +18,7 @@ The token is generated with 244 random bits, stored sealed with the installation
 
 ## People and sign-in
 
-`userName` is the provider's email-shaped tenant provisioning identifier. On creation Bilibi uses it to create a new installation identity with no administrator-known password, plus the Person, business affiliation, membership and first desk in one audited transaction. Later SCIM updates keep `userName` in the tenant's SCIM document and update tenant-owned Person and affiliation contact facts; they never change the portable sign-in address. Display name updates the Person and membership. No password is supplied by SCIM, and verified-mail recovery is how an SSO-created identity establishes portable proof.
+`userName` is the provider's email-shaped tenant provisioning identifier. Creation provisions a membership with an unverified internal identity address, plus the Person, business affiliation and first desk in one audited transaction. SCIM keeps `userName` in the tenant's document on creation and updates. Contact changes update tenant-owned Person and affiliation facts. Display name updates the Person and membership. No password is supplied by SCIM, and verified-mail recovery is how an SSO-created identity establishes portable proof.
 
 An existing local account is never adopted by matching an email. A duplicate sign-in address returns 409. A provisioned account's Person and business affiliation remain bound to the original provisioning record; a later local Person reassignment cannot let the old connection edit a different identity. Removing the provider company's desk does not stop that provider from updating or deactivating its own provisioned record.
 
@@ -60,7 +60,7 @@ There is no bulk, sort, ETag, cursor, arbitrary schema extension, nested group o
 
 | Provider | Setup |
 | --- | --- |
-| Entra ID | Use a non-gallery application's automatic provisioning with the displayed base URL and bearer secret. Map `userName` to the tenant provisioning address; it initializes a new identity but later updates do not replace the portable sign-in email. Configure group provisioning and map group display names to Bilibi roles. |
+| Entra ID | Use a non-gallery application's automatic provisioning with the displayed base URL and bearer secret. Map `userName` to the tenant provisioning address; the value stays in the tenant SCIM document. Configure group provisioning and map group display names to Bilibi roles. |
 | Okta | Use its SCIM 2.0 connector with bearer authentication. User existence filters, full PUT profile updates, PATCH activation and Group Push use the same endpoint. |
 | Keycloak | Install and operate a SCIM client extension in Keycloak; SCIM is not part of Keycloak's built-in OIDC server. Configure its outbound base URL/token and immutable subject mapping. Federated Entra, AD/LDAP or SAML sources stay behind Keycloak. |
 

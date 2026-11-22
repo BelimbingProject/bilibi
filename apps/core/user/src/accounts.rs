@@ -265,6 +265,43 @@ impl UserService {
         Ok(account)
     }
 
+    pub async fn send_password_recovery(
+        &self,
+        scope: &Scope,
+        user: i64,
+    ) -> std::result::Result<(), AccountError> {
+        if scope.impersonator().is_some() {
+            return Err(AccountError::Impersonating);
+        }
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        let tx = self
+            .mutations
+            .begin(
+                &mut client,
+                scope.mutation_context("user.recovery_requested"),
+            )
+            .await?;
+        let scope = self.fresh(tx.sql(), scope).await?;
+        let account = self
+            .open_account_write(&tx, &scope, user, None, UPDATE)
+            .await?;
+        if account.status != "active" || !account.email_verified {
+            return Err(AccountError::Access(Error::Invalid));
+        }
+        tx.rollback().await?;
+        drop(client);
+        self.reset_mail()
+            .mail_with_reset_link(
+                scope.tenant(),
+                user,
+                "Recover your Bilibi sign-in",
+                "Your workspace administrator requested a recovery email for you.",
+                true,
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Removes a membership: `admin.user.delete`, never the actor's own nor one
     /// holding a permission the actor lacks. It always retires only this
     /// tenant membership; customer administrators never delete a shared identity.
@@ -341,10 +378,7 @@ impl UserService {
         let email = email.expect("validated");
         let name = name.trim().to_owned();
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let (scope, authority) = self
-            .sessions
-            .activity_with_authority(&**client, token)
-            .await?;
+        let scope = self.sessions.activity(&**client, token).await?;
         if scope.csrf != csrf {
             return Err(Error::Forbidden.into());
         }
@@ -361,8 +395,10 @@ impl UserService {
             tx.rollback().await?;
             return Ok(ProfileOutcome { email_changed });
         }
-        if email_changed && !authority.is_portable() {
-            return Err(AccountError::Access(Error::Forbidden));
+        if email_changed {
+            self.sessions
+                .require_portable_authority(tx.sql(), &scope)
+                .await?;
         }
         if email_changed && email_taken(tx.sql(), &email, Some(user)).await? {
             return Err(AccountError::Validation(vec![field_error(

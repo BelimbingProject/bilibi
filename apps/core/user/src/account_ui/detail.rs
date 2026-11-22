@@ -53,6 +53,7 @@ struct View {
 #[template(path = "account_actions.html")]
 struct Actions {
     impersonate: Html,
+    recovery: Html,
     back: Html,
 }
 #[derive(Template)]
@@ -1042,6 +1043,21 @@ impl Detail {
             subtitle: &subtitle,
             actions: render(&Actions {
                 impersonate: self.impersonate(scope).await?,
+                recovery: if loaded.can_edit()
+                    && account.status == "active"
+                    && account.email_verified
+                    && scope.impersonator().is_none()
+                {
+                    render(&Button {
+                        id: "user-send-recovery",
+                        button_type: "button",
+                        event: "send_recovery",
+                        body: Html::text("Send recovery email"),
+                        ..Button::default()
+                    })?
+                } else {
+                    Html::EMPTY
+                },
                 back: render(&BackLink {
                     href: "/users",
                     id: "user-back",
@@ -1355,6 +1371,20 @@ impl Detail {
         match event(value)? {
             "save_field" => self.save_field(scope, value).await?,
             "clear-flash" => self.flash.dismiss(value.get("key").and_then(Value::as_str)),
+            "send_recovery" => {
+                match self
+                    .pages
+                    .users
+                    .send_password_recovery(scope, self.id)
+                    .await
+                {
+                    Ok(()) => self.flash.success("Recovery email requested."),
+                    Err(AccountError::Access(Error::Unauthorized)) => {
+                        return Err(Error::Unauthorized)
+                    }
+                    Err(_) => self.flash.error("Recovery email could not be requested."),
+                }
+            }
             "request_delete" => {
                 if !self.pages.allowed(scope, DELETE).await? {
                     self.flash

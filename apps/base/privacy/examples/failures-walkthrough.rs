@@ -713,8 +713,8 @@ async fn main() -> Result<()> {
         .get(0);
     client
         .execute(
-            "INSERT INTO user_sign_ins(tenant_id,user_id,identity_id,token_hash,csrf,credential_hash,state,expires_at) \
-             SELECT 1,$1,identity_id,sha256('walkthrough sign-in'::bytea),'walkthrough',sha256('walkthrough credential'::bytea),'pending',now()+interval '5 minutes' FROM users WHERE tenant_id=1 AND id=$1",
+            "INSERT INTO user_sign_ins(tenant_id,user_id,identity_id,token_hash,csrf,credential_hash,state,expires_at,authentication_authority) \
+             SELECT 1,$1,identity_id,sha256('walkthrough sign-in'::bytea),'walkthrough',sha256('walkthrough credential'::bytea),'pending',now()+interval '5 minutes','portable' FROM users WHERE tenant_id=1 AND id=$1",
             &[&ann_user],
         )
         .await?;

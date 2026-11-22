@@ -17,7 +17,7 @@ async fn add_session(db: &Db, tenant: i64, user: i64) -> Result<(String, String)
     db.get()
         .await?
         .execute(
-            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,$4,now()+interval '24 hours')",
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) VALUES($1,$2,$3,$4,now()+interval '24 hours','portable')",
             &[&id, &tenant, &user, &csrf],
         )
         .await?;

@@ -280,7 +280,7 @@ When running the binary directly, use the same flags with `bilibi-web tenant-pro
 
 ## Lost phone
 
-Bilibi has no 2FA recovery codes, and customer administrators cannot reset another person's installation-wide factor. A person who loses their phone asks the server owner to reset it from the server:
+Bilibi has no 2FA recovery codes, and customer administrators cannot reset another person's installation-wide factor. A staff member who loses their phone asks the server owner to reset it from the server.
 
 ```sh
 sudo scripts/install-server.sh two-factor-reset production --email owner@example.com
@@ -345,7 +345,7 @@ Script commands:
 | `release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance and checksums, copy into `releases/<n>`, migrate, switch, check |
 | `create-owner <instance> [--email <address>] [--name <name>] [--password-stdin] [--company-name <name> --company-code <code>]` | [Server owner setup](#the-first-account) |
 | `tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>` | [Customer tenant and first-owner setup](#the-first-owner-of-a-customer-tenant) |
-| `two-factor-reset <instance> --email <address>` | Turn off one account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
+| `two-factor-reset <instance> --email <address>` | Turn off one staff account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
 | `installer <bilibi-installer> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance, copy the installer to `/opt/bilibi/build/bin` and start `bilibi-installer@<instance>` for every instance; rerun to update it |
 | `switch <instance> <n>` | Put a kept release in service |
 | `status [<instance>]` | Roles, addresses, service and installer states, releases |

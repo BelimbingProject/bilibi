@@ -27,7 +27,7 @@ pub enum TwoFactorEmailReset {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum TwoFactorEmailError {
-    #[error("No account uses that email.")]
+    #[error("No staff account uses that email.")]
     NotFound,
     #[error("That email address is not valid.")]
     Invalid,
@@ -150,7 +150,7 @@ fn wake(
 }
 
 impl UserService {
-    /// Turns off the confirmed authenticator for the one non-deleted account
+    /// Turns off the confirmed authenticator for the one non-deleted staff account
     /// with this email. Already off is success and writes nothing. The audit
     /// actor is the system principal `two-factor-reset`.
     pub async fn reset_two_factor_by_email(

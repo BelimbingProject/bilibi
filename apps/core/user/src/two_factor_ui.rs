@@ -324,7 +324,7 @@ impl TwoFactorPage {
             description: fragment(Html::render(&Bullets {
                 first,
                 second: if self.portal {
-                    "Lost your phone? Ask the server administrator for recovery, then set it up again."
+                    "If you lose your phone, contact your portal administrator for help."
                 } else {
                     "If you lose your phone, ask the server administrator for recovery, then set it up again."
                 },

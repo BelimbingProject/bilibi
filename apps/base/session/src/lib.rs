@@ -532,16 +532,30 @@ impl Sessions {
         client: &(impl GenericClient + Sync),
         scope: &Scope,
     ) -> Result<()> {
-        if scope.impersonator().is_some()
-            || scope.agent().is_some()
-            || scope.principal().is_some()
-            || client
-                .query_opt(
-                    "SELECT 1 FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND csrf=$3 AND impersonator_id IS NULL AND authentication_authority='portable'",
-                    &[&scope.tenant(), &scope.user(), &scope.csrf],
-                )
-                .await?
-                .is_none()
+        if scope.impersonator().is_some() || scope.agent().is_some() || scope.principal().is_some()
+        {
+            return Err(Error::Forbidden);
+        }
+        let fingerprint = scope
+            .browser_session_fingerprint()
+            .ok_or(Error::Forbidden)?;
+        let idle = self.policy(client).await?.idle_seconds as f64;
+        if client
+            .query_opt(
+                "SELECT id FROM sessions WHERE id=encode($1,'hex') AND tenant_id=$2 AND user_id=$3
+                 AND csrf=$4 AND impersonator_id IS NULL AND ended_reason IS NULL
+                 AND authentication_authority='portable' AND expires_at>clock_timestamp()
+                 AND last_activity>clock_timestamp()-make_interval(secs => $5) FOR SHARE",
+                &[
+                    &fingerprint,
+                    &scope.tenant(),
+                    &scope.user(),
+                    &scope.csrf,
+                    &idle,
+                ],
+            )
+            .await?
+            .is_none()
         {
             return Err(Error::Forbidden);
         }

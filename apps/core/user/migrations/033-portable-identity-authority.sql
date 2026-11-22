@@ -18,7 +18,7 @@ ALTER TABLE user_identities ADD CONSTRAINT user_identities_audience_check CHECK 
 );
 
 ALTER TABLE user_sign_ins
- ADD COLUMN authentication_authority text NOT NULL DEFAULT 'portable',
+ ADD COLUMN authentication_authority text NOT NULL,
  ADD COLUMN authentication_tenant_id bigint,
  ADD COLUMN authentication_provider_id bigint,
  ADD COLUMN authentication_company_id bigint,
@@ -29,6 +29,7 @@ ALTER TABLE user_sign_ins
    AND authentication_company_id IS NULL)
   OR
   (authentication_authority='tenant_sso'
+   AND authentication_tenant_id IS NOT NULL
    AND authentication_tenant_id=tenant_id
    AND authentication_provider_id IS NOT NULL
    AND authentication_company_id IS NOT NULL)

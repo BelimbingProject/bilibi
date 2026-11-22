@@ -201,12 +201,12 @@ impl UserService {
         if !self.settings.encryption_available() {
             return Err(TwoFactorError::Unavailable);
         }
-        self.unlocked(scope).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
         let client = self.db.get().await.map_err(Error::from)?;
         self.sessions
             .require_portable_authority(&**client, scope)
             .await?;
+        self.unlocked(scope).await?;
         let row = client
             .query_opt(
                 "SELECT i.password_hash,i.email,i.id FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND u.deleted_at IS NULL",
@@ -239,6 +239,9 @@ impl UserService {
                 &mut client,
                 scope.mutation_context("user.two_factor.enrollment_started"),
             )
+            .await?;
+        self.sessions
+            .require_portable_authority(tx.sql(), scope)
             .await?;
         let started = tx
             .mutate(move |sql| {
@@ -274,12 +277,12 @@ impl UserService {
     /// and counts as this session's step-up.
     pub async fn confirm_two_factor(&self, scope: &Scope, code: &str) -> Outcome<()> {
         refuse_impersonation(scope)?;
-        self.unlocked(scope).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
         let client = self.db.get().await.map_err(Error::from)?;
         self.sessions
             .require_portable_authority(&**client, scope)
             .await?;
+        self.unlocked(scope).await?;
         let row = client
             .query_opt(
                 "SELECT f.secret,f.confirmed_at IS NOT NULL,f.last_step,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2)",
@@ -308,6 +311,9 @@ impl UserService {
             .await?;
         let sessions = self.sessions.clone();
         let scope_for_tx = scope.clone();
+        self.sessions
+            .require_portable_authority(tx.sql(), scope)
+            .await?;
         let enabled = tx
             .mutate(move |sql| {
                 Box::pin(async move {
@@ -360,16 +366,6 @@ impl UserService {
         if !self.settings.encryption_available() {
             return Err(TwoFactorError::Unavailable);
         }
-        let step = self.prove(scope, code).await?;
-        self.consume(
-            scope,
-            step,
-            Spend::Purpose {
-                operation: "core.user.two_factor.move".into(),
-                channel: "web",
-            },
-        )
-        .await?;
         let client = self.db.get().await.map_err(Error::from)?;
         self.sessions
             .require_portable_authority(&**client, scope)
@@ -385,6 +381,16 @@ impl UserService {
             .get(0);
         let issuer = self.issuer()?;
         drop(client);
+        let step = self.prove(scope, code).await?;
+        self.consume(
+            scope,
+            step,
+            Spend::Purpose {
+                operation: "core.user.two_factor.move".into(),
+                channel: "web",
+            },
+        )
+        .await?;
         let encoded = totp::encode_secret(&totp::generate_secret()?);
         Ok(Enrollment::new(issuer, email, encoded)?)
     }
@@ -393,7 +399,6 @@ impl UserService {
     /// The old phone stops working. Audited as `user.two_factor.moved`.
     pub async fn confirm_move(&self, scope: &Scope, to: &Enrollment, code: &str) -> Outcome<()> {
         refuse_impersonation(scope)?;
-        self.unlocked(scope).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
         let secret = data_encoding::BASE32_NOPAD
             .decode(to.secret.as_bytes())
@@ -402,6 +407,7 @@ impl UserService {
         self.sessions
             .require_portable_authority(&**client, scope)
             .await?;
+        self.unlocked(scope).await?;
         let step = totp::verify(&secret, code, now_unix(&**client).await?, None)?;
         let sign_in = client
             .query_opt(
@@ -424,6 +430,9 @@ impl UserService {
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("user.two_factor.moved"))
+            .await?;
+        self.sessions
+            .require_portable_authority(tx.sql(), scope)
             .await?;
         let moved = tx
             .mutate(move |sql| {

@@ -8,7 +8,7 @@ use bilibi_database::{Db, Error, Result};
 use bilibi_user::{TwoFactorEmailError, TwoFactorEmailReset};
 
 const USAGE: &str = "usage: bilibi-web two-factor-reset --email ADDRESS
-Turns off the authenticator app of the account with that email, signs the account out and
+Turns off the authenticator app of the staff account with that email, signs the account out and
 notifies the person. They sign in with their password and set the app up again in Settings.
 If sign-in requires 2FA, another signed-in administrator must turn that requirement off
 while this account sets up a new method. Reset does not bypass the sign-in policy.
@@ -36,7 +36,7 @@ pub async fn two_factor_reset(db: &Db, args: &[String]) -> Result<()> {
             println!("2FA is already off for {email}. Nothing changed.")
         }
         Err(TwoFactorEmailError::NotFound) => {
-            eprintln!("No account uses {email}.");
+            eprintln!("No staff account uses {email}.");
             return Err(Error::NotFound);
         }
         Err(TwoFactorEmailError::Invalid) => {
