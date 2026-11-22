@@ -1,0 +1,10 @@
+{% import "components.html" as ui %}
+<div id="step-up-gate" data-hook="StepUpGate" data-step-up-prompt="{{ prompt }}" data-step-up-return="{{ return_to }}" class="relative min-h-[24rem] overflow-hidden" aria-label="Protected page">
+<div id="step-up-placeholder" aria-hidden="true" class="mx-auto w-full max-w-7xl space-y-4 opacity-35 blur-[1px]">
+{% call ui::header(subtitle="", title_actions=bilibi_ui::Html::EMPTY, actions=bilibi_ui::Html::EMPTY, pin=false) %}{{ title }}{% endcall %}
+<div class="space-y-3 rounded-xl border border-line bg-surface p-3"><div class="h-7 w-2/5 rounded-md bg-surface-sunken"></div><div class="h-8 rounded-md bg-surface-sunken"></div><div class="h-8 rounded-md bg-surface-sunken"></div><div class="h-8 w-4/5 rounded-md bg-surface-sunken"></div></div>
+</div>
+<div class="absolute inset-0 z-20 flex items-start justify-center bg-canvas/50 px-3 py-8 backdrop-blur-[1px]" data-step-up-cover>
+<section id="step-up-card" role="dialog" aria-modal="true" aria-label="Confirm access" class="w-full max-w-md">{{ body }}</section>
+</div>
+</div>

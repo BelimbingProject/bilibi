@@ -67,7 +67,17 @@
   const params = () => Object.fromEntries(new URLSearchParams(location.search));
   const address = () => location.pathname + location.search;
   let shown = address(); // The path and query the page on screen was mounted for.
-  const mountIntent = () => ({type: 'mount', path: location.pathname, params: params()});
+  const mountIntent = () => {
+    const gate = document.querySelector('[data-hook="StepUpGate"]');
+    if (!gate) return {type: 'mount', path: location.pathname, params: params()};
+    const prompt = new URL(gate.dataset.stepUpPrompt, location.href);
+    return {
+      type: 'mount',
+      path: prompt.pathname,
+      params: Object.fromEntries(prompt.searchParams),
+      step_up_return: gate.dataset.stepUpReturn,
+    };
+  };
 
   function connect() {
     if (stopped || !document.querySelector('[data-live]')) return;
@@ -293,6 +303,16 @@
       entry.onReply?.({type: 'error', message: refusal});
       loading();
       return;
+    }
+    const gate = document.querySelector('[data-hook="StepUpGate"]');
+    if (message.type === 'page' && message.redirect && gate) {
+      const destination = new URL(message.redirect, location.href);
+      const expected = new URL(gate.dataset.stepUpReturn, location.href);
+      if (destination.pathname === expected.pathname && destination.search === expected.search) {
+        enqueue({type: 'navigate', path: expected.pathname, params: Object.fromEntries(expected.searchParams)}, {loading: true});
+        loading();
+        return;
+      }
     }
     if (message.type === 'page') {
       // Consent replies can hand the browser back to an OAuth client.

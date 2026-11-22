@@ -68,6 +68,16 @@ impl Page<Scope, Error> for Pages {
             _ => return None,
         })
     }
+    fn step_up_title(
+        &self,
+        operation: &str,
+        path: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        if operation == "table" {
+            return path.get("table").cloned();
+        }
+        self.title(operation).map(str::to_owned)
+    }
     fn render<'a>(&'a self, request: PageRequest<'a, Scope>) -> PageFuture<'a, Error> {
         Box::pin(async move {
             if matches!(request.operation, "tables" | "table") {

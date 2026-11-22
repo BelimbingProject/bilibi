@@ -610,6 +610,94 @@ async fn step_up_redirect(
     Ok(axum::response::Redirect::to(&destination).into_response())
 }
 
+/// A local prompt address split into its discovered path and decoded query.
+/// Providers already validate and return a local address; the host still
+/// refuses fragments and non-root paths before resolving it.
+pub(crate) fn local_address(address: &str) -> Result<(&str, HashMap<String, String>)> {
+    let (path, query) = address.split_once('?').unwrap_or((address, ""));
+    if !path.starts_with('/') || path.starts_with("//") || address.contains('#') {
+        return Err(Error::Forbidden);
+    }
+    Ok((
+        path,
+        url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect(),
+    ))
+}
+
+/// Draws the factor provider's prompt over placeholders inside the requested
+/// page's shell. The protected page service is deliberately not called.
+async fn step_up_page(
+    app: &App,
+    requested: &BoundRoute,
+    requested_path: &HashMap<String, String>,
+    scope: &bilibi_security::Scope,
+    credential: &str,
+    uri: &Uri,
+    framed: bool,
+) -> Result<Response> {
+    let return_to = uri
+        .path_and_query()
+        .map_or(uri.path(), |address| address.as_str());
+    let destination = app.step_up.prompt(scope, return_to).await?;
+    let (prompt_path, prompt_query) = local_address(&destination)?;
+    let (prompt, prompt_params) = resolve(app, prompt_path)?;
+    match admit(
+        app,
+        prompt.route.access,
+        Some(credential),
+        Some(prompt_path),
+    )
+    .await?
+    {
+        Admission::Admitted(_) => {}
+        Admission::StepUp(_) => return Err(Error::Forbidden),
+    }
+    let page = crate::render_fields(
+        app,
+        Some(scope),
+        prompt.page.0.render(PageRequest {
+            operation: prompt.route.operation,
+            scope: Some(scope),
+            path: &prompt_params,
+            query: &prompt_query,
+            body: &[],
+            framed,
+        }),
+    )
+    .await?;
+    let title = requested
+        .page
+        .0
+        .step_up_title(requested.route.operation, requested_path)
+        .unwrap_or_else(|| "Protected page".to_owned());
+    let gate = bilibi_ui::Html::render(&bilibi_ui::StepUpGate::new(
+        destination,
+        return_to,
+        title.clone(),
+        bilibi_ui::Html::raw(page.html),
+    ))
+    .map_err(|_| Error::Internal)?;
+    let shell = crate::shell::render(
+        app,
+        Some(scope),
+        uri.path(),
+        if framed {
+            PageChrome::Framed
+        } else {
+            requested.page.0.chrome(requested.route.operation)
+        },
+        true,
+        gate.as_str(),
+        bilibi_ui::Html::EMPTY,
+    )
+    .await?;
+    let mut response = crate::document_themed(&title, &shell.html, shell.theme)?.into_response();
+    *response.status_mut() = StatusCode::OK;
+    Ok(response)
+}
+
 async fn dispatch(
     app: App,
     bound: BoundRoute,
@@ -630,6 +718,10 @@ async fn dispatch(
         }
     }
     let credential = token(&headers).ok();
+    let framed = matches!(
+        headers.get("sec-fetch-dest").and_then(|h| h.to_str().ok()),
+        Some("iframe" | "frame")
+    );
     let scope = match admit(
         &app,
         bound.route.access,
@@ -646,7 +738,8 @@ async fn dispatch(
             ))
         }
         Ok(Admission::StepUp(scope)) if bound.route.method == Method::Get => {
-            return Ok(step_up_redirect(&app, &scope, &uri).await?)
+            let credential = credential.as_deref().ok_or(Error::Unauthorized)?;
+            return Ok(step_up_page(&app, &bound, &path, &scope, credential, &uri, framed).await?);
         }
         Ok(Admission::StepUp(_)) => return Err(Error::Forbidden.into()),
         Ok(Admission::Admitted(scope)) => scope,
@@ -662,10 +755,6 @@ async fn dispatch(
             }
         }
     }
-    let framed = matches!(
-        headers.get("sec-fetch-dest").and_then(|h| h.to_str().ok()),
-        Some("iframe" | "frame")
-    );
     if framed && !bound.route.framed {
         return Err(Error::Forbidden.into());
     }
@@ -688,7 +777,8 @@ async fn dispatch(
             if bound.route.method == Method::Get && reason != "impersonating" =>
         {
             let scope = scope.as_ref().ok_or(Error::Forbidden)?;
-            return Ok(step_up_redirect(&app, scope, &uri).await?);
+            let credential = credential.as_deref().ok_or(Error::Unauthorized)?;
+            return Ok(step_up_page(&app, &bound, &path, scope, credential, &uri, framed).await?);
         }
         Err(Error::NotFound) if bound.route.method == Method::Get => {
             return match crate::auth::missing_record_redirect(&app, bound.route.path) {

@@ -322,6 +322,10 @@ enum Event {
         path: String,
         #[serde(default)]
         params: HashMap<String, String>,
+        /// Present only for the host-rendered 2FA cover. The socket verifies
+        /// that this address still owes step-up before mounting the prompt.
+        #[serde(default)]
+        step_up_return: Option<String>,
     },
     Navigate {
         path: String,
@@ -571,6 +575,12 @@ struct Panel<C: 'static> {
     spec: PanelSpec,
     mounted: Mounted<C>,
 }
+struct StepUpView {
+    prompt: String,
+    return_to: String,
+    path: String,
+    title: String,
+}
 struct Session<S: Side> {
     identity: Identity,
     /// Set when the session no longer holds `identity`: the socket then
@@ -585,6 +595,9 @@ struct Session<S: Side> {
     /// path the page or the browser names is still this page.
     page_route: Option<&'static bilibi_module_registry::contributions::Route>,
     page: Option<Mounted<S::Context>>,
+    /// The factor prompt is mounted as the live owner while the requested
+    /// page remains only shell chrome and placeholders.
+    step_up: Option<StepUpView>,
     panels: HashMap<String, Panel<S::Context>>,
     /// `EmbedContext::Shell` panels (the bell), keyed by their element id.
     /// They outlive navigation and are never mounted in a framed page.
@@ -705,14 +718,15 @@ impl<S: Side> Session<S> {
         }
     }
     /// Where this page's browser confirms a step-up and comes back.
-    async fn prompt(&mut self, app: &App, token: &str) -> Option<String> {
+    async fn prompt(&mut self, app: &App, token: &str) -> Option<(String, String)> {
         let scope = self.scope(app, token).await.ok()?;
         let back = if self.canonical.is_empty() {
-            self.path.clone()
+            bilibi_ui::params::address(&self.path, &self.query)
         } else {
             self.canonical.clone()
         };
-        S::prompt(app, &scope, &back).await
+        let destination = S::prompt(app, &scope, &back).await?;
+        Some((destination, back))
     }
     /// An embed's access for this socket: a step-up still owed is a refusal,
     /// since a panel has no prompt to send anyone to.
@@ -736,6 +750,7 @@ impl<S: Side> Session<S> {
         token: &str,
         path: String,
         query: HashMap<String, String>,
+        step_up_return: Option<String>,
     ) -> Result<Vec<Value>> {
         let bound = S::resolve(app, &path)?;
         let params = &bound.params;
@@ -746,6 +761,30 @@ impl<S: Side> Session<S> {
             .admit(app, bound.route.access, token, path.clone())
             .await?;
         let scope = self.bound(scope)?;
+        let step_up = if let Some(return_to) = step_up_return {
+            let (return_path, _) = routes::local_address(&return_to)?;
+            let return_path = return_path.to_owned();
+            let requested = S::resolve(app, &return_path)?;
+            let expected = S::prompt(app, &scope, &return_to)
+                .await
+                .ok_or(Error::Forbidden)?;
+            let (expected_path, expected_query) = routes::local_address(&expected)?;
+            if expected_path != path || expected_query != query {
+                return Err(Error::Forbidden);
+            }
+            Some(StepUpView {
+                prompt: expected,
+                return_to,
+                path: return_path,
+                title: requested
+                    .page
+                    .0
+                    .step_up_title(requested.route.operation, &requested.params)
+                    .unwrap_or_else(|| "Protected page".to_owned()),
+            })
+        } else {
+            None
+        };
         let state = crate::render_fields(
             app,
             Some(S::scope(&scope)),
@@ -772,6 +811,7 @@ impl<S: Side> Session<S> {
             &self.sender,
             Audience::of(S::scope(&scope)),
         ));
+        self.step_up = step_up;
         self.path = path;
         self.route = bound.route.path.to_owned();
         self.page_route = Some(bound.route);
@@ -813,8 +853,12 @@ impl<S: Side> Session<S> {
     /// Mounts each shell embed the actor may see, once per socket, and drops
     /// one whose access is gone. A refused embed renders nothing in the shell.
     async fn sync_shell(&mut self, app: &App, token: &str, scope: &S::Context) -> Result<()> {
+        let visible_path = self
+            .step_up
+            .as_ref()
+            .map_or(self.path.as_str(), |gate| gate.path.as_str());
         let standalone = S::SHELL
-            && S::resolve(app, &self.path).is_ok_and(|bound| {
+            && S::resolve(app, visible_path).is_ok_and(|bound| {
                 bound.page.0.chrome(bound.route.operation)
                     == bilibi_ui::page::PageChrome::StandaloneReview
             });
@@ -992,7 +1036,25 @@ impl<S: Side> Session<S> {
         scope: &S::Context,
         body: LiveBody,
     ) -> Result<Value> {
-        let html = S::chrome(app, scope, &self.path, self.framed, &body.html).await?;
+        let (path, page_html) = match &self.step_up {
+            Some(gate) => {
+                let html = bilibi_ui::Html::render(&bilibi_ui::StepUpGate::new(
+                    gate.prompt.clone(),
+                    gate.return_to.clone(),
+                    gate.title.clone(),
+                    bilibi_ui::Html::raw(body.html.clone()),
+                ))
+                .map_err(|_| Error::Internal)?;
+                (gate.path.as_str(), html.as_str().to_owned())
+            }
+            None => (self.path.as_str(), body.html.clone()),
+        };
+        let html = S::chrome(app, scope, path, self.framed, &page_html).await?;
+        if self.step_up.is_some() {
+            return Ok(
+                json!({"type":"page", "target":"app", "html":html, "url":Value::Null, "panel_params":false, "notice":body.notice, "rows":body.rows, "redirect":body.redirect, "events":events(&body.events)}),
+            );
+        }
         let prefixes: Vec<_> = self
             .panels
             .values()
@@ -1522,9 +1584,12 @@ impl<S: Side> Session<S> {
     }
     async fn event(&mut self, app: &App, token: &str, event: Event) -> Result<Vec<Value>> {
         let messages = match event {
-            Event::Mount { path, params } | Event::Navigate { path, params } => {
-                self.mount(app, token, path, params).await?
-            }
+            Event::Mount {
+                path,
+                params,
+                step_up_return,
+            } => self.mount(app, token, path, params, step_up_return).await?,
+            Event::Navigate { path, params } => self.mount(app, token, path, params, None).await?,
             // Back or Forward inside a `data-history="params"` page: the
             // historical path stays this page's state (its route parameters
             // join the params, after the query so the path wins) or, when it
@@ -1542,7 +1607,7 @@ impl<S: Side> Session<S> {
                     {
                         // A child query belongs to this record, not another
                         // record served by the same page service/operation.
-                        self.mount(app, token, path, params).await?
+                        self.mount(app, token, path, params, None).await?
                     }
                     Some(path) => match self.relocate(app, token, &path).await? {
                         Some(route_params) => {
@@ -1551,7 +1616,7 @@ impl<S: Side> Session<S> {
                             self.update(app, token, "page", LiveInput::Params(&params))
                                 .await?
                         }
-                        None => self.mount(app, token, path, params).await?,
+                        None => self.mount(app, token, path, params, None).await?,
                     },
                     None => {
                         self.update(app, token, "page", LiveInput::Params(&params))
@@ -1641,6 +1706,7 @@ pub async fn run<S: Side>(
         route: String::new(),
         page_route: None,
         page: None,
+        step_up: None,
         panels: HashMap::new(),
         shell: HashMap::new(),
         generation: 0,
@@ -1672,7 +1738,7 @@ pub async fn run<S: Side>(
         let mut target = "page".to_owned();
         let mut history = "replace";
         session.background = false;
-        let result = tokio::select! {
+        let mut result = tokio::select! {
             message = socket.recv() => match message {
                 Some(Ok(Message::Text(text))) => {
                     // Over the session's budget: refused before it is read,
@@ -1793,16 +1859,12 @@ pub async fn run<S: Side>(
         // the person repeats the action. Nothing acted.
         if let Err(Error::StepUpRequired { reason, .. }) = &result {
             if *reason != "impersonating" {
-                if let Some(destination) = session.prompt(&app, &token).await {
-                    let message = json!({"type":"page", "target":"app", "html":"", "url":Value::Null, "notice":"", "rows":0, "redirect":destination, "request_id":request_id, "history":"push"});
-                    if socket
-                        .send(Message::Text(message.to_string().into()))
-                        .await
-                        .is_err()
-                    {
-                        return;
+                if let Some((destination, return_to)) = session.prompt(&app, &token).await {
+                    if let Ok((path, query)) = routes::local_address(&destination) {
+                        result = session
+                            .mount(&app, &token, path.to_owned(), query, Some(return_to))
+                            .await;
                     }
-                    continue;
                 }
             }
         }

@@ -1067,10 +1067,13 @@ pub struct CodeInput {
     pub name: String,
     pub value: String,
     pub label: String,
+    pub label_hidden: bool,
     pub length: usize,
     pub group_size: Option<usize>,
     pub numeric: bool,
     pub optional: bool,
+    pub autofocus: bool,
+    pub hint: bool,
     pub errors: Vec<String>,
 }
 
@@ -1086,10 +1089,13 @@ impl CodeInput {
             name: name.into(),
             value: String::new(),
             label: label.into(),
+            label_hidden: false,
             length,
             group_size: None,
             numeric: false,
             optional: false,
+            autofocus: false,
+            hint: true,
             errors: Vec::new(),
         }
     }
@@ -1107,8 +1113,28 @@ impl CodeInput {
         self
     }
 
+    /// Move keyboard focus here when this field is the page's immediate task.
+    pub fn autofocus(mut self) -> Self {
+        self.autofocus = true;
+        self
+    }
+
     pub fn errors(mut self, errors: Vec<String>) -> Self {
         self.errors = errors;
+        self
+    }
+
+    /// Omit the generic typing hint when the surrounding prompt already says
+    /// exactly what code to enter.
+    pub fn without_hint(mut self) -> Self {
+        self.hint = false;
+        self
+    }
+
+    /// Keep the field name for assistive technology when nearby copy already
+    /// identifies the code and a second visible label would repeat it.
+    pub fn hidden_label(mut self) -> Self {
+        self.label_hidden = true;
         self
     }
 
@@ -1117,7 +1143,7 @@ impl CodeInput {
     }
 
     pub fn described_by(&self) -> String {
-        described_by(&self.id, true, self.errors.len())
+        described_by(&self.id, self.hint, self.errors.len())
     }
 
     pub fn value(mut self, value: impl Into<String>) -> Self {

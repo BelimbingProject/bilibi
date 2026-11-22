@@ -42,6 +42,17 @@ fn code_field(id: &str, errors: &[String]) -> Result<Html, Error> {
     ))
 }
 
+fn confirm_code_field(id: &str, errors: &[String]) -> Result<Html, Error> {
+    fragment(Html::render(
+        &CodeInput::new(id, "two_factor[code]", "Authentication code", 6)
+            .numeric()
+            .autofocus()
+            .hidden_label()
+            .without_hint()
+            .errors(errors.to_vec()),
+    ))
+}
+
 /// The browser's return address from the query, kept only when it is a
 /// local path ([`crate::safe_return`]).
 fn return_to(query: &HashMap<String, String>) -> Option<String> {
@@ -403,8 +414,6 @@ impl LiveState<Scope, Error> for TwoFactorPage {
 pub struct ConfirmPage {
     users: Arc<UserService>,
     enabled: bool,
-    minutes: i64,
-    hours: i64,
     return_to: Option<String>,
     errors: Vec<String>,
     notice: String,
@@ -427,11 +436,17 @@ enum ConfirmEvent {
 struct ConfirmView<'a> {
     header: Html,
     notice: &'a str,
-    enabled: bool,
-    minutes: i64,
-    hours: i64,
     step_up: Html,
-    portal: bool,
+}
+
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::header(subtitle=subtitle, title_actions=bilibi_ui::Html::EMPTY, actions=bilibi_ui::Html::EMPTY, pin=false) %}{{ title }}{% endcall %}"#,
+    ext = "html"
+)]
+struct ConfirmHeader<'a> {
+    title: &'a str,
+    subtitle: &'a str,
 }
 
 impl ConfirmPage {
@@ -441,12 +456,9 @@ impl ConfirmPage {
         query: &HashMap<String, String>,
     ) -> Result<Self, Error> {
         let enabled = users.two_factor_status(scope).await?.enabled;
-        let window = users.step_up.window(scope).await?;
         Ok(Self {
             users,
             enabled,
-            minutes: window.window_minutes,
-            hours: window.cap_hours,
             return_to: return_to(query),
             errors: Vec::new(),
             notice: if scope.impersonator().is_some() {
@@ -477,7 +489,7 @@ impl ConfirmPage {
         }
         let mut step =
             bilibi_ui::StepUp::new(self.enabled, self.return_to.as_deref().unwrap_or_default());
-        step.code = code_field("two_factor_code", &self.errors)?;
+        step.code = confirm_code_field("two_factor_code", &self.errors)?;
         step.actions = fragment(Html::render(&Button {
             id: "confirm-access-verify",
             button_type: "submit",
@@ -491,27 +503,20 @@ impl ConfirmPage {
 
     fn render(&self) -> Result<String, Error> {
         ConfirmView {
-            header: fragment(Html::render(&Header {
-                title: Html::text(if self.portal {
+            header: fragment(Html::render(&ConfirmHeader {
+                title: if self.portal {
                     "Confirm it is you"
                 } else {
                     "Confirm access"
-                }),
+                },
                 subtitle: match (self.enabled, self.portal) {
-                    (true, true) => "Enter the code from your authenticator app to continue.",
-                    (true, false) => "Enter your 2FA code to continue.",
+                    (true, _) => "Enter the 6-digit code from your authenticator app.",
                     (false, true) => "This page needs a code from an authenticator app, and you have not set one up yet.",
                     (false, false) => "",
                 },
-                title_actions: Html::EMPTY,
-                actions: Html::EMPTY,
             }))?,
             notice: &self.notice,
-            enabled: self.enabled,
-            minutes: self.minutes,
-            hours: self.hours,
             step_up: self.step()?,
-            portal: self.portal,
         }
         .render()
         .map_err(|_| Error::Internal)

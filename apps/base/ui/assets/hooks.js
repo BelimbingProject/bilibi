@@ -11,6 +11,45 @@
 // `bilibi:event` CustomEvent, and hears a server push as a `window` event
 // `bilibi:<name>` with the payload in detail. ui.js must load first.
 (() => {
+  window.BilibiUI.registerHook("StepUpGate", {
+    mounted() {
+      this.card = this.el.querySelector("#step-up-card")
+      this.focusCode = () => this.card.querySelector('input:not([type="hidden"]), select, button, a[href]')?.focus()
+      this.keydown = event => {
+        if (event.key === "Escape") {
+          event.preventDefault()
+          if (history.length > 1) history.back()
+          else location.assign("/")
+          return
+        }
+        if (event.key !== "Tab") return
+        const controls = [...this.card.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+          .filter(control => !control.hidden && control.getClientRects().length)
+        if (!controls.length) return
+        const first = controls[0]
+        const last = controls[controls.length - 1]
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault()
+          last.focus()
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault()
+          first.focus()
+        }
+      }
+      this.el.addEventListener("keydown", this.keydown)
+      this.focusCode()
+      requestAnimationFrame(() => requestAnimationFrame(this.focusCode))
+      this.focusTimer = setTimeout(this.focusCode, 100)
+    },
+    updated() {
+      if (!this.card.querySelector('input:not([type="hidden"])')?.matches(':focus')) requestAnimationFrame(this.focusCode)
+    },
+    destroyed() {
+      clearTimeout(this.focusTimer)
+      this.el.removeEventListener("keydown", this.keydown)
+    },
+  })
+
   // The server owns opening/closing; this hook owns keyboard and focus only.
   window.BilibiUI.registerHook("InlineForm", {
     mounted() {
