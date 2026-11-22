@@ -173,7 +173,7 @@ Opening or editing the Platform PR body starts a new run, as does pushing a Plat
 
 ## Versions inside the program
 
-**The program is the truth about what it contains.** `scripts/discover-modules.py --pin` records the Platform commit, its version and release tag, each mounted Domain or Extension's commit and release, and each Extension's reviewed/customer code declaration in `.local/composition/manifest.txt`. The executable host's build script (`apps/web/build.rs`) compiles that manifest into the program, and `bilibi_web::composition` hands it to `bilibi-web status`, the status bar and anything else that asks. Nothing is read from a file or the database at run time, so the shown versions cannot drift from the running code.
+**The program is the truth about what it contains.** `scripts/discover-modules.py --pin` records the Platform commit, its version and release tag, each mounted Domain or Extension's commit and release, and each Extension's reviewed/customer code declaration in `.local/composition/manifest.txt`. The executable host's build script (`apps/web/build.rs`) compiles that manifest into the program, and `bilibi_web::composition` hands it to `bilibi-web status` and anything else that asks. Those composition facts are compiled in, so they cannot drift from the running code. The application release identity is separate: the status bar reads the `release.json` packaged beside the executable.
 
 Pin, then build:
 
@@ -189,16 +189,9 @@ Customer-code Extensions require a saved isolated installation at discovery, pin
 
 **Platform-only setups can be pinned too.** With no Domains or Extensions mounted, `--pin` records the Platform revision, version and resolved `Cargo.lock`, with an empty `[containers]` table. On a checkout at that Platform revision, copy `.local/composition/` into place and run `python3 scripts/discover-modules.py --restore` to restore the lockfile. The same checks apply: a changed Platform revision, an altered pinned lockfile or a mounted container absent from the pin is refused.
 
-What you see in each state:
+`bilibi-web status` reports each pinned Platform and component version and commit, marks untagged components, and explains an unpinned or stale composition. The Software page also shows component versions.
 
-| State | `status` says | Status bar |
-| --- | --- | --- |
-| Pinned at a release | `Bilibi 0.1.0, release v0.1.0, commit …` and `finance 0.1.0, commit …` | `v0.1.0` `finance 0.1.0` |
-| Pinned between releases | `unreleased, commit …`; a Domain at no tag reads `untagged, commit …` | `v0.1.1` `finance 24938fb69a4d` |
-| No pin (a developer build) | `built from commit …` and `Pin: none`; a Domain checkout read from its own Git shows its commit (or release), any other reads `unpinned` | `v0.1.1` `finance 24938fb69a4d` (a Domain with no known commit has no badge) |
-| Stale pin (mounted set, `Cargo.toml` or a checkout's commit changed after the pin) | `Pin: stale, …` with what differs; no commits are shown, because they would be wrong | No Domain badge; the reason is in the Platform badge's tooltip |
-
-Hover a badge in the status bar for the commit and the module list.
+The status bar shows the application tag without `setup-`, with its release date in the details. Dev shows the Platform working version and `*` when a source checkout has uncommitted changes. A package whose `setup.nightly` is a counter shows `v0.2.1 nightly #7`, labelled as a nightly build. If the application identity is unavailable, the bar says `Build` rather than calling the Platform version an application release.
 
 ## Where to go next
 

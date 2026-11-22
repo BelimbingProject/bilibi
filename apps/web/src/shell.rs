@@ -416,7 +416,7 @@ async fn context<'a>(
         } else {
             None
         },
-        versions: bilibi_ui::version_badges(&crate::composition()),
+        versions: crate::application_version::application_version(instance.role, &display),
         topbar_actions,
         page_search: bilibi_ui::page_search(&pages, records).map_err(|_| Error::Internal)?,
     })

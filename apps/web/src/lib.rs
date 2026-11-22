@@ -3,6 +3,7 @@
 mod agent_targets;
 mod api;
 mod api_gate;
+mod application_version;
 mod auth;
 mod composition;
 mod create_owner;
