@@ -240,7 +240,7 @@ other business writes must commit with the transition. The engine runs inside
 the owner's audited `mutate`, so a guard denial after an earlier owner write
 poisons the whole transaction and the outer commit fails.
 
-A queued or scheduled job, or an owner write made without a signed-in person (such as a public form creating a record), may transition or adopt a subject and may start or drive a process run with the named system principal from its sealed `Scope`. The owner declares the principal and the capabilities it may use; an administrator grants those capabilities in the same tenant. Workflow rechecks the owner policy for every operation: `Transition` or `Adopt` for status writes, and both the subject and process adapters for each run write. A transition also rechecks its edge capability and every guard. The mutation context must name the same tenant and exact principal, with no impersonator or agent. Audit, and a transition's history fact, then name `System · <principal>`. Comments, recorded facts, approval actions and human actions still require a person.
+A queued or scheduled job, or an owner write made without a signed-in person (such as a public form creating a record), may transition or adopt a subject and may start or drive a process run with the named system principal from its sealed `Scope`. The owner declares the principal and the capabilities it may use; an administrator grants those capabilities in the same tenant. Workflow rechecks the owner policy for every operation: `Transition` or `Adopt` for status writes, and both the subject and process adapters for each run write. A transition also rechecks its edge capability and every guard. The mutation context must name the same tenant and exact principal, with no impersonator or agent. Audit, and a transition's history fact, then name `System · <principal>`. Explicit reconciliation, comments, recorded facts, approval actions and human actions still require a person.
 
 Lock order is owner row, then flow and status definitions (`FOR SHARE`), then the subject binding (`FOR UPDATE`).
 
@@ -347,11 +347,12 @@ cargo run -p bilibi-workflow --example owner -- run-attribution system/reference
 cargo run -p bilibi-workflow --example owner -- start-lifecycle system/reference-workflow 9
 cargo run -p bilibi-workflow --example owner -- pause system/reference-workflow <run> "Principal pause"
 cargo run -p bilibi-workflow --example owner -- resume system/reference-workflow <run>
+cargo run -p bilibi-workflow --example owner -- run-attribution system/reference-workflow <run>
 cargo run -p bilibi-workflow --example owner -- start-deny system/reference-workflow 10
 cargo run -p bilibi-workflow --example owner -- start-borrowed system/reference-workflow 11
 ```
 
-The start, claim, lease completion, pause and resume pass the subject and process adapters for the reference principal. `run-attribution` prints each run mutation as actor type `system`, actor ID `0`, principal `reference-workflow` and no impersonator. `start-deny` proves the process adapter can still refuse the principal, while `start-borrowed` opens the transaction as a person for the principal's scope and is refused `Forbidden` before any run is written.
+The start, claim, lease completion, pause and resume pass the subject and process adapters for the reference principal. `run-attribution` prints audit rows for the selected run, its command receipts, work items, events and dependencies. The rows from these commands show actor type `system`, actor ID `0`, principal `reference-workflow` and no impersonator. `start-deny` proves the process adapter can still refuse the principal, while `start-borrowed` opens the transaction as a person for the principal's scope and is refused `Forbidden` before any run is written.
 
 To demonstrate the run lifecycle, start the six-step `reference.lifecycle`
 graph and drive it (on a fresh database the run ID is `1`; use the ID `start`
