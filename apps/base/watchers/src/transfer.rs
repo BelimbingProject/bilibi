@@ -24,8 +24,8 @@ pub struct WatcherSetup {
 pub enum WatcherTransfer {
     Same,
     Add(Vec<String>),
-    Collision,
-    Missing(Vec<String>),
+    Collision(Vec<String>),
+    Missing(Vec<String>, Vec<String>),
     Invalid(Vec<(String, String)>, Vec<String>),
 }
 
@@ -96,10 +96,13 @@ impl Watchers {
         let mut setup = setup(&row);
         let (draft, problems) = setup.parse(&row.get(4));
         let catalog = Catalog::for_scope(tx, scope).await.map_err(Error::from)?;
-        let (review, warnings) = self
-            .check_transfer(tx, scope, &catalog, &draft, problems)
+        let mut problems = problems;
+        let warnings = self.check_literals(&catalog, &draft, &mut problems);
+        let trigger = self.trigger(&draft.trigger).ok_or(Error::Invalid)?;
+        let review = self
+            .review_new_draft(tx, scope, &draft, problems, &catalog, trigger)
             .await?;
-        if !review.is_empty() {
+        if !review.ok() {
             return Err(Error::Refused(
                 "The draft contains unavailable, restricted or nonportable inputs.".into(),
             ));
@@ -119,7 +122,7 @@ impl Watchers {
     ) -> Result<WatcherTransfer> {
         bilibi_authz::authorize_key(tx, scope, MANAGE).await?;
         bilibi_authz::authorize_key(tx, scope, VIEW).await?;
-        let (draft, problems) = incoming.parse(&Value::Null);
+        let (draft, mut problems) = incoming.parse(&Value::Null);
         let Some(definition) = &draft.definition else {
             return Ok(WatcherTransfer::Invalid(problems, Vec::new()));
         };
@@ -132,11 +135,15 @@ impl Watchers {
                 missing.push(format!("Action “{}” is unavailable.", action.operation));
             }
         }
+        let catalog = Catalog::for_setup_preview(tx, scope, fields)
+            .await
+            .map_err(Error::from)?;
+        let warnings = self.check_literals(&catalog, &draft, &mut problems);
         if !missing.is_empty() {
-            return Ok(WatcherTransfer::Missing(missing));
+            return Ok(WatcherTransfer::Missing(missing, warnings));
         }
         if !problems.is_empty() {
-            return Ok(WatcherTransfer::Invalid(problems, Vec::new()));
+            return Ok(WatcherTransfer::Invalid(problems, warnings));
         }
         if lock {
             self.lock_admission(tx, scope).await?;
@@ -157,50 +164,47 @@ impl Watchers {
             {
                 return Ok(WatcherTransfer::Same)
             }
-            _ => return Ok(WatcherTransfer::Collision),
+            _ => return Ok(WatcherTransfer::Collision(warnings)),
         }
         let (draft, problems) = incoming.parse(examples);
-        let catalog = Catalog::for_setup_preview(tx, scope, fields)
-            .await
-            .map_err(Error::from)?;
-        let (problems, warnings) = self
-            .check_transfer(tx, scope, &catalog, &draft, problems)
+        let trigger = self.trigger(&draft.trigger).ok_or(Error::Invalid)?;
+        let review = self
+            .review_new_draft(tx, scope, &draft, problems, &catalog, trigger)
             .await?;
-        Ok(if problems.is_empty() {
+        Ok(if review.ok() {
             WatcherTransfer::Add(warnings)
         } else {
-            WatcherTransfer::Invalid(problems, warnings)
+            WatcherTransfer::Invalid(review.problems, warnings)
         })
     }
 
-    async fn check_transfer(
+    fn check_literals(
         &self,
-        tx: &Transaction<'_>,
-        scope: &Scope,
         catalog: &Catalog,
         draft: &Draft,
-        mut problems: Problems,
-    ) -> Result<(Problems, Vec<String>)> {
-        let trigger = self.trigger(&draft.trigger).ok_or(Error::Invalid)?;
-        let definition = draft.definition.as_ref().ok_or(Error::Invalid)?;
+        problems: &mut Problems,
+    ) -> Vec<String> {
+        let Some(definition) = &draft.definition else {
+            return Vec::new();
+        };
+        let table = self
+            .trigger(&draft.trigger)
+            .and_then(|trigger| catalog.table(trigger.definition.table));
         let mut warnings = Vec::new();
         for (index, condition) in definition.conditions.iter().enumerate() {
-            let Some(column) = catalog
-                .table(trigger.definition.table)
-                .and_then(|table| catalog.resolve(table, &condition.field).ok())
-            else {
-                continue;
-            };
-            if catalog.table(column.table).is_some_and(|table| {
-                column.field.is_some_and(|field| {
-                    table.custom_reference(field.id).is_some()
-                        || field.id == table.key()
-                        || record_id(field.id)
-                        || field.personal.is_some()
-                        || table
-                            .record_fields()
-                            .iter()
-                            .any(|record| record.id == field.id && record.personal.is_some())
+            let column = table.and_then(|table| catalog.resolve(table, &condition.field).ok());
+            if column.as_ref().is_some_and(|column| {
+                catalog.table(column.table).is_some_and(|table| {
+                    column.field.is_some_and(|field| {
+                        table.custom_reference(field.id).is_some()
+                            || field.id == table.key()
+                            || record_id(field.id)
+                            || field.personal.is_some()
+                            || table
+                                .record_fields()
+                                .iter()
+                                .any(|record| record.id == field.id && record.personal.is_some())
+                    })
                 })
             }) {
                 problems.push((
@@ -208,7 +212,10 @@ impl Watchers {
                     "A condition on a record identifier or personal field cannot travel.".into(),
                 ));
             }
-            if column.ty == FieldType::String {
+            if column
+                .as_ref()
+                .is_none_or(|column| column.ty == FieldType::String)
+            {
                 let values = condition
                     .value
                     .as_array()
@@ -230,29 +237,26 @@ impl Watchers {
             }
         }
         for (index, action) in definition.actions.iter().enumerate() {
-            if let Some(offered) = self.action(&action.operation) {
-                for (key, value) in &action.input {
-                    let schema = &offered.input["properties"][key];
-                    if !portable_input(schema, key, value) {
-                        problems.push((
-                            "do".into(),
-                            "Use only declared action parameters that do not identify a record or hold a secret.".into(),
-                        ));
-                    } else {
-                        warn_action_text(
-                            schema,
-                            value,
-                            &format!("/do/{index}/input/{}", pointer_key(key)),
-                            &mut warnings,
-                        );
-                    }
+            let offered = self.action(&action.operation);
+            for (key, value) in &action.input {
+                let schema =
+                    offered.map_or(&Value::Null, |action| &action.input["properties"][key]);
+                if offered.is_some() && !portable_input(schema, key, value) {
+                    problems.push((
+                        "do".into(),
+                        "Use only declared action parameters that do not identify a record or hold a secret.".into(),
+                    ));
+                } else {
+                    warn_action_text(
+                        schema,
+                        value,
+                        &format!("/do/{index}/input/{}", pointer_key(key)),
+                        &mut warnings,
+                    );
                 }
             }
         }
-        let review = self
-            .review_new_draft(tx, scope, draft, problems, catalog, trigger)
-            .await?;
-        Ok((review.problems, warnings))
+        warnings
     }
 
     pub async fn import_draft(

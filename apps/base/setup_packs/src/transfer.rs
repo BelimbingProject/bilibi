@@ -161,9 +161,10 @@ impl SetupPacks {
                 .compare_draft(tx, scope, &watcher, &examples, fields, lock)
                 .await?;
             let warnings = match &transfer {
-                WatcherTransfer::Add(warnings) | WatcherTransfer::Invalid(_, warnings) => {
-                    warnings.as_slice()
-                }
+                WatcherTransfer::Add(warnings)
+                | WatcherTransfer::Collision(warnings)
+                | WatcherTransfer::Missing(_, warnings)
+                | WatcherTransfer::Invalid(_, warnings) => warnings.as_slice(),
                 _ => &[],
             };
             diff.warnings.extend(warnings.iter().map(|reason| Issue {
@@ -179,12 +180,12 @@ impl SetupPacks {
                         examples,
                     });
                 }
-                WatcherTransfer::Collision => diff.collisions.push(Issue {
+                WatcherTransfer::Collision(_) => diff.collisions.push(Issue {
                     entry,
                     reason: "The destination has a different or ambiguous watcher with this name."
                         .into(),
                 }),
-                WatcherTransfer::Missing(reasons) => {
+                WatcherTransfer::Missing(reasons, _) => {
                     diff.missing.extend(reasons.into_iter().map(|reason| Issue {
                         entry: entry.clone(),
                         reason,

@@ -129,7 +129,8 @@ pub(crate) fn receipt_value(kind: &str, value: &Value) -> String {
         let name = value["name"].as_str().unwrap_or("Watcher");
         let summary = match value["state"].as_str() {
             Some("draft") => format!("{name} · Awaiting approval"),
-            Some("approved") => format!("{name} · Approved"),
+            Some("on") => format!("{name} · On"),
+            Some("needs_review") => format!("{name} · Needs review"),
             Some("off") => format!("{name} · Off"),
             _ => name.to_owned(),
         };

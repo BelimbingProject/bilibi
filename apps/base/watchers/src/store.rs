@@ -43,6 +43,15 @@ pub enum WatcherState {
     Off,
 }
 impl WatcherState {
+    pub(crate) fn from_flags(approved: bool, off: bool, needs_review: bool) -> Self {
+        match (approved, off, needs_review) {
+            (false, _, _) => Self::Draft,
+            (true, _, true) => Self::NeedsReview,
+            (true, false, false) => Self::On,
+            (true, true, false) => Self::Off,
+        }
+    }
+
     pub fn key(self) -> &'static str {
         match self {
             Self::Draft => "draft",
@@ -150,12 +159,7 @@ impl Watchers {
                 .trigger(&trigger)
                 .map_or_else(|| trigger.clone(), |t| t.definition.title.to_owned()),
             trigger,
-            state: match (approved, off, row.get::<_, bool>(11)) {
-                (false, _, _) => WatcherState::Draft,
-                (true, _, true) => WatcherState::NeedsReview,
-                (true, false, false) => WatcherState::On,
-                (true, true, false) => WatcherState::Off,
-            },
+            state: WatcherState::from_flags(approved, off, row.get(11)),
             running: row.get(5),
             latest: row.get(6),
             pending: row.get(7),

@@ -1,6 +1,6 @@
 //! Reverse the creation of a draft through the Customisations page. An
 //! approved watcher or one with subsequent edits needs its ordinary workflow.
-use crate::{agent::watchers, Watchers, MANAGE};
+use crate::{agent::watchers, WatcherState, Watchers, MANAGE, VIEW};
 use bilibi_agent_api::{
     Channels, Definitions, Handler, Operation, OperationClient, OperationFuture, WriteHandler,
     DEFINITIONS,
@@ -23,6 +23,7 @@ impl Watchers {
         id: i64,
     ) -> Result<(String, String)> {
         bilibi_authz::authorize_key(sql, scope, MANAGE).await?;
+        bilibi_authz::authorize_key(sql, scope, VIEW).await?;
         sql.query_opt(
             "SELECT name,trigger FROM base_watchers WHERE tenant_id=$1 AND id=$2 AND version=1 AND active_version_id IS NULL",
             &[&scope.tenant(), &id],
@@ -166,7 +167,7 @@ fn project_draft_receipt<'a>(
         let current = client
             .query_opt(
                 "SELECT w.name,w.version,w.active_version_id IS NOT NULL,w.disabled_at IS NOT NULL,
-                    w.trigger,v.definition,v.examples,v.approved_at IS NOT NULL
+                    w.trigger,v.definition,v.examples,v.approved_at IS NOT NULL,w.needs_review
              FROM base_watchers w JOIN LATERAL (
                  SELECT definition,examples,approved_at FROM base_watcher_versions
                  WHERE tenant_id=w.tenant_id AND watcher_id=w.id
@@ -176,11 +177,7 @@ fn project_draft_receipt<'a>(
             )
             .await?;
         change["effective"] = current.as_ref().map_or(Value::Null, |row| {
-            let state = match (row.get::<_, bool>(2) || row.get::<_, bool>(7), row.get::<_, bool>(3)) {
-                (true, true) => "off",
-                (true, false) => "approved",
-                _ => "draft",
-            };
+            let state = WatcherState::from_flags(row.get(2), row.get(3), row.get(8)).key();
             json!({"name":row.get::<_,String>(0), "state":state, "watch":row.get::<_,String>(4), "rule":draft_summary(&row.get(5), &row.get(6))})
         });
         change["changed_since"] = json!(if created {

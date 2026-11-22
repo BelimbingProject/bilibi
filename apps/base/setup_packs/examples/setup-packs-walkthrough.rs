@@ -357,14 +357,17 @@ async fn watcher_draft(source: &Person<'_>, target: &Person<'_>) -> Result<(), F
     let mut edited = request.clone();
     edited["pack"]["watchers"][0]["warnings"] = json!([]);
     let edited_preview = target.read(PREVIEW, &edited).await?;
-    let warnings = Value::Array(
-        edited_preview["warnings"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|issue| issue["reason"].clone())
-            .collect(),
-    );
+    let reasons = |preview: &Value| {
+        Value::Array(
+            preview["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|issue| issue["reason"].clone())
+                .collect(),
+        )
+    };
+    let warnings = reasons(&edited_preview);
     check(
         "Preview flags both literals even when source flags are removed",
         has_path(&warnings, condition_path)
@@ -422,25 +425,54 @@ async fn watcher_draft(source: &Person<'_>, target: &Person<'_>) -> Result<(), F
             && receipt["after"]["rule"]["example outcomes"] == json!(["match"])
             && receipt["after"]["rule"].get("examples").is_none(),
     )?;
-    let mut collision = request;
+    let mut collision = edited;
     collision["pack"]["watchers"][0]["definition"]["do"][0]["input"]["queue"] = json!("another");
     let preview = target.read(PREVIEW, &collision).await?;
     check(
-        "A different draft with the same name collides",
+        "A collision still warns about both incoming free-text literals",
         preview["ready"] == false
             && preview["collisions"]
                 .as_array()
-                .is_some_and(|issues| issues.len() == 1),
+                .is_some_and(|issues| issues.len() == 1)
+            && has_path(&reasons(&preview), condition_path)
+            && has_path(&reasons(&preview), action_path),
     )?;
+    collision["pack"]["watchers"][0]["watch"] = json!("unmounted.opened");
+    let missing = target.read(PREVIEW, &collision).await?;
+    check(
+        "A missing trigger still warns about both incoming free-text literals",
+        missing["ready"] == false
+            && missing["missing"]
+                .as_array()
+                .is_some_and(|issues| issues.len() == 1)
+            && has_path(&reasons(&missing), condition_path)
+            && has_path(&reasons(&missing), action_path),
+    )?;
+    let discard = op(
+        "base.watchers.discard_draft",
+        json!({"watcher_id":imported["watcher_id"]}),
+    );
+    let set_read = |allowed| async move {
+        let sql = target.db.get().await?;
+        sql.execute(
+            "UPDATE principal_capabilities SET is_allowed=$3 WHERE tenant_id=$1 AND user_id=$2 AND capability='admin.watchers.view'",
+            &[&target.scope.tenant(), &target.scope.user(), &allowed],
+        ).await?;
+        Ok::<_, Failure>(())
+    };
+    set_read(false).await?;
+    let refused = target
+        .plans()?
+        .preview(target, std::slice::from_ref(&discard))
+        .await?;
+    check(
+        "A watcher manager denied read access cannot preview discard",
+        refused["valid"] == false,
+    )?;
+    set_read(true).await?;
     check(
         "An initial imported draft can be discarded through its reviewed operation",
-        target
-            .write(&[op(
-                "base.watchers.discard_draft",
-                json!({"watcher_id":imported["watcher_id"]}),
-            )])
-            .await?["results"][0]["result"]["result"]["discarded"]
-            == true,
+        target.write(&[discard]).await?["results"][0]["result"]["result"]["discarded"] == true,
     )
 }
 
