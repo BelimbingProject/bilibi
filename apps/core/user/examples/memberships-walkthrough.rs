@@ -1,8 +1,8 @@
 //! Manual proof of issue 147's invitation and acceptance service against a
 //! migrated disposable database. It follows emailed links from the dev mailbox.
 //! It also proves, for a person with accounts in two tenants, that one
-//! authenticator works in both (#534), that a password change, reset or
-//! administrator set ends the sign-in's sessions and AI connections in every
+//! authenticator works in both (#534), that a password change or reset ends
+//! the sign-in's sessions and AI connections in every
 //! tenant (#532), and that "Forgot your password?" still mails a working link
 //! after the last-used tenant account is removed (#535), with the reset
 //! token's issue audited (#536). It stores the development instance role
@@ -11,8 +11,8 @@ use bilibi_audit::RequestInfo;
 use bilibi_database::{pool, Error, Result};
 use bilibi_mail::Mailbox;
 use bilibi_user::{
-    AccountError, CredentialError, InvitationError, InvitationInput, Login, TenantEntry,
-    TwoFactorError, UserService,
+    CredentialError, InvitationError, InvitationInput, Login, TenantEntry, TwoFactorError,
+    UserService,
 };
 use std::{path::PathBuf, time::Duration};
 
@@ -296,7 +296,50 @@ async fn main() -> Result<()> {
         return Err(Error::Internal);
     }
 
-    // #534: the authenticator is set up in the home tenant...
+    // Issue 787: model an Acme SSO admission with the authority Session owns.
+    // It cannot enter the Beta membership or change the portable recovery
+    // address. A target-bound portable password admission can enter Beta.
+    let acme_token = "walkthrough-acme-sso-authority";
+    let acme_csrf = "walkthrough-acme-sso-csrf";
+    client
+        .execute(
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,company_id,expires_at,authentication_authority,authentication_tenant_id,authentication_provider_id,authentication_company_id) VALUES($1,1,$2,$3,1,now()+interval '1 hour','tenant_sso',1,9001,1)",
+            &[&bilibi_session::session_id(acme_token), &existing.user(), &acme_csrf],
+        )
+        .await?;
+    let name: String = client
+        .query_one(
+            "SELECT name FROM users WHERE tenant_id=1 AND id=$1",
+            &[&existing.user()],
+        )
+        .await?
+        .get(0);
+    let foreign_entry = users
+        .choose_tenant(acme_token, acme_csrf, 2, &RequestInfo::default())
+        .await;
+    let changed_shared_email = users
+        .update_profile(acme_token, acme_csrf, &name, "acme-controlled@example.test")
+        .await;
+    let beta_login = users
+        .login_to_tenant(2, EMAIL, bilibi_walkthrough_fixture::PASSWORD)
+        .await
+        .map_err(|_| Error::Unauthorized)?;
+    let beta = app.security.guard(&beta_login.token).await?;
+    println!(
+        "Acme SSO -> Beta refused={}; shared email refused={}; portable -> Beta admitted={}",
+        matches!(foreign_entry, Ok(TenantEntry::Reauthenticate(2))),
+        changed_shared_email.is_err(),
+        beta.tenant() == 2 && beta.user() == joined
+    );
+    if !matches!(foreign_entry, Ok(TenantEntry::Reauthenticate(2)))
+        || changed_shared_email.is_ok()
+        || beta.tenant() != 2
+        || beta.user() != joined
+    {
+        return Err(Error::Internal);
+    }
+
+    // #534: the authenticator is set up from the first membership...
     let enrollment = users
         .begin_two_factor(&existing, bilibi_walkthrough_fixture::PASSWORD)
         .await
@@ -334,16 +377,14 @@ async fn main() -> Result<()> {
     }
 
     // Issue 532. The sign-in now has accounts in tenants 1 and 2.
-    let home = existing.user();
+    let source_user = existing.user();
     let mut password = bilibi_walkthrough_fixture::PASSWORD.to_owned();
     let elsewhere = session_in(&users, &app, &password, 2).await?;
     let changing = session_in(&users, &app, &password, 1).await?;
     let agent = connection(&client, 2, joined).await?;
-    // Refused: an outside tenant's administrator, and a wrong current password.
+    // A wrong current password is refused. Tenant administrators have no
+    // operation that writes another person's shared password.
     if !matches!(
-        users.set_password(&inviter, joined, "outside-reset").await,
-        Err(AccountError::Access(Error::Forbidden))
-    ) || !matches!(
         users
             .change_password(&changing.token, &changing.csrf, "not-it", "changed-532")
             .await,
@@ -384,7 +425,7 @@ async fn main() -> Result<()> {
     // 1's session and connection end too.
     let first = session_in(&users, &app, &password, 1).await?;
     let second = session_in(&users, &app, &password, 2).await?;
-    let agent = connection(&client, 1, home).await?;
+    let agent = connection(&client, 1, source_user).await?;
     let before = count(&mailbox);
     users
         .request_password_reset(EMAIL)
@@ -408,7 +449,6 @@ async fn main() -> Result<()> {
         .reset_password(EMAIL, &token, "reset-532-pw")
         .await
         .map_err(|_| Error::Internal)?;
-    password = "reset-532-pw".into();
     let after = standing(&app, &[&first, &second]).await;
     let agent_end = ended(&client, agent).await?;
     println!("Reset in tenant 2: [tenant 1, tenant 2] sessions={after:?} tenant 1 connection ended={agent_end:?}");
@@ -416,46 +456,25 @@ async fn main() -> Result<()> {
         return Err(Error::Internal);
     }
 
-    // An administrator of the home tenant sets the password: both end.
-    client
-        .execute(
-            "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES(1,4,'admin.user.update',true) ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=true",
-            &[],
-        )
-        .await?;
-    let admin_login = users
-        .login("admin@example.test", bilibi_walkthrough_fixture::PASSWORD)
-        .await
-        .map_err(|_| Error::Unauthorized)?;
-    let admin = app.security.guard(&admin_login.token).await?;
-    let first = session_in(&users, &app, &password, 1).await?;
-    let second = session_in(&users, &app, &password, 2).await?;
-    let agent = connection(&client, 2, joined).await?;
-    // Setting another person's password asks for step-up off a development
-    // instance, which this fixture's administrator has no authenticator to
-    // pass; the identity walkthrough proves that refusal.
-    let step_up = app
-        .services
-        .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?;
-    step_up.set_enforced(false);
+    // Removing one membership never erases the portable identity.
     users
-        .set_password(&admin, home, bilibi_walkthrough_fixture::PASSWORD)
-        .await
-        .map_err(|_| Error::Internal)?;
-    step_up.set_enforced(true);
-    let after = standing(&app, &[&first, &second, &admin_login]).await;
-    let agent_end = ended(&client, agent).await?;
-    println!("Administrator set in tenant 1: [tenant 1, tenant 2, administrator] sessions={after:?} tenant 2 connection ended={agent_end:?}");
-    if after != [false, false, true] || agent_end.as_deref() != Some("admin_action") {
-        return Err(Error::Internal);
-    }
-    users
-        .delete_account(&inviter, joined)
+        .remove_membership(&inviter, joined)
         .await
         .map_err(|_| Error::Invalid)?;
+    let identity_survived: bool = client
+        .query_one(
+            "SELECT i.status='active' AND i.deleted_at IS NULL FROM user_identities i JOIN users u ON u.identity_id=i.id WHERE u.tenant_id=1 AND u.id=$1",
+            &[&source_user],
+        )
+        .await?
+        .get(0);
+    println!("Removing the Beta membership kept the portable identity: {identity_survived}");
+    if !identity_survived {
+        return Err(Error::Internal);
+    }
 
-    // #535: the last-used tenant account is gone; the reset still reaches the
-    // home account, and its link works once.
+    // #535: the last-used membership is gone; reset still reaches the
+    // portable identity and its link works once.
     let before = count(&mailbox);
     users
         .request_password_reset("manager@example.test")
@@ -508,7 +527,7 @@ async fn main() -> Result<()> {
         .login(EMAIL, bilibi_walkthrough_fixture::PASSWORD)
         .await
         .map_err(|_| Error::Unauthorized)?;
-    println!("Outside tenant cannot reset credentials; removal keeps the home sign-in active");
+    println!("Customer administrators cannot reset credentials; membership removal keeps the portable sign-in active");
 
     let before = count(&mailbox);
     let new_invitation = users
@@ -533,7 +552,7 @@ async fn main() -> Result<()> {
         .map_err(|_| Error::Unauthorized)?;
     let scope = app.security.guard(&login.token).await?;
     println!(
-        "New sign-in home: tenant={} user={} invited_user={}",
+        "New portable sign-in: tenant={} user={} invited_user={}",
         scope.tenant(),
         scope.user(),
         new_invitation.user

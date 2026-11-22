@@ -1,8 +1,9 @@
 //! User's record classes (ADR 05, `base/privacy` retention). Each account
 //! follows its company's settings (the primary company's for an account of
 //! no company), and a notification its recipient's. Closed accounts are
-//! anonymised once the period has passed since they were closed: the row, its ID and its links stay, the name and sign-in email do
-//! not, and the sign-in links that remain are deleted. Notifications, which
+//! anonymised once the period has passed since they were closed: the row and
+//! its ID stay, while its tenant-owned name and sign-in links do not. The
+//! installation-owned sign-in email is outside tenant retention. Notifications, which
 //! have no business value, are purged once the period has passed since they
 //! were sent. An invitation never accepted is closed once the period has passed
 //! since it expired or was revoked, and its address and the sign-in-less
@@ -45,9 +46,6 @@ fn next(rows: &[(i64, Option<i64>)], limit: i64) -> Option<i64> {
         .flatten()
 }
 
-/// An anonymised account and, for a home account, its sign-in.
-type Closed = (i64, Option<i64>);
-
 struct ClosedAccounts;
 static CLOSED_ACCOUNTS: ClosedAccounts = ClosedAccounts;
 impl Sweeper for ClosedAccounts {
@@ -70,8 +68,8 @@ impl Sweeper for ClosedAccounts {
                 .sql()
                 .query(
                     &format!(
-                        "SELECT u.id,u.person_id,u.name,i.email,i.id,(i.home_tenant_id=u.tenant_id AND i.home_user_id=u.id) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.status='deleted' AND (u.anonymised_at IS NULL OR u.name<>$5 OR ((i.home_tenant_id=u.tenant_id AND i.home_user_id=u.id) AND i.email NOT LIKE 'erased-%@erased.invalid')) \
-                         AND u.deleted_at < $2::text::timestamptz AND u.id>$3 AND {} ORDER BY u.id LIMIT $4 FOR UPDATE OF u,i",
+                        "SELECT u.id,u.person_id,u.name FROM users u WHERE u.tenant_id=$1 AND u.status='deleted' AND (u.anonymised_at IS NULL OR u.name<>$5) \
+                         AND u.deleted_at < $2::text::timestamptz AND u.id>$3 AND {} ORDER BY u.id LIMIT $4 FOR UPDATE OF u",
                         Companies::predicate("organisation_id", 6)
                     ),
                     &[&tenant, &cutoff, &after, &limit, &ERASED, &company, &primary, &listed],
@@ -80,19 +78,6 @@ impl Sweeper for ClosedAccounts {
             let keys: Vec<(i64, Option<i64>)> =
                 rows.iter().map(|row| (row.get(0), row.get(1))).collect();
             let mut kept = held(holds, grant, USER_KIND, &keys).await?;
-            let identity_ids: Vec<i64> = rows.iter().map(|row| row.get(4)).collect();
-            let held_identities = holds
-                .records(grant, crate::privacy::IDENTITY_KIND, &identity_ids)
-                .await?;
-            for row in &rows {
-                let user = row.get::<_, i64>(0);
-                if row.get::<_, bool>(5)
-                    && held_identities.contains_key(&row.get::<_, i64>(4))
-                    && !kept.contains(&user)
-                {
-                    kept.push(user);
-                }
-            }
             // A held accepted invitation keeps its account.
             let open: Vec<i64> = keys
                 .iter()
@@ -112,10 +97,10 @@ impl Sweeper for ClosedAccounts {
                     kept.push(user);
                 }
             }
-            let due: Vec<(i64, String, String, i64, bool)> = rows
+            let due: Vec<(i64, String)> = rows
                 .iter()
                 .filter(|row| !kept.contains(&row.get::<_, i64>(0)))
-                .map(|row| (row.get(0), row.get(2), row.get(3), row.get(4), row.get(5)))
+                .map(|row| (row.get(0), row.get(2)))
                 .collect();
             let persons: std::collections::BTreeMap<i64, Option<i64>> =
                 keys.iter().copied().collect();
@@ -129,7 +114,7 @@ impl Sweeper for ClosedAccounts {
                 return Ok(swept);
             }
             // A sign-in link a legal hold names stays with its account.
-            let due_users: Vec<i64> = due.iter().map(|(user, _, _, _, _)| *user).collect();
+            let due_users: Vec<i64> = due.iter().map(|(user, _)| *user).collect();
             let identities: Vec<i64> = tx
                 .sql()
                 .query(
@@ -145,50 +130,34 @@ impl Sweeper for ClosedAccounts {
                 .await?
                 .into_keys()
                 .collect();
-            let (ids, extra): (Vec<Closed>, Vec<(&'static str, i64)>) = tx
+            let (ids, extra): (Vec<i64>, Vec<(&'static str, i64)>) = tx
                 .mutate(move |sql| {
                     Box::pin(async move {
                         let mut ids = Vec::with_capacity(due.len());
                         let mut changes = Vec::with_capacity(due.len());
                         let mut extra = Vec::new();
-                        for (user, name, email, identity, home) in due {
-                            let placeholder = format!("erased-{user}@erased.invalid");
+                        for (user, name) in due {
                             sql.execute(
                                 "UPDATE users SET name=$3,anonymised_at=now(),version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2",
                                 &[&tenant, &user, &ERASED],
                             )
                             .await?;
-                            if home {
-                            sql.execute(
-                                "UPDATE user_identities SET email=$2,password_hash='!erased',updated_at=now() WHERE id=$1",
-                                &[&identity, &placeholder],
-                            )
-                            .await?;
-                            }
                             let links =
-                                crate::privacy::remove_links(sql, tenant, user, &keep_identities, home)
+                                crate::privacy::remove_links(sql, tenant, user, &keep_identities)
                                     .await?;
                             changes.push(Change {
                                 kind: USER_KIND.into(),
                                 id: user,
-                                old: json!({"name": name, "email": email}),
-                                new: json!({"name": ERASED, "email": ERASED, "links_removed": links.len()}),
+                                old: json!({"name": name}),
+                                new: json!({"name": ERASED, "links_removed": links.len()}),
                             });
-                            if home {
-                            changes.push(Change {
-                                kind: crate::privacy::IDENTITY_KIND.into(),
-                                id: identity,
-                                old: json!({"email": email}),
-                                new: json!({"email": ERASED}),
-                            });
-                            }
                             changes.extend(links);
                             let (invitation_changes, records) =
                                 crate::privacy::invitations::anonymise_accepted_invitations(sql, tenant, user)
                                     .await?;
                             changes.extend(invitation_changes);
                             extra.extend(records);
-                            ids.push((user, home.then_some(identity)));
+                            ids.push(user);
                         }
                         Ok(((ids, extra), changes))
                     })
@@ -197,18 +166,13 @@ impl Sweeper for ClosedAccounts {
             swept.acted = ids.len() as i64;
             swept.records = ids
                 .into_iter()
-                .flat_map(|(user, identity)| {
+                .map(|user| {
                     let person = persons.get(&user).copied().flatten();
-                    std::iter::once(ErasedRecord {
+                    ErasedRecord {
                         kind: USER_KIND.into(),
                         id: user,
                         person,
-                    })
-                    .chain(identity.map(|identity| ErasedRecord {
-                        kind: crate::privacy::IDENTITY_KIND.into(),
-                        id: identity,
-                        person,
-                    }))
+                    }
                 })
                 .chain(extra.into_iter().map(|(kind, id)| ErasedRecord {
                     kind: kind.into(),

@@ -2,8 +2,7 @@
 //! second-factor provider behind Base Step-up (`provider.rs`).
 //! The flow follows GitHub's: re-enter the password, scan
 //! a QR code, confirm with a current code. There are no recovery codes. A
-//! person who loses their phone asks an admin to reset 2FA
-//! ([`RESET_KEY`], `agent.rs`), or the server owner runs
+//! person who loses their phone asks the installation owner, who runs
 //! `bilibi-web two-factor-reset`. This module knows nothing of what step-up
 //! guards: it checks the account holder, opens the browser session's window
 //! ([`CONFIRM_PATH`]) and spends a code an agent carries, for whatever
@@ -42,17 +41,10 @@ pub const CONFIRM_PATH: &str = "/settings/two-factor/confirm";
 pub const PORTAL_SETTINGS_PATH: &str = "/portal/account/two-factor";
 /// A customer's step-up prompt on the portal, mounted by Core Portal.
 pub const PORTAL_CONFIRM_PATH: &str = "/portal/account/two-factor/confirm";
-/// An admin resets another person's 2FA. Declared `.always()`: their own
-/// current authenticator code, every time.
-pub(crate) const RESET_KEY: &str = "core.user.two_factor.reset";
-/// The account page event that calls [`RESET_KEY`].
-pub(crate) const RESET_EVENT: &str = "reset-two-factor";
-/// The page service that owns [`RESET_EVENT`].
-pub(crate) const PAGES: &str = "core/user.pages";
 /// Why checking a code takes its connection detached (`Db::get_detached`).
 const STEP_UP_CONNECTION: &str = "a code is checked from inside the caller's write (step-up), and the spent code and failure count must stay when that write rolls back";
 /// The owner the sealed secret is bound to (`Settings::seal_owned`), with
-/// the sign-in's home tenant and identity id ([`SignIn`]).
+/// installation scope `0` and the identity id ([`SignIn`]).
 const OWNER: &str = "core/user.two_factor";
 const KIND: &str = "user_two_factor";
 /// The two-factor counter: five failed checks within fifteen minutes lock
@@ -194,12 +186,6 @@ impl UserService {
         })
     }
 
-    /// Whether any registered method is enrolled for `user` in this tenant.
-    pub async fn account_two_factor_on(&self, scope: &Scope, user: i64) -> Result<bool> {
-        let client = self.db.get().await?;
-        self.step_up.enrolled_for(&**client, scope, user).await
-    }
-
     /// Where a step-up guard sends a browser that has not confirmed access:
     /// the prompt, or enrollment for an account with no authenticator yet.
     /// Either brings it back to `return_to` afterwards.
@@ -218,9 +204,12 @@ impl UserService {
         self.unlocked(scope).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
         let client = self.db.get().await.map_err(Error::from)?;
+        self.sessions
+            .require_portable_authority(&**client, scope)
+            .await?;
         let row = client
             .query_opt(
-                "SELECT i.password_hash,i.email,i.home_tenant_id,i.id FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND u.deleted_at IS NULL",
+                "SELECT i.password_hash,i.email,i.id FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND u.deleted_at IS NULL",
                 &[&tenant, &user],
             )
             .await
@@ -228,8 +217,7 @@ impl UserService {
             .ok_or(Error::Unauthorized)?;
         let (stored, email): (String, String) = (row.get(0), row.get(1));
         let sign_in = SignIn {
-            home_tenant: row.get(2),
-            identity: row.get(3),
+            identity: row.get(2),
         };
         let matched = current.len() <= password::MAX_LENGTH
             && password::verify(current, Some(&stored)).await?;
@@ -241,12 +229,9 @@ impl UserService {
         drop(client);
         let secret = totp::generate_secret()?;
         let encoded = totp::encode_secret(&secret);
-        let sealed = self.settings.seal_owned(
-            OWNER,
-            sign_in.home_tenant,
-            sign_in.identity,
-            &json!(encoded),
-        )?;
+        let sealed = self
+            .settings
+            .seal_owned(OWNER, 0, sign_in.identity, &json!(encoded))?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
@@ -292,9 +277,12 @@ impl UserService {
         self.unlocked(scope).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
         let client = self.db.get().await.map_err(Error::from)?;
+        self.sessions
+            .require_portable_authority(&**client, scope)
+            .await?;
         let row = client
             .query_opt(
-                "SELECT f.secret,f.confirmed_at IS NOT NULL,f.last_step,i.home_tenant_id,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2)",
+                "SELECT f.secret,f.confirmed_at IS NOT NULL,f.last_step,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2)",
                 &[&tenant, &user],
             )
             .await
@@ -383,6 +371,9 @@ impl UserService {
         )
         .await?;
         let client = self.db.get().await.map_err(Error::from)?;
+        self.sessions
+            .require_portable_authority(&**client, scope)
+            .await?;
         let email: String = client
             .query_opt(
                 "SELECT i.email FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND u.deleted_at IS NULL",
@@ -408,10 +399,13 @@ impl UserService {
             .decode(to.secret.as_bytes())
             .map_err(|_| Error::Internal)?;
         let client = self.db.get().await.map_err(Error::from)?;
+        self.sessions
+            .require_portable_authority(&**client, scope)
+            .await?;
         let step = totp::verify(&secret, code, now_unix(&**client).await?, None)?;
         let sign_in = client
             .query_opt(
-                "SELECT i.home_tenant_id,i.id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2",
+                "SELECT i.id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2",
                 &[&tenant, &user],
             )
             .await
@@ -423,12 +417,9 @@ impl UserService {
             self.failed(scope, "authenticator").await?;
             return Err(TwoFactorError::InvalidCode);
         };
-        let sealed = self.settings.seal_owned(
-            OWNER,
-            sign_in.home_tenant,
-            sign_in.identity,
-            &json!(to.secret),
-        )?;
+        let sealed = self
+            .settings
+            .seal_owned(OWNER, 0, sign_in.identity, &json!(to.secret))?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
@@ -491,7 +482,7 @@ impl UserService {
             .map_err(Error::from)?;
         let row = client
             .query_opt(
-                "SELECT f.secret,f.last_step,i.home_tenant_id,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND f.confirmed_at IS NOT NULL",
+                "SELECT f.secret,f.last_step,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND f.confirmed_at IS NOT NULL",
                 &[&tenant, &user],
             )
             .await
@@ -667,9 +658,9 @@ impl UserService {
         if !self.settings.encryption_available() {
             return Err(TwoFactorError::Unavailable);
         }
-        let opened =
-            self.settings
-                .open_owned(OWNER, sign_in.home_tenant, sign_in.identity, sealed)?;
+        let opened = self
+            .settings
+            .open_owned(OWNER, 0, sign_in.identity, sealed)?;
         let encoded = opened.as_str().ok_or(Error::Internal)?;
         Ok(data_encoding::BASE32_NOPAD
             .decode(encoded.as_bytes())
@@ -677,20 +668,17 @@ impl UserService {
     }
 }
 
-/// What the sealed secret is bound to: the person's sign-in, not the tenant
-/// account that enrolled, so one authenticator opens in each of their
-/// tenants. The home tenant never changes for a sign-in.
+/// What the sealed secret is bound to: the installation-owned sign-in, not a
+/// customer tenant account, so one authenticator opens in each membership.
 #[derive(Clone, Copy)]
 struct SignIn {
-    home_tenant: i64,
     identity: i64,
 }
 impl SignIn {
-    /// Reads `home_tenant_id,id` from `row` starting at column `at`.
+    /// Reads the identity id from `row` at `at`.
     fn of(row: &tokio_postgres::Row, at: usize) -> Self {
         Self {
-            home_tenant: row.get(at),
-            identity: row.get(at + 1),
+            identity: row.get(at),
         }
     }
 }

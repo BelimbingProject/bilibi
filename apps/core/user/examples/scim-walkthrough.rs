@@ -6,6 +6,21 @@ use serde_json::json;
 use std::{io::Write, os::unix::fs::OpenOptionsExt};
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
+async fn set_fixture_password(
+    db: &bilibi_database::Db,
+    user: i64,
+    password: &str,
+) -> bilibi_database::Result<()> {
+    let hash = bilibi_user::hash_password(password)?;
+    db.get()
+        .await?
+        .execute(
+            "UPDATE user_identities SET password_hash=$2 WHERE id=(SELECT identity_id FROM users WHERE id=$1)",
+            &[&user, &hash],
+        )
+        .await?;
+    Ok(())
+}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("BILIBI_SCIM_WALKTHROUGH").as_deref() != Ok("disposable") {
@@ -60,14 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
-        // Only a signed-in session for the provisioned account is wanted here.
-        // Setting another person's password asks the administrator for step-up,
-        // which this fixture's administrator has no authenticator to pass; the
-        // identity walkthrough proves that refusal.
-        app.services
-            .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?
-            .set_enforced(false);
-        users.set_password(&scope, user, &password).await?;
+        // Fixture setup gives the provisioned identity a private password;
+        // production administrators have no corresponding operation.
+        set_fixture_password(&db, user, &password).await?;
         let session = users.login(email, &password).await?;
         if session.pending {
             return Err("A real admitted session is required for the revocation proof.".into());

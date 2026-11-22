@@ -805,6 +805,19 @@ pub async fn choose_tenant(
             );
             Ok(response)
         }
+        Ok(bilibi_user::TenantEntry::Reauthenticate(target)) => {
+            let mut response = Redirect::to("/login").into_response();
+            response.headers_mut().append(
+                header::SET_COOKIE,
+                format!(
+                    "bilibi_tenant_entry={target}; HttpOnly; SameSite=Strict; Path=/; Max-Age=600{}",
+                    crate::auth::secure(&app)
+                )
+                .parse()
+                .map_err(|_| Error::Internal)?,
+            );
+            Ok(response)
+        }
         Err(bilibi_user::TenantChoiceRefusal::Unavailable) => {
             let mut response = Redirect::to("/dashboard").into_response();
             crate::auth::set_flash(&app, &mut response, crate::auth::TENANT_UNAVAILABLE);

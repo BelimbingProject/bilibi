@@ -597,28 +597,7 @@ impl UserService {
         let row=tx.sql().query_opt("SELECT s.id,s.user_id,u.person_id,s.affiliation_id FROM user_scim_users s JOIN users u ON u.tenant_id=s.tenant_id AND u.id=s.user_id AND u.person_id=s.person_id AND u.deleted_at IS NULL WHERE s.tenant_id=$1 AND s.provider_id=$2 AND s.resource_id=$3 FOR UPDATE OF s",&[&c.tenant,&c.id,&id]).await?.ok_or_else(ScimError::missing)?;
         let (record, user, person, affiliation): (i64, i64, i64, i64) =
             (row.get(0), row.get(1), row.get(2), row.get(3));
-        let username = doc["userName"]
-            .as_str()
-            .ok_or_else(ScimError::invalid)?
-            .to_owned();
-        let outside_rename: bool = tx
-            .sql()
-            .query_one(
-                "SELECT NOT (i.home_tenant_id=$1 AND i.home_user_id=$2) AND lower(i.email)<>lower($3) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2",
-                &[&c.tenant, &user, &username],
-            )
-            .await
-            .map_err(Error::from)?
-            .get(0);
-        if outside_rename {
-            return Err(ScimError::bad(
-                "mutability",
-                "userName belongs to the account's home tenant and cannot change here.",
-            ));
-        }
-        if crate::accounts::email_taken(tx.sql(), &username, Some(user)).await? {
-            return Err(Error::Conflict.into());
-        }
+        doc["userName"].as_str().ok_or_else(ScimError::invalid)?;
         let name = doc["displayName"]
             .as_str()
             .ok_or_else(ScimError::invalid)?
@@ -655,13 +634,11 @@ impl UserService {
         let old_doc = old.clone();
         let saved = doc.clone();
         tx.mutate(move|sql|Box::pin(async move{
-            let previous=sql.query_one("SELECT u.name,i.email,i.id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2 FOR UPDATE OF u,i",&[&tenant,&user]).await?;
+            let previous=sql.query_one("SELECT u.name FROM users u WHERE u.tenant_id=$1 AND u.id=$2 FOR UPDATE OF u",&[&tenant,&user]).await?;
             sql.execute("UPDATE users SET name=$3,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2",&[&tenant,&user,&name]).await?;
-            sql.execute("UPDATE user_identities SET email=$3,email_verified_at=CASE WHEN email=$3 THEN email_verified_at ELSE NULL END,updated_at=now() WHERE id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2)",&[&tenant,&user,&username]).await?;
             sql.execute("UPDATE user_scim_users SET document=$3,active=$4 WHERE tenant_id=$1 AND id=$2",&[&tenant,&record,&saved,&active]).await?;
             Ok(((),vec![
                 change("user",user,json!({"name":previous.get::<_,String>(0)}),json!({"name":name})),
-                change("user_identity",previous.get::<_,i64>(2),json!({"email":previous.get::<_,String>(1)}),json!({"email":username})),
                 change("user.scim_user",record,old_doc,saved),
             ]))
         })).await?;

@@ -229,7 +229,7 @@ async fn finish_existing_owner(
     }
     eprintln!(
         "Not created: this install already has an owner. The platform operator holds {count} account(s); the first is {first}.\n\
-         Sign in as one of them at {origin}/login. To add people, use Users > New user there.\n\
+         Sign in as one of them at {origin}/login. To add people, use Users > Invite user there.\n\
          If nobody can sign in any more, that is account recovery, which this command does not do."
     );
     match settled {

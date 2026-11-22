@@ -149,7 +149,6 @@ impl Pages {
         request: &PageRequest<'_, Scope>,
     ) -> Result<Option<Box<dyn LiveState<Scope, Error>>>, Error> {
         Ok(Some(match request.operation {
-            "create" => Box::new(crate::account_ui::Create::new(self.clone())),
             "invite" => Box::new(crate::account_ui::Invite::new(self.clone())),
             "detail" => Box::new(crate::account_ui::Detail::new(
                 self.clone(),

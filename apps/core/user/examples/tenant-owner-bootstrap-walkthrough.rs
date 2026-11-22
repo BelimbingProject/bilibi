@@ -3,7 +3,7 @@
 use bilibi_database::{pool, Error, Result};
 use bilibi_mail::Mailbox;
 use bilibi_tenancy::Scope;
-use bilibi_user::{AccountInput, InvitationError, InvitationInput};
+use bilibi_user::{InvitationError, InvitationInput};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -201,7 +201,7 @@ async fn verify_owner(
              JOIN tenant_primary_companies x ON x.tenant_id=t.id
              JOIN companies c ON c.tenant_id=t.id AND c.id=x.company_id
              JOIN users u ON u.tenant_id=t.id AND u.id=$1
-             JOIN user_identities i ON i.id=u.identity_id AND i.home_tenant_id=t.id AND i.home_user_id=u.id
+             JOIN user_identities i ON i.id=u.identity_id
              JOIN persons p ON p.tenant_id=t.id AND p.id=u.person_id
              JOIN user_tenant_owner_bootstraps b ON b.tenant_id=t.id AND b.user_id=u.id AND b.company_id=c.id
              WHERE t.name=$2 AND c.name='Customer Company Sdn. Bhd.' AND c.code='customer'",
@@ -549,19 +549,25 @@ async fn main() -> Result<()> {
         member_email,
         &format!("You are invited to become the owner of {reserved_workspace}."),
     )?;
-    let member_account = app
-        .user
-        .create_account(
-            &owner,
-            &AccountInput {
-                name: "Second workspace invitee".into(),
-                email: member_email.into(),
-                password: PASSWORD.into(),
-                ..AccountInput::default()
-            },
+    // Fixture setup creates an existing portable identity. Production
+    // customer administrators create memberships only through invitations.
+    let hash = bilibi_user::hash_password(PASSWORD)?;
+    let client = db.get().await?;
+    let identity: i64 = client
+        .query_one(
+            "INSERT INTO user_identities(kind,email,password_hash,last_tenant_id) VALUES('staff',$1,$2,$3) RETURNING id",
+            &[&member_email, &hash, &owner.tenant()],
         )
-        .await
-        .map_err(|_| Error::Internal)?;
+        .await?
+        .get(0);
+    let member_account: i64 = client
+        .query_one(
+            "INSERT INTO users(tenant_id,identity_id,name) VALUES($1,$2,'Second workspace invitee') RETURNING id",
+            &[&owner.tenant(), &identity],
+        )
+        .await?
+        .get(0);
+    drop(client);
     let member_login = app
         .user
         .login(member_email, PASSWORD)
@@ -685,7 +691,7 @@ async fn main() -> Result<()> {
         .authenticate_session(
             &**client,
             tenant,
-            member_account.id,
+            member_account,
             Some(user),
             None,
             String::new(),
@@ -757,7 +763,7 @@ async fn main() -> Result<()> {
          AND EXISTS(SELECT 1 FROM base_audit_actions WHERE tenant_id=$1 AND actor_id=$2
          AND impersonator_id IS NULL AND event='user.invitation.accept.refused'
          AND payload->>'reason'='source_session_unavailable')",
-            &[&tenant, &member_account.id, &user],
+            &[&tenant, &member_account, &user],
         )
         .await?
         .get(0);

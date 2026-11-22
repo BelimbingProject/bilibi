@@ -55,9 +55,7 @@ mod verification;
 mod web;
 mod wording;
 
-pub use accounts::{
-    AccountError, AccountField, AccountInput, FieldError, LandingPage, ProfileOutcome,
-};
+pub use accounts::{AccountError, AccountField, FieldError, LandingPage, ProfileOutcome};
 pub use administration::{
     list_users, Entry, Membership, Options, Page, Role, Sort, MAX_PAGE, MAX_ROLE_IDS,
     MAX_SEARCH_BYTES, PAGE_SIZES, PATH,
@@ -237,7 +235,7 @@ pub async fn login(
     password: &str,
 ) -> std::result::Result<Login, CredentialError> {
     users
-        .begin_sign_in(identity::Audience::Staff, email, password)
+        .begin_sign_in(identity::Audience::Staff, None, email, password)
         .await
 }
 
@@ -290,7 +288,7 @@ pub struct UserService {
 inventory::submit! {
     bilibi_module_registry::Module {
         id:"core/user",layer:bilibi_module_registry::Layer::Core,
-        dependencies:&["base/authz_agent","base/integration","base/agent_api","base/database","base/security","base/step_up","base/system","base/notifications","base/tenancy","base/session","base/events","base/principal_directory","base/mail","base/templates","base/media","base/settings","base/datetime","base/locale","base/ui","base/audit","base/authz","base/menu","base/grid","base/dashboard","base/party_ids","base/records","base/personal_data","base/privacy","core/company","core/person","core/affiliation"],migrations:&[MIGRATION,CREDENTIALS_MIGRATION,PINS_MIGRATION,NOTIFICATIONS_MIGRATION,database_queries::MIGRATION,database_queries::DROP_PROMPT,BOOTSTRAP_MIGRATION,IDENTITY_MIGRATION,ACCOUNTS_MIGRATION,IMPERSONATION_MIGRATION,BOOTSTRAP_AFFILIATION_MIGRATION,MOVED_PINS_MIGRATION,TWO_FACTOR_MIGRATION,TWO_FACTOR_RECOVERY_DROP,sign_in::MIGRATION,sso::MIGRATION,sso::RUNTIME_MIGRATION,CREDENTIAL_ATTEMPTS_MIGRATION,BARE_ICON_NAMES_MIGRATION,scim::MIGRATION,DATABASE_TABLE_PIN_ICONS_MIGRATION,ACCOUNT_KIND_MIGRATION,PIN_WORKSPACE_ADDRESSES,("core-user-024-desks",include_str!("../migrations/024-desks.sql")),("core-user-025-tenant-accounts",include_str!("../migrations/025-tenant-accounts.sql")),("core-user-026-provider-step-up-proof",include_str!("../migrations/026-provider-step-up-proof.sql")),ANONYMISED_MIGRATION,SIGN_IN_IDENTITIES_MIGRATION,ICON_RENAMES_MIGRATION,MEMBERSHIP_INVITATIONS_MIGRATION,TWO_FACTOR_IDENTITY_SEAL_MIGRATION,TENANT_OWNER_BOOTSTRAP_MIGRATION],
+        dependencies:&["base/authz_agent","base/integration","base/agent_api","base/database","base/security","base/step_up","base/system","base/notifications","base/tenancy","base/session","base/events","base/principal_directory","base/mail","base/templates","base/media","base/settings","base/datetime","base/locale","base/ui","base/audit","base/authz","base/menu","base/grid","base/dashboard","base/party_ids","base/records","base/personal_data","base/privacy","core/company","core/person","core/affiliation"],migrations:&[MIGRATION,CREDENTIALS_MIGRATION,PINS_MIGRATION,NOTIFICATIONS_MIGRATION,database_queries::MIGRATION,database_queries::DROP_PROMPT,BOOTSTRAP_MIGRATION,IDENTITY_MIGRATION,ACCOUNTS_MIGRATION,IMPERSONATION_MIGRATION,BOOTSTRAP_AFFILIATION_MIGRATION,MOVED_PINS_MIGRATION,TWO_FACTOR_MIGRATION,TWO_FACTOR_RECOVERY_DROP,sign_in::MIGRATION,sso::MIGRATION,sso::RUNTIME_MIGRATION,CREDENTIAL_ATTEMPTS_MIGRATION,BARE_ICON_NAMES_MIGRATION,scim::MIGRATION,DATABASE_TABLE_PIN_ICONS_MIGRATION,ACCOUNT_KIND_MIGRATION,PIN_WORKSPACE_ADDRESSES,("core-user-024-desks",include_str!("../migrations/024-desks.sql")),("core-user-025-tenant-accounts",include_str!("../migrations/025-tenant-accounts.sql")),("core-user-026-provider-step-up-proof",include_str!("../migrations/026-provider-step-up-proof.sql")),ANONYMISED_MIGRATION,SIGN_IN_IDENTITIES_MIGRATION,ICON_RENAMES_MIGRATION,MEMBERSHIP_INVITATIONS_MIGRATION,TWO_FACTOR_IDENTITY_SEAL_MIGRATION,TENANT_OWNER_BOOTSTRAP_MIGRATION,("core-user-033-portable-identity-authority",include_str!("../migrations/033-portable-identity-authority.sql"))],
         services:&[bilibi_module_registry::Service {id:"core/user.database_queries",factory:|services| {
             Ok(std::sync::Arc::new(database_queries::QueryService::new(services.get::<Db>("base/database.pool")?.as_ref().clone(), services.get("base/database.mutations")?, services.get("base/tenancy.authentication")?)))
         }},bilibi_module_registry::Service {id:"core/user.query-pages",factory:|services| {
@@ -303,7 +301,7 @@ inventory::submit! {
             services.get::<bilibi_security::Authentication>("base/tenancy.authentication")?.bind(std::sync::Arc::new(AccountVerifier))?;
             services.get::<bilibi_notifications::NotificationBoundary>("base/notifications.sink")?.bind(std::sync::Arc::new(notifications.clone()))?;
             services.get::<bilibi_principal_directory::PrincipalDirectory>("base/principal_directory.directory")?.bind("core/user", std::sync::Arc::new(directory::UserDirectory))?;
-            privacy::bind(services.get("base/session.sessions")?, services.get(bilibi_step_up::SERVICE)?)?;
+            privacy::bind(services.get("base/session.sessions")?)?;
             services.get::<Sessions>("base/session.sessions")?.bind_end_notice(std::sync::Arc::new(session_notice::SessionNotice(services.get(bilibi_events::SERVICE)?)))?;
             let modules = bilibi_module_registry::discover()?;
             let staff_assignments = staff_choices::Assignments::from_catalog(&bilibi_module_registry::Catalog::discover(&modules)?, &modules)?;
@@ -333,7 +331,22 @@ impl UserService {
         email: &str,
         password: &str,
     ) -> std::result::Result<Login, CredentialError> {
-        self.begin_sign_in(identity::Audience::Staff, email, password)
+        self.begin_sign_in(identity::Audience::Staff, None, email, password)
+            .await
+    }
+    /// Portable sign-in bound to a selected tenant membership. The target is
+    /// only a selector after the shared password is proved; it grants no
+    /// membership and unknown targets are indistinguishable from bad credentials.
+    pub async fn login_to_tenant(
+        &self,
+        tenant: i64,
+        email: &str,
+        password: &str,
+    ) -> std::result::Result<Login, CredentialError> {
+        if tenant <= 0 {
+            return Err(CredentialError::Rejected);
+        }
+        self.begin_sign_in(identity::Audience::Staff, Some(tenant), email, password)
             .await
     }
     /// A customer's sign-in at the portal of `tenant`, which the caller
@@ -351,8 +364,13 @@ impl UserService {
         if tenant <= 0 {
             return Err(CredentialError::Rejected);
         }
-        self.begin_sign_in(identity::Audience::Customer { tenant }, email, password)
-            .await
+        self.begin_sign_in(
+            identity::Audience::Customer { tenant },
+            None,
+            email,
+            password,
+        )
+        .await
     }
     /// A customer ends its own portal session (ADR 16): the portal's
     /// sign-out, through Session, so every other live page of the session is
@@ -404,13 +422,13 @@ impl UserService {
     }
 }
 
-// Role assignments and resetting another person's 2FA use contracts. Other
+// Role assignments use contracts. Other
 // account, password, two-factor setup and notification events still write
 // through the facade (`base/agent_api` page).
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "core/user.pages", bilibi_module_registry::Provenance { module: "core/user", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
     service: "core/user.pages",
-    contracts: &[(two_factor::RESET_EVENT, two_factor::RESET_KEY), ("assign_selected_roles", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("confirm_role_assignments", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("request_remove_role", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("remove_role", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("desk_assign", "core.user.desk.set"), ("desk_confirm_remove", "core.user.desk.set")],
-    pending: bilibi_module_registry::contributions::Pending::Every { reason: "Accounts, passwords, two-factor setup and notifications write through the User facade. Role assignments, desk changes and resetting another person's 2FA use operation contracts." },
+    contracts: &[("assign_selected_roles", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("confirm_role_assignments", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("request_remove_role", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("remove_role", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("desk_assign", "core.user.desk.set"), ("desk_confirm_remove", "core.user.desk.set")],
+    pending: bilibi_module_registry::contributions::Pending::Every { reason: "Accounts, two-factor setup and notifications write through the User facade. Role assignments and desk changes use operation contracts." },
 }) }
 
 // ADR 01 gap, listed so it stays visible: these pages still write through
@@ -431,7 +449,7 @@ bilibi_ui::record_fields! { "core/user", pub(crate) mod record_fields {
     UPDATED_AT: bilibi_ui::RecordField::new("updated_at", "Updated", bilibi_ui::RecordFieldType::DateTime),
 } }
 
-pub use accounts::{validate_input, LANDING_KEY, NAME_MAX};
+pub use accounts::{LANDING_KEY, NAME_MAX};
 pub use bootstrap::{BOOTSTRAP_ACTION, BOOTSTRAP_COMPLETED, CREATE_OWNER_PRINCIPAL};
 pub use company_accounts::CompanyAccount;
 pub use contributions::{CREATE, DELETE, INVITE, LIST, UPDATE, VIEW};

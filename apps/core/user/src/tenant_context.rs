@@ -24,6 +24,9 @@ pub enum TenantEntry {
     Entered(Login),
     Challenge(Login),
     Sso(String),
+    /// The current proof belongs to another tenant. The browser must prove
+    /// the portable identity for this target before the old session is replaced.
+    Reauthenticate(i64),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,7 +85,10 @@ impl UserService {
             return Err(Error::Invalid.into());
         }
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let current = self.sessions.activity(&**client, token).await?;
+        let (current, authority) = self
+            .sessions
+            .activity_with_authority(&**client, token)
+            .await?;
         if current.csrf != csrf {
             return Err(Error::Forbidden.into());
         }
@@ -111,6 +117,20 @@ impl UserService {
             .authenticate_session(&**client, target, target_user, None, None, new_csrf.clone())
             .await
             .map_err(|_| TenantChoiceRefusal::Unavailable)?;
+        if !authority.admits_tenant(target) {
+            let company = target_scope.current_company().map(|id| id.get());
+            if let Some(row) = client
+                .query_opt(
+                    "SELECT public_id FROM user_identity_providers WHERE tenant_id=$1 AND company_id=$2 AND enabled ORDER BY enforce_sso DESC,id LIMIT 1",
+                    &[&target, &company],
+                )
+                .await
+                .map_err(Error::from)?
+            {
+                return Ok(TenantEntry::Sso(row.get(0)));
+            }
+            return Ok(TenantEntry::Reauthenticate(target));
+        }
         if !self.password_sso_allowed(&**client, &target_scope).await? {
             let company = target_scope.current_company().map(|id| id.get());
             return client
@@ -180,7 +200,7 @@ impl UserService {
             .mutate(move |sql| {
                 Box::pin(async move {
                     let row = sql.query_opt(
-                        "UPDATE sessions s SET id=$6,tenant_id=$3,user_id=$4,csrf=$7,company_id=$8,held_company_id=NULL,impersonator_id=NULL,last_activity=now(),stepped_up_at=NULL,step_up_used_at=NULL,step_up_spent_at=NULL FROM users current,users target_user,tenants target_tenant WHERE s.id=$5 AND s.tenant_id=$1 AND s.user_id=$2 AND s.csrf=$9 AND s.impersonator_id IS NULL AND current.tenant_id=$1 AND current.id=$2 AND target_user.tenant_id=$3 AND target_user.id=$4 AND target_user.identity_id=current.identity_id AND target_user.status='active' AND target_user.deleted_at IS NULL AND target_tenant.id=$3 AND target_tenant.status='active' AND target_tenant.deleted_at IS NULL RETURNING current.identity_id",
+                        "UPDATE sessions s SET id=$6,tenant_id=$3,user_id=$4,csrf=$7,company_id=$8,held_company_id=NULL,impersonator_id=NULL,last_activity=now(),stepped_up_at=NULL,step_up_used_at=NULL,step_up_spent_at=NULL FROM users current,users target_user,tenants target_tenant WHERE s.id=$5 AND s.tenant_id=$1 AND s.user_id=$2 AND s.csrf=$9 AND s.impersonator_id IS NULL AND s.authentication_authority='portable' AND current.tenant_id=$1 AND current.id=$2 AND target_user.tenant_id=$3 AND target_user.id=$4 AND target_user.identity_id=current.identity_id AND target_user.status='active' AND target_user.deleted_at IS NULL AND target_tenant.id=$3 AND target_tenant.status='active' AND target_tenant.deleted_at IS NULL RETURNING current.identity_id",
                         &[&from_tenant,&from_user,&target,&target_user,&current_id,&next_id,&next_csrf,&company,&old_csrf],
                     ).await?;
                     let Some(row) = row else { return Err(Error::Unauthorized); };

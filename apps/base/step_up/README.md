@@ -187,7 +187,7 @@ Core User owns [pending sign-in admission](../../core/user/README.md#sign-in-adm
 
 On a migrated disposable database, select Staging in Instance settings (`BILIBI_ENV=staging` supplies it only during the first install seed):
 
-- Enroll at `/settings/two-factor`. There are no recovery codes: after a lost phone another admin resets the account (`core.user.two_factor.reset`, `.always()`), or the server owner runs `bilibi-web two-factor-reset`.
+- Enroll at `/settings/two-factor`. There are no recovery codes and no customer-administrator reset: after a lost phone the installation server owner runs `bilibi-web two-factor-reset`.
 - Open `/authz/step-up` and turn an operation on.
 - `cargo run -p bilibi-web --example step-up-reference -- <user id> auditor assign` with `BILIBI_SESSION_TOKEN` set to a browser session's cookie. It prints `ok` or the `step_up_required` answer.
 

@@ -1,6 +1,6 @@
 //! `/users/{id}`: the account
-//! as read-first facts. Name and email commit in place through the shared
-//! inline editors; the Person is a choice fact over the owner's list, written
+//! as read-first facts. Name commits in place through the shared inline
+//! editor; email is an installation-owned identity fact. The Person is a choice fact over the owner's list, written
 //! through the account binder's commands, which prove and lock the target.
 //! Desks are managed through the shared panel. Every write asks Authz and the
 //! owners again; the mount-time flags only decide what renders.
@@ -8,7 +8,7 @@ use super::*;
 use crate::{
     accounts::AccountField,
     contributions::{DELETE, UPDATE},
-    two_factor, Account, AccountError, LinkError,
+    Account, AccountError, LinkError,
 };
 use bilibi_agent_api::{page::Call, Error as ContractError};
 use bilibi_authz::{
@@ -23,11 +23,10 @@ use bilibi_tenancy::OrganisationSearch;
 use bilibi_ui::{
     lists::RecordLink,
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, PanelSpec},
-    ActionLink, Alert, BackLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card,
-    Choice, CommitStates, CommitStatus, ConfirmDialog, EmptyState, Fact, Facts, Field, FlashGroup,
-    FlexRow, FlexTable, Header, IconButton, InlineChoice, InlineEdit, InlineField, InputKind,
-    ListColumns, Modal, ModalWidth, PageVariant, SecretInput, SectionHeading, StatusKind, StepUp,
-    TableEmpty,
+    ActionLink, BackLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, Choice,
+    CommitStates, CommitStatus, ConfirmDialog, EmptyState, Fact, Facts, Field, FlashGroup, FlexRow,
+    FlexTable, Header, IconButton, InlineChoice, InlineEdit, InlineField, InputKind, ListColumns,
+    PageVariant, SectionHeading, TableEmpty,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,10 +45,7 @@ struct View {
     header: Html,
     details: Html,
     access: Html,
-    password: Html,
     links: Html,
-    two_factor: Html,
-    sign_in: Html,
     danger: Html,
     dialog: Html,
 }
@@ -74,33 +70,6 @@ struct Muted<'a> {
 )]
 struct Stamp {
     value: Html,
-}
-#[derive(Template)]
-#[template(path = "account_password.html")]
-struct PasswordCard {
-    open: bool,
-    password: Html,
-    confirmation: Html,
-    submit: Html,
-}
-#[derive(Template)]
-#[template(path = "account_sign_in.html")]
-struct SignInCard {
-    until: Html,
-    button: Html,
-}
-#[derive(Template)]
-#[template(path = "account_two_factor.html")]
-struct TwoFactorCard {
-    description: String,
-    button: Html,
-}
-#[derive(Template)]
-#[template(path = "account_reset_two_factor.html")]
-struct ResetBody {
-    event: &'static str,
-    step_up: StepUp,
-    error: Html,
 }
 #[derive(Template)]
 #[template(path = "account_danger.html")]
@@ -174,8 +143,6 @@ enum Pending {
     Delete,
     Unlink(String),
     Authz(AuthzRule),
-    /// Reset 2FA, waiting for the admin's own authenticator code.
-    ResetTwoFactor,
 }
 #[derive(Clone)]
 enum AuthzRule {
@@ -255,7 +222,7 @@ struct Loaded {
     can_manage_roles: bool,
     can_delete: bool,
     person: Option<(String, bool)>,
-    persons: Option<Vec<create::PersonChoice>>,
+    persons: Option<Vec<PersonChoice>>,
 }
 impl Loaded {
     fn can_edit(&self) -> bool {
@@ -272,15 +239,11 @@ pub(crate) struct Detail {
     framed: bool,
     statuses: CommitStates,
     flash: Flash,
-    show_password: bool,
-    password_errors: (Vec<String>, Vec<String>),
     pending: Option<Pending>,
     access: AccessUi,
     assignment_columns: ListColumns,
     history: bool,
     desk_person: Option<PersonId>,
-    /// The last authenticator-code error on Reset 2FA. Other failures use the flash.
-    reset_error: String,
 }
 
 impl Detail {
@@ -291,8 +254,6 @@ impl Detail {
             framed,
             statuses: CommitStates::default(),
             flash: Flash::default(),
-            show_password: false,
-            password_errors: (Vec::new(), Vec::new()),
             pending: None,
             access: AccessUi::default(),
             assignment_columns: ListColumns::mount(
@@ -309,7 +270,6 @@ impl Detail {
             .map_err(|_| Error::Internal)?,
             history: false,
             desk_person: None,
-            reset_error: String::new(),
         })
     }
 
@@ -439,9 +399,7 @@ impl Detail {
             words.get(&crate::record_fields::EMAIL),
             &account.email,
         );
-        if !account.home {
-            email_field = email_field.readonly();
-        }
+        email_field = email_field.readonly();
         let items = vec![
             Fact {
                 title: words.get(&crate::record_fields::get("name")),
@@ -1013,70 +971,16 @@ impl Detail {
         })
     }
 
-    fn password_card(&self) -> Result<Html> {
-        let secret = |id: &str, name: &str, label: &str, placeholder: &str, errors: &[String]| {
-            render(
-                &SecretInput::new(id, name, "password")
-                    .label(label)
-                    .errors(errors.to_vec())
-                    .wrapper_class("mb-0")
-                    .autocomplete("new-password")
-                    .attrs(bilibi_ui::Attrs {
-                        placeholder: Some(placeholder.into()),
-                        required: true,
-                        ..bilibi_ui::Attrs::default()
-                    }),
-            )
-        };
-        let body = render(&PasswordCard {
-            open: self.show_password,
-            password: secret(
-                "user-new-password",
-                "password",
-                "New Password",
-                "Enter new password",
-                &self.password_errors.0,
-            )?,
-            confirmation: secret(
-                "user-new-password-confirmation",
-                "password_confirmation",
-                "Confirm New Password",
-                "Confirm new password",
-                &self.password_errors.1,
-            )?,
-            submit: render(&Button {
-                id: "update-password-btn",
-                button_type: "submit",
-                variant: ButtonVariant::Primary,
-                class: "text-sm",
-                working: "Updating…",
-                body: Html::text("Update Password"),
-                ..Button::default()
-            })?,
-        })?;
-        render(&Card {
-            id: "user-password-card",
-            inner_class: "p-5 sm:p-6",
-            body,
-            ..Card::default()
-        })
-    }
-
-    fn dialog(
-        &self,
-        loaded: &Loaded,
-        admin_enrolled: bool,
-        methods: &[bilibi_ui::ProofMethod],
-    ) -> Result<Html> {
+    fn dialog(&self, loaded: &Loaded) -> Result<Html> {
         let name = &loaded.account.name;
         Ok(match &self.pending {
             None => Html::EMPTY,
             Some(Pending::Delete) => render(&ConfirmDialog {
                 id: "delete-user-confirm",
-                consequence: &format!("{name}'s account will be deleted."),
-                detail: "They can no longer sign in. This cannot be undone.",
-                confirm: "Delete",
-                working: "Deleting…",
+                consequence: &format!("{name}'s membership in this workspace will be removed."),
+                detail: "Their portable identity and access to other workspaces remain available.",
+                confirm: "Remove",
+                working: "Removing…",
                 confirm_event: "delete",
                 cancel_event: "cancel_delete",
             })?,
@@ -1089,7 +993,6 @@ impl Detail {
                 confirm_event: "unlink",
                 cancel_event: "cancel_unlink",
             })?,
-            Some(Pending::ResetTwoFactor) => self.reset_dialog(loaded, admin_enrolled, methods)?,
             Some(Pending::Authz(rule)) => {
                 let (confirm, working, event) = rule.verb();
                 render(&ConfirmDialog {
@@ -1103,199 +1006,6 @@ impl Detail {
                 })?
             }
         })
-    }
-
-    /// The Reset 2FA card, for an admin looking at someone else's account
-    /// that has an authenticator on. Hidden otherwise. Also answers whether
-    /// the admin has 2FA set up, which the confirmation needs.
-    async fn two_factor_card(&self, scope: &Scope, loaded: &Loaded) -> Result<(Html, bool)> {
-        if !loaded.account.home
-            || !loaded.can_edit()
-            || self.id == scope.user()
-            || scope.impersonator().is_some()
-            || !self
-                .pages
-                .users
-                .account_two_factor_on(scope, self.id)
-                .await?
-        {
-            return Ok((Html::EMPTY, false));
-        }
-        let enrolled = self.pages.users.step_up.enrolled(scope).await?;
-        let card = render(&TwoFactorCard {
-            description: format!(
-                "{} has set up 2FA. If they lost access, reset it so they can set it up again.",
-                loaded.account.name
-            ),
-            button: render(&Button {
-                id: "user-reset-two-factor",
-                button_type: "button",
-                event: "request_reset_two_factor",
-                variant: ButtonVariant::Secondary,
-                body: Html::text("Reset 2FA"),
-                ..Button::default()
-            })?,
-        })?;
-        Ok((card, enrolled))
-    }
-
-    /// The sign-in lock, for an administrator who may edit the account, only
-    /// while it holds.
-    async fn sign_in_card(&self, scope: &Scope, loaded: &Loaded) -> Result<Html> {
-        if !loaded.account.home || !loaded.can_edit() {
-            return Ok(Html::EMPTY);
-        }
-        let Some(until) = self
-            .pages
-            .users
-            .sign_in_locked_until(scope, self.id)
-            .await?
-        else {
-            return Ok(Html::EMPTY);
-        };
-        let display = self.pages.display(scope).await?;
-        render(&SignInCard {
-            until: datetime(&display, "user-sign-in-locked-until", until)?,
-            button: render(&Button {
-                id: "user-unlock-sign-in",
-                button_type: "button",
-                event: "unlock-sign-in",
-                variant: ButtonVariant::Secondary,
-                working: "Unlocking…",
-                body: Html::text("Unlock"),
-                ..Button::default()
-            })?,
-        })
-    }
-
-    fn reset_dialog(
-        &self,
-        loaded: &Loaded,
-        enrolled: bool,
-        methods: &[bilibi_ui::ProofMethod],
-    ) -> Result<Html> {
-        let name = &loaded.account.name;
-        let error = if self.reset_error.is_empty() {
-            Html::EMPTY
-        } else {
-            render(&Alert {
-                kind: StatusKind::Error,
-                id: "user-reset-two-factor-error",
-                class: "mb-3",
-                body: Html::text(&self.reset_error),
-            })?
-        };
-        let mut step_up = StepUp::new(enrolled, format!("/users/{}", self.id));
-        step_up.reason = "to reset someone else's 2FA.".into();
-        step_up.body = Html::text(&format!(
-            "{name} will be signed out everywhere, their AI apps will be disconnected, and they will be notified and asked to set up 2FA again. Enter your own 2FA code to confirm."
-        ));
-        step_up.code = render(&bilibi_ui::ProofInput::new(
-            "user-reset-two-factor-code",
-            "code",
-            methods.to_vec(),
-        ))?;
-        step_up.secondary_actions = render(&Button {
-            id: "user-reset-two-factor-cancel",
-            button_type: "button",
-            event: "cancel_reset_two_factor",
-            body: Html::text("Cancel"),
-            ..Button::default()
-        })?;
-        step_up.actions = render(&Button {
-            id: "user-reset-two-factor-confirm",
-            button_type: "submit",
-            variant: ButtonVariant::Danger,
-            working: "Resetting…",
-            body: Html::text("Reset 2FA"),
-            ..Button::default()
-        })?;
-        let body = render(&ResetBody {
-            event: two_factor::RESET_EVENT,
-            step_up,
-            error,
-        })?;
-        render(&Modal {
-            id: "user-reset-two-factor-dialog",
-            title: &format!("Reset 2FA for {name}?"),
-            cancel_event: "cancel_reset_two_factor",
-            width: ModalWidth::Narrow,
-            description: "Nothing changes until you confirm with your code.",
-            role: "",
-            flash: None,
-            body,
-        })
-    }
-
-    /// Runs the `core.user.two_factor.reset` contract with the admin's code
-    /// presented on the request, as an agent's `step_up_code` is.
-    async fn reset_two_factor(
-        &mut self,
-        scope: &Scope,
-        credential: &str,
-        value: &Value,
-    ) -> Result<()> {
-        if !matches!(self.pending, Some(Pending::ResetTwoFactor)) {
-            return Ok(());
-        }
-        let code = text(value, "code");
-        let code = code.trim();
-        if code.is_empty() {
-            self.reset_error = "Enter the 6-digit code from your authenticator app.".into();
-            return Ok(());
-        }
-        let name = self.load(scope).await?.account.name;
-        let presented = scope.clone().presenting_step_up(code);
-        let call = Call {
-            scope: &presented,
-            credential,
-            service: two_factor::PAGES,
-            event: two_factor::RESET_EVENT,
-            contract: two_factor::RESET_KEY,
-        };
-        match self
-            .pages
-            .contracts
-            .submit(&call, json!({"user_id": self.id}))
-            .await
-        {
-            Ok(_) => {
-                self.pending = None;
-                self.reset_error.clear();
-                self.flash.success(format!(
-                    "2FA was reset for {name}. They are signed out, their AI apps are disconnected, and they were notified to set it up again in Settings."
-                ));
-            }
-            Err(ContractError::Backend(Error::StepUpRequired { reason, operation })) => {
-                self.reset_error = match reason {
-                    // Enrolment is the host's prompt: it enrols and comes back.
-                    "not_enrolled" => return Err(Error::StepUpRequired { reason, operation }),
-                    "invalid_code" => "That code was not accepted. Enter the current code from your authenticator app.",
-                    "locked" => "Too many wrong codes. Wait a while, then try again with a fresh code.",
-                    "impersonating" => "2FA cannot be reset while viewing as someone else.",
-                    _ => "Enter the current 6-digit code from your authenticator app.",
-                }
-                .into();
-            }
-            Err(ContractError::Backend(Error::Unauthorized)) => return Err(Error::Unauthorized),
-            Err(ContractError::Forbidden | ContractError::Backend(Error::Forbidden)) => {
-                self.pending = None;
-                self.flash.error("You do not have permission to reset 2FA.");
-            }
-            Err(ContractError::InvalidInput(fields)) => {
-                let message = fields
-                    .values()
-                    .flatten()
-                    .next()
-                    .cloned()
-                    .unwrap_or_else(|| "The reset was not accepted.".into());
-                self.pending = None;
-                self.flash.error(message);
-            }
-            Err(ContractError::Backend(error)) => return Err(error),
-            Err(_) => return Err(Error::Internal),
-        }
-        Ok(())
     }
 
     /// The guard of the users list: the capability, never the signed-in
@@ -1342,11 +1052,6 @@ impl Detail {
         })?;
         let details = self.details(scope, &loaded).await?;
         let access = self.access(scope, &loaded).await?;
-        let password = if !account.home || !loaded.can_manage {
-            Html::EMPTY
-        } else {
-            self.password_card()?
-        };
         self.desk_person = if self.pages.allowed(scope, bilibi_company::VIEW).await? {
             account.links.person
         } else {
@@ -1357,17 +1062,6 @@ impl Detail {
         } else {
             Html::EMPTY
         };
-        let (two_factor, admin_enrolled) = self.two_factor_card(scope, &loaded).await?;
-        let sign_in = self.sign_in_card(scope, &loaded).await?;
-        let methods = self
-            .pages
-            .users
-            .step_up
-            .enrolled_methods(scope)
-            .await?
-            .into_iter()
-            .map(|m| bilibi_ui::ProofMethod::new(m.id, m.label, m.code_length, m.numeric))
-            .collect::<Vec<_>>();
         let danger = if loaded.can_delete && scope.user() != self.id {
             render(&Danger {
                 button: render(&Button {
@@ -1375,7 +1069,7 @@ impl Detail {
                     button_type: "button",
                     event: "request_delete",
                     variant: ButtonVariant::Danger,
-                    body: Html::text("Delete user"),
+                    body: Html::text("Remove user"),
                     ..Button::default()
                 })?,
             })?
@@ -1391,12 +1085,9 @@ impl Detail {
             header,
             details,
             access,
-            password,
             links,
-            two_factor,
-            sign_in,
             danger,
-            dialog: self.dialog(&loaded, admin_enrolled, &methods)?,
+            dialog: self.dialog(&loaded)?,
         })?;
         Ok(LiveBody {
             html: render(&bilibi_ui::Page {
@@ -1478,18 +1169,13 @@ impl Detail {
             .ok_or(Error::Invalid)?;
         let users = self.pages.users.clone();
         match field.as_str() {
-            "name" | "email" => {
-                let kind = AccountField::parse(&field).expect("matched");
-                let label = if kind == AccountField::Name {
-                    "Name"
-                } else {
-                    "Email"
-                };
+            "name" => {
+                let kind = AccountField::Name;
                 let result = users
                     .update_account(scope, self.id, version, kind, &submitted)
                     .await
                     .map(|_| ());
-                self.fact_outcome(&field, label, &submitted, result)
+                self.fact_outcome(&field, "Name", &submitted, result)
             }
             "person" => {
                 let result = if submitted.trim().is_empty() {
@@ -1530,64 +1216,6 @@ impl Detail {
             }
         }
         submitted.to_owned()
-    }
-
-    async fn update_password(&mut self, scope: &Scope, value: &Value) -> Result<()> {
-        let password = text(value, "password");
-        let confirmation = text(value, "password_confirmation");
-        let mut errors = (Vec::new(), Vec::new());
-        if password.is_empty() {
-            errors.0.push("can't be blank".to_owned());
-        } else if let Err(violation) = crate::password::check_policy(&password) {
-            errors.0.push(violation.to_string());
-        }
-        if confirmation.is_empty() {
-            errors.1.push("can't be blank".to_owned());
-        } else if confirmation != password {
-            errors.1.push("Passwords do not match".to_owned());
-        }
-        if !(errors.0.is_empty() && errors.1.is_empty()) {
-            self.flash.error(
-                errors
-                    .1
-                    .first()
-                    .or(errors.0.first())
-                    .cloned()
-                    .unwrap_or_else(|| "Invalid password.".into()),
-            );
-            self.password_errors = errors;
-            return Ok(());
-        }
-        match self
-            .pages
-            .users
-            .set_password(scope, self.id, &password)
-            .await
-        {
-            Ok(()) => {
-                self.flash
-                    .success("Password updated. This also disconnects their AI apps.");
-                self.password_errors = (Vec::new(), Vec::new());
-                self.show_password = false;
-            }
-            Err(AccountError::Validation(refused)) => {
-                self.password_errors =
-                    (refused.into_iter().map(|e| e.message).collect(), Vec::new());
-                self.flash.error("Invalid password.");
-            }
-            Err(AccountError::Access(Error::Unauthorized)) => return Err(Error::Unauthorized),
-            // The host sends the browser to confirm with a code and back.
-            Err(AccountError::Access(error @ Error::StepUpRequired { .. })) => return Err(error),
-            Err(AccountError::Access(Error::Forbidden)) => self
-                .flash
-                .error("You do not have permission to change passwords."),
-            Err(AccountError::Outranked) => self.flash.error(
-                "You cannot change this password: the account has permissions you do not have.",
-            ),
-            Err(AccountError::Impersonating) => self.flash.error(IMPERSONATING),
-            Err(_) => self.flash.error("Failed to update password."),
-        }
-        Ok(())
     }
 
     async fn set_role(
@@ -1727,61 +1355,26 @@ impl Detail {
         match event(value)? {
             "save_field" => self.save_field(scope, value).await?,
             "clear-flash" => self.flash.dismiss(value.get("key").and_then(Value::as_str)),
-            "toggle_change_password" => self.show_password = !self.show_password,
-            "update_password" => {
-                if self
-                    .guard_write(
-                        scope,
-                        UPDATE,
-                        "You do not have permission to change passwords.",
-                    )
-                    .await?
-                {
-                    self.update_password(scope, value).await?;
-                }
-            }
             "request_delete" => {
                 if !self.pages.allowed(scope, DELETE).await? {
                     self.flash
-                        .error("You do not have permission to delete users.");
+                        .error("You do not have permission to remove users.");
                 } else if scope.user() == self.id {
-                    self.flash.error("You cannot delete your own account.");
+                    self.flash.error("You cannot remove your own membership.");
                 } else {
                     self.flash.clear();
                     self.pending = Some(Pending::Delete);
                 }
             }
-            "request_reset_two_factor" => {
-                if !self.pages.allowed(scope, UPDATE).await? {
-                    self.flash.error("You do not have permission to reset 2FA.");
-                } else if scope.user() == self.id {
-                    self.flash
-                        .error("You cannot reset your own 2FA. Ask another admin.");
-                } else {
-                    self.flash.clear();
-                    self.reset_error.clear();
-                    self.pending = Some(Pending::ResetTwoFactor);
-                }
-            }
-            "cancel_reset_two_factor" => {
-                self.pending = None;
-                self.reset_error.clear();
-            }
-            "reset-two-factor" => self.reset_two_factor(scope, credential, value).await?,
-            "unlock-sign-in" => match self.pages.users.unlock_sign_in(scope, self.id).await {
-                Ok(()) => self.flash.success("Sign-in unlocked."),
-                Err(AccountError::NotFound) => self.flash.error("Sign-in is no longer locked."),
-                Err(AccountError::Access(Error::Forbidden)) => self.flash.error(FORBIDDEN),
-                Err(_) => self.flash.error("Failed to unlock sign-in."),
-            },
             "cancel_delete" | "cancel_unlink" | "cancel_authz" => self.pending = None,
             "delete" => {
                 if matches!(self.pending, Some(Pending::Delete)) {
                     self.pending = None;
                     let name = self.load(scope).await?.account.name;
-                    match self.pages.users.delete_account(scope, self.id).await {
+                    match self.pages.users.remove_membership(scope, self.id).await {
                         Ok(()) => {
-                            self.flash.success(format!("{name}'s account was deleted."));
+                            self.flash
+                                .success(format!("{name}'s membership was removed."));
                             return Ok(());
                         }
                         Err(AccountError::Access(Error::Unauthorized)) => {
@@ -1789,16 +1382,16 @@ impl Detail {
                         }
                         Err(AccountError::Access(Error::Forbidden)) => self
                             .flash
-                            .error("You do not have permission to delete users."),
+                            .error("You do not have permission to remove users."),
                         Err(AccountError::OwnAccount) => {
-                            self.flash.error("You cannot delete your own account.")
+                            self.flash.error("You cannot remove your own membership.")
                         }
                         Err(AccountError::Outranked) => self.flash.error(format!(
-                            "You cannot delete {name}: they have permissions you do not have."
+                            "You cannot remove {name}: they have permissions you do not have."
                         )),
                         Err(AccountError::Impersonating) => self.flash.error(IMPERSONATING),
                         Err(_) => self.flash.error(format!(
-                            "{name} was not deleted. Reload the page and try again."
+                            "{name} was not removed. Reload the page and try again."
                         )),
                     }
                 }

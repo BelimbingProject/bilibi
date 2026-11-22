@@ -317,10 +317,10 @@ async fn finish_reset_request() -> Result<(), CredentialError> {
 }
 /// The account a forgotten-password request mails and its link redeems for:
 /// per sign-in under the address, the one `identity::password_identity`
-/// signs in to (last used, then home, then the lowest tenant), so a removed
+/// signs in to (last used, then the lowest live tenant), so a removed
 /// or suspended last tenant never strands the request. Columns: account,
 /// tenant, account name, address, identity, live token digest.
-const RESET_ACCOUNT: &str = "SELECT DISTINCT ON (i.id) u.id,u.tenant_id,u.name,i.email,i.id,r.token_hash FROM user_identities i JOIN users u ON u.identity_id=i.id JOIN tenants t ON t.id=u.tenant_id LEFT JOIN password_reset_tokens r ON r.identity_id=i.id AND r.expires_at>now() WHERE lower(i.email)=$1 AND i.kind=$2 AND u.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' ORDER BY i.id,(u.tenant_id=i.last_tenant_id) DESC,(u.tenant_id=i.home_tenant_id) DESC,u.tenant_id LIMIT 2";
+const RESET_ACCOUNT: &str = "SELECT DISTINCT ON (i.id) u.id,u.tenant_id,u.name,i.email,i.id,r.token_hash FROM user_identities i JOIN users u ON u.identity_id=i.id JOIN tenants t ON t.id=u.tenant_id LEFT JOIN password_reset_tokens r ON r.identity_id=i.id AND r.expires_at>now() WHERE lower(i.email)=$1 AND i.kind=$2 AND u.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' ORDER BY i.id,(u.tenant_id=i.last_tenant_id) DESC,u.tenant_id LIMIT 2";
 
 fn encode_component(value: &str) -> String {
     value
@@ -443,7 +443,7 @@ impl UserService {
         let email = normalize_email(email)?;
         let client = self.db.get().await.map_err(Error::from)?;
         // The account sign-in would choose (`identity::password_identity`):
-        // last used, then home, then any live membership. Ambiguity (two
+        // last used, then the lowest live membership. Ambiguity (two
         // sign-ins under one address, possible only for customers) is
         // treated as unknown rather than guessed; a frozen account
         // (archived company, retired identity) is unknown here too.

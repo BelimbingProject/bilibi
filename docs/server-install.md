@@ -234,7 +234,7 @@ Notice that the company questions come first only on a database that has no oper
 
 ```
 Not created: this install already has an owner. The platform operator holds 1 account(s); the first is owner@example.com.
-Sign in as one of them at https://erp.example.com/login. To add people, use Users > New user there.
+Sign in as one of them at https://erp.example.com/login. To add people, use Users > Invite user there.
 If nobody can sign in any more, that is account recovery, which this command does not do. If an owner only lost their phone, see [Lost phone](#lost-phone).
 ```
 
@@ -274,13 +274,13 @@ The command exits unsuccessfully if delivery fails after commit. To recover from
 
 Use the signed-in Users page to invite later administrators.
 
-Ordinary membership invitations can link the owner’s sign-in to another tenant. Cross-tenant access through shared sign-ins, including SSO, remains a [known limitation](https://github.com/BelimbingProject/bilibi/issues/787).
+Ordinary membership invitations can link the owner's portable identity to another tenant. Company SSO proof remains confined to its issuing tenant; entering another tenant requires portable proof or that target's own SSO ([ADR 21](architecture/decisions/21-one-sign-in-several-tenant-memberships.md)).
 
 When running the binary directly, use the same flags with `bilibi-web tenant-provision` and load the instance's database and mail settings and `APP_ORIGIN` into its environment. The installer wrapper loads these settings and runs the command as the Bilibi service account.
 
 ## Lost phone
 
-Bilibi has no 2FA recovery codes. A person who loses their phone asks another admin to reset their 2FA (Users › the person › **Reset 2FA**, which needs the admin's own code). When the person is the only admin, the server owner resets it from the server:
+Bilibi has no 2FA recovery codes, and customer administrators cannot reset another person's installation-wide factor. A person who loses their phone asks the server owner to reset it from the server:
 
 ```sh
 sudo scripts/install-server.sh two-factor-reset production --email owner@example.com

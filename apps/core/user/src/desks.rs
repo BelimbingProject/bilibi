@@ -73,15 +73,6 @@ pub(crate) async fn check(
     client.query_opt(&format!("SELECT p.id FROM persons p WHERE p.tenant_id=$1 AND p.id=$2 AND p.retired_at IS NULL AND EXISTS(SELECT 1 FROM users u WHERE u.tenant_id=p.tenant_id AND u.person_id=p.id AND u.kind='staff' AND u.deleted_at IS NULL){suffix}"), &[&scope.tenant(), &person]).await?.ok_or(Error::NotFound)?;
     Ok(())
 }
-pub(crate) async fn set(
-    tx: &mut MutationTransaction<'_>,
-    scope: &Scope,
-    company: i64,
-    person: i64,
-) -> Result<Value> {
-    check(tx.sql(), scope, company, person, true, true).await?;
-    write_in(tx, scope, company, person).await
-}
 pub(crate) async fn write_in(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
