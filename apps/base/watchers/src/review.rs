@@ -250,16 +250,32 @@ impl Watchers {
             review.problems = problems;
             return Ok(review);
         };
-        review.trigger_title = trigger.definition.title.to_owned();
+        let catalog = Catalog::for_scope(client, scope)
+            .await
+            .map_err(Error::from)?;
+        self.review_new_draft(client, scope, draft, problems, &catalog, trigger)
+            .await
+    }
+
+    pub(crate) async fn review_new_draft(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        draft: &Draft,
+        mut problems: Problems,
+        catalog: &Catalog,
+        trigger: &OfferedTrigger,
+    ) -> Result<Review> {
+        let mut review = Review {
+            trigger_title: trigger.definition.title.to_owned(),
+            ..Review::default()
+        };
         let Some(definition) = &draft.definition else {
             review.problems = problems;
             return Ok(review);
         };
-        let catalog = Catalog::for_scope(client, scope)
-            .await
-            .map_err(Error::from)?;
         self.check(
-            &catalog,
+            catalog,
             trigger,
             definition,
             &draft.examples,
@@ -446,6 +462,7 @@ impl Watchers {
         draft: Draft,
         problems: Problems,
     ) -> Result<(i64, i32, Review)> {
+        self.lock_admission(tx.sql(), scope).await?;
         if let Some(id) = draft.watcher_id {
             tx.sql()
                 .query_opt(
@@ -486,7 +503,7 @@ impl Watchers {
                 }
                 None => {
                     let id: i64 = sql.query_one("INSERT INTO base_watchers(tenant_id,name,trigger) VALUES($1,$2,$3) RETURNING id", &[&tenant, &name, &trigger]).await?.get(0);
-                    changes.push(Change { kind: "base/watchers.watcher".into(), id, old: Value::Null, new: json!({"name": name, "trigger": trigger}) });
+                    changes.push(Change { kind: "base/watchers.watcher".into(), id, old: Value::Null, new: json!({"name": name, "trigger": trigger, "version": 1, "state": "draft"}) });
                     id
                 }
             };

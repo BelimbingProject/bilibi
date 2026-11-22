@@ -397,6 +397,8 @@ A save review uses the [shared audience preview](../agent_api/README.md#audience
 
 Declare the canonical list address on `TableDecl::list_address` for the tables whose labels the list uses, including lists without shared views. A shared-view list with no Grid table supplies its address in `PageMetadata`. Lists contribute `PageMetadata` through `contribute_page_metadata!` reusing their `PageColumns` construction and the actual `ListSpec` when the table has search and filters. Supply dynamic filter details on the same client and scope when the page has tenant-specific filters. Declare query keys that live outside `ListState` as extra filters. Keep the contribution beside the page's construction so discovery and parsing change together.
 
+[Setup packs](../setup_packs/README.md) transfer registered shared views through the same Grid save. Use portable filters when exporting. Customisations can remove a visible view when its owner or a viewer with sharing permission confirms the removal.
+
 The `g6-shared-views` walkthrough (`scripts/run-walkthroughs.sh grid-shared-views`) proves role visibility when switching companies, tenant-wide and owner visibility, Grid and Labels operation writes with a one-connection pool, concurrent saves at the view limit, owner deletion without sharing permission, saving filters after queued changes, and refusal of an employee email search saved on the Users page when a reader lacks the page grant.
 
 ## Scalar access predicates

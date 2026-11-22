@@ -18,6 +18,7 @@ pub mod query;
 pub mod reference;
 mod shared_views;
 mod summary;
+mod transfer;
 pub mod view;
 mod view_operations;
 pub use lens::{Lens, Range};
@@ -39,6 +40,7 @@ pub use summary::{
     MAX_COST_BOUND, MAX_FILTERS, MAX_GROUPINGS, MAX_MEASURES, MAX_OFFSET, MAX_RESULT_GROUPS,
     MAX_SORTS, MAX_STATEMENT_MS, MAX_TEXT,
 };
+pub use transfer::{ViewPreview, ViewSetup, ViewTransfer};
 pub use view::View;
 
 use bilibi_module_registry::{Consumer, Layer, Module, RegistryError, Result, Service};

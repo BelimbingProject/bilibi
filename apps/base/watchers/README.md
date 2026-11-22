@@ -138,9 +138,13 @@ For a match, the watcher principal calls the action owner's preview at the curre
 - **Receipts and privacy**: a receipt's facts and condition outcomes are the record's values; current record reach and field restrictions apply to every read, including values collected before a restriction changed. A reader who cannot read the subject or any recorded field sees the evidence as restricted. Protected facts and condition outcomes are kept out of audit metadata.
 - **Agents**: `base.watchers.vocabulary` (installed triggers with their fields, actions with their inputs, operators, limits), `base.watchers.list`, `base.watchers.get`, `base.watchers.runs`, `base.watchers.trial`, `base.watchers.draft`, `base.watchers.approve`, `base.watchers.switch`, and the guide `base.watchers`. An agent's draft records `drafted_via: agent`; it runs only once a person approves it.
 
+## Setup packs
+
+Export a latest unapproved version and preview it as a new destination draft through [Setup packs](../setup_packs/README.md). Reverse an initial unapproved draft through Customisations. The draft discard operation refuses a watcher after it has been revised or approved.
+
 ## Tables
 
-`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects`, `base_watcher_buckets` and `base_watcher_trials` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events`, `base-watchers-004-watchers`, `base-watchers-005-token-bucket` and `base-watchers-006-activation`, and `base-watchers-007-trials`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
+`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects`, `base_watcher_buckets` and `base_watcher_trials` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events`, `base-watchers-004-watchers`, `base-watchers-005-token-bucket` `base-watchers-006-activation`, `base-watchers-007-trials`, and `base-watchers-008-name-lookup`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 
@@ -151,4 +155,4 @@ The official Domain companion walkthrough is `apps/web/examples/watchers-domains
 ## Not yet
 
 - Custom fields of a linked record (`company.cf_segment`) as conditions.
-- Configuration packs, a bounded text formula, AI observations as inputs and script or Wasm tooling for isolated installations: later items of [#682](https://github.com/BelimbingProject/bilibi/issues/682).
+- A bounded text formula, AI observations as inputs and script or Wasm tooling for isolated installations: later items of [#682](https://github.com/BelimbingProject/bilibi/issues/682).

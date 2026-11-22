@@ -119,6 +119,8 @@ impl SetupPacks {
         let counts = json!({
             "labels_added": additions.labels.len(),
             "custom_fields_added": additions.custom_fields.len(),
+            "views_added": additions.views.len(),
+            "watchers_added": additions.watchers.len(),
         });
         for label in additions.labels {
             self.labels.apply(tx, scope, label.edit()?).await?;
@@ -132,6 +134,14 @@ impl SetupPacks {
                 return Err(bilibi_agent_api::Error::InvalidInput(fields));
             }
         }
+        for saved in additions.views {
+            self.views
+                .import_view(tx, scope, &saved.setup, &saved.audience)
+                .await?;
+        }
+        for watcher in additions.watchers {
+            self.watchers.import_draft(tx, scope, &watcher).await?;
+        }
         Ok(counts.into())
     }
 }
@@ -143,10 +153,10 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/setup_packs.agent", Pr
         Operation {
             key: "base.setup_packs.export",
             title: "Export selected setup",
-            summary: "Export selected label overrides and active custom field definitions as one versioned pack.",
+            summary: "Export selected label overrides, active custom field definitions, shared list views and watcher drafts as one versioned pack.",
             keywords: &["setup", "customisation", "pack", "export"],
             capability: VIEW,
-            input: schema::selection,
+            input: schema::export_selection,
             output: schema::pack,
             handler: Handler::Read(&Read::Export),
             channels: Channels::Every,
@@ -180,9 +190,9 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/setup_packs.agent", Pr
     guides: &[Guide {
         key: "base.setup_packs",
         title: "Setup packs",
-        summary: "Copy selected label overrides and custom field definitions between tenants.",
+        summary: "Copy selected labels, field definitions, shared views and watcher drafts between tenants.",
         capability: VIEW,
         keywords: &["setup", "customisation", "pack", "transfer"],
-        body: "Use base.labels.list and base.custom_fields.list in the source tenant to choose entries, then call base.setup_packs.export. The pack contains only label overrides and active custom field definitions. In the destination tenant, call base.setup_packs.preview with the pack. Map any pick-list to an eligible destination key using picklist_map (from and to); unmapped lists use their stable keys. Each pack carries at most 100 entries. Resolve every reported issue before applying. Existing identical entries are omitted. A different label or a different or archived field with the same key is a collision. Copy expected_additions into base.setup_packs.apply along with the same pack and mappings. Dry-run the operation, show the additions and wait for explicit approval before committing the unchanged operation. All additions commit together and are audited by their owners. An empty difference applies zero changes.",
+        body: "Choose source entries with base.labels.list, base.custom_fields.list, base.grid.view.pages and base.watchers.list. Export up to 100 entries with base.setup_packs.export. In the destination, preview with base.setup_packs.preview. Use picklist_map (from and to keys) to map pick-lists. Use role_map (from exported role key, to destination role ID) to map audiences. System roles and pick-lists can use unchanged stable keys. Resolve all missing dependencies, collisions and invalid entries. Copy expected_additions into base.setup_packs.apply with the same pack and mappings, dry-run and obtain explicit approval before committing. All additions commit together through their owners. Watchers arrive as drafts and need separate destination approval. A repeat preview shows an empty difference.",
     }],
 }) }

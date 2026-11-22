@@ -87,29 +87,13 @@ impl CustomColumns for Columns {
                     .into_iter()
                     .filter(|definition| bilibi_grid::key_shaped(&definition.key))
                     .map(|definition| {
-                        let reference = definition
-                            .target
-                            .as_deref()
-                            .and_then(|target| self.fields.records.kind(target))
-                            .map(|kind| kind.key);
-                        let (ty, value) = value(definition.kind, &definition.key);
-                        CustomColumn {
-                            key: definition.key,
-                            label: definition.label,
-                            ty,
-                            value,
-                            reference,
-                            searchable: matches!(
-                                definition.kind,
-                                Kind::Text
-                                    | Kind::LongText
-                                    | Kind::Link
-                                    | Kind::Phone
-                                    | Kind::Email
-                            ),
-                            watcher_condition: definition.watcher_condition
-                                && definition.kind.watcher_condition_kind(),
-                        }
+                        self.fields.grid_column(
+                            definition.key,
+                            definition.label,
+                            definition.kind,
+                            definition.target.as_deref(),
+                            definition.watcher_condition,
+                        )
                     })
                     .collect();
                 tables.push(CustomTable {
@@ -120,6 +104,73 @@ impl CustomColumns for Columns {
             }
             Ok(tables)
         })
+    }
+}
+
+impl CustomFields {
+    fn grid_column(
+        &self,
+        key: String,
+        label: String,
+        kind: Kind,
+        target: Option<&str>,
+        watcher_condition: bool,
+    ) -> CustomColumn {
+        let reference = target
+            .and_then(|target| self.records.kind(target))
+            .map(|kind| kind.key);
+        let (ty, value) = value(kind, &key);
+        CustomColumn {
+            key,
+            label,
+            ty,
+            value,
+            reference,
+            searchable: matches!(
+                kind,
+                Kind::Text | Kind::LongText | Kind::Link | Kind::Phone | Kind::Email
+            ),
+            watcher_condition: watcher_condition && kind.watcher_condition_kind(),
+        }
+    }
+
+    /// Describe proposed, already validated definitions for a Grid setup preview.
+    pub fn preview_grid_fields<'a>(
+        &self,
+        fields: impl IntoIterator<Item = &'a crate::NewField>,
+    ) -> Vec<CustomTable> {
+        let mut tables = BTreeMap::new();
+        for field in fields {
+            let Some(kind) = Kind::parse(&field.kind) else {
+                continue;
+            };
+            let Some(source) = self
+                .sources
+                .iter()
+                .find(|source| source.record_type == field.record_type)
+            else {
+                continue;
+            };
+            if !bilibi_grid::key_shaped(&field.key) {
+                continue;
+            }
+            tables
+                .entry(source.table)
+                .or_insert_with(|| CustomTable {
+                    table: source.table,
+                    column: source.column,
+                    columns: Vec::new(),
+                })
+                .columns
+                .push(self.grid_column(
+                    field.key.clone(),
+                    field.label.clone(),
+                    kind,
+                    field.target.as_deref(),
+                    field.watcher_condition,
+                ));
+        }
+        tables.into_values().collect()
     }
 }
 

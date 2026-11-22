@@ -2,6 +2,7 @@
 mod operations;
 mod pack;
 mod schema;
+mod transfer;
 
 use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_custom_fields::CustomFields;
@@ -16,6 +17,8 @@ const MANAGE: &str = "base.setup-packs.manage";
 
 struct SetupPacks {
     labels: Arc<Labels>,
+    views: Arc<bilibi_grid::PageViews>,
+    watchers: Arc<bilibi_watchers::Watchers>,
     fields: Arc<CustomFields>,
 }
 
@@ -35,11 +38,13 @@ inventory::submit! {
         layer: Layer::Base,
         dependencies: &[
             "base/agent_api", "base/authz", "base/custom_fields", "base/database",
-            "base/labels", "base/module_registry", "base/tenancy",
+            "base/grid", "base/labels", "base/module_registry", "base/tenancy", "base/watchers",
         ],
         migrations: &[],
         services: &[Service { id: SERVICE, factory: |services| {
             let packs = Arc::new(SetupPacks {
+                views: services.get(bilibi_grid::PAGE_VIEWS)?,
+                watchers: services.get(bilibi_watchers::SERVICE)?,
                 labels: services.get(bilibi_labels::SERVICE)?,
                 fields: services.get(bilibi_custom_fields::SERVICE)?,
             });

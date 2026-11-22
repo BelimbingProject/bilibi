@@ -1,4 +1,8 @@
-use crate::{schema, SetupPacks};
+use crate::{
+    schema,
+    transfer::{self, RoleMap, SavedView, ViewKey, ViewSelection},
+    SetupPacks,
+};
 use bilibi_agent_api::{invalid, Result};
 use bilibi_custom_fields::{Definition, NewField};
 use bilibi_database::Error;
@@ -47,7 +51,7 @@ pub(crate) struct FieldKey {
     key: String,
 }
 
-/// Version 1 carries only the facts someone could enter when defining a field.
+/// The facts someone can enter when defining a field.
 #[derive(Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Field {
     record_type: String,
@@ -97,6 +101,20 @@ impl From<&Field> for NewField {
 pub(crate) struct Selection {
     labels: Vec<LabelKey>,
     custom_fields: Vec<FieldKey>,
+    #[serde(default)]
+    pub views: Vec<ViewKey>,
+    #[serde(default)]
+    pub watchers: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ExportSelection {
+    labels: Vec<LabelKey>,
+    custom_fields: Vec<FieldKey>,
+    #[serde(default)]
+    pub views: Vec<ViewSelection>,
+    #[serde(default)]
+    pub watchers: Vec<i64>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -104,6 +122,8 @@ pub(crate) struct Pack {
     version: u8,
     labels: Vec<Label>,
     custom_fields: Vec<Field>,
+    pub views: Vec<bilibi_grid::ViewSetup>,
+    pub watchers: Vec<bilibi_watchers::WatcherSetup>,
 }
 
 #[derive(Deserialize)]
@@ -117,6 +137,8 @@ pub(crate) struct Import {
     pack: Pack,
     #[serde(default)]
     picklist_map: Vec<PicklistMap>,
+    #[serde(default)]
+    role_map: Vec<RoleMap>,
 }
 
 #[derive(Deserialize)]
@@ -127,9 +149,9 @@ pub(crate) struct ApplyRequest {
 }
 
 #[derive(Serialize)]
-struct Issue {
-    entry: String,
-    reason: String,
+pub(crate) struct Issue {
+    pub entry: String,
+    pub reason: String,
 }
 
 #[derive(Default, Serialize)]
@@ -137,15 +159,17 @@ pub(crate) struct Difference {
     pub ready: bool,
     pub additions: Additions,
     expected_additions: Selection,
-    collisions: Vec<Issue>,
-    missing: Vec<Issue>,
-    invalid: Vec<Issue>,
+    pub collisions: Vec<Issue>,
+    pub missing: Vec<Issue>,
+    pub invalid: Vec<Issue>,
 }
 
 #[derive(Default, Serialize)]
 pub(crate) struct Additions {
     pub labels: Vec<Label>,
     pub custom_fields: Vec<Field>,
+    pub views: Vec<SavedView>,
+    pub watchers: Vec<bilibi_watchers::WatcherSetup>,
 }
 
 impl Difference {
@@ -163,7 +187,12 @@ impl Difference {
                 issues,
             )])));
         }
-        count(expected.labels.len(), expected.custom_fields.len())?;
+        count(
+            expected.labels.len()
+                + expected.custom_fields.len()
+                + expected.views.len()
+                + expected.watchers.len(),
+        )?;
         if self
             .expected_additions
             .labels
@@ -174,6 +203,16 @@ impl Difference {
                 .custom_fields
                 .iter()
                 .any(|key| !expected.custom_fields.contains(key))
+            || self
+                .expected_additions
+                .views
+                .iter()
+                .any(|key| !expected.views.contains(key))
+            || self
+                .expected_additions
+                .watchers
+                .iter()
+                .any(|name| !expected.watchers.contains(name))
         {
             return Err(invalid(
                 "expected_additions",
@@ -184,8 +223,8 @@ impl Difference {
     }
 }
 
-fn count(labels: usize, fields: usize) -> Result<()> {
-    if labels + fields > MAX_ENTRIES {
+fn count(entries: usize) -> Result<()> {
+    if entries > MAX_ENTRIES {
         return Err(invalid(
             "pack",
             format!("Select at most {MAX_ENTRIES} entries in one pack."),
@@ -194,7 +233,7 @@ fn count(labels: usize, fields: usize) -> Result<()> {
     Ok(())
 }
 
-fn distinct<K: Ord>(keys: impl Iterator<Item = K>, field: &str) -> Result<()> {
+pub(crate) fn distinct<K: Ord>(keys: impl Iterator<Item = K>, field: &str) -> Result<()> {
     let mut seen = BTreeSet::new();
     for key in keys {
         if !seen.insert(key) {
@@ -238,9 +277,14 @@ impl SetupPacks {
         &self,
         tx: &Transaction<'_>,
         scope: &Scope,
-        selection: Selection,
+        selection: ExportSelection,
     ) -> Result<Pack> {
-        count(selection.labels.len(), selection.custom_fields.len())?;
+        count(
+            selection.labels.len()
+                + selection.custom_fields.len()
+                + selection.views.len()
+                + selection.watchers.len(),
+        )?;
         authorize(
             tx,
             scope,
@@ -302,6 +346,23 @@ impl SetupPacks {
             ))
         });
         pack.custom_fields = fields.into_iter().map(Field::from).collect();
+        distinct(
+            selection.views.iter().map(|view| (&view.page, view.id)),
+            "views",
+        )?;
+        distinct(selection.watchers.iter(), "watchers")?;
+        for view in selection.views {
+            pack.views.push(
+                self.views
+                    .export_view(tx, scope, &view.page, view.id)
+                    .await?,
+            );
+        }
+        for id in selection.watchers {
+            pack.watchers
+                .push(self.watchers.export_draft(tx, scope, id).await?);
+        }
+        transfer::sort_pack(&mut pack)?;
         Ok(pack)
     }
 
@@ -327,8 +388,12 @@ impl SetupPacks {
         let Import {
             mut pack,
             picklist_map,
+            role_map,
         } = request;
-        count(pack.labels.len(), pack.custom_fields.len())?;
+        count(
+            pack.labels.len() + pack.custom_fields.len() + pack.views.len() + pack.watchers.len(),
+        )?;
+        transfer::sort_pack(&mut pack)?;
         authorize(
             tx,
             scope,
@@ -354,6 +419,28 @@ impl SetupPacks {
             .await?;
         self.compare_fields(tx, scope, pack.custom_fields, &mappings, lock, &mut diff)
             .await?;
+        let proposed: Vec<NewField> = diff
+            .additions
+            .custom_fields
+            .iter()
+            .map(NewField::from)
+            .collect();
+        let fields = self.fields.preview_grid_fields(&proposed);
+        self.compare_views(
+            tx,
+            scope,
+            pack.views,
+            &role_map,
+            bilibi_grid::ViewPreview {
+                fields: &fields,
+                pending: 0,
+                lock,
+            },
+            &mut diff,
+        )
+        .await?;
+        self.compare_watchers(tx, scope, pack.watchers, &fields, lock, &mut diff)
+            .await?;
         diff.ready =
             diff.collisions.is_empty() && diff.missing.is_empty() && diff.invalid.is_empty();
         diff.expected_additions = Selection {
@@ -371,6 +458,13 @@ impl SetupPacks {
                     record_type: field.record_type.clone(),
                     key: field.key.clone(),
                 })
+                .collect(),
+            views: diff.additions.views.iter().map(SavedView::key).collect(),
+            watchers: diff
+                .additions
+                .watchers
+                .iter()
+                .map(|watcher| watcher.name.clone())
                 .collect(),
         };
         Ok(diff)

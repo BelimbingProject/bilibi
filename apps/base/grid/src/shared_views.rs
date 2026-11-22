@@ -151,7 +151,7 @@ pub(crate) async fn has_audience_role(
         .is_some())
 }
 
-fn as_view(row: &tokio_postgres::Row, page: &str, reader: i64) -> SharedView {
+pub(crate) fn as_view(row: &tokio_postgres::Row, page: &str, reader: i64) -> SharedView {
     let stored: Value = row.get(3);
     let roles: Vec<i64> = row.get(5);
     let params = stored
@@ -178,7 +178,7 @@ fn as_view(row: &tokio_postgres::Row, page: &str, reader: i64) -> SharedView {
     }
 }
 
-const SHARED_COLUMNS: &str = "v.id, v.owner_id, v.name, v.view, v.shared_with_everyone, COALESCE((SELECT array_agg(s.role_id ORDER BY s.role_id) FROM base_grid_shared_view_roles s WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id), '{}')";
+pub(crate) const SHARED_COLUMNS: &str = "v.id, v.owner_id, v.name, v.view, v.shared_with_everyone, COALESCE((SELECT array_agg(s.role_id ORDER BY s.role_id) FROM base_grid_shared_view_roles s WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id), '{}')";
 
 impl PageViews {
     /// The views of `page` this reader may open: their own, those shared with
@@ -273,44 +273,12 @@ impl PageViews {
         name: &str,
         audience: &Audience,
     ) -> Result<i64> {
+        let (stored, roles) = prepare_shared(view, params, name, audience)?;
         let name = name.trim();
-        if name.is_empty() || name.chars().count() > MAX_NAME || name.chars().any(char::is_control)
-        {
-            return Err(refused("Give the view a name of up to 80 characters."));
-        }
-        if !valid_page(&view.table) {
-            return Err(Error::Invalid);
-        }
-        let mut roles = match audience {
-            Audience::Roles(roles) => roles.clone(),
-            _ => Vec::new(),
-        };
-        roles.sort_unstable();
-        roles.dedup();
-        if matches!(audience, Audience::Roles(_)) && roles.is_empty() {
-            return Err(refused("Choose at least one role."));
-        }
-        if roles.len() > MAX_ROLES {
-            return Err(refused("Share a view with at most 50 roles."));
-        }
-        let mut stored = canonical_arrangement(view).to_json();
-        stored["params"] = json!(clean_params(params)?);
-        if serde_json::to_vec(&stored)
-            .map_err(|_| Error::Invalid)?
-            .len()
-            > 8000
-        {
-            return Err(refused(
-                "The saved view is too large; use fewer columns or filters.",
-            ));
-        }
         let everyone = *audience == Audience::Everyone;
         let (tenant, owner, page) = (scope.tenant(), scope.user(), view.table.clone());
         bilibi_authz::authorize_key(tx.sql(), scope, SHARE).await?;
-        tx.sql().execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended('base-grid-shared-views-' || $1::text || ':' || $2, 0))",
-            &[&tenant.to_string(), &page],
-        ).await?;
+        lock_page(tx.sql(), scope, &page).await?;
         let taken: i64 = tx
             .sql()
             .query_one(
@@ -362,7 +330,7 @@ impl PageViews {
                         &[&tenant, &id, &roles],
                     )
                     .await?;
-                    let new = json!({"owner_id": owner, "page": page, "name": name, "view": stored, "shared_with_everyone": everyone, "roles": roles});
+                    let new = json!({"owner_id": owner, "page": page, "name": name, "view": stored, "shared_with_everyone": everyone, "roles": roles, "version": 1});
                     Ok((id, vec![Change { kind: KIND.into(), id, old: Value::Null, new }]))
                 })
             })
@@ -418,4 +386,57 @@ impl PageViews {
         .await?;
         Ok(())
     }
+}
+
+pub(crate) fn prepare_shared(
+    view: &View,
+    params: &BTreeMap<String, String>,
+    name: &str,
+    audience: &Audience,
+) -> Result<(Value, Vec<i64>)> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > MAX_NAME || name.chars().any(char::is_control) {
+        return Err(refused("Give the view a name of up to 80 characters."));
+    }
+    if !valid_page(&view.table) {
+        return Err(Error::Invalid);
+    }
+    let mut roles = match audience {
+        Audience::Roles(roles) => roles.clone(),
+        _ => Vec::new(),
+    };
+    roles.sort_unstable();
+    roles.dedup();
+    if matches!(audience, Audience::Roles(_)) && roles.is_empty() {
+        return Err(refused("Choose at least one role."));
+    }
+    if roles.len() > MAX_ROLES {
+        return Err(refused("Share a view with at most 50 roles."));
+    }
+    let mut stored = canonical_arrangement(view).to_json();
+    stored["params"] = json!(clean_params(params)?);
+    if serde_json::to_vec(&stored)
+        .map_err(|_| Error::Invalid)?
+        .len()
+        > 8000
+    {
+        return Err(refused(
+            "The saved view is too large; use fewer columns or filters.",
+        ));
+    }
+    Ok((stored, roles))
+}
+
+pub(crate) async fn lock_page(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    page: &str,
+) -> Result<()> {
+    let key = format!("base-grid-shared-views-{}:{page}", scope.tenant());
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&key],
+    )
+    .await?;
+    Ok(())
 }

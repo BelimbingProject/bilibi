@@ -81,6 +81,7 @@ pub(crate) fn receipt_where(change: &Value) -> String {
         ),
         "base/settings" => value["key"].as_str().unwrap_or_default().to_owned(),
         "grid.shared_view" => value["page"].as_str().unwrap_or_default().to_owned(),
+        "base/watchers.watcher" => "Watchers".into(),
         "menu_order" => match value["parent"].as_str() {
             Some(parent) if !parent.is_empty() => format!("Menu › {parent}"),
             _ => "Main menu".into(),
@@ -88,9 +89,36 @@ pub(crate) fn receipt_where(change: &Value) -> String {
         _ => format!("{} #{}", kind, change["id"].as_str().unwrap_or_default()),
     }
 }
-pub(crate) fn receipt_value(value: &Value) -> String {
+pub(crate) fn receipt_value(kind: &str, value: &Value) -> String {
     if value.is_null() || value.as_object().is_some_and(|object| object.is_empty()) {
         return "None".into();
+    }
+    if kind == "grid.shared_view" {
+        let name = value["name"].as_str().unwrap_or("Saved view");
+        let audience =
+            if value["shared_with_everyone"] == true || value["audience"]["everyone"] == true {
+                "Shared with everyone".into()
+            } else {
+                match value["roles"]
+                    .as_array()
+                    .or_else(|| value["audience"]["roles"].as_array())
+                    .map(Vec::len)
+                {
+                    Some(0) | None => "No shared audience".into(),
+                    Some(1) => "Shared with one role".into(),
+                    Some(count) => format!("Shared with {count} roles"),
+                }
+            };
+        return format!("{name} · {audience}");
+    }
+    if kind == "base/watchers.watcher" {
+        let name = value["name"].as_str().unwrap_or("Watcher");
+        return match value["state"].as_str() {
+            Some("draft") => format!("{name} · Awaiting approval"),
+            Some("approved") => format!("{name} · Approved"),
+            Some("off") => format!("{name} · Off"),
+            _ => name.to_owned(),
+        };
     }
     let mut parts = Vec::new();
     for (key, label) in [
@@ -100,12 +128,6 @@ pub(crate) fn receipt_value(value: &Value) -> String {
         ("target", "Reference"),
         ("value", "Value"),
         ("source", "Source"),
-        ("name", "View"),
-        ("view", "Layout"),
-        ("params", "Filters"),
-        ("shared_with_everyone", "Shared with everyone"),
-        ("roles", "Roles"),
-        ("audience", "Audience"),
         ("item_ids", "Order"),
         ("help", "Help"),
         ("archived_on", "Archived"),

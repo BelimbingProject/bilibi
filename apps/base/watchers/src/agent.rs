@@ -25,7 +25,7 @@ static WATCHERS: OnceLock<Arc<Watchers>> = OnceLock::new();
 pub(crate) fn bind(watchers: Arc<Watchers>) -> bool {
     WATCHERS.set(watchers).is_ok()
 }
-fn watchers() -> bilibi_agent_api::Result<&'static Arc<Watchers>> {
+pub(crate) fn watchers() -> bilibi_agent_api::Result<&'static Arc<Watchers>> {
     WATCHERS.get().ok_or(Error::Internal.into())
 }
 
@@ -128,7 +128,10 @@ impl ReadHandler for Read {
                 Self::List => {
                     let search = bilibi_agent_api::text_field(input, "search");
                     let (rows, total) = watchers.list(&**client, scope, &search, 100, 0).await?;
-                    json!({"watchers": rows.iter().map(summary_json).collect::<Vec<_>>(), "total": total})
+                    let can_discard = bilibi_authz::effective_capabilities(&**client, scope)
+                        .await?
+                        .contains(MANAGE);
+                    json!({"watchers": rows.iter().map(summary_json).collect::<Vec<_>>(), "total": total, "can_discard":can_discard})
                 }
                 Self::Get => {
                     let view = watchers

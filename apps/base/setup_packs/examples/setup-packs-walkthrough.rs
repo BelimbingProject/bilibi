@@ -69,10 +69,13 @@ impl<'a> Person<'a> {
     async fn write(&self, operations: &[PlannedOperation]) -> Result<Value, Failure> {
         let plans = self.plans()?;
         let preview = plans.preview(self, operations).await?;
-        check(
-            "The operation plan passes its dry run",
-            preview["valid"] == true,
-        )?;
+        if preview["valid"] != true {
+            return Err(format!(
+                "The operation plan refused the dry run: {}",
+                preview["results"]
+            )
+            .into());
+        }
         Ok(plans.commit(&self.scope, self, operations).await?)
     }
 }
@@ -132,11 +135,11 @@ async fn round_trip(source: &Person<'_>, target: &Person<'_>) -> Result<Value, F
     });
     let pack = source.read(EXPORT, &selection).await?;
     check(
-        "Tenant A exports the definition and override in version 2",
+        "Tenant A exports the definition and override in version 3",
         pack == json!({
-            "version":2,
+            "version":3,
             "labels":[{"kind":"menu","subject":LABEL,"label":"Vocabulary"}],
-            "custom_fields":[field]
+            "custom_fields":[field], "views":[], "watchers":[]
         }),
     )?;
     check(
@@ -161,7 +164,7 @@ async fn round_trip(source: &Person<'_>, target: &Person<'_>) -> Result<Value, F
     check(
         "Tenant B applies both owner changes with one audit row each",
         outcome["results"][0]["result"]["result"]
-            == json!({"labels_added":1,"custom_fields_added":1})
+            == json!({"labels_added":1,"custom_fields_added":1,"views_added":0,"watchers_added":0})
             && counts(target.db, target.scope.tenant()).await? == (1, 1, 1, 1)
             && counts(source.db, source.scope.tenant()).await? == (1, 1, 1, 1),
     )?;
@@ -170,8 +173,8 @@ async fn round_trip(source: &Person<'_>, target: &Person<'_>) -> Result<Value, F
         "A repeat import shows an empty difference",
         repeat
             == json!({
-                "ready":true,"additions":{"labels":[],"custom_fields":[]},
-                "expected_additions":{"labels":[],"custom_fields":[]},
+                "ready":true,"additions":{"labels":[],"custom_fields":[],"views":[],"watchers":[]},
+                "expected_additions":{"labels":[],"custom_fields":[],"views":[],"watchers":[]},
                 "collisions":[],"missing":[],"invalid":[]
             }),
     )?;
@@ -179,10 +182,193 @@ async fn round_trip(source: &Person<'_>, target: &Person<'_>) -> Result<Value, F
     check(
         "Reapplying the original reviewed request writes no rows or audit changes",
         outcome["results"][0]["result"]["result"]
-            == json!({"labels_added":0,"custom_fields_added":0})
+            == json!({"labels_added":0,"custom_fields_added":0,"views_added":0,"watchers_added":0})
             && counts(target.db, target.scope.tenant()).await? == (1, 1, 1, 1),
     )?;
     Ok(request)
+}
+
+async fn shared_views(source: &Person<'_>, target: &Person<'_>) -> Result<(), Failure> {
+    let client = source.db.get().await?;
+    let source_role: i64 = client
+        .query_one(
+            "INSERT INTO roles(tenant_id,name) VALUES($1,'Setup pack reviewers') RETURNING id",
+            &[&source.scope.tenant()],
+        )
+        .await?
+        .get(0);
+    let target_role: i64 = client
+        .query_one(
+            "INSERT INTO roles(tenant_id,name) VALUES($1,'Local reviewers') RETURNING id",
+            &[&target.scope.tenant()],
+        )
+        .await?
+        .get(0);
+    drop(client);
+    let outcome = source
+        .write(&[op(
+            "base.grid.view.save",
+            json!({
+                "page":"companies","name":"Regional companies",
+                "view":json!({"columns":["name"],"lenses":{},"zoom":18,"since":null}).to_string(),
+                "params":json!({"status":"active"}).to_string(),"audience":{"roles":[source_role]}
+            }),
+        )])
+        .await?;
+    let id = outcome["results"][0]["result"]["result"]["id"].clone();
+    let pack = source
+        .read(
+            EXPORT,
+            &json!({"labels":[],"custom_fields":[],"views":[{"page":"companies","id":id}]}),
+        )
+        .await?;
+    check(
+        "Export carries the view and portable audience key",
+        pack["views"][0]["roles"] == json!(["name:Setup pack reviewers"]),
+    )?;
+    let mut request = json!({"pack":pack});
+    let missing = target.read(PREVIEW, &request).await?;
+    check(
+        "A custom role needs an explicit mapping",
+        missing["ready"] == false
+            && missing["missing"]
+                .as_array()
+                .is_some_and(|issues| issues.len() == 1),
+    )?;
+    request["role_map"] = json!([{"from":"name:Setup pack reviewers","to":target_role}]);
+    let ready = target.read(PREVIEW, &request).await?;
+    check(
+        "The review names the mapped audience",
+        ready["ready"] == true
+            && ready["expected_additions"]["views"][0]["role_ids"] == json!([target_role]),
+    )?;
+
+    let mut unavailable = request.clone();
+    unavailable["pack"]["watchers"] = json!([{
+        "name":"Unavailable watcher","watch":"unmounted.opened",
+        "definition":{"do":[{"operation":"unmounted.route","input":{}}]},
+        "examples":[]
+    }]);
+    let missing = target.read(PREVIEW, &unavailable).await?;
+    check(
+        "Missing watcher modules block the otherwise valid view",
+        missing["ready"] == false
+            && missing["missing"]
+                .as_array()
+                .is_some_and(|issues| issues.len() == 2)
+            && target
+                .plans()?
+                .preview(target, &[apply(&unavailable, &missing)])
+                .await?["valid"]
+                == false,
+    )?;
+    let result = target.write(&[apply(&request, &ready)]).await?;
+    let views = target
+        .read("base.grid.view.list", &json!({"page":"companies"}))
+        .await?;
+    check(
+        "The view uses the destination role and keeps its filter",
+        result["results"][0]["result"]["result"]["views_added"] == 1
+            && views["views"].as_array().is_some_and(|views| {
+                views.iter().any(|view| {
+                    view["name"] == "Regional companies"
+                        && view["params"]["status"] == "active"
+                        && view["audience"]["roles"] == json!([target_role])
+                })
+            }),
+    )?;
+    let repeat = target.read(PREVIEW, &request).await?;
+    check(
+        "A repeat role-mapped view import is empty",
+        repeat["ready"] == true && repeat["additions"]["views"] == json!([]),
+    )?;
+    request["pack"]["views"][0]["params"]["status"] = json!("suspended");
+    let collision = target.read(PREVIEW, &request).await?;
+    check(
+        "A same-name view with a different filter collides",
+        collision["ready"] == false
+            && collision["collisions"]
+                .as_array()
+                .is_some_and(|issues| issues.len() == 1),
+    )
+}
+
+const OPENED: &str = "watcher_cases/cases.opened";
+
+async fn watcher_draft(source: &Person<'_>, target: &Person<'_>) -> Result<(), Failure> {
+    let field = json!({"record_type":"watcher_case","key":"pack_threshold","label":"Pack threshold","kind":"number","watcher_condition":true});
+    source.write(&[op(DEFINE, field)]).await?;
+    let draft = source
+        .write(&[op(
+            "base.watchers.draft",
+            json!({
+                "name":"Route high thresholds","watch":OPENED,
+                "if":{"conditions":[{"field":"cf_pack_threshold","op":"gt","value":"100"}]},
+                "do":[{"operation":"watcher_cases.cases.route","input":{"queue":"review"}}],
+                "examples":[{"facts":"{\"cf_pack_threshold\":\"150\"}","expect":"match"}],
+                "explanation":"Source-only request"
+            }),
+        )])
+        .await?;
+    let draft_id = &draft["results"][0]["result"]["result"]["watcher_id"];
+    let pack = source.read(EXPORT, &json!({
+        "labels":[],"custom_fields":[{"record_type":"watcher_case","key":"pack_threshold"}],"watchers":[draft_id]
+    })).await?;
+    check(
+        "Export contains the authored configuration without source evidence",
+        pack["watchers"][0]["watch"] == OPENED
+            && pack["watchers"][0]
+                .as_object()
+                .is_some_and(|draft| draft.len() == 4),
+    )?;
+    let request = json!({"pack":pack});
+    let preview = target.read(PREVIEW, &request).await?;
+    check(
+        "Preview resolves the watcher condition against a field in the same pack",
+        preview["ready"] == true
+            && preview["additions"]["watchers"]
+                .as_array()
+                .is_some_and(|entries| entries.len() == 1),
+    )?;
+    let outcome = target.write(&[apply(&request, &preview)]).await?;
+    let watchers = target
+        .read(
+            "base.watchers.list",
+            &json!({"search":"Route high thresholds"}),
+        )
+        .await?;
+    let imported = &watchers["watchers"][0];
+    check(
+        "Import creates the field and an unapproved watcher with no running version",
+        outcome["results"][0]["result"]["result"]["watchers_added"] == 1
+            && imported["awaiting_approval"] == true
+            && imported["running_version"].is_null(),
+    )?;
+    let repeat = target.read(PREVIEW, &request).await?;
+    check(
+        "A repeat draft import is empty",
+        repeat["ready"] == true && repeat["additions"]["watchers"] == json!([]),
+    )?;
+    let mut collision = request;
+    collision["pack"]["watchers"][0]["definition"]["do"][0]["input"]["queue"] = json!("another");
+    let preview = target.read(PREVIEW, &collision).await?;
+    check(
+        "A different draft with the same name collides",
+        preview["ready"] == false
+            && preview["collisions"]
+                .as_array()
+                .is_some_and(|issues| issues.len() == 1),
+    )?;
+    check(
+        "An initial imported draft can be discarded through its reviewed operation",
+        target
+            .write(&[op(
+                "base.watchers.discard_draft",
+                json!({"watcher_id":imported["watcher_id"]}),
+            )])
+            .await?["results"][0]["result"]["result"]["discarded"]
+            == true,
+    )
 }
 
 async fn refusals(target: &Person<'_>, mut request: Value) -> Result<(), Failure> {
@@ -300,12 +486,21 @@ async fn main() -> Result<(), Failure> {
             "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed)
          SELECT 2,5,capability,true FROM unnest(ARRAY[
              'base.setup-packs.view','base.setup-packs.manage','base.labels.view',
-             'base.labels.manage','base.custom-fields.view','base.custom-fields.manage'
+             'base.labels.manage','base.custom-fields.view','base.custom-fields.manage',
+             'grid.views.share','admin.watchers.view','admin.watchers.manage','watcher-cases.case.view'
          ]) capability ON CONFLICT DO NOTHING",
         )
         .await?;
     let source = Person::login(&app, &db, "ai@agent.my").await?;
     let target = Person::login(&app, &db, "manager@other.example.test").await?;
+    shared_views(&source, &target).await?;
+    let vocabulary = source.read("base.watchers.vocabulary", &json!({})).await?;
+    if vocabulary["triggers"]
+        .as_array()
+        .is_some_and(|triggers| triggers.iter().any(|trigger| trigger["trigger"] == OPENED))
+    {
+        return watcher_draft(&source, &target).await;
+    }
     let request = round_trip(&source, &target).await?;
     let staff = Person::login(&app, &db, "staff@example.test").await?;
     check(
@@ -326,7 +521,7 @@ async fn main() -> Result<(), Failure> {
         staff
             .read(
                 PREVIEW,
-                &json!({"pack":{"version":2,"labels":[],"custom_fields":[]}}),
+                &json!({"pack":{"version":3,"labels":[],"custom_fields":[],"views":[],"watchers":[]}}),
             )
             .await?["ready"]
             == true

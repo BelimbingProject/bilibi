@@ -433,7 +433,9 @@ impl Index {
         for group in reply["receipts"].as_array().into_iter().flatten() {
             for change in group["changes"].as_array().into_iter().flatten() {
                 let key = change["mutation_id"].to_string();
-                let show = |key: &str| receipt_value(&change[key]);
+                let show = |key: &str| {
+                    receipt_value(change["kind"].as_str().unwrap_or_default(), &change[key])
+                };
                 let when = change["when"]
                     .as_str()
                     .and_then(|when| when.parse().ok())
