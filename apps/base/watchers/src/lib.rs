@@ -163,7 +163,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, MAX_ATTEMPTS, provenance!(),
 inventory::submit! { Contribution::new(DEFINITIONS, TRIAL_DAYS, provenance!(), &limit(
 "Trial window (days)", "The longest past window a watcher trial may read.", || json!(30), 365.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, TRIAL_EVENTS, provenance!(), &limit(
-"Events per trial", "The most past events a watcher trial may examine.", || json!(100), 500.0)) }
+"Events per trial", "The most readable past events a watcher trial may return.", || json!(100), 500.0)) }
 
 inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker { max_attempts: ATTEMPT_CEILING, validate: run::arguments }) }
 inventory::submit! { Contribution::new(WORKERS, ADMISSION_WORKER, provenance!(), &Worker { max_attempts: ATTEMPT_CEILING, validate: run::admission_arguments }) }
@@ -205,7 +205,7 @@ inventory::submit! {
     Module {
         id: "base/watchers", layer: Layer::Base,
         dependencies: &["base/custom_fields", "base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/events", "base/grid", "base/settings", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql")), ("base-watchers-005-token-bucket", include_str!("../migrations/005-token-bucket.sql")), ("base-watchers-006-activation", include_str!("../migrations/006-activation.sql")), ("base-watchers-007-trials", include_str!("../migrations/007-trials.sql")), ("base-watchers-008-trial-completion", include_str!("../migrations/008-trial-completion.sql"))],
+        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql")), ("base-watchers-005-token-bucket", include_str!("../migrations/005-token-bucket.sql")), ("base-watchers-006-activation", include_str!("../migrations/006-activation.sql")), ("base-watchers-007-trials", include_str!("../migrations/007-trials.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let watchers = Arc::new(build(services)?);

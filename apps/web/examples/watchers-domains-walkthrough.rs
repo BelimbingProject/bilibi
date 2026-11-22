@@ -704,6 +704,7 @@ async fn main() -> Result<()> {
                 r["event_id"] == trial_event
                     && r["state"] == "match"
                     && r["would_be_effects"][0]["preview"] == "allowed"
+                    && r["would_be_effects"][0]["effect"].is_object()
             }),
             "trial previews a matching Commerce order",
         )?;

@@ -75,6 +75,10 @@ pub trait OperationClient: bilibi_tenancy::ReadClient {
     fn transaction(&self) -> Option<&tokio_postgres::Transaction<'_>> {
         None
     }
+    /// Whether dispatch released its admission connection before calling this read.
+    fn detached_read(&self) -> bool {
+        false
+    }
     fn reserve_preview_value(&self, _namespace: &'static str, _value: &str) -> bool {
         true
     }
@@ -158,6 +162,9 @@ impl bilibi_tenancy::ReadClient for Pooled<'_> {
     }
 }
 impl OperationClient for Pooled<'_> {
+    fn detached_read(&self) -> bool {
+        self.connection.get().is_none()
+    }
     fn sql_client(&self) -> bilibi_tenancy::ProofFuture<'_, &tokio_postgres::Client> {
         Box::pin(async move { Ok(&***self.connection().await?) })
     }

@@ -15,7 +15,7 @@ use bilibi_agent_api::{
 };
 use bilibi_database::{Error, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance};
-use bilibi_tenancy::Scope;
+use bilibi_tenancy::{Channel, Scope};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -104,13 +104,16 @@ impl ReadHandler for Read {
     }
     fn call<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        operation_client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let watchers = watchers()?;
             if matches!(self, Self::Trial) {
+                if !operation_client.detached_read() {
+                    return Err(AgentError::ChannelNotAllowed);
+                }
                 let days = input["days"].as_i64().unwrap_or(0);
                 let limit = input["limit"].as_i64().unwrap_or(0);
                 let draft_input = normalise(&input["draft"])?;
@@ -525,7 +528,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/watchers", Provenance 
         Operation { key:"base.watchers.list", title:"List watchers", summary:"This tenant's watchers: trigger, whether they are on, the running and latest version, and the last run.", keywords:&["watcher","automation","list"], capability:VIEW, input:list_schema, output, handler:Handler::Read(&Read::List), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.get", title:"Get a watcher", summary:"One watcher with its versions (conditions, actions, examples, who drafted and approved each) and its latest receipts.", keywords:&["watcher","automation","version"], capability:VIEW, input:watcher_schema, output, handler:Handler::Read(&Read::Get), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.runs", title:"List watcher runs", summary:"Receipts of watcher runs: which conditions held, the facts read, each action's outcome, or why the run was refused.", keywords:&["watcher","run","receipt","why","automation"], capability:VIEW, input:runs_schema, output, handler:Handler::Read(&Read::Runs), channels:Channels::Every, step_up:&[] },
-        Operation { key:"base.watchers.trial", title:"Trial a draft watcher", summary:"Evaluate a draft against bounded past events and preview its actions without acting. Current record facts are marked separately from event evidence.", keywords:&["watcher","trial","preview","replay"], capability:VIEW, input:trial_schema, output, handler:Handler::Read(&Read::Trial), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.watchers.trial", title:"Trial a draft watcher", summary:"Evaluate a draft against bounded past events and preview its actions without acting. Current record facts are marked separately from event evidence.", keywords:&["watcher","trial","preview","replay"], capability:VIEW, input:trial_schema, output, handler:Handler::Read(&Read::Trial), channels:Channels::Only { channels:&[Channel::Api,Channel::Mcp,Channel::Web], reason:"The audited trial requires a detached read." }, step_up:&[] },
         Operation { key:"base.watchers.draft", title:"Draft a watcher", summary:"Save a watcher, or a watcher's next version, for an administrator to approve. The review shows the conditions, the actions and how each example comes out. Nothing runs until approved.", keywords:&["watcher","automation","draft","when","then"], capability:MANAGE, input:draft_schema, output, handler:Handler::SafeWrite(&DRAFT), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.approve", title:"Approve a watcher version", summary:"Approve one fixed version of a watcher; from then on it runs on every new trigger event, without AI, as the watchers automation principal.", keywords:&["watcher","approve","activate","automation"], capability:APPROVE, input:approve_schema, output, handler:Handler::SafeWrite(&Approve), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.switch", title:"Switch a watcher on or off", summary:"Stop a watcher's approved version from running, or let it run again.", keywords:&["watcher","disable","enable","off","on","automation"], capability:APPROVE, input:switch_schema, output, handler:Handler::SafeWrite(&Switch), channels:Channels::Every, step_up:&[] },

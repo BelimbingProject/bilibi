@@ -195,33 +195,27 @@ impl JobContracts {
         output.map(|output| output.envelope(key))
     }
 
-    /// Preview an admitted principal's job action without enqueuing or committing it.
-    /// The caller supplies a freshly authenticated principal scope; the same schema,
-    /// capability and owner preview as the job door apply.
+    /// Preview an admitted principal's job action inside the caller's snapshot.
+    /// The caller owns transaction recovery and checks reader access before disclosure.
     pub async fn preview_principal(
         &self,
-        client: &mut (impl GenericClient + Sync),
+        tx: &tokio_postgres::Transaction<'_>,
         scope: &Scope,
         key: &str,
         input: &Value,
+        reservations: &crate::PreviewReservations,
     ) -> Result<Value> {
         let principal = scope.principal().ok_or(bilibi_database::Error::Forbidden)?;
         let registered = self.principal_writable(key, principal)?;
         let scope = scope.clone().in_job();
-        self.check(client, &scope, registered, input).await?;
+        self.check(tx, &scope, registered, input).await?;
         let Handler::SafeWrite(owner) = registered.definition.handler else {
             return Err(Error::WritesNotEnabled);
         };
-        let tx = client
-            .transaction()
+        owner
+            .preview(&crate::TransactionRead(tx, reservations), &scope, input)
             .await
-            .map_err(bilibi_database::Error::from)?;
-        let reservations = crate::PreviewReservations::default();
-        let output = owner
-            .preview(&crate::TransactionRead(&tx, &reservations), &scope, input)
-            .await;
-        crate::finish_read_transaction(tx, &output).await?;
-        output.map(|output| output.envelope(key))
+            .map(|output| output.envelope(key))
     }
 
     /// The owner's preview, then its commit on `tx`, which must be this

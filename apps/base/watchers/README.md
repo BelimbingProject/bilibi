@@ -94,7 +94,7 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 | `watchers.facts_read` | 21 | 1–21 | Distinct condition field paths and the record version |
 | `watchers.max_attempts` | 25 | 1–25 | Attempts per watchers job, including the first |
 | `watchers.trial_days` | 30 | 1–365 | Longest past window a trial can examine |
-| `watchers.trial_events` | 100 | 1–500 | Most events examined in a trial |
+| `watchers.trial_events` | 100 | 1–500 | Most readable events returned in a trial |
 
 Each tenant starts with a full bucket shared by its watchers. A new run spends one token. An admitted run keeps its token across retries. Tokens refill continuously up to one minute of the current rate, which also applies to the time elapsed since the last debit. When the bucket is empty, Queue keeps the same head job scheduled for the next token with its attempt budget intact. Admission jobs wait in tenant enqueue order and admit an event's runs by run ID. Each debit and its action job commit together. Action jobs execute in order within their event, and action retries leave later events free to admit and execute.
 
@@ -127,9 +127,9 @@ Boot refuses a trigger that is not the contributor's own declared event or names
 
 ## Trying a draft on past events
 
-**Call `base.watchers.trial` with a draft, optional `days` and `limit`; it never acts.** It requires both `admin.watchers.view` and `admin.watchers.manage`. It checks the draft as its reader, scans the newest retained, unerased events in the bounded window and evaluates their subjects with the live condition checker. The response identifies event-time evidence (event ID, recorded time and subject) separately from the condition facts and revision read from the current record. A near miss is an event whose accessible current record does not satisfy the conditions. Deleted, unreachable or restricted records and unsupported event versions are omitted; a truncated result is not a complete count. Event retention may leave gaps.
+**Call `base.watchers.trial` with a draft, optional `days` and `limit`; it never acts.** It requires both `admin.watchers.view` and `admin.watchers.manage`. It checks the draft as its reader, scans retained, unerased events in recorded order in the bounded window and evaluates their subjects with the live condition checker. The response identifies event-time evidence (event ID, recorded time and subject) separately from the condition facts and revision read from the current record. A near miss is an event whose accessible current record does not satisfy the conditions. Deleted, unreachable or restricted records and unsupported event versions do not count toward the return limit. Truncation indicates another readable event or the response size limit. Event retention may leave gaps.
 
-For a match, the watcher principal calls each action owner's real preview using the current revision. The response names the operation and whether the preview allowed or refused it; it withholds the preview body because it may contain fields unavailable to the reader. It also withholds the outcome unless the reader has unrestricted grant-all access and All reach for the action and its prerequisites. Each preview sees the current record independently, so later previews do not simulate earlier actions. An allowed preview is not a promise that a future run will act: principal grants, record state, approval, activation, chain budget and other conditions may change. No action is committed and the token bucket is untouched. Returned facts require the reader's and principal's current field and record access. Each trial records its actor, trigger, definition digest, window and bound in the audited trial log before scanning, then records its examined count on completion; interrupted trials remain visible without retaining facts or preview bodies. Individual facts larger than 4 KiB are omitted and the response is capped at 512 KiB.
+For a match, the watcher principal calls the action owner's preview at the current revision. An unrestricted reader with All reach for the action and its prerequisites receives the owner's effect details. The trial checks preview visibility in the same snapshot as the preview. Follow-ups reuse the owner's logical occurrence deduplication. Each preview uses the current record independently of changes an earlier action would make. The trial takes no action and leaves the token bucket untouched. The audited start receipt records the actor, trigger, definition digest, window and return limit, and survives interruption. Individual facts larger than 4 KiB are omitted and the response is capped at 512 KiB.
 
 ## Pages and agents
 
@@ -140,7 +140,7 @@ For a match, the watcher principal calls each action owner's real preview using 
 
 ## Tables
 
-`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects`, `base_watcher_buckets` and `base_watcher_trials` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events`, `base-watchers-004-watchers`, `base-watchers-005-token-bucket` and `base-watchers-006-activation`, `base-watchers-007-trials` and `base-watchers-008-trial-completion`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
+`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects`, `base_watcher_buckets` and `base_watcher_trials` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events`, `base-watchers-004-watchers`, `base-watchers-005-token-bucket` and `base-watchers-006-activation`, and `base-watchers-007-trials`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 
