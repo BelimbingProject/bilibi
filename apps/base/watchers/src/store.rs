@@ -22,6 +22,7 @@ use tokio_postgres::GenericClient;
 pub struct Watchers {
     pub(crate) db: Db,
     pub(crate) jobs: Arc<JobContracts>,
+    pub(crate) mutations: Arc<bilibi_database::MutationBoundary>,
     pub(crate) events: Arc<bilibi_events::Events>,
     pub(crate) queue: Arc<bilibi_queue::Queue>,
     pub(crate) settings: Arc<Settings>,
@@ -644,6 +645,8 @@ impl Watchers {
                 "values_per_list": self.limit(client, scope, VALUES_PER_LIST).await?,
                 "facts_read": self.limit(client, scope, FACTS_READ).await?,
                 "max_attempts": self.limit(client, scope, MAX_ATTEMPTS).await?,
+                "trial_days": self.limit(client, scope, crate::TRIAL_DAYS).await?,
+                "trial_events": self.limit(client, scope, crate::TRIAL_EVENTS).await?,
             },
         }))
     }

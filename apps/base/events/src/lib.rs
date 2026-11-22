@@ -358,6 +358,7 @@ inventory::submit! {
             ("base-events-002-erased", include_str!("../migrations/002-erased.sql")),
             ("base-events-003-delivered-index", include_str!("../migrations/003-delivered-index.sql")),
             ("base-events-004-retention", include_str!("../migrations/004-retention.sql")),
+            ("base-events-005-name-recorded", include_str!("../migrations/005-name-recorded.sql")),
             ("base-events-005-cause", include_str!("../migrations/005-cause.sql")),
         ],
         services: &[

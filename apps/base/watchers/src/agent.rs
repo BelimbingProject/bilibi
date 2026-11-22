@@ -78,7 +78,7 @@ pub(crate) fn run_json(run: &RunView) -> Value {
 }
 
 /// A refused review as the agent doors answer it: each problem on its field.
-fn refused(review: &Review) -> AgentError {
+pub(crate) fn refused(review: &Review) -> AgentError {
     let mut fields: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (field, why) in &review.problems {
         fields.entry(field.clone()).or_default().push(why.clone());
@@ -96,6 +96,7 @@ enum Read {
     List,
     Get,
     Runs,
+    Trial,
 }
 impl ReadHandler for Read {
     fn owner(&self) -> &'static str {
@@ -109,8 +110,17 @@ impl ReadHandler for Read {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let watchers = watchers()?;
+            if matches!(self, Self::Trial) {
+                let days = input["days"].as_i64().unwrap_or(0);
+                let limit = input["limit"].as_i64().unwrap_or(0);
+                let draft_input = normalise(&input["draft"])?;
+                let (draft, problems) = parse_draft(&draft_input);
+                let data = watchers.trial(scope, draft, problems, days, limit).await?;
+                return Ok(Output::Data(Data::Json(data)));
+            }
             let client = watchers.db.get().await.map_err(Error::from)?;
             let data = match self {
+                Self::Trial => return Err(Error::Internal.into()),
                 Self::Vocabulary => watchers.vocabulary(&**client, scope).await?,
                 Self::List => {
                     let search = bilibi_agent_api::text_field(input, "search");
@@ -399,6 +409,13 @@ fn draft_schema() -> Value {
         "explanation":{"type":"string","maxLength":2000,"description":"The person's request in their own words"}
     }})
 }
+fn trial_schema() -> Value {
+    json!({"type":"object","required":["draft"],"properties":{
+        "draft":draft_schema(),
+        "days":{"type":"integer","minimum":1,"maximum":365,"description":"Past days to examine; default 30, subject to tenant limit"},
+        "limit":{"type":"integer","minimum":1,"maximum":500,"description":"Maximum events to examine; default 100, subject to tenant limit"}
+    }})
+}
 fn approve_schema() -> Value {
     json!({"type":"object","required":["watcher_id","version"],"properties":{"watcher_id":{"type":"integer","minimum":1},"version":{"type":"integer","minimum":1,"description":"The version number reviewed"}}})
 }
@@ -500,7 +517,7 @@ impl WriteHandler for Normalised {
 }
 static DRAFT: Normalised = Normalised(&DraftWatcher);
 
-const GUIDE: &str = "A watcher is data: when a trigger event happens to a record, if its conditions hold, run its actions. Read base.watchers.vocabulary first: it lists the installed triggers with the fields their record offers, the actions with their parameters, the operators and the tenant's limits. Turn the person's plain words into one draft: a name, watch (the event), optional if (match all or any, conditions with field, op, value; values for in and not_in), do (operation and its input as a JSON object, leaving out the record field the runner binds) and up to 10 examples of records that should and should not match (facts as a JSON object of the fields the conditions read, expect match or no_match). Plan base.watchers.draft and show the person its review: the conditions in words, the actions, how each example comes out and any warnings. Without if, every event of the watched kind matches. A draft never runs. Tell the person an administrator approves the version on the Watchers page (or with base.watchers.approve after reviewing it there); the approved version then runs on every new event without AI. To change a running watcher, draft its next version with watcher_id; it runs only once approved. Read base.watchers.runs to explain what a watcher did: each receipt says which conditions held, the facts read and each action's outcome.";
+const GUIDE: &str = "A watcher is data: when a trigger event happens to a record, if its conditions hold, run its actions. Read base.watchers.vocabulary first: it lists the installed triggers with the fields their record offers, the actions with their parameters, the operators and the tenant's limits. Turn the person's plain words into one draft: a name, watch (the event), optional if (match all or any, conditions with field, op, value; values for in and not_in), do (operation and its input as a JSON object, leaving out the record field the runner binds) and up to 10 examples of records that should and should not match (facts as a JSON object of the fields the conditions read, expect match or no_match). Use base.watchers.trial to examine past events before saving; its event evidence and current record facts have different times, and it takes no action. Plan base.watchers.draft and show the person its review: the conditions in words, the actions, how each example comes out and any warnings. Without if, every event of the watched kind matches. A draft never runs. Tell the person an administrator approves the version on the Watchers page (or with base.watchers.approve after reviewing it there); the approved version then runs on every new event without AI. To change a running watcher, draft its next version with watcher_id; it runs only once approved. Read base.watchers.runs to explain what a watcher did: each receipt says which conditions held, the facts read and each action's outcome.";
 
 inventory::submit! { Contribution::new(DEFINITIONS, "base/watchers", Provenance { module: "base/watchers", source: file!(), line: line!() }, &Definitions {
     operations: &[
@@ -508,6 +525,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/watchers", Provenance 
         Operation { key:"base.watchers.list", title:"List watchers", summary:"This tenant's watchers: trigger, whether they are on, the running and latest version, and the last run.", keywords:&["watcher","automation","list"], capability:VIEW, input:list_schema, output, handler:Handler::Read(&Read::List), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.get", title:"Get a watcher", summary:"One watcher with its versions (conditions, actions, examples, who drafted and approved each) and its latest receipts.", keywords:&["watcher","automation","version"], capability:VIEW, input:watcher_schema, output, handler:Handler::Read(&Read::Get), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.runs", title:"List watcher runs", summary:"Receipts of watcher runs: which conditions held, the facts read, each action's outcome, or why the run was refused.", keywords:&["watcher","run","receipt","why","automation"], capability:VIEW, input:runs_schema, output, handler:Handler::Read(&Read::Runs), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.watchers.trial", title:"Trial a draft watcher", summary:"Evaluate a draft against bounded past events and preview its actions without acting. Current record facts are marked separately from event evidence.", keywords:&["watcher","trial","preview","replay"], capability:VIEW, input:trial_schema, output, handler:Handler::Read(&Read::Trial), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.draft", title:"Draft a watcher", summary:"Save a watcher, or a watcher's next version, for an administrator to approve. The review shows the conditions, the actions and how each example comes out. Nothing runs until approved.", keywords:&["watcher","automation","draft","when","then"], capability:MANAGE, input:draft_schema, output, handler:Handler::SafeWrite(&DRAFT), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.approve", title:"Approve a watcher version", summary:"Approve one fixed version of a watcher; from then on it runs on every new trigger event, without AI, as the watchers automation principal.", keywords:&["watcher","approve","activate","automation"], capability:APPROVE, input:approve_schema, output, handler:Handler::SafeWrite(&Approve), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.switch", title:"Switch a watcher on or off", summary:"Stop a watcher's approved version from running, or let it run again.", keywords:&["watcher","disable","enable","off","on","automation"], capability:APPROVE, input:switch_schema, output, handler:Handler::SafeWrite(&Switch), channels:Channels::Every, step_up:&[] },

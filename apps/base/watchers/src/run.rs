@@ -818,7 +818,7 @@ enum Acted {
 
 /// An owner's refusal as a bounded code and the owner's own words for it
 /// (field messages, a refusal sentence), or an infrastructure failure to retry.
-fn refusal(error: bilibi_agent_api::Error) -> Result<(&'static str, Value)> {
+pub(crate) fn refusal(error: bilibi_agent_api::Error) -> Result<(&'static str, Value)> {
     use bilibi_agent_api::Error as E;
     Ok(match error {
         E::Forbidden | E::Backend(Error::Forbidden) => ("forbidden", Value::Null),
