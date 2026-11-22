@@ -267,7 +267,7 @@ MCP uses the same retryable lock-contention body as `/api/v1`. Authentication re
 
 `build.rs` compiles the pin and checks Git drift. The private `src/composition.rs` validates the mounted set and exposes the stable registry `Composition` through `bilibi_web::composition`. Only this executable host watches Git, so a commit rebuilds the host and final link instead of every registry consumer. For the Platform and each mounted Domain or Extension, it watches HEAD and the common Git directory's `refs/heads` directory, including newly created loose refs. It also watches `packed-refs` while the current branch has no loose ref. HEAD reflog updates and changes to `packed-refs` alone do not trigger a rebuild while the current branch ref is loose.
 
-The status bar shows the same facts through `bilibi_ui::version_badges`. The scheme, the catalogue and the states a build can be in are in `docs/versions.md`.
+Staging and Production show an application version when `release.json` beside the running executable supplies both `setup.tag` and `setup.released`. The maker records the annotated tag’s UTC date and the shell shows it in the tooltip. Dev shows the Platform working version and marks uncommitted changes. The Components popover and Software page show Domain and Extension versions. See `docs/versions.md` for the version scheme and catalogue.
 
 # Agent plugins
 
