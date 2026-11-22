@@ -18,7 +18,7 @@ List toolbars put search first and filter boxes to its right, and on a phone fol
 
 Page headers include a pin for the current address in signed-in pages, including workspace tiles. The shell keeps its state with the account. Dialogs do not show it.
 
-Opening a record from a `FlexTable` carries the grid path and query into the record page in both standalone pages and workspace tiles. `BackLink` restores that address when it matches the link’s same-origin destination. Page pins use the record address without the grid return address.
+Opening a record from a `FlexTable` carries the grid path and query into the record page when a record opens in the same tab or tile as the grid. `BackLink` restores that address when it matches the link’s same-origin destination. Page pins and workspace layouts omit the grid return address.
 
 ## Phone lists and header actions
 

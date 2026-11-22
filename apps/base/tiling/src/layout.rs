@@ -300,7 +300,7 @@ impl Layout {
     fn new_leaf(&mut self, path: &str) -> Leaf {
         Leaf {
             id: self.next_id('t'),
-            path: path.to_owned(),
+            path: layout_path(path),
             follow: None,
         }
     }
@@ -379,7 +379,7 @@ impl Layout {
     /// Changes the path a tile shows, keeping its id, place and follow.
     pub fn update_path(&mut self, id: &str, path: &str) {
         if let Some(Node::Leaf(leaf)) = self.root.as_mut().and_then(|root| root.find_mut(id)) {
-            leaf.path = path.to_owned();
+            leaf.path = layout_path(path);
         }
     }
 
@@ -738,6 +738,32 @@ pub fn percent_decode(raw: &str) -> Option<String> {
         }
     }
     String::from_utf8(bytes).ok()
+}
+
+fn layout_path(address: &str) -> String {
+    let (path, fragment) = address.split_once('#').unwrap_or((address, ""));
+    let Some((base, query)) = path.split_once('?') else {
+        return address.to_owned();
+    };
+    let mut pairs: Vec<_> = query.split('&').collect();
+    let count = pairs.len();
+    pairs.retain(|pair| {
+        let key = pair.split_once('=').map_or(*pair, |(key, _)| key);
+        percent_decode(key).as_deref() != Some("return_to")
+    });
+    if pairs.len() == count {
+        return address.to_owned();
+    }
+    let mut clean = base.to_owned();
+    if !pairs.is_empty() {
+        clean.push('?');
+        clean.push_str(&pairs.join("&"));
+    }
+    if address.contains('#') {
+        clean.push('#');
+        clean.push_str(fragment);
+    }
+    clean
 }
 
 /// Whether `path` names a page on this origin: one leading `/`, never

@@ -69,8 +69,7 @@ impl SharedPage {
     ) -> Result<Self> {
         let tree = query
             .get("t")
-            .filter(|tree| layouts::clean_tree(tree).is_ok())
-            .cloned()
+            .and_then(|tree| layouts::clean_tree(tree).ok())
             .unwrap_or_default();
         let client = core.db.get().await?;
         let entries = core.layouts.shared(&**client, scope).await?;

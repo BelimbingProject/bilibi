@@ -70,8 +70,10 @@
     },
 
     applyReturnAddress() {
-      const controls = 'a[href]:not([download], [data-method], [data-patch]), button[data-record-select][data-path]'
-      const source = location.pathname + location.search
+      const grid = new URL(location.href)
+      if (grid.searchParams.has('return_to')) grid.searchParams.delete('return_to')
+      const controls = 'a[data-record-link][href], button[data-record-select][data-path]'
+      const source = grid.pathname + grid.search
       for (const control of this.el.querySelectorAll(`tbody td :is(${controls})`)) {
         if (control.closest('[data-table-frame]') !== this.el) continue
         const attribute = control.matches('a') ? 'href' : 'data-path'

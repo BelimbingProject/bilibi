@@ -269,7 +269,9 @@
         const win = frame.contentWindow;
         const doc = frame.contentDocument;
         if (!win?.location || !doc) return;
-        path = win.location.pathname + win.location.search;
+        const url = new URL(win.location.href);
+        if (url.searchParams.has('return_to')) url.searchParams.delete('return_to');
+        path = url.pathname + url.search;
         title = this.frameTitle(doc);
       } catch {
         return;
