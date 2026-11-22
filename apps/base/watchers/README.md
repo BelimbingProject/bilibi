@@ -144,7 +144,7 @@ Export a latest unapproved version and preview it as a new destination draft thr
 
 ## Tables
 
-`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects`, `base_watcher_buckets` and `base_watcher_trials` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events`, `base-watchers-004-watchers`, `base-watchers-005-token-bucket` `base-watchers-006-activation`, `base-watchers-007-trials`, and `base-watchers-008-name-lookup`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
+`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects`, `base_watcher_buckets` and `base_watcher_trials` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events`, `base-watchers-004-watchers`, `base-watchers-005-token-bucket`, `base-watchers-006-activation`, `base-watchers-007-trials`, and `base-watchers-008-name-lookup`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 
