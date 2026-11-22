@@ -10,6 +10,9 @@
 #   install-server.sh create-owner <instance> [bilibi-web create-owner flags]
 #   install-server.sh tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>
 #   install-server.sh two-factor-reset <instance> --email <address>
+#   install-server.sh identity-recover <instance> --email <old> --new-email <new>
+#   install-server.sh identity-delete <instance> --email <address> --confirm <address>
+#   install-server.sh identity-retention <instance>
 #   install-server.sh installer <bilibi-installer binary> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
 #   install-server.sh switch <instance> <release number>
 #   install-server.sh status [<instance>]
@@ -937,6 +940,17 @@ two_factor_reset() {
     [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
     with_env "$instance" bilibi-build "$dir/current/bilibi-web" two-factor-reset "$@"
 }
+# ========================================================= identity lifecycle
+identity_lifecycle() {
+    local command=${1:-} instance=${2:-}
+    [[ -n $command && -n $instance ]] || usage
+    shift 2
+    need_root "$command" "$instance" "$@"
+    instance_exists "$instance" || fail "no instance named $instance"
+    local dir; dir=$(instance_dir "$instance")
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
+    with_env "$instance" bilibi-build "$dir/current/bilibi-web" "$command" "$@"
+}
 switch() {
     local instance=${1:-} n=${2:-}
     [[ -n $instance && $n =~ ^[0-9]+$ ]] || usage
@@ -977,6 +991,7 @@ case ${1:-} in
     create-owner) shift; create_owner "$@" ;;
     tenant-provision) shift; tenant_provision "$@" ;;
     two-factor-reset) shift; two_factor_reset "$@" ;;
+    identity-recover|identity-delete|identity-retention) command=$1; shift; identity_lifecycle "$command" "$@" ;;
     installer) shift; installer "$@" ;;
     switch) shift; switch "$@" ;;
     status) shift; status "$@" ;;

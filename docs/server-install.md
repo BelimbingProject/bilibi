@@ -295,6 +295,22 @@ sudo scripts/install-server.sh two-factor-reset production --email owner@example
 - It shows in the audit log as **System · two-factor-reset**.
 - The command is `bilibi-web two-factor-reset --email <address>` in the instance's environment.
 
+## Portable sign-in recovery and retention
+
+Customer administrators can remove memberships but cannot recover or delete the installation-wide sign-in. The server owner handles the exceptional lifecycle from the server.
+
+```sh
+sudo scripts/install-server.sh identity-recover production --email old@example.com --new-email new@example.com
+sudo scripts/install-server.sh identity-delete production --email unused@example.com --confirm unused@example.com
+sudo scripts/install-server.sh identity-retention production
+```
+
+- `identity-recover` is for a person who lost the old mailbox. It treats the new mailbox as operator-verified, revokes pending reset links, signs every membership out, notifies the new address and records **System · identity-recover**. It refuses an address already used by another portable identity.
+- Removing the last membership starts the **Unused sign-in retention** clock (90 days by default, configurable in Settings › Session). Accepting another invitation before it ends cancels the clock.
+- `identity-retention` anonymises at most 100 due identities per run. Run it repeatedly from the server's ordinary maintenance schedule until it reports zero.
+- `identity-delete` performs the same final anonymisation immediately, but only for an identity with no live membership. Repeating the address in `--confirm` prevents an accidental target typo. It records **System · identity-delete**.
+- Final anonymisation releases the address and removes the password, reset token, credential-attempt state, 2FA and pending sign-ins. Historical tenant memberships and their tenant audit evidence remain under their own privacy and retention rules.
+
 ## The waiting page
 
 While the service is stopped, Caddy answers every request with status 503 and the waiting page, marked with the header `X-Bilibi-Waiting`. The page says which instance is pausing (**PRODUCTION erp.example.com**, "Production is updating", in the role's colour), polls the same address every second or two, and reloads itself once an answer arrives without that header. People land back on what they asked for. A pause that runs long shows how the server owner can check the service.
@@ -346,6 +362,9 @@ Script commands:
 | `create-owner <instance> [--email <address>] [--name <name>] [--password-stdin] [--company-name <name> --company-code <code>]` | [Server owner setup](#the-first-account) |
 | `tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>` | [Customer tenant and first-owner setup](#the-first-owner-of-a-customer-tenant) |
 | `two-factor-reset <instance> --email <address>` | Turn off one staff account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
+| `identity-recover <instance> --email <old> --new-email <new>` | Recover an installation-wide staff sign-in address and sign it out everywhere |
+| `identity-delete <instance> --email <address> --confirm <address>` | Immediately anonymise a portable identity after its last membership is gone |
+| `identity-retention <instance>` | Anonymise up to 100 unused portable identities whose configured retention ended |
 | `installer <bilibi-installer> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance, copy the installer to `/opt/bilibi/build/bin` and start `bilibi-installer@<instance>` for every instance; rerun to update it |
 | `switch <instance> <n>` | Put a kept release in service |
 | `status [<instance>]` | Roles, addresses, service and installer states, releases |

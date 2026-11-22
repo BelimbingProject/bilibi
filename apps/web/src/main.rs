@@ -64,6 +64,18 @@ async fn main() -> Result<()> {
             let args: Vec<String> = std::env::args().skip(2).collect();
             bilibi_web::two_factor_reset(&db, &args).await?;
         }
+        Some("identity-recover") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            bilibi_web::recover_identity(&db, &args).await?;
+        }
+        Some("identity-delete") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            bilibi_web::delete_identity(&db, &args).await?;
+        }
+        Some("identity-retention") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            bilibi_web::retain_identities(&db, &args).await?;
+        }
         Some(command @ ("tenant-provision" | "platform-provision")) => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             bilibi_web::provision(&db, command, &args).await?;
