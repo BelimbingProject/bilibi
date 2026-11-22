@@ -118,7 +118,7 @@ fn refuse(scope: &Scope, account: &Account, enrolled: bool) -> Result<(), AgentE
 }
 
 fn reset_notice(body: &str) -> Result<Notice, Error> {
-    let notice = Notice::new("Your 2FA was reset")
+    let notice = Notice::new(crate::wording::TWO_FACTOR_SUBJECT)
         .kind("two_factor_reset")
         .body(body)
         .url(SETTINGS_PATH);
@@ -126,18 +126,26 @@ fn reset_notice(body: &str) -> Result<Notice, Error> {
     Ok(notice)
 }
 
-fn reset_mail(origin: &str, name: &str, email: &str, body: &str) -> Option<Message> {
+/// The packaged reset email; `slot` says who reset it. The
+/// reset stands without it, so a mail that cannot be built is only logged.
+fn reset_mail(service: &UserService, account: &Account, slot: &str) -> Option<Message> {
+    let to = Address::new(Some(&account.name), &account.email).ok()?;
+    let wording = service
+        .templates
+        .platform_wording(crate::wording::TWO_FACTOR_RESET, &[])
+        .map_err(|error| {
+            eprintln!(
+                "mail: 2FA reset notice for user {} was not written: {error}",
+                account.id
+            )
+        })
+        .ok()?;
     Some(Message::text(
-        Address::new(Some(name), email).ok()?,
-        "Your 2FA was reset",
-        format!("{body}\n\n{origin}{SETTINGS_PATH}\n"),
+        to,
+        wording["subject"].clone(),
+        format!("{}\n\n{}{SETTINGS_PATH}\n", wording[slot], service.origin),
     ))
 }
-
-const ADMIN_BODY: &str =
-    "An admin turned off your 2FA methods and disconnected your AI apps. Sign in and set up 2FA again in Settings.";
-const SYSTEM_BODY: &str =
-    "A server administrator turned off your 2FA methods and disconnected your AI apps. Sign in and set up 2FA again in Settings.";
 
 /// Deletes the confirmed authenticator, ends every session of that account
 /// and records who did it. Returns the ended session ids for announce after
@@ -205,7 +213,7 @@ fn wake(
     };
     let mailer = service.mailer.clone();
     tokio::spawn(async move {
-        if let Err(error) = mailer.deliver(&message).await {
+        if let Err(error) = mailer.deliver_for(tenant, &message).await {
             eprintln!("mail: 2FA reset notice for user {user} was not delivered: {error}");
         }
     });
@@ -274,8 +282,8 @@ impl WriteHandler for Reset {
                     }
                     other => other.into(),
                 })?;
-            notify_target(tx, scope, &account, ADMIN_BODY).await?;
-            let mail = reset_mail(&service.origin, &account.name, &account.email, ADMIN_BODY);
+            notify_target(tx, scope, &account, crate::wording::TWO_FACTOR_ADMIN_BODY).await?;
+            let mail = reset_mail(service, &account, "by_admin");
             let (tenant, user) = (account.tenant, account.id);
             let service = Arc::clone(service);
             tx.after_commit(move || wake(&service, tenant, user, ended, mail));
@@ -331,11 +339,11 @@ impl UserService {
             Err(error) => return Err(error.into()),
         };
         if account.active {
-            let notice = reset_notice(SYSTEM_BODY)?;
+            let notice = reset_notice(crate::wording::TWO_FACTOR_SYSTEM_BODY)?;
             notifications::record_in_tenant(&mut tx, account.tenant, &[account.id], &notice)
                 .await?;
         }
-        let mail = reset_mail(&self.origin, &account.name, &account.email, SYSTEM_BODY);
+        let mail = reset_mail(self, &account, "by_server_admin");
         let (tenant, user) = (account.tenant, account.id);
         // Live pages subscribe to the service bound at boot, which is this one.
         let service = USERS.get().cloned().ok_or(Error::Internal)?;

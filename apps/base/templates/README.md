@@ -8,12 +8,42 @@ Ask an AI assistant to draft and preview wording through the template operations
 
 ## Declare a template
 
-Contribute a static `Template` under `bilibi_templates::CATALOGUE` through Module Registry. Use `<domain>.<module>.<purpose>` for the key. Base and Core use their layer name in place of the domain. Give each packaged language an explicit version and declare a base language. The registry checks duplicate keys, slot and variable IDs, and whether the defaults render.
+Contribute a static `Template` through Module Registry. Use `bilibi_templates::CATALOGUE` for editable wording and `bilibi_templates::PLATFORM_CATALOGUE` for packaged-only wording. Use `<domain>.<module>.<purpose>` for the key. Base and Core use their layer name in place of the domain. Give each packaged language an explicit version and declare a base language. The registry checks duplicate keys, slot and variable IDs, and whether the defaults render.
 
 - Declare which slots a variable can appear in and give it a sample of the same type as the runtime fact. The first slice supports text and calendar dates.
 - Pass the sealed scope and the authorised business record's company to `Templates::resolve`. Pass the resolved slots and typed facts to `Template::render`. Rendering performs no lookups.
 - Use `{{variable_id}}` for substitution. The renderer treats every supplied value as text, and makes control characters in subject values spaces. A missing required fact stops rendering of a slot that uses it. The error identifies the field.
 - The sending module owns recipients, attachments, access, and delivery. Its approved wording can be snapshotted before the job queues.
+- `Slot::subject()`, `Slot::text(id, label)`, `Variable::text(..)` and `Variable::optional_text(..)` build the common shapes. `bounded(text, max_bytes)` shortens a fact (a title, a name) that must fit a subject.
+
+## Word a module's own mail
+
+**No message text in code: declare a template and ask for its wording.**
+
+```rust,ignore
+let text = templates.platform_wording("core.user.password_reset", &[])?;
+let message = Message::text(to, text["subject"].clone(), format!("{}\n\n{link}\n\n{}\n", text["intro"], text["closing"]));
+mailer.deliver_for(tenant, &message).await?;
+```
+
+- `Templates::wording` renders scoped mail using the authorised record’s company and the message’s resolved locale. `Templates::tenant_wording` uses the template’s base language and a tenant the caller proved from its own record. `Templates::platform_wording` renders packaged security mail without a database connection.
+- Supply full facts for mail. If the rendered subject exceeds its byte limit, delivery shortens the text facts in that slot and preserves body text.
+- A published override that cannot hold the real facts gives way to the packaged wording, with a log line, so the message is still sent.
+- **Links stay in code.** A slot is prose before or after a link; the sending module builds the link and fixes the order of the parts. Security messages use packaged wording. Publish and restore refuse those keys.
+- A line some messages lack (a place, an end date) is its own slot with an optional variable; Pass omitted slots to `Templates::wording` when the message leaves out those lines.
+- `Mailer::deliver_for` sends under the workspace's sender name ([Mail](../mail/README.md#sender-name)).
+
+| Module | Templates |
+| --- | --- |
+| `core/user` | `core.user.password_reset`, `core.user.sign_in_locked`, `core.user.invitation`, `core.user.email_verification`, `core.user.new_device_sign_in`, `core.user.two_factor_reset` |
+| `core/portal` | `core.portal.registration_confirmation`, `core.portal.invitation` |
+| `core/activity` | `core.activity.invitation`, `core.activity.guest_reminder`, `core.activity.reminder` |
+| `core/document` | `core.document.share` |
+| `base/reports` | `base.reports.scheduled_report` |
+
+Portal notices and PDF prose slots are later slices of issue #833.
+
+The first tenant owner's invitation (`bilibi tenant-owner`) keeps fixed text: it is sent before the workspace exists.
 
 ## Which wording is used?
 

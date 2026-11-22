@@ -1328,7 +1328,7 @@ impl Documents {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/artifacts", "base/audit", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/personal_data", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/search", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/activity", "core/company", "core/portal", "core/user"],
+    dependencies: &["base/agent_api", "base/artifacts", "base/audit", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/templates", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/personal_data", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/search", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/activity", "core/company", "core/portal", "core/user"],
     migrations: &[
         ("core-document-001-documents", include_str!("../migrations/001-documents.sql")),
         ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),
@@ -1376,6 +1376,8 @@ inventory::submit! { Module {
         Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(email::EmailJob {
             db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
             mailer: s.get("base/mail.mailer")?,
+            templates: s.get(bilibi_templates::SERVICE)?,
+            locales: s.get("base/locale.locales")?,
             authentication: s.get("base/tenancy.authentication")?,
             origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
         }))))

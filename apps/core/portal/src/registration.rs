@@ -217,18 +217,26 @@ impl PortalService {
             }
             return Ok(());
         }
+        let days_text = days.to_string();
+        let wording = self.templates.platform_wording(
+            crate::wording::REGISTRATION,
+            &[
+                ("site_title", bilibi_templates::Value::Text(&site.title)),
+                ("days", bilibi_templates::Value::Text(&days_text)),
+            ],
+        )?;
         let message = Message::text(
-                Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
-                format!("Confirm your request for {}", site.title),
-                format!(
-                    "You asked for an account on {}.\n\nOpen this link to confirm your email address:\n\n{}/portal/verify/{}/{token}\n\nThe link expires in {days} day(s). {} will then review your request. If you did not ask for this, you can ignore this email.\n",
-                    site.title, self.origin, site.address, site.title
-                ),
-            );
+            Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
+            wording["subject"].clone(),
+            crate::wording::around_link(
+                &wording,
+                &format!("{}/portal/verify/{}/{token}", self.origin, site.address),
+            ),
+        );
         let mailer = self.mailer.clone();
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver(&message).await {
+                if let Err(error) = mailer.deliver_for(tenant, &message).await {
                     eprintln!("mail: a registration verification was not delivered: {error}");
                 }
             });

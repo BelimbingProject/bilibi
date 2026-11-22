@@ -16,6 +16,7 @@ bilibi-events.workspace = true
 bilibi-grid.workspace = true
 bilibi-locale.workspace = true
 bilibi-mail.workspace = true
+bilibi-templates.workspace = true
 bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-notifications.workspace = true

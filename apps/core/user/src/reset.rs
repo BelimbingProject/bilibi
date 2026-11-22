@@ -15,6 +15,7 @@ use bilibi_database::{Change, Context, Db, Error, MutationBoundary, MutationTran
 use bilibi_mail::{Address, Mailer, Message};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_settings::{Definition, ScopeKind, Setting, Settings, Target, ValueType, DEFINITIONS};
+use bilibi_templates::Value as Fact;
 use bilibi_tenancy::{ReadClient, Scope};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -131,6 +132,7 @@ pub(crate) struct ResetMail {
     pub(crate) mutations: Arc<MutationBoundary>,
     mailer: Arc<Mailer>,
     settings: Arc<bilibi_settings::Settings>,
+    templates: Arc<bilibi_templates::Templates>,
     origin: String,
 }
 
@@ -198,7 +200,7 @@ impl ResetMail {
     fn deliver(&self, tenant: i64, user: i64, message: Message, token: Option<&str>) {
         let (mail, hash) = (self.clone(), token.map(digest));
         tokio::spawn(async move {
-            let Err(error) = mail.mailer.deliver(&message).await else {
+            let Err(error) = mail.mailer.deliver_for(tenant, &message).await else {
                 return;
             };
             eprintln!("mail: reset link for user {user} was not delivered: {error}");
@@ -242,16 +244,16 @@ impl ResetMail {
         }
     }
 
-    /// Mails `text` to the account with a reset link appended, when a token
-    /// can be issued now (a request within the last minute already holds
-    /// one; the mail then points to "Forgot your password?"). A failed
-    /// delivery releases the token, as for a requested reset.
-    pub(crate) async fn mail_with_reset_link(
+    /// Tells the account its sign-in is locked for about `minutes`, with a
+    /// reset link appended when a token can be issued now (a request within
+    /// the last minute already holds one; the mail then points to "Forgot
+    /// your password?"). A failed delivery releases the token, as for a
+    /// requested reset.
+    pub(crate) async fn mail_lock_notice(
         &self,
         tenant: i64,
         user: i64,
-        subject: &str,
-        text: &str,
+        minutes: i64,
     ) -> Result<(), Error> {
         let client = self.db.get().await?;
         let Some(row) = client
@@ -265,20 +267,24 @@ impl ResetMail {
         };
         drop(client);
         let (name, address): (String, String) = (row.get(0), row.get(1));
+        let duration = format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" });
+        let wording = self.templates.platform_wording(
+            crate::wording::SIGN_IN_LOCKED,
+            &[("duration", Fact::Text(&duration))],
+        )?;
         let token = self.issue_token(tenant, user).await?;
         let link = match &token {
             Some(token) => format!(
-                "Reset your password with this link:\n\n{}\n",
+                "{}\n\n{}\n",
+                wording["reset_with_link"],
                 reset_link(&self.origin, &address, token)
             ),
-            None => {
-                "Reset your password with \"Forgot your password?\" on the sign-in page.\n".into()
-            }
+            None => format!("{}\n", wording["reset_without_link"]),
         };
         let message = Message::text(
             Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
-            subject,
-            format!("{text}\n\n{link}"),
+            wording["subject"].clone(),
+            format!("{}\n\n{link}", wording["intro"]),
         );
         self.deliver(tenant, user, message, token.as_deref());
         Ok(())
@@ -465,6 +471,9 @@ impl UserService {
         }
         drop(client);
         let mail = self.reset_mail();
+        let wording = self
+            .templates
+            .platform_wording(crate::wording::PASSWORD_RESET, &[])?;
         let Some(token) = mail.issue_token(tenant, user).await? else {
             return finish_reset_request().await;
         };
@@ -474,10 +483,8 @@ impl UserService {
         };
         let message = Message::text(
             Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
-            "Reset your Bilibi password",
-            format!(
-                "Reset your Bilibi password by opening this link:\n\n{link}\n\nIf you did not request this, you can ignore this email.\n"
-            ),
+            wording["subject"].clone(),
+            crate::wording::around_link(&wording, &link),
         );
         mail.deliver(tenant, user, message, Some(&token));
         finish_reset_request().await
@@ -490,6 +497,7 @@ impl UserService {
             mutations: self.mutations.clone(),
             mailer: self.mailer.clone(),
             settings: self.settings.clone(),
+            templates: self.templates.clone(),
             origin: self.origin.clone(),
         }
     }

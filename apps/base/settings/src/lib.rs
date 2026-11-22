@@ -368,6 +368,33 @@ impl Settings {
         }
         Ok(value)
     }
+    /// Ambient read of one non-secret, tenant-scope value for unattended work
+    /// on a tenant the caller proved from its own record (a reset token, an
+    /// invitation, a queued job), where no session gives a `Scope`: the
+    /// tenant's own value, else the global one when the definition has that
+    /// scope, else the default. Encrypted definitions and runtime claims
+    /// refuse, as for [`Settings::get_global`].
+    pub async fn get_tenant(
+        &self,
+        client: &dyn ReadClient,
+        tenant: i64,
+        key: &str,
+    ) -> Result<Value> {
+        let definition = match self.definitions.lookup(key)?.setting {
+            Setting::Definition(d) if !d.encrypted && d.scopes.contains(&ScopeKind::Tenant) => d,
+            _ => return Err(Error::Invalid),
+        };
+        let global = definition.scopes.contains(&ScopeKind::Global);
+        let row = client.query_opt("SELECT value,is_encrypted FROM base_settings WHERE key=$1 AND ((tenant_id=$2 AND scope_type='tenant' AND scope_id=$2) OR ($3 AND tenant_id=0 AND scope_type='global' AND scope_id=0)) ORDER BY tenant_id DESC LIMIT 1", &[&key, &tenant, &global]).await?;
+        let Some(row) = row else {
+            return Ok((definition.default)());
+        };
+        let value: Value = row.get("value");
+        if row.get::<_, bool>("is_encrypted") || definition.validate(&value).is_err() {
+            return Err(Error::Invalid);
+        }
+        Ok(value)
+    }
     /// Every company's own stored value of one non-secret, company-scope key
     /// in the actor's tenant, by company ID: for rules that must honour each
     /// company's value at once, such as a legal minimum. A company with no

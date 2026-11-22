@@ -944,13 +944,13 @@ impl Reports {
         };
         let outcome = client
             .query_opt(
-                "SELECT state, message, report_name FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3",
+                "SELECT state, message, report_name, company_id FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3",
                 &[&scope.tenant(), &export, &scope.user()],
             )
             .await;
         drop(client);
-        let (state, message, name): (String, Option<String>, String) = match outcome {
-            Ok(Some(row)) => (row.get(0), row.get(1), row.get(2)),
+        let (state, message, name, company): (String, Option<String>, String, i64) = match outcome {
+            Ok(Some(row)) => (row.get(0), row.get(1), row.get(2), row.get(3)),
             Ok(None) => return JobOutcome::Retry("export_missing"),
             Err(_) => return JobOutcome::Retry("database_unavailable"),
         };
@@ -979,11 +979,40 @@ impl Reports {
                     .await
             }
         };
+        let Ok(company) = bilibi_party_ids::OrganisationId::new(company) else {
+            return JobOutcome::Retry("mail_not_written");
+        };
+        let wording = match self.db.get().await {
+            Ok(client) => {
+                let Ok(locale) = self.locales.resolve(&**client, scope, None).await else {
+                    return JobOutcome::Retry("mail_not_written");
+                };
+                self.templates
+                    .wording(
+                        &**client,
+                        scope,
+                        crate::wording::SCHEDULED_REPORT,
+                        Some(company),
+                        locale.locale,
+                        (
+                            &[("report_name", bilibi_templates::Value::Text(&name))],
+                            &[],
+                        ),
+                    )
+                    .await
+                    .ok()
+            }
+            Err(_) => None,
+        };
+        let Some(wording) = wording else {
+            return JobOutcome::Retry("mail_not_written");
+        };
         let message = bilibi_mail::Message::text(
             address,
-            format!("Scheduled report: {}", name.chars().take(150).collect::<String>()),
+            wording["subject"].clone(),
             format!(
-                "Your scheduled report {name} is ready.\n\nDownload it, signed in, before it expires:\n{}{}\n",
+                "{}\n{}{}\n",
+                wording["intro"],
                 self.origin,
                 exports::path(export)
             ),
@@ -993,7 +1022,12 @@ impl Reports {
             Ok(false) => return self.close(execution, scope, delivery, "sent", None).await,
             Err(_) => return JobOutcome::Retry("mail_not_recorded"),
         }
-        if self.mailer.deliver(&message).await.is_err() {
+        if self
+            .mailer
+            .deliver_for(scope.tenant(), &message)
+            .await
+            .is_err()
+        {
             if self
                 .mail_attempt(execution, scope, delivery, false)
                 .await

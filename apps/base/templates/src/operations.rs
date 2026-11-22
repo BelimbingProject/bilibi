@@ -35,9 +35,9 @@ fn owner() -> bilibi_agent_api::Result<&'static Templates> {
     Ok(OWNER.get().ok_or(Error::Internal)?)
 }
 
-fn metadata(entry: &Template) -> Value {
+fn metadata(entry: &Template, editable: bool) -> Value {
     json!({
-        "key":entry.key,"label":entry.label,"audience":entry.audience,"outputs":entry.outputs,
+        "key":entry.key,"label":entry.label,"editable":editable,"audience":entry.audience,"outputs":entry.outputs,
         "base_language":entry.base_language,
         "languages":entry.defaults.iter().map(|d| d.language).collect::<Vec<_>>(),
         "slots":entry.slots.iter().map(|s| json!({
@@ -95,12 +95,15 @@ impl ReadHandler for Read {
             let templates = owner()?;
             let value = match self {
                 Self::Overrides => json!(templates.overrides(client, scope).await?),
-                Self::List => json!(templates.list().map(metadata).collect::<Vec<_>>()),
+                Self::List => json!(templates
+                    .list()
+                    .map(|entry| metadata(entry, templates.editable(entry.key)))
+                    .collect::<Vec<_>>()),
                 Self::Inspect => {
                     let selection = selection(input)?;
                     let entry = templates.get(selection.key)?;
                     let edit = templates.edit(client, scope, &selection, false).await?;
-                    json!({"template":metadata(entry),"wording":edit})
+                    json!({"template":metadata(entry, templates.editable(entry.key)),"wording":edit})
                 }
             };
             Ok(Output::Data(Data::restricted(value, &Default::default())))
@@ -120,18 +123,22 @@ impl Write {
         input: &'a Value,
     ) -> bilibi_agent_api::Result<Revision<'a>> {
         let selection = selection(input)?;
+        let entry = templates.get(selection.key)?;
+        if !templates.editable(entry.key) {
+            return Err(bilibi_agent_api::invalid(
+                "key",
+                "This template uses platform-controlled wording.",
+            ));
+        }
         let expected = input["revision"].as_i64().ok_or(Error::Invalid)?;
         let slots = match self {
             Self::Publish => {
                 let slots: Text = serde_json::from_value(input["slots"].clone()).map_err(|_| {
                     bilibi_agent_api::invalid("slots", "Enter text for each field.")
                 })?;
-                templates
-                    .get(selection.key)?
-                    .preview(&slots)
-                    .map_err(|problem| {
-                        bilibi_agent_api::invalid(&problem.field, &problem.message)
-                    })?;
+                entry.preview(&slots).map_err(|problem| {
+                    bilibi_agent_api::invalid(&problem.field, &problem.message)
+                })?;
                 Some(slots)
             }
             Self::Restore => None,
@@ -226,7 +233,7 @@ fn publish() -> Value {
 inventory::submit! { Contribution::new(DEFINITIONS, "base/templates.agent", crate::provenance!(), &Definitions {
     operations: &[
         Operation { key: OVERRIDES, title: "List published wording", summary: "Find current template overrides for the workspace and companies you can work in.", keywords: &["wording","templates"], capability: VIEW, input: empty, output: list_output, handler: Handler::Read(&Read::Overrides), channels: Channels::Every, step_up: &[] },
-        Operation { key: LIST, title: "List templates", summary: "Find editable templates and the fields and variables each one offers.", keywords: &["wording","email","copy"], capability: VIEW, input: empty, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
+        Operation { key: LIST, title: "List templates", summary: "Find templates, their editability, fields and variables.", keywords: &["wording","email","copy"], capability: VIEW, input: empty, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
         Operation { key: INSPECT, title: "Read template wording", summary: "See the current and inherited wording and the revision for one language and company.", keywords: &["wording","email"], capability: VIEW, input: inspect, output, handler: Handler::Read(&Read::Inspect), channels: Channels::Every, step_up: &[] },
         Operation { key: PUBLISH, title: "Publish template wording", summary: "Publish plain-text wording for one language and company or the workspace.", keywords: &["wording","email"], capability: MANAGE, input: publish, output, handler: Handler::SafeWrite(&Write::Publish), channels: Channels::Every, step_up: &[] },
         Operation { key: RESTORE, title: "Restore inherited wording", summary: "Remove the custom wording for one language and company or the workspace.", keywords: &["wording","email"], capability: MANAGE, input: restore, output, handler: Handler::SafeWrite(&Write::Restore), channels: Channels::Every, step_up: &[] },
@@ -279,6 +286,9 @@ fn rows(value: &Value) -> Vec<bilibi_labels::CustomisationRow> {
 fn choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
     let mut choices = std::collections::BTreeMap::new();
     for row in reads[0].as_array().into_iter().flatten() {
+        if row["editable"].as_bool() != Some(true) {
+            continue;
+        }
         let (Some(key), Some(label)) = (row["key"].as_str(), row["label"].as_str()) else {
             continue;
         };

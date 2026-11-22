@@ -905,12 +905,6 @@ impl crate::reset::ResetMail {
         if lock.locks > 1 {
             return Ok(());
         }
-        let minutes = lock.minutes;
-        let text = format!(
-            "Several wrong passwords were entered for your Bilibi account, so its sign-in is locked for about {minutes} minute{}.\n\nIf this was you, wait and try again, or reset your password now to unlock it. If it was not you, your password is still safe; resetting it is a good idea.",
-            if minutes == 1 { "" } else { "s" }
-        );
-        self.mail_with_reset_link(tenant, user, "Your Bilibi sign-in is locked", &text)
-            .await
+        self.mail_lock_notice(tenant, user, lock.minutes).await
     }
 }

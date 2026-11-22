@@ -23,7 +23,7 @@ pub use delivery::{
     reference, DeliveryReport, DeliveryReports, ObserveFuture, Observer, Outcome, OBSERVERS,
     REFERENCE_HEADER, REPORTS,
 };
-pub use limits::{Limits, MAX_MESSAGE_BYTES, MAX_RECIPIENTS};
+pub use limits::{Limits, MAX_MESSAGE_BYTES, MAX_RECIPIENTS, SENDER_NAME};
 pub use mailbox::{Mailbox, MailboxEntry};
 pub use message::{
     render, Address, Attachment, Envelope, ListUnsubscribe, Message, Rendered, Sent,
@@ -152,6 +152,35 @@ impl Mailer {
     }
     pub async fn deliver(&self, message: &Message) -> Result<Sent> {
         self.deliver_rendered(self.render(message).await?).await
+    }
+    /// Sends a workspace's own mail: when the message names no sender, From
+    /// carries that workspace's `mail.sender_name` at the installation
+    /// address. `tenant` is one the caller proved from its own record or
+    /// session. A blank name, and a standalone mailer, use the installation
+    /// sender; a settings read failure refuses delivery, as for limits.
+    pub async fn deliver_for(&self, tenant: i64, message: &Message) -> Result<Sent> {
+        if message.from.is_some() {
+            return self.deliver(message).await;
+        }
+        let Some((db, settings)) = &self.settings else {
+            return self.deliver(message).await;
+        };
+        let unavailable = || Error::Config("the mail sender name is unavailable".into());
+        let name = {
+            let client = db.get().await.map_err(|_| unavailable())?;
+            settings
+                .get_tenant(&**client, tenant, SENDER_NAME)
+                .await
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .ok_or_else(unavailable)?
+        };
+        if name.trim().is_empty() {
+            return self.deliver(message).await;
+        }
+        let mut message = message.clone();
+        message.from = Some(Address::new(Some(&name), &self.sender.email)?);
+        self.deliver(&message).await
     }
     /// Send a trusted renderer's output without rebuilding headers or MIME.
     /// Taking ownership returns the exact wire allocation in `Sent`.

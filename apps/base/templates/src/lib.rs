@@ -4,8 +4,8 @@ mod operations;
 mod store;
 
 pub use catalogue::{
-    Audience, Context, DefaultText, Origin, Output, Problem, Resolved, Slot, Template, Text, Value,
-    Variable, CATALOGUE,
+    bounded, Audience, Context, DefaultText, Origin, Output, Problem, Resolved, Slot, Template,
+    Text, Value, Variable, CATALOGUE, PLATFORM_CATALOGUE,
 };
 pub use store::Templates;
 

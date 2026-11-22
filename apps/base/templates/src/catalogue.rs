@@ -2,6 +2,9 @@ use bilibi_module_registry::{Consumer, Entry, RegistryError};
 use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
+
+pub const PLATFORM_CATALOGUE: &str = "base/templates.platform_catalogue";
 
 pub const CATALOGUE: &str = "base/templates.catalogue";
 
@@ -10,6 +13,8 @@ pub const CATALOGUE: &str = "base/templates.catalogue";
 pub enum Audience {
     Staff,
     Customer,
+    /// Staff and customers alike, such as a password reset.
+    Anyone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -53,6 +58,79 @@ pub struct Slot {
     pub context: Context,
     pub required: bool,
     pub max_bytes: usize,
+}
+
+impl Slot {
+    /// The one-line subject of a message, within Base Mail's subject limit.
+    pub const fn subject() -> Self {
+        Self {
+            id: "subject",
+            label: "Subject",
+            context: Context::Subject,
+            required: true,
+            max_bytes: 200,
+        }
+    }
+
+    /// A required plain-text passage of a message.
+    pub const fn text(id: &'static str, label: &'static str) -> Self {
+        Self {
+            id,
+            label,
+            context: Context::PlainText,
+            required: true,
+            max_bytes: 4000,
+        }
+    }
+}
+
+impl Variable {
+    /// A text fact the sender always supplies.
+    pub const fn text(
+        id: &'static str,
+        label: &'static str,
+        sample: &'static str,
+        slots: &'static [&'static str],
+    ) -> Self {
+        Self {
+            id,
+            label,
+            optional: false,
+            sample: Value::Text(sample),
+            slots,
+        }
+    }
+
+    /// A text fact some messages lack; it then renders as nothing.
+    pub const fn optional_text(
+        id: &'static str,
+        label: &'static str,
+        sample: &'static str,
+        slots: &'static [&'static str],
+    ) -> Self {
+        Self {
+            id,
+            label,
+            optional: true,
+            sample: Value::Text(sample),
+            slots,
+        }
+    }
+}
+
+/// `text` cut to `max_bytes` at a character boundary, ending in an ellipsis
+/// when cut and the marker fits: for a fact (a title, a name) placed in a bounded slot such as a
+/// subject.
+pub fn bounded(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let marker = if max_bytes >= "…".len() { "…" } else { "" };
+    let mut end = max_bytes - marker.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{marker}", &text[..end])
 }
 
 pub struct DefaultText {
@@ -201,6 +279,25 @@ impl Template {
     /// Render declared slots without any lookups. Only named references use
     /// braces. A value is appended as data and is never parsed again.
     pub fn render(&self, text: &Text, values: &[(&str, Value<'_>)]) -> Checked<Text> {
+        self.render_slots(text, values, &[], false)
+    }
+
+    pub(crate) fn render_delivery(
+        &self,
+        text: &Text,
+        values: &[(&str, Value<'_>)],
+        omitted: &[&str],
+    ) -> Checked<Text> {
+        self.render_slots(text, values, omitted, true)
+    }
+
+    fn render_slots(
+        &self,
+        text: &Text,
+        values: &[(&str, Value<'_>)],
+        omitted: &[&str],
+        fit_subject: bool,
+    ) -> Checked<Text> {
         for id in text.keys() {
             if !self.slots.iter().any(|slot| slot.id == id) {
                 return Err(Problem::new("slots", "This template has an unknown field."));
@@ -208,10 +305,16 @@ impl Template {
         }
         self.slots
             .iter()
+            .filter(|slot| !omitted.contains(&slot.id))
             .filter(|slot| slot.required || text.contains_key(slot.id))
             .map(|slot| {
                 let source = text.get(slot.id).map(String::as_str).unwrap_or_default();
-                let output = self.render_slot(slot, source, values)?;
+                let output = self.render_slot(
+                    slot,
+                    source,
+                    values,
+                    fit_subject && slot.context == Context::Subject,
+                )?;
                 Ok((slot.id.into(), output))
             })
             .collect()
@@ -227,6 +330,7 @@ impl Template {
         slot: &Slot,
         source: &str,
         values: &[(&str, Value<'_>)],
+        fit_subject: bool,
     ) -> Checked<String> {
         check_text(slot, source)?;
         let syntax = || {
@@ -237,6 +341,7 @@ impl Template {
         };
         let mut remaining = source;
         let mut output = String::with_capacity(source.len());
+        let mut facts = Vec::new();
         while let Some((literal, reference)) = remaining.split_once("{{") {
             if literal.contains("}}") {
                 return Err(syntax());
@@ -276,12 +381,13 @@ impl Template {
                                 "Required template value is missing.",
                             ));
                         }
-                        if value.len() > slot.max_bytes {
+                        if !fit_subject && value.len() > slot.max_bytes {
                             return Err(Problem::new(
                                 variable.id,
                                 "Template value exceeds the field limit.",
                             ));
                         }
+                        let start = output.len();
                         output.extend(value.chars().map(|c| {
                             if forbidden_character(c)
                                 && !(slot.context == Context::PlainText
@@ -292,6 +398,9 @@ impl Template {
                                 c
                             }
                         }));
+                        if fit_subject && start != output.len() {
+                            facts.push(start..output.len());
+                        }
                     }
                     Value::Date(date) => output
                         .push_str(&bilibi_datetime::DisplayContext::anonymous().render_date(date)),
@@ -310,7 +419,7 @@ impl Template {
                     ))
                 }
             }
-            if output.len() > slot.max_bytes {
+            if !fit_subject && output.len() > slot.max_bytes {
                 return Err(Problem::new(
                     slot.id,
                     format!("{} exceeds the rendered field limit.", slot.label),
@@ -322,9 +431,39 @@ impl Template {
             return Err(syntax());
         }
         output.push_str(remaining);
+        if fit_subject && output.len() > slot.max_bytes {
+            output = fit_subject_facts(&output, &facts, slot.max_bytes).unwrap_or(output);
+        }
         check_text(slot, &output)?;
         Ok(output)
     }
+}
+
+/// Shortens only the longest facts, to one shared length, until the subject
+/// fits: a short fact (a name beside a long title) is never the one cut.
+fn fit_subject_facts(text: &str, facts: &[Range<usize>], limit: usize) -> Option<String> {
+    let total: usize = facts.iter().map(Range::len).sum();
+    let budget = limit.checked_sub(text.len() - total)?;
+    let fits = |cap: usize| facts.iter().map(|fact| fact.len().min(cap)).sum::<usize>() <= budget;
+    let longest = facts.iter().map(Range::len).max().unwrap_or(0);
+    let (mut low, mut high) = (0, longest);
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if fits(middle) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    let mut result = String::with_capacity(limit);
+    let mut previous = 0;
+    for fact in facts {
+        result.push_str(&text[previous..fact.start]);
+        result.push_str(&bounded(&text[fact.clone()], low));
+        previous = fact.end;
+    }
+    result.push_str(&text[previous..]);
+    Some(result)
 }
 
 fn validate(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
@@ -398,3 +537,5 @@ fn validate(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
 }
 
 inventory::submit! { Consumer::new::<Template>(CATALOGUE, "base/templates", validate) }
+
+inventory::submit! { Consumer::new::<Template>(PLATFORM_CATALOGUE, "base/templates", validate) }

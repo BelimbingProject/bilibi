@@ -10,7 +10,6 @@ use crate::{
 };
 use bilibi_audit::{record_action, Attribution};
 use bilibi_database::{Change, Context, Error, Result};
-use bilibi_mail::{Address, Message};
 use bilibi_security::Scope;
 use bilibi_settings::Target;
 use serde_json::json;
@@ -205,13 +204,13 @@ impl UserService {
             }
             Err(error) => return Err(error),
         };
-        let message = Message::text(Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?, format!("You're invited to {tenant_name}"), format!("You are invited to join {tenant_name}.\n\nOpen this link to accept:\n\n{}/accept/{new_token}\n\nThe link works once. If you did not expect this, you can ignore this email.\n", self.origin));
+        let message = self.invitation_mail((&name, &email), &tenant_name, None, &new_token)?;
         let mailer = self.mailer.clone();
         let db = self.db.clone();
         let mutations = self.mutations.clone();
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver(&message).await {
+                if let Err(error) = mailer.deliver_for(tenant, &message).await {
                     eprintln!("mail: user invitation {id} was not delivered: {error}");
                     let restore = async {
                         let mut client = db.get().await?;
@@ -385,18 +384,13 @@ impl UserService {
                 )
                 .await?;
         }
-        let message = Message::text(
-            Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
-            format!("You're invited to {tenant_name}"),
-            format!(
-                "You are invited to join {tenant_name}.\n\nOpen this link to accept:\n\n{}/accept/{raw_token}\n\nThe link works once and expires in {days} day(s). If you did not expect this, you can ignore this email.\n",
-                self.origin
-            ),
-        );
+        let tenant = scope.tenant();
+        let message =
+            self.invitation_mail((&name, &email), &tenant_name, Some(days), &raw_token)?;
         let (mailer, id) = (self.mailer.clone(), invitation.id);
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver(&message).await {
+                if let Err(error) = mailer.deliver_for(tenant, &message).await {
                     eprintln!("mail: user invitation {id} was not delivered: {error}");
                 }
             });

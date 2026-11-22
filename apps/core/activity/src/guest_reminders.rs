@@ -11,9 +11,9 @@
 //! consent) can still refuse a guest. `core_activity_guest_reminders` holds
 //! one row per guest and reminder sent, so a retried job emails nobody twice.
 //! README, Reminders.
-use crate::invitations::{allowed, bounded, gates, person_email, sender_label, when, Invitee};
+use crate::invitations::{allowed, gates, person_email, sender_label, when, Invitee};
 use crate::store::{self, system};
-use crate::{Activity, GUEST_RECORD, MANAGE};
+use crate::{GUEST_RECORD, MANAGE};
 use bilibi_database::{Change, Db, Error, Result};
 use bilibi_mail::{Address, Mailer, Message};
 use bilibi_module_registry::{Contribution, Provenance};
@@ -60,30 +60,11 @@ fn arguments(args: Value) -> Result<Value> {
 inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker { max_attempts: 5, validate: arguments }) }
 inventory::submit! { Contribution::new(HANDLERS, WORKER, provenance!(), &HandlerBinding { service: HANDLER, capability: MANAGE }) }
 
-/// The reminder's subject and text: what, when and where, the join link and
-/// who invited them. No link into Bilibi: the guest has no account.
-fn reminder(activity: &Activity, sender: &str, when: &str) -> (String, String) {
-    let kind = activity.kind.label().to_lowercase();
-    let subject = bounded(&format!("Reminder: {}", activity.title), 200);
-    let mut body = format!(
-        "A reminder of the {kind} {sender} invited you to: {}\n\nWhen: {when}\n",
-        activity.title
-    );
-    if let Some(location) = &activity.location {
-        body.push_str(&format!("Where: {location}\n"));
-    }
-    if let Some(url) = &activity.join_url {
-        body.push_str(&format!("Join: {url}\n"));
-    }
-    body.push_str(&format!(
-        "\nIf you can no longer come, please reply to {sender}.\n"
-    ));
-    (subject, body)
-}
-
 pub(crate) struct GuestReminderJob {
     pub db: Db,
     pub mailer: Arc<Mailer>,
+    pub locales: Arc<bilibi_locale::Locales>,
+    pub templates: Arc<bilibi_templates::Templates>,
     pub settings: Arc<Settings>,
     pub directory: Arc<PrincipalDirectory>,
     pub authentication: Arc<Authentication>,
@@ -159,7 +140,23 @@ impl GuestReminderJob {
             .await
             .ok()
             .and_then(|account| Address::new(Some(&sender), &account.email).ok());
-        let (subject, body) = reminder(&activity, &sender, &when);
+        // The text says what, when, where and how to join: never the
+        // description or notes, which the invitation already carried or
+        // which are internal.
+        let locale = self
+            .locales
+            .resolve_global(&**client, &scope, None)
+            .await?
+            .locale;
+        let (subject, body) = crate::wording::guest_mail(
+            &self.templates,
+            &**client,
+            (&scope, locale),
+            crate::wording::GUEST_REMINDER,
+            (&activity, &sender, &when),
+            false,
+        )
+        .await?;
         let mut delivered = true;
         for row in &targets {
             let guest: i64 = row.get(0);
@@ -192,7 +189,12 @@ impl GuestReminderJob {
             };
             let mut message = Message::text(to, subject.clone(), body.clone());
             message.reply_to = reply_to.clone();
-            if self.mailer.deliver(&message).await.is_err() {
+            if self
+                .mailer
+                .deliver_for(scope.tenant(), &message)
+                .await
+                .is_err()
+            {
                 eprintln!(
                     "error: core/activity could not deliver a guest reminder (job {})",
                     execution.job_id
