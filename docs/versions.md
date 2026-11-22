@@ -191,7 +191,7 @@ Customer-code Extensions require a saved isolated installation at discovery, pin
 
 `bilibi-web status` reports each pinned Platform and component version and commit, marks untagged components, and explains an unpinned or stale composition. The Software page also shows component versions.
 
-The status bar shows the application tag without `setup-`, with its release date in the details. Dev shows the Platform working version and `*` when a source checkout has uncommitted changes. A package whose `setup.nightly` is a counter shows `v0.2.1 nightly #7`, labelled as a nightly build. If the application identity is unavailable, the bar says `Build` rather than calling the Platform version an application release.
+The status bar shows the application tag without `setup-`, with its release date in the details. Dev shows the Platform working version and `*` when a source checkout has uncommitted changes. If the application identity is unavailable, the bar shows the short Platform commit or `dev` rather than calling the Platform version an application release.
 
 ## Where to go next
 

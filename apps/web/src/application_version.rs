@@ -5,7 +5,8 @@ pub(super) fn application_version(
     role: bilibi_base::system::Role,
     display: &bilibi_base::datetime::DisplayContext,
 ) -> Vec<bilibi_ui::VersionBadge> {
-    let mut badges = bilibi_ui::version_badges(&crate::composition());
+    let composition = crate::composition();
+    let mut badges = bilibi_ui::version_badges(&composition);
     let badge = &mut badges[0];
     let setup = std::env::current_exe()
         .ok()
@@ -15,16 +16,6 @@ pub(super) fn application_version(
         .and_then(|record| record.get("setup").cloned());
     let tag = setup.as_ref().and_then(|setup| setup["tag"].as_str());
     let version = tag.and_then(|tag| tag.strip_prefix("setup-"));
-    if let Some(nightly) = setup.as_ref().and_then(|setup| setup.get("nightly")) {
-        if let (Some(version), Some(counter)) = (version, nightly.as_u64()) {
-            badge.text = format!("{version} nightly #{counter}");
-            badge.title = "Nightly application build".into();
-        } else {
-            badge.text = "Nightly".into();
-            badge.title = "Nightly application build; version information unavailable".into();
-        }
-        return badges;
-    }
     if role == bilibi_base::system::Role::Dev {
         badge.title = "Development build".into();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -66,8 +57,8 @@ pub(super) fn application_version(
                 .push_str(&format!(" · {}", display.render_date(date)));
         }
     } else {
-        badge.text = "Build".into();
-        badge.title = "Application release information unavailable".into();
+        badge.text = composition.short_commit().unwrap_or("dev").into();
+        badge.title = "Unreleased application build".into();
     }
     badges
 }
