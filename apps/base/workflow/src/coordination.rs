@@ -141,7 +141,7 @@ impl Engine {
         tx.mutate(move |sql| {
             Box::pin(async move {
                 command.validate()?;
-                engine.writer(&context, &scope, run_id)?;
+                engine.writer_or_principal(&context, &scope, run_id)?;
                 let scope = engine.live(sql, &scope).await?;
                 let (run, definition, items, dependencies) = engine
                     .locked_run(sql, &scope, run_id, command.operation())
