@@ -60,6 +60,79 @@ impl Watchers {
     }
 }
 
+pub(crate) fn event_subject(trigger: &crate::Trigger, payload: &Value) -> Option<String> {
+    match payload.pointer(trigger.subject) {
+        Some(Value::Number(n)) => Some(n.to_string()),
+        Some(Value::String(s)) if !s.is_empty() && s.len() <= 200 => Some(s.clone()),
+        _ => None,
+    }
+}
+
+pub(crate) fn logical_event(
+    trigger: &crate::Trigger,
+    name: &str,
+    id: i64,
+    payload: &Value,
+) -> Result<String> {
+    match trigger.logical_event {
+        Some(pointer) => match payload.pointer(pointer) {
+            Some(Value::String(key)) if !key.is_empty() && key.len() <= 200 => {
+                Ok(json!([name, key]).to_string())
+            }
+            Some(Value::Number(key)) if key.is_i64() || key.is_u64() => {
+                Ok(json!([name, key]).to_string())
+            }
+            _ => Err(Error::Invalid),
+        },
+        None => Ok(json!([name, id]).to_string()),
+    }
+}
+
+pub(crate) async fn set_action_identity(
+    tx: &Transaction<'_>,
+    version: Option<i64>,
+    position: i32,
+    logical_event: &str,
+) -> Result<()> {
+    tx.execute(
+        "SELECT set_config('bilibi.watchers.action', $1, true)",
+        &[&json!([version, position, logical_event]).to_string()],
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) fn action_input(
+    action: &crate::Action,
+    schema: &Value,
+    subject: &str,
+    parameters: &serde_json::Map<String, Value>,
+    revision: i64,
+) -> Option<Value> {
+    let mut input = crate::review::bind(schema, action.subject, subject, parameters)?;
+    input[action.version] = json!(revision);
+    Some(input)
+}
+
+pub(crate) fn record_revision(value: Option<&Value>) -> Result<i64> {
+    value
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+        .ok_or(Error::Invalid)
+}
+
+pub(crate) fn evaluate(
+    definition: &Definition,
+    facts: &serde_json::Map<String, Value>,
+    types: &[(String, FieldType)],
+) -> (bool, Vec<bool>) {
+    definition.evaluate(facts, &|path| {
+        types
+            .iter()
+            .find(|(p, _)| p == path)
+            .map_or(FieldType::String, |(_, ty)| *ty)
+    })
+}
+
 pub(crate) struct Triggers;
 pub(crate) static TRIGGERS: Triggers = Triggers;
 impl Subscribe for Triggers {
@@ -77,26 +150,11 @@ impl Subscribe for Triggers {
             let Some(trigger) = watchers.trigger(&event.name) else {
                 return Ok(Vec::new());
             };
-            let subject = match event.payload.pointer(trigger.definition.subject) {
-                Some(Value::Number(n)) => n.to_string(),
-                Some(Value::String(s)) if !s.is_empty() && s.len() <= 200 => s.clone(),
-                // The owner's payload lacks its documented record key: no watcher
-                // can bind it, and refusing would hold the subject's later
-                // events behind it for ever.
-                _ => return Ok(Vec::new()),
+            let Some(subject) = event_subject(trigger.definition, &event.payload) else {
+                return Ok(Vec::new());
             };
-            let logical_event = match trigger.definition.logical_event {
-                Some(pointer) => match event.payload.pointer(pointer) {
-                    Some(Value::String(key)) if !key.is_empty() && key.len() <= 200 => {
-                        json!([event.name, key]).to_string()
-                    }
-                    Some(Value::Number(key)) if key.is_i64() || key.is_u64() => {
-                        json!([event.name, key]).to_string()
-                    }
-                    _ => return Err(Error::Invalid),
-                },
-                None => json!([event.name, event.id]).to_string(),
-            };
+            let logical_event =
+                logical_event(trigger.definition, &event.name, event.id, &event.payload)?;
             // The run whose action recorded this event, when one did.
             let cause = match event
                 .cause
@@ -497,16 +555,8 @@ impl Worker {
                         .await;
                 }
             };
-            let subject_version = facts
-                .get(offered.definition.version)
-                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
-                .ok_or(Error::Invalid)?;
-            let (matched, outcomes) = definition.evaluate(&facts, &|path| {
-                types
-                    .iter()
-                    .find(|(p, _)| p == path)
-                    .map_or(FieldType::String, |(_, ty)| *ty)
-            });
+            let subject_version = record_revision(facts.get(offered.definition.version))?;
+            let (matched, outcomes) = evaluate(&definition, &facts, &types);
             let decided = (Value::Object(facts), json!(outcomes));
             if !matched {
                 return self
@@ -633,14 +683,6 @@ impl Worker {
             return Ok(Acted::Stopped("event_identity_missing"));
         };
         let action = watchers.action(&call.operation).ok_or(Error::Invalid)?;
-        let Some(mut input) = crate::review::bind(
-            &action.input,
-            action.definition.subject,
-            &run.subject,
-            &call.input,
-        ) else {
-            return Ok(Acted::Stopped("subject_unbound"));
-        };
         let mut tx = execution.begin(client, "watchers.run.acted").await?;
         // Off or replaced since the run was decided: stop at the boundary.
         let current = tx.sql().query_opt(
@@ -672,7 +714,16 @@ impl Worker {
             tx.rollback().await?;
             return Ok(Acted::Stopped("record_changed"));
         };
-        input[action.definition.version] = json!(expected);
+        let Some(input) = action_input(
+            action.definition,
+            &action.input,
+            &run.subject,
+            &call.input,
+            expected,
+        ) else {
+            tx.rollback().await?;
+            return Ok(Acted::Stopped("subject_unbound"));
+        };
         let scope = watchers.principal(tx.sql(), tenant).await?;
         let version = tx.sql().query_one("SELECT r.trigger,v.definition,v.catalog_digest,v.examples FROM base_watchers r JOIN base_watcher_versions v ON v.tenant_id=r.tenant_id AND v.id=$3 WHERE r.tenant_id=$1 AND r.id=$2", &[&tenant, &run.watcher, &run.version]).await?;
         let trigger: String = version.get(0);
@@ -724,12 +775,7 @@ impl Worker {
             .events
             .cause(&mut tx, &format!("{CAUSE}{}", run.id))
             .await?;
-        tx.sql()
-            .execute(
-                "SELECT set_config('bilibi.watchers.action', $1, true)",
-                &[&json!([run.version, position, logical_event]).to_string()],
-            )
-            .await?;
+        set_action_identity(tx.sql(), Some(run.version), position, logical_event).await?;
         let outcome = watchers
             .jobs
             .commit(&mut tx, execution, action.key, &input)
@@ -746,10 +792,7 @@ impl Worker {
                     )
                     .await?
                 {
-                    let next = facts
-                        .get(trigger.definition.version)
-                        .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
-                        .ok_or(Error::Invalid)?;
+                    let next = record_revision(facts.get(trigger.definition.version))?;
                     let id = run.id;
                     tx.mutate(move |sql| Box::pin(async move {
                         sql.execute("UPDATE base_watcher_runs SET subject_version=$3 WHERE tenant_id=$1 AND id=$2", &[&tenant, &id, &next]).await?;
@@ -818,7 +861,7 @@ enum Acted {
 
 /// An owner's refusal as a bounded code and the owner's own words for it
 /// (field messages, a refusal sentence), or an infrastructure failure to retry.
-fn refusal(error: bilibi_agent_api::Error) -> Result<(&'static str, Value)> {
+pub(crate) fn refusal(error: bilibi_agent_api::Error) -> Result<(&'static str, Value)> {
     use bilibi_agent_api::Error as E;
     Ok(match error {
         E::Forbidden | E::Backend(Error::Forbidden) => ("forbidden", Value::Null),

@@ -45,6 +45,23 @@ impl FollowUp {
             "title":{"type":"string","maxLength":160}
         }})
     }
+    async fn watcher_key(
+        &self,
+        client: &(impl bilibi_tenancy::ProofClient + ?Sized),
+        scope: &Scope,
+        source: i64,
+    ) -> bilibi_database::Result<Option<String>> {
+        Ok(bilibi_watchers::Watchers::action_identity(client, scope)
+            .await?
+            .map(|action| {
+                let binding = json!([action, self.kind, source]);
+                Sha256::digest(binding.to_string().as_bytes())
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect()
+            }))
+    }
+
     async fn prepare(
         &self,
         client: &dyn OperationClient,
@@ -93,6 +110,20 @@ impl FollowUp {
         ))
     }
 }
+async fn existing(
+    client: &(impl bilibi_tenancy::ProofClient + ?Sized),
+    tenant: i64,
+    key: &str,
+) -> bilibi_database::Result<Option<i64>> {
+    Ok(client
+        .query_opt(
+            "SELECT id FROM core_activities WHERE tenant_id=$1 AND followup_watcher_key=$2",
+            &[&tenant, &key],
+        )
+        .await?
+        .map(|row| row.get(0)))
+}
+
 impl WriteHandler for FollowUp {
     fn owner(&self) -> &'static str {
         self.module
@@ -105,6 +136,18 @@ impl WriteHandler for FollowUp {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let (company, assignee, task) = self.prepare(client, scope, input).await?;
+            let sql = client.sql_client().await?;
+            let source = input["record_id"].as_i64().ok_or(Error::Invalid)?;
+            if let Some(key) = self.watcher_key(sql, scope, source).await? {
+                if existing(sql, scope.tenant(), &key).await?.is_some()
+                    || !client.reserve_preview_value("core/activity.followup", &key)
+                {
+                    return Ok(
+                        json!({"summary":"Reuse the private follow-up task for this occurrence"})
+                            .into(),
+                    );
+                }
+            }
             Ok(json!({"summary":"Create a private follow-up task","company_id":company.get(),"assignee_user_id":assignee,"title":task.common.title,"related":{"kind":self.kind,"id":input["record_id"]}}).into())
         })
     }
@@ -120,28 +163,11 @@ impl WriteHandler for FollowUp {
                 .await
                 .map_err(|error| bilibi_agent_api::invalid("record_id", error.to_string()))?;
             let tenant = scope.tenant();
-            let kind = self.kind.to_owned();
             let source = input["record_id"].as_i64().ok_or(Error::Invalid)?;
-            let key = bilibi_watchers::Watchers::action_identity(tx.sql(), scope)
-                .await?
-                .map(|action| {
-                    let binding = json!([action, kind, source]);
-                    Sha256::digest(binding.to_string().as_bytes())
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>()
-                });
+            let key = self.watcher_key(tx.sql(), scope, source).await?;
             if let Some(key) = &key {
-                if let Some(row) = tx
-                    .sql()
-                    .query_opt(
-                        "SELECT id FROM core_activities WHERE tenant_id=$1 AND followup_watcher_key=$2",
-                        &[&tenant, key],
-                    )
-                    .await
-                    .map_err(Error::from)?
-                {
-                    return Ok(json!({"activity_id":row.get::<_,i64>(0)}).into());
+                if let Some(id) = existing(tx.sql(), tenant, key).await? {
+                    return Ok(json!({"activity_id":id}).into());
                 }
             }
             let activity = if scope.actor().principal().is_some() {

@@ -672,6 +672,133 @@ async fn main() -> Result<()> {
         )
         .await?;
         commerce_event(&db, event, 1, backlog, "confirmed", 2).await?;
+        // Trial real creation events before approving any creation watcher.
+        let trial_order = commerce_order(&plans, &admin).await?;
+        let trial_event = commerce_event(&db, created, 1, trial_order, "draft", 1).await?;
+        let before = db.get().await?.query_one(
+            "SELECT (SELECT count(*) FROM base_watcher_effects WHERE tenant_id=1), COALESCE((SELECT row_to_json(b)::text FROM base_watcher_buckets b WHERE tenant_id=1),'none')", &[]).await?;
+        let effects_before: i64 = before.get(0);
+        let bucket_before: String = before.get(1);
+        let trial_draft = json!({"name":"Trial cancellation", "watch":created,
+            "if":{"conditions":[{"field":"status","op":"eq","value":"draft"}]},
+            "do":[{"operation":"commerce.sales.order.transition","input":{"status":"cancelled","reason":"Trial"}}],
+            "examples":[{"facts":"{\"status\":\"draft\"}","expect":"match"},{"facts":"{\"status\":\"confirmed\"}","expect":"no_match"}]});
+        let registry = services.get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
+        let trial = registry
+            .read(
+                &db,
+                &admin,
+                "base.watchers.trial",
+                &json!({"draft":trial_draft.clone(),"days":30,"limit":100}),
+            )
+            .await
+            .map_err(|error| {
+                eprintln!("trial: {error:?}");
+                Error::Invalid
+            })?;
+        let rows = trial["result"]["results"]
+            .as_array()
+            .ok_or(Error::Invalid)?;
+        check(
+            rows.iter().any(|r| {
+                r["event_id"] == trial_event
+                    && r["state"] == "match"
+                    && r["would_be_effects"][0]["preview"] == "allowed"
+                    && r["would_be_effects"][0]["effect"].is_object()
+            }),
+            "trial previews a matching Commerce order",
+        )?;
+        check(
+            rows.iter().any(|r| {
+                r["event_id"] == backlog_event
+                    && r["state"] == "near_miss"
+                    && r["current_record"]["facts"]["status"] == "confirmed"
+            }),
+            "trial reports a near miss from today's record, distinct from the creation event",
+        )?;
+        let after = db.get().await?.query_one(
+            "SELECT (SELECT count(*) FROM base_watcher_effects WHERE tenant_id=1), COALESCE((SELECT row_to_json(b)::text FROM base_watcher_buckets b WHERE tenant_id=1),'none'), (SELECT status='draft' AND revision=1 FROM commerce_sales_documents WHERE tenant_id=1 AND id=$1), (SELECT count(*) FROM base_watcher_trials WHERE tenant_id=1 AND id=$2)", &[&trial_order, &trial["result"]["trial_id"].as_i64().ok_or(Error::Invalid)?]).await?;
+        check(
+            after.get::<_, i64>(0) == effects_before
+                && after.get::<_, String>(1) == bucket_before
+                && after.get::<_, bool>(2)
+                && after.get::<_, i64>(3) == 1,
+            "trial logs itself without actions or token consumption",
+        )?;
+        let restrictions = services.get::<bilibi_authz::restrictions::FieldRestrictions>(
+            "base/authz.field_restrictions",
+        )?;
+        restrictions
+            .put(&admin, "commerce_rule_orders", "total", &[4])
+            .await?;
+        let restricted_trial = registry
+            .read(
+                &db,
+                &admin,
+                "base.watchers.trial",
+                &json!({"draft":trial_draft.clone()}),
+            )
+            .await
+            .map_err(|_| Error::Invalid)?;
+        check(
+            restricted_trial["result"]["results"]
+                .as_array()
+                .ok_or(Error::Invalid)?
+                .iter()
+                .any(|r| {
+                    r["event_id"] == trial_event
+                        && r["would_be_effects"][0]["preview"] == "restricted"
+                }),
+            "a field restriction hides the action preview outcome",
+        )?;
+        let hidden_draft = json!({"name":"Restricted trial", "watch":created,
+            "if":{"conditions":[{"field":"total","op":"gt","value":"10"}]},
+            "do":[{"operation":"commerce.sales.order.transition","input":{"status":"cancelled","reason":"Trial"}}],
+            "examples":[{"facts":"{\"total\":\"20\"}","expect":"match"}]});
+        check(
+            registry
+                .read(
+                    &db,
+                    &admin,
+                    "base.watchers.trial",
+                    &json!({"draft":hidden_draft}),
+                )
+                .await
+                .is_err(),
+            "a trial cannot read a field restricted from its reader",
+        )?;
+        restrictions
+            .remove(&admin, "commerce_rule_orders", "total")
+            .await?;
+        let limited = registry
+            .read(
+                &db,
+                &admin,
+                "base.watchers.trial",
+                &json!({"draft":trial_draft.clone(),"limit":1}),
+            )
+            .await
+            .map_err(|_| Error::Invalid)?;
+        check(
+            limited["result"]["truncated"] == true
+                && limited["result"]["scan_notice"].is_null()
+                && limited["result"]["results"]
+                    .as_array()
+                    .is_some_and(|rows| rows.len() <= 1),
+            "the event bound truncates the trial",
+        )?;
+        check(
+            registry
+                .read(
+                    &db,
+                    &admin,
+                    "base.watchers.trial",
+                    &json!({"draft":trial_draft,"days":31}),
+                )
+                .await
+                .is_err(),
+            "the tenant's trial window limit is enforced",
+        )?;
         let definition = json!({"name":"Cancel newly created orders", "watch":created, "do":[{"operation":"commerce.sales.order.transition","input":{"status":"cancelled","reason":"Proof cancellation"}}], "examples":[], "explanation":"Cancel a new order in the disposable walkthrough."});
         let watcher = write(&plans, &admin, "base.watchers.draft", definition).await?;
         write(
@@ -692,7 +819,19 @@ async fn main() -> Result<()> {
                 Some("event_before_approval"),
             )
             .await?;
-            wait_for_runs(&db, &[creation_event], &[watcher_id], None).await
+            wait_for_runs(&db, &[creation_event], &[watcher_id], None).await?;
+            // The cancellation also emits a status event for the two earlier
+            // watchers. Let its admission finish before stopping the executor;
+            // otherwise its lease can block later FIFO admissions.
+            for _ in 0..300 {
+                let complete: i64 = db.get().await?.query_one(
+                    "SELECT count(*) FROM base_events e JOIN base_watcher_runs r ON r.tenant_id=e.tenant_id AND r.event_id=e.id JOIN base_queue_jobs j ON j.tenant_id=r.tenant_id AND j.worker_id='base/watchers-run' AND j.args->>'run_id'=r.id::text WHERE e.tenant_id=1 AND e.name=$1 AND e.payload->>'order_id'=$2 AND e.payload->>'status'='cancelled' AND r.watcher_id=ANY($3) AND r.state='no_match' AND j.state='completed'",
+                    &[&event, &id.to_string(), &watcher_ids],
+                ).await?.get(0);
+                if complete == watcher_ids.len() as i64 { return Ok(()); }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            check(false, "the cancellation's follow-up admissions drained")
         })
         .await?;
         let untouched: bool = db.get().await?.query_one(
@@ -802,6 +941,46 @@ async fn main() -> Result<()> {
         check(
             row.get::<_, i64>(0) == 3 && row.get::<_, i64>(1) == 1,
             "off-period events are skipped and a new event acts after switching on",
+        )?;
+        drop(client);
+        // Retained events whose subjects are no longer available exercise the
+        // scan budget without revealing how many of those events exist.
+        let events = services.get::<bilibi_base::events::Events>(bilibi_base::events::SERVICE)?;
+        let boundary =
+            services.get::<bilibi_database::MutationBoundary>("base/database.mutations")?;
+        let mut client = db.get().await?;
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                admin.mutation_context("walkthrough.trial_budget"),
+            )
+            .await?;
+        for n in 0..5000 {
+            let key = format!("trial-budget:{n}");
+            events.record(&mut tx, bilibi_base::events::NewEvent {
+                name: created, subject: "order:900000000", key: &key,
+                payload: json!({"order_id":900000000,"company_id":1,"status":"draft","revision":1}),
+            }).await?;
+        }
+        tx.commit().await?;
+        drop(client);
+        let budget_draft = json!({"name":"Trial budget", "watch":created,
+            "do":[{"operation":"commerce.sales.order.transition","input":{"status":"cancelled","reason":"Trial"}}], "examples":[]});
+        let budget = registry
+            .read(
+                &db,
+                &admin,
+                "base.watchers.trial",
+                &json!({"draft":budget_draft}),
+            )
+            .await
+            .map_err(|_| Error::Invalid)?;
+        check(
+            budget["result"]["scan_notice"]
+                == "Scan stopped early; narrow the window to check for more events."
+                && budget["result"].get("examined").is_none()
+                && budget["result"].get("hidden").is_none(),
+            "the trial stops at its candidate budget without exposing a count",
         )?;
     }
     println!("every {domain} watcher follow-up check passed");
