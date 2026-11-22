@@ -146,7 +146,7 @@ impl Catalog {
         client: &(impl GenericClient + Sync),
         scope: &Scope,
     ) -> Result<Self, CatalogError> {
-        Self::build(client, scope, None).await
+        Self::build(client, scope, None, &[]).await
     }
     /// [`Catalog::for_scope`] with one masked field of one table unmasked, for
     /// a reveal the caller has already authorized and recorded.
@@ -156,12 +156,22 @@ impl Catalog {
         table: &str,
         field: &str,
     ) -> Result<Self, CatalogError> {
-        Self::build(client, scope, Some((table, field))).await
+        Self::build(client, scope, Some((table, field)), &[]).await
     }
+    /// Describe additions proposed by the custom-field owner before saving them.
+    pub async fn for_setup_preview(
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        fields: &[crate::CustomTable],
+    ) -> Result<Self, CatalogError> {
+        Self::build(client, scope, None, fields).await
+    }
+
     async fn build(
         client: &(impl GenericClient + Sync),
         scope: &Scope,
         reveal: Option<(&str, &str)>,
+        proposed: &[crate::CustomTable],
     ) -> Result<Self, CatalogError> {
         let installed = crate::installed().map_err(|_| Error::Internal)?;
         // One read for what the reader holds and how far it reaches (#683).
@@ -267,6 +277,10 @@ impl Catalog {
                 let withheld = restricted.get(custom.table).cloned().unwrap_or_default();
                 add_custom(&mut tables, custom, &withheld);
             }
+        }
+        for custom in proposed {
+            let withheld = restricted.get(custom.table).cloned().unwrap_or_default();
+            add_custom(&mut tables, custom.clone(), &withheld);
         }
         let catalog = Self {
             tenant: scope.tenant(),

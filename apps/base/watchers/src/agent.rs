@@ -25,7 +25,7 @@ static WATCHERS: OnceLock<Arc<Watchers>> = OnceLock::new();
 pub(crate) fn bind(watchers: Arc<Watchers>) -> bool {
     WATCHERS.set(watchers).is_ok()
 }
-fn watchers() -> bilibi_agent_api::Result<&'static Arc<Watchers>> {
+pub(crate) fn watchers() -> bilibi_agent_api::Result<&'static Arc<Watchers>> {
     WATCHERS.get().ok_or(Error::Internal.into())
 }
 

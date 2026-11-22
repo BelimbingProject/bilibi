@@ -325,7 +325,7 @@ impl WriteHandler for Write {
                     format!("Delete shared view “{}”", row.get::<_, String>(0))
                 }
             };
-            Ok(json!({"summary": summary, "input": input}).into())
+            Ok(json!({"summary": summary}).into())
         })
     }
     fn commit<'a>(
@@ -493,9 +493,51 @@ fn customisation_choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
     choices
 }
 
+fn customisation_rows(read: &Value) -> Vec<bilibi_labels::CustomisationRow> {
+    read["pages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|page| {
+            page["saved_views"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|view| {
+                    if view["owned"] != true && page["can_share"] != true {
+                        return None;
+                    }
+                    let id = view["id"].as_i64()?;
+                    Some(bilibi_labels::CustomisationRow {
+                        description: format!(
+                            "{} · {}",
+                            page["label"].as_str().or_else(|| page["page"].as_str())?,
+                            view["name"].as_str()?
+                        ),
+                        audit_kind: crate::shared_views::KIND,
+                        audit_id: id,
+                        revision: 1,
+                        input: json!({"id":id}),
+                    })
+                })
+        })
+        .collect()
+}
+
+inventory::submit! {
+    Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.grid.view.delete.customisations",
+        Provenance { module: "base/grid", source: file!(), line: line!() },
+        &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations",
+            event: "customisation.shared_view", contract: "base.grid.view.delete" })
+}
+
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/grid.customisations", Provenance { module: "base/grid", source: file!(), line: line!() }, &bilibi_labels::CustomisationSection {
     title: "Shared list views",
-    undo: None,
+    undo: Some(bilibi_labels::Undo {
+        read: "base.grid.view.pages", read_input: pages_input, operation: "base.grid.view.delete",
+        event: "customisation.shared_view", action: "Remove view",
+        detail: "The people it was shared with lose the saved view.", rows: customisation_rows,
+    }),
     changes: Some(bilibi_labels::Changes {
         purpose: "Save a list's columns, filters and sort as a named view for everyone in this tenant or for chosen roles.",
         limits: "Up to 100 shared views on a list, each with a name of at most 80 characters, for everyone or 1 to 50 roles. A view never widens what a reader may see: their own grants and field restrictions still apply.",

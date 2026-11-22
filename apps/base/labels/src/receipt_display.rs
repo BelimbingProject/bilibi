@@ -81,6 +81,7 @@ pub(crate) fn receipt_where(change: &Value) -> String {
         ),
         "base/settings" => value["key"].as_str().unwrap_or_default().to_owned(),
         "grid.shared_view" => value["page"].as_str().unwrap_or_default().to_owned(),
+        "base/watchers.watcher" => "Watchers".into(),
         "menu_order" => match value["parent"].as_str() {
             Some(parent) if !parent.is_empty() => format!("Menu › {parent}"),
             _ => "Main menu".into(),
@@ -88,9 +89,59 @@ pub(crate) fn receipt_where(change: &Value) -> String {
         _ => format!("{} #{}", kind, change["id"].as_str().unwrap_or_default()),
     }
 }
-pub(crate) fn receipt_value(value: &Value) -> String {
+pub(crate) fn receipt_value(kind: &str, value: &Value) -> String {
     if value.is_null() || value.as_object().is_some_and(|object| object.is_empty()) {
         return "None".into();
+    }
+    if kind == "grid.shared_view" {
+        let name = value["name"].as_str().unwrap_or("Saved view");
+        let audience =
+            if value["shared_with_everyone"] == true || value["audience"]["everyone"] == true {
+                "Shared with everyone".into()
+            } else {
+                match value["roles"]
+                    .as_array()
+                    .or_else(|| value["audience"]["roles"].as_array())
+                    .map(Vec::len)
+                {
+                    Some(0) | None => "No shared audience".into(),
+                    Some(1) => "Shared with one role".into(),
+                    Some(count) => format!("Shared with {count} roles"),
+                }
+            };
+        let mut details = serde_json::json!({
+            "summary": format!("{name} · {audience}"),
+            "columns": value["view"]["columns"],
+            "lenses": value["view"]["lenses"],
+            "row height": value["view"]["zoom"],
+            "changed since": value["view"]["since"],
+            "filters and sort": value.get("params").unwrap_or(&value["view"]["params"]),
+        });
+        if let Some(roles) = value["roles"]
+            .as_array()
+            .or_else(|| value["audience"]["roles"].as_array())
+        {
+            details["role IDs"] = serde_json::json!(roles);
+        }
+        return preview_text(&details);
+    }
+    if kind == "base/watchers.watcher" {
+        let name = value["name"].as_str().unwrap_or("Watcher");
+        let summary = match value["state"].as_str() {
+            Some("draft") => format!("{name} · Awaiting approval"),
+            Some("on") => format!("{name} · On"),
+            Some("needs_review") => format!("{name} · Needs review"),
+            Some("off") => format!("{name} · Off"),
+            _ => name.to_owned(),
+        };
+        let mut details = serde_json::json!({"summary":summary});
+        if let Some(trigger) = value.get("watch").or_else(|| value.get("trigger")) {
+            details["watch"] = trigger.clone();
+        }
+        if let Some(rule) = value.get("rule") {
+            details["rule"] = rule.clone();
+        }
+        return preview_text(&details);
     }
     let mut parts = Vec::new();
     for (key, label) in [
@@ -100,12 +151,6 @@ pub(crate) fn receipt_value(value: &Value) -> String {
         ("target", "Reference"),
         ("value", "Value"),
         ("source", "Source"),
-        ("name", "View"),
-        ("view", "Layout"),
-        ("params", "Filters"),
-        ("shared_with_everyone", "Shared with everyone"),
-        ("roles", "Roles"),
-        ("audience", "Audience"),
         ("item_ids", "Order"),
         ("help", "Help"),
         ("archived_on", "Archived"),

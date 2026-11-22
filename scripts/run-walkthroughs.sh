@@ -95,7 +95,7 @@ WALKTHROUGHS=(
   'base|bulk-export|apps/base/bulk_data|export-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-update|apps/base/bulk_data|update-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|custom-fields-structured|apps/base/custom_fields|structured-fields-walkthrough|migrate|BILIBI_CUSTOM_FIELDS_DEMO=disposable BILIBI_CUSTOM_FIELDS_ROOT=@/artifacts|-'
-  'base|setup-packs|apps/base/setup_packs|setup-packs-walkthrough|migrate|BILIBI_SETUP_PACKS_DEMO=disposable|-'
+  'base|setup-packs|apps/base/setup_packs|setup-packs-walkthrough|none|BILIBI_SETUP_PACKS_DEMO=disposable|-'
   'base|database-pool|apps/base/database|pool-walkthrough|none||-'
   'base|integration|apps/base/integration|integration-walkthrough|migrate|BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes|-'
   'base|language-detection|apps/base/language_detection|language-detection-walkthrough|none|BILIBI_DISPOSABLE_LANGUAGE_WALKTHROUGH=yes|@model'
@@ -246,6 +246,7 @@ WALKTHROUGHS=(
   'mounted|events-mounted|apps/web|events-reference|seed||@mount:event_publisher;-;@expect:("event_publisher/receiving";@absent:("event_subscriber/payables";@mount:event_subscriber;-;@expect:("event_publisher/receiving";@expect:("event_subscriber/payables";@unmount:event_publisher;-;@expect:("event_subscriber/payables";@absent:("event_publisher/receiving"'
   'mounted|ports-mounted|apps/web|ports-reference|none||@mount:port_reference;-;@expect:port_reference/orders'
   # The reference owner (watcher_cases) mounted; the heading is printed only then.
+  'mounted|setup-packs-watchers|apps/base/setup_packs|setup-packs-walkthrough|none|BILIBI_SETUP_PACKS_DEMO=disposable|@mount:watcher_cases;-;@expect:ok  A repeat draft import is empty'
   'mounted|watchers-mounted|apps/web|watchers-walkthrough|seed||@mount:watcher_cases;-;@expect:== Same facts, two tenants, two destinations'
   # `end`, then `deliver` in a new process: the notices outlive the first one.
   'mounted|session-ended|apps/web|session-ended-walkthrough|none||@mount:session_listener;end;@expect:session_listener/presence.sessions;deliver;@expect:session_listener/presence.sessions'
