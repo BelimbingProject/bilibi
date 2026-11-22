@@ -684,12 +684,9 @@ body:has(dialog:modal) #flash-group > #connection-server-error {
 }
 
 /* Keep the horizontal scroll affordance visible against the table surface. */
-.flex-table [data-viewport]::-webkit-scrollbar { height: 12px; width: 12px; }
-.flex-table [data-viewport]::-webkit-scrollbar-track { background: var(--color-surface-sunken); }
-.flex-table [data-viewport]::-webkit-scrollbar-thumb { background: var(--color-ink-subtle); border: 3px solid var(--color-surface-sunken); border-radius: 6px; }
-@supports not selector(::-webkit-scrollbar) {
-  .flex-table [data-viewport] { scrollbar-color: var(--color-ink-subtle) var(--color-surface-sunken); }
-}
+.flex-table [data-viewport]::-webkit-scrollbar:horizontal { height: 12px; }
+.flex-table [data-viewport]::-webkit-scrollbar-track:horizontal { background: var(--color-surface-sunken); }
+.flex-table [data-viewport]::-webkit-scrollbar-thumb:horizontal { background: var(--color-ink-subtle); border: 3px solid var(--color-surface-sunken); border-radius: 6px; }
 
 /* The notch of an unframed `flex_table/1` is placed its own height (`h-3.5`)
  * above the table, out of flow, so that it stands on the page body rather
