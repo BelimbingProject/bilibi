@@ -42,10 +42,7 @@ impl Address {
             || email
                 .chars()
                 .any(|c| c.is_control() || c.is_whitespace() || "<>,;:\"()[]\\".contains(c))
-            || self
-                .name
-                .as_deref()
-                .is_some_and(|name| !header_value(name, 200))
+            || self.name.as_deref().is_some_and(|name| !display_name(name))
         {
             return Err(Error::Invalid);
         }
@@ -281,6 +278,10 @@ pub fn render(message: &Message, default_from: &Address, limits: Limits) -> Resu
         },
     })
 }
+pub(crate) fn display_name(value: &str) -> bool {
+    header_value(value, 200)
+}
+
 fn header_value(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
 }

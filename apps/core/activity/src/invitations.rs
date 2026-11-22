@@ -205,6 +205,7 @@ pub(crate) async fn when(
 pub(crate) struct InviteJob {
     pub db: Db,
     pub mailer: Arc<Mailer>,
+    pub locales: Arc<bilibi_locale::Locales>,
     pub templates: Arc<bilibi_templates::Templates>,
     pub settings: Arc<Settings>,
     pub directory: Arc<PrincipalDirectory>,
@@ -263,10 +264,15 @@ impl InviteJob {
             .await
             .ok()
             .and_then(|account| Address::new(Some(&sender), &account.email).ok());
+        let locale = self
+            .locales
+            .resolve_global(&**client, &scope, None)
+            .await?
+            .locale;
         let (subject, body) = crate::wording::guest_mail(
             &self.templates,
             &**client,
-            scope.tenant(),
+            (&scope, locale),
             crate::wording::INVITATION,
             (&activity, &sender, &when),
             true,

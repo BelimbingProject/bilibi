@@ -217,10 +217,8 @@ impl PortalService {
             }
             return Ok(());
         }
-        let (title, days_text) = (
-            bilibi_templates::bounded(&site.title, 150),
-            days.to_string(),
-        );
+        let subject_title = bilibi_templates::bounded(&site.title, 150);
+        let days_text = days.to_string();
         let wording = self
             .templates
             .tenant_wording(
@@ -229,7 +227,11 @@ impl PortalService {
                 crate::wording::REGISTRATION,
                 &[
                     ("person_name", bilibi_templates::Value::Text(&name)),
-                    ("site_title", bilibi_templates::Value::Text(&title)),
+                    (
+                        "subject_title",
+                        bilibi_templates::Value::Text(&subject_title),
+                    ),
+                    ("site_title", bilibi_templates::Value::Text(&site.title)),
                     ("days", bilibi_templates::Value::Text(&days_text)),
                 ],
             )

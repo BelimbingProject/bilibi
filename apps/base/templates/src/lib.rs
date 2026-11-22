@@ -5,7 +5,7 @@ mod store;
 
 pub use catalogue::{
     bounded, Audience, Context, DefaultText, Origin, Output, Problem, Resolved, Slot, Template,
-    Text, Value, Variable, CATALOGUE,
+    Text, Value, Variable, CATALOGUE, PLATFORM_CATALOGUE,
 };
 pub use store::Templates;
 

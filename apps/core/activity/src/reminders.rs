@@ -84,6 +84,7 @@ pub(crate) struct Sweep {
     pub notifications: Arc<NotificationBoundary>,
     pub settings: Arc<Settings>,
     pub mailer: Arc<bilibi_mail::Mailer>,
+    pub locales: Arc<bilibi_locale::Locales>,
     pub templates: Arc<bilibi_templates::Templates>,
     pub mutations: Arc<MutationBoundary>,
     pub queue: Arc<bilibi_queue::Queue>,
@@ -338,17 +339,34 @@ impl Sweep {
             .due
             .map(|t| t.strftime("%Y-%m-%d %H:%M UTC").to_string())
             .unwrap_or_default();
+        let Ok(locale) = self.locales.resolve(&**client, &assignee, None).await else {
+            return;
+        };
+        let Ok(company) = bilibi_party_ids::OrganisationId::new(reminder.company) else {
+            return;
+        };
+        let (timing, unused) = if reminder.kind == Kind::Task {
+            ("due_line", "starts_line")
+        } else {
+            ("starts_line", "due_line")
+        };
         let wording = self
             .templates
-            .tenant_wording(
+            .wording(
                 &**client,
-                tenant,
+                &assignee,
                 crate::wording::REMINDER,
-                &[
-                    ("what", bilibi_templates::Value::Text(what(reminder.kind))),
-                    ("title", bilibi_templates::Value::Text(&title)),
-                    ("when", bilibi_templates::Value::Text(&when)),
-                ],
+                Some(company),
+                locale.locale,
+                (
+                    &[
+                        ("what", bilibi_templates::Value::Text(what(reminder.kind))),
+                        ("subject_title", bilibi_templates::Value::Text(&title)),
+                        ("title", bilibi_templates::Value::Text(&reminder.title)),
+                        ("when", bilibi_templates::Value::Text(&when)),
+                    ],
+                    &[unused],
+                ),
             )
             .await;
         drop(client);
@@ -364,15 +382,7 @@ impl Sweep {
             wording["subject"].clone(),
             format!(
                 "{}\n{}\n\n{}\n{}/activities/{}\n",
-                wording["intro"],
-                if reminder.kind == Kind::Task {
-                    &wording["due_line"]
-                } else {
-                    &wording["starts_line"]
-                },
-                wording["link_label"],
-                self.origin,
-                reminder.id
+                wording["intro"], wording[timing], wording["link_label"], self.origin, reminder.id
             ),
         );
         if self.mailer.deliver_for(tenant, &message).await.is_err() {

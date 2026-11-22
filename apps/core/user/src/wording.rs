@@ -1,14 +1,13 @@
 //! The wording of the mail this module sends, as shared templates
-//! (`apps/base/templates/README.md`): a workspace changes it through the
-//! template operations. Every link and the order of the parts stay here in
-//! code, so security mail keeps a fixed structure and a link can come only
-//! from this module.
+//! (`apps/base/templates/README.md`). Security wording is platform-controlled;
+//! this module builds the links and fixes the order of the parts.
 use crate::UserService;
 use bilibi_database::{Db, Error};
 use bilibi_mail::{Address, Message};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_templates::{
-    Audience, DefaultText, Output, Slot, Template, Templates, Text, Value, Variable, CATALOGUE,
+    Audience, DefaultText, Output, Slot, Template, Templates, Text, Value, Variable,
+    PLATFORM_CATALOGUE,
 };
 
 pub(crate) const PASSWORD_RESET: &str = "core.user.password_reset";
@@ -39,35 +38,41 @@ pub(crate) fn around_link(text: &Text, link: &str) -> String {
 }
 
 impl UserService {
-    /// The invitation email in the workspace's wording, around the one-time
-    /// link this module builds.
+    /// The workspace invitation email around the one-time link.
     pub(crate) async fn invitation_mail(
         &self,
         client: &dyn bilibi_tenancy::ReadClient,
         tenant: i64,
         (name, email): (&str, &str),
         tenant_name: &str,
-        days: i32,
+        days: Option<i32>,
         token: &str,
     ) -> Result<Message, Error> {
-        let days = days.to_string();
+        let closing = if days.is_some() {
+            "closing"
+        } else {
+            "reissue_closing"
+        };
+        let days = days.map(|days| days.to_string());
+        let subject_name = bilibi_templates::bounded(tenant_name, 150);
+        let mut values = vec![
+            ("workspace_name", Value::Text(tenant_name)),
+            ("subject_name", Value::Text(&subject_name)),
+        ];
+        if let Some(days) = &days {
+            values.push(("days", Value::Text(days)));
+        }
         let wording = self
             .templates
-            .tenant_wording(
-                client,
-                tenant,
-                INVITATION,
-                &[
-                    ("person_name", Value::Text(name)),
-                    ("workspace_name", Value::Text(tenant_name)),
-                    ("days", Value::Text(&days)),
-                ],
-            )
+            .tenant_wording(client, tenant, INVITATION, &values)
             .await?;
         Ok(Message::text(
             Address::new(Some(name), email).map_err(|_| Error::Invalid)?,
             wording["subject"].clone(),
-            around_link(&wording, &format!("{}/accept/{token}", self.origin)),
+            format!(
+                "{}\n\n{}/accept/{token}\n\n{}\n",
+                wording["intro"], self.origin, wording[closing]
+            ),
         ))
     }
 }
@@ -83,7 +88,7 @@ const PERSON: Variable =
 
 macro_rules! template {
     ($key:expr, $template:expr) => {
-        inventory::submit! { Contribution::new(CATALOGUE, $key, Provenance {
+        inventory::submit! { Contribution::new(PLATFORM_CATALOGUE, $key, Provenance {
             module: "core/user", source: file!(), line: line!(),
         }, &$template) }
     };
@@ -162,20 +167,26 @@ template!(
         label: "Workspace invitation email",
         audience: Audience::Staff,
         outputs: &[Output::PlainText],
-        slots: LINK_SLOTS,
+        slots: &[
+            Slot::subject(),
+            Slot::text("intro", "Text before the link"),
+            Slot::text("closing", "Text after the initial link"),
+            Slot::text("reissue_closing", "Text after a reissued link"),
+        ],
         variables: &[
-            PERSON,
-            Variable::text("workspace_name", "Workspace name", "Example Trading", LINK_MAIL),
-            Variable::text("days", "Days the link works", "7", LINK_MAIL),
+            Variable::text("workspace_name", "Workspace name", "Example Trading", &["intro"]),
+            Variable::text("subject_name", "Workspace name for the subject", "Example Trading", &["subject"]),
+            Variable::optional_text("days", "Days the link works", "7", &["closing"]),
         ],
         base_language: "en",
         defaults: &[DefaultText {
             language: "en",
             version: "1",
             slots: &[
-                ("subject", "You're invited to {{workspace_name}}"),
+                ("subject", "You're invited to {{subject_name}}"),
                 ("intro", "You are invited to join {{workspace_name}}.\n\nOpen this link to accept:"),
                 ("closing", "The link works once and expires in {{days}} day(s). If you did not expect this, you can ignore this email."),
+                ("reissue_closing", "The link works once. If you did not expect this, you can ignore this email."),
             ],
         }],
     }

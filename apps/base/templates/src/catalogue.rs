@@ -3,6 +3,8 @@ use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const PLATFORM_CATALOGUE: &str = "base/templates.platform_catalogue";
+
 pub const CATALOGUE: &str = "base/templates.catalogue";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -116,17 +118,18 @@ impl Variable {
 }
 
 /// `text` cut to `max_bytes` at a character boundary, ending in an ellipsis
-/// when cut: for a fact (a title, a name) placed in a bounded slot such as a
+/// when cut and the marker fits: for a fact (a title, a name) placed in a bounded slot such as a
 /// subject.
 pub fn bounded(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_owned();
     }
-    let mut end = max_bytes.saturating_sub('…'.len_utf8());
+    let marker = if max_bytes >= "…".len() { "…" } else { "" };
+    let mut end = max_bytes - marker.len();
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…", &text[..end])
+    format!("{}{marker}", &text[..end])
 }
 
 pub struct DefaultText {
@@ -275,6 +278,15 @@ impl Template {
     /// Render declared slots without any lookups. Only named references use
     /// braces. A value is appended as data and is never parsed again.
     pub fn render(&self, text: &Text, values: &[(&str, Value<'_>)]) -> Checked<Text> {
+        self.render_except(text, values, &[])
+    }
+
+    pub(crate) fn render_except(
+        &self,
+        text: &Text,
+        values: &[(&str, Value<'_>)],
+        omitted: &[&str],
+    ) -> Checked<Text> {
         for id in text.keys() {
             if !self.slots.iter().any(|slot| slot.id == id) {
                 return Err(Problem::new("slots", "This template has an unknown field."));
@@ -282,6 +294,7 @@ impl Template {
         }
         self.slots
             .iter()
+            .filter(|slot| !omitted.contains(&slot.id))
             .filter(|slot| slot.required || text.contains_key(slot.id))
             .map(|slot| {
                 let source = text.get(slot.id).map(String::as_str).unwrap_or_default();
@@ -472,3 +485,5 @@ fn validate(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
 }
 
 inventory::submit! { Consumer::new::<Template>(CATALOGUE, "base/templates", validate) }
+
+inventory::submit! { Consumer::new::<Template>(PLATFORM_CATALOGUE, "base/templates", validate) }

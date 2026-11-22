@@ -63,6 +63,7 @@ inventory::submit! { Contribution::new(HANDLERS, WORKER, provenance!(), &Handler
 pub(crate) struct GuestReminderJob {
     pub db: Db,
     pub mailer: Arc<Mailer>,
+    pub locales: Arc<bilibi_locale::Locales>,
     pub templates: Arc<bilibi_templates::Templates>,
     pub settings: Arc<Settings>,
     pub directory: Arc<PrincipalDirectory>,
@@ -142,10 +143,15 @@ impl GuestReminderJob {
         // The text says what, when, where and how to join: never the
         // description or notes, which the invitation already carried or
         // which are internal.
+        let locale = self
+            .locales
+            .resolve_global(&**client, &scope, None)
+            .await?
+            .locale;
         let (subject, body) = crate::wording::guest_mail(
             &self.templates,
             &**client,
-            scope.tenant(),
+            (&scope, locale),
             crate::wording::GUEST_REMINDER,
             (&activity, &sender, &when),
             false,

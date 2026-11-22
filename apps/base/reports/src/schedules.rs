@@ -944,13 +944,13 @@ impl Reports {
         };
         let outcome = client
             .query_opt(
-                "SELECT state, message, report_name FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3",
+                "SELECT state, message, report_name, company_id FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3",
                 &[&scope.tenant(), &export, &scope.user()],
             )
             .await;
         drop(client);
-        let (state, message, name): (String, Option<String>, String) = match outcome {
-            Ok(Some(row)) => (row.get(0), row.get(1), row.get(2)),
+        let (state, message, name, company): (String, Option<String>, String, i64) = match outcome {
+            Ok(Some(row)) => (row.get(0), row.get(1), row.get(2), row.get(3)),
             Ok(None) => return JobOutcome::Retry("export_missing"),
             Err(_) => return JobOutcome::Retry("database_unavailable"),
         };
@@ -979,18 +979,33 @@ impl Reports {
                     .await
             }
         };
-        let name = bilibi_templates::bounded(&name, 150);
+        let Ok(company) = bilibi_party_ids::OrganisationId::new(company) else {
+            return JobOutcome::Retry("mail_not_written");
+        };
+        let subject_name = bilibi_templates::bounded(&name, 150);
         let wording = match self.db.get().await {
-            Ok(client) => self
-                .templates
-                .tenant_wording(
-                    &**client,
-                    scope.tenant(),
-                    crate::wording::SCHEDULED_REPORT,
-                    &[("report_name", bilibi_templates::Value::Text(&name))],
-                )
-                .await
-                .ok(),
+            Ok(client) => {
+                let Ok(locale) = self.locales.resolve(&**client, scope, None).await else {
+                    return JobOutcome::Retry("mail_not_written");
+                };
+                self.templates
+                    .wording(
+                        &**client,
+                        scope,
+                        crate::wording::SCHEDULED_REPORT,
+                        Some(company),
+                        locale.locale,
+                        (
+                            &[
+                                ("report_name", bilibi_templates::Value::Text(&name)),
+                                ("subject_name", bilibi_templates::Value::Text(&subject_name)),
+                            ],
+                            &[],
+                        ),
+                    )
+                    .await
+                    .ok()
+            }
             Err(_) => None,
         };
         let Some(wording) = wording else {

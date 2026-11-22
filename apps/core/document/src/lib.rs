@@ -1377,6 +1377,7 @@ inventory::submit! { Module {
             db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
             mailer: s.get("base/mail.mailer")?,
             templates: s.get(bilibi_templates::SERVICE)?,
+            locales: s.get("base/locale.locales")?,
             authentication: s.get("base/tenancy.authentication")?,
             origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
         }))))

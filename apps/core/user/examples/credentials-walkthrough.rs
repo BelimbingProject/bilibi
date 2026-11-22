@@ -4,9 +4,12 @@
 //! the dev mailbox exactly as a developer would to follow an emailed link. It
 //! stores the development instance role first: the dev mailbox sends nowhere
 //! else.
-use bilibi_database::{pool, Error, Result};
+use bilibi_agent_api::plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans};
+use bilibi_database::{pool, Error};
 use bilibi_mail::{Mailbox, Mailer};
 use bilibi_module_registry::Services;
+use bilibi_session::Sessions;
+use bilibi_tenancy::ProofFuture;
 use bilibi_user::{CredentialError, UserService};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -60,11 +63,30 @@ fn show_mail(label: &str, message: &str) {
     );
 }
 
+struct Browser<'a> {
+    sessions: &'a Sessions,
+    token: &'a str,
+}
+
+impl PlanAuthority for Browser<'_> {
+    fn verify<'a>(
+        &'a self,
+        tx: &'a tokio_postgres::Transaction<'_>,
+    ) -> ProofFuture<'a, PlanIdentity> {
+        Box::pin(async move {
+            Ok(PlanIdentity {
+                scope: self.sessions.hold(tx, self.token).await?,
+                credential_binding: format!("browser:{}", self.token),
+            })
+        })
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // The explicit opt-in protects normal development data from fixture writes.
     if std::env::var("BILIBI_DISPOSABLE_CREDENTIALS_DEMO").as_deref() != Ok("yes") {
-        return Err(Error::Invalid);
+        return Err(Error::Invalid.into());
     }
     bilibi_base::link();
     bilibi_core::link();
@@ -394,19 +416,40 @@ async fn main() -> Result<()> {
         None => println!("no verification mail arrived (is BILIBI_USER_SIGNING_KEY set?)"),
     }
 
-    println!("\n== workspace wording and sender name ==");
-    // Tenant 1 publishes its own reset wording and sender name; the link and
-    // its place in the message stay the module's.
-    client
-        .execute(
-            "INSERT INTO base_template_revisions (tenant_id,template_key,language,slots) VALUES (1,'core.user.password_reset','en',$1)",
-            &[&serde_json::json!({
-                "subject": "Reset your Example Trading password",
-                "intro": "Hello {{person_name}}, open this link to choose a new password:",
-                "closing": "Ask the Example Trading help desk if you did not request this.",
-            })],
+    println!("\n== platform wording and workspace sender name ==");
+    let admin = users
+        .login("admin@example.test", seeded)
+        .await
+        .map_err(|_| Error::Unauthorized)?;
+    let sessions = services.get::<Sessions>("base/session.sessions")?;
+    let plans = services.get::<Plans>("base/agent_api.plans")?;
+    let browser = Browser {
+        sessions: &sessions,
+        token: &admin.token,
+    };
+    let result = plans
+        .preview(
+            &browser,
+            &[PlannedOperation {
+                key: "base.templates.template.publish".into(),
+                input: serde_json::json!({
+                    "key": "core.user.password_reset",
+                    "language": "en",
+                    "revision": 0,
+                    "slots": {
+                        "subject": "Reset your Example Trading password",
+                        "intro": "Open this link to choose a new password:",
+                        "closing": "Ask the Example Trading help desk if you did not request this.",
+                    },
+                }),
+            }],
         )
         .await?;
+    assert_eq!(result["valid"], false);
+    assert_eq!(
+        result["results"][0]["error"]["fields"]["key"][0],
+        "This template uses platform-controlled wording.",
+    );
     client
         .execute(
             "INSERT INTO base_settings (key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES ('mail.sender_name',1,'tenant',1,'\"Example Trading\"',false)",
@@ -431,12 +474,12 @@ async fn main() -> Result<()> {
         ("sender name", from.contains("Example Trading")),
         (
             "subject",
-            message.contains("Subject: Reset your Example Trading password"),
+            message.contains("Subject: Reset your Bilibi password"),
         ),
         (
-            "wording with the recipient's name",
-            message.contains("Hello Sam Staff, open this link to choose a new password:")
-                && message.contains("Ask the Example Trading help desk"),
+            "platform wording",
+            message.contains("Reset your Bilibi password by opening this link:")
+                && message.contains("If you did not request this, you can ignore this email."),
         ),
         (
             "the module's own link",
@@ -447,7 +490,7 @@ async fn main() -> Result<()> {
         println!("{}: {name}", if passed { "PASS" } else { "FAIL" });
     }
     if checks.iter().any(|(_, passed)| !passed) {
-        return Err(Error::refused("the workspace's reset mail is wrong"));
+        return Err(Error::refused("the workspace's reset mail is wrong").into());
     }
 
     println!("\n== audit (secrets redacted) ==");

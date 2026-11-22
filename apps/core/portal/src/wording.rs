@@ -2,7 +2,9 @@
 //! (`apps/base/templates/README.md`). Each link and its place in the message
 //! stay in code.
 use bilibi_module_registry::{Contribution, Provenance};
-use bilibi_templates::{Audience, DefaultText, Output, Slot, Template, Text, Variable, CATALOGUE};
+use bilibi_templates::{
+    Audience, DefaultText, Output, Slot, Template, Text, Variable, PLATFORM_CATALOGUE,
+};
 
 pub(crate) const REGISTRATION: &str = "core.portal.registration_confirmation";
 pub(crate) const INVITATION: &str = "core.portal.invitation";
@@ -34,12 +36,18 @@ const VARIABLES: &[Variable] = &[
         "site_title",
         "Portal name",
         "Example Trading customer portal",
-        ALL,
+        &["intro", "closing"],
+    ),
+    Variable::text(
+        "subject_title",
+        "Portal name for the subject",
+        "Example Trading customer portal",
+        &["subject"],
     ),
     Variable::text("days", "Days the link works", "7", ALL),
 ];
 
-inventory::submit! { Contribution::new(CATALOGUE, REGISTRATION, provenance!(), &Template {
+inventory::submit! { Contribution::new(PLATFORM_CATALOGUE, REGISTRATION, provenance!(), &Template {
     key: REGISTRATION,
     label: "Customer account request confirmation email",
     audience: Audience::Customer,
@@ -48,13 +56,13 @@ inventory::submit! { Contribution::new(CATALOGUE, REGISTRATION, provenance!(), &
     variables: VARIABLES,
     base_language: "en",
     defaults: &[DefaultText { language: "en", version: "1", slots: &[
-        ("subject", "Confirm your request for {{site_title}}"),
+        ("subject", "Confirm your request for {{subject_title}}"),
         ("intro", "You asked for an account on {{site_title}}.\n\nOpen this link to confirm your email address:"),
         ("closing", "The link expires in {{days}} day(s). {{site_title}} will then review your request. If you did not ask for this, you can ignore this email."),
     ] }],
 }) }
 
-inventory::submit! { Contribution::new(CATALOGUE, INVITATION, provenance!(), &Template {
+inventory::submit! { Contribution::new(PLATFORM_CATALOGUE, INVITATION, provenance!(), &Template {
     key: INVITATION,
     label: "Customer invitation email",
     audience: Audience::Customer,
@@ -63,7 +71,7 @@ inventory::submit! { Contribution::new(CATALOGUE, INVITATION, provenance!(), &Te
     variables: VARIABLES,
     base_language: "en",
     defaults: &[DefaultText { language: "en", version: "1", slots: &[
-        ("subject", "You're invited to {{site_title}}"),
+        ("subject", "You're invited to {{subject_title}}"),
         ("intro", "You are invited to {{site_title}}.\n\nOpen this link to choose a password and finish setting up your account:"),
         ("closing", "The link works once and expires in {{days}} day(s). If you did not expect this, you can ignore this email."),
     ] }],

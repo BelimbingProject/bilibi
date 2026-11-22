@@ -188,15 +188,15 @@ impl UserService {
             .await?;
         let issued = tx.mutate(move |sql| Box::pin(async move {
             let row = sql.query_opt(
-                "UPDATE user_invitations v SET token_hash=$3, expires_at=clock_timestamp()+LEAST(GREATEST(v.expires_at-v.created_at, interval '1 day'), interval '60 days'), created_at=clock_timestamp() FROM users u, tenants t WHERE v.tenant_id=$1 AND v.token_hash=$2 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at<=clock_timestamp() AND u.tenant_id=v.tenant_id AND u.id=v.user_id AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL RETURNING v.id,v.email,u.name,t.name,CEIL(EXTRACT(EPOCH FROM (v.expires_at-v.created_at))/86400)::int",
+                "UPDATE user_invitations v SET token_hash=$3, expires_at=clock_timestamp()+LEAST(GREATEST(v.expires_at-v.created_at, interval '1 day'), interval '60 days'), created_at=clock_timestamp() FROM users u, tenants t WHERE v.tenant_id=$1 AND v.token_hash=$2 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at<=clock_timestamp() AND u.tenant_id=v.tenant_id AND u.id=v.user_id AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL RETURNING v.id,v.email,u.name,t.name",
                 &[&tenant, &old_hash, &new_hash],
             ).await?;
             let Some(row) = row else { return Err(Error::Conflict) };
             let id: i64 = row.get(0);
-            let details = (id, row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, String>(3), row.get::<_, i32>(4));
+            let details = (id, row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, String>(3));
             Ok((details, vec![Change { kind: "user.invitation".into(), id, old: json!({"status": "pending"}), new: json!({"status": "pending", "reissued": true}) }]))
         })).await;
-        let (id, email, name, tenant_name, days) = match issued {
+        let (id, email, name, tenant_name) = match issued {
             Ok(details) => details,
             Err(Error::Conflict) => {
                 tx.rollback().await?;
@@ -210,7 +210,7 @@ impl UserService {
                 tenant,
                 (&name, &email),
                 &tenant_name,
-                days,
+                None,
                 &new_token,
             )
             .await?;
@@ -400,7 +400,7 @@ impl UserService {
                 tenant,
                 (&name, &email),
                 &tenant_name,
-                days,
+                Some(days),
                 &raw_token,
             )
             .await?;

@@ -5,10 +5,11 @@
 use crate::Activity;
 use bilibi_database::Result;
 use bilibi_module_registry::{Contribution, Provenance};
+use bilibi_party_ids::OrganisationId;
 use bilibi_templates::{
     bounded, Audience, DefaultText, Output, Slot, Template, Templates, Value, Variable, CATALOGUE,
 };
-use bilibi_tenancy::ReadClient;
+use bilibi_tenancy::{ReadClient, Scope};
 
 pub(crate) const INVITATION: &str = "core.activity.invitation";
 pub(crate) const GUEST_REMINDER: &str = "core.activity.guest_reminder";
@@ -25,7 +26,7 @@ pub(crate) fn title(title: &str) -> String {
 pub(crate) async fn guest_mail(
     templates: &Templates,
     client: &dyn ReadClient,
-    tenant: i64,
+    (scope, language): (&Scope, &str),
     key: &str,
     (activity, sender, when): (&Activity, &str, &str),
     described: bool,
@@ -35,24 +36,38 @@ pub(crate) async fn guest_mail(
     let mut values = vec![
         ("sender_name", Value::Text(sender)),
         ("kind", Value::Text(&kind)),
-        ("title", Value::Text(&title)),
+        ("subject_title", Value::Text(&title)),
+        ("title", Value::Text(&activity.title)),
         ("when", Value::Text(when)),
     ];
+    let mut omitted = Vec::new();
     if let Some(location) = &activity.location {
         values.push(("location", Value::Text(location)));
+    } else {
+        omitted.push("where_line");
     }
-    if let Some(url) = &activity.join_url {
-        values.push(("join_url", Value::Text(url)));
+    if activity.join_url.is_none() {
+        omitted.push("join_label");
     }
     let text = templates
-        .tenant_wording(client, tenant, key, &values)
+        .wording(
+            client,
+            scope,
+            key,
+            Some(
+                OrganisationId::new(activity.company_id)
+                    .map_err(|_| bilibi_database::Error::Internal)?,
+            ),
+            language,
+            (&values, &omitted),
+        )
         .await?;
     let mut body = format!("{}\n\n{}\n", text["intro"], text["when_line"]);
     if activity.location.is_some() {
         body.push_str(&format!("{}\n", text["where_line"]));
     }
-    if activity.join_url.is_some() {
-        body.push_str(&format!("{}\n", text["join_line"]));
+    if let Some(url) = &activity.join_url {
+        body.push_str(&format!("{} {url}\n", text["join_label"]));
     }
     if let Some(description) = activity.description.as_ref().filter(|_| described) {
         body.push_str(&format!("\n{description}\n"));
@@ -76,7 +91,7 @@ const GUEST_SLOTS: &[Slot] = &[
     Slot::text("intro", "Opening line"),
     Slot::text("when_line", "Line that says when"),
     Slot::text("where_line", "Line that says where"),
-    Slot::text("join_line", "Line with the link to join"),
+    Slot::text("join_label", "Text before the link to join"),
     Slot::text("closing", "Closing text"),
 ];
 const GUEST_ALL: &[&str] = &[
@@ -84,13 +99,24 @@ const GUEST_ALL: &[&str] = &[
     "intro",
     "when_line",
     "where_line",
-    "join_line",
+    "join_label",
     "closing",
 ];
 const GUEST_VARIABLES: &[Variable] = &[
     Variable::text("sender_name", "Sender's name", "Ahmad Faiz", GUEST_ALL),
     Variable::text("kind", "Kind of activity", "meeting", GUEST_ALL),
-    Variable::text("title", "Title", "Quarterly review", GUEST_ALL),
+    Variable::text(
+        "subject_title",
+        "Title for the subject",
+        "Quarterly review",
+        &["subject"],
+    ),
+    Variable::text(
+        "title",
+        "Title",
+        "Quarterly review",
+        &["intro", "when_line", "where_line", "join_label", "closing"],
+    ),
     Variable::text(
         "when",
         "Date and time",
@@ -98,12 +124,6 @@ const GUEST_VARIABLES: &[Variable] = &[
         GUEST_ALL,
     ),
     Variable::optional_text("location", "Place", "Meeting room 2", &["where_line"]),
-    Variable::optional_text(
-        "join_url",
-        "Link to join",
-        "https://meet.example.test/quarterly",
-        &["join_line"],
-    ),
 ];
 
 inventory::submit! { Contribution::new(CATALOGUE, INVITATION, provenance!(), &Template {
@@ -115,11 +135,11 @@ inventory::submit! { Contribution::new(CATALOGUE, INVITATION, provenance!(), &Te
     variables: GUEST_VARIABLES,
     base_language: "en",
     defaults: &[DefaultText { language: "en", version: "1", slots: &[
-        ("subject", "Invitation: {{title}}"),
+        ("subject", "Invitation: {{subject_title}}"),
         ("intro", "{{sender_name}} invites you to a {{kind}}: {{title}}"),
         ("when_line", "When: {{when}}"),
         ("where_line", "Where: {{location}}"),
-        ("join_line", "Join: {{join_url}}"),
+        ("join_label", "Join:"),
         ("closing", "Please reply to {{sender_name}} to accept or decline."),
     ] }],
 }) }
@@ -133,11 +153,11 @@ inventory::submit! { Contribution::new(CATALOGUE, GUEST_REMINDER, provenance!(),
     variables: GUEST_VARIABLES,
     base_language: "en",
     defaults: &[DefaultText { language: "en", version: "1", slots: &[
-        ("subject", "Reminder: {{title}}"),
+        ("subject", "Reminder: {{subject_title}}"),
         ("intro", "A reminder of the {{kind}} {{sender_name}} invited you to: {{title}}"),
         ("when_line", "When: {{when}}"),
         ("where_line", "Where: {{location}}"),
-        ("join_line", "Join: {{join_url}}"),
+        ("join_label", "Join:"),
         ("closing", "If you can no longer come, please reply to {{sender_name}}."),
     ] }],
 }) }
@@ -157,12 +177,13 @@ inventory::submit! { Contribution::new(CATALOGUE, REMINDER, provenance!(), &Temp
     ],
     variables: &[
         Variable::text("what", "What is due", "Meeting", OWN_ALL),
-        Variable::text("title", "Title", "Quarterly review", OWN_ALL),
+        Variable::text("subject_title", "Title for the subject", "Quarterly review", &["subject"]),
+        Variable::text("title", "Title", "Quarterly review", &["intro", "due_line", "starts_line", "link_label"]),
         Variable::optional_text("when", "Date and time", "2026-11-20 09:15 UTC", &["due_line", "starts_line"]),
     ],
     base_language: "en",
     defaults: &[DefaultText { language: "en", version: "1", slots: &[
-        ("subject", "Reminder: {{title}}"),
+        ("subject", "Reminder: {{subject_title}}"),
         ("intro", "{{what}}: {{title}}"),
         ("due_line", "Due {{when}}"),
         ("starts_line", "Starts {{when}}"),

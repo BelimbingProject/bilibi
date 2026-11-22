@@ -56,10 +56,9 @@ setting!(
 fn sender_name(value: &serde_json::Value) -> bool {
     value.as_str().is_some_and(|name| {
         name.trim() == name
+            && (name.is_empty() || crate::message::display_name(name))
             && name.chars().count() <= 100
-            && !name
-                .chars()
-                .any(|c| c.is_control() || matches!(c, '@' | '<' | '>' | '"'))
+            && !name.chars().any(|c| matches!(c, '@' | '<' | '>' | '"'))
     })
 }
 
@@ -69,7 +68,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, SENDER_NAME, Provenance {
     value_type: ValueType::String, scopes: &[ScopeKind::Tenant],
     default: || json!(""), nullable: false, encrypted: false,
     minimum: None, maximum: None,
-    validator: Some(Validator { accepts: sender_name, message: "Enter a name of up to 100 characters without @, quotes or angle brackets." }),
+    validator: Some(Validator { accepts: sender_name, message: "Enter a name of up to 100 characters and 200 UTF-8 bytes without @, quotes or angle brackets." }),
     editor: Some(Editor { group: "Mail", label: "Sender name",
         help: "The sender name on this tenant's email. Blank uses the server's name; the address stays the server's.",
         capability: None, reveal_duration_ms: 5_000 }),

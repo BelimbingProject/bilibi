@@ -8,7 +8,7 @@ Ask an AI assistant to draft and preview wording through the template operations
 
 ## Declare a template
 
-Contribute a static `Template` under `bilibi_templates::CATALOGUE` through Module Registry. Use `<domain>.<module>.<purpose>` for the key. Base and Core use their layer name in place of the domain. Give each packaged language an explicit version and declare a base language. The registry checks duplicate keys, slot and variable IDs, and whether the defaults render.
+Contribute a static `Template` through Module Registry. Use `bilibi_templates::CATALOGUE` for editable wording and `bilibi_templates::PLATFORM_CATALOGUE` for packaged-only wording. Use `<domain>.<module>.<purpose>` for the key. Base and Core use their layer name in place of the domain. Give each packaged language an explicit version and declare a base language. The registry checks duplicate keys, slot and variable IDs, and whether the defaults render.
 
 - Declare which slots a variable can appear in and give it a sample of the same type as the runtime fact. The first slice supports text and calendar dates.
 - Pass the sealed scope and the authorised business record's company to `Templates::resolve`. Pass the resolved slots and typed facts to `Template::render`. Rendering performs no lookups.
@@ -28,10 +28,10 @@ let message = Message::text(to, text["subject"].clone(), format!("{}\n\n{link}\n
 mailer.deliver_for(tenant, &message).await?;
 ```
 
-- `Templates::tenant_wording` resolves the workspace override or the packaged text in the template's base language and fills it in. It takes a tenant the caller proved from its own record, because a reset link or an invitation has no session. It reads no company override; use `resolve` for a business record that has a company.
+- `Templates::wording` renders scoped mail using the authorised record’s company and the message’s resolved locale. `Templates::tenant_wording` uses the template’s base language and a tenant the caller proved from its own record, such as a password reset without a session.
 - A published override that cannot hold the real facts gives way to the packaged wording, with a log line, so the message is still sent.
-- **Links stay in code.** A slot is prose before or after a link; the sending module builds the link and fixes the order of the parts. A workspace can reword a security message (reset, verification, sign-in alert) but cannot remove, move or replace its link.
-- A line some messages lack (a place, an end date) is its own slot with an optional variable; the module leaves the slot out when the fact is absent.
+- **Links stay in code.** A slot is prose before or after a link; the sending module builds the link and fixes the order of the parts. Security messages use packaged wording. Publish and restore refuse those keys.
+- A line some messages lack (a place, an end date) is its own slot with an optional variable; Pass omitted slots to `Templates::wording` when the message leaves out those lines.
 - `Mailer::deliver_for` sends under the workspace's sender name ([Mail](../mail/README.md#sender-name)).
 
 | Module | Templates |
@@ -41,6 +41,8 @@ mailer.deliver_for(tenant, &message).await?;
 | `core/activity` | `core.activity.invitation`, `core.activity.guest_reminder`, `core.activity.reminder` |
 | `core/document` | `core.document.share` |
 | `base/reports` | `base.reports.scheduled_report` |
+
+Portal notices and PDF prose slots are later slices of issue #833.
 
 The first tenant owner's invitation (`bilibi tenant-owner`) keeps fixed text: it is sent before the workspace exists.
 

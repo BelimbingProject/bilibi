@@ -260,6 +260,7 @@ pub struct Reports {
     mutations: Arc<bilibi_database::MutationBoundary>,
     mailer: Arc<bilibi_mail::Mailer>,
     templates: Arc<bilibi_templates::Templates>,
+    locales: Arc<bilibi_locale::Locales>,
     directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
     labels: Arc<bilibi_labels::Labels>,
     /// The public origin emailed links point at (`APP_ORIGIN`).
@@ -1686,6 +1687,7 @@ inventory::submit! {
                 mutations: services.get("base/database.mutations")?,
                 mailer: services.get("base/mail.mailer")?,
                 templates: services.get(bilibi_templates::SERVICE)?,
+                locales: services.get("base/locale.locales")?,
                 directory: services.get("base/principal_directory.directory")?,
                 labels: services.get(bilibi_labels::SERVICE)?,
                 origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
