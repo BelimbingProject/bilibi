@@ -237,7 +237,7 @@ impl UserService {
             self.failed(scope, "password").await?;
             return Err(TwoFactorError::IncorrectPassword);
         }
-        let issuer = self.issuer(&**client).await?;
+        let issuer = self.issuer()?;
         drop(client);
         let secret = totp::generate_secret()?;
         let encoded = totp::encode_secret(&secret);
@@ -392,7 +392,7 @@ impl UserService {
             .map_err(Error::from)?
             .ok_or(Error::Unauthorized)?
             .get(0);
-        let issuer = self.issuer(&**client).await?;
+        let issuer = self.issuer()?;
         drop(client);
         let encoded = totp::encode_secret(&totp::generate_secret()?);
         Ok(Enrollment::new(issuer, email, encoded)?)
@@ -468,18 +468,14 @@ impl UserService {
         }
     }
 
-    /// The name the authenticator app lists this server under, from the
-    /// instance identity (Base System): `Bilibi <name> (<role>)`, or
-    /// `Bilibi <role>` when the instance still carries its role's own name.
-    async fn issuer(&self, client: &(impl GenericClient + Sync)) -> Result<String> {
-        let instance = bilibi_system::Instance::resolve(&self.settings, client).await?;
-        let role = instance.role.label();
-        let name = instance.label.replace(':', " ");
-        Ok(if name.trim().eq_ignore_ascii_case(role) {
-            format!("Bilibi {role}")
-        } else {
-            format!("Bilibi {} ({role})", name.trim())
-        })
+    /// The public installation host distinguishes entries in authenticator apps.
+    fn issuer(&self) -> Result<String> {
+        let origin = url::Url::parse(&self.origin).map_err(|_| Error::Invalid)?;
+        let issuer = match origin.host().ok_or(Error::Invalid)? {
+            url::Host::Domain(host) if !host.contains(':') => host,
+            _ => "Bilibi",
+        };
+        Ok(issuer.to_owned())
     }
 
     /// Checks a code against the confirmed authenticator without consuming
