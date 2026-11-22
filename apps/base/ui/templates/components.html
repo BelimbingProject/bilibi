@@ -114,7 +114,7 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
 
 {#- The demoted "← Back" link; title names the destination and must start with "Back". -#}
 {% macro back_link(href, id="", title="", class="") %}
-<a href="{{ href }}"{% if !id.is_empty() %} id="{{ id }}"{% endif %}{% if !title.is_empty() %} title="{{ title }}" aria-label="{{ title }}"{% endif %} class="{{ bilibi_ui::DEMOTED_ACTION_CLASS }}{% if !class.is_empty() %} {{ class }}{% endif %}"><span aria-hidden="true">←</span> Back</a>
+<a href="{{ href }}" data-hook="RecordBackLink" data-back-href="{{ href }}"{% if !id.is_empty() %} id="{{ id }}"{% endif %}{% if !title.is_empty() %} title="{{ title }}" aria-label="{{ title }}"{% endif %} class="{{ bilibi_ui::DEMOTED_ACTION_CLASS }}{% if !class.is_empty() %} {{ class }}{% endif %}"><span aria-hidden="true">←</span> Back</a>
 {% endmacro %}
 
 {#- A copy icon for a text the person pastes elsewhere. It must sit inside an

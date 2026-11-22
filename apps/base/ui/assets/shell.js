@@ -560,7 +560,9 @@
     address() {
       const url = new URL(window.location.href);
       url.hash = '';
-      const query = new URLSearchParams(url.search); query.sort();
+      const query = url.searchParams;
+      query.delete('return_to');
+      query.sort();
       return url.pathname.replace(/\/+$/, '') + (query.size ? `?${query}` : '') || '/';
     }
     apply() {

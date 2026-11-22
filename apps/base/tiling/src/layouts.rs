@@ -46,8 +46,8 @@ impl Entry {
     fn read(value: &Value) -> Option<Self> {
         let slug = value.get("slug")?.as_str()?;
         let label = value.get("label")?.as_str()?;
-        let tree = value.get("tree")?.as_str()?;
-        if !valid_slug(slug) || clean_label(label).is_err() || clean_tree(tree).is_err() {
+        let tree = clean_tree(value.get("tree")?.as_str()?).ok()?;
+        if !valid_slug(slug) || clean_label(label).is_err() {
             return None;
         }
         let roles = match value.get("roles") {
@@ -64,7 +64,7 @@ impl Entry {
         Some(Self {
             slug: slug.to_owned(),
             label: label.to_owned(),
-            tree: tree.to_owned(),
+            tree,
             roles,
         })
     }
@@ -388,10 +388,14 @@ pub fn clean_label(label: &str) -> std::result::Result<String, Refusal> {
 
 /// The encoded tree, when it decodes to at least one tile.
 pub fn clean_tree(tree: &str) -> std::result::Result<String, Refusal> {
-    match Layout::decode(tree) {
-        Some(layout) if !layout.is_empty() && tree.len() <= MAX_TREE => Ok(tree.to_owned()),
-        _ => Err(Refusal::Tree),
+    if tree.len() > MAX_TREE {
+        return Err(Refusal::Tree);
     }
+    Layout::decode(tree)
+        .filter(|layout| !layout.is_empty())
+        .map(|layout| layout.encode())
+        .filter(|encoded| encoded.len() <= MAX_TREE)
+        .ok_or(Refusal::Tree)
 }
 
 pub fn valid_role(code: &str) -> bool {
