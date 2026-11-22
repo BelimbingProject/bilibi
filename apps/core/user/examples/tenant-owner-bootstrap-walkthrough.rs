@@ -292,7 +292,10 @@ async fn verify_retirement_refusal(
         .await?
         .get(0);
     if !audited || after != expected {
-        return Err(Error::Internal);
+        return Err(Error::Refused(format!(
+            "Retired Person refusal proof failed: audited={audited} state={}",
+            after == expected
+        )));
     }
     Ok(())
 }
@@ -399,7 +402,14 @@ async fn main() -> Result<()> {
         provision(&workspace, Some(OWNER), None)?,
         Some("the bootstrap owner has no pending invitation"),
     )?;
-    if snapshot(&client).await? != before_retry || count(&mailbox)? != mail_before_retry {
+    let after_retry = snapshot(&client).await?;
+    let mail_after_retry = count(&mailbox)?;
+    println!(
+        "Accepted owner retry kept state: database={} mailbox={}",
+        after_retry == before_retry,
+        mail_after_retry == mail_before_retry
+    );
+    if after_retry != before_retry || mail_after_retry != mail_before_retry {
         return Err(Error::Internal);
     }
 
@@ -409,7 +419,14 @@ async fn main() -> Result<()> {
         provision("Independent workspace", Some(OWNER), None)?,
         Some("a matching tenant already exists without a matching owner bootstrap receipt"),
     )?;
-    if snapshot(&client).await? != independent || count(&mailbox)? != mail_before_retry {
+    let after_independent = snapshot(&client).await?;
+    let mail_after_independent = count(&mailbox)?;
+    println!(
+        "Independent owner refusal kept state: database={} mailbox={}",
+        after_independent == independent,
+        mail_after_independent == mail_before_retry
+    );
+    if after_independent != independent || mail_after_independent != mail_before_retry {
         return Err(Error::Internal);
     }
 
@@ -426,6 +443,7 @@ async fn main() -> Result<()> {
     if !original.unexpired || original.reissues != 0 || count(&mailbox)? != mail_before_retry {
         return Err(Error::Internal);
     }
+    println!("Delivery failure kept one pending invitation");
     let before_wrong_address = snapshot(&client).await?;
     expect_output(
         provision(retry_workspace, Some(OWNER), None)?,
@@ -434,6 +452,7 @@ async fn main() -> Result<()> {
     if snapshot(&client).await? != before_wrong_address || count(&mailbox)? != mail_before_retry {
         return Err(Error::Internal);
     }
+    println!("Dedicated-address refusal kept the pending invitation");
     expect_output(provision(retry_workspace, Some(retry_email), None)?, None)?;
     let first_token = invitation_token(
         &mailbox,
@@ -450,6 +469,7 @@ async fn main() -> Result<()> {
     {
         return Err(Error::Internal);
     }
+    println!("First invitation reissue replaced only the token");
     client.execute(
         "UPDATE user_invitations SET expires_at=clock_timestamp()-interval '1 minute' WHERE tenant_id=$1 AND id=$2",
         &[&original.tenant, &original.invitation],
@@ -472,6 +492,7 @@ async fn main() -> Result<()> {
     if snapshot(&client).await? != ambiguous || count(&mailbox)? != mail_before_retry + 2 {
         return Err(Error::Internal);
     }
+    println!("Ambiguous retry kept both invitations");
     for (command, name) in [
         ("tenant-provision", "Legacy tenant"),
         ("platform-provision", "Legacy platform"),
@@ -497,33 +518,47 @@ async fn main() -> Result<()> {
         }
         expect_output(output, None)?;
     }
+    println!("Repeated provisioning options used their last value");
     drop(client);
     assert!(matches!(
         app.user.accept_member_invitation(&owner, &new_token).await,
         Err(InvitationError::DedicatedSignIn)
     ));
+    let first_invalid = matches!(
+        app.user.member_invitation(&first_token).await,
+        Err(InvitationError::Link)
+    );
+    let accepted = app
+        .user
+        .accept_new_member_invitation(&new_token, PASSWORD)
+        .await
+        .map_err(|error| Error::Refused(format!("Owner reissue acceptance failed: {error}")))?;
+    println!(
+        "Second reissue retained the invitation: same={} rotated={} live={} reissues={} first_invalid={} accepted={}",
+        reissued.same_invitation(&original),
+        reissued.digest != delivered.digest,
+        reissued.unexpired,
+        reissued.reissues,
+        first_invalid,
+        accepted == original.user
+    );
     if !reissued.same_invitation(&original)
         || reissued.digest == delivered.digest
         || !reissued.unexpired
         || reissued.reissues != 2
-        || !matches!(
-            app.user.member_invitation(&first_token).await,
-            Err(InvitationError::Link)
-        )
-        || app
-            .user
-            .accept_new_member_invitation(&new_token, PASSWORD)
-            .await
-            .map_err(|_| Error::Internal)?
-            != original.user
+        || !first_invalid
+        || accepted != original.user
     {
         return Err(Error::Internal);
     }
     let client = db.get().await?;
     let (retry_tenant, _) =
         verify_owner(&client, original.user, retry_workspace, retry_email).await?;
+    println!("Reissued owner account verified");
     if retry_tenant != original.tenant {
-        return Err(Error::Internal);
+        return Err(Error::Refused(
+            "Reissued owner moved to another tenant".into(),
+        ));
     }
     let before = count(&mailbox)?;
     let state = snapshot(&client).await?;
@@ -531,8 +566,11 @@ async fn main() -> Result<()> {
         provision("Address already used", Some(OWNER), None)?,
         Some(DEDICATED),
     )?;
+    println!("Portable owner address remained reserved");
     if snapshot(&client).await? != state || count(&mailbox)? != before {
-        return Err(Error::Internal);
+        return Err(Error::Refused(
+            "Reserved owner address refusal changed state".into(),
+        ));
     }
     drop(client);
 
@@ -558,15 +596,26 @@ async fn main() -> Result<()> {
             "INSERT INTO user_identities(kind,email,password_hash,last_tenant_id) VALUES('staff',$1,$2,$3) RETURNING id",
             &[&member_email, &hash, &owner.tenant()],
         )
-        .await?
+        .await
+        .map_err(|error| Error::Refused(format!("Portable identity fixture failed: {error}")))?
+        .get(0);
+    let person: i64 = client
+        .query_one(
+            "INSERT INTO persons(tenant_id,code,name,kind) VALUES($1,'second_workspace_invitee','Second workspace invitee','human') RETURNING id",
+            &[&owner.tenant()],
+        )
+        .await
+        .map_err(|error| Error::Refused(format!("Portable Person fixture failed: {error}")))?
         .get(0);
     let member_account: i64 = client
         .query_one(
-            "INSERT INTO users(tenant_id,identity_id,name) VALUES($1,$2,'Second workspace invitee') RETURNING id",
-            &[&owner.tenant(), &identity],
+            "INSERT INTO users(tenant_id,identity_id,person_id,name) VALUES($1,$2,$3,'Second workspace invitee') RETURNING id",
+            &[&owner.tenant(), &identity, &person],
         )
-        .await?
+        .await
+        .map_err(|error| Error::Refused(format!("Portable membership fixture failed: {error}")))?
         .get(0);
+    println!("Portable identity fixture created");
     drop(client);
     let member_login = app
         .user
@@ -574,6 +623,7 @@ async fn main() -> Result<()> {
         .await
         .map_err(|_| Error::Unauthorized)?;
     let revoked = app.security.guard(&member_login.token).await?;
+    println!("Portable identity signed in to its existing membership");
     let client = db.get().await?;
     let before_refusal = snapshot(&client).await?;
     let pending = retry_state(&client, reserved_workspace).await?;
@@ -598,9 +648,17 @@ async fn main() -> Result<()> {
             .await,
         Err(InvitationError::DedicatedSignIn)
     ));
+    println!("Reserved owner invitation refused every acceptance path");
     let client = db.get().await?;
-    if snapshot(&client).await? != before_refusal || count(&mailbox)? != before + 1 {
-        return Err(Error::Internal);
+    let after_refusal = snapshot(&client).await?;
+    let mailbox_after_refusal = count(&mailbox)?;
+    if after_refusal != before_refusal || mailbox_after_refusal != before + 1 {
+        return Err(Error::Refused(format!(
+            "Reserved owner refusal changed state: database={} mailbox={} expected_mailbox={}",
+            after_refusal != before_refusal,
+            mailbox_after_refusal,
+            before + 1
+        )));
     }
     drop(client);
     let replacement_email = "replacement@customer.example.test";
@@ -659,19 +717,27 @@ async fn main() -> Result<()> {
         || !replacement.unexpired
         || !audited
     {
-        return Err(Error::Internal);
+        return Err(Error::Refused(format!(
+            "Replacement owner reissue proof failed: same={} rotated={} reissues={} live={} audited={audited}",
+            pending.same_invitation(&replacement),
+            pending.digest != replacement.digest,
+            replacement.reissues,
+            replacement.unexpired
+        )));
     }
+    println!("Reserved owner address was replaced with an audited reissue");
     drop(client);
     let accepted = app
         .user
         .accept_new_member_invitation(&replacement_token, PASSWORD)
         .await
-        .map_err(|_| Error::Internal)?;
+        .map_err(|error| Error::Refused(format!("Replacement owner acceptance failed: {error}")))?;
     assert_eq!(accepted, pending.user);
     let client = db.get().await?;
     let (replacement_tenant, _) =
         verify_owner(&client, accepted, reserved_workspace, replacement_email).await?;
     assert_eq!(replacement_tenant, pending.tenant);
+    println!("Replacement owner accepted and verified");
     let accepted_state = snapshot(&client).await?;
     expect_output(
         provision(
@@ -682,8 +748,11 @@ async fn main() -> Result<()> {
         Some("the bootstrap owner has no pending invitation"),
     )?;
     if snapshot(&client).await? != accepted_state || count(&mailbox)? != before + 2 {
-        return Err(Error::Internal);
+        return Err(Error::Refused(
+            "Accepted replacement owner retry changed state".into(),
+        ));
     }
+    println!("Accepted replacement owner retry kept state");
     let auth = app
         .services
         .get::<bilibi_tenancy::Authentication>("base/tenancy.authentication")?;
@@ -696,7 +765,9 @@ async fn main() -> Result<()> {
             None,
             String::new(),
         )
-        .await?;
+        .await
+        .map_err(|error| Error::Refused(format!("Impersonated fixture session failed: {error}")))?;
+    println!("Impersonated fixture session created");
     drop(client);
     let second_login = app
         .user
@@ -704,6 +775,7 @@ async fn main() -> Result<()> {
         .await
         .map_err(|_| Error::Unauthorized)?;
     let second_owner = app.security.guard(&second_login.token).await?;
+    println!("Reissued owner signed in");
     let before = count(&mailbox)?;
     app.user
         .invite_member(
@@ -715,7 +787,7 @@ async fn main() -> Result<()> {
             },
         )
         .await
-        .map_err(|_| Error::Internal)?;
+        .map_err(|error| Error::Refused(format!("Ordinary invitation failed: {error}")))?;
     tokio::time::timeout(Duration::from_secs(5), async {
         while count(&mailbox)? == before {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -731,6 +803,7 @@ async fn main() -> Result<()> {
         member_email,
         &format!("You are invited to join {retry_workspace}."),
     )?;
+    println!("Ordinary invitation delivered");
     app.user
         .logout(&member_login.token, &member_login.csrf)
         .await?;
@@ -768,8 +841,12 @@ async fn main() -> Result<()> {
         .await?
         .get(0);
     if !audited || after != expected {
-        return Err(Error::Internal);
+        return Err(Error::Refused(format!(
+            "Ordinary invitation session refusals failed: audited={audited} state={}",
+            after == expected
+        )));
     }
+    println!("Ordinary invitation refused impersonated and revoked sessions");
     drop(client);
     let member_login = app
         .user
@@ -777,7 +854,9 @@ async fn main() -> Result<()> {
         .await
         .map_err(|_| Error::Unauthorized)?;
     let signed_in = app.security.guard(&member_login.token).await?;
+    println!("Portable member signed in for retirement-race proof");
     verify_retirement_refusal(&app, &pool(&database_url)?, &signed_in, &ordinary_token).await?;
+    println!("Ordinary invitation refused a concurrently retired Person");
     let invitation = app
         .user
         .member_invitation(&ordinary_token)

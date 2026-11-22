@@ -250,6 +250,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let notices = lock_notices(&mailbox, viewer) - before;
         println!("Two sign-in locks in a row mailed {notices} notice(s)");
         assert_eq!(notices, 1);
+        // The remaining account-bound checks reuse this fixture identity; only
+        // the fixture clock advances the installation-owned sign-in lock.
+        client
+            .execute(
+                "UPDATE user_credential_attempts SET locked_until=now()-interval '1 second' WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=1 AND id=2) AND kind='sign_in'",
+                &[],
+            )
+            .await?;
         bilibi_walkthrough_fixture::set_instance_role(&db, "production").await?;
 
         // Sign-in lockout is installation-owned: tenant administrators cannot

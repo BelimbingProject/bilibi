@@ -350,6 +350,14 @@ async fn main() -> Result<()> {
         "INSERT INTO user_identity_providers(tenant_id,company_id,public_id,configured_by,method,enabled) VALUES(1,1,$1,$2,'walkthrough',true) RETURNING id",
         &[&provider_public, &existing.user()],
     ).await?.get(0);
+    // This fixture inserts the provider below the production configuration
+    // facade, so it also supplies the empty fail-closed authorization policy.
+    client
+        .execute(
+            "INSERT INTO authz_identity_policies(tenant_id,source,company_id,role_ids) VALUES(1,$1,1,'{}')",
+            &[&format!("core.user.sso.{provider}")],
+        )
+        .await?;
     let issuer = "https://identity.example.test";
     let settings = app
         .services
