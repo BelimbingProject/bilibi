@@ -306,6 +306,7 @@ sudo scripts/install-server.sh identity-retention production
 ```
 
 - `identity-recover` is for a person who lost the old mailbox. It treats the new mailbox as operator-verified, revokes pending reset links, signs every membership out, notifies the new address and records **System · identity-recover**. It refuses an address already used by another portable identity.
+- Recovery remains available while an identity is unused but still inside its retention window, so losing the old mailbox does not prevent a later invitation from reactivating it.
 - Removing the last membership starts the **Unused sign-in retention** clock (90 days by default, configurable in Settings › Session). Accepting another invitation before it ends cancels the clock.
 - `identity-retention` anonymises at most 100 due identities per run. Run it repeatedly from the server's ordinary maintenance schedule until it reports zero.
 - `identity-delete` performs the same final anonymisation immediately, but only for an identity with no live membership. Repeating the address in `--confirm` prevents an accidental target typo. It records **System · identity-delete**.
