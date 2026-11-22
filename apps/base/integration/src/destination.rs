@@ -13,26 +13,29 @@ use serde_json::Value;
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-/// The code a connector reports for a destination the policy refuses. It is
-/// the same for every reason and decided before anything is sent, so it says
-/// nothing about whether something answers at that address.
+/// The code a connector reports for every destination it cannot use before
+/// connecting: a name that gives no address, an address outside the policy, an
+/// empty host or port 0. It is the same for every reason and decided before
+/// anything is sent, so it says nothing about which internal names exist or
+/// whether something answers at an address.
 pub const DESTINATION_REFUSED: &str = "destination_refused";
 
 /// The most entries `integration.connector_allowed_destinations` may hold.
 const MAX_ALLOWED: usize = 200;
 
-/// Why a configured host and port cannot be used.
+/// The most addresses of one name that are checked and tried: a name may not
+/// make a connector check or dial an unbounded list.
+const MAX_ADDRESSES: usize = 16;
+
+/// A configured host and port that cannot be used. It carries no reason on
+/// purpose: a name that gives no address and one that gives a forbidden
+/// address are the same refusal, so a tenant cannot tell which internal names
+/// exist. Report [`DESTINATION_REFUSED`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Unusable {
-    /// An address the name gives is outside the operator's policy. Report
-    /// [`DESTINATION_REFUSED`], whatever the address was.
-    Refused,
-    /// The name gives no address. Nothing was checked or contacted.
-    Unresolved,
-}
+pub struct Unusable;
 
 /// The operator's connector destination policy, as it stood when loaded.
 ///
@@ -74,35 +77,36 @@ impl ConnectorPolicy {
         })
     }
 
-    /// Resolves `host` and checks every address it gives. One refused address
-    /// refuses the whole destination. Blocking (it asks the system resolver):
-    /// call it on the thread that connects, right before connecting.
+    /// Resolves `host` and checks every address it gives (the first
+    /// `MAX_ADDRESSES` distinct ones, the only ones a connection may use). One
+    /// refused address refuses the whole destination, and so does a name that
+    /// gives no address: both are the same [`Unusable`]. Blocking (it asks the
+    /// system resolver): call it on the thread that connects, right before
+    /// connecting.
     pub fn resolve(&self, host: &str, port: u16) -> std::result::Result<Destination, Unusable> {
         let host = host.strip_prefix('[').unwrap_or(host);
         let host = host.strip_suffix(']').unwrap_or(host);
         if host.is_empty() || port == 0 {
-            return Err(Unusable::Refused);
+            return Err(Unusable);
         }
         let mut addresses: Vec<SocketAddr> = Vec::new();
-        for address in (host, port)
-            .to_socket_addrs()
-            .map_err(|_| Unusable::Unresolved)?
-        {
+        for address in (host, port).to_socket_addrs().map_err(|_| Unusable)? {
+            if addresses.len() == MAX_ADDRESSES {
+                break;
+            }
             if !addresses.contains(&address) {
                 addresses.push(address);
             }
         }
-        if addresses.is_empty() {
-            return Err(Unusable::Unresolved);
-        }
         let named = self.names(host, port);
-        if addresses
-            .iter()
-            .all(|address| self.admitted(named, *address))
+        if !addresses.is_empty()
+            && addresses
+                .iter()
+                .all(|address| self.admitted(named, *address))
         {
             Ok(Destination { addresses })
         } else {
-            Err(Unusable::Refused)
+            Err(Unusable)
         }
     }
 
@@ -140,13 +144,19 @@ impl Destination {
         &self.addresses
     }
 
-    /// Connects to the first checked address that accepts, giving each
-    /// `timeout`. Blocking. A host may list an address family its server does
-    /// not listen on first; only when none accepts does this fail.
+    /// Connects to the first checked address that accepts, all within one
+    /// `timeout` in total, however many addresses there are. Blocking. A host
+    /// may list an address family its server does not listen on first; only
+    /// when none accepts in time does this fail.
     pub fn connect(&self, timeout: Duration) -> io::Result<TcpStream> {
+        let deadline = Instant::now() + timeout;
         let mut last = io::Error::from(io::ErrorKind::AddrNotAvailable);
         for address in &self.addresses {
-            match TcpStream::connect_timeout(address, timeout) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::from(io::ErrorKind::TimedOut));
+            }
+            match TcpStream::connect_timeout(address, left) {
                 Ok(stream) => return Ok(stream),
                 Err(error) => last = error,
             }

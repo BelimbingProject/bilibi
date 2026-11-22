@@ -4,10 +4,12 @@
 //! way a connector does, and shows which hosts it refuses before anything is
 //! sent: loopback, link-local and cloud metadata, unspecified, multicast and
 //! broadcast addresses, their IPv4-mapped IPv6 forms, private ranges unless the
-//! operator opens them, and names that resolve to any of these. Public
-//! addresses are admitted; an allowed host or block connects to a local server
-//! on the checked address only. Refused setting values are named. Exits
-//! non-zero when a check fails. Run against a freshly migrated database.
+//! operator opens them, and names that resolve to any of these. A name that
+//! gives no address is the same refusal, so a tenant cannot tell which internal
+//! names exist. Public addresses are admitted; an allowed host or block
+//! connects to a local server on the checked address only, within one time
+//! limit. Refused setting values are named. Exits non-zero when a check fails.
+//! Run against a freshly migrated database.
 use bilibi_database::{pool, MutationBoundary};
 use bilibi_integration::{
     ConnectorPolicy, Unusable, CONNECTOR_ALLOWED_DESTINATIONS, CONNECTOR_PRIVATE_NETWORKS,
@@ -20,7 +22,7 @@ use serde_json::{json, Value};
 use std::{
     net::{SocketAddr, TcpListener},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 type Outcome<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -76,9 +78,19 @@ impl Proof {
 fn verdict(policy: &ConnectorPolicy, host: &str, port: u16) -> String {
     match policy.resolve(host, port) {
         Ok(destination) => format!("admitted {:?}", destination.addresses()),
-        Err(Unusable::Refused) => DESTINATION_REFUSED.into(),
-        Err(Unusable::Unresolved) => "unresolved".into(),
+        Err(Unusable) => DESTINATION_REFUSED.into(),
     }
+}
+
+/// Whether a name that gives no address and a name that gives a forbidden
+/// address get the very same answer: a tenant must not learn which internal
+/// names exist.
+fn indistinguishable(policy: &ConnectorPolicy, missing: &str, forbidden: &str, port: u16) -> bool {
+    let (missing, forbidden) = (
+        policy.resolve(missing, port),
+        policy.resolve(forbidden, port),
+    );
+    missing.is_err() && missing.err() == forbidden.err()
 }
 
 /// Every one of `hosts` gets `expected` (`admitted` matches any address list).
@@ -203,23 +215,26 @@ async fn main() -> Outcome {
         "admitted",
     );
     proof.check(
-        "a name that resolves to nothing is unresolved, not refused",
-        verdict(&policy, "no-such-host.invalid", 993) == "unresolved",
+        "a name that gives no address is refused with the one code",
+        verdict(&policy, "no-such-host.invalid", 993) == DESTINATION_REFUSED,
+    );
+    proof.check(
+        "and it cannot be told from a name that gives a forbidden address, so internal names cannot be enumerated",
+        indistinguishable(&policy, "no-such-host.invalid", "localhost", 993),
     );
     // Public names that resolve to local addresses (a wildcard DNS service):
-    // the check reads the resolved address, never the name.
+    // the check reads the resolved address, never the name. Without a public
+    // resolver they give no address, which is the same refusal.
     for host in [
         "127.0.0.1.nip.io",
         "10.0.0.1.nip.io",
         "169.254.169.254.nip.io",
     ] {
-        match verdict(&policy, host, 993).as_str() {
-            "unresolved" => println!("skip {host}: no public resolver here"),
-            got => proof.check(
-                &format!("a public name resolving to a local address is refused: {host} -> {got}"),
-                got == DESTINATION_REFUSED,
-            ),
-        }
+        let got = verdict(&policy, host, 993);
+        proof.check(
+            &format!("a public name resolving to a local address is refused: {host} -> {got}"),
+            got == DESTINATION_REFUSED,
+        );
     }
 
     println!("== the operator opens private networks");
@@ -248,6 +263,10 @@ async fn main() -> Outcome {
         "loopback, link-local, metadata and other local addresses stay refused",
         &local,
         DESTINATION_REFUSED,
+    );
+    proof.check(
+        "with private networks open, a missing internal name still cannot be told from loopback",
+        indistinguishable(&policy, "pbx.invalid", "localhost", 5039),
     );
     proof.check(
         "the operator turns private networks off again",
@@ -313,7 +332,8 @@ async fn main() -> Outcome {
                 json!([
                     format!("127.0.0.1:{port}"),
                     "10.20.0.0/16",
-                    "[fd00:aa::/64]:5039"
+                    "[fd00:aa::/64]:5039",
+                    "192.0.2.0/24:993"
                 ]),
             )
             .await?,
@@ -351,6 +371,20 @@ async fn main() -> Outcome {
             ("fd00:ab::7", 5039),
         ],
         DESTINATION_REFUSED,
+    );
+    // A documentation address the operator allowed: nothing answers there, so
+    // connecting either fails at once or waits out its one time limit.
+    let limit = Duration::from_millis(500);
+    let started = Instant::now();
+    let attempt = policy
+        .resolve("192.0.2.1", 993)
+        .map(|destination| destination.connect(limit));
+    let took = started.elapsed();
+    proof.check(
+        &format!(
+            "an allowed address that does not answer gives up within the one time limit ({took:?})"
+        ),
+        matches!(attempt, Ok(Err(_))) && took < limit + Duration::from_secs(1),
     );
 
     proof.check(

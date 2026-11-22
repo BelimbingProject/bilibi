@@ -68,25 +68,24 @@ A connector that speaks its own protocol to a server a tenant configures (IMAP, 
 // On the connection you already hold (no second pooled connection).
 let policy = ConnectorPolicy::load(&settings, client).await?;
 // On the blocking thread that connects, right before connecting.
-let destination = policy.resolve(&host, port).map_err(|unusable| match unusable {
-    Unusable::Refused => Failure::DestinationRefused, // report DESTINATION_REFUSED
-    Unusable::Unresolved => Failure::Unreachable,
-})?;
-let tcp = destination.connect(timeout)?; // only the checked addresses
+let destination = policy
+    .resolve(&host, port)
+    .map_err(|Unusable| Failure::DestinationRefused)?; // report DESTINATION_REFUSED
+let tcp = destination.connect(timeout)?; // only the checked addresses, one time limit in total
 ```
 
-- `resolve` asks the system resolver once and checks **every** address the name gives; one refused address refuses the destination. `Destination` holds only checked addresses and has no name: `connect` tries them in order, and a library that dials by itself (an SMTP client) is given a checked address from `addresses()` as its server while TLS still verifies the configured name.
+- `resolve` asks the system resolver once and checks **every** address the name gives, up to the first 16 distinct ones (the only ones a connection may use); one refused address refuses the destination. `Destination` holds only checked addresses and has no name: `connect` tries them in order within one `timeout` in total, however many there are, and a library that dials by itself (an SMTP client) is given a checked address from `addresses()` as its server while TLS still verifies the configured name.
 - An address is admitted when it is public (the conservative global-unicast test `public_https` uses), when it is private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`) and the operator turned on `integration.connector_private_networks`, or when an entry of `integration.connector_allowed_destinations` covers it.
 - Never admitted, whatever the operator lists: unspecified (`0.0.0.0/8`, `::`), multicast, broadcast, link-local (`169.254.0.0/16`, `fe80::/10`) and the cloud metadata addresses outside them (`fd00:ec2::254`, `100.100.100.200`, `192.0.0.192`). Loopback, shared (`100.64.0.0/10`), documentation, benchmarking and reserved ranges are refused unless an entry names them. An IPv4-mapped IPv6 address is judged as its IPv4 form; NAT64 and 6to4 forms are not public.
 - A connection kept open between uses (a phone system's event stream) asks `policy.admits(host, peer)` with a freshly loaded policy before each use, so a policy the operator tightened ends it.
-- A refusal is `Unusable::Refused`, which a connector reports as the one code `DESTINATION_REFUSED` (`destination_refused`) for every reason, before anything is sent, so it says nothing about whether something answers there. `Unusable::Unresolved` is a name with no address; nothing was checked or contacted.
+- Every failure before connecting is the one `Unusable`, which carries no reason: a name that gives no address, an address outside the policy, an empty host and port 0. A connector reports it as the one code `DESTINATION_REFUSED` (`destination_refused`), decided before anything is sent. It must not map any of these to a code of its own, such as `unreachable`: a tenant who could tell "no such name" from "a name that resolves to a forbidden address" could enumerate the installation's internal DNS names without making a connection. `unreachable` is only for a checked destination that did not accept in time.
 
 | Global operator setting (System Settings, group Connectors) | Default | Meaning |
 | --- | --- | --- |
 | `integration.connector_private_networks` | `false` | `true` admits the private ranges above. |
 | `integration.connector_allowed_destinations` | `[]` | At most 200 entries: `host` or `host:port` (a name: every address it resolves to is admitted), `a.b.c.d[/len][:port]` or `[v6[/len]][:port]` (an address or block). No port means any port. Anything else is refused when saved. |
 
-Proof: `examples/connector-destinations-walkthrough.rs` (in `scripts/run-walkthroughs.sh`) sets both settings as the operator on a disposable database and checks each class above, IPv4-mapped forms, names that resolve to local addresses, a public address admitted, an allowed name, address and block connecting to a local server on the checked address only, ports, a kept connection re-checked with `admits`, and the refused setting values.
+Proof: `examples/connector-destinations-walkthrough.rs` (in `scripts/run-walkthroughs.sh`) sets both settings as the operator on a disposable database and checks each class above, IPv4-mapped forms, names that resolve to local addresses, a name that gives no address getting exactly the refusal a forbidden name gets (with private networks closed and open), a public address admitted, an allowed name, address and block connecting to a local server on the checked address only, an allowed address that does not answer giving up within its one time limit, ports, a kept connection re-checked with `admits`, and the refused setting values.
 
 ## Incoming calls
 
