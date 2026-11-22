@@ -1,9 +1,11 @@
-{#- The centered credential layout: the brand mark
-    and name above a compact card with the brand bar, the platform line below,
-    and the flash group, which this layout renders itself because the workspace
-    shell is absent. The root carries data-shared-ui so the legacy compatibility
-    sheet (assets/css/legacy-compat.css) stops at it. The brand mark is the
-    vendored favicon. -#}
+{#- The staff credential layout (DESIGN.md, Shell): the wordmark, the
+    installation owner's company and the instance badge above one card,
+    and the flash group, which this layout renders itself because the
+    workspace shell is absent. The root carries data-shared-ui so the legacy
+    compatibility sheet (assets/css/legacy-compat.css) stops at it. The parts are the shared macros of
+    credential.html. -#}
+{% import "components.html" as ui %}
 {% import "feedback.html" as feedback %}
-<div data-shared-ui class="flex min-h-svh flex-col items-center justify-center gap-6 p-6"><div class="flex w-full max-w-sm flex-col gap-5"><a href="/" class="flex flex-col items-center gap-2.5" aria-label="Bilibi home"><img src="{{ bilibi_ui::Assets::url("/favicon.svg") }}" alt="" class="shrink-0 object-contain size-9" width="36" height="36" decoding="async" loading="eager" aria-hidden="true" /><span class="text-base font-semibold tracking-tight text-ink-strong">Bilibi</span></a>{% if !instance.is_empty() %}<div class="flex justify-center">{{ instance|safe }}</div>{% endif %}<div id="auth-card" class="rounded-xl border border-line bg-surface shadow-sm shadow-ink/[0.04]"><div class="h-0.5 rounded-t-xl bg-brand" aria-hidden="true"></div><div class="px-7 py-6 sm:px-8">{{ body }}</div></div><p class="text-center text-xs text-ink-faint">Business application platform</p></div></div>
+{% import "credential.html" as credential %}
+<div data-shared-ui class="flex min-h-svh flex-col items-center justify-center px-4 py-8">{% call credential::column() %}{% call credential::masthead(id="auth-masthead") %}{% call ui::wordmark(size=bilibi_ui::WordmarkSize::Credential, href="/") %}{% endcall %}{% if let Some(workspace) = workspace %}{% if let bilibi_ui::LoginWorkspace::Ready(company) = workspace %}<p id="auth-workspace" data-state="{{ workspace.state() }}" class="max-w-full break-words text-base text-ink-muted">{{ company }}</p>{% else %}<p id="auth-workspace" data-state="{{ workspace.state() }}" class="inline-flex items-center gap-1.5 text-sm text-ink-muted"><span class="size-1.5 shrink-0 rounded-full bg-warning" aria-hidden="true"></span>Platform workspace not provisioned</p>{% endif %}{% endif %}{% if !instance.is_empty() %}<div class="flex justify-center">{{ instance|safe }}</div>{% endif %}{% endcall %}{% call credential::card() %}{{ body }}{% endcall %}{% endcall %}</div>
 {% call feedback::flash_group(messages=flash) %}{% endcall %}

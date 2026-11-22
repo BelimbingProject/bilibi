@@ -5,15 +5,16 @@
     notice only. -#}
 {% import "components.html" as ui %}
 {% import "feedback.html" as feedback %}
-<div id="{{ id }}" class="flex flex-col gap-5">
-<div><h1 class="text-lg font-semibold tracking-tight text-ink-strong">{{ heading }}</h1>{% if !intro.is_empty() %}<p class="mt-1 text-sm text-ink-muted">{{ intro }}</p>{% endif %}</div>
+{% import "credential.html" as credential %}
+<div id="{{ id }}" class="flex flex-col gap-4">
+{% call credential::heading(title=heading, intro=intro) %}{% endcall %}
 {% if !success.is_empty() %}<div id="{{ id }}-success">{% call feedback::alert(kind=bilibi_ui::StatusKind::Success) %}{{ success }}{% endcall %}</div>{% endif %}
 {% if !error.is_empty() %}<div id="{{ id }}-error">{% call feedback::alert(kind=bilibi_ui::StatusKind::Error) %}{{ error }}{% endcall %}</div>{% endif %}
 {% if !fields.is_empty() %}
-<form id="{{ id }}-form" action="{{ action }}" method="post" class="flex flex-col gap-4">
+<form id="{{ id }}-form" action="{{ action }}" method="post" class="flex flex-col">
 {% for field in fields %}{{ field }}{% endfor %}
-{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="{}-submit"|format(id), class="w-full", button_type="submit", working=working) %}{{ submit }}{% endcall %}
+{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="{}-submit"|format(id), class="mt-1 w-full", button_type="submit", working=working) %}{{ submit }}{% endcall %}
 </form>
 {% endif %}
-{% for link in links %}<div class="flex justify-center">{% call ui::action_link(id=link.id, icon="", href=link.href, title=link.label) %}{{ link.label }}{% endcall %}</div>{% endfor %}
+{% for link in links %}{% call credential::link(id=link.id, href=link.href, label=link.label) %}{% endcall %}{% endfor %}
 </div>

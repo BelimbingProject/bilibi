@@ -1,31 +1,34 @@
-{# Neutral continuation. #}
+{#- The 2FA step of sign-in, method-neutral: the heading, what happened so
+    far, the method choice when there are several, the explicit start or
+    resend, then the code with the one primary action, and Cancel demoted at
+    the foot. Reading the card sends no challenge. -#}
 {% import "components.html" as ui %}
 {% import "feedback.html" as feedback %}
+{% import "credential.html" as credential %}
 <div class="flex flex-col gap-4">
-{% call ui::section_heading(title="Confirm sign-in") %}{% endcall %}
-{% call feedback::alert(kind=bilibi_ui::StatusKind::Info) %}Your password was accepted. Confirm your second factor to finish signing in.{% endcall %}
+{% call credential::heading(title="Confirm sign-in", intro="Your password was accepted. Enter your 2FA code to finish signing in.") %}{% endcall %}
 {% if !message.is_empty() %}{% call feedback::alert(kind=bilibi_ui::StatusKind::Info) %}{{ message }}{% endcall %}{% endif %}
 {% if !error.is_empty() %}{% call feedback::alert(kind=bilibi_ui::StatusKind::Error) %}{{ error }}{% endcall %}{% endif %}
 {% if has_methods %}
 {% if multiple %}
-<form method="get" action="{{ action }}" class="flex flex-col gap-3">
+<form method="get" action="{{ action }}" class="flex flex-col">
 {{ selector }}
-{% call ui::button(button_type="submit", id="sign-in-choose") %}Choose method{% endcall %}
+<div>{% call ui::button(button_type="submit", id="sign-in-choose") %}Choose method{% endcall %}</div>
 </form>
 {% endif %}
-<form method="post" action="{{ action }}" class="flex flex-col gap-3">
+<form method="post" action="{{ action }}">
 {{ start_fields }}
 {% call ui::button(button_type="submit", name="action", value="start", id="sign-in-start") %}Start or resend challenge{% endcall %}
 </form>
-<form method="post" action="{{ action }}" class="flex flex-col gap-3">
+<form method="post" action="{{ action }}" class="flex flex-col">
 {{ verify_fields }}
 {{ code }}
-{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, button_type="submit", name="action", value="verify", id="sign-in-verify", working="Signing in…") %}Sign in{% endcall %}
+{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, class="w-full", button_type="submit", name="action", value="verify", id="sign-in-verify", working="Signing in…") %}Sign in{% endcall %}
 </form>
 {% else %}
-{% call feedback::alert(kind=bilibi_ui::StatusKind::Warning) %}No second factor is enrolled. Ask an administrator for help before signing in again.{% endcall %}
+{% call feedback::alert(kind=bilibi_ui::StatusKind::Warning) %}No 2FA method is set up for this account. Ask an administrator for help before signing in again.{% endcall %}
 {% endif %}
-<form method="post" action="{{ action }}">
+<form method="post" action="{{ action }}" class="flex justify-center">
 {{ cancel_fields }}
 {% call ui::button(button_type="submit", name="action", value="cancel", id="sign-in-cancel") %}Cancel sign-in{% endcall %}
 </form>

@@ -301,6 +301,7 @@ async fn card<T: Template>(
 ) -> std::result::Result<Response, HttpError> {
     let body = AuthLayout {
         body: Html::render(&card).map_err(|_| Error::Internal)?,
+        workspace: Some(login_workspace(app).await),
         instance: instance_badge(app).await?,
         flash,
     }
@@ -448,11 +449,10 @@ pub async fn home(
 }
 async fn login_card(
     app: &App,
-    mut form: LoginForm,
+    form: LoginForm,
     flash: FlashMap<'_>,
     status: StatusCode,
 ) -> std::result::Result<Response, HttpError> {
-    form.workspace = login_workspace(app).await;
     card(
         app,
         "Sign in",
@@ -462,8 +462,8 @@ async fn login_card(
     )
     .await
 }
-/// The sign-in card's workspace strip. A failed lookup degrades the strip and
-/// is logged; it never fails the sign-in card.
+/// Whose installation a credential page belongs to, shown after the brand. A
+/// failed lookup degrades the line and is logged; it never fails the card.
 async fn login_workspace(app: &App) -> LoginWorkspace {
     let lookup = async {
         let client = app.db.get().await.map_err(Error::from)?;

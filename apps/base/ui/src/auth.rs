@@ -1,10 +1,11 @@
 //! The credential pages: the centered layout and the
-//! sign-in, forgotten-password and reset cards as typed templates. The host
+//! sign-in, forgotten-password and reset cards as typed templates, all built
+//! from the shared parts in `templates/credential.html`. The host
 //! owns the routes, the validation and the credential services; these models
 //! own the DOM, the ids and the copy, so a field error lands on the right element.
 //! Field values are the submitted text kept for another
 //! attempt; a password is never echoed back.
-use crate::{Attrs, Field, FlashMap, Html, InputKind, SecretInput};
+use crate::{Attrs, ButtonVariant, Field, FlashMap, Html, InputKind, Reveal, SecretInput};
 use askama::Template;
 
 /// The centered credential layout around one card body, with the page-level
@@ -13,9 +14,13 @@ use askama::Template;
 #[template(path = "auth.html")]
 pub struct AuthLayout<'a> {
     pub body: Html,
-    /// Which installation this is (`bilibi_system::Instance` badge), under the brand
-    /// so nobody signs in to a test copy thinking it is live; empty for
-    /// production and for error pages.
+    /// Whose installation this is, right after the brand: the platform
+    /// operator's company, or that none is provisioned yet. `None` leaves the
+    /// line out, as an error page does because it reads nothing.
+    pub workspace: Option<LoginWorkspace>,
+    /// Which installation this is (`bilibi_system::Instance` badge), under the
+    /// company so nobody signs in to a test copy thinking it is live; empty
+    /// for error pages.
     pub instance: Html,
     pub flash: FlashMap<'a>,
 }
@@ -52,12 +57,11 @@ pub struct LoginForm {
     /// The announced failure above the form; the email field repeats it.
     pub form_error: String,
     pub session_expired: bool,
-    pub workspace: LoginWorkspace,
     pub sso_public: String,
     pub sso_label: String,
 }
 
-/// The workspace strip under the sign-in card:
+/// The line after the brand on every staff credential page:
 /// the platform operator's company once provisioned, else why not. Every
 /// state but `Ready` reads "Platform workspace not provisioned"; `data-state`
 /// keeps the distinction.
@@ -87,7 +91,6 @@ impl LoginWorkspace {
 pub struct LoginPage {
     pub session_expired: bool,
     pub form_error: String,
-    pub workspace: LoginWorkspace,
     pub sso_public: String,
     pub sso_label: String,
     pub email: Html,
@@ -99,7 +102,6 @@ impl LoginPage {
         Ok(Self {
             session_expired: form.session_expired,
             form_error: form.form_error.clone(),
-            workspace: form.workspace.clone(),
             sso_public: form.sso_public.clone(),
             sso_label: form.sso_label.clone(),
             email: Html::render(
@@ -120,16 +122,25 @@ impl LoginPage {
             password: Html::render(
                 &Field::in_form("login", "password")
                     .id("login-password")
-                    .wrapper_class("mb-0")
                     .kind(InputKind::Password)
+                    .reveal(Reveal::Subject("password".into()))
                     .label("Password")
                     .value(&form.password)
                     .errors(form.password_errors.clone())
-                    .placeholder("Password")
                     .autocomplete("current-password")
                     .required(),
             )?,
         })
+    }
+
+    /// The password button's weight: the card's one primary action, unless
+    /// a company sign-in link put that company's button there.
+    pub fn submit_variant(&self) -> ButtonVariant {
+        if self.sso_public.is_empty() {
+            ButtonVariant::Primary
+        } else {
+            ButtonVariant::Secondary
+        }
     }
 }
 

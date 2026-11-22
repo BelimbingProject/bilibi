@@ -65,6 +65,7 @@ mod shell;
 mod softphone;
 mod specimen;
 mod statusbar;
+mod wordmark;
 pub use softphone::{CallAction, CallPhase, PhoneHealth, Softphone, SoftphoneAction};
 pub mod upload;
 pub mod workspace;
@@ -136,6 +137,7 @@ pub use upload::{
     ChunkOutcome, ClientEntry, FileInput, Registration, UploadBudget, UploadEntry, UploadError,
     UploadSpec, UploadedFile, Uploads,
 };
+pub use wordmark::{Wordmark, WordmarkSize};
 
 /// The HTML document around a page. `title` is the page's own name, or the product name when a page has none.
 #[derive(Template)]

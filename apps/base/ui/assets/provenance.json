@@ -19,9 +19,11 @@
   "vendored_sha256": {
     "static/favicon.ico": "01723aeae3ce3b5195a8f42e3eb6e9018a8c08b7acda4ed382b31341811f0a8a",
     "static/favicon.svg": "d18bdf44fd897f7883b350826b4620653d7795f07e35c9e0b1accca45c7d1b03",
+    "static/fonts/OFL-Lexend.txt": "5da8505887d0fa7fe963445fd58852707fda34adfeb65af25c99d152bab285bd",
     "static/fonts/OFL.txt": "bc29b497c4e8316b2d248322a9cea670c2f0afc24ae0eb7bbaa54e02e00eebab",
     "static/fonts/instrument-sans-variable-italic.woff2": "e958f71ffb2d576dd6a9499bd9bb336ad060ab48e1920b2444d68919dee29ba5",
     "static/fonts/instrument-sans-variable.woff2": "aa72922aafcc0dc18f36ec1d805b0212057dabe8b9d5b8b57f67035aea1b826d",
+    "static/fonts/lexend-wordmark.woff2": "26577bebc579158e7f594967929bb34685254eca5e02e5aeedada4b6d1a99c28",
     "vendor/PROJECT-LICENSE": "4141ffe0dc23a0209bc55f53183b96d189b25e8d81c7f19a01324917e313378f",
     "vendor/TAILWIND-LICENSE": "60e0b68c0f35c078eef3a5d29419d0b03ff84ec1df9c3f9d6e39a519a5ae7985",
     "vendor/heroicons/16/solid/academic-cap.svg": "209443a697bc1b8df08718e9f2fe847078ecfe9f74d1814502b98582126cbc1a",

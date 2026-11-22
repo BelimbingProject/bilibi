@@ -600,8 +600,15 @@
         if (focused) this.input.setSelectionRange(selectionStart, selectionEnd)
       }
 
+      // A shown secret goes back to a password box as its form submits, so
+      // the browser offers to save it as a password and never keeps it in
+      // its text-field history.
+      this.form = this.input.form
+      this.onSubmit = () => this.input.setAttribute("type", "password")
+
       this.el.addEventListener("mousedown", this.onMouseDown)
       this.el.addEventListener("click", this.onClick)
+      this.form?.addEventListener("submit", this.onSubmit, true)
 
       this.masking = new MutationObserver(this.sync)
       this.masking.observe(this.input, {attributeFilter: ["type"]})
@@ -615,6 +622,7 @@
 
     destroyed() {
       this.masking.disconnect()
+      this.form?.removeEventListener("submit", this.onSubmit, true)
       this.el.removeEventListener("mousedown", this.onMouseDown)
       this.el.removeEventListener("click", this.onClick)
     },

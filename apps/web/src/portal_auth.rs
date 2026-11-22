@@ -249,6 +249,7 @@ fn sign_in_card(
                     &Field::in_form("portal", "password")
                         .id("portal-password")
                         .kind(InputKind::Password)
+                        .reveal(bilibi_ui::Reveal::Subject("password".into()))
                         .label("Password")
                         .errors(form.password_errors)
                         .autocomplete("current-password")
