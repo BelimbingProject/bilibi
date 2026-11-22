@@ -10,6 +10,8 @@ pub const CATALOGUE: &str = "base/templates.catalogue";
 pub enum Audience {
     Staff,
     Customer,
+    /// Staff and customers alike, such as a password reset.
+    Anyone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -53,6 +55,78 @@ pub struct Slot {
     pub context: Context,
     pub required: bool,
     pub max_bytes: usize,
+}
+
+impl Slot {
+    /// The one-line subject of a message, within Base Mail's subject limit.
+    pub const fn subject() -> Self {
+        Self {
+            id: "subject",
+            label: "Subject",
+            context: Context::Subject,
+            required: true,
+            max_bytes: 200,
+        }
+    }
+
+    /// A required plain-text passage of a message.
+    pub const fn text(id: &'static str, label: &'static str) -> Self {
+        Self {
+            id,
+            label,
+            context: Context::PlainText,
+            required: true,
+            max_bytes: 4000,
+        }
+    }
+}
+
+impl Variable {
+    /// A text fact the sender always supplies.
+    pub const fn text(
+        id: &'static str,
+        label: &'static str,
+        sample: &'static str,
+        slots: &'static [&'static str],
+    ) -> Self {
+        Self {
+            id,
+            label,
+            optional: false,
+            sample: Value::Text(sample),
+            slots,
+        }
+    }
+
+    /// A text fact some messages lack; it then renders as nothing.
+    pub const fn optional_text(
+        id: &'static str,
+        label: &'static str,
+        sample: &'static str,
+        slots: &'static [&'static str],
+    ) -> Self {
+        Self {
+            id,
+            label,
+            optional: true,
+            sample: Value::Text(sample),
+            slots,
+        }
+    }
+}
+
+/// `text` cut to `max_bytes` at a character boundary, ending in an ellipsis
+/// when cut: for a fact (a title, a name) placed in a bounded slot such as a
+/// subject.
+pub fn bounded(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let mut end = max_bytes.saturating_sub('…'.len_utf8());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 pub struct DefaultText {

@@ -22,6 +22,7 @@ bilibi-grid.workspace = true
 bilibi-locale.workspace = true
 bilibi-menu.workspace = true
 bilibi-mail.workspace = true
+bilibi-templates.workspace = true
 bilibi-media.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-notifications.workspace = true

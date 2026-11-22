@@ -20,6 +20,7 @@ mod reminders;
 mod series;
 mod store;
 mod web;
+mod wording;
 
 use bilibi_database::{Db, Error, MutationTransaction, Result};
 use bilibi_events::Events;
@@ -911,7 +912,7 @@ impl Activities {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/watchers", "base/schedule", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
+    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/templates", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/watchers", "base/schedule", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
     migrations: &[
         ("core-activity-001-activities", include_str!("../migrations/001-activities.sql")),
         ("core-activity-002-invitations", include_str!("../migrations/002-invitations.sql")),
@@ -957,6 +958,7 @@ inventory::submit! { Module {
             notifications: s.get("base/notifications.sink")?,
             settings: s.get("base/settings.store")?,
             mailer: s.get("base/mail.mailer")?,
+            templates: s.get(bilibi_templates::SERVICE)?,
             mutations: s.get("base/database.mutations")?,
             queue: s.get("base/queue.store")?,
             origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
@@ -965,6 +967,7 @@ inventory::submit! { Module {
         Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(guest_reminders::GuestReminderJob {
             db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
             mailer: s.get("base/mail.mailer")?,
+            templates: s.get(bilibi_templates::SERVICE)?,
             settings: s.get("base/settings.store")?,
             directory: s.get("base/principal_directory.directory")?,
             authentication: s.get("base/tenancy.authentication")?,
@@ -973,6 +976,7 @@ inventory::submit! { Module {
         Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(invitations::InviteJob {
             db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
             mailer: s.get("base/mail.mailer")?,
+            templates: s.get(bilibi_templates::SERVICE)?,
             settings: s.get("base/settings.store")?,
             directory: s.get("base/principal_directory.directory")?,
             authentication: s.get("base/tenancy.authentication")?,

@@ -14,6 +14,7 @@ mod privacy;
 mod registration;
 mod registration_limits;
 mod web;
+mod wording;
 
 pub use bilibi_user::CustomerAccount;
 pub use facade::{
@@ -130,7 +131,7 @@ inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/portal.verify-reg
 inventory::submit! {
     Module {
         id: "core/portal", layer: Layer::Core,
-        dependencies: &["base/module_registry", "base/database", "base/events", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "base/personal_data", "base/privacy", "core/company", "core/person", "core/affiliation", "core/user"],
+        dependencies: &["base/module_registry", "base/database", "base/events", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/templates", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "base/personal_data", "base/privacy", "core/company", "core/person", "core/affiliation", "core/user"],
         migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION, PERSONAL_DATA_MIGRATION, REGISTRATION_LIMITS_MIGRATION, INVITATION_PERSONAL_DATA_MIGRATION, CAPABILITY_RENAME_MIGRATION],
         services: &[
             Service { id: SERVICE, factory: |services| {
@@ -149,6 +150,7 @@ inventory::submit! {
                     grants: services.get("base/authz.grants")?,
                     authentication: services.get("base/tenancy.authentication")?,
                     mailer: services.get("base/mail.mailer")?,
+                    templates: services.get(bilibi_templates::SERVICE)?,
                     media: services.get(bilibi_media::SERVICE)?,
                     settings: services.get("base/settings.store")?,
                     events: services.get(bilibi_events::SERVICE)?,

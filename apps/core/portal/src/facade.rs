@@ -232,6 +232,7 @@ pub struct PortalService {
     pub(crate) grants: Arc<Grants>,
     pub(crate) authentication: Arc<Authentication>,
     pub(crate) mailer: Arc<Mailer>,
+    pub(crate) templates: Arc<bilibi_templates::Templates>,
     pub(crate) delivery: crate::delivery::Desk,
     pub(crate) media: Arc<bilibi_media::Media>,
     pub(crate) settings: Arc<Settings>,
@@ -770,12 +771,29 @@ impl PortalService {
                 })
             })
             .await?;
+        let (title, days_text) = (
+            bilibi_templates::bounded(&site.title, 150),
+            days.to_string(),
+        );
+        let wording = self
+            .templates
+            .tenant_wording(
+                tx.sql(),
+                tenant,
+                crate::wording::INVITATION,
+                &[
+                    ("person_name", bilibi_templates::Value::Text(&name)),
+                    ("site_title", bilibi_templates::Value::Text(&title)),
+                    ("days", bilibi_templates::Value::Text(&days_text)),
+                ],
+            )
+            .await?;
         let mut message = Message::text(
             Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
-            format!("You're invited to {}", site.title),
-            format!(
-                "You are invited to {}.\n\nOpen this link to choose a password and finish setting up your account:\n\n{}/portal/accept/{}/{token}\n\nThe link works once and expires in {days} day(s). If you did not expect this, you can ignore this email.\n",
-                site.title, self.origin, site.address
+            wording["subject"].clone(),
+            crate::wording::around_link(
+                &wording,
+                &format!("{}/portal/accept/{}/{token}", self.origin, site.address),
             ),
         );
         // A mail adapter's bounce report finds the invitation by this tag.
@@ -786,7 +804,7 @@ impl PortalService {
         let (mailer, id, desk) = (self.mailer.clone(), invitation.id, self.delivery.clone());
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver(&message).await {
+                if let Err(error) = mailer.deliver_for(tenant, &message).await {
                     eprintln!("mail: customer invitation {id} was not delivered: {error}");
                     // The relay refused it: staff are told, and can invite again.
                     if let Err(error) = desk

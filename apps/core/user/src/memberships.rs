@@ -13,6 +13,7 @@ use bilibi_database::{Change, Context, Error, Result};
 use bilibi_mail::{Address, Message};
 use bilibi_security::Scope;
 use bilibi_settings::Target;
+use bilibi_templates::Value;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::time::SystemTime;
@@ -189,15 +190,15 @@ impl UserService {
             .await?;
         let issued = tx.mutate(move |sql| Box::pin(async move {
             let row = sql.query_opt(
-                "UPDATE user_invitations v SET token_hash=$3, expires_at=clock_timestamp()+LEAST(GREATEST(v.expires_at-v.created_at, interval '1 day'), interval '60 days'), created_at=clock_timestamp() FROM users u, tenants t WHERE v.tenant_id=$1 AND v.token_hash=$2 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at<=clock_timestamp() AND u.tenant_id=v.tenant_id AND u.id=v.user_id AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL RETURNING v.id,v.email,u.name,t.name",
+                "UPDATE user_invitations v SET token_hash=$3, expires_at=clock_timestamp()+LEAST(GREATEST(v.expires_at-v.created_at, interval '1 day'), interval '60 days'), created_at=clock_timestamp() FROM users u, tenants t WHERE v.tenant_id=$1 AND v.token_hash=$2 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at<=clock_timestamp() AND u.tenant_id=v.tenant_id AND u.id=v.user_id AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL RETURNING v.id,v.email,u.name,t.name,CEIL(EXTRACT(EPOCH FROM (v.expires_at-v.created_at))/86400)::int",
                 &[&tenant, &old_hash, &new_hash],
             ).await?;
             let Some(row) = row else { return Err(Error::Conflict) };
             let id: i64 = row.get(0);
-            let details = (id, row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, String>(3));
+            let details = (id, row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, String>(3), row.get::<_, i32>(4));
             Ok((details, vec![Change { kind: "user.invitation".into(), id, old: json!({"status": "pending"}), new: json!({"status": "pending", "reissued": true}) }]))
         })).await;
-        let (id, email, name, tenant_name) = match issued {
+        let (id, email, name, tenant_name, days) = match issued {
             Ok(details) => details,
             Err(Error::Conflict) => {
                 tx.rollback().await?;
@@ -205,13 +206,22 @@ impl UserService {
             }
             Err(error) => return Err(error),
         };
-        let message = Message::text(Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?, format!("You're invited to {tenant_name}"), format!("You are invited to join {tenant_name}.\n\nOpen this link to accept:\n\n{}/accept/{new_token}\n\nThe link works once. If you did not expect this, you can ignore this email.\n", self.origin));
+        let message = self
+            .invitation_mail(
+                tx.sql(),
+                tenant,
+                (&name, &email),
+                &tenant_name,
+                days,
+                &new_token,
+            )
+            .await?;
         let mailer = self.mailer.clone();
         let db = self.db.clone();
         let mutations = self.mutations.clone();
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver(&message).await {
+                if let Err(error) = mailer.deliver_for(tenant, &message).await {
                     eprintln!("mail: user invitation {id} was not delivered: {error}");
                     let restore = async {
                         let mut client = db.get().await?;
@@ -230,6 +240,38 @@ impl UserService {
         });
         tx.commit().await?;
         Ok(())
+    }
+
+    /// The invitation email in the workspace's wording, around the one-time
+    /// link this module builds.
+    async fn invitation_mail(
+        &self,
+        client: &dyn bilibi_tenancy::ReadClient,
+        tenant: i64,
+        (name, email): (&str, &str),
+        tenant_name: &str,
+        days: i32,
+        token: &str,
+    ) -> Result<Message> {
+        let days = days.to_string();
+        let wording = self
+            .templates
+            .tenant_wording(
+                client,
+                tenant,
+                crate::wording::INVITATION,
+                &[
+                    ("person_name", Value::Text(name)),
+                    ("workspace_name", Value::Text(tenant_name)),
+                    ("days", Value::Text(&days)),
+                ],
+            )
+            .await?;
+        Ok(Message::text(
+            Address::new(Some(name), email).map_err(|_| Error::Invalid)?,
+            wording["subject"].clone(),
+            crate::wording::around_link(&wording, &format!("{}/accept/{token}", self.origin)),
+        ))
     }
 
     /// Prepares one tenant-owned account and emails a one-time invitation.
@@ -385,18 +427,21 @@ impl UserService {
                 )
                 .await?;
         }
-        let message = Message::text(
-            Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
-            format!("You're invited to {tenant_name}"),
-            format!(
-                "You are invited to join {tenant_name}.\n\nOpen this link to accept:\n\n{}/accept/{raw_token}\n\nThe link works once and expires in {days} day(s). If you did not expect this, you can ignore this email.\n",
-                self.origin
-            ),
-        );
+        let tenant = scope.tenant();
+        let message = self
+            .invitation_mail(
+                tx.sql(),
+                tenant,
+                (&name, &email),
+                &tenant_name,
+                days,
+                &raw_token,
+            )
+            .await?;
         let (mailer, id) = (self.mailer.clone(), invitation.id);
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver(&message).await {
+                if let Err(error) = mailer.deliver_for(tenant, &message).await {
                     eprintln!("mail: user invitation {id} was not delivered: {error}");
                 }
             });

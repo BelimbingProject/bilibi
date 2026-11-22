@@ -258,6 +258,7 @@ pub struct Reports {
     authentication: Arc<bilibi_tenancy::Authentication>,
     mutations: Arc<bilibi_database::MutationBoundary>,
     mailer: Arc<bilibi_mail::Mailer>,
+    templates: Arc<bilibi_templates::Templates>,
     directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
     labels: Arc<bilibi_labels::Labels>,
     /// The public origin emailed links point at (`APP_ORIGIN`).
@@ -1668,7 +1669,7 @@ fn line(out: &mut String, fields: impl IntoIterator<Item = String>) {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/reports", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/records", "base/principal_directory", "base/labels"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/templates", "base/records", "base/principal_directory", "base/labels"],
         migrations: &MIGRATIONS,
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let reports = Arc::new(Reports {
@@ -1683,6 +1684,7 @@ inventory::submit! {
                 authentication: services.get("base/tenancy.authentication")?,
                 mutations: services.get("base/database.mutations")?,
                 mailer: services.get("base/mail.mailer")?,
+                templates: services.get(bilibi_templates::SERVICE)?,
                 directory: services.get("base/principal_directory.directory")?,
                 labels: services.get(bilibi_labels::SERVICE)?,
                 origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),

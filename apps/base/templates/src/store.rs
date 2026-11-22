@@ -1,4 +1,4 @@
-use crate::{catalogue, Origin, Resolved, Template, Text, CATALOGUE, MANAGE, VIEW};
+use crate::{catalogue, Origin, Resolved, Template, Text, Value, CATALOGUE, MANAGE, VIEW};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::Catalog;
 use bilibi_party_ids::OrganisationId;
@@ -74,8 +74,40 @@ impl Templates {
         let entry = self.get(key)?;
         let languages = catalogue::languages(requested, fallback, entry.base_language)
             .map_err(|problem| Error::refused(problem.to_string()))?;
-        let heads = heads(client, scope, key, company, &languages).await?;
+        let heads = heads(client, scope.tenant(), key, company, &languages).await?;
         Ok(select(entry, &languages, &heads, None))
+    }
+
+    /// The rendered slots of a message a module sends for a workspace, in
+    /// the template's base language with the workspace's own wording. For
+    /// mail with no business record's company and often no session (a reset
+    /// link, an invitation, a queued reminder): `tenant` is one the caller
+    /// proved from its own record. A published override that cannot hold
+    /// these facts (a name longer than its field) gives way to the packaged
+    /// wording, so a message people wait for is still sent.
+    pub async fn tenant_wording(
+        &self,
+        client: &dyn ReadClient,
+        tenant: i64,
+        key: &str,
+        values: &[(&str, Value<'_>)],
+    ) -> Result<Text> {
+        let entry = self.get(key)?;
+        let languages = [entry.base_language.to_owned()];
+        let heads = heads(client, tenant, key, None, &languages).await?;
+        let resolved = select(entry, &languages, &heads, None);
+        let problem = match entry.render(&resolved.slots, values) {
+            Ok(text) => return Ok(text),
+            Err(problem) => problem,
+        };
+        if let Origin::Tenant { revision } = resolved.origin {
+            eprintln!("templates: {key} revision {revision} could not be filled in ({problem}); the packaged wording was used");
+            let packaged = select(entry, &languages, &[], None);
+            if let Ok(text) = entry.render(&packaged.slots, values) {
+                return Ok(text);
+            }
+        }
+        Err(Error::refused(problem.to_string()))
     }
 
     pub(crate) async fn companies(
@@ -121,7 +153,14 @@ impl Templates {
         let entry = self.get(selection.key)?;
         let languages = catalogue::languages(selection.language, None, entry.base_language)
             .map_err(|problem| Error::refused(problem.to_string()))?;
-        let heads = heads(client, scope, entry.key, selection.company, &languages).await?;
+        let heads = heads(
+            client,
+            scope.tenant(),
+            entry.key,
+            selection.company,
+            &languages,
+        )
+        .await?;
         let company = selection.company.map(OrganisationId::get);
         let head = heads
             .iter()
@@ -232,7 +271,7 @@ impl Edit {
 
 async fn heads(
     client: &dyn ReadClient,
-    scope: &Scope,
+    tenant: i64,
     key: &str,
     company: Option<OrganisationId>,
     languages: &[String],
@@ -244,12 +283,7 @@ async fn heads(
          WHERE tenant_id=$1 AND template_key=$2 AND language=ANY($3)
            AND (company_id=$4 OR company_id IS NULL)
          ORDER BY language,company_id,id DESC",
-            &[
-                &scope.tenant(),
-                &key,
-                &languages,
-                &company.map(OrganisationId::get),
-            ],
+            &[&tenant, &key, &languages, &company.map(OrganisationId::get)],
         )
         .await?;
     rows.into_iter()

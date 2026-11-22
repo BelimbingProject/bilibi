@@ -14,6 +14,35 @@ Contribute a static `Template` under `bilibi_templates::CATALOGUE` through Modul
 - Pass the sealed scope and the authorised business record's company to `Templates::resolve`. Pass the resolved slots and typed facts to `Template::render`. Rendering performs no lookups.
 - Use `{{variable_id}}` for substitution. The renderer treats every supplied value as text, and makes control characters in subject values spaces. A missing required fact stops rendering of a slot that uses it. The error identifies the field.
 - The sending module owns recipients, attachments, access, and delivery. Its approved wording can be snapshotted before the job queues.
+- `Slot::subject()`, `Slot::text(id, label)`, `Variable::text(..)` and `Variable::optional_text(..)` build the common shapes. `bounded(text, max_bytes)` shortens a fact (a title, a name) that must fit a subject.
+
+## Word a module's own mail
+
+**No message text in code: declare a template and ask for its wording.**
+
+```rust,ignore
+let text = templates
+    .tenant_wording(client, tenant, "core.user.password_reset", &[("person_name", Value::Text(&name))])
+    .await?;
+let message = Message::text(to, text["subject"].clone(), format!("{}\n\n{link}\n\n{}\n", text["intro"], text["closing"]));
+mailer.deliver_for(tenant, &message).await?;
+```
+
+- `Templates::tenant_wording` resolves the workspace override or the packaged text in the template's base language and fills it in. It takes a tenant the caller proved from its own record, because a reset link or an invitation has no session. It reads no company override; use `resolve` for a business record that has a company.
+- A published override that cannot hold the real facts gives way to the packaged wording, with a log line, so the message is still sent.
+- **Links stay in code.** A slot is prose before or after a link; the sending module builds the link and fixes the order of the parts. A workspace can reword a security message (reset, verification, sign-in alert) but cannot remove, move or replace its link.
+- A line some messages lack (a place, an end date) is its own slot with an optional variable; the module leaves the slot out when the fact is absent.
+- `Mailer::deliver_for` sends under the workspace's sender name ([Mail](../mail/README.md#sender-name)).
+
+| Module | Templates |
+| --- | --- |
+| `core/user` | `core.user.password_reset`, `core.user.sign_in_locked`, `core.user.invitation`, `core.user.email_verification`, `core.user.new_device_sign_in`, `core.user.two_factor_reset` |
+| `core/portal` | `core.portal.registration_confirmation`, `core.portal.invitation` |
+| `core/activity` | `core.activity.invitation`, `core.activity.guest_reminder`, `core.activity.reminder` |
+| `core/document` | `core.document.share` |
+| `base/reports` | `base.reports.scheduled_report` |
+
+The first tenant owner's invitation (`bilibi tenant-owner`) keeps fixed text: it is sent before the workspace exists.
 
 ## Which wording is used?
 

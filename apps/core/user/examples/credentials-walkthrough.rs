@@ -394,6 +394,62 @@ async fn main() -> Result<()> {
         None => println!("no verification mail arrived (is BILIBI_USER_SIGNING_KEY set?)"),
     }
 
+    println!("\n== workspace wording and sender name ==");
+    // Tenant 1 publishes its own reset wording and sender name; the link and
+    // its place in the message stay the module's.
+    client
+        .execute(
+            "INSERT INTO base_template_revisions (tenant_id,template_key,language,slots) VALUES (1,'core.user.password_reset','en',$1)",
+            &[&serde_json::json!({
+                "subject": "Reset your Example Trading password",
+                "intro": "Hello {{person_name}}, open this link to choose a new password:",
+                "closing": "Ask the Example Trading help desk if you did not request this.",
+            })],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO base_settings (key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES ('mail.sender_name',1,'tenant',1,'\"Example Trading\"',false)",
+            &[],
+        )
+        .await?;
+    client
+        .execute("DELETE FROM password_reset_tokens", &[])
+        .await?;
+    let before = count(&mailbox);
+    println!(
+        "reset requested: {}",
+        outcome(&users.request_password_reset(email).await)
+    );
+    let message = arrival(&mailbox, before).await.unwrap_or_default();
+    show_mail("received", &message);
+    let from = message
+        .lines()
+        .find(|line| line.starts_with("From:"))
+        .unwrap_or_default();
+    let checks = [
+        ("sender name", from.contains("Example Trading")),
+        (
+            "subject",
+            message.contains("Subject: Reset your Example Trading password"),
+        ),
+        (
+            "wording with the recipient's name",
+            message.contains("Hello Sam Staff, open this link to choose a new password:")
+                && message.contains("Ask the Example Trading help desk"),
+        ),
+        (
+            "the module's own link",
+            link(&message).is_some_and(|url| url.contains("/reset-password/")),
+        ),
+    ];
+    for (name, passed) in checks {
+        println!("{}: {name}", if passed { "PASS" } else { "FAIL" });
+    }
+    if checks.iter().any(|(_, passed)| !passed) {
+        return Err(Error::refused("the workspace's reset mail is wrong"));
+    }
+
     println!("\n== audit (secrets redacted) ==");
     for row in client
         .query("SELECT a.event,m.actor_type,m.new_values::text FROM base_audit_mutations m JOIN base_audit_actions a ON a.trace_id=m.trace_id AND a.tenant_id=m.tenant_id WHERE m.auditable_type='user_identity' AND a.event IN ('user.reset_requested','user.reset_withdrawn') ORDER BY m.id DESC LIMIT 3", &[])

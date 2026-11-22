@@ -11,6 +11,7 @@ use bilibi_database::{Error, Result};
 use bilibi_datetime::{Format, Precision};
 use bilibi_mail::{Address, Message};
 use bilibi_session::NewDevice;
+use bilibi_templates::Value;
 use std::sync::Arc;
 
 const ACTION: &str = "user.new_device_sign_in_email";
@@ -50,18 +51,27 @@ impl UserService {
         let at = display.render(at, Format::DateTime, Precision::Minute).text;
         let ip = device.ip_address.as_deref().unwrap_or("not recorded");
         let place = device.place.as_deref().unwrap_or("not recorded");
+        let wording = self
+            .templates
+            .tenant_wording(
+                &**client,
+                scope.tenant(),
+                crate::wording::NEW_DEVICE_SIGN_IN,
+                &[
+                    ("person_name", Value::Text(&name)),
+                    ("time", Value::Text(&at)),
+                    ("device", Value::Text(&device.device)),
+                    ("ip_address", Value::Text(ip)),
+                    ("place", Value::Text(place)),
+                ],
+            )
+            .await?;
         let message = Message::text(
             Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
-            "New sign-in to your Bilibi account",
+            wording["subject"].clone(),
             format!(
-                "Your Bilibi account was signed in from a device it has not used before.\n\n\
-                 Time: {at}\nDevice: {device}\nIP address: {ip}\nPlace: {place}\n\n\
-                 If this was you, you can ignore this email.\n\n\
-                 If this wasn't you, change your password now. Then sign that session out in Your sessions:\n\n\
-                 {origin}/settings/sessions\n",
-                device = device.device,
-                place = place,
-                origin = self.origin,
+                "{}\n\n{}\n\n{}\n\n{}/settings/sessions\n",
+                wording["intro"], wording["details"], wording["closing"], self.origin,
             ),
         );
         let mut tx = self
@@ -83,7 +93,7 @@ impl UserService {
         }
         tx.commit().await?;
         drop(client);
-        if let Err(error) = self.mailer.deliver(&message).await {
+        if let Err(error) = self.mailer.deliver_for(scope.tenant(), &message).await {
             eprintln!(
                 "mail: new-device sign-in email for user {} was not delivered: {error}",
                 scope.user()

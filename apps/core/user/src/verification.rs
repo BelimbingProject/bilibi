@@ -106,14 +106,23 @@ impl UserService {
             self.origin,
             self.signer.sign(tenant, user, &email, issued)?
         );
+        let wording = self
+            .templates
+            .tenant_wording(
+                &**client,
+                tenant,
+                crate::wording::EMAIL_VERIFICATION,
+                &[("person_name", bilibi_templates::Value::Text(&name))],
+            )
+            .await?;
         let message = Message::text(
             Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
-            "Verify your Bilibi email address",
-            format!("Verify your email address by opening this link:\n\n{link}\n\nThe link expires in one hour. If you did not request this, you can ignore this email.\n"),
+            wording["subject"].clone(),
+            crate::wording::around_link(&wording, &link),
         );
         drop(client);
         self.mailer
-            .deliver(&message)
+            .deliver_for(tenant, &message)
             .await
             .map(|_| ())
             .map_err(|error| {

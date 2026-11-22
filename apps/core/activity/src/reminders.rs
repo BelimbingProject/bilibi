@@ -84,6 +84,7 @@ pub(crate) struct Sweep {
     pub notifications: Arc<NotificationBoundary>,
     pub settings: Arc<Settings>,
     pub mailer: Arc<bilibi_mail::Mailer>,
+    pub templates: Arc<bilibi_templates::Templates>,
     pub mutations: Arc<MutationBoundary>,
     pub queue: Arc<bilibi_queue::Queue>,
     /// The public origin emailed links point at (`APP_ORIGIN`).
@@ -317,43 +318,64 @@ impl Sweep {
     /// Emails one reminder to its assignee: the kind, title and when, and a
     /// link to the activity. Notes and the description stay in Bilibi.
     async fn mail(&self, tenant: i64, reminder: &Reminded) {
-        let assignee = match self.db.get().await {
-            Ok(client) => self
-                .authentication
-                .authenticate(&**client, tenant, reminder.assignee, String::new())
-                .await
-                .ok(),
-            Err(_) => None,
+        let Ok(client) = self.db.get().await else {
+            return;
         };
         // An assignee who can no longer sign in is not mailed.
-        let Some(assignee) = assignee else {
+        let Ok(assignee) = self
+            .authentication
+            .authenticate(&**client, tenant, reminder.assignee, String::new())
+            .await
+        else {
             return;
         };
         let Ok(address) = bilibi_mail::Address::new(Some(&assignee.user_name), &assignee.email)
         else {
             return;
         };
-        let title: String = reminder.title.chars().take(150).collect();
+        let title = crate::wording::title(&reminder.title);
         let when = reminder
             .due
             .map(|t| t.strftime("%Y-%m-%d %H:%M UTC").to_string())
             .unwrap_or_default();
-        let what = what(reminder.kind);
+        let wording = self
+            .templates
+            .tenant_wording(
+                &**client,
+                tenant,
+                crate::wording::REMINDER,
+                &[
+                    ("what", bilibi_templates::Value::Text(what(reminder.kind))),
+                    ("title", bilibi_templates::Value::Text(&title)),
+                    ("when", bilibi_templates::Value::Text(&when)),
+                ],
+            )
+            .await;
+        drop(client);
+        let Ok(wording) = wording else {
+            eprintln!(
+                "error: activity reminder {} could not be written",
+                reminder.id
+            );
+            return;
+        };
         let message = bilibi_mail::Message::text(
             address,
-            format!("Reminder: {title}"),
+            wording["subject"].clone(),
             format!(
-                "{what}: {title}\n{}\n\nOpen it, signed in:\n{}/activities/{}\n",
+                "{}\n{}\n\n{}\n{}/activities/{}\n",
+                wording["intro"],
                 if reminder.kind == Kind::Task {
-                    format!("Due {when}")
+                    &wording["due_line"]
                 } else {
-                    format!("Starts {when}")
+                    &wording["starts_line"]
                 },
+                wording["link_label"],
                 self.origin,
                 reminder.id
             ),
         );
-        if self.mailer.deliver(&message).await.is_err() {
+        if self.mailer.deliver_for(tenant, &message).await.is_err() {
             eprintln!(
                 "error: activity reminder {} could not be emailed",
                 reminder.id

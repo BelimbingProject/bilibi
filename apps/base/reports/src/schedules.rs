@@ -979,11 +979,29 @@ impl Reports {
                     .await
             }
         };
+        let name = bilibi_templates::bounded(&name, 150);
+        let wording = match self.db.get().await {
+            Ok(client) => self
+                .templates
+                .tenant_wording(
+                    &**client,
+                    scope.tenant(),
+                    SCHEDULED_REPORT,
+                    &[("report_name", bilibi_templates::Value::Text(&name))],
+                )
+                .await
+                .ok(),
+            Err(_) => None,
+        };
+        let Some(wording) = wording else {
+            return JobOutcome::Retry("mail_not_written");
+        };
         let message = bilibi_mail::Message::text(
             address,
-            format!("Scheduled report: {}", name.chars().take(150).collect::<String>()),
+            wording["subject"].clone(),
             format!(
-                "Your scheduled report {name} is ready.\n\nDownload it, signed in, before it expires:\n{}{}\n",
+                "{}\n{}{}\n",
+                wording["intro"],
                 self.origin,
                 exports::path(export)
             ),
@@ -993,7 +1011,12 @@ impl Reports {
             Ok(false) => return self.close(execution, scope, delivery, "sent", None).await,
             Err(_) => return JobOutcome::Retry("mail_not_recorded"),
         }
-        if self.mailer.deliver(&message).await.is_err() {
+        if self
+            .mailer
+            .deliver_for(scope.tenant(), &message)
+            .await
+            .is_err()
+        {
             if self
                 .mail_attempt(execution, scope, delivery, false)
                 .await
@@ -1204,3 +1227,25 @@ pub(crate) fn validate_sweep(args: Value) -> bilibi_database::Result<Value> {
         _ => Err(Error::Invalid),
     })
 }
+
+/// The wording of the scheduled-report email, as a shared template
+/// (`apps/base/templates/README.md`). The download link stays in code.
+const SCHEDULED_REPORT: &str = "base.reports.scheduled_report";
+inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_templates::CATALOGUE, SCHEDULED_REPORT, bilibi_module_registry::Provenance {
+    module: "base/reports", source: file!(), line: line!(),
+}, &bilibi_templates::Template {
+    key: SCHEDULED_REPORT,
+    label: "Scheduled report email",
+    audience: bilibi_templates::Audience::Staff,
+    outputs: &[bilibi_templates::Output::PlainText],
+    slots: &[
+        bilibi_templates::Slot::subject(),
+        bilibi_templates::Slot::text("intro", "Text before the download link"),
+    ],
+    variables: &[bilibi_templates::Variable::text("report_name", "Report name", "Monthly sales", &["subject", "intro"])],
+    base_language: "en",
+    defaults: &[bilibi_templates::DefaultText { language: "en", version: "1", slots: &[
+        ("subject", "Scheduled report: {{report_name}}"),
+        ("intro", "Your scheduled report {{report_name}} is ready.\n\nDownload it, signed in, before it expires:"),
+    ] }],
+}) }

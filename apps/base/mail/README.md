@@ -39,6 +39,15 @@ let sent = mailer.deliver(&message).await?;
 
 Read each attachment through the owning service's authorised `download_attachment` or `Artifacts::read`, and pass its **detected** MIME type. Mail receives bytes and never depends on Media or Artifacts.
 
+## Sender name
+
+**Send a workspace's mail with `mailer.deliver_for(tenant, &message)`.** From then shows that workspace's **Sender name** (`mail.sender_name`) at the installation address. `deliver` always uses the installation sender.
+
+- The setting is per workspace and blank by default, which keeps the installation name (`MAIL_FROM_NAME`). It takes up to 100 characters and refuses `@`, quotes and angle brackets, so a name cannot pose as an address.
+- A workspace administrator changes it through the delegated tenant setting operations ([Settings editor](../settings_editor/README.md#tenant-agent-operations)); the operator sets its own on **System Settings → This tenant**.
+- A message that names its own `from` keeps it. A standalone `Mailer` has no settings and uses its sender.
+- The message text comes from [Templates](../templates/README.md#word-a-modules-own-mail), never from a string in code.
+
 ## Delivery reports
 
 A relay that takes a message says nothing later, and Base reads no mailbox, so a bounce reaches Bilibi when an Extension adapting a mail provider (a webhook, a feed) reports it, or when a module that fetches mail finds a `Parsed.report` (see Receiving a message). `base/mail.reports` (`DeliveryReports`) is that one door:

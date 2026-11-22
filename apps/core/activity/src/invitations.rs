@@ -202,47 +202,10 @@ pub(crate) async fn when(
     })
 }
 
-/// At most `max` bytes of `text`, cut on a character boundary.
-pub(crate) fn bounded(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_owned();
-    }
-    let mut end = max.saturating_sub(1);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &text[..end])
-}
-
-/// The invitation's subject and text: what, when, where and the join link,
-/// the description, and who sent it. Internal notes are never in it, and
-/// neither is a link into Bilibi: the guest has no account. A reply goes to
-/// the sender (`Reply-To`).
-fn invitation(activity: &Activity, sender: &str, when: &str) -> (String, String) {
-    let kind = activity.kind.label().to_lowercase();
-    let subject = bounded(&format!("Invitation: {}", activity.title), 200);
-    let mut body = format!(
-        "{sender} invites you to a {kind}: {}\n\nWhen: {when}\n",
-        activity.title
-    );
-    if let Some(location) = &activity.location {
-        body.push_str(&format!("Where: {location}\n"));
-    }
-    if let Some(url) = &activity.join_url {
-        body.push_str(&format!("Join: {url}\n"));
-    }
-    if let Some(description) = &activity.description {
-        body.push_str(&format!("\n{description}\n"));
-    }
-    body.push_str(&format!(
-        "\nPlease reply to {sender} to accept or decline.\n"
-    ));
-    (subject, body)
-}
-
 pub(crate) struct InviteJob {
     pub db: Db,
     pub mailer: Arc<Mailer>,
+    pub templates: Arc<bilibi_templates::Templates>,
     pub settings: Arc<Settings>,
     pub directory: Arc<PrincipalDirectory>,
     pub authentication: Arc<Authentication>,
@@ -300,7 +263,15 @@ impl InviteJob {
             .await
             .ok()
             .and_then(|account| Address::new(Some(&sender), &account.email).ok());
-        let (subject, body) = invitation(&activity, &sender, &when);
+        let (subject, body) = crate::wording::guest_mail(
+            &self.templates,
+            &**client,
+            scope.tenant(),
+            crate::wording::INVITATION,
+            (&activity, &sender, &when),
+            true,
+        )
+        .await?;
         let mut delivered = true;
         for row in &targets {
             let guest: i64 = row.get(0);
@@ -333,7 +304,12 @@ impl InviteJob {
             };
             let mut message = Message::text(to, subject.clone(), body.clone());
             message.reply_to = reply_to.clone();
-            if self.mailer.deliver(&message).await.is_err() {
+            if self
+                .mailer
+                .deliver_for(scope.tenant(), &message)
+                .await
+                .is_err()
+            {
                 // The transport's detail may name the address; the job's
                 // failure code is enough for the operator's board.
                 eprintln!(

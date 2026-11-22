@@ -126,11 +126,35 @@ fn reset_notice(body: &str) -> Result<Notice, Error> {
     Ok(notice)
 }
 
-fn reset_mail(origin: &str, name: &str, email: &str, body: &str) -> Option<Message> {
+/// The reset email in the workspace's wording; `slot` says who reset it. The
+/// reset stands without it, so a mail that cannot be built is only logged.
+async fn reset_mail(
+    service: &UserService,
+    client: &dyn bilibi_tenancy::ReadClient,
+    account: &Account,
+    slot: &str,
+) -> Option<Message> {
+    let to = Address::new(Some(&account.name), &account.email).ok()?;
+    let wording = service
+        .templates
+        .tenant_wording(
+            client,
+            account.tenant,
+            crate::wording::TWO_FACTOR_RESET,
+            &[("person_name", bilibi_templates::Value::Text(&account.name))],
+        )
+        .await
+        .map_err(|error| {
+            eprintln!(
+                "mail: 2FA reset notice for user {} was not written: {error}",
+                account.id
+            )
+        })
+        .ok()?;
     Some(Message::text(
-        Address::new(Some(name), email).ok()?,
-        "Your 2FA was reset",
-        format!("{body}\n\n{origin}{SETTINGS_PATH}\n"),
+        to,
+        wording["subject"].clone(),
+        format!("{}\n\n{}{SETTINGS_PATH}\n", wording[slot], service.origin),
     ))
 }
 
@@ -205,7 +229,7 @@ fn wake(
     };
     let mailer = service.mailer.clone();
     tokio::spawn(async move {
-        if let Err(error) = mailer.deliver(&message).await {
+        if let Err(error) = mailer.deliver_for(tenant, &message).await {
             eprintln!("mail: 2FA reset notice for user {user} was not delivered: {error}");
         }
     });
@@ -275,7 +299,7 @@ impl WriteHandler for Reset {
                     other => other.into(),
                 })?;
             notify_target(tx, scope, &account, ADMIN_BODY).await?;
-            let mail = reset_mail(&service.origin, &account.name, &account.email, ADMIN_BODY);
+            let mail = reset_mail(service, tx.sql(), &account, "by_admin").await;
             let (tenant, user) = (account.tenant, account.id);
             let service = Arc::clone(service);
             tx.after_commit(move || wake(&service, tenant, user, ended, mail));
@@ -335,7 +359,7 @@ impl UserService {
             notifications::record_in_tenant(&mut tx, account.tenant, &[account.id], &notice)
                 .await?;
         }
-        let mail = reset_mail(&self.origin, &account.name, &account.email, SYSTEM_BODY);
+        let mail = reset_mail(self, tx.sql(), &account, "by_server_admin").await;
         let (tenant, user) = (account.tenant, account.id);
         // Live pages subscribe to the service bound at boot, which is this one.
         let service = USERS.get().cloned().ok_or(Error::Internal)?;

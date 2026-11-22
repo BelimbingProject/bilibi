@@ -28,6 +28,7 @@ use bilibi_queue::{
     Outcome, State, Worker, ENDINGS, HANDLERS, WORKERS,
 };
 use bilibi_settings::{Setting, Target};
+use bilibi_templates::{Audience, DefaultText, Output, Slot, Template, Value as Fact, Variable};
 use bilibi_tenancy::{Authentication, Scope};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -221,6 +222,7 @@ impl Store<'_> {
 pub(crate) struct EmailJob {
     pub db: Db,
     pub mailer: Arc<Mailer>,
+    pub templates: Arc<bilibi_templates::Templates>,
     pub authentication: Arc<Authentication>,
     /// The public origin the link points at (`APP_ORIGIN`).
     pub origin: String,
@@ -298,27 +300,40 @@ impl EmailJob {
                 .await?;
             return Ok(Done::Settled);
         };
-        let from_name = scope.user_name.clone();
-        let name: String = current.get::<_, String>(0).chars().take(150).collect();
+        // Short enough that the subject holds both names.
+        let from_name = bilibi_templates::bounded(&scope.user_name, 60);
+        let name = bilibi_templates::bounded(&current.get::<_, String>(0), 100);
         let ends = current
             .get::<_, Option<std::time::SystemTime>>(1)
             .and_then(|t| jiff::Timestamp::try_from(t).ok())
-            .map(|t| format!("\nYour access ends {}.", t.strftime("%Y-%m-%d %H:%M UTC")))
-            .unwrap_or_default();
-        let address = Address::new(Some(&to.user_name), &to.email);
-        let delivered = match address {
-            Ok(address) => {
+            .map(|t| t.strftime("%Y-%m-%d %H:%M UTC").to_string());
+        let mut values = vec![
+            ("sender_name", Fact::Text(&from_name)),
+            ("document_name", Fact::Text(&name)),
+        ];
+        if let Some(ends) = &ends {
+            values.push(("access_ends", Fact::Text(ends)));
+        }
+        let wording = self
+            .templates
+            .tenant_wording(&**client, tenant, SHARE, &values)
+            .await;
+        let delivered = match (Address::new(Some(&to.user_name), &to.email), wording) {
+            (Ok(address), Ok(wording)) => {
+                let ends = ends
+                    .map(|_| format!("\n{}", wording["access_ends_line"]))
+                    .unwrap_or_default();
                 let message = bilibi_mail::Message::text(
                     address,
-                    format!("{from_name} shared a document with you: {name}"),
+                    wording["subject"].clone(),
                     format!(
-                        "{from_name} shared “{name}” with you.{ends}\n\nOpen it, signed in:\n{}/documents/{document}\n\nThe link works only for your account and only while your access lasts.\n",
-                        self.origin
+                        "{}{ends}\n\n{}\n{}/documents/{document}\n\n{}\n",
+                        wording["intro"], wording["link_label"], self.origin, wording["closing"]
                     ),
                 );
-                self.mailer.deliver(&message).await.is_ok()
+                self.mailer.deliver_for(tenant, &message).await.is_ok()
             }
-            Err(_) => false,
+            _ => false,
         };
         if delivered {
             self.settle(execution, &mut client, request, "sent", None)
@@ -433,3 +448,43 @@ impl Ending for EmailEnded {
         })
     }
 }
+
+/// The wording of the share email, as a shared template
+/// (`apps/base/templates/README.md`). The link and the order of the lines
+/// stay in code.
+const SHARE: &str = "core.document.share";
+const SHARE_ALL: &[&str] = &[
+    "subject",
+    "intro",
+    "access_ends_line",
+    "link_label",
+    "closing",
+];
+inventory::submit! { Contribution::new(bilibi_templates::CATALOGUE, SHARE, Provenance {
+    module: "core/document", source: file!(), line: line!(),
+}, &Template {
+    key: SHARE,
+    label: "Shared document email",
+    audience: Audience::Anyone,
+    outputs: &[Output::PlainText],
+    slots: &[
+        Slot::subject(),
+        Slot::text("intro", "Opening line"),
+        Slot::text("access_ends_line", "Line that says when access ends"),
+        Slot::text("link_label", "Text before the link"),
+        Slot::text("closing", "Closing text"),
+    ],
+    variables: &[
+        Variable::text("sender_name", "Sender's name", "Ahmad Faiz", SHARE_ALL),
+        Variable::text("document_name", "Document name", "Supply agreement 2026.pdf", SHARE_ALL),
+        Variable::optional_text("access_ends", "When access ends", "2026-12-31 16:00 UTC", &["access_ends_line"]),
+    ],
+    base_language: "en",
+    defaults: &[DefaultText { language: "en", version: "1", slots: &[
+        ("subject", "{{sender_name}} shared a document with you: {{document_name}}"),
+        ("intro", "{{sender_name}} shared “{{document_name}}” with you."),
+        ("access_ends_line", "Your access ends {{access_ends}}."),
+        ("link_label", "Open it, signed in:"),
+        ("closing", "The link works only for your account and only while your access lasts."),
+    ] }],
+}) }
