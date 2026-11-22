@@ -3,7 +3,9 @@
 //! template operations. Every link and the order of the parts stay here in
 //! code, so security mail keeps a fixed structure and a link can come only
 //! from this module.
+use crate::UserService;
 use bilibi_database::{Db, Error};
+use bilibi_mail::{Address, Message};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_templates::{
     Audience, DefaultText, Output, Slot, Template, Templates, Text, Value, Variable, CATALOGUE,
@@ -34,6 +36,40 @@ pub(crate) async fn wording(
 /// The text of a message whose link stands alone between two passages.
 pub(crate) fn around_link(text: &Text, link: &str) -> String {
     format!("{}\n\n{link}\n\n{}\n", text["intro"], text["closing"])
+}
+
+impl UserService {
+    /// The invitation email in the workspace's wording, around the one-time
+    /// link this module builds.
+    pub(crate) async fn invitation_mail(
+        &self,
+        client: &dyn bilibi_tenancy::ReadClient,
+        tenant: i64,
+        (name, email): (&str, &str),
+        tenant_name: &str,
+        days: i32,
+        token: &str,
+    ) -> Result<Message, Error> {
+        let days = days.to_string();
+        let wording = self
+            .templates
+            .tenant_wording(
+                client,
+                tenant,
+                INVITATION,
+                &[
+                    ("person_name", Value::Text(name)),
+                    ("workspace_name", Value::Text(tenant_name)),
+                    ("days", Value::Text(&days)),
+                ],
+            )
+            .await?;
+        Ok(Message::text(
+            Address::new(Some(name), email).map_err(|_| Error::Invalid)?,
+            wording["subject"].clone(),
+            around_link(&wording, &format!("{}/accept/{token}", self.origin)),
+        ))
+    }
 }
 
 const LINK_SLOTS: &[Slot] = &[

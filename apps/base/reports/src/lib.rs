@@ -13,6 +13,7 @@ mod oversight;
 mod schedules;
 mod store;
 mod web;
+mod wording;
 
 #[doc(hidden)]
 pub use bilibi_module_registry::{Contribution, Provenance};

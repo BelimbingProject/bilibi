@@ -10,10 +10,8 @@ use crate::{
 };
 use bilibi_audit::{record_action, Attribution};
 use bilibi_database::{Change, Context, Error, Result};
-use bilibi_mail::{Address, Message};
 use bilibi_security::Scope;
 use bilibi_settings::Target;
-use bilibi_templates::Value;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::time::SystemTime;
@@ -240,38 +238,6 @@ impl UserService {
         });
         tx.commit().await?;
         Ok(())
-    }
-
-    /// The invitation email in the workspace's wording, around the one-time
-    /// link this module builds.
-    async fn invitation_mail(
-        &self,
-        client: &dyn bilibi_tenancy::ReadClient,
-        tenant: i64,
-        (name, email): (&str, &str),
-        tenant_name: &str,
-        days: i32,
-        token: &str,
-    ) -> Result<Message> {
-        let days = days.to_string();
-        let wording = self
-            .templates
-            .tenant_wording(
-                client,
-                tenant,
-                crate::wording::INVITATION,
-                &[
-                    ("person_name", Value::Text(name)),
-                    ("workspace_name", Value::Text(tenant_name)),
-                    ("days", Value::Text(&days)),
-                ],
-            )
-            .await?;
-        Ok(Message::text(
-            Address::new(Some(name), email).map_err(|_| Error::Invalid)?,
-            wording["subject"].clone(),
-            crate::wording::around_link(&wording, &format!("{}/accept/{token}", self.origin)),
-        ))
     }
 
     /// Prepares one tenant-owned account and emails a one-time invitation.
