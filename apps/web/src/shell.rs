@@ -374,6 +374,7 @@ async fn context<'a>(
         .filter_map(|part| part.chars().next())
         .collect::<String>()
         .to_uppercase();
+    let composition = crate::composition();
     Ok(ShellContext {
         user: &scope.user_name,
         email: &scope.email,
@@ -416,7 +417,12 @@ async fn context<'a>(
         } else {
             None
         },
-        versions: crate::application_version::application_version(instance.role, &display),
+        version: crate::application_version::application_version(
+            instance.role,
+            composition.version,
+            &display,
+        ),
+        components: composition.containers,
         topbar_actions,
         page_search: bilibi_ui::page_search(&pages, records).map_err(|_| Error::Internal)?,
     })

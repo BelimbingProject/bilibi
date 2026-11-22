@@ -58,7 +58,29 @@
 <div id="app-sidebar-drag" class="app-sidebar-drag relative z-20 hidden w-2 shrink-0 cursor-col-resize hover:bg-surface-muted lg:block" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0" aria-valuemin="180" aria-valuemax="360" aria-valuenow="240"></div>
 <main id="app-content" class="min-h-0 min-w-0 flex-1 overflow-y-auto px-1 py-2 sm:px-4 sm:py-1">{{ body|safe }}</main>
 </div>
-<footer id="app-statusbar" class="relative flex h-6 shrink-0 items-center justify-between gap-3 border-t border-line bg-surface px-4 text-xs text-ink-subtle"><div class="flex min-w-0 flex-1 items-center gap-4 overflow-hidden"><a href="{{ context.home }}" id="app-brand" class="flex shrink-0 items-center transition hover:opacity-90" aria-label="Bilibi dashboard"><img src="{{ bilibi_ui::Assets::url("/favicon.svg") }}" alt="" class="shrink-0 object-contain size-4" width="16" height="16" decoding="async" loading="eager" aria-hidden="true"></a><span id="app-mode" data-live-ignore hidden role="status" aria-live="polite" class="shrink-0 rounded-sm bg-brand-surface px-1.5 font-medium text-brand-ink"></span>{{ context.instance_status|safe }}{% if let Some(address) = context.listen_address %}<span id="app-listen" class="shrink-0 tabular-nums">{{ address }}</span>{% endif %}{% if context.operator_company_missing %}<a href="/setup/platform-operator" id="app-operator-company-missing" class="inline-flex items-center gap-1 font-medium text-danger hover:underline">{% call ui::icon(name=bilibi_ui::Icons::shell("warning"), class="size-3.5") %}{% endcall %}<span>Operator company not set</span></a>{% endif %}</div>{{ context.ai|safe }}<div id="app-versions" class="flex min-w-0 flex-1 items-center justify-end gap-3 overflow-hidden whitespace-nowrap">{% for badge in context.versions %}<button type="button" id="{{ badge.id }}" data-statusbar-toggle aria-haspopup="true" aria-controls="app-version-panel" aria-expanded="false" aria-label="{{ badge.title }}" class="shrink-0 tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong" title="{{ badge.title }}">{{ badge.text }}</button>{% endfor %}</div><div class="absolute right-48 bottom-full">{% call feedback::statusbar_panel(id="app-version-panel", label="Application version") %}{% for badge in context.versions %}<div class="flex items-center justify-between gap-3 p-3"><p>{{ badge.title }}</p><button type="button" data-statusbar-toggle aria-controls="app-version-panel" class="min-h-10 min-w-10 shrink-0 text-link hover:underline">Close</button></div>{% endfor %}{% endcall %}</div></footer>
+<footer id="app-statusbar" class="relative flex h-6 shrink-0 items-center justify-between gap-3 border-t border-line bg-surface px-4 text-xs text-ink-subtle"><div class="flex min-w-0 flex-1 items-center gap-4 overflow-hidden"><a href="{{ context.home }}" id="app-brand" class="flex shrink-0 items-center transition hover:opacity-90" aria-label="Bilibi dashboard"><img src="{{ bilibi_ui::Assets::url("/favicon.svg") }}" alt="" class="shrink-0 object-contain size-4" width="16" height="16" decoding="async" loading="eager" aria-hidden="true"></a><span id="app-mode" data-live-ignore hidden role="status" aria-live="polite" class="shrink-0 rounded-sm bg-brand-surface px-1.5 font-medium text-brand-ink"></span>{{ context.instance_status|safe }}{% if let Some(address) = context.listen_address %}<span id="app-listen" class="shrink-0 tabular-nums">{{ address }}</span>{% endif %}{% if context.operator_company_missing %}<a href="/setup/platform-operator" id="app-operator-company-missing" class="inline-flex items-center gap-1 font-medium text-danger hover:underline">{% call ui::icon(name=bilibi_ui::Icons::shell("warning"), class="size-3.5") %}{% endcall %}<span>Operator company not set</span></a>{% endif %}</div>{{ context.ai|safe }}<div id="app-versions" class="flex min-w-max flex-1 items-center justify-end gap-3">
+{% if !context.components.is_empty() %}
+{% call feedback::statusbar_tag(tag=context.component_tag()) %}{% endcall %}
+<div class="absolute right-0 bottom-0 sm:w-96">
+{% call feedback::statusbar_panel(id="app-components-panel", label="Installed Domains and Extensions") %}
+<dl class="max-h-[50vh] overflow-y-auto p-3">
+{% for component in context.components %}
+<div class="flex items-baseline justify-between gap-3 py-1">
+<dt class="break-all">{{ component.id }}</dt>
+<dd class="shrink-0 tabular-nums">{% if let Some(version) = component.version %}{{ version }}{% else %}No release{% endif %}</dd>
+</div>
+{% endfor %}
+</dl>
+{% endcall %}
+</div>
+{% endif %}
+{% if let Some(version) = context.version %}
+<span class="group shrink-0 tabular-nums">
+<span id="app-version" tabindex="0" aria-describedby="app-version-tooltip">{{ version.text }}</span>
+<span id="app-version-tooltip" role="tooltip" class="invisible absolute right-2 bottom-full z-50 rounded-md border border-line bg-surface px-2 py-1 text-ink shadow-lg group-hover:visible group-focus-within:visible">{{ version.title }}</span>
+</span>
+{% endif %}
+</div></footer>
 {{ context.page_search|safe }}
 </div>
 </div>

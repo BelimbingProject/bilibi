@@ -1,6 +1,6 @@
 # Versions, releases and the catalogue
 
-Every release of Bilibi and of each Domain is a Git tag `vX.Y.Z`. `catalogue.json` lists those releases and the pairs CI proved build and run together. The running program knows exactly which commits it was built from and shows them in `bilibi-web status` and in the status bar.
+Every release of Bilibi and of each Domain is a Git tag `vX.Y.Z`. `catalogue.json` lists those releases and the pairs CI proved build and run together. The running program knows exactly which commits it was built from and reports them in `bilibi-web status`. The status bar identifies the assembled application.
 
 ## One example
 
@@ -14,7 +14,7 @@ Domains:
 Extensions: none mounted
 ```
 
-Notice what you learn without opening a file: the Platform is release 0.1.0 (not some commit after it), Finance is release 0.1.0, and the exact commits both came from. The status bar at the bottom of every page shows the same in short form: `v0.1.0` and `finance 0.1.0`, with the commits in the tooltip.
+The Platform and Finance are both at release 0.1.0. The command gives the exact commit for each. The status bar’s Components popover shows the installed Finance version.
 
 You may already have questions: where does a version number come from, how do you make a release, what counts as "tested together", and what happens on a developer's machine without a pin? We cover each below.
 
@@ -191,7 +191,7 @@ Customer-code Extensions require a saved isolated installation at discovery, pin
 
 `bilibi-web status` reports each pinned Platform and component version and commit, marks untagged components, and explains an unpinned or stale composition. The Software page also shows component versions.
 
-The status bar shows the application tag without `setup-`, with its release date in the details. Dev shows the Platform working version and `*` when a source checkout has uncommitted changes. If the application identity is unavailable, the bar shows the short Platform commit or `dev` rather than calling the Platform version an application release.
+Staging and Production show the application tag without `setup-` when the package provides the tag and release date. Hover or focus the version to see its release date. Dev shows the Platform working version and `*` when a source checkout has uncommitted changes. Open Components to see the installed Domain and Extension versions.
 
 ## Where to go next
 

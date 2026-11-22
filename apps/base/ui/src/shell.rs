@@ -284,7 +284,8 @@ pub struct ShellContext<'a> {
     /// it only when the role is Dev.
     pub listen_address: Option<&'a str>,
     /// The application or working-build identity supplied by the host.
-    pub versions: Vec<VersionBadge>,
+    pub version: Option<VersionBadge>,
+    pub components: Vec<bilibi_module_registry::Container>,
     /// The open page's controls in the top bar, left of the bell
     /// (`topbar_actions` slot), from `Page::topbar_actions`.
     pub topbar_actions: Html,
@@ -293,6 +294,17 @@ pub struct ShellContext<'a> {
     pub page_search: Html,
 }
 impl ShellContext<'_> {
+    fn component_tag(&self) -> crate::StatusbarTag<'static> {
+        crate::StatusbarTag {
+            id: "app-components",
+            label: "Components",
+            title: "Installed Domains and Extensions",
+            controls: "app-components-panel",
+            state: "",
+            quiet: true,
+        }
+    }
+
     pub fn initials(&self) -> String {
         self.user
             .split_whitespace()
@@ -305,44 +317,8 @@ impl ShellContext<'_> {
 
 /// The status bar version. `text` is the short form; `title` describes the build.
 pub struct VersionBadge {
-    pub id: String,
     pub text: String,
     pub title: String,
-}
-
-/// The status bar's version badges for the program's composition (docs/versions.md):
-/// `v0.1.0` for the Platform. Component versions remain on the Software page.
-pub fn version_badges(made: &bilibi_module_registry::Composition) -> Vec<VersionBadge> {
-    use bilibi_module_registry::PinState;
-    let mut title = format!("Bilibi {}", made.version);
-    match (&made.pin, made.tag, made.short_commit()) {
-        (PinState::Stale(reason), _, _) => {
-            title.push_str(&format!(" · the pin is stale: {reason}"))
-        }
-        (PinState::Unpinned, _, commit) => {
-            if let Some(commit) = commit {
-                title.push_str(&format!(" · commit {commit}"));
-            }
-            title.push_str(" · development build");
-        }
-        (PinState::Pinned, Some(tag), commit) => {
-            title.push_str(&format!(" · release {tag}"));
-            if let Some(commit) = commit {
-                title.push_str(&format!(" · commit {commit}"));
-            }
-        }
-        (PinState::Pinned, None, commit) => {
-            title.push_str(" · unreleased");
-            if let Some(commit) = commit {
-                title.push_str(&format!(" · commit {commit}"));
-            }
-        }
-    }
-    vec![VersionBadge {
-        id: "app-version".into(),
-        text: format!("v{}", made.version),
-        title,
-    }]
 }
 
 #[derive(Template)]
