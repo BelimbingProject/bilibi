@@ -181,6 +181,11 @@ impl DevicePage {
             origin: &self.pages.origin,
             connections: Html::render(&Button {
                 id: "device-connections",
+                variant: if completed.is_some() {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::default()
+                },
                 href: "/settings/ai-connections",
                 body: Html::text("Your connections"),
                 ..Button::default()

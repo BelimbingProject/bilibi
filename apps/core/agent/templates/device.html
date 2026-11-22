@@ -53,7 +53,6 @@
 <p class="mt-3 text-sm text-ink-muted">Nothing was connected. {{ done.agent_id }} is told you refused.</p>
 {% endif %}
 </div>
-<div class="mt-3">{% call ui::button(id="device-another", button_type="button", event="another") %}Connect another app{% endcall %}</div>
 </section>
 {% else %}
 {% call forms::form(id="device-code-form", event="lookup", actions=code_actions) %}

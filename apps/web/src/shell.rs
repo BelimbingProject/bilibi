@@ -402,10 +402,10 @@ async fn context<'a>(
         served_routes: serde_json::to_string(&served).map_err(|_| Error::Internal)?,
         pins: serde_json::to_string(&pins).map_err(|_| Error::Internal)?,
         pin_icons,
-        instance: if instance.role == bilibi_base::system::Role::Dev {
-            Html::EMPTY
-        } else {
+        instance: if instance.role == bilibi_base::system::Role::Staging {
             instance.badge().map_err(|_| Error::Internal)?
+        } else {
+            Html::EMPTY
         },
         instance_status: instance
             .status(manage_instance)
