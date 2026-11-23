@@ -159,10 +159,21 @@ impl Watchers {
             }
             Some(binding)
         }).collect();
+        let lookups: Option<Vec<Value>> = definition
+            .scripts()
+            .flat_map(|script| &script.lookups)
+            .map(|call| {
+                let lookup = self.lookup(&call.operation)?;
+                Some(
+                    json!({"key": lookup.key, "input": lookup.input, "output": lookup.output,
+                "capability": lookup.capability}),
+                )
+            })
+            .collect();
         Some(digest(
             &json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
             "subject": trigger.subject, "logical_event": trigger.logical_event, "version": trigger.version, "source": root.source().sql, "key": root.key(), "key_column": root.key_field().source_key(), "tenant_scoped": root.source().tenant_scoped,
-            "capability": root.capability(), "fields": fields?, "actions": actions?}),
+            "capability": root.capability(), "fields": fields?, "actions": actions?, "lookups": lookups?}),
             &Value::Null,
         ))
     }
@@ -393,6 +404,24 @@ impl Watchers {
                     problems.push(("do".into(), format!("{} cannot read {path}.", script.name)));
                 }
             }
+            for (index, call) in script.lookups.iter().enumerate() {
+                let Some(lookup) = self.lookup(&call.operation) else {
+                    problems.push((
+                        "do".into(),
+                        format!("{} lookup {} is not installed", script.name, call.operation),
+                    ));
+                    continue;
+                };
+                if let Err(fields) = bilibi_agent_api::schema::validate(
+                    &lookup.input,
+                    &Value::Object(call.input.clone()),
+                ) {
+                    for (field, why) in fields {
+                        problems
+                            .push((format!("do.{index}.script.lookups.{field}"), why.join("; ")));
+                    }
+                }
+            }
             review.actions.push(script.describe());
         }
         review.conditions = definition
@@ -553,7 +582,7 @@ impl Watchers {
                 }
                 let actual = tokio::time::timeout(
                     std::time::Duration::from_millis(time),
-                    script.capture(&facts, time, heap),
+                    script.capture(&facts, &example.replies, time, heap),
                 )
                 .await
                 .unwrap_or(Err("script_timeout"));
@@ -659,7 +688,18 @@ impl Watchers {
         watcher: i64,
         number: i32,
     ) -> Result<Review> {
-        self.review_activation(client, scope, watcher, number, false)
+        self.review_activation(client, scope, watcher, number, Activation::Approve)
+            .await
+    }
+
+    pub async fn review_restore(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        watcher: i64,
+        number: i32,
+    ) -> Result<Review> {
+        self.review_activation(client, scope, watcher, number, Activation::Restore)
             .await
     }
 
@@ -669,7 +709,7 @@ impl Watchers {
         scope: &Scope,
         watcher: i64,
         number: i32,
-        reenable: bool,
+        activation: Activation,
     ) -> Result<Review> {
         bilibi_authz::authorize_key(client, scope, APPROVE).await?;
         let tenant = scope.tenant();
@@ -679,14 +719,20 @@ impl Watchers {
         ).await?.ok_or(Error::NotFound)?;
         let mut problems = Problems::new();
         let latest: i32 = row.get(5);
-        if !reenable && latest != number {
+        if activation == Activation::Approve && latest != number {
             problems.push((
                 "version".into(),
                 format!("version {latest} is newer; review and approve that one"),
             ));
         }
-        if !reenable && row.get::<_, Option<bool>>(6) == Some(true) {
+        if activation != Activation::Reenable && row.get::<_, Option<bool>>(6) == Some(true) {
             problems.push(("version".into(), "this version already runs".into()));
+        }
+        if activation == Activation::Restore && !row.get::<_, bool>(4) {
+            problems.push((
+                "version".into(),
+                "only an earlier approved version can be restored".into(),
+            ));
         }
         let trigger: String = row.get(1);
         if row.get::<_, bool>(4) {
@@ -788,6 +834,13 @@ impl Watchers {
                     std::iter::once(a.capability)
                         .chain(a.definition.approval_capabilities.iter().copied())
                 }),
+        );
+        needed.extend(
+            definition
+                .scripts()
+                .flat_map(|script| &script.lookups)
+                .filter_map(|lookup| self.lookup(&lookup.operation))
+                .map(|lookup| lookup.capability),
         );
         for key in needed {
             if !bilibi_authz::decide(client, scope, key).await?.allowed {
@@ -901,6 +954,30 @@ impl Watchers {
         watcher: i64,
         number: i32,
     ) -> Result<Review> {
+        self.activate(tx, scope, watcher, number, false).await
+    }
+
+    /// Restores an earlier approved version only after repeating every current
+    /// permission, binding, example, limit and cycle check. A refusal leaves
+    /// the running version unchanged.
+    pub async fn restore(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        watcher: i64,
+        number: i32,
+    ) -> Result<Review> {
+        self.activate(tx, scope, watcher, number, true).await
+    }
+
+    async fn activate(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        watcher: i64,
+        number: i32,
+        restoring: bool,
+    ) -> Result<Review> {
         let tenant = scope.tenant();
         self.lock_admission(tx.sql(), scope).await?;
         tx.sql()
@@ -910,9 +987,13 @@ impl Watchers {
             )
             .await?
             .ok_or(Error::NotFound)?;
-        let review = self
-            .review_approval(tx.sql(), scope, watcher, number)
-            .await?;
+        let review = if restoring {
+            self.review_restore(tx.sql(), scope, watcher, number)
+                .await?
+        } else {
+            self.review_approval(tx.sql(), scope, watcher, number)
+                .await?
+        };
         if !review.ok() {
             return Err(Error::Invalid);
         }
@@ -931,6 +1012,10 @@ impl Watchers {
         let catalog_digest = self
             .catalog_digest(&event, &definition, &custom)
             .ok_or(Error::Invalid)?;
+        let script_digests: Vec<String> = definition
+            .scripts()
+            .map(|script| script.permission_digest())
+            .collect();
         let user = scope.user();
         tx.mutate(move |sql| Box::pin(async move {
             let previous = sql.query_one("SELECT id,approved_by,approved_at::text,catalog_digest FROM base_watcher_versions WHERE tenant_id=$1 AND watcher_id=$2 AND number=$3", &[&tenant, &watcher, &number]).await?;
@@ -938,17 +1023,28 @@ impl Watchers {
                 "UPDATE base_watcher_versions SET approved_by=COALESCE(approved_by,$4),approved_at=COALESCE(approved_at,clock_timestamp()),catalog_digest=COALESCE(catalog_digest,$5) WHERE tenant_id=$1 AND watcher_id=$2 AND number=$3 RETURNING id",
                 &[&tenant, &watcher, &number, &user, &catalog_digest],
             ).await?.get(0);
-            let old: Option<i64> = sql.query_one(
-                "SELECT active_version_id FROM base_watchers WHERE tenant_id=$1 AND id=$2",
+            let old = sql.query_one(
+                "SELECT r.active_version_id,v.number FROM base_watchers r LEFT JOIN base_watcher_versions v ON v.tenant_id=r.tenant_id AND v.id=r.active_version_id WHERE r.tenant_id=$1 AND r.id=$2",
                 &[&tenant, &watcher],
-            ).await?.get(0);
+            ).await?;
+            let old_id: Option<i64> = old.get(0);
+            let old_number: Option<i32> = old.get(1);
+            for digest in &script_digests {
+                sql.execute(
+                    "INSERT INTO base_watcher_script_permissions(tenant_id,watcher_id,version_id,script_digest,principal,granted_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,version_id,script_digest,principal) DO UPDATE SET granted_by=EXCLUDED.granted_by,granted_at=clock_timestamp()",
+                    &[&tenant, &watcher, &version, digest, &crate::PRINCIPAL, &user],
+                ).await?;
+            }
             sql.execute(
                 "UPDATE base_watchers SET active_version_id=$3,disabled_at=NULL,enabled_at=clock_timestamp(),needs_review=false,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2",
                 &[&tenant, &watcher, &version],
             ).await?;
             let evidence = sql.query_one("SELECT approved_by,approved_at::text,catalog_digest FROM base_watcher_versions WHERE tenant_id=$1 AND id=$2", &[&tenant, &version]).await?;
             Ok(((), vec![Change { kind: "base/watchers.watcher".into(), id: watcher,
-                old: json!({"active_version": old}), new: json!({"active_version": version, "number": number, "approved": true}) },
+                old: json!({"active_version": old_id}), new: json!({"active_version": version, "number": number, "approved": true}) },
+                Change { kind: "base/watchers.activation".into(), id: watcher,
+                    old: json!({"active_version": old_id, "number": old_number}),
+                    new: json!({"active_version": version, "number": number}) },
                 Change { kind: "base/watchers.version".into(), id: previous.get(0),
                     old: json!({"approved_by": previous.get::<_, Option<i64>>(1), "approved_at": previous.get::<_, Option<String>>(2), "catalog_digest": previous.get::<_, Option<String>>(3)}),
                     new: json!({"approved_by": evidence.get::<_, Option<i64>>(0), "approved_at": evidence.get::<_, Option<String>>(1), "catalog_digest": evidence.get::<_, Option<String>>(2)}) }]))
@@ -983,7 +1079,7 @@ impl Watchers {
         let mut review = None;
         if enabled {
             let checked = self
-                .review_activation(tx.sql(), scope, watcher, running, true)
+                .review_activation(tx.sql(), scope, watcher, running, Activation::Reenable)
                 .await?;
             if !checked.ok() {
                 return Err(Error::Invalid);
@@ -999,6 +1095,13 @@ impl Watchers {
         })).await?;
         Ok(review)
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Activation {
+    Approve,
+    Reenable,
+    Restore,
 }
 
 /// A stand-in for the bound subject, typed as the contract's schema wants it,

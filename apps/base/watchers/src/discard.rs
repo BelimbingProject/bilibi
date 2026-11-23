@@ -1,6 +1,6 @@
 //! Reverse the creation of a draft through the Customisations page. An
 //! approved watcher or one with subsequent edits needs its ordinary workflow.
-use crate::{agent::watchers, WatcherState, Watchers, MANAGE, VIEW};
+use crate::{agent::watchers, WatcherState, Watchers, APPROVE, MANAGE, VIEW};
 use bilibi_agent_api::{
     Channels, Definitions, Handler, Operation, OperationClient, OperationFuture, WriteHandler,
     DEFINITIONS,
@@ -14,6 +14,7 @@ use tokio_postgres::GenericClient;
 const DISCARD: &str = "base.watchers.discard_draft";
 const EVENT: &str = "customisation.receipt_watcher_draft";
 const KIND: &str = "base/watchers.watcher";
+const ACTIVATION_KIND: &str = "base/watchers.activation";
 
 impl Watchers {
     async fn discardable(
@@ -149,6 +150,9 @@ inventory::submit! { Contribution::new(DEFINITIONS, DISCARD, Provenance { module
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, DISCARD, Provenance { module: "base/watchers", source: file!(), line: line!() },
     &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: EVENT, contract: DISCARD }
 ) }
+inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.watchers.restore", Provenance { module: "base/watchers", source: file!(), line: line!() },
+    &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.receipt_watcher_restore", contract: "base.watchers.restore" }
+) }
 
 fn project_draft_receipt<'a>(
     client: &'a dyn OperationClient,
@@ -201,5 +205,62 @@ inventory::submit! {
             kind: KIND, capability: crate::VIEW, subject_filter: None,
             undo: Some(bilibi_labels::ReceiptUndo { capability: MANAGE, correction }),
             read: None, project: project_draft_receipt,
+        })
+}
+
+fn restore_correction(
+    change: &Value,
+    effective: &Value,
+) -> Option<bilibi_labels::ReceiptCorrection> {
+    let number = change["before"]["number"].as_i64()?;
+    if effective["active_version"] != change["after"]["active_version"] {
+        return None;
+    }
+    let watcher = change["id"].as_str()?.parse::<i64>().ok()?;
+    Some(bilibi_labels::ReceiptCorrection {
+        contract: "base.watchers.restore",
+        event: "customisation.receipt_watcher_restore",
+        input: json!({"watcher_id":watcher,"version":number}),
+    })
+}
+
+fn project_activation<'a>(
+    client: &'a dyn OperationClient,
+    scope: &'a Scope,
+    change: &'a mut Value,
+    _: &'a Value,
+) -> bilibi_labels::ReceiptFuture<'a> {
+    Box::pin(async move {
+        let watcher = change["id"]
+            .as_str()
+            .and_then(|id| id.parse::<i64>().ok())
+            .ok_or(Error::Internal)?;
+        let current = client
+            .query_opt(
+                "SELECT w.name,w.active_version_id,v.number FROM base_watchers w LEFT JOIN base_watcher_versions v ON v.tenant_id=w.tenant_id AND v.id=w.active_version_id WHERE w.tenant_id=$1 AND w.id=$2",
+                &[&scope.tenant(), &watcher],
+            )
+            .await?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        change["effective"] = json!({
+            "name": current.get::<_, String>(0),
+            "active_version": current.get::<_, Option<i64>>(1),
+            "number": current.get::<_, Option<i32>>(2),
+        });
+        change["changed_since"] =
+            json!(change["effective"]["active_version"] != change["after"]["active_version"]);
+        Ok(true)
+    })
+}
+
+inventory::submit! {
+    Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/watchers.activation_receipts",
+        Provenance { module: "base/watchers", source: file!(), line: line!() },
+        &bilibi_labels::ReceiptSource {
+            kind: ACTIVATION_KIND, capability: VIEW, subject_filter: None,
+            undo: Some(bilibi_labels::ReceiptUndo { capability: APPROVE, correction: restore_correction }),
+            read: None, project: project_activation,
         })
 }

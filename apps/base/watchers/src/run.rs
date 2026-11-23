@@ -620,6 +620,7 @@ impl Worker {
                         &**client,
                         scope,
                         &definition,
+                        Some(run.version),
                         (offered, &run.subject, subject_version),
                         budget.deadline,
                     )

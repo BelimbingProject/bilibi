@@ -40,9 +40,9 @@ QuickJS fits the JSON inputs that tenants and AI drafts already use. Lua would i
 
 ## Implementation
 
-The first implementation stores the JavaScript source and its SHA-256 digest in the watcher version. The optional filter runs before script facts are read. The worker receives declared event-record fields and returns an ordered selection from approved operation and input pairs. Only operations their owners explicitly designate as local can be selected by a script. Outbound operations remain unavailable to scripts in this slice. Setup packs refuse scripted watchers.
+The implementation stores the JavaScript source and its SHA-256 digest in the watcher version. The optional filter runs before script facts are read. The worker receives declared event-record fields and owner-declared read-contract replies, then returns an ordered selection from approved operation and input pairs. Approval records a permission for the watchers principal to run each exact script declaration; execution checks it and the live `watchers.script.execute` grant. Only operations their owners explicitly designate as local can be selected by a script. Outbound operations remain unavailable to scripts in this slice. Setup packs refuse scripted watchers.
 
-The tenant-wide `watchers.script.execute` grant applies to the named watcher principal for queued runs and to the person running examples at draft or approval. Use the watcher's version and Customisations entry to inspect, switch off or undo the watcher. Independent script records, per-script grants, contract lookups, outbound terms and schedule, page, CLI and delegated-agent entry points remain future work. [Watchers contract](../../../apps/base/watchers/README.md#javascript-steps)
+The tenant-wide `watchers.script.execute` grant applies to the named watcher principal for queued runs and to the person running examples at draft or approval. The watcher's exact-version permission narrows it. Use the watcher page and Customisations history to inspect, switch off or restore an approved version; restore repeats current permission, binding and example checks. Independent script records, outbound terms and schedule, page, CLI and delegated-agent entry points remain future work. [Watchers contract](../../../apps/base/watchers/README.md#javascript-steps)
 
 ## Consequences
 

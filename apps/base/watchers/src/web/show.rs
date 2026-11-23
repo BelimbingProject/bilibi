@@ -60,6 +60,8 @@ fn reason(code: &str) -> &'static str {
         "script_timeout" => "The script reached its time limit.",
         "script_refused" => "The script failed inside its sandbox.",
         "script_call_refused" => "The script requested a call outside its approved list.",
+        "script_lookup_refused" => "The script requested a read outside its approved lookups, or the read owner refused it.",
+        "script_permission_refused" => "This watcher is not permitted to run that particular script version.",
         "script_output" | "script_input" => "The script input or result exceeded its contract.",
         "script_unavailable" => "The script worker could not start.",
         "read_refused" => "Not run: automation may not read these records yet. An administrator allows it in Automation access.",
@@ -172,6 +174,7 @@ fn outcome_badge(run: &RunView) -> Result<Html> {
 /// A pending approval the person asked for and has not yet confirmed.
 struct Request {
     number: i32,
+    restore: bool,
 }
 
 pub(super) struct Show {
@@ -237,19 +240,37 @@ impl Show {
                     .and_then(|v| v.parse::<i32>().ok())
                     .ok_or(Error::Invalid)?;
                 self.flash = None;
-                self.request = Some(Request { number });
+                self.request = Some(Request {
+                    number,
+                    restore: false,
+                });
             }
-            "cancel_approve" => self.request = None,
-            "approve" => {
+            "request_restore" => {
+                let number = get("value")
+                    .and_then(|v| v.parse::<i32>().ok())
+                    .ok_or(Error::Invalid)?;
+                self.flash = None;
+                self.request = Some(Request {
+                    number,
+                    restore: true,
+                });
+            }
+            "cancel_approve" | "cancel_restore" => self.request = None,
+            "approve" | "restore" => {
                 let Some(request) = self.request.take() else {
                     return Ok(());
+                };
+                let (event, contract) = if request.restore {
+                    ("restore", "base.watchers.restore")
+                } else {
+                    ("approve", "base.watchers.approve")
                 };
                 let call = Call {
                     scope,
                     credential,
                     service: crate::PAGES,
-                    event: "approve",
-                    contract: "base.watchers.approve",
+                    event,
+                    contract,
                 };
                 let outcome = self
                     .pages
@@ -261,10 +282,17 @@ impl Show {
                     .await;
                 self.answer(
                     outcome,
-                    format!(
-                        "Version {} approved. It runs on every new event from now on.",
-                        request.number
-                    ),
+                    if request.restore {
+                        format!(
+                            "Version {} restored. It now runs on new events.",
+                            request.number
+                        )
+                    } else {
+                        format!(
+                            "Version {} approved. It runs on every new event from now on.",
+                            request.number
+                        )
+                    },
                 )?;
             }
             "switch" => {
@@ -359,6 +387,17 @@ impl Show {
                 value: &version.number.to_string(),
                 disabled: !ready,
                 body: Html::text("Approve…"),
+                ..Button::default()
+            })?
+        } else if can_approve && version.approved_at.is_some() && !running {
+            render(Button {
+                variant: ButtonVariant::Secondary,
+                id: &format!("{dom}-restore"),
+                button_type: "button",
+                event: "request_restore",
+                name: "value",
+                value: &version.number.to_string(),
+                body: Html::text("Restore…"),
                 ..Button::default()
             })?
         } else {
@@ -623,13 +662,15 @@ impl Show {
                 can_approve,
             )?);
         }
-        if let Some(running) = view
-            .versions
-            .iter()
-            .skip(1)
-            .find(|v| Some(v.number) == view.summary.running)
-        {
-            versions.push(self.version_card(&view, running, &display, None, true, can_approve)?);
+        for version in view.versions.iter().skip(1) {
+            versions.push(self.version_card(
+                &view,
+                version,
+                &display,
+                None,
+                Some(version.number) == view.summary.running,
+                can_approve,
+            )?);
         }
         let mut rows = Vec::new();
         for run in &view.runs {
@@ -677,22 +718,49 @@ impl Show {
         })?;
         let mut dialog = match &self.request {
             Some(request) => {
-                let consequence = format!(
-                    "Approve version {} of \u{201c}{}\u{201d}?",
-                    request.number, view.summary.name
-                );
-                let detail = format!(
-                    "From now on it runs each time \u{201c}{}\u{201d}, without AI. A run still waiting for an earlier version will not act.",
-                    view.summary.trigger_title
-                );
+                let consequence = if request.restore {
+                    format!(
+                        "Restore version {} of \u{201c}{}\u{201d}?",
+                        request.number, view.summary.name
+                    )
+                } else {
+                    format!(
+                        "Approve version {} of \u{201c}{}\u{201d}?",
+                        request.number, view.summary.name
+                    )
+                };
+                let detail = if request.restore {
+                    "Its current permissions, bindings and examples are checked again. If any check fails, the version running now stays active.".to_owned()
+                } else {
+                    format!(
+                        "From now on it runs each time \u{201c}{}\u{201d}, without AI. A run still waiting for an earlier version will not act.",
+                        view.summary.trigger_title
+                    )
+                };
                 render(ConfirmDialog {
                     id: "watcher-approve-confirm",
                     consequence: &consequence,
                     detail: &detail,
-                    confirm: "Approve",
-                    working: "Approving…",
-                    confirm_event: "approve",
-                    cancel_event: "cancel_approve",
+                    confirm: if request.restore {
+                        "Restore"
+                    } else {
+                        "Approve"
+                    },
+                    working: if request.restore {
+                        "Restoring…"
+                    } else {
+                        "Approving…"
+                    },
+                    confirm_event: if request.restore {
+                        "restore"
+                    } else {
+                        "approve"
+                    },
+                    cancel_event: if request.restore {
+                        "cancel_restore"
+                    } else {
+                        "cancel_approve"
+                    },
                 })?
             }
             None => Html::EMPTY,

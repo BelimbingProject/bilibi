@@ -234,7 +234,7 @@ impl Watchers {
                                 return Ok(Some(base("script_facts_restricted")));
                             }
                         }
-                        let calls = match self.plan_steps(&tx, &principal, definition, (trigger, &subject, revision), budget.deadline).await? {
+                        let calls = match self.plan_steps(&tx, &principal, definition, None, (trigger, &subject, revision), budget.deadline).await? {
                             Ok(calls) => calls,
                             Err(reason) => return Ok(Some(base(reason))),
                         };
