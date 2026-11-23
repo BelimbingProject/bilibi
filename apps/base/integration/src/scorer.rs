@@ -216,7 +216,7 @@ pub enum ScoreFailure {
     Transport(#[from] Failure),
     #[error("Scorer returned an unsuccessful HTTP status")]
     HttpStatus,
-    #[error("Scorer reply arrived after the request expired")]
+    #[error("Scorer decision expired")]
     Expired,
     #[error("Scorer returned a reply outside its typed result schema")]
     InvalidReply,
@@ -224,6 +224,7 @@ pub enum ScoreFailure {
     Unrecorded,
 }
 
+#[derive(PartialEq)]
 struct Configuration {
     destination: String,
     secret: String,
@@ -232,7 +233,7 @@ struct Configuration {
 impl Integration {
     /// Send a consented event to a customer-hosted scorer and return only its
     /// contributed action choice. The caller invokes that action through its
-    /// owner contract and uses `delivery_id` as its idempotency key.
+    /// owner contract and can correlate that action with `delivery_id`.
     pub async fn score(
         &self,
         origin: Origin<'_>,
@@ -305,15 +306,36 @@ impl Integration {
             .no_redirects()
             .timeout(Duration::from_millis(contract.contract.timeout_ms))
             .max_body_bytes(16_384);
+        if self.configuration(scope, contract).await.as_ref().ok() != Some(&configuration) {
+            self.finish_delivery(
+                scope.tenant(),
+                &delivery_id,
+                "revoked",
+                None,
+                None,
+                None,
+                Some("revoked"),
+            )
+            .await?;
+            return Err(ScoreFailure::Revoked);
+        }
         let reply = match self.send(origin, &call, outgoing).await {
             Ok(reply) => reply,
             Err(error) => {
+                let (exchange_id, status) = match &error {
+                    Failure::Transport {
+                        exchange_id,
+                        status,
+                        ..
+                    } => (Some(exchange_id.as_str()), *status),
+                    _ => (None, None),
+                };
                 self.finish_delivery(
                     scope.tenant(),
                     &delivery_id,
                     "failed",
-                    None,
-                    None,
+                    exchange_id,
+                    status,
                     None,
                     Some("transport"),
                 )
@@ -327,24 +349,21 @@ impl Integration {
                 &delivery_id,
                 "refused",
                 Some(&reply.exchange_id),
-                Some(i16::try_from(reply.status).unwrap_or(599)),
+                Some(reply.status),
                 None,
                 Some("http_status"),
             )
             .await?;
             return Err(ScoreFailure::HttpStatus);
         }
-        let received = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| ScoreFailure::Invalid)?
-            .as_secs();
-        if received > expires_at {
+        let deadline = UNIX_EPOCH + Duration::from_secs(expires_at);
+        if SystemTime::now() >= deadline {
             self.finish_delivery(
                 scope.tenant(),
                 &delivery_id,
                 "refused",
                 Some(&reply.exchange_id),
-                Some(i16::try_from(reply.status).unwrap_or(599)),
+                Some(reply.status),
                 None,
                 Some("expired"),
             )
@@ -359,7 +378,7 @@ impl Integration {
                     &delivery_id,
                     "refused",
                     Some(&reply.exchange_id),
-                    Some(i16::try_from(reply.status).unwrap_or(599)),
+                    Some(reply.status),
                     None,
                     Some("invalid_reply"),
                 )
@@ -381,7 +400,7 @@ impl Integration {
                 &delivery_id,
                 "refused",
                 Some(&reply.exchange_id),
-                Some(i16::try_from(reply.status).unwrap_or(599)),
+                Some(reply.status),
                 None,
                 Some("invalid_reply"),
             )
@@ -390,31 +409,33 @@ impl Integration {
         };
         // Consent, destination policy and secret are live. A revocation or
         // rotation while the request was in flight withholds the action.
-        let live = self.configuration(scope, contract).await;
-        if !matches!(live, Ok(Configuration { ref destination, ref secret }) if destination == &configuration.destination && secret == &configuration.secret)
-        {
+        if self.configuration(scope, contract).await.as_ref().ok() != Some(&configuration) {
             self.finish_delivery(
                 scope.tenant(),
                 &delivery_id,
                 "revoked",
                 Some(&reply.exchange_id),
-                Some(i16::try_from(reply.status).unwrap_or(599)),
+                Some(reply.status),
                 Some(result),
                 Some("revoked"),
             )
             .await?;
             return Err(ScoreFailure::Revoked);
         }
+        let expired = SystemTime::now() >= deadline;
         self.finish_delivery(
             scope.tenant(),
             &delivery_id,
-            "done",
+            if expired { "refused" } else { "done" },
             Some(&reply.exchange_id),
-            Some(i16::try_from(reply.status).unwrap_or(599)),
-            Some(result),
-            None,
+            Some(reply.status),
+            (!expired).then_some(*result),
+            expired.then_some("expired"),
         )
         .await?;
+        if expired || SystemTime::now() >= deadline {
+            return Err(ScoreFailure::Expired);
+        }
         Ok(ScoreDecision {
             delivery_id,
             result: (*result).to_owned(),
@@ -445,6 +466,11 @@ impl Integration {
             .map_err(|_| ScoreFailure::NotConfigured)?;
         let consent = values
             .get(scorer.contract.consent_setting)
+            .filter(|value| {
+                value.source.is_some_and(|source| {
+                    source.kind == ScopeKind::Tenant && source.tenant == scope.tenant()
+                })
+            })
             .and_then(|value| value.value.as_bool())
             .unwrap_or(false);
         let destination = values
@@ -505,11 +531,14 @@ impl Integration {
         delivery_id: &str,
         state: &str,
         exchange_id: Option<&str>,
-        response_status: Option<i16>,
+        response_status: Option<u16>,
         result: Option<&str>,
         reason: Option<&str>,
     ) -> std::result::Result<(), ScoreFailure> {
         let client = self.db.get().await.map_err(|_| ScoreFailure::Unrecorded)?;
+        let response_status = response_status
+            .filter(|status| (100..=599).contains(status))
+            .map(|status| status as i16);
         let changed = client
             .execute(
                 "UPDATE base_integration_scorer_deliveries SET state=$3,exchange_id=$4,response_status=$5,result=$6,reason=$7,finished_at=now() WHERE tenant_id=$1 AND delivery_id=$2 AND state='sending'",

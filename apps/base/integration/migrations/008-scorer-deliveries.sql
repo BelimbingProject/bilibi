@@ -18,5 +18,3 @@ CREATE TABLE base_integration_scorer_deliveries (
  UNIQUE (tenant_id, delivery_id),
  CHECK ((state = 'sending') = (finished_at IS NULL))
 );
-CREATE INDEX base_integration_scorer_deliveries_timeline
- ON base_integration_scorer_deliveries (tenant_id, created_at DESC, id DESC);
