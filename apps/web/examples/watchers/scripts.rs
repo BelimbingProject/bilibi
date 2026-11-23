@@ -53,8 +53,8 @@ pub(super) async fn walkthrough(proof: &Proof) -> Result<()> {
                 "name":"Lookup route","fields":["priority"],"lookups":[lookup],"calls":[call],
                 "source":format!("if (facts.priority !== 'urgent') return []; const target=lookup('watcher_cases.cases.lookup',{{case_id:{configuration}}}); return [{{operation:'watcher_cases.cases.route',input:{{queue:target.title}}}}];"),
                 "examples":[
-                    {"facts":{"priority":"normal"},"replies":[lookup_reply],"expect":[]},
-                    {"facts":{"priority":"urgent"},"replies":[lookup_reply],"expect":[call]}
+                    {"facts":{"priority":"normal"},"lookup_fixtures":[lookup_reply],"expect":[]},
+                    {"facts":{"priority":"urgent"},"lookup_fixtures":[lookup_reply],"expect":[call]}
                 ]
             }}]}),
         )
@@ -76,6 +76,44 @@ pub(super) async fn walkthrough(proof: &Proof) -> Result<()> {
         looked_up_state.0.as_deref() == Some("priority"),
         "the script uses an approved read-contract reply",
     );
+    let (same_lookup_id, replacement_version) = proof
+        .draft(
+            one,
+            json!({"watcher_id":lookup_id,"name":"Route without a lookup","watch":OPENED,"do":[{"script":{
+                "name":"Direct route","fields":["priority"],"calls":[call],
+                "source":"if (facts.priority !== 'urgent') return []; return [{operation:'watcher_cases.cases.route',input:{queue:'priority'}}];",
+                "examples":[{"facts":{"priority":"normal"},"expect":[]},{"facts":{"priority":"urgent"},"expect":[call]}]
+            }}]}),
+        )
+        .await?;
+    proof
+        .approve(one, same_lookup_id, replacement_version)
+        .await
+        .map_err(|_| Error::Invalid)?;
+    proof
+        .grant(one, "watchers", "watcher-cases.case.view", Some(false))
+        .await?;
+    let refused_restore = proof.restore(one, lookup_id, lookup_version).await;
+    let client = proof.db.get().await?;
+    let active_number: i32 = client
+        .query_one(
+            "SELECT v.number FROM base_watchers w JOIN base_watcher_versions v ON v.tenant_id=w.tenant_id AND v.id=w.active_version_id WHERE w.tenant_id=$1 AND w.id=$2",
+            &[&one.tenant(), &lookup_id],
+        )
+        .await?
+        .get(0);
+    drop(client);
+    check(
+        refused_restore.is_err() && active_number == replacement_version as i32,
+        "restore refuses a missing live lookup grant and leaves the active version unchanged",
+    );
+    proof
+        .grant(one, "watchers", "watcher-cases.case.view", Some(true))
+        .await?;
+    proof
+        .restore(one, lookup_id, lookup_version)
+        .await
+        .map_err(|_| Error::Invalid)?;
     proof
         .switch(one, lookup_id, false)
         .await

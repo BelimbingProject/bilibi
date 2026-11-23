@@ -170,12 +170,14 @@ impl Watchers {
                 )
             })
             .collect();
-        Some(digest(
-            &json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
+        let mut binding = json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
             "subject": trigger.subject, "logical_event": trigger.logical_event, "version": trigger.version, "source": root.source().sql, "key": root.key(), "key_column": root.key_field().source_key(), "tenant_scoped": root.source().tenant_scoped,
-            "capability": root.capability(), "fields": fields?, "actions": actions?, "lookups": lookups?}),
-            &Value::Null,
-        ))
+            "capability": root.capability(), "fields": fields?, "actions": actions?});
+        let lookups = lookups?;
+        if !lookups.is_empty() {
+            binding["lookups"] = json!(lookups);
+        }
+        Some(digest(&binding, &Value::Null))
     }
 
     pub(crate) async fn approved_field_uses(
@@ -543,7 +545,21 @@ impl Watchers {
             .ok_or(Error::Invalid)?;
         let time = self.limit(client, scope, crate::SCRIPT_TIME).await? as u64;
         let (heap, limit) = self.script_limits(client, scope).await?;
+        let permits = match self
+            .reviewed_script_permits(client, scope, definition)
+            .await?
+        {
+            Ok(permits) => permits,
+            Err(_) => {
+                problems.push((
+                    "do".into(),
+                    "You need the script execution grant to run examples.".into(),
+                ));
+                return Ok(());
+            }
+        };
         for script in definition.scripts() {
+            let permit = permits.for_script(script).map_err(|_| Error::Invalid)?;
             for (index, example) in script.examples.iter().enumerate() {
                 let mut facts = serde_json::Map::new();
                 let mut valid = true;
@@ -570,19 +586,9 @@ impl Watchers {
                 if !valid {
                     continue;
                 }
-                if !bilibi_authz::decide(client, scope, crate::RUN_SCRIPT)
-                    .await?
-                    .allowed
-                {
-                    problems.push((
-                        "do".into(),
-                        "You need the script execution grant to run examples.".into(),
-                    ));
-                    return Ok(());
-                }
                 let actual = tokio::time::timeout(
                     std::time::Duration::from_millis(time),
-                    script.capture(&facts, &example.replies, time, heap),
+                    script.capture(&permit, &facts, &example.lookup_fixtures, time, heap),
                 )
                 .await
                 .unwrap_or(Err("script_timeout"));
@@ -739,10 +745,9 @@ impl Watchers {
             let definition = Definition::parse(&row.get::<_, Value>(2), &mut Vec::new())
                 .ok_or(Error::Invalid)?;
             let custom = self.custom_tables(client, scope, [&definition]).await?;
-            let saved = client.query_one("SELECT v.catalog_digest,r.needs_review FROM base_watcher_versions v JOIN base_watchers r ON r.tenant_id=v.tenant_id AND r.id=v.watcher_id WHERE v.tenant_id=$1 AND v.watcher_id=$2 AND v.number=$3", &[&tenant, &watcher, &number]).await?;
+            let saved = client.query_one("SELECT catalog_digest FROM base_watcher_versions WHERE tenant_id=$1 AND watcher_id=$2 AND number=$3", &[&tenant, &watcher, &number]).await?;
             let fingerprint: Option<String> = saved.get(0);
-            if saved.get::<_, bool>(1)
-                || fingerprint.is_none()
+            if fingerprint.is_none()
                 || fingerprint != self.catalog_digest(&trigger, &definition, &custom)
             {
                 problems.push((
@@ -875,6 +880,22 @@ impl Watchers {
                         }
                     }
                 }
+                for key in definition
+                    .scripts()
+                    .flat_map(|script| &script.lookups)
+                    .filter_map(|lookup| self.lookup(&lookup.operation))
+                    .map(|lookup| lookup.capability)
+                    .collect::<std::collections::BTreeSet<_>>()
+                {
+                    if !bilibi_authz::decide(client, &principal, key).await?.allowed {
+                        problems.push((
+                            "lookups".into(),
+                            format!(
+                                "automation may not use {key}; restore its live grant before activating this version"
+                            ),
+                        ));
+                    }
+                }
             }
             Err(Error::Unauthorized) => return Err(Error::Unauthorized),
             Err(_) => review
@@ -954,7 +975,7 @@ impl Watchers {
         watcher: i64,
         number: i32,
     ) -> Result<Review> {
-        self.activate(tx, scope, watcher, number, false).await
+        self.activate(tx, scope, watcher, number, false, None).await
     }
 
     /// Restores an earlier approved version only after repeating every current
@@ -966,8 +987,10 @@ impl Watchers {
         scope: &Scope,
         watcher: i64,
         number: i32,
+        expected_activation: Option<i32>,
     ) -> Result<Review> {
-        self.activate(tx, scope, watcher, number, true).await
+        self.activate(tx, scope, watcher, number, true, expected_activation)
+            .await
     }
 
     async fn activate(
@@ -977,16 +1000,24 @@ impl Watchers {
         watcher: i64,
         number: i32,
         restoring: bool,
+        expected_activation: Option<i32>,
     ) -> Result<Review> {
         let tenant = scope.tenant();
         self.lock_admission(tx.sql(), scope).await?;
-        tx.sql()
+        let locked = tx.sql()
             .query_opt(
-                "SELECT 1 FROM base_watchers WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                "SELECT version,disabled_at IS NULL FROM base_watchers WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
                 &[&tenant, &watcher],
             )
             .await?
             .ok_or(Error::NotFound)?;
+        if restoring
+            && expected_activation.is_some_and(|expected| {
+                locked.get::<_, i32>(0) != expected || !locked.get::<_, bool>(1)
+            })
+        {
+            return Err(Error::Conflict);
+        }
         let review = if restoring {
             self.review_restore(tx.sql(), scope, watcher, number)
                 .await?
@@ -1024,27 +1055,29 @@ impl Watchers {
                 &[&tenant, &watcher, &number, &user, &catalog_digest],
             ).await?.get(0);
             let old = sql.query_one(
-                "SELECT r.active_version_id,v.number FROM base_watchers r LEFT JOIN base_watcher_versions v ON v.tenant_id=r.tenant_id AND v.id=r.active_version_id WHERE r.tenant_id=$1 AND r.id=$2",
+                "SELECT r.active_version_id,v.number,r.version,r.disabled_at IS NULL FROM base_watchers r LEFT JOIN base_watcher_versions v ON v.tenant_id=r.tenant_id AND v.id=r.active_version_id WHERE r.tenant_id=$1 AND r.id=$2",
                 &[&tenant, &watcher],
             ).await?;
             let old_id: Option<i64> = old.get(0);
             let old_number: Option<i32> = old.get(1);
+            let old_activation: i32 = old.get(2);
+            let old_enabled: bool = old.get(3);
             for digest in &script_digests {
                 sql.execute(
                     "INSERT INTO base_watcher_script_permissions(tenant_id,watcher_id,version_id,script_digest,principal,granted_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,version_id,script_digest,principal) DO UPDATE SET granted_by=EXCLUDED.granted_by,granted_at=clock_timestamp()",
                     &[&tenant, &watcher, &version, digest, &crate::PRINCIPAL, &user],
                 ).await?;
             }
-            sql.execute(
-                "UPDATE base_watchers SET active_version_id=$3,disabled_at=NULL,enabled_at=clock_timestamp(),needs_review=false,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2",
+            let activation: i32 = sql.query_one(
+                "UPDATE base_watchers SET active_version_id=$3,disabled_at=NULL,enabled_at=clock_timestamp(),needs_review=false,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2 RETURNING version",
                 &[&tenant, &watcher, &version],
-            ).await?;
+            ).await?.get(0);
             let evidence = sql.query_one("SELECT approved_by,approved_at::text,catalog_digest FROM base_watcher_versions WHERE tenant_id=$1 AND id=$2", &[&tenant, &version]).await?;
             Ok(((), vec![Change { kind: "base/watchers.watcher".into(), id: watcher,
                 old: json!({"active_version": old_id}), new: json!({"active_version": version, "number": number, "approved": true}) },
                 Change { kind: "base/watchers.activation".into(), id: watcher,
-                    old: json!({"active_version": old_id, "number": old_number}),
-                    new: json!({"active_version": version, "number": number}) },
+                    old: json!({"active_version": old_id, "number": old_number, "activation": old_activation, "enabled": old_enabled}),
+                    new: json!({"active_version": version, "number": number, "activation": activation, "enabled": true}) },
                 Change { kind: "base/watchers.version".into(), id: previous.get(0),
                     old: json!({"approved_by": previous.get::<_, Option<i64>>(1), "approved_at": previous.get::<_, Option<String>>(2), "catalog_digest": previous.get::<_, Option<String>>(3)}),
                     new: json!({"approved_by": evidence.get::<_, Option<i64>>(0), "approved_at": evidence.get::<_, Option<String>>(1), "catalog_digest": evidence.get::<_, Option<String>>(2)}) }]))

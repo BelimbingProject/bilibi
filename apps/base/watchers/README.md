@@ -37,8 +37,8 @@ A `do` step can carry a named JavaScript function body under `script`. The conne
     "lookups": [{"operation":"watcher_cases.cases.lookup","input":{"case_id":7}}],
     "calls": [{"operation":"watcher_cases.cases.route","input":{"queue":"priority"}}],
     "examples": [
-      {"facts":{"priority":"normal"},"replies":[{"operation":"watcher_cases.cases.lookup","input":{"case_id":7},"reply":{"title":"priority"}}],"expect":[]},
-      {"facts":{"priority":"urgent"},"replies":[{"operation":"watcher_cases.cases.lookup","input":{"case_id":7},"reply":{"title":"priority"}}],"expect":[{"operation":"watcher_cases.cases.route","input":{"queue":"priority"}}]}
+      {"facts":{"priority":"normal"},"lookup_fixtures":[{"operation":"watcher_cases.cases.lookup","input":{"case_id":7},"reply":{"title":"priority"}}],"expect":[]},
+      {"facts":{"priority":"urgent"},"lookup_fixtures":[{"operation":"watcher_cases.cases.lookup","input":{"case_id":7},"reply":{"title":"priority"}}],"expect":[{"operation":"watcher_cases.cases.route","input":{"queue":"priority"}}]}
     ]
   }
 }
@@ -66,7 +66,7 @@ A `do` step can carry a named JavaScript function body under `script`. The conne
 - **Drafting runs nothing.** A new version of a running watcher runs only once approved; until then the earlier version keeps running.
 - **A queued run keeps its pinned version.** If another version is approved, the watcher is switched off, or it is switched off and on before the run acts, the run is refused (`stale_version`, `watcher_off`, `stale_activation`); nothing silently swaps in the new watcher or activation.
 - **Installed bindings are pinned.** Approval stores a fingerprint of the condition fields' types, choices and source mappings (for a custom field, its type and value SQL while it is offered to watchers), every linked table's join and key bindings, the trigger bindings and the action schemas. A changed catalog refuses execution (`catalog_changed`) and marks the watcher **Needs review** until a new version is approved.
-- **Earlier approved versions can be restored.** Select an earlier version on the watcher page or undo an activation from Customisations. A refusal leaves the version running now active.
+- **Earlier approved versions can be restored.** Undo an activation from Customisations. A refusal leaves the version running now active.
 - **Approval never delegates more.** The approver must hold All reach for every capability the watcher reads or acts on, including linked tables; Own or Team reach cannot approve or switch on tenant-wide automation; a watcher cannot reach a field the principal may not read.
 
 ## How a run works
@@ -168,7 +168,7 @@ For a match, the watcher principal calls the action owner's preview at the curre
 
 ## Pages and agents
 
-- **Administration › Watchers** (`/watchers`, `admin.watchers.view`): every watcher, its trigger, whether it is on, the running version and the last run. **New watcher** (`admin.watchers.manage`) opens the drafting dialog; `/watchers/{id}` has **Draft next version** (same dialog, filled from the latest version; a watcher keeps its trigger). The watcher page shows every retained version with its declared fields, lookups and actions. An administrator can approve the latest draft, restore an earlier approved version through the same checked contract, use the on/off switch and read the latest 25 receipts.
+- **Administration › Watchers** (`/watchers`, `admin.watchers.view`): every watcher, its trigger, whether it is on, the running version and the last run. **New watcher** (`admin.watchers.manage`) opens the drafting dialog; `/watchers/{id}` has **Draft next version** (same dialog, filled from the latest version; a watcher keeps its trigger). The watcher page shows the latest version and, when different, the running version with their declared fields, lookups and actions. An administrator can approve the latest draft, use the on/off switch and read the latest 25 receipts. Restore an earlier activation from Customisations.
 - **Drafting on the page** builds the input of `base.watchers.draft` (page events `draft_review` and `draft_save`, the one write path) and nothing else: the trigger and actions are searchable comboboxes from `base.watchers.vocabulary` (actions limited to the trigger's table), conditions pick a field of the trigger's Grid table with the operators and a value control of the field's type (a choice list for enums, Yes/No for true/false, a date, a number; lists take one value per line), and each example is a row of the condition fields' values with matches or does not match. **Review** previews the draft through the contract and shows its conditions in words, actions, each example's result, warnings and problems; **Save draft** is enabled only for a reviewed draft, and any edit discards the review. Saving lands on the watcher, where a holder of `admin.watchers.approve` approves it.
 - **Receipts and privacy**: a receipt's facts and condition outcomes are the record's values; current record reach and field restrictions apply to every read, including values collected before a restriction changed. A reader who cannot read the subject or any recorded field sees the evidence as restricted. Protected facts and condition outcomes are kept out of audit metadata.
 - **Agents**: `base.watchers.vocabulary` (installed triggers with their fields, lookups, actions, operators and limits), `base.watchers.list`, `base.watchers.get`, `base.watchers.runs`, `base.watchers.trial`, `base.watchers.draft`, `base.watchers.approve`, `base.watchers.restore`, `base.watchers.switch`, and the guide `base.watchers`. An agent's draft records `drafted_via: agent`; it runs only once a person approves it.

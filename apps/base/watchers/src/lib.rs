@@ -261,7 +261,6 @@ inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageW
     service: PAGES,
     contracts: &[
         ("approve", "base.watchers.approve"),
-        ("restore", "base.watchers.restore"),
         ("switch", "base.watchers.switch"),
         ("draft_review", "base.watchers.draft"),
         ("draft_save", "base.watchers.draft"),

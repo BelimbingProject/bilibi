@@ -216,11 +216,14 @@ fn restore_correction(
     if effective["active_version"] != change["after"]["active_version"] {
         return None;
     }
+    if effective["activation"] != change["after"]["activation"] || effective["enabled"] != true {
+        return None;
+    }
     let watcher = change["id"].as_str()?.parse::<i64>().ok()?;
     Some(bilibi_labels::ReceiptCorrection {
         contract: "base.watchers.restore",
         event: "customisation.receipt_watcher_restore",
-        input: json!({"watcher_id":watcher,"version":number}),
+        input: json!({"watcher_id":watcher,"version":number,"expected_activation":change["after"]["activation"]}),
     })
 }
 
@@ -237,7 +240,7 @@ fn project_activation<'a>(
             .ok_or(Error::Internal)?;
         let current = client
             .query_opt(
-                "SELECT w.name,w.active_version_id,v.number FROM base_watchers w LEFT JOIN base_watcher_versions v ON v.tenant_id=w.tenant_id AND v.id=w.active_version_id WHERE w.tenant_id=$1 AND w.id=$2",
+                "SELECT w.name,w.active_version_id,v.number,w.version,w.disabled_at IS NULL FROM base_watchers w LEFT JOIN base_watcher_versions v ON v.tenant_id=w.tenant_id AND v.id=w.active_version_id WHERE w.tenant_id=$1 AND w.id=$2",
                 &[&scope.tenant(), &watcher],
             )
             .await?;
@@ -248,9 +251,14 @@ fn project_activation<'a>(
             "name": current.get::<_, String>(0),
             "active_version": current.get::<_, Option<i64>>(1),
             "number": current.get::<_, Option<i32>>(2),
+            "activation": current.get::<_, i32>(3),
+            "enabled": current.get::<_, bool>(4),
         });
-        change["changed_since"] =
-            json!(change["effective"]["active_version"] != change["after"]["active_version"]);
+        change["changed_since"] = json!(
+            change["effective"]["active_version"] != change["after"]["active_version"]
+                || change["effective"]["activation"] != change["after"]["activation"]
+                || change["effective"]["enabled"] != true
+        );
         Ok(true)
     })
 }
