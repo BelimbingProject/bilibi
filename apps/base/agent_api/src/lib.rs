@@ -613,6 +613,69 @@ impl RegisteredDefinitions {
     }
 }
 impl Registry {
+    /// Preview every write selected by an approved tenant script, without
+    /// changing business data. Script callers may reach only operations whose
+    /// owners explicitly declared `local_script_action`; ordinary channel,
+    /// schema and capability checks still apply to the current caller.
+    pub async fn preview_script_calls(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+        calls: &[(String, Value)],
+    ) -> Result<Vec<Value>> {
+        let reservations = PreviewReservations::default();
+        let mut previews = Vec::with_capacity(calls.len());
+        for (key, input) in calls {
+            let registered = self
+                .operations
+                .get(key.as_str())
+                .ok_or(Error::UnknownOperation)?;
+            let operation = registered.definition;
+            let Handler::SafeWrite(owner) = operation.handler else {
+                return Err(Error::WritesNotEnabled);
+            };
+            if !owner.local_script_action()
+                || !operation.step_up.is_empty()
+                || !operation.channels.allows(scope.channel())
+            {
+                return Err(Error::ChannelNotAllowed);
+            }
+            schema::validate(&registered.input, input).map_err(Error::InvalidInput)?;
+            authorize_target(tx, scope, operation.capability, input).await?;
+            previews.push(
+                owner
+                    .preview(&TransactionRead(tx, &reservations), scope, input)
+                    .await?
+                    .envelope(key),
+            );
+        }
+        Ok(previews)
+    }
+
+    /// Commit a complete, already-selected tenant-script plan on the caller's
+    /// mutation transaction. The whole plan is previewed before its first
+    /// effect, then every owner commits on that same transaction.
+    pub async fn commit_script_calls(
+        &self,
+        tx: &mut bilibi_database::MutationTransaction<'_>,
+        scope: &Scope,
+        calls: &[(String, Value)],
+    ) -> Result<Vec<Value>> {
+        self.preview_script_calls(tx.sql(), scope, calls).await?;
+        let mut results = Vec::with_capacity(calls.len());
+        for (key, input) in calls {
+            let registered = self
+                .operations
+                .get(key.as_str())
+                .ok_or(Error::UnknownOperation)?;
+            let Handler::SafeWrite(owner) = registered.definition.handler else {
+                return Err(Error::WritesNotEnabled);
+            };
+            results.push(owner.commit(tx, scope, input).await?.envelope(key));
+        }
+        Ok(results)
+    }
+
     /// The app entries alone: shape and uniqueness. Whether each names a
     /// read operation of its own module is checked with the operations in
     /// `from_catalog`.

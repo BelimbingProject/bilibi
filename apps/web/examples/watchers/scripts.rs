@@ -118,6 +118,49 @@ pub(super) async fn walkthrough(proof: &Proof) -> Result<()> {
         .switch(one, lookup_id, false)
         .await
         .map_err(|_| Error::Invalid)?;
+    let page_target = proof
+        .open(one, 1, "Person-run script", "urgent", "10")
+        .await?;
+    proof
+        .write(
+            one,
+            "base.watchers.script.run",
+            json!({"watcher_id":lookup_id,"version":lookup_version,"script":1,"subject":page_target.to_string()}),
+        )
+        .await
+        .map_err(|why| {
+            println!("     person-run script refused: {why}");
+            Error::Invalid
+        })?;
+    check(
+        proof.case(page_target).await?.0.as_deref() == Some("priority"),
+        "the page, CLI and delegated-agent operation runs the exact approved script as its person",
+    );
+    let refused_target = proof
+        .open(one, 1, "Person permission revoked", "urgent", "10")
+        .await?;
+    let client = proof.db.get().await?;
+    client
+        .execute(
+            "DELETE FROM base_watcher_script_permissions WHERE tenant_id=$1 AND watcher_id=$2 AND principal='person'",
+            &[&one.tenant(), &lookup_id],
+        )
+        .await?;
+    drop(client);
+    let refused_person = proof
+        .write(
+            one,
+            "base.watchers.script.run",
+            json!({"watcher_id":lookup_id,"version":lookup_version,"script":1,"subject":refused_target.to_string()}),
+        )
+        .await;
+    check(
+        refused_person
+            .as_ref()
+            .is_err_and(|why| why.contains("script_permission_refused"))
+            && proof.case(refused_target).await?.1 == 0,
+        "revoking this script's person permit refuses every person-initiated door before effects",
+    );
     let approved = format!("return [{call}];");
     for (name, body, expected) in [
         ("Route an urgent case", approved.as_str(), None),
