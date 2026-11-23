@@ -707,7 +707,7 @@ impl Workspace {
                         .map(|leaf| {
                             self.titles
                                 .get(&leaf.id)
-                                .map(|title| title.trim_end_matches(" · Bilibi").to_owned())
+                                .cloned()
                                 .unwrap_or_else(|| leaf.path.clone())
                         })
                         .collect::<Vec<_>>()

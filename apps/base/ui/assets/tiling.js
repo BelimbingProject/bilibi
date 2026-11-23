@@ -258,7 +258,10 @@
     // product's name, by its heading.
     frameTitle(doc) {
       const title = (doc.title || '').trim();
-      if (title && title !== PRODUCT) return title;
+      if (title && title !== PRODUCT) {
+        const suffix = ` · ${PRODUCT}`;
+        return title.endsWith(suffix) ? title.slice(0, -suffix.length) : title;
+      }
       return doc.querySelector('#app-content h1')?.textContent.replace(/\s+/g, ' ').trim() || '';
     },
 

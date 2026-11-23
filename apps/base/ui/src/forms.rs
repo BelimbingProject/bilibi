@@ -1004,15 +1004,11 @@ impl SecretInput {
         self
     }
 
-    /// The gap under the secret: an inset secret sits as far from the next
-    /// field as every other inset field (`DESIGN.md`, Forms).
     pub fn wrapper(&self) -> &str {
-        if !self.wrapper_class.is_empty() {
-            &self.wrapper_class
-        } else if self.label.is_empty() || !self.class.is_empty() {
+        if self.wrapper_class.is_empty() {
             "mb-4"
         } else {
-            INSET_FIELD_GAP
+            &self.wrapper_class
         }
     }
 

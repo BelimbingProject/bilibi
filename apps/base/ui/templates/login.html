@@ -1,11 +1,8 @@
 {#- The sign-in card: the notices above the form, the credential fields, the
-    one primary action and the forgot link demoted below it. Email and
+    sign-in actions and the forgot link demoted below it. Email and
     password only: the address is unique platform-wide, so no tenant is
     asked. A credential failure is reported twice over: the announced alert
-    for assistive technology and the email field's own error line. A company
-    sign-in link (`?sso=`) makes that company's button the primary action and
-    the password button the secondary one, so the card keeps one clear
-    action. -#}
+    for assistive technology and the email field's own error line. -#}
 {% import "components.html" as ui %}
 {% import "feedback.html" as feedback %}
 {% import "credential.html" as credential %}
@@ -20,7 +17,7 @@
 <form id="login-form" method="post" class="flex flex-col">
 {{ email }}
 {{ password }}
-{% call ui::button(variant=self.submit_variant(), id="login-submit", class="mt-1 w-full", button_type="submit", working="Signing in…") %}Sign in{% endcall %}
+{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="login-submit", class="mt-1 w-full", button_type="submit", working="Signing in…") %}Sign in{% endcall %}
 </form>
 {% call credential::link(id="login-forgot-password", href="/forgot-password", label="Forgot your password?") %}{% endcall %}
 </div>

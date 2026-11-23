@@ -75,12 +75,12 @@ The running specimen at `/assets/ui-components.html#specimen-markdown` pairs the
 
 ## Wordmark and credential pages
 
-`Wordmark` (`ui::wordmark`) draws Bilibi's name: the mark, then "bilibi" in lowercase in its own face.
+`ui::wordmark` draws Bilibi's name: the mark, then "bilibi" in lowercase in its own face.
 
-- **Sizes:** `WordmarkSize::Bar` for the workspace top bar (the mark alone below `sm`), `WordmarkSize::Credential` for the line above a credential card.
+- **Sizes:** `WordmarkSize::Bar` for the workspace top bar, with a smaller one-line wordmark below `sm`, `WordmarkSize::Credential` for the line above a credential card.
 - **Link:** set `href` to make it the way home; `label` names the destination for assistive technology.
 - **Font:** `static/fonts/lexend-wordmark.woff2` holds only the letters b, i and l. See [assets](assets/README.md#pinned-sources-and-licenses).
-- **Credential pages:** `AuthLayout` wraps one card body with the wordmark, the installation owner's company (`LoginWorkspace`) and the instance badge. Card bodies use the macros in `templates/credential.html` (`heading`, `link`, `back`). `PortalCard` is the same layout with the tenant's title and logo.
+- **Credential pages:** `AuthLayout` wraps one card body with the wordmark and instance badge. On sign-in, the installation owner's company (`LoginWorkspace`) appears between them. Card bodies use the macros in `templates/credential.html` (`heading`, `link`, `back`).
 
 ## Signed-in standalone reviews
 

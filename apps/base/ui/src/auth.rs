@@ -5,7 +5,7 @@
 //! own the DOM, the ids and the copy, so a field error lands on the right element.
 //! Field values are the submitted text kept for another
 //! attempt; a password is never echoed back.
-use crate::{Attrs, ButtonVariant, Field, FlashMap, Html, InputKind, Reveal, SecretInput};
+use crate::{Attrs, Field, FlashMap, Html, InputKind, Reveal, SecretInput};
 use askama::Template;
 
 /// The centered credential layout around one card body, with the page-level
@@ -16,11 +16,10 @@ pub struct AuthLayout<'a> {
     pub body: Html,
     /// Whose installation this is, right after the brand: the platform
     /// operator's company, or that none is provisioned yet. `None` leaves the
-    /// line out, as an error page does because it reads nothing.
+    /// line out for cards other than sign-in.
     pub workspace: Option<LoginWorkspace>,
-    /// Which installation this is (`bilibi_system::Instance` badge), under the
-    /// company so nobody signs in to a test copy thinking it is live; empty
-    /// for error pages.
+    /// Which installation this is (`bilibi_system::Instance` badge), below
+    /// the wordmark and any company line.
     pub instance: Html,
     pub flash: FlashMap<'a>,
 }
@@ -61,7 +60,7 @@ pub struct LoginForm {
     pub sso_label: String,
 }
 
-/// The line after the brand on every staff credential page:
+/// The line after the brand on the sign-in page:
 /// the platform operator's company once provisioned, else why not. Every
 /// state but `Ready` reads "Platform workspace not provisioned"; `data-state`
 /// keeps the distinction.
@@ -131,16 +130,6 @@ impl LoginPage {
                     .required(),
             )?,
         })
-    }
-
-    /// The password button's weight: the card's one primary action, unless
-    /// a company sign-in link put that company's button there.
-    pub fn submit_variant(&self) -> ButtonVariant {
-        if self.sso_public.is_empty() {
-            ButtonVariant::Primary
-        } else {
-            ButtonVariant::Secondary
-        }
     }
 }
 
@@ -245,6 +234,7 @@ impl InvitationPage {
                     .id("invitation-password")
                     .label("Password")
                     .errors(form.password_errors.clone())
+                    .wrapper_class("mb-3")
                     .attrs(new_password()),
             )?,
             password_confirmation: Html::render(
@@ -252,6 +242,7 @@ impl InvitationPage {
                     .id("invitation-password-confirmation")
                     .label("Confirm password")
                     .errors(form.confirmation_errors.clone())
+                    .wrapper_class("mb-3")
                     .attrs(new_password()),
             )?,
         })
@@ -280,6 +271,7 @@ impl ResetPasswordPage {
                     .id("reset-password")
                     .label("New password")
                     .errors(form.password_errors.clone())
+                    .wrapper_class("mb-3")
                     .attrs(new_password()),
             )?,
             password_confirmation: Html::render(
@@ -287,6 +279,7 @@ impl ResetPasswordPage {
                     .id("reset-password-confirmation")
                     .label("Confirm new password")
                     .errors(form.confirmation_errors.clone())
+                    .wrapper_class("mb-3")
                     .attrs(new_password()),
             )?,
         })

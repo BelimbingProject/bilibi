@@ -530,11 +530,9 @@ body {
   font-size: 1.125rem;
 }
 
-/* Below `sm` the top bar keeps the mark alone, so the company label beside
- * it keeps its room. */
 @media (width < 40rem) {
-  .ui-wordmark-bar > span {
-    display: none;
+  .ui-wordmark-bar {
+    font-size: 0.8125rem;
   }
 }
 
