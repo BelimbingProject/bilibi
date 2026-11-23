@@ -336,6 +336,7 @@ impl ReleaseFiles {
         let accepted = github["accepted"].as_bool() == Some(true);
         let identity_changed = github["identity_changed"].as_bool() == Some(true);
         let token_set = github["token_set"].as_bool() == Some(true);
+        let app = github["app"].as_str();
         let minutes = github["refresh_minutes"].as_i64().unwrap_or(15);
         let mut body = render(Facts {
             id: "release-files-github-facts",
@@ -355,9 +356,13 @@ impl ReleaseFiles {
                     value: Html::text(if accepted { "Yes" } else { "No" }),
                 },
                 Fact {
-                    title: "Read token",
+                    title: "Read access",
                     id: "release-files-github-token-fact",
-                    value: Html::text(if token_set { "Saved" } else { "Not set" }),
+                    value: Html::text(&match app {
+                        Some(client_id) => format!("This server's GitHub App {client_id}: a new read-only token for each check"),
+                        None if token_set => "Saved read token".into(),
+                        None => "None (a public repository)".into(),
+                    }),
                 },
                 Fact {
                     title: "Check every",
@@ -449,10 +454,12 @@ impl ReleaseFiles {
             if let Some(error) = &self.github_error {
                 repository_field = repository_field.error(error.clone());
             }
+            // With the server's GitHub App a saved token is never used, so its
+            // field is not offered (Read access names the App).
             let mut secret = SecretInput::in_form("github", "token", "GitHub read token")
                 .id("release-files-github-token")
                 .label("GitHub read token")
-                .hint("Leave empty for a public repository. For a private one, use a fine-grained token that can read this repository only.");
+                .hint("Leave empty for a public repository. For a private one, give the server a GitHub App with scripts/install-server.sh github-app: it never expires. A fine-grained token that can read this repository only also works, until it expires.");
             if token_set {
                 secret = secret.stored();
             }
@@ -466,7 +473,9 @@ impl ReleaseFiles {
                 .attr("min", "1")
                 .attr("max", "1440");
             let mut fields = render(repository_field)?;
-            fields.push(&render(secret)?);
+            if app.is_none() {
+                fields.push(&render(secret)?);
+            }
             fields.push(&render(minutes_field)?);
             let mut actions = render(Button {
                 id: "release-files-github-save",

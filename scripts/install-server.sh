@@ -14,6 +14,9 @@
 #   install-server.sh identity-delete <instance> --email <address> --confirm <address>
 #   install-server.sh identity-retention <instance>
 #   install-server.sh installer <bilibi-installer binary> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
+#   install-server.sh github-app --client-id <id> --repo <owner/name>   (the App private key on standard input)
+#   install-server.sh github-app --check | --remove
+#   install-server.sh verify <file> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
 #   install-server.sh switch <instance> <release number>
 #   install-server.sh status [<instance>]
 #
@@ -32,6 +35,10 @@ root=/opt/bilibi
 unit_name='bilibi@'
 installer_unit='bilibi-installer@'
 installer_bin=$root/build/bin/bilibi-installer
+# The GitHub App that reads a private application repository: one per server,
+# shared by its instances (they serve the same application). root:bilibi 0640
+# like env, because each instance's program mints from it too.
+github_app=$root/github-app.json
 pg=$POSTGRESQL_MAJOR
 log=/var/log/bilibi-install-server.log
 os_family=
@@ -594,19 +601,27 @@ stage_source() {
 # verify_provenance <artifact> <repository> <repository id> <tag>: GitHub
 # verifies the file's digest, signing repository, release workflow and tag, and
 # the signing repository's number must equal the expected one. Public
-# repositories do not need a login. For a private repository, pass its read
-# token as GH_TOKEN; it is inherited only by this command and is never printed.
+# repositories do not need a login. A private one is read with the server's
+# GitHub App (a fresh read-only token for this one command, lib/github-app.py),
+# or with a read token the operator passes as GH_TOKEN; either is inherited
+# only by gh and never printed.
 verify_provenance() {
     local artifact=$1 repository=$2 repository_id=$3 tag=$4 ids id found=0
     command -v gh >/dev/null || fail 'GitHub CLI is not installed, so release provenance cannot be checked' 'rerun create to install the server packages, then retry'
     valid_repository "$repository" || fail 'the release repository must be owner/name'
     valid_setup_tag "$tag" || fail 'the release tag must be setup-vX.Y.Z'
     repository_id=$(expected_repository_id "$repository" "$repository_id")
-    ids=$(gh attestation verify "$artifact" --repo "$repository" \
-        --signer-workflow "$repository/.github/workflows/release.yml" \
-        --source-ref "refs/tags/$tag" \
-        --format json --jq '.[].verificationResult.signature.certificate.sourceRepositoryIdentifier' 2>>"$log") ||
-        fail "GitHub build provenance did not verify for $repository tag $tag; nothing was installed" 'download the asset from the official Release setup workflow and retry'
+    local check=(gh attestation verify "$artifact" --repo "$repository"
+        --signer-workflow "$repository/.github/workflows/release.yml"
+        --source-ref "refs/tags/$tag"
+        --format json --jq '.[].verificationResult.signature.certificate.sourceRepositoryIdentifier')
+    if [[ -z ${GH_TOKEN:-} && -f $github_app ]]; then
+        ids=$(python3 "$here/lib/github-app.py" run "$github_app" --repo "$repository" --log "$log" -- "${check[@]}") ||
+            fail "GitHub build provenance did not verify for $repository tag $tag with the server's GitHub App; nothing was installed" "check the App with: $0 github-app --check, then download the asset from the official Release setup workflow and retry"
+    else
+        ids=$("${check[@]}" 2>>"$log") ||
+            fail "GitHub build provenance did not verify for $repository tag $tag; nothing was installed" 'download the asset from the official Release setup workflow and retry'
+    fi
     while IFS= read -r id; do
         [[ -n $id ]] || continue
         found=1
@@ -711,6 +726,58 @@ installer() {
         systemctl restart "$installer_unit$instance" || say "Warning: $installer_unit$instance did not start; see: systemctl status $installer_unit$instance"
         say "$instance: $installer_unit$instance $(installer_state "$instance")"
     done
+}
+
+# ================================================================ GitHub App
+# github-app: put the server's GitHub App here, check it, or remove it. The
+# key comes on standard input only, so it never enters the shell history or
+# the process list; it is checked against GitHub before it is kept.
+github_app_command() {
+    local client_id='' repository='' action=save
+    while (($#)); do
+        case $1 in
+            --client-id) client_id=${2:-}; shift 2 ;;
+            --repo) repository=${2:-}; shift 2 ;;
+            --check) action=check; shift ;;
+            --remove) action=remove; shift ;;
+            *) usage ;;
+        esac
+    done
+    need_root github-app
+    case $action in
+        check) python3 "$here/lib/github-app.py" check "$github_app" ;;
+        remove)
+            [[ -f $github_app ]] || { say 'No GitHub App is set up on this server; nothing was removed.'; return; }
+            rm -f -- "$github_app"
+            say "Removed the GitHub App from this server. Private releases now need GH_TOKEN, and Software › Releases uses its saved read token. Delete the App, or its key, on GitHub too."
+            ;;
+        save)
+            [[ -n $client_id && -n $repository ]] || usage
+            [[ ! -t 0 ]] || fail 'pipe the GitHub App private key to this command' "$0 github-app --client-id $client_id --repo $repository < app.pem"
+            getent group bilibi >/dev/null || fail 'no instance exists yet' "create one first: $0 create <instance> --role ... --site ..."
+            python3 "$here/lib/github-app.py" save "$github_app" --client-id "$client_id" --repo "$repository"
+            ;;
+    esac
+}
+# verify: check a file the way release and installer do, without installing
+# it. Use it on a newer bilibi-server-tools.tar.gz before extracting it.
+verify_command() {
+    local source=${1:-} repository='' repository_id='' tag=''
+    [[ -n $source ]] || usage; shift
+    while (($#)); do
+        case $1 in
+            --repo) repository=${2:-}; shift 2 ;;
+            --repo-id) repository_id=${2:-}; shift 2 ;;
+            --tag) tag=${2:-}; shift 2 ;;
+            *) usage ;;
+        esac
+    done
+    [[ -n $repository && -n $tag ]] || usage
+    need_root verify
+    [[ -f $source ]] || fail "$source is not a file"
+    stage_source "$source"
+    verify_provenance "$staged" "$repository" "$repository_id" "$tag"
+    say "$source: GitHub build provenance verified for $repository tag $tag."
 }
 
 # ================================================================ release
@@ -971,6 +1038,7 @@ status() {
     local instance list
     if [[ -n ${1:-} ]]; then list=$1; else list=$(instances); fi
     [[ -n $list ]] || { say "No instances under $root yet."; return; }
+    python3 "$here/lib/github-app.py" show "$github_app" || true
     for instance in $list; do
         instance_exists "$instance" || fail "no instance named $instance"
         local dir; dir=$(instance_dir "$instance")
@@ -993,6 +1061,8 @@ case ${1:-} in
     two-factor-reset) shift; two_factor_reset "$@" ;;
     identity-recover|identity-delete|identity-retention) command=$1; shift; identity_lifecycle "$command" "$@" ;;
     installer) shift; installer "$@" ;;
+    github-app) shift; github_app_command "$@" ;;
+    verify) shift; verify_command "$@" ;;
     switch) shift; switch "$@" ;;
     status) shift; status "$@" ;;
     *) usage ;;

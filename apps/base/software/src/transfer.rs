@@ -311,7 +311,9 @@ impl Software {
         )
         .await
         .map_err(db)?;
-        crate::github::recheck(self, &scope, &pin).await?;
+        // One fresh token for the recheck, download and provenance check.
+        let token = self.github_token(&scope, &pin.repository).await?;
+        crate::github::recheck(self, &scope, &pin, token.as_deref()).await?;
         let size = pin.bytes;
         if let Some(free) = transport::free_bytes(&paths.incoming()) {
             let need = size.saturating_mul(2) + DISK_MARGIN;
@@ -378,7 +380,6 @@ impl Software {
                 }
             })
         };
-        let token = self.github_token(&scope).await.map_err(db)?;
         let request = crate::github::asset_request(&pin.repository, pin.asset_id, token.as_deref())
             .timeout(DOWNLOAD_TIMEOUT)
             .max_body_bytes(transport::MAX_BUNDLE_BYTES);
