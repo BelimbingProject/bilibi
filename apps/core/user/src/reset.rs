@@ -337,6 +337,50 @@ impl ResetMail {
         self.deliver(tenant, user, message, token.as_deref());
         Ok(())
     }
+
+    /// Mails the server owner the one-time link that claims the account: the
+    /// owner chooses its password there, so only the holder of the address
+    /// can sign in. Waits for delivery so the server command can report it.
+    /// A link issued within the last minute stands ([`ClaimMail::RecentlySent`]);
+    /// a failed delivery withdraws the token so a retry can send again.
+    pub(crate) async fn mail_owner_claim(
+        &self,
+        tenant: i64,
+        user: i64,
+        name: &str,
+        address: &str,
+    ) -> Result<ClaimMail, Error> {
+        let Some(token) = self.issue_token(tenant, user, address, false).await? else {
+            return Ok(ClaimMail::RecentlySent);
+        };
+        let origin = &self.origin;
+        let message = Message::text(
+            Address::new(Some(name), address).map_err(|_| Error::Invalid)?,
+            "Claim your Bilibi server",
+            format!(
+                "You are the owner of the Bilibi server at {origin}.\n\n\
+                 1. Choose your password with this link:\n\n{}\n\n\
+                 2. Sign in, then set up two-factor authentication with your phone:\n\n{origin}/settings/two-factor?method=core.user.authenticator\n\n\
+                 The server is yours once both are done. The link works once. If you did not expect this email, ignore it: nobody can sign in as you without it.\n",
+                reset_link(origin, address, &token)
+            ),
+        );
+        match self.mailer.deliver_for(tenant, &message).await {
+            Ok(_) => Ok(ClaimMail::Sent),
+            Err(error) => {
+                self.withdraw(tenant, user, digest(&token)).await?;
+                Ok(ClaimMail::NotDelivered(error.to_string()))
+            }
+        }
+    }
+}
+
+/// What [`ResetMail::mail_owner_claim`] did.
+pub(crate) enum ClaimMail {
+    Sent,
+    RecentlySent,
+    /// The transport refused; the detail is for the operator.
+    NotDelivered(String),
 }
 
 /// The audit change of a reset token: only that it was issued or withdrawn.
@@ -495,6 +539,23 @@ impl UserService {
         email: &str,
     ) -> Result<(), CredentialError> {
         let email = normalize_email(email)?;
+        let public = if let Some(site) = site {
+            let Some(origin) = std::env::var("PUBLIC_ORIGIN")
+                .ok()
+                .filter(|origin| !origin.is_empty())
+                .filter(|_| {
+                    std::env::var("PUBLIC_TENANT_ID")
+                        .ok()
+                        .and_then(|id| id.parse().ok())
+                        == audience.tenant()
+                })
+            else {
+                return finish_reset_request().await;
+            };
+            Some((origin, site))
+        } else {
+            None
+        };
         let client = self.db.get().await.map_err(Error::from)?;
         // The account sign-in would choose (`identity::password_identity`):
         // last used, then the lowest live membership. Ambiguity (two
@@ -531,8 +592,12 @@ impl UserService {
         let Some(token) = mail.issue_token(tenant, user, &address, false).await? else {
             return finish_reset_request().await;
         };
-        let link = match site {
-            Some(site) => self.portal_reset_link(site, &address, &token),
+        let link = match public {
+            Some((origin, site)) => format!(
+                "{}/portal/reset/{site}/{token}?email={}",
+                origin.trim_end_matches('/'),
+                encode_component(&address)
+            ),
             None => self.reset_link(&address, &token),
         };
         let message = Message::text(
@@ -559,16 +624,6 @@ impl UserService {
     /// Where the emailed link points; the reset page reads both values.
     pub fn reset_link(&self, email: &str, token: &str) -> String {
         reset_link(&self.origin, email, token)
-    }
-
-    /// Where a portal's emailed link points: the host's reset page of the
-    /// portal at `site` (ADR 16).
-    pub(crate) fn portal_reset_link(&self, site: &str, email: &str, token: &str) -> String {
-        format!(
-            "{}/portal/reset/{site}/{token}?email={}",
-            self.origin,
-            encode_component(email)
-        )
     }
 
     /// Check a staff reset link before asking for a new password. Redemption

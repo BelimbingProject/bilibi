@@ -4,8 +4,9 @@
 # BILIBI_DEV_HOST first (scripts/dev-env.py).
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-host=${BILIBI_DEV_HOST:-bilibi.localhost}
-port=${BILIBI_DEV_PORT:-4300}
+host=${1:-${BILIBI_DEV_HOST:-bilibi.localhost}}
+port=${2:-${BILIBI_DEV_PORT:-4300}}
+instance_file=${3:-$root/.local/https/instance}
 for tool in mkcert openssl python3 ss flock; do
     command -v "$tool" >/dev/null || { echo "Missing prerequisite: $tool. Run ./bilibi setup" >&2; exit 1; }
 done
@@ -28,7 +29,7 @@ readarray -t registered <<< "$registration"
 [[ ${#registered[@]} == 2 ]] || exit 1
 port=${registered[0]}
 https_port=${registered[1]}
-printf '%s\n%s\n%s\n' "$host" "$port" "$https_port" > "$root/.local/https/instance"
+printf '%s\n%s\n%s\n' "$host" "$port" "$https_port" > "$instance_file"
 address="https://$host"
 [[ $https_port == 443 ]] || address+=":$https_port"
 echo "Local HTTPS configured through Caddy's admin API: $address → 127.0.0.1:$port"

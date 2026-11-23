@@ -9,28 +9,34 @@ use crate::{store::HandlerFuture, Cause, Erasure};
 use bilibi_database::{Error, Result};
 use bilibi_module_registry::{RegistryError, Result as RegistryResult};
 use bilibi_party_ids::PersonId;
-use bilibi_tenancy::Scope;
+use bilibi_tenancy::{ReadClient, Scope};
 use std::{
     collections::BTreeMap,
     sync::{Arc, OnceLock},
 };
+use tokio_postgres::Client;
 
 /// Opens hold sessions; bound once by the module that keeps holds.
 pub trait HoldSource: Send + Sync {
-    fn open<'a>(&'a self, tenant: i64) -> HandlerFuture<'a, Box<dyn HoldSession>>;
+    fn session(&self, tenant: i64) -> Result<Box<dyn HoldSession>>;
 }
 /// One open guard over a tenant's holds.
 pub trait HoldSession: Send + Sync {
+    fn lock<'a>(&'a self, client: &'a Client) -> HandlerFuture<'a, ()>;
+    fn unlock<'a>(&'a self, client: &'a Client) -> HandlerFuture<'a, ()>;
     /// Active person holds among `persons`: person ID → hold ID.
-    fn persons<'a>(&'a self, persons: &'a [i64]) -> HandlerFuture<'a, BTreeMap<i64, i64>>;
+    fn persons<'a>(
+        &'a self,
+        client: &'a dyn ReadClient,
+        persons: &'a [i64],
+    ) -> HandlerFuture<'a, BTreeMap<i64, i64>>;
     /// Active record holds on `ids` of `kind`: record ID → hold ID.
     fn records<'a>(
         &'a self,
+        client: &'a dyn ReadClient,
         kind: &'a str,
         ids: &'a [i64],
     ) -> HandlerFuture<'a, BTreeMap<i64, i64>>;
-    /// Ends the guard. A session dropped without it closes its connection.
-    fn release(self: Box<Self>) -> HandlerFuture<'static, ()>;
 }
 
 static SOURCE: OnceLock<Arc<dyn HoldSource>> = OnceLock::new();
@@ -41,13 +47,13 @@ pub fn bind_holds(source: Arc<dyn HoldSource>) -> RegistryResult<()> {
 }
 
 /// The holds one erasure or sweep must respect, guarded until
-/// [`Holds::release`]. A session is bound to the grant it was acquired for:
+/// [`HoldGuard::release`]. A session is bound to the grant it was acquired for:
 /// its tenant and person come from that sealed [`Erasure`], and every read
 /// presents the grant again, so a session acquired for another tenant,
 /// person or run fails closed (`Forbidden`) instead of answering for the
 /// wrong holds.
 pub struct Holds {
-    session: Option<Box<dyn HoldSession>>,
+    session: Option<Arc<dyn HoldSession>>,
     tenant: i64,
     cause: Cause,
     person: Option<PersonId>,
@@ -55,14 +61,22 @@ pub struct Holds {
 impl Holds {
     /// Opens the guard for `grant`, in `scope`'s tenant: the request's
     /// subject, whose person hold keeps every record, or no person for a sweep.
-    pub async fn acquire(scope: &Scope, grant: &Erasure) -> Result<Self> {
+    pub async fn acquire<'a>(
+        client: &'a mut Client,
+        scope: &Scope,
+        grant: &Erasure,
+    ) -> Result<(Self, HoldGuard<'a>)> {
         grant.check(scope)?;
-        Ok(Self {
-            session: open(grant.tenant()).await?,
-            tenant: grant.tenant(),
-            cause: grant.cause(),
-            person: grant.person(),
-        })
+        let (session, guard) = open(client, grant.tenant()).await?;
+        Ok((
+            Self {
+                session,
+                tenant: grant.tenant(),
+                cause: grant.cause(),
+                person: grant.person(),
+            },
+            guard,
+        ))
     }
     /// `Forbidden` unless `grant` is the one this session was acquired for.
     fn bound(&self, grant: &Erasure) -> Result<()> {
@@ -76,11 +90,15 @@ impl Holds {
         }
     }
     /// The subject's person hold.
-    pub async fn person_hold(&self, grant: &Erasure) -> Result<Option<i64>> {
+    pub async fn person_hold(
+        &self,
+        client: &dyn ReadClient,
+        grant: &Erasure,
+    ) -> Result<Option<i64>> {
         self.bound(grant)?;
         match (&self.session, self.person) {
             (Some(session), Some(person)) => Ok(session
-                .persons(&[person.get()])
+                .persons(client, &[person.get()])
                 .await?
                 .remove(&person.get())),
             _ => Ok(None),
@@ -90,6 +108,7 @@ impl Holds {
     /// person hold: record ID → hold ID.
     pub async fn records(
         &self,
+        client: &dyn ReadClient,
         grant: &Erasure,
         kind: &str,
         ids: &[i64],
@@ -101,29 +120,33 @@ impl Holds {
         if ids.is_empty() {
             return Ok(BTreeMap::new());
         }
-        if let Some(hold) = self.person_hold(grant).await? {
+        if let Some(hold) = self.person_hold(client, grant).await? {
             return Ok(ids.iter().map(|id| (*id, hold)).collect());
         }
-        session.records(kind, ids).await
+        session.records(client, kind, ids).await
     }
     /// Whether one record is held: its hold ID.
-    pub async fn record(&self, grant: &Erasure, kind: &str, id: i64) -> Result<Option<i64>> {
-        Ok(self.records(grant, kind, &[id]).await?.remove(&id))
+    pub async fn record(
+        &self,
+        client: &dyn ReadClient,
+        grant: &Erasure,
+        kind: &str,
+        id: i64,
+    ) -> Result<Option<i64>> {
+        Ok(self.records(client, grant, kind, &[id]).await?.remove(&id))
     }
     /// Which of `persons` are held: person ID → hold ID. For a sweep that
     /// keeps everything about a held person.
-    pub async fn persons(&self, grant: &Erasure, persons: &[i64]) -> Result<BTreeMap<i64, i64>> {
+    pub async fn persons(
+        &self,
+        client: &dyn ReadClient,
+        grant: &Erasure,
+        persons: &[i64],
+    ) -> Result<BTreeMap<i64, i64>> {
         self.bound(grant)?;
         match &self.session {
-            Some(session) if !persons.is_empty() => session.persons(persons).await,
+            Some(session) if !persons.is_empty() => session.persons(client, persons).await,
             _ => Ok(BTreeMap::new()),
-        }
-    }
-    /// Releases the guard; call it after the work it guards has committed.
-    pub async fn release(mut self) -> Result<()> {
-        match self.session.take() {
-            Some(session) => session.release().await,
-            None => Ok(()),
         }
     }
 }
@@ -133,34 +156,69 @@ impl Holds {
 /// whether records are held, and is a type of its own, so it can never be
 /// passed where an erasure expects [`Holds`].
 pub struct RecordHolds {
-    session: Option<Box<dyn HoldSession>>,
+    session: Option<Arc<dyn HoldSession>>,
 }
 impl RecordHolds {
     /// Opens the guard over `tenant`'s holds.
-    pub async fn acquire(tenant: i64) -> Result<Self> {
-        Ok(Self {
-            session: open(tenant).await?,
-        })
+    pub async fn acquire(client: &mut Client, tenant: i64) -> Result<(Self, HoldGuard<'_>)> {
+        let (session, guard) = open(client, tenant).await?;
+        Ok((Self { session }, guard))
     }
     /// Which of `ids` of `kind` a record hold names: record ID → hold ID.
-    pub async fn records(&self, kind: &str, ids: &[i64]) -> Result<BTreeMap<i64, i64>> {
+    pub async fn records(
+        &self,
+        client: &dyn ReadClient,
+        kind: &str,
+        ids: &[i64],
+    ) -> Result<BTreeMap<i64, i64>> {
         match &self.session {
-            Some(session) if !ids.is_empty() => session.records(kind, ids).await,
+            Some(session) if !ids.is_empty() => session.records(client, kind, ids).await,
             _ => Ok(BTreeMap::new()),
-        }
-    }
-    /// Releases the guard; call it after the work it guards has committed.
-    pub async fn release(mut self) -> Result<()> {
-        match self.session.take() {
-            Some(session) => session.release().await,
-            None => Ok(()),
         }
     }
 }
 
-async fn open(tenant: i64) -> Result<Option<Box<dyn HoldSession>>> {
-    match SOURCE.get() {
-        Some(source) => Ok(Some(source.open(tenant).await?)),
-        None => Ok(None),
+pub struct HoldGuard<'a> {
+    client: &'a mut Client,
+    session: Option<Arc<dyn HoldSession>>,
+}
+
+impl HoldGuard<'_> {
+    pub fn client(&mut self) -> &mut Client {
+        self.client
     }
+
+    pub async fn release(mut self) -> Result<()> {
+        if let Some(session) = &self.session {
+            session.unlock(self.client).await?;
+        }
+        self.session = None;
+        Ok(())
+    }
+}
+
+impl Drop for HoldGuard<'_> {
+    fn drop(&mut self) {
+        if self.session.is_some() {
+            self.client.__private_api_close();
+        }
+    }
+}
+
+async fn open(
+    client: &mut Client,
+    tenant: i64,
+) -> Result<(Option<Arc<dyn HoldSession>>, HoldGuard<'_>)> {
+    let session: Option<Arc<dyn HoldSession>> = SOURCE
+        .get()
+        .map(|source| source.session(tenant).map(Arc::from))
+        .transpose()?;
+    let guard = HoldGuard {
+        client,
+        session: session.clone(),
+    };
+    if let Some(session) = &session {
+        session.lock(guard.client).await?;
+    }
+    Ok((session, guard))
 }

@@ -7,7 +7,7 @@
 //! runs with no AI.
 use crate::review::{Draft, Review};
 use crate::store::{RunView, VersionView, WatcherSummary, Watchers};
-use crate::{APPROVE, MANAGE, VIEW};
+use crate::{APPROVE, MANAGE, RUN_SCRIPT, VIEW};
 use bilibi_agent_api::{
     json::{Data, Output},
     Channels, Definitions, Error as AgentError, Guide, Handler, Operation, OperationClient,
@@ -398,6 +398,74 @@ impl Switch {
         }
     }
 }
+
+struct RunScript;
+fn script_call(input: &Value) -> bilibi_agent_api::Result<crate::script::ScriptCall> {
+    let position = input["script"]
+        .as_i64()
+        .and_then(|value| usize::try_from(value).ok())
+        .and_then(|value| value.checked_sub(1))
+        .ok_or_else(|| bilibi_agent_api::invalid("script", "must name a script in this version"))?;
+    Ok(crate::script::ScriptCall {
+        watcher: input["watcher_id"].as_i64().unwrap_or_default(),
+        version: version(input),
+        position,
+        subject: match &input["subject"] {
+            Value::String(value) => value.clone(),
+            Value::Number(value) => value.to_string(),
+            _ => {
+                return Err(bilibi_agent_api::invalid(
+                    "subject",
+                    "must name the target record",
+                ))
+            }
+        },
+    })
+}
+impl WriteHandler for RunScript {
+    fn owner(&self) -> &'static str {
+        "base/watchers"
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let tx = client.transaction().ok_or(AgentError::ChannelNotAllowed)?;
+            let request = script_call(input)?;
+            let previews = watchers()?.preview_script_call(tx, scope, &request).await?;
+            Ok(json!({
+                "watcher_id": request.watcher,
+                "version": request.version,
+                "script": request.position + 1,
+                "subject": request.subject,
+                "calls": previews,
+                "summary": if previews.is_empty() { "The script selected no actions." } else { "Run the selected approved actions as this caller." },
+            }).into())
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let request = script_call(input)?;
+            let results = watchers()?.commit_script_call(tx, scope, &request).await?;
+            Ok(json!({
+                "watcher_id": request.watcher,
+                "version": request.version,
+                "script": request.position + 1,
+                "subject": request.subject,
+                "calls": results,
+            })
+            .into())
+        })
+    }
+}
 impl WriteHandler for Switch {
     fn owner(&self) -> &'static str {
         "base/watchers"
@@ -523,6 +591,14 @@ fn restore_schema() -> Value {
 fn switch_schema() -> Value {
     json!({"type":"object","required":["watcher_id","enabled"],"properties":{"watcher_id":{"type":"integer","minimum":1},"enabled":{"type":"boolean"}}})
 }
+fn run_script_schema() -> Value {
+    json!({"type":"object","required":["watcher_id","version","script","subject"],"properties":{
+        "watcher_id":{"type":"integer","minimum":1},
+        "version":{"type":"integer","minimum":1,"description":"An approved watcher version"},
+        "script":{"type":"integer","minimum":1,"description":"The script's one-based position among scripts in that version"},
+        "subject":{"type":"string","maxLength":200,"description":"The target record key. Bilibi reads the approved fields and current record version under this caller's live access."}
+    }})
+}
 fn output() -> Value {
     json!({"type":"object","description":"Watchers, their versions and receipts; reviews list conditions, actions, example results, warnings and problems."})
 }
@@ -618,7 +694,7 @@ impl WriteHandler for Normalised {
 }
 static DRAFT: Normalised = Normalised(&DraftWatcher);
 
-const GUIDE: &str = "A watcher is data: when a trigger event happens to a record, if its conditions hold, run its actions. Read base.watchers.vocabulary first: it lists the installed watcher triggers, fields (including linked paths such as company.cf_segment), actions, script lookups, operators and limits. A script may call only its declared lookup operation and input, and each example supplies author-typed lookup fixtures that are never populated from live records. Drafts never run until approved. Use base.watchers.restore to select an earlier approved version; it becomes active only after its current permissions, bindings and examples all pass again. Read base.watchers.runs to explain what a watcher did: each receipt says which conditions held, the facts read and each action's outcome.";
+const GUIDE: &str = "A watcher is data: when a trigger event happens to a record, if its conditions hold, run its actions. Read base.watchers.vocabulary first: it lists the installed watcher triggers, fields (including linked paths such as company.cf_segment), actions, script lookups, operators and limits. A script may call only its declared lookup operation and input, and each example supplies author-typed lookup fixtures that are never populated from live records. Drafts never run until approved. Use base.watchers.script.run with an approved watcher version, its one-based script position and a target record to run it as the connected person; pages, bilibi-axi and delegated agents share that reviewed operation, while scheduled jobs use it as the watchers principal. Use base.watchers.restore to select an earlier approved version; it becomes active only after its current permissions, bindings and examples all pass again. Read base.watchers.runs to explain event-driven runs: each receipt says which conditions held, the facts read and each action's outcome.";
 
 inventory::submit! { Contribution::new(DEFINITIONS, "base/watchers", Provenance { module: "base/watchers", source: file!(), line: line!() }, &Definitions {
     operations: &[
@@ -631,6 +707,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/watchers", Provenance 
         Operation { key:"base.watchers.approve", title:"Approve a watcher version", summary:"Approve one fixed version of a watcher; from then on it runs on every new trigger event, without AI, as the watchers automation principal.", keywords:&["watcher","approve","activate","automation"], capability:APPROVE, input:approve_schema, output, handler:Handler::SafeWrite(&Approve), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.restore", title:"Restore a watcher version", summary:"Restore an earlier approved version after rechecking its current permissions, bindings and examples.", keywords:&["watcher","restore","version","automation"], capability:APPROVE, input:restore_schema, output, handler:Handler::SafeWrite(&Restore), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.switch", title:"Switch a watcher on or off", summary:"Stop a watcher's approved version from running, or let it run again.", keywords:&["watcher","disable","enable","off","on","automation"], capability:APPROVE, input:switch_schema, output, handler:Handler::SafeWrite(&Switch), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.watchers.script.run", title:"Run an approved watcher script", summary:"Run one exact approved script as the current person or queued automation principal. The script may select only its approved local operations.", keywords:&["watcher","script","run","page action","schedule","command line"], capability:RUN_SCRIPT, input:run_script_schema, output, handler:Handler::SafeWrite(&RunScript), channels:Channels::Every, step_up:&[] },
     ],
     guides: &[Guide { key:"base.watchers", title:"Tenant watchers", summary:"Draft a \u{201c}when this happens, do that\u{201d} watcher from a person's words for an administrator to approve.", keywords:&["watcher","automation","when","then","trigger"], capability:VIEW, body:GUIDE }],
 }) }

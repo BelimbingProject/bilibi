@@ -591,7 +591,7 @@ pub async fn login(
                 response.headers_mut().append(
                     header::SET_COOKIE,
                     HeaderValue::from_static(
-                        "bilibi_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
+                        "__Host-bilibi_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0",
                     ),
                 );
             }
@@ -694,9 +694,8 @@ async fn admitted(
             .await?;
     }
     let cookie = format!(
-        "bilibi_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400{}",
-        session.token,
-        secure(app)
+        "__Host-bilibi_session={}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=86400",
+        session.token
     );
     // The account's chosen landing page when it still may open it; else the
     // workspace.

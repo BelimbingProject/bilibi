@@ -18,11 +18,10 @@
 //! principal, since no account exists yet to act as. It refuses once the
 //! operator tenant holds any account, so it can never promote or replace one.
 use crate::{
-    accounts::{
-        email_taken, field_error, validate_email, validate_name, validate_password, FieldError,
-        EMAIL_TAKEN,
-    },
-    password, UserService,
+    accounts::{email_taken, field_error, validate_email, validate_name, FieldError, EMAIL_TAKEN},
+    password,
+    reset::{random_token, ClaimMail},
+    UserService,
 };
 use bilibi_affiliation::{AffiliationInput, EffectiveDates, OrganisationId};
 use bilibi_audit::{record_action, Attribution};
@@ -192,14 +191,15 @@ async fn mark_settled(sql: &(impl GenericClient + Sync)) -> Result<()> {
     Ok(())
 }
 
-/// What the first administrator is created from:
-/// `admin_name`, `admin_email` and `password`. The password is plaintext
-/// from the operator's terminal and is hashed here, never stored or shown.
+/// What the first administrator is created from: `admin_name` and
+/// `admin_email`. There is no password: the account gets a random one nobody
+/// knows, and the owner chooses their own from the emailed claim link
+/// ([`UserService::claim_owner`]), so whoever runs the server command never
+/// holds the owner's sign-in.
 #[derive(Clone, Debug, Default)]
 pub struct FirstAdministrator {
     pub name: String,
     pub email: String,
-    pub password: String,
 }
 
 /// The platform-operator tenant and its primary company, as Company's
@@ -273,13 +273,47 @@ pub struct FirstAdministratorCreated {
 }
 
 /// The create command's validation, without touching the database: the
-/// administrator form's rules for name, email and the password policy.
+/// administrator form's rules for name and email.
 pub fn validate_first_administrator(input: &FirstAdministrator) -> Vec<FieldError> {
     let mut errors = Vec::new();
     errors.extend(validate_name(&input.name));
     errors.extend(validate_email(&input.email).err());
-    errors.extend(validate_password(&input.password));
     errors
+}
+
+/// Where the server owner's claim stands. The owner proves the address by
+/// choosing a password from the emailed link, then sets up 2FA; until both
+/// are done the install is not finished.
+#[derive(Debug)]
+pub enum OwnerClaim {
+    /// A claim link was mailed now.
+    Sent { email: String },
+    /// A link went out within the last minute; that link stands.
+    RecentlySent { email: String },
+    /// The owner chose a password; 2FA is not set up yet.
+    PasswordChosen { email: String },
+    /// Password chosen and 2FA set up: the owner holds the server.
+    Claimed { email: String },
+}
+
+/// Why [`UserService::claim_owner`] could not report or send a claim.
+#[derive(Debug, thiserror::Error)]
+pub enum OwnerClaimError {
+    #[error("this install has no owner yet")]
+    NoOwner,
+    /// Mail cannot be sent from this install; nothing was issued.
+    #[error("{0}")]
+    MailNotReady(String),
+    /// The transport refused; the link was withdrawn.
+    #[error("{0}")]
+    Delivery(String),
+    #[error(transparent)]
+    Access(#[from] Error),
+}
+impl From<tokio_postgres::Error> for OwnerClaimError {
+    fn from(error: tokio_postgres::Error) -> Self {
+        Error::from(error).into()
+    }
 }
 
 impl UserService {
@@ -310,7 +344,8 @@ impl UserService {
         let email = validate_email(&input.email)
             .map_err(|error| FirstAdministratorError::Validation(vec![error]))?;
         let name = input.name.trim().to_owned();
-        let hash = password::hash(&input.password).await?;
+        // Unusable until the owner chooses their own from the claim link.
+        let hash = password::hash(&random_token()?).await?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
@@ -452,5 +487,61 @@ impl UserService {
             role,
             receipt_replaced,
         })
+    }
+
+    /// The server owner's claim, read from the bootstrap receipt's account,
+    /// never from an address typed at the server. While the owner has not
+    /// chosen a password it mails the claim link (again), so the command is
+    /// safe to repeat; afterwards it only reports, and the owner finishes by
+    /// setting up 2FA. Root can still do anything on its own server: this
+    /// keeps the person running the install from holding the owner's sign-in
+    /// by mistake or shortcut, not from a malicious administrator.
+    pub async fn claim_owner(&self) -> std::result::Result<OwnerClaim, OwnerClaimError> {
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        let Some(row) = client
+            .query_opt(
+                "SELECT b.tenant_id,b.user_id,u.name,i.email,i.password_version>1 \
+                 FROM user_bootstrap b \
+                 JOIN users u ON u.tenant_id=b.tenant_id AND u.id=b.user_id AND u.deleted_at IS NULL AND u.status='active' \
+                 JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' \
+                 WHERE b.id=1",
+                &[],
+            )
+            .await?
+        else {
+            return Err(OwnerClaimError::NoOwner);
+        };
+        let (tenant, user, name, email, chosen): (i64, i64, String, String, bool) =
+            (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
+        if chosen {
+            let tx = self
+                .mutations
+                .begin(
+                    &mut client,
+                    Context::system(tenant, CREATE_OWNER_PRINCIPAL, "user.bootstrap.claim"),
+                )
+                .await?;
+            let enrolled = self.step_up.account_enrolled(&tx, user).await?;
+            tx.rollback().await?;
+            return Ok(if enrolled {
+                OwnerClaim::Claimed { email }
+            } else {
+                OwnerClaim::PasswordChosen { email }
+            });
+        }
+        drop(client);
+        self.mailer
+            .ready()
+            .await
+            .map_err(|error| OwnerClaimError::MailNotReady(error.to_string()))?;
+        match self
+            .reset_mail()
+            .mail_owner_claim(tenant, user, &name, &email)
+            .await?
+        {
+            ClaimMail::Sent => Ok(OwnerClaim::Sent { email }),
+            ClaimMail::RecentlySent => Ok(OwnerClaim::RecentlySent { email }),
+            ClaimMail::NotDelivered(detail) => Err(OwnerClaimError::Delivery(detail)),
+        }
     }
 }

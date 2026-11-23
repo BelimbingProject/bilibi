@@ -227,7 +227,7 @@ def check_available():
         route = find(ROUTE_ID)[1]
         servers = request('GET', '/config/apps/http/servers') or {}
     except (ApiError, RuntimeError):
-        return  # Missing HTTPS still permits the loopback HTTP address.
+        return  # The launcher's two-site plan reports the required HTTPS error.
     check_host(route, servers)
 
 
@@ -538,12 +538,14 @@ def main():
     else:
         request("PATCH", "/id/" + quote(own_id, safe=""), route_config)
     install_waiting_route(server_path, server, host)
-    # A restarted checkout keeps only its chosen name. Claims from other
-    # checkouts stay untouched, even if an old instance file names their host.
+    # A restarted checkout keeps only its chosen name or the explicit set its
+    # two-site launcher is registering. Claims from other checkouts stay
+    # untouched, even if an old instance file names their host.
+    keep_hosts = {host, *(name for name in os.environ.get("BILIBI_DEV_HOSTS", "").split(",") if name)}
     for old_server in config.values():
         for old_route in caddy_routes(old_server):
             old_hosts = [name for matcher in old_route.get('match', []) for name in matcher.get('host', [])]
-            if len(old_hosts) != 1 or old_hosts[0] == host:
+            if len(old_hosts) != 1 or old_hosts[0] in keep_hosts:
                 continue
             old_host = old_hosts[0]
             old_owners = {f'{BASES["route"]}-{old_host}-owner-{checkout}'}

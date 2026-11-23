@@ -175,7 +175,7 @@ async fn main() -> Result<(), Failure> {
     if std::env::args().any(|arg| arg == "--serve") {
         let listener = tokio::net::TcpListener::bind(std::env::var("BIND_ADDR")?).await?;
         println!("reference application ready");
-        axum::serve(listener, bilibi_web::router(app))
+        axum::serve(listener, bilibi_web::staff_router(app))
             .with_graceful_shutdown(async {
                 let _ = tokio::signal::ctrl_c().await;
             })

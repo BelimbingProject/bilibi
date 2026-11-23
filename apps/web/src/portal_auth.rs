@@ -8,16 +8,16 @@
 //! query, never free text.
 //!
 //! The portal cookie (`portal::COOKIE`) is set here and nowhere else:
-//! `HttpOnly`, `SameSite=Lax`, `Path=/portal` and `Secure` on an `https`
-//! origin, holding the fresh token each sign-in issues (the sign-in form, or
+//! `HttpOnly`, `SameSite=Lax`, `Path=/` and `Secure`, holding the fresh token
+//! each sign-in issues (the sign-in form, or
 //! accepting an invitation, which signs the customer in). One browser holds one
-//! portal session: signing in to another tenant's portal ends the session the
-//! cookie held before.
+//! portal session on a public hostname: signing in to another tenant's portal
+//! ends the session the cookie held before.
 use crate::{
     api,
     auth::{
-        bounded, recovery_allowed, secure, validate_confirmation, validate_email,
-        validate_new_password, validate_required, RECOVERY_THROTTLED,
+        bounded, recovery_allowed, validate_confirmation, validate_email, validate_new_password,
+        validate_required, RECOVERY_THROTTLED,
     },
     origin, portal, App, HttpError,
 };
@@ -39,13 +39,13 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 /// Remembers the portal a browser last signed in to, so `/portal/sign-in`
 /// (where a signed-out portal page sends the customer) can return there.
-const SITE_COOKIE: &str = "bilibi_portal_site";
+const SITE_COOKIE: &str = "__Host-bilibi_portal_site";
 /// The brand of a card whose site is unknown: no tenant is named.
 const UNNAMED: &str = "Customer portal";
 /// Holds a customer's pending portal sign-in between its password and its
-/// second step. `HttpOnly`, `Path=/portal/sign-in`, so no other portal page
-/// receives it; completing it still needs the pending credential's own CSRF.
-const PENDING_COOKIE: &str = "bilibi_portal_sign_in";
+/// second step. Like every `__Host-` cookie, it has `Path=/`; completing it
+/// still needs the pending credential's own CSRF.
+const PENDING_COOKIE: &str = "__Host-bilibi_portal_sign_in";
 const INVITATION_INVALID: &str =
     "This invitation link is invalid, already used or expired. Ask the company that invited you for a new one.";
 const ACCOUNT_EXISTS: &str =
@@ -64,7 +64,9 @@ fn access(app: &App) -> Result<Arc<PortalService>, HttpError> {
         .map_err(Error::from)?)
 }
 async fn site(app: &App, address: &str) -> Result<Option<Site>, HttpError> {
-    Ok(access(app)?.portal_site(address).await?)
+    Ok(access(app)?
+        .portal_site(app.public_tenant.ok_or(Error::NotFound)?, address)
+        .await?)
 }
 
 /// A credential card in the portal's document, branded with `brand`.
@@ -119,10 +121,9 @@ fn unknown_site() -> Result<Response, HttpError> {
     )
 }
 
-fn cookie(app: &App, name: &str, value: &str, max_age: u64) -> Result<HeaderValue, HttpError> {
+fn cookie(name: &str, value: &str, max_age: u64) -> Result<HeaderValue, HttpError> {
     HeaderValue::from_str(&format!(
-        "{name}={value}; HttpOnly; SameSite=Lax; Path=/portal; Max-Age={max_age}{}",
-        secure(app)
+        "{name}={value}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age={max_age}"
     ))
     .map_err(|_| Error::Internal.into())
 }
@@ -139,7 +140,7 @@ fn remembered(headers: &HeaderMap) -> Option<String> {
 /// The tenant of the portal session this browser holds, if one is live.
 async fn signed_in_tenant(app: &App, headers: &HeaderMap) -> Option<i64> {
     let token = portal::token(headers).ok()?;
-    let portal = app.security.guard_portal(&token).await.ok()?;
+    let portal = portal::session(app, &token).await.ok()?;
     Some(portal.scope().tenant())
 }
 fn email_field(form: &str, value: &str, errors: Vec<String>, autofocus: bool) -> Field {
@@ -393,10 +394,9 @@ pub async fn sign_in(
         // The tenant asks for a second step: the password was accepted, the
         // customer confirms it on the challenge page.
         let mut response = Redirect::to(&challenge_path(&site.address)).into_response();
-        response.headers_mut().append(
-            header::SET_COOKIE,
-            pending_cookie(&app, &session.token, true)?,
-        );
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, pending_cookie(&session.token, true)?);
         return Ok(response);
     }
     admitted(&app, &headers, peer, &site, &session).await
@@ -405,12 +405,11 @@ pub async fn sign_in(
 fn challenge_path(address: &str) -> String {
     format!("/portal/sign-in/{address}/challenge")
 }
-fn pending_cookie(app: &App, token: &str, set: bool) -> Result<HeaderValue, HttpError> {
+fn pending_cookie(token: &str, set: bool) -> Result<HeaderValue, HttpError> {
     HeaderValue::from_str(&format!(
-        "{PENDING_COOKIE}={}; HttpOnly; SameSite=Lax; Path=/portal/sign-in{}{}",
+        "{PENDING_COOKIE}={}; HttpOnly; SameSite=Lax; Secure; Path=/{}",
         if set { token } else { "" },
-        if set { "" } else { "; Max-Age=0" },
-        secure(app)
+        if set { "" } else { "; Max-Age=0" }
     ))
     .map_err(|_| Error::Internal.into())
 }
@@ -426,11 +425,11 @@ fn pending_token(headers: &HeaderMap) -> Option<String> {
 }
 /// The pending sign-in ended (expired, cancelled or never there): back to the
 /// sign-in card, with the pending cookie cleared.
-fn pending_ended(app: &App, address: &str) -> Result<Response, HttpError> {
+fn pending_ended(address: &str) -> Result<Response, HttpError> {
     let mut response = Redirect::to(&format!("/portal/sign-in/{address}")).into_response();
     response
         .headers_mut()
-        .append(header::SET_COOKIE, pending_cookie(app, "", false)?);
+        .append(header::SET_COOKIE, pending_cookie("", false)?);
     Ok(response)
 }
 /// The second-step card in the portal's document, branded with the site's
@@ -471,7 +470,7 @@ async fn challenge_card(
 ) -> Result<Response, HttpError> {
     let pending = match app.user.portal_pending_sign_in(token).await {
         Ok(pending) => pending,
-        Err(Error::Unauthorized) => return pending_ended(app, &site.address),
+        Err(Error::Unauthorized) => return pending_ended(&site.address),
         Err(error) => return Err(error.into()),
     };
     let methods = pending
@@ -499,7 +498,7 @@ pub async fn challenge_page(
         return unknown_site();
     };
     let Some(token) = pending_token(&headers) else {
-        return pending_ended(&app, &site.address);
+        return pending_ended(&site.address);
     };
     challenge_card(
         &app,
@@ -536,7 +535,7 @@ pub async fn challenge(
         return unknown_site();
     };
     let Some(token) = pending_token(&headers) else {
-        return pending_ended(&app, &site.address);
+        return pending_ended(&site.address);
     };
     let result: Result<Response, HttpError> = async {
         match submission.action.as_str() {
@@ -544,7 +543,7 @@ pub async fn challenge(
                 app.user
                     .portal_cancel_sign_in(&token, &submission.csrf)
                     .await?;
-                pending_ended(&app, &site.address)
+                pending_ended(&site.address)
             }
             "start" => {
                 let challenge = app
@@ -577,7 +576,7 @@ pub async fn challenge(
                     let mut response = admitted(&app, &headers, peer, &site, &session).await?;
                     response
                         .headers_mut()
-                        .append(header::SET_COOKIE, pending_cookie(&app, "", false)?);
+                        .append(header::SET_COOKIE, pending_cookie("", false)?);
                     Ok(response)
                 }
                 None => {
@@ -600,7 +599,7 @@ pub async fn challenge(
         // A forged CSRF value or an ended pending sign-in is not the
         // customer's mistake to read about: the sign-in card starts over.
         Err(error) if matches!(error.0, Error::Forbidden | Error::Unauthorized) => {
-            pending_ended(&app, &site.address)
+            pending_ended(&site.address)
         }
         other => other,
     }
@@ -616,26 +615,25 @@ async fn admitted(
     site: &Site,
     session: &bilibi_user::Login,
 ) -> Result<Response, HttpError> {
-    let mut client = app.db.get().await.map_err(Error::from)?;
-    // One browser holds one portal session: the one the cookie held before,
-    // this tenant's or another's, ends now.
-    if let Ok(previous) = portal::token(headers) {
-        if let Ok(scope) = app
-            .security
-            .sessions
-            .check_portal(&**client, &previous)
+    let previous = match portal::token(headers) {
+        Ok(token) => portal::session(app, &token)
             .await
-        {
-            let mut tx = app
-                .mutations
-                .begin(&mut client, scope.mutation_context("session.sign_out"))
-                .await?;
-            app.security
-                .sessions
-                .delete(&mut tx, &scope, &previous)
-                .await?;
-            tx.commit().await?;
-        }
+            .ok()
+            .map(|portal| (token, portal)),
+        Err(_) => None,
+    };
+    let mut client = app.db.get().await.map_err(Error::from)?;
+    if let Some((previous, portal)) = previous {
+        let scope = portal.scope();
+        let mut tx = app
+            .mutations
+            .begin(&mut client, scope.mutation_context("session.sign_out"))
+            .await?;
+        app.security
+            .sessions
+            .delete(&mut tx, scope, &previous)
+            .await?;
+        tx.commit().await?;
     }
     // The portal has no Your sessions page, so a customer gets no
     // new-device email; the sign-in is still recorded.
@@ -658,11 +656,11 @@ async fn admitted(
     let cookies = response.headers_mut();
     cookies.append(
         header::SET_COOKIE,
-        cookie(app, portal::COOKIE, &session.token, 86_400)?,
+        cookie(portal::COOKIE, &session.token, 86_400)?,
     );
     cookies.append(
         header::SET_COOKIE,
-        cookie(app, SITE_COOKIE, &site.address, 31_536_000)?,
+        cookie(SITE_COOKIE, &site.address, 31_536_000)?,
     );
     Ok(response)
 }
@@ -1014,7 +1012,10 @@ pub async fn accept_page(
     let Some(site) = site(&app, &address).await? else {
         return unknown_site();
     };
-    let Some(invitation) = access(&app)?.open_invitation(&address, &token).await? else {
+    let Some(invitation) = access(&app)?
+        .open_invitation(site.tenant, &address, &token)
+        .await?
+    else {
         return invitation_invalid(&site, false);
     };
     accept_card(
@@ -1053,7 +1054,10 @@ pub async fn accept(
         return unknown_site();
     };
     let access = access(&app)?;
-    let Some(invitation) = access.open_invitation(&address, &token).await? else {
+    let Some(invitation) = access
+        .open_invitation(site.tenant, &address, &token)
+        .await?
+    else {
         return invitation_invalid(&site, false);
     };
     let name = submission.name.trim().chars().take(255).collect::<String>();
@@ -1075,7 +1079,7 @@ pub async fn accept(
         return accept_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY);
     }
     match access
-        .accept(&address, &token, &name, &submission.password)
+        .accept(site.tenant, &address, &token, &name, &submission.password)
         .await
     {
         Ok(()) => {
@@ -1104,7 +1108,7 @@ pub async fn accept(
                     .into_response();
             response.headers_mut().append(
                 header::SET_COOKIE,
-                cookie(&app, SITE_COOKIE, &site.address, 31_536_000)?,
+                cookie(SITE_COOKIE, &site.address, 31_536_000)?,
             );
             Ok(response)
         }
@@ -1207,7 +1211,10 @@ pub async fn register_page(
     State(app): State<App>,
     Path(address): Path<String>,
 ) -> Result<Response, HttpError> {
-    let Some(site) = access(&app)?.registration_site(&address).await? else {
+    let Some(site) = access(&app)?
+        .registration_site(app.public_tenant.ok_or(Error::NotFound)?, &address)
+        .await?
+    else {
         return unknown_site();
     };
     register_card(
@@ -1246,7 +1253,10 @@ pub async fn register(
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
     let access = access(&app)?;
-    let Some(site) = access.registration_site(&address).await? else {
+    let Some(site) = access
+        .registration_site(app.public_tenant.ok_or(Error::NotFound)?, &address)
+        .await?
+    else {
         return unknown_site();
     };
     let (name, email, company) = (
@@ -1272,7 +1282,7 @@ pub async fn register(
         &headers,
     ));
     match access
-        .register(&address, &name, &email, &company, &sender)
+        .register(site.tenant, &address, &name, &email, &company, &sender)
         .await
     {
         Ok(()) => {
@@ -1349,10 +1359,15 @@ pub async fn verify_page(
     Path((address, token)): Path<(String, String)>,
 ) -> Result<Response, HttpError> {
     let access = access(&app)?;
-    let Some(site) = access.registration_site(&address).await? else {
+    let Some(site) = access
+        .registration_site(app.public_tenant.ok_or(Error::NotFound)?, &address)
+        .await?
+    else {
         return unknown_site();
     };
-    let open = access.verification_open(&address, &token).await?;
+    let open = access
+        .verification_open(site.tenant, &address, &token)
+        .await?;
     verify_card(&site, open, false)
 }
 /// `POST /portal/verify/{site}/{token}`: confirms the request's address; it
@@ -1364,9 +1379,12 @@ pub async fn verify(
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
     let access = access(&app)?;
-    let Some(site) = access.registration_site(&address).await? else {
+    let Some(site) = access
+        .registration_site(app.public_tenant.ok_or(Error::NotFound)?, &address)
+        .await?
+    else {
         return unknown_site();
     };
-    let verified = access.verify(&address, &token).await?;
+    let verified = access.verify(site.tenant, &address, &token).await?;
     verify_card(&site, verified, verified)
 }

@@ -85,7 +85,7 @@ cd bilibi
 
 `start` checks the tools, runs the existing setup when needed, activates newly installed Rust tools in the same shell, and launches local sources. Setup installs the Rust version pinned in `rust-toolchain.toml`, PostgreSQL 18, Caddy, mkcert and Node.js 22 or newer (Node.js 24 when it installs it). You do not need a GitHub account. An AI agent follows these same steps.
 
-Bilibi opens in your browser at the sign-in page when it is ready. Sign in as `ai@agent.my` / `bilibi-dev` (development seed only). Later starts do not open another tab; open the address the launcher prints, or the tab you already have. If no browser opens, open that address too. To stop it opening a browser, set `BILIBI_OPEN_BROWSER=0`. To open one again, delete `.local/dev/browser-opened`. Every checkout defaults to <https://bilibi.localhost> and gets its own private database. To choose another address, put `BILIBI_DEV_HOST=<name>.localhost` in `.env` (see [Local launcher](#local-launcher)). If another checkout owns the address, startup stops and names that checkout. Follow the printed `BILIBI_DEV_HOST` line in your `.env`, then start again. Restart the launcher after changing the address; it releases its old name when it registers the new one. Setting `BILIBI_DEV_PORT` selects a backend port, without taking over another checkout's HTTPS address.
+Bilibi opens the staff sign-in page when it is ready. Sign in as `ai@agent.my` / `bilibi-dev` (development seed only). Every checkout gets two HTTPS names: staff at <https://bilibi.localhost> and public pages at <https://shop.bilibi.localhost>, plus its own private database. `BILIBI_DEV_HOST=<name>.localhost` changes the pair to `<name>.localhost` and `shop.<name>.localhost`. Caddy and local certificate trust are required because the two sites use hostname-bound secure cookies. If either name belongs to another checkout, startup stops and names the conflict.
 
 ### Supported environment
 
@@ -93,7 +93,7 @@ Use apt-based Ubuntu or Debian, or Arch Linux and its derivatives (including Oma
 
 On Arch/Omarchy, setup uses `pacman` and the Node.js 24 LTS package (`nodejs-lts-krypton`). Setup keeps an installed Node.js 22 or newer. Setup refuses a different PostgreSQL major. Rustup selects the pinned Rust version for this checkout without changing your global default.
 
-Python 3.11 or newer is required. Ubuntu 20.04 and 22.04, and Debian 11, ship older Python versions. Upgrade to Ubuntu 24.04 or newer, or Debian 12 or newer, before starting; setup does not replace the distribution's Python. If local HTTPS trust needs manual setup (including Windows trust in WSL2), use the printed loopback HTTP address. The launcher falls back to HTTP when local HTTPS is unavailable.
+Python 3.11 or newer is required. Ubuntu 20.04 and 22.04, and Debian 11, ship older Python versions. Upgrade to Ubuntu 24.04 or newer, or Debian 12 or newer, before starting; setup does not replace the distribution's Python. Local Caddy and certificate trust are required, including Windows trust in WSL2: the launcher refuses an HTTP fallback because the staff and public sites use hostname-bound secure cookies.
 
 ### Commands in a Platform clone
 
@@ -140,8 +140,8 @@ The launcher reads its settings from your shell first, then from an optional `.e
 
 | Line in `.env` | What it changes | Default |
 |----------------|-----------------|---------|
-| `BILIBI_DEV_HOST` | This instance's address, a name under `.localhost`, served over HTTPS | `bilibi.localhost` for every checkout |
-| `BILIBI_DEV_PORT` | The port Bilibi itself listens on behind Caddy | The first free port from 4300 |
+| `BILIBI_DEV_HOST` | The staff address under `.localhost`; the launcher also creates `shop.<name>` for public pages | `bilibi.localhost` and `shop.bilibi.localhost` |
+| `BILIBI_DEV_PORT` | The first of the two backend ports behind Caddy | The first free pair from 4300 |
 | `BILIBI_OPEN_BROWSER` | Open the sign-in page in your browser when the app is ready, on the first start of a checkout only, `1` or `0` | `1` |
 
 Servers never read `.env`: `install-server.sh` writes each server instance its own `env` file ([server installation](docs/server-install.md)).
@@ -157,8 +157,11 @@ The launcher's Rust build ends with its elapsed time, the number of crates Cargo
 | Variable | Use |
 |----------|-----|
 | `DATABASE_URL` | PostgreSQL 18. Unset: this checkout's private instance under `.local/postgres18`, on a port chosen once (5438 when free) and remembered in `.local/postgres18/port` |
-| `APP_ORIGIN` | The exact browser origin, no trailing slash. Staging and Production refuse to start unless it is HTTPS; see [HTTPS for OAuth](docs/server-install.md#https-for-oauth) |
-| `BIND_ADDR` | Listen address, default `127.0.0.1:3000` |
+| `APP_ORIGIN` | The exact staff origin, no trailing slash. Staging and Production refuse to start unless it is HTTPS; see [HTTPS for OAuth](docs/server-install.md#https-for-oauth) |
+| `BIND_ADDR` | Staff listen address, default `127.0.0.1:3000` |
+| `PUBLIC_ORIGIN` | The exact public origin. Omit it together with `PUBLIC_BIND_ADDR` and `PUBLIC_TENANT_ID` to serve no public routes |
+| `PUBLIC_BIND_ADDR` | Public listen address. Required with `PUBLIC_ORIGIN` and different from `BIND_ADDR` |
+| `PUBLIC_TENANT_ID` | Positive ID of the tenant served by the public listener. The development launcher defaults to tenant 1 |
 | `DATABASE_POOL_SIZE` | Database connections one app process may hold, 1 to 1000, default 16. System Info shows it as Pool Size. Keep the total of every process under PostgreSQL's `max_connections` |
 | `DATABASE_POOL_WAIT_SECONDS` | How long a request or job waits for a free connection before it is refused (a page answers 503, a job retries), 1 to 300, default 5 |
 | `MAIL_HOST` | SMTP relay. Unset: write mail to `.local/mailbox/` |
@@ -184,7 +187,7 @@ Terminate TLS at a reverse proxy, and keep the database on a private network: Bi
 
 ## Run it on a server
 
-`scripts/install-server.sh` sets up Dev, Staging and Production instances under `/opt/bilibi`, each with its own database, service and address, and puts releases into service. The install seed saves the initial `BILIBI_ENV` role in settings. Later changes use the protected Instance settings page. Build software on your own machine, then install the tested release on any of them. Follow the [server installation guide](docs/server-install.md) to set up an instance, its server owner and first owners of customer tenants.
+`scripts/install-server.sh` sets up Dev, Staging and Production instances under `/opt/bilibi`, each with its own database, service and address, and puts releases into service. The install seed saves the initial `BILIBI_ENV` role in settings. Later changes use the protected Instance settings page. Build software on your own machine, then install the tested release on any of them. Follow the [server installation guide](docs/server-install.md) to set up an instance, its server owner and first owners of customer tenants. To let your own AI assistant install it, give it [the Install Bilibi skill](docs/install-with-ai/SKILL.md) ([guide](docs/install-with-ai/README.md)).
 
 ## Add a business area
 

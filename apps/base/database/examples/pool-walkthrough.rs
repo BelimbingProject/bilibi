@@ -18,8 +18,7 @@ async fn ask(db: &Db) -> Result<()> {
         .map_err(Error::from)
 }
 
-/// What a task that asks for a second connection gets, run as a child so
-/// that its log lines are read here and not mistaken for a real hit.
+/// What a task that asks for a second connection gets.
 async fn second_connection(url: &str) -> Result<()> {
     let db = pool_with(
         url,
@@ -29,13 +28,19 @@ async fn second_connection(url: &str) -> Result<()> {
         },
     )?;
     let held = db.get().await?;
-    // Asked three times from one line: logged once.
+    // Each second ask is refused immediately with both sites.
     for _ in 0..3 {
-        drop(db.get().await?);
+        let started = Instant::now();
+        let error = match db.get().await {
+            Ok(_) => return Err(Error::Internal),
+            Err(error) => error.to_string(),
+        };
+        assert!(started.elapsed() < WAIT, "the refusal waited for the pool");
+        assert_eq!(error.matches(concat!(file!(), ":")).count(), 2, "{error}");
+        assert!(error.contains("try_get_detached"));
     }
-    println!("second=served");
     // None of these is a second connection of this task.
-    let detached = db.get_detached(BY_HAND).await?;
+    let detached = db.try_get_detached(BY_HAND).await?;
     let other_task = tokio::spawn({
         let db = db.clone();
         async move { db.get().await.is_ok() }
@@ -50,23 +55,7 @@ async fn second_connection(url: &str) -> Result<()> {
     let kept = db.get_detached(BY_HAND).await?;
     drop(db.get().await?);
     drop(kept);
-    println!("others=served");
     Ok(())
-}
-
-/// The child's verdict lines and its log.
-fn second_connection_of(url: &str) -> Result<(bool, String, String)> {
-    let mut child = Command::new(std::env::current_exe().map_err(|_| Error::Internal)?);
-    child
-        .arg("second-connection")
-        .env("DATABASE_URL", url)
-        .env_remove("RUST_BACKTRACE");
-    let output = child.output().map_err(|_| Error::Internal)?;
-    Ok((
-        output.status.success(),
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    ))
 }
 
 /// The limits a child process reads from its environment, as it prints them.
@@ -102,9 +91,6 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
-    if std::env::args().nth(1).as_deref() == Some("second-connection") {
-        return second_connection(&url).await;
-    }
 
     let db = pool_with(
         &url,
@@ -113,7 +99,7 @@ async fn main() -> Result<()> {
             wait: WAIT,
         },
     )?;
-    let first = db.get_detached(BY_HAND).await?;
+    let first = db.get().await?;
     let second = db.get_detached(BY_HAND).await?;
     let started = Instant::now();
     let refused = ask(&db).await;
@@ -122,7 +108,7 @@ async fn main() -> Result<()> {
     assert!(waited >= WAIT && waited < WAIT * 3);
     println!("PASS empty pool: the third caller is refused after {waited:.1?}, not left waiting");
     let started = Instant::now();
-    let refused = db.try_get_detached(BY_HAND).await.map_err(Error::from);
+    let refused = db.get_independent(BY_HAND).await.map_err(Error::from);
     assert!(matches!(&refused, Err(error) if error.is_pool_exhausted()));
     assert!(started.elapsed() < WAIT / 2);
     println!("PASS empty pool: a caller that will not wait is refused at once");
@@ -135,7 +121,7 @@ async fn main() -> Result<()> {
 
     let waiter = tokio::spawn({
         let db = db.clone();
-        async move { ask(&db).await }
+        async move { db.get_independent(BY_HAND).await.map(|_| ()) }
     });
     tokio::time::sleep(WAIT / 4).await;
     drop(first);
@@ -146,32 +132,38 @@ async fn main() -> Result<()> {
     // The shape that used to lock a process for good: more callers than
     // connections, each holding one and asking for a second.
     let started = Instant::now();
+    let occupied = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let mut callers = tokio::task::JoinSet::new();
     for _ in 0..6 {
         let db = db.clone();
+        let occupied = occupied.clone();
         callers.spawn(async move {
-            let Ok(held) = db.get_detached(BY_HAND).await else {
-                return (false, false);
+            let held = db.get().await?;
+            occupied.wait().await;
+            let started = Instant::now();
+            let nested = db.get().await;
+            let elapsed = started.elapsed();
+            occupied.wait().await;
+            assert!(elapsed < WAIT / 2, "the nested checkout waited");
+            let error = match nested {
+                Ok(_) => return Err(Error::Internal),
+                Err(error) => error.to_string(),
             };
-            let nested = ask(&db).await;
-            held.query_one("SELECT 1", &[]).await.ok();
-            (true, nested.is_ok())
+            assert_eq!(error.matches(concat!(file!(), ":")).count(), 2, "{error}");
+            held.query_one("SELECT 1", &[]).await?;
+            Ok::<_, Error>(())
         });
     }
-    let (mut held, mut nested) = (0, 0);
-    let answered = tokio::time::timeout(WAIT * 10, async {
+    tokio::time::timeout(WAIT * 10, async {
         while let Some(caller) = callers.join_next().await {
-            let (got, second) = caller.map_err(|_| Error::Internal)?;
-            held += usize::from(got);
-            nested += usize::from(second);
+            caller.map_err(|_| Error::Internal)??;
         }
         Ok::<_, Error>(())
     })
-    .await;
-    assert!(matches!(answered, Ok(Ok(()))));
-    assert!(held >= 2);
+    .await
+    .map_err(|_| Error::Internal)??;
     println!(
-        "PASS nested asks: 6 callers on 2 connections all answered in {:.1?} ({held} held one, {nested} got a second)",
+        "PASS nested asks: 6 callers on 2 connections all refused a second checkout in {:.1?}",
         started.elapsed()
     );
     ask(&db).await?;
@@ -209,18 +201,9 @@ async fn main() -> Result<()> {
         assert_eq!(limits_of(&url, size, wait)?, None);
     }
 
-    let here = concat!(file!(), ":");
-    let (ok, verdict, log) = second_connection_of(&url)?;
-    let warnings: Vec<&str> = log
-        .lines()
-        .filter(|line| line.starts_with("warning: second pooled connection: "))
-        .collect();
-    assert!(ok && verdict.contains("second=served") && verdict.contains("others=served"));
-    assert_eq!(warnings.len(), 1, "{log}");
-    assert_eq!(warnings[0].matches(here).count(), 2, "{log}");
-    assert!(warnings[0].contains("get_detached"));
-    println!("PASS a task that holds a connection and asks for another is served and logged once, with both call sites:\n  {}", warnings[0]);
-    println!("PASS not logged: another task, a detached connection, a connection taken out of the pool, an ask after the first was returned");
+    second_connection(&url).await?;
+    println!("PASS a second checkout is refused immediately with both call sites");
+    println!("PASS served: another task, a detached connection, a connection taken out of the pool, an ask after the first was returned");
     println!("PASS environment: defaults 16 and 5 s, DATABASE_POOL_SIZE=3 and DATABASE_POOL_WAIT_SECONDS=2 are used, values outside the range refuse the start");
     Ok(())
 }

@@ -142,11 +142,6 @@ impl Layout {
             .find(|(name, _)| name.trim() == key)
             .map(|(_, value)| value.trim().to_owned())
     }
-    /// The local port the instance's program listens on, from `BIND_ADDR`.
-    pub fn port(&self) -> Option<u16> {
-        let bind = self.env_value("BIND_ADDR")?;
-        bind.rsplit_once(':')?.1.parse().ok()
-    }
     /// The systemd unit that runs this instance.
     pub fn unit(&self) -> String {
         format!("bilibi@{}", self.name)

@@ -24,9 +24,10 @@ use bilibi_ui::{
         PageFuture, PageRequest,
     },
     params, Alert, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ColumnType,
-    ColumnsOutcome, ConfirmDialog, CreateButton, Fact, Facts, FilterToolbar, FlashMap, FlexRow,
-    FlexTable, Header, Html, Instant, ListColumns, ListSpec, ListState, Pagination, RecordLink,
-    SectionHeading, StatusKind, TableEmpty, Toggle, ToolbarControl, NO_FLASH,
+    ColumnsOutcome, ConfirmDialog, CreateButton, Fact, Facts, Field, FilterToolbar, FlashMap,
+    FlexRow, FlexTable, Form, Header, Html, InputKind, Instant, ListColumns, ListSpec, ListState,
+    Pagination, RecordLink, SectionHeading, StatusKind, TableEmpty, Toggle, ToolbarControl,
+    NO_FLASH,
 };
 use jiff::Timestamp;
 use serde_json::{json, Value};
@@ -36,6 +37,7 @@ use std::{
 };
 
 mod editor;
+mod script_run;
 mod show;
 
 pub const INDEX: &str = "/watchers";

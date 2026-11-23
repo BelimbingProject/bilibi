@@ -1,12 +1,6 @@
 # Managed by Bilibi scripts/install-server.sh for instance "@INSTANCE@".
 # Rerun the script to change it; edits here are overwritten.
-@SITE@ {
-	@TLS@
-	encode zstd gzip
-	reverse_proxy 127.0.0.1:@PORT@
-	# While bilibi-web is stopped (a release switch, a restart, a crash) the proxy
-	# answers 503 with the waiting page. The page polls this same address and
-	# reloads once an answer arrives without the X-Bilibi-Waiting header.
+(bilibi_waiting_@INSTANCE@) {
 	handle_errors {
 		@down expression `{err.status_code} in [502, 503, 504]`
 		handle @down {
@@ -21,3 +15,12 @@
 		}
 	}
 }
+
+@SITE@ {
+	@TLS@
+	@STAFF_BIND@
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:@PORT@
+	import bilibi_waiting_@INSTANCE@
+}
+@PUBLIC_BLOCK@

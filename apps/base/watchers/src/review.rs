@@ -1152,10 +1152,12 @@ impl Watchers {
             let old_activation: i32 = old.get(2);
             let old_enabled: bool = old.get(3);
             for digest in &script_digests {
-                sql.execute(
-                    "INSERT INTO base_watcher_script_permissions(tenant_id,watcher_id,version_id,script_digest,principal,granted_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,version_id,script_digest,principal) DO UPDATE SET granted_by=EXCLUDED.granted_by,granted_at=clock_timestamp()",
-                    &[&tenant, &watcher, &version, digest, &crate::PRINCIPAL, &user],
-                ).await?;
+                for caller in [crate::PRINCIPAL, crate::script::PERSON_CALLER] {
+                    sql.execute(
+                        "INSERT INTO base_watcher_script_permissions(tenant_id,watcher_id,version_id,script_digest,principal,granted_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,version_id,script_digest,principal) DO UPDATE SET granted_by=EXCLUDED.granted_by,granted_at=clock_timestamp()",
+                        &[&tenant, &watcher, &version, digest, &caller, &user],
+                    ).await?;
+                }
             }
             let activation: i32 = sql.query_one(
                 "UPDATE base_watchers SET active_version_id=$3,disabled_at=NULL,enabled_at=clock_timestamp(),needs_review=false,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2 RETURNING version",
