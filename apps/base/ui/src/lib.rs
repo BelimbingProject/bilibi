@@ -65,6 +65,7 @@ mod shell;
 mod softphone;
 mod specimen;
 mod statusbar;
+mod step_up_gate;
 mod wordmark;
 pub use softphone::{CallAction, CallPhase, PhoneHealth, Softphone, SoftphoneAction};
 pub mod upload;
@@ -133,6 +134,7 @@ pub use page_search::{page_search, RecordGroup, RecordHit, SearchPage, SearchRec
 pub use settings::{SettingsTab, SETTINGS_LOCATION};
 pub use specimen::ComponentsSpecimen;
 pub use statusbar::StatusbarTag;
+pub use step_up_gate::StepUpGate;
 pub use upload::{
     ChunkOutcome, ClientEntry, FileInput, Registration, UploadBudget, UploadEntry, UploadError,
     UploadSpec, UploadedFile, Uploads,

@@ -4,7 +4,7 @@
 {% import "feedback.html" as fb %}
 {% macro method_card(choices, confirm) %}
 {% call ui::card() %}
-{% for choice in choices %}{{ choice }}{% endfor %}
+<div{% if confirm %} data-step-up-methods{% endif %}>{% for choice in choices %}{{ choice }}{% endfor %}</div>
 {% if choices.is_empty() %}{% call fb::alert(kind=bilibi_ui::StatusKind::Warning, id="factor-unavailable") %}{% if confirm %}2FA is unavailable. Ask a server administrator for help.{% else %}2FA is unavailable. Ask your admin for help.{% endif %}{% endcall %}{% endif %}
 {% endcall %}
 {% endmacro %}

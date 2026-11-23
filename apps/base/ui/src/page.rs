@@ -43,6 +43,12 @@ pub trait Page<Context, Error>: Send + Sync {
     fn title(&self, _operation: &str) -> Option<&'static str> {
         None
     }
+    /// The title retained behind a step-up cover. The default is the static
+    /// document title; an owner may derive a more specific title only from
+    /// route parameters, never by reading the protected record or store.
+    fn step_up_title(&self, operation: &str, _path: &HashMap<String, String>) -> Option<String> {
+        self.title(operation).map(str::to_owned)
+    }
     /// Selects the host-owned chrome for this operation. This is presentation
     /// only; route access, CSRF and the owner's authorization are unchanged.
     fn chrome(&self, _operation: &str) -> PageChrome {

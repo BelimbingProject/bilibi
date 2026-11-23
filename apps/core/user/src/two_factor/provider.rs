@@ -66,17 +66,7 @@ impl SessionProvider for Authenticator {
         })
     }
     fn prompt<'a>(&'a self, scope: &'a Scope, back: &'a str) -> ProofFuture<'a, String> {
-        Box::pin(async move {
-            // The neutral choice page is a staff page. A customer has the
-            // authenticator alone on the portal: its prompt, or its setup
-            // while they have none.
-            if scope.actor().kind() == AccountKind::Customer {
-                let (confirm, setup) = pages(scope);
-                let enrolled = self.0.two_factor_status(scope).await?.enabled;
-                return Ok(selected(if enrolled { confirm } else { setup }, back));
-            }
-            Ok(super::with_return(super::CONFIRM_PATH, Some(back)))
-        })
+        Box::pin(async move { Ok(super::with_return(pages(scope).0, Some(back))) })
     }
 }
 impl Provider for Authenticator {

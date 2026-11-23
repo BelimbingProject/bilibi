@@ -421,13 +421,24 @@ pub fn install(mut router: Router<App>, routes: &Pages, downloads: &Downloads) -
             on(
                 method_filter(bound.route.method),
                 move |State(app): State<App>,
+                      method: axum::http::Method,
                       uri: Uri,
                       headers: HeaderMap,
                       peer: Option<Extension<ConnectInfo<SocketAddr>>>,
                       Path(path): Path<HashMap<String, String>>,
                       Query(query): Query<HashMap<String, String>>,
                       body: Bytes| {
-                    dispatch(app, bound, uri, headers, peer, path, query, body)
+                    dispatch(
+                        app,
+                        bound,
+                        uri,
+                        headers,
+                        peer,
+                        path,
+                        query,
+                        body,
+                        method == axum::http::Method::HEAD,
+                    )
                 },
             ),
         );
@@ -610,6 +621,99 @@ async fn step_up_redirect(
     Ok(axum::response::Redirect::to(&destination).into_response())
 }
 
+/// A local prompt address split into its discovered path and decoded query.
+/// Providers already validate and return a local address; the host still
+/// refuses fragments and non-root paths before resolving it.
+pub(crate) fn local_address(address: &str) -> Result<(&str, HashMap<String, String>)> {
+    let (path, query) = address.split_once('?').unwrap_or((address, ""));
+    if !path.starts_with('/') || path.starts_with("//") || address.contains('#') {
+        return Err(Error::Forbidden);
+    }
+    Ok((
+        path,
+        url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect(),
+    ))
+}
+
+pub(crate) const STEP_UP_HEADER: &str = "x-bilibi-step-up";
+
+/// Draws the factor provider's prompt over placeholders inside the requested
+/// page's shell. The protected page service is deliberately not called.
+async fn step_up_page(
+    app: &App,
+    requested: &BoundRoute,
+    requested_path: &HashMap<String, String>,
+    scope: &bilibi_security::Scope,
+    credential: &str,
+    uri: &Uri,
+    framed: bool,
+) -> Result<Response> {
+    let return_to = uri
+        .path_and_query()
+        .map_or(uri.path(), |address| address.as_str());
+    let destination = app.step_up.prompt(scope, return_to).await?;
+    let (prompt_path, prompt_query) = local_address(&destination)?;
+    let (prompt, prompt_params) = resolve(app, prompt_path)?;
+    match admit(
+        app,
+        prompt.route.access,
+        Some(credential),
+        Some(prompt_path),
+    )
+    .await?
+    {
+        Admission::Admitted(_) => {}
+        Admission::StepUp(_) => return Err(Error::Forbidden),
+    }
+    let page = crate::render_fields(
+        app,
+        Some(scope),
+        prompt.page.0.render(PageRequest {
+            operation: prompt.route.operation,
+            scope: Some(scope),
+            path: &prompt_params,
+            query: &prompt_query,
+            body: &[],
+            framed,
+        }),
+    )
+    .await?;
+    let title = requested
+        .page
+        .0
+        .step_up_title(requested.route.operation, requested_path)
+        .unwrap_or_else(|| "Protected page".to_owned());
+    let gate = bilibi_ui::Html::render(&bilibi_ui::StepUpGate::rendered_page(
+        destination,
+        return_to,
+        title.clone(),
+        page.html,
+    ))
+    .map_err(|_| Error::Internal)?;
+    let shell = crate::shell::render(
+        app,
+        Some(scope),
+        uri.path(),
+        if framed {
+            PageChrome::Framed
+        } else {
+            requested.page.0.chrome(requested.route.operation)
+        },
+        true,
+        gate.as_str(),
+        bilibi_ui::Html::EMPTY,
+    )
+    .await?;
+    let mut response = crate::document_themed(&title, &shell.html, shell.theme)?.into_response();
+    response
+        .headers_mut()
+        .insert(STEP_UP_HEADER, HeaderValue::from_static("required"));
+    *response.status_mut() = StatusCode::OK;
+    Ok(response)
+}
+
 async fn dispatch(
     app: App,
     bound: BoundRoute,
@@ -619,6 +723,7 @@ async fn dispatch(
     path: HashMap<String, String>,
     query: HashMap<String, String>,
     body: Bytes,
+    head: bool,
 ) -> std::result::Result<Response, HttpError> {
     if let Some(admission) = &bound.sender_admission {
         let sender = crate::api::sender_key(crate::api::client_address(
@@ -630,6 +735,13 @@ async fn dispatch(
         }
     }
     let credential = token(&headers).ok();
+    let framed = matches!(
+        headers.get("sec-fetch-dest").and_then(|h| h.to_str().ok()),
+        Some("iframe" | "frame")
+    );
+    if framed && !bound.route.framed {
+        return Err(Error::Forbidden.into());
+    }
     let scope = match admit(
         &app,
         bound.route.access,
@@ -646,7 +758,8 @@ async fn dispatch(
             ))
         }
         Ok(Admission::StepUp(scope)) if bound.route.method == Method::Get => {
-            return Ok(step_up_redirect(&app, &scope, &uri).await?)
+            let credential = credential.as_deref().ok_or(Error::Unauthorized)?;
+            return Ok(step_up_page(&app, &bound, &path, &scope, credential, &uri, framed).await?);
         }
         Ok(Admission::StepUp(_)) => return Err(Error::Forbidden.into()),
         Ok(Admission::Admitted(scope)) => scope,
@@ -661,13 +774,6 @@ async fn dispatch(
                 return Err(Error::Forbidden.into());
             }
         }
-    }
-    let framed = matches!(
-        headers.get("sec-fetch-dest").and_then(|h| h.to_str().ok()),
-        Some("iframe" | "frame")
-    );
-    if framed && !bound.route.framed {
-        return Err(Error::Forbidden.into());
     }
     let rendered = crate::render_fields(
         &app,
@@ -688,7 +794,8 @@ async fn dispatch(
             if bound.route.method == Method::Get && reason != "impersonating" =>
         {
             let scope = scope.as_ref().ok_or(Error::Forbidden)?;
-            return Ok(step_up_redirect(&app, scope, &uri).await?);
+            let credential = credential.as_deref().ok_or(Error::Unauthorized)?;
+            return Ok(step_up_page(&app, &bound, &path, scope, credential, &uri, framed).await?);
         }
         Err(Error::NotFound) if bound.route.method == Method::Get => {
             return match crate::auth::missing_record_redirect(&app, bound.route.path) {
@@ -730,9 +837,9 @@ async fn dispatch(
     // A missing record or a refused action elsewhere sent the visitor here with
     // its message (a one-shot cookie), or a live action redirected here with a
     // success of its own (held by `landing`).
-    let waiting = crate::auth::waiting_flash(&headers).filter(|_| !framed);
+    let waiting = crate::auth::waiting_flash(&headers).filter(|_| !framed && !head);
     let landed = match (&waiting, credential.as_deref()) {
-        (None, Some(credential)) if !framed && crate::auth::navigating(&headers) => {
+        (None, Some(credential)) if !framed && !head && crate::auth::navigating(&headers) => {
             app.landing.take(credential, uri.path())
         }
         _ => None,
@@ -824,6 +931,10 @@ async fn download(
 /// The page with one flash group after it, the outlet for a message that
 /// arrived with the visitor.
 fn flash_group(page: &str, kind: StatusKind, message: &str) -> Result<String> {
+    Ok(format!("{page}{}", redirect_flash(kind, message)?))
+}
+
+pub(crate) fn redirect_flash(kind: StatusKind, message: &str) -> Result<bilibi_ui::Html> {
     let mut flash = bilibi_ui::FlashMap::default();
     match kind {
         StatusKind::Error => flash.error = message,
@@ -831,12 +942,11 @@ fn flash_group(page: &str, kind: StatusKind, message: &str) -> Result<String> {
         StatusKind::Success => flash.success = message,
         StatusKind::Info => flash.info = message,
     }
-    let group = bilibi_ui::Html::render(&bilibi_ui::FloatingFlashGroup {
+    bilibi_ui::Html::render(&bilibi_ui::FloatingFlashGroup {
         id: "flash-redirect",
         flash,
     })
-    .map_err(|_| Error::Internal)?;
-    Ok(format!("{page}{group}"))
+    .map_err(|_| Error::Internal)
 }
 
 /// Resolve the same discovered GET routes as HTTP, with literal siblings first.
