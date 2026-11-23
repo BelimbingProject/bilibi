@@ -23,6 +23,7 @@ const OUTPUT_BYTES: usize = 32 * 1024;
 struct Invocation<'a> {
     source: &'a str,
     facts: Value,
+    lookups: Value,
     milliseconds: u64,
     heap_mib: u64,
 }
@@ -93,6 +94,7 @@ fn worker() -> Option<i32> {
     struct Request {
         source: String,
         facts: Value,
+        lookups: Value,
         milliseconds: u64,
         heap_mib: u64,
     }
@@ -111,12 +113,18 @@ fn worker() -> Option<i32> {
     })));
     let context = Context::custom::<(intrinsic::Eval, intrinsic::Json)>(&runtime).ok()?;
     let facts = serde_json::to_vec(&request.facts).ok()?;
+    let lookups = serde_json::to_vec(&request.lookups).ok()?;
     let output = context.with(|ctx| {
         let run = || -> rquickjs::Result<Option<String>> {
             let facts = ctx.json_parse(facts)?;
             ctx.globals().set("facts", facts)?;
+            let lookups = ctx.json_parse(lookups)?;
+            ctx.globals().set("__lookups", lookups)?;
             let source = format!(
-                "(function(facts){{'use strict';\n{}\n}})(facts)",
+                "(function(facts){{'use strict';\n\
+                 const canonical=(value)=>value&&typeof value==='object'?(Array.isArray(value)?value.map(canonical):Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])]))):value;\n\
+                 const lookup=(operation,input={{}})=>{{const wanted=JSON.stringify(canonical({{operation,input}}));const found=__lookups.find(item=>JSON.stringify(canonical({{operation:item.operation,input:item.input}}))===wanted);if(!found)throw new Error('lookup_refused');return JSON.parse(JSON.stringify(found.reply));}};\n{}
+                 }})(facts)",
                 request.source
             );
             let result = ctx.eval::<rquickjs::Value, _>(source)?;
@@ -133,10 +141,10 @@ fn worker() -> Option<i32> {
                 let message = exception
                     .as_exception()
                     .and_then(|exception| exception.message());
-                Err(if message.as_deref() == Some("out of memory") {
-                    3
-                } else {
-                    1
+                Err(match message.as_deref() {
+                    Some("out of memory") => 3,
+                    Some("lookup_refused") => 4,
+                    _ => 1,
                 })
             }
             Err(_) => Err(1),
@@ -157,12 +165,14 @@ fn worker() -> Option<i32> {
 pub(crate) async fn evaluate(
     source: &str,
     facts: Value,
+    lookups: Value,
     milliseconds: u64,
     heap_mib: u64,
 ) -> Result<Value, &'static str> {
     let frame = serde_json::to_vec(&Invocation {
         source,
         facts,
+        lookups,
         milliseconds,
         heap_mib,
     })
@@ -203,6 +213,7 @@ pub(crate) async fn evaluate(
                 Some(0) => serde_json::from_slice(&output).map_err(|_| "script_output"),
                 Some(2) => Err("script_timeout"),
                 Some(3) => Err("script_memory"),
+                Some(4) => Err("script_lookup_refused"),
                 _ => Err("script_refused"),
             }
         })
