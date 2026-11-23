@@ -289,7 +289,7 @@ async fn main() -> Result<()> {
         .unwrap_or(48210);
     let listener = TcpListener::bind(("127.0.0.1", base)).await?;
     let app_port = listener.local_addr()?.port();
-    let router = bilibi_web::router(app.clone());
+    let router = bilibi_web::staff_router(app.clone());
     tokio::spawn(async move { axum::serve(listener, router).await });
     let wire = Arc::new(Mutex::new(Wire::default()));
     let proxy_port = proxy(base + 1, app_port, wire.clone(), db.clone()).await?;

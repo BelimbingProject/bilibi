@@ -704,7 +704,7 @@ async fn main() -> Result<(), Failure> {
 async fn serve(app: bilibi_web::App, bind: &str, origin: &str) -> Result<(), Failure> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     println!("Serving {origin}");
-    axum::serve(listener, bilibi_web::router(app))
+    axum::serve(listener, bilibi_web::staff_router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

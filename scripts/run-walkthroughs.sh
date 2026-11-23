@@ -239,6 +239,7 @@ WALKTHROUGHS=(
   'web|two-doors|apps/cli|two-doors-walkthrough|migrate|BILIBI_TWO_DOORS_DEMO=disposable|-'
   'web|tenant-settings|apps/web|tenant-settings-walkthrough|migrate|BILIBI_TENANT_SETTINGS_DEMO=disposable|-'
   'web|sign-in-throttle|apps/web|sign-in-throttle-walkthrough|migrate|BILIBI_DISPOSABLE_THROTTLE_DEMO=yes|-'
+  'web|site-boundary|apps/web|site-boundary-walkthrough|migrate||-'
   'web|session-place|apps/web|session-place-walkthrough|none|BILIBI_SESSION_PLACE_WALKTHROUGH=disposable BILIBI_SESSION_PLACE_ROOT=@/place|-'
 
   # Each mounts a container from fixtures/containers, rebuilds, runs and unmounts.

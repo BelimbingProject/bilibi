@@ -8,16 +8,16 @@
 //! query, never free text.
 //!
 //! The portal cookie (`portal::COOKIE`) is set here and nowhere else:
-//! `HttpOnly`, `SameSite=Lax`, `Path=/portal` and `Secure` on an `https`
-//! origin, holding the fresh token each sign-in issues (the sign-in form, or
+//! `HttpOnly`, `SameSite=Lax`, `Path=/` and `Secure`, holding the fresh token
+//! each sign-in issues (the sign-in form, or
 //! accepting an invitation, which signs the customer in). One browser holds one
-//! portal session: signing in to another tenant's portal ends the session the
-//! cookie held before.
+//! portal session on a public hostname: signing in to another tenant's portal
+//! ends the session the cookie held before.
 use crate::{
     api,
     auth::{
-        bounded, recovery_allowed, secure, validate_confirmation, validate_email,
-        validate_new_password, validate_required, RECOVERY_THROTTLED,
+        bounded, recovery_allowed, validate_confirmation, validate_email, validate_new_password,
+        validate_required, RECOVERY_THROTTLED,
     },
     origin, portal, App, HttpError,
 };
@@ -39,13 +39,13 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 /// Remembers the portal a browser last signed in to, so `/portal/sign-in`
 /// (where a signed-out portal page sends the customer) can return there.
-const SITE_COOKIE: &str = "bilibi_portal_site";
+const SITE_COOKIE: &str = "__Host-bilibi_portal_site";
 /// The brand of a card whose site is unknown: no tenant is named.
 const UNNAMED: &str = "Customer portal";
 /// Holds a customer's pending portal sign-in between its password and its
-/// second step. `HttpOnly`, `Path=/portal/sign-in`, so no other portal page
-/// receives it; completing it still needs the pending credential's own CSRF.
-const PENDING_COOKIE: &str = "bilibi_portal_sign_in";
+/// second step. Like every `__Host-` cookie, it has `Path=/`; completing it
+/// still needs the pending credential's own CSRF.
+const PENDING_COOKIE: &str = "__Host-bilibi_portal_sign_in";
 const INVITATION_INVALID: &str =
     "This invitation link is invalid, already used or expired. Ask the company that invited you for a new one.";
 const ACCOUNT_EXISTS: &str =
@@ -119,10 +119,9 @@ fn unknown_site() -> Result<Response, HttpError> {
     )
 }
 
-fn cookie(app: &App, name: &str, value: &str, max_age: u64) -> Result<HeaderValue, HttpError> {
+fn cookie(name: &str, value: &str, max_age: u64) -> Result<HeaderValue, HttpError> {
     HeaderValue::from_str(&format!(
-        "{name}={value}; HttpOnly; SameSite=Lax; Path=/portal; Max-Age={max_age}{}",
-        secure(app)
+        "{name}={value}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age={max_age}"
     ))
     .map_err(|_| Error::Internal.into())
 }
@@ -393,10 +392,9 @@ pub async fn sign_in(
         // The tenant asks for a second step: the password was accepted, the
         // customer confirms it on the challenge page.
         let mut response = Redirect::to(&challenge_path(&site.address)).into_response();
-        response.headers_mut().append(
-            header::SET_COOKIE,
-            pending_cookie(&app, &session.token, true)?,
-        );
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, pending_cookie(&session.token, true)?);
         return Ok(response);
     }
     admitted(&app, &headers, peer, &site, &session).await
@@ -405,12 +403,11 @@ pub async fn sign_in(
 fn challenge_path(address: &str) -> String {
     format!("/portal/sign-in/{address}/challenge")
 }
-fn pending_cookie(app: &App, token: &str, set: bool) -> Result<HeaderValue, HttpError> {
+fn pending_cookie(token: &str, set: bool) -> Result<HeaderValue, HttpError> {
     HeaderValue::from_str(&format!(
-        "{PENDING_COOKIE}={}; HttpOnly; SameSite=Lax; Path=/portal/sign-in{}{}",
+        "{PENDING_COOKIE}={}; HttpOnly; SameSite=Lax; Secure; Path=/{}",
         if set { token } else { "" },
-        if set { "" } else { "; Max-Age=0" },
-        secure(app)
+        if set { "" } else { "; Max-Age=0" }
     ))
     .map_err(|_| Error::Internal.into())
 }
@@ -426,11 +423,11 @@ fn pending_token(headers: &HeaderMap) -> Option<String> {
 }
 /// The pending sign-in ended (expired, cancelled or never there): back to the
 /// sign-in card, with the pending cookie cleared.
-fn pending_ended(app: &App, address: &str) -> Result<Response, HttpError> {
+fn pending_ended(address: &str) -> Result<Response, HttpError> {
     let mut response = Redirect::to(&format!("/portal/sign-in/{address}")).into_response();
     response
         .headers_mut()
-        .append(header::SET_COOKIE, pending_cookie(app, "", false)?);
+        .append(header::SET_COOKIE, pending_cookie("", false)?);
     Ok(response)
 }
 /// The second-step card in the portal's document, branded with the site's
@@ -471,7 +468,7 @@ async fn challenge_card(
 ) -> Result<Response, HttpError> {
     let pending = match app.user.portal_pending_sign_in(token).await {
         Ok(pending) => pending,
-        Err(Error::Unauthorized) => return pending_ended(app, &site.address),
+        Err(Error::Unauthorized) => return pending_ended(&site.address),
         Err(error) => return Err(error.into()),
     };
     let methods = pending
@@ -499,7 +496,7 @@ pub async fn challenge_page(
         return unknown_site();
     };
     let Some(token) = pending_token(&headers) else {
-        return pending_ended(&app, &site.address);
+        return pending_ended(&site.address);
     };
     challenge_card(
         &app,
@@ -536,7 +533,7 @@ pub async fn challenge(
         return unknown_site();
     };
     let Some(token) = pending_token(&headers) else {
-        return pending_ended(&app, &site.address);
+        return pending_ended(&site.address);
     };
     let result: Result<Response, HttpError> = async {
         match submission.action.as_str() {
@@ -544,7 +541,7 @@ pub async fn challenge(
                 app.user
                     .portal_cancel_sign_in(&token, &submission.csrf)
                     .await?;
-                pending_ended(&app, &site.address)
+                pending_ended(&site.address)
             }
             "start" => {
                 let challenge = app
@@ -577,7 +574,7 @@ pub async fn challenge(
                     let mut response = admitted(&app, &headers, peer, &site, &session).await?;
                     response
                         .headers_mut()
-                        .append(header::SET_COOKIE, pending_cookie(&app, "", false)?);
+                        .append(header::SET_COOKIE, pending_cookie("", false)?);
                     Ok(response)
                 }
                 None => {
@@ -600,7 +597,7 @@ pub async fn challenge(
         // A forged CSRF value or an ended pending sign-in is not the
         // customer's mistake to read about: the sign-in card starts over.
         Err(error) if matches!(error.0, Error::Forbidden | Error::Unauthorized) => {
-            pending_ended(&app, &site.address)
+            pending_ended(&site.address)
         }
         other => other,
     }
@@ -658,11 +655,11 @@ async fn admitted(
     let cookies = response.headers_mut();
     cookies.append(
         header::SET_COOKIE,
-        cookie(app, portal::COOKIE, &session.token, 86_400)?,
+        cookie(portal::COOKIE, &session.token, 86_400)?,
     );
     cookies.append(
         header::SET_COOKIE,
-        cookie(app, SITE_COOKIE, &site.address, 31_536_000)?,
+        cookie(SITE_COOKIE, &site.address, 31_536_000)?,
     );
     Ok(response)
 }
@@ -1104,7 +1101,7 @@ pub async fn accept(
                     .into_response();
             response.headers_mut().append(
                 header::SET_COOKIE,
-                cookie(&app, SITE_COOKIE, &site.address, 31_536_000)?,
+                cookie(SITE_COOKIE, &site.address, 31_536_000)?,
             );
             Ok(response)
         }

@@ -116,7 +116,7 @@ pub async fn leave(
             response.headers_mut().insert(
                 header::SET_COOKIE,
                 HeaderValue::from_static(
-                    "bilibi_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
+                    "__Host-bilibi_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0",
                 ),
             );
             Ok(response)

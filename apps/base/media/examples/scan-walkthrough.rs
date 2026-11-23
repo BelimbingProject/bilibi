@@ -442,7 +442,7 @@ async fn serve(db: bilibi_database::Db) -> DbResult<()> {
         .await
         .map_err(internal)?;
     println!("Bilibi (with the fixture ticket owner) at {origin}");
-    let served = axum::serve(listener, bilibi_web::router(app)).await;
+    let served = axum::serve(listener, bilibi_web::staff_router(app)).await;
     let _ = stop.send(true);
     let _ = running.await;
     served.map_err(internal)

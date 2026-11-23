@@ -295,7 +295,7 @@ async fn main() -> Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(48230);
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    let router = bilibi_web::router(app.clone());
+    let router = bilibi_web::staff_router(app.clone());
     tokio::spawn(async move { axum::serve(listener, router).await });
 
     let client = db

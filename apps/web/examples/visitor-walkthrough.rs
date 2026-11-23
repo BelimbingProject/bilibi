@@ -429,7 +429,7 @@ async fn serve(db: Db) -> Result<()> {
         .collect();
     let page = std::env::var("PAGE_ADDR").unwrap_or_else(|_| "127.0.0.1:3992".into());
     open_sites(&pages, &pages);
-    let app = bilibi_web::App::new(db.clone(), &origin)?;
+    let app = bilibi_web::App::new(db.clone(), &origin)?.at_site(bilibi_web::Site::Public, &origin);
     let setup = prepare_host(&db, app.services.clone()).await?;
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let running = tokio::spawn(executor(&setup.services)?.run(stopped));
@@ -445,7 +445,8 @@ async fn serve(db: Db) -> Result<()> {
     println!("Bilibi at {origin}; customer page at http://{page}; staff control at http://{control}; sites allow {pages:?}");
     let served = axum::serve(
         listener,
-        bilibi_web::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        bilibi_web::public_router(app)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await;
     let _ = stop.send(true);
@@ -821,14 +822,14 @@ async fn prepare(db: Db) -> Result<()> {
     let addr = listener.local_addr().map_err(internal)?.to_string();
     let host = format!("http://{addr}");
     open_sites(&[PAGE.into()], &[PAGE.into()]);
-    let app = bilibi_web::App::new(db.clone(), &host)?;
+    let app = bilibi_web::App::new(db.clone(), &host)?.at_site(bilibi_web::Site::Public, &host);
     let setup = prepare_host(&db, app.services.clone()).await?;
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let running = tokio::spawn(executor(&setup.services)?.run(stopped));
     tokio::spawn(async move {
         let _ = axum::serve(
             listener,
-            bilibi_web::router(app)
+            bilibi_web::public_router(app)
                 .layer(axum::middleware::from_fn(played_peer))
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
@@ -1865,9 +1866,9 @@ async fn prepare(db: Db) -> Result<()> {
     println!("== a visitor token against every staff route");
     let t = token.as_str();
     let bearer = format!("Bearer {t}");
-    let cookie_staff = format!("bilibi_session={t}");
-    let thirty_two = format!("bilibi_session={}", &t[4..36]);
-    let cookie_portal = format!("bilibi_portal={t}");
+    let cookie_staff = format!("__Host-bilibi_session={t}");
+    let thirty_two = format!("__Host-bilibi_session={}", &t[4..36]);
+    let cookie_portal = format!("__Host-bilibi_customer={t}");
     let cases: Vec<StaffCase> = vec![
         (
             "staff page, token as the session cookie",
@@ -1953,7 +1954,7 @@ async fn prepare(db: Db) -> Result<()> {
             .insert("Origin", host.parse().expect("origin"));
         request.headers_mut().insert(
             "Cookie",
-            format!("bilibi_session={t}; bilibi_portal={t}")
+            format!("__Host-bilibi_session={t}; __Host-bilibi_customer={t}")
                 .parse()
                 .expect("cookie"),
         );
@@ -1968,7 +1969,10 @@ async fn prepare(db: Db) -> Result<()> {
         &addr,
         "GET",
         "/visitor/v1/live",
-        &[("Cookie", "bilibi_session=00000000000000000000000000000000")],
+        &[(
+            "Cookie",
+            "__Host-bilibi_session=00000000000000000000000000000000",
+        )],
         "",
     )
     .await;

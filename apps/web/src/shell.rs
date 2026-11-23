@@ -748,9 +748,8 @@ pub async fn choose_tenant(
     {
         Ok(bilibi_user::TenantEntry::Entered(login)) => {
             let cookie = format!(
-                "bilibi_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400{}",
-                login.token,
-                crate::auth::secure(&app)
+                "__Host-bilibi_session={}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=86400",
+                login.token
             );
             let mut response = Redirect::to("/dashboard").into_response();
             response.headers_mut().insert(

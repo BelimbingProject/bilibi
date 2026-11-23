@@ -869,7 +869,7 @@ async fn main() -> Result<()> {
         .await
         .map_err(|_| Error::Internal)?;
     println!("Schedule reference listening at {origin}{PATH} and {origin}{BOARD_PATH}");
-    axum::serve(listener, bilibi_web::router(app))
+    axum::serve(listener, bilibi_web::staff_router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

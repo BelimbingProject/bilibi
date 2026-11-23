@@ -57,17 +57,27 @@ pub struct BoundPortalDownload {
 /// Every discovered page, staff and portal, which share one pattern space.
 pub struct Pages {
     pub staff: Vec<BoundRoute>,
+    pub public: Vec<BoundRoute>,
     pub portal: Vec<BoundPortalRoute>,
 }
 pub struct Downloads {
     pub staff: Vec<BoundDownload>,
     pub portal: Vec<BoundPortalDownload>,
 }
+pub struct MovedRoutes {
+    pub staff: Vec<&'static Moved>,
+    pub public: Vec<&'static Moved>,
+}
 impl Pages {
     pub(crate) fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
         self.staff
             .iter()
             .map(|bound| (bound.route.method, bound.route.path))
+            .chain(
+                self.public
+                    .iter()
+                    .map(|bound| (bound.route.method, bound.route.path)),
+            )
             .chain(
                 self.portal
                     .iter()
@@ -120,6 +130,7 @@ const HOST_PATHS: [&str; 23] = [
 pub fn bind(services: &Services) -> Result<Pages> {
     let mut bound = Pages {
         staff: Vec::new(),
+        public: Vec::new(),
         portal: Vec::new(),
     };
     for entry in services.catalog()?.entries::<Route>(ROUTES)? {
@@ -135,7 +146,7 @@ pub fn bind(services: &Services) -> Result<Pages> {
                 page: services.get(route.service)?,
             });
         } else {
-            bound.staff.push(BoundRoute {
+            let bound_route = BoundRoute {
                 route,
                 page: services.get(route.service)?,
                 sections: Vec::new(),
@@ -143,7 +154,12 @@ pub fn bind(services: &Services) -> Result<Pages> {
                     .access
                     .sender_budget()
                     .map(|budget| Arc::new(SenderAdmission::new(budget))),
-            });
+            };
+            if matches!(route.access.base(), Access::Public { .. }) {
+                bound.public.push(bound_route);
+            } else {
+                bound.staff.push(bound_route);
+            }
         }
     }
     for entry in services
@@ -366,7 +382,11 @@ pub(crate) fn validate_pair(other: (Method, &str), route: (Method, &str)) -> Res
     Ok(())
 }
 
-pub fn install(mut router: Router<App>, routes: &Pages, downloads: &Downloads) -> Router<App> {
+pub fn install_public(
+    mut router: Router<App>,
+    routes: &Pages,
+    downloads: &Downloads,
+) -> Router<App> {
     for bound in &downloads.portal {
         let bound = bound.clone();
         router = router.route(
@@ -399,6 +419,32 @@ pub fn install(mut router: Router<App>, routes: &Pages, downloads: &Downloads) -
             ),
         );
     }
+    for bound in &routes.public {
+        let bound = bound.clone();
+        router = router.route(
+            bound.route.path,
+            on(
+                method_filter(bound.route.method),
+                move |State(app): State<App>,
+                      uri: Uri,
+                      headers: HeaderMap,
+                      peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+                      Path(path): Path<HashMap<String, String>>,
+                      Query(query): Query<HashMap<String, String>>,
+                      body: Bytes| {
+                    dispatch(app, bound, uri, headers, peer, path, query, body)
+                },
+            ),
+        );
+    }
+    router
+}
+
+pub fn install_staff(
+    mut router: Router<App>,
+    routes: &Pages,
+    downloads: &Downloads,
+) -> Router<App> {
     for bound in &downloads.staff {
         let bound = bound.clone();
         router = router.route(
@@ -464,7 +510,7 @@ pub fn bind_moved(
     pages: &Pages,
     downloads: &Downloads,
     endpoints: &crate::endpoints::Endpoints,
-) -> Result<Vec<&'static Moved>> {
+) -> Result<MovedRoutes> {
     let mut bound: Vec<&'static Moved> = Vec::new();
     for entry in services.catalog()?.entries::<Moved>(MOVED)? {
         let moved = entry.get::<Moved>()?;
@@ -489,7 +535,26 @@ pub fn bind_moved(
         }
         bound.push(moved);
     }
-    Ok(bound)
+    let mut routes = MovedRoutes {
+        staff: Vec::new(),
+        public: Vec::new(),
+    };
+    for moved in bound {
+        let is_public = pages
+            .public
+            .iter()
+            .any(|page| page.route.method == Method::Get && page.route.path == moved.to)
+            || pages
+                .portal
+                .iter()
+                .any(|page| page.route.method == Method::Get && page.route.path == moved.to);
+        if is_public {
+            routes.public.push(moved);
+        } else {
+            routes.staff.push(moved);
+        }
+    }
+    Ok(routes)
 }
 
 /// Each moved path answers a GET with a permanent redirect to its page,

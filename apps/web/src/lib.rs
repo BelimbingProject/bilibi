@@ -50,15 +50,23 @@ pub use identity_lifecycle::{
 pub use provision::provision;
 pub use two_factor_reset::two_factor_reset;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Site {
+    Staff,
+    Public,
+}
+pub const STAFF_COOKIE: &str = "__Host-bilibi_session";
+
 #[derive(Clone)]
 pub struct App {
     routes: Arc<routes::Pages>,
     downloads: Arc<routes::Downloads>,
     endpoints: Arc<endpoints::Endpoints>,
-    moved: Arc<Vec<&'static bilibi_module_registry::contributions::Moved>>,
+    moved: Arc<routes::MovedRoutes>,
     credential_paths: Arc<CredentialPaths>,
     pub db: Db,
     pub origin: Arc<str>,
+    pub site: Site,
     settings: Arc<bilibi_base::settings::Settings>,
     pub step_up: Arc<bilibi_base::step_up::StepUp>,
     /// The host the server listens on, shown in the status bar;
@@ -162,6 +170,7 @@ impl App {
             credential_paths,
             db,
             origin: origin.into(),
+            site: Site::Staff,
             settings,
             step_up,
             listen_address: None,
@@ -181,6 +190,12 @@ impl App {
             proxies,
             services: Arc::new(services),
         })
+    }
+
+    pub fn at_site(mut self, site: Site, origin: &str) -> Self {
+        self.site = site;
+        self.origin = origin.into();
+        self
     }
 }
 
@@ -315,14 +330,12 @@ pub async fn media_reconcile(db: &Db) -> Result<()> {
     media::reconcile(db).await
 }
 
-pub fn router(app: App) -> Router {
+pub fn staff_router(app: App) -> Router {
+    debug_assert_eq!(app.site, Site::Staff);
     let perf = app.perf.clone();
-    let pages = routes::install(Router::new(), &app.routes, &app.downloads);
-    let pages = endpoints::install(pages, &app.endpoints);
-    routes::install_moved(pages, &app.moved)
+    let pages = routes::install_staff(Router::new(), &app.routes, &app.downloads);
+    let router = routes::install_moved(pages, &app.moved.staff)
         .merge(api::router(app.clone()))
-        .merge(webhooks::router())
-        .merge(visitor::router())
         .merge(scim::router())
         .route("/", get(auth::home).post(auth::login))
         .route("/login", get(auth::home).post(auth::login))
@@ -350,6 +363,36 @@ pub fn router(app: App) -> Router {
             post(auth::sso_backchannel),
         )
         .route("/logout", post(logout))
+        .route(impersonation::LEAVE, post(impersonation::leave))
+        .route(impersonation::ENTER, post(impersonation::enter))
+        .route("/preferences", post(shell::save))
+        .route(shell::COMPANY_PATH, post(shell::choose_company))
+        .route(shell::TENANT_PATH, post(shell::choose_tenant))
+        .route(shell::TENANT_CHANGED_PATH, get(shell::tenant_changed))
+        .route("/api/pins", get(shell::pins))
+        .route("/api/pins/toggle", post(shell::toggle_pin))
+        .route("/api/pins/reorder", post(shell::reorder_pins))
+        .route("/live", get(upgrade))
+        .route(media::STREAM, get(media::stream))
+        .route(media::ATTACHMENT, get(media::attachment))
+        .route(pdf::RENDER, get(pdf::render))
+        .route("/fonts/{name}", get(embedded_asset))
+        .route("/assets/{name}", get(embedded_asset))
+        .route("/assets/ui-components.html", get(components_specimen))
+        .route("/assets/ui-feedback.html", get(feedback_specimen))
+        .route("/favicon.svg", get(embedded_asset))
+        .route("/favicon.ico", get(embedded_asset));
+    finish_router(router, app, perf)
+}
+
+pub fn public_router(app: App) -> Router {
+    debug_assert_eq!(app.site, Site::Public);
+    let perf = app.perf.clone();
+    let pages = routes::install_public(Router::new(), &app.routes, &app.downloads);
+    let pages = endpoints::install(pages, &app.endpoints);
+    let router = routes::install_moved(pages, &app.moved.public)
+        .merge(webhooks::router())
+        .merge(visitor::router())
         .route("/portal/sign-in", get(portal_auth::sign_in_root))
         .route(
             "/portal/sign-in/{site}",
@@ -381,25 +424,15 @@ pub fn router(app: App) -> Router {
         )
         .route("/portal/sign-out", post(portal::sign_out))
         .route("/portal/live", get(portal::upgrade))
-        .route(impersonation::LEAVE, post(impersonation::leave))
-        .route(impersonation::ENTER, post(impersonation::enter))
-        .route("/preferences", post(shell::save))
-        .route(shell::COMPANY_PATH, post(shell::choose_company))
-        .route(shell::TENANT_PATH, post(shell::choose_tenant))
-        .route(shell::TENANT_CHANGED_PATH, get(shell::tenant_changed))
-        .route("/api/pins", get(shell::pins))
-        .route("/api/pins/toggle", post(shell::toggle_pin))
-        .route("/api/pins/reorder", post(shell::reorder_pins))
-        .route("/live", get(upgrade))
-        .route(media::STREAM, get(media::stream))
-        .route(media::ATTACHMENT, get(media::attachment))
-        .route(pdf::RENDER, get(pdf::render))
         .route("/fonts/{name}", get(embedded_asset))
         .route("/assets/{name}", get(embedded_asset))
-        .route("/assets/ui-components.html", get(components_specimen))
-        .route("/assets/ui-feedback.html", get(feedback_specimen))
         .route("/favicon.svg", get(embedded_asset))
-        .route("/favicon.ico", get(embedded_asset))
+        .route("/favicon.ico", get(embedded_asset));
+    finish_router(router, app, perf)
+}
+
+fn finish_router(router: Router<App>, app: App, perf: Arc<bilibi_base::perf::Recorder>) -> Router {
+    router
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), errors::pages))
         .layer(middleware::from_fn_with_state(
@@ -419,7 +452,31 @@ pub fn router(app: App) -> Router {
             app.clone(),
             proxies::resolve,
         ))
+        .layer(middleware::from_fn_with_state(app.clone(), host_guard))
         .with_state(app)
+}
+
+async fn host_guard(
+    State(app): State<App>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let expected = app.origin.parse::<axum::http::Uri>().ok().and_then(|uri| {
+        uri.authority()
+            .map(|authority| authority.as_str().to_owned())
+    });
+    let given = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    if expected
+        .as_deref()
+        .zip(given)
+        .is_none_or(|(expected, given)| !expected.eq_ignore_ascii_case(given))
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(request).await
 }
 
 /// Only text pages and assets compress; any response with a
@@ -530,12 +587,31 @@ async fn response_headers(
     if let Some(Failure(cause)) = response.extensions_mut().remove::<Failure>() {
         eprintln!("error: {line} failed: {cause}");
     }
-    for (key,value) in [
-        ("cache-control","no-store"),
-        ("x-content-type-options","nosniff"),
-        ("referrer-policy",referrer),
-        ("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; form-action 'self'; base-uri 'none'"),
-    ] { response.headers_mut().entry(axum::http::HeaderName::from_static(key)).or_insert(HeaderValue::from_static(value)); }
+    let frame_ancestors = match app.site {
+        Site::Staff => "'self'",
+        Site::Public => "'none'",
+    };
+    let csp = format!("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors {frame_ancestors}; form-action 'self'; base-uri 'none'");
+    for (key, value) in [
+        ("cache-control", "no-store"),
+        ("x-content-type-options", "nosniff"),
+        ("referrer-policy", referrer),
+    ] {
+        response
+            .headers_mut()
+            .entry(axum::http::HeaderName::from_static(key))
+            .or_insert(HeaderValue::from_static(value));
+    }
+    if !response
+        .headers()
+        .contains_key(header::CONTENT_SECURITY_POLICY)
+    {
+        if let Ok(value) = HeaderValue::from_str(&csp) {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_SECURITY_POLICY, value);
+        }
+    }
     response
 }
 
@@ -643,7 +719,8 @@ fn token(headers: &HeaderMap) -> Result<String> {
             h.split(';').find_map(|cookie| {
                 cookie
                     .trim()
-                    .strip_prefix("bilibi_session=")
+                    .strip_prefix(STAFF_COOKIE)
+                    .and_then(|rest| rest.strip_prefix('='))
                     .map(str::to_owned)
             })
         })
@@ -688,7 +765,9 @@ async fn logout(
     };
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("bilibi_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"),
+        HeaderValue::from_static(
+            "__Host-bilibi_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0",
+        ),
     );
     Ok(response)
 }

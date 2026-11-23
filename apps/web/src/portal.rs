@@ -26,9 +26,9 @@ use std::collections::HashMap;
 /// The portal home, where a customer lands after signing in.
 pub const HOME: &str = "/portal";
 
-/// The customer's session cookie. `Path=/portal`, so the browser never sends
-/// it to a staff path, where a customer is therefore anonymous.
-pub const COOKIE: &str = "bilibi_portal";
+/// The customer's session cookie. The public listener alone reads it; its
+/// `__Host-` prefix binds it to the public hostname.
+pub const COOKIE: &str = "__Host-bilibi_customer";
 
 /// The portal cookie's token. The staff cookie is never read here.
 pub fn token(headers: &HeaderMap) -> Result<String> {
@@ -494,7 +494,9 @@ pub async fn sign_out(
     let mut response = sign_in();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("bilibi_portal=; HttpOnly; SameSite=Lax; Path=/portal; Max-Age=0"),
+        HeaderValue::from_static(
+            "__Host-bilibi_customer=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0",
+        ),
     );
     Ok(response)
 }

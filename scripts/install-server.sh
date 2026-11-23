@@ -5,7 +5,7 @@
 # rerun: it keeps what exists.
 # The layout, and why it is this way, is in docs/server-install.md.
 #
-#   install-server.sh create <instance> --role dev|staging|production --site <host> [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
+#   install-server.sh create <instance> --role dev|staging|production --site <staff-host> [--public-site <public-host>] [--staff-bind <address>] [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
 #   install-server.sh release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
 #   install-server.sh create-owner <instance> [bilibi-web create-owner flags]
 #   install-server.sh tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>
@@ -318,7 +318,7 @@ port_in_use() {
     [[ -n $(ss -H -ltn "sport = :$1") ]] && return 0
     local other
     for other in $(instances); do
-        [[ $(env_value "$other" BIND_ADDR) == *":$1" ]] && return 0
+        [[ $(env_value "$other" BIND_ADDR) == *":$1" || $(env_value "$other" PUBLIC_BIND_ADDR) == *":$1" ]] && return 0
     done
     return 1
 }
@@ -354,7 +354,7 @@ open(out, "w", encoding="utf-8").write(page)
 PY
 }
 cloudflare_env_key() { printf 'BILIBI_CLOUDFLARE_API_TOKEN_%s' "$(tr '[:lower:]-' '[:upper:]_' <<<"$1")"; }
-write_caddy_site() { # <instance> <site> <port> <tls> <caddy env>
+write_caddy_site() { # <instance> <site> <port> <tls> <caddy env> [public site] [public port] [staff bind]
     local tls='' token_key
     case $4 in
         internal) tls='tls internal' ;;
@@ -364,11 +364,20 @@ write_caddy_site() { # <instance> <site> <port> <tls> <caddy env>
             ;;
     esac
     install -d /etc/caddy/sites
-    python3 - "$here/server/site.caddy" "/etc/caddy/sites/bilibi-$1.caddy" "$1" "$2" "$3" "$tls" <<'PY'
+    python3 - "$here/server/site.caddy" "/etc/caddy/sites/bilibi-$1.caddy" "$1" "$2" "$3" "$tls" "${6:-}" "${7:-}" "${8:-}" <<'PY'
 import sys
-source, out, instance, site, port, tls = sys.argv[1:]
+source, out, instance, site, port, tls, public_site, public_port, staff_bind = sys.argv[1:]
 text = open(source, encoding="utf-8").read()
-for old, new in (("@INSTANCE@", instance), ("@SITE@", site), ("@PORT@", port), ("@TLS@", tls)):
+public = ""
+if public_site:
+    tls_line = f"\t{tls}\n" if tls else ""
+    public = f'''\n{public_site} {{
+{tls_line}\tencode zstd gzip
+\treverse_proxy 127.0.0.1:{public_port}
+\timport bilibi_waiting_{instance}
+}}\n'''
+staff_bind = f"bind {staff_bind}" if staff_bind else ""
+for old, new in (("@INSTANCE@", instance), ("@SITE@", site), ("@PORT@", port), ("@TLS@", tls), ("@STAFF_BIND@", staff_bind), ("@PUBLIC_BLOCK@", public)):
     text = text.replace(old, new)
 open(out, "w", encoding="utf-8").write(text)
 PY
@@ -442,13 +451,15 @@ start_installer() {
 }
 # ================================================================ create
 create() {
-    local instance=${1:-} role='' site='' port='' tls='' cloudflare_token_stdin='' cloudflare_token=''
+    local instance=${1:-} role='' site='' public_site='' staff_bind='' port='' public_port='' tls='' cloudflare_token_stdin='' cloudflare_token=''
     [[ -n $instance ]] || usage
     shift
     while (($#)); do
         case $1 in
             --role) role=${2:-}; shift 2 ;;
             --site) site=${2:-}; shift 2 ;;
+            --public-site) public_site=${2:-}; shift 2 ;;
+            --staff-bind) staff_bind=${2:-}; shift 2 ;;
             --port) port=${2:-}; shift 2 ;;
             --tls) tls=${2:-}; shift 2 ;;
             --cloudflare-token-stdin) cloudflare_token_stdin=1; shift ;;
@@ -458,7 +469,12 @@ create() {
     valid_name "$instance" || fail "instance name must be 1 to 32 lower-case letters, digits or hyphens: $instance"
     [[ $role =~ ^(dev|staging|production)$ ]] || fail '--role must be dev, staging or production'
     [[ $site =~ ^[a-z0-9.-]+$ ]] || fail '--site must be a host name, like erp.example.com'
+    [[ -z $public_site || $public_site =~ ^[a-z0-9.-]+$ ]] || fail '--public-site must be a host name, like shop.example.com'
+    [[ -z $public_site || $public_site != "$site" ]] || fail '--public-site must differ from --site'
+    [[ -z $staff_bind || $staff_bind =~ ^[0-9a-fA-F:.]+$ ]] || fail '--staff-bind must be an IP address'
     [[ -z $port || $port =~ ^[0-9]+$ ]] || fail '--port must be a number'
+    [[ -z $port || ( $port -ge 1 && $port -le 65535 ) ]] || fail '--port must be between 1 and 65535'
+    [[ -z $public_site || -z $port || $port -lt 65535 ]] || fail '--port must leave another port for --public-site'
     [[ -z $tls || $tls == internal || $tls == cloudflare ]] || fail '--tls takes "internal" or "cloudflare"'
     [[ -z $cloudflare_token_stdin || $tls == cloudflare ]] || fail '--cloudflare-token-stdin requires --tls cloudflare'
     need_root create "$@"
@@ -501,6 +517,13 @@ create() {
         created=1
         [[ -n $port ]] || port=$(free_port)
         port_in_use "$port" && fail "port $port is in use" 'pick another with --port'
+        if [[ -n $public_site ]]; then
+            public_port=$((port + 1))
+            while port_in_use "$public_port" || [[ $public_port == "$port" ]]; do
+                ((public_port += 1))
+                ((public_port <= 65535)) || fail 'no free local port for --public-site'
+            done
+        fi
         local bilibi_env
         case $role in dev) bilibi_env=development ;; *) bilibi_env=$role ;; esac
         umask 027
@@ -519,6 +542,9 @@ BILIBI_MAIL_DIR=$dir/data/mailbox
 # Where the program receives releases and the installer keeps them.
 BILIBI_INSTANCE_DIR=$dir
 EOF
+        if [[ -n $public_site ]]; then
+            printf 'PUBLIC_ORIGIN=https://%s\nPUBLIC_BIND_ADDR=127.0.0.1:%s\n' "$public_site" "$public_port" >>"$env"
+        fi
         umask 022
     else
         local kept_role; kept_role=$(role_of "$instance")
@@ -527,6 +553,18 @@ EOF
         [[ -z $port || $(env_value "$instance" BIND_ADDR) == "127.0.0.1:$port" ]] || fail "$instance already listens on $(env_value "$instance" BIND_ADDR); the port is fixed at creation"
         port=${port:-$(env_value "$instance" BIND_ADDR | sed 's/.*://')}
         sed -i "s|^APP_ORIGIN=.*|APP_ORIGIN=https://$site|" "$env"
+        public_port=$(env_value "$instance" PUBLIC_BIND_ADDR | sed 's/.*://')
+        sed -i '/^PUBLIC_ORIGIN=/d; /^PUBLIC_BIND_ADDR=/d' "$env"
+        if [[ -n $public_site ]]; then
+            if [[ -z $public_port ]]; then
+                public_port=$((port + 1))
+                while port_in_use "$public_port" || [[ $public_port == "$port" ]]; do
+                    ((public_port += 1))
+                    ((public_port <= 65535)) || fail 'no free local port for --public-site'
+                done
+            fi
+            printf 'PUBLIC_ORIGIN=https://%s\nPUBLIC_BIND_ADDR=127.0.0.1:%s\n' "$public_site" "$public_port" >>"$env"
+        fi
         # Older layouts gain the instance path used by release transport.
         grep -q '^BILIBI_INSTANCE_DIR=' "$env" || printf 'BILIBI_INSTANCE_DIR=%s\n' "$dir" >>"$env"
     fi
@@ -550,12 +588,13 @@ EOF
     chmod 0644 "$dir/site/waiting.html"
     configure_selinux "$instance"
     configure_caddy_environment
-    write_caddy_site "$instance" "$site" "$port" "$tls" "$caddy_env"
+    write_caddy_site "$instance" "$site" "$port" "$tls" "$caddy_env" "$public_site" "$public_port" "$staff_bind"
     configure_firewall
     systemctl enable "$unit_name$instance" >/dev/null 2>&1
     start_installer "$instance"
 
     say "$instance: $([[ -n $created ]] && echo created || echo updated) as $role at https://$site (backend 127.0.0.1:$port), files under $dir"
+    [[ -z $public_site ]] || say "$instance: public site at https://$public_site (backend 127.0.0.1:$public_port)"
     if [[ -z $(current_release "$instance") ]]; then
         say "Next: put a verified release into service with: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
     fi
@@ -1045,6 +1084,7 @@ status() {
         printf '%s: role %s, %s, service %s, installer %s, current release %s\n' "$instance" "$(role_of "$instance")" \
             "$(env_value "$instance" APP_ORIGIN)" "$(service_state "$instance")" \
             "$(installer_state "$instance")" "$(current_release "$instance")"
+        [[ -z $(env_value "$instance" PUBLIC_ORIGIN) ]] || printf '  public site  %s\n' "$(env_value "$instance" PUBLIC_ORIGIN)"
         local r
         for r in $(release_numbers "$instance"); do
             printf '  release %s  %s\n' "$r" "$(cut -c1-12 "$dir/releases/$r/SHA256SUMS" 2>/dev/null)"

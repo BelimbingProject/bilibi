@@ -432,7 +432,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let _ = DB.set(db);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     println!("Grid lenses at {origin}/g3-lenses");
-    axum::serve(listener, bilibi_web::router(app))
+    axum::serve(listener, bilibi_web::staff_router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
