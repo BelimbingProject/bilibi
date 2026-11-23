@@ -1059,7 +1059,7 @@ async fn main() -> Outcome {
     // stores. The scopes above carry the same CSRF value.
     client
         .execute(
-            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) SELECT encode(sha256(convert_to('records-'||u,'UTF8')),'hex'),1,u,'records',now()+interval '24 hours' FROM unnest(ARRAY[4,1]::bigint[]) u ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) SELECT encode(sha256(convert_to('records-'||u,'UTF8')),'hex'),1,u,'records',now()+interval '24 hours','portable' FROM unnest(ARRAY[4,1]::bigint[]) u ON CONFLICT (id) DO NOTHING",
             &[],
         )
         .await?;

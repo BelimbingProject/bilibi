@@ -73,16 +73,17 @@ def main():
         return json.loads(result.stdout)
 
     suffix = uuid.uuid4().hex[:12]
-    email = 'scim-' + suffix + '@example.test'
+    email = 'manager@example.test'
+    initial_contact = 'scim-' + suffix + '@example.test'
     doc = {'schemas': [USER], 'externalId': 'subject-' + suffix, 'userName': email,
         'displayName': 'Provisioned Person', 'active': True,
-        'emails': [{'value': email, 'primary': True, 'type': 'work'}]}
+        'emails': [{'value': initial_contact, 'primary': True, 'type': 'work'}]}
     created = call('POST', '/Users', doc, 201)
     uid = created['id']
-    require(created['meta']['location'] == base + '/Users/' + uid, 'create Person, affiliation and account with stable resource URL')
+    require(created['meta']['location'] == base + '/Users/' + uid, 'create membership using a userName already held as a portable address')
     call('POST', '/Users', doc, expected=409)
     require(query('Users', f'userName eq "{email.upper()}"')['Resources'][0]['id'] == uid, 'case-insensitive uniqueness lookup')
-    require(query('Users', f'emails[type eq "work"].value eq "{email}" and active eq true')['totalResults'] == 1, 'email and active conjunction')
+    require(query('Users', f'emails[type eq "work"].value eq "{initial_contact}" and active eq true')['totalResults'] == 1, 'email and active conjunction')
     page = call('GET', '/Users?startIndex=1&count=0')
     require(page['itemsPerPage'] == 0 and page['totalResults'] >= 1, 'count-only pagination')
     updated = patch('/Users/' + uid, [{'op': 'Replace', 'path': 'displayName', 'value': 'Updated Person'}, {'op': 'add', 'value': {'name': {'givenName': 'Updated', 'familyName': 'Person'}}}])

@@ -106,6 +106,65 @@ pub struct SessionClient {
     pub name: String,
 }
 
+/// The proof that admitted a staff browser session. Portable proof belongs to
+/// the installation-owned identity. Company SSO proof is valid only inside
+/// the tenant and connection that issued it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthenticationAuthority {
+    Portable,
+    TenantSso {
+        tenant: i64,
+        provider: i64,
+        company: i64,
+    },
+}
+impl AuthenticationAuthority {
+    pub fn portable() -> Self {
+        Self::Portable
+    }
+    pub fn tenant_sso(tenant: i64, provider: i64, company: i64) -> Result<Self> {
+        if tenant <= 0 || provider <= 0 || company <= 0 {
+            return Err(Error::Invalid);
+        }
+        Ok(Self::TenantSso {
+            tenant,
+            provider,
+            company,
+        })
+    }
+    pub fn is_portable(self) -> bool {
+        matches!(self, Self::Portable)
+    }
+    pub fn admits_tenant(self, tenant: i64) -> bool {
+        self.is_portable()
+            || matches!(self, Self::TenantSso { tenant: proof, .. } if proof == tenant)
+    }
+    pub fn stored(self) -> (&'static str, Option<i64>, Option<i64>, Option<i64>) {
+        match self {
+            Self::Portable => ("portable", None, None, None),
+            Self::TenantSso {
+                tenant,
+                provider,
+                company,
+            } => ("tenant_sso", Some(tenant), Some(provider), Some(company)),
+        }
+    }
+    fn from_stored(
+        kind: &str,
+        tenant: Option<i64>,
+        provider: Option<i64>,
+        company: Option<i64>,
+    ) -> Result<Self> {
+        match (kind, tenant, provider, company) {
+            ("portable", None, None, None) => Ok(Self::Portable),
+            ("tenant_sso", Some(tenant), Some(provider), Some(company)) => {
+                Self::tenant_sso(tenant, provider, company)
+            }
+            _ => Err(Error::Unauthorized),
+        }
+    }
+}
+
 /// One active session owned by the signed-in account. Its stored id stays in
 /// the mounted page state; [`OwnSummary::key`] is the only row identity rendered.
 #[derive(Clone, Debug)]
@@ -441,6 +500,66 @@ impl Sessions {
         token: &str,
     ) -> Result<Scope> {
         self.resolve(client, token, true, AccountKind::Staff).await
+    }
+    /// Re-proves a staff session and returns the immutable authority recorded
+    /// at admission. Callers use this before portable identity changes or a
+    /// cross-tenant entry; they never infer authority from the active tenant.
+    pub async fn activity_with_authority(
+        &self,
+        client: &(impl GenericClient + Sync),
+        token: &str,
+    ) -> Result<(Scope, AuthenticationAuthority)> {
+        let scope = self.activity(client, token).await?;
+        let row = client
+            .query_opt(
+                "SELECT authentication_authority,authentication_tenant_id,authentication_provider_id,authentication_company_id FROM sessions WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND csrf=$4",
+                &[&session_id(token), &scope.tenant(), &scope.user(), &scope.csrf],
+            )
+            .await?
+            .ok_or(Error::Unauthorized)?;
+        let authority =
+            AuthenticationAuthority::from_stored(row.get(0), row.get(1), row.get(2), row.get(3))?;
+        if !authority.admits_tenant(scope.tenant()) {
+            return Err(Error::Unauthorized);
+        }
+        Ok((scope, authority))
+    }
+    /// Requires that this sealed browser scope came from portable identity
+    /// proof. Tenant SSO may satisfy tenant policy but never authorizes a
+    /// change to the shared password, email or factors.
+    pub async fn require_portable_authority(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<()> {
+        if scope.impersonator().is_some() || scope.agent().is_some() || scope.principal().is_some()
+        {
+            return Err(Error::Forbidden);
+        }
+        let fingerprint = scope
+            .browser_session_fingerprint()
+            .ok_or(Error::Forbidden)?;
+        let idle = self.policy(client).await?.idle_seconds as f64;
+        if client
+            .query_opt(
+                "SELECT id FROM sessions WHERE id=encode($1,'hex') AND tenant_id=$2 AND user_id=$3
+                 AND csrf=$4 AND impersonator_id IS NULL AND ended_reason IS NULL
+                 AND authentication_authority='portable' AND expires_at>clock_timestamp()
+                 AND last_activity>clock_timestamp()-make_interval(secs => $5) FOR SHARE",
+                &[
+                    &fingerprint,
+                    &scope.tenant(),
+                    &scope.user(),
+                    &scope.csrf,
+                    &idle,
+                ],
+            )
+            .await?
+            .is_none()
+        {
+            return Err(Error::Forbidden);
+        }
+        Ok(())
     }
     /// [`Self::activity`] for a customer's portal session.
     pub async fn activity_portal(
@@ -851,6 +970,7 @@ inventory::submit! {
             ("base-session-008-ended-reason", include_str!("../migrations/008-ended-reason.sql")),
             ("base-session-009-token-digest", include_str!("../migrations/009-token-digest.sql")),
             ("base-session-010-sign-in-place", include_str!("../migrations/010-sign-in-place.sql")),
+            ("base-session-011-authentication-authority", include_str!("../migrations/011-authentication-authority.sql")),
         ],
         services: &[
             bilibi_module_registry::Service { id: "base/session.sessions", factory: |services| Ok(Arc::new(Sessions::new(services.get("base/tenancy.authentication")?, services.get("base/settings.store")?).with_factors(services.get(bilibi_step_up::SERVICE)?))) },

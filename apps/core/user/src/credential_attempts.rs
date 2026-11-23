@@ -121,8 +121,8 @@ pub(crate) async fn reset_count(
     Ok(())
 }
 
-/// Forgets the count, any lock and the run of locks (a successful sign-in, a
-/// password reset, an administrator's unlock). True when there was a row.
+/// Forgets the count, any lock and the run of locks after a successful sign-in
+/// or the holder's password reset. True when there was a row.
 pub(crate) async fn forget(
     sql: &impl GenericClient,
     tenant: i64,

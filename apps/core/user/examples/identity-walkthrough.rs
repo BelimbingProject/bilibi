@@ -7,7 +7,7 @@ use bilibi_company::{CompanyService, SERVICE as COMPANIES};
 use bilibi_database::pool;
 use bilibi_party_ids::OrganisationId;
 use bilibi_tenancy::{Authentication, OrganisationDirectory};
-use bilibi_user::{AccountError, UserService};
+use bilibi_user::UserService;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Barrier;
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
@@ -250,10 +250,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let notices = lock_notices(&mailbox, viewer) - before;
         println!("Two sign-in locks in a row mailed {notices} notice(s)");
         assert_eq!(notices, 1);
+        // The remaining account-bound checks reuse this fixture identity; only
+        // the fixture clock advances the installation-owned sign-in lock.
+        client
+            .execute(
+                "UPDATE user_credential_attempts SET locked_until=now()-interval '1 second' WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=1 AND id=2) AND kind='sign_in'",
+                &[],
+            )
+            .await?;
         bilibi_walkthrough_fixture::set_instance_role(&db, "production").await?;
 
-        // #536: an administrator reads and lifts the lock of a staff account
-        // only; a customer account of the same tenant is not one.
+        // Sign-in lockout is installation-owned: tenant administrators cannot
+        // read or clear another person's credential lock.
         for _ in 1..=5 {
             assert!(users
                 .portal_login(1, "identity-customer@example.test", "incorrect-password")
@@ -262,26 +270,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         counted(&client, 1, customer, 0, 1).await?;
-        let admin_login = users
-            .login("admin@example.test", bilibi_walkthrough_fixture::PASSWORD)
-            .await?;
-        let admin = app.security.guard(&admin_login.token).await?;
-        assert!(users
-            .sign_in_locked_until(&admin, customer)
-            .await?
-            .is_none());
-        assert!(matches!(
-            users.unlock_sign_in(&admin, customer).await,
-            Err(AccountError::NotFound)
-        ));
         counted(&client, 1, customer, 0, 1).await?;
-        assert!(users.sign_in_locked_until(&admin, 2).await?.is_some());
-        users
-            .unlock_sign_in(&admin, 2)
-            .await
-            .map_err(|error| format!("unlock the viewer: {error}"))?;
-        assert!(users.sign_in_locked_until(&admin, 2).await?.is_none());
-        println!("PASS: lock notices once per run; Unlock reaches staff accounts only");
+        println!(
+            "PASS: lock notices once per run; credential lockout has no tenant-admin override"
+        );
     }
     let login = users
         .login(
@@ -637,15 +629,9 @@ async fn version(sql: &tokio_postgres::Client, user: i64) -> Result<i64, tokio_p
         .get(0))
 }
 
-/// The step-up operation that guards setting another person's password or
-/// sign-in email (`core/user` `accounts.rs`).
-const SET_CREDENTIALS: &str = "core.user.account.credentials.set";
-
-/// Account takeover bounds (#530, #531): a User Editor cannot set the password
-/// or sign-in email of, or delete, an account holding more than they do;
-/// setting another person's password or email needs step-up; impersonation
-/// reaches only accounts holding nothing the operator lacks; and an
-/// impersonated session creates, changes and deletes no account.
+/// Account takeover bounds: a User Editor cannot remove a membership holding
+/// more than they do, and an impersonated session changes no account. Shared
+/// identity credentials have no tenant-administrator operation at all.
 ///
 /// Mallory is the viewer (id 2) given the system role User Editor and
 /// `admin.user.impersonate`. The administrator (id 4) holds a full-access role.
@@ -656,10 +642,8 @@ async fn account_bounds(
     db: &bilibi_database::Db,
     users: &UserService,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use bilibi_database::Error;
     use bilibi_user::{
-        impersonation::Refusal, AccountError, AccountField, AccountInput, InvitationError,
-        InvitationInput,
+        impersonation::Refusal, AccountError, AccountField, InvitationError, InvitationInput,
     };
     let password = bilibi_walkthrough_fixture::PASSWORD;
     let (mallory_id, admin_id, staff_id, contractor_id) = (2_i64, 4_i64, 3_i64, 7_i64);
@@ -697,103 +681,18 @@ async fn account_bounds(
     let mallory_login = users.login("viewer@example.test", password).await?;
     let mallory = app.security.guard(&mallory_login.token).await?;
 
-    // #530: the User Editor cannot take over or remove the administrator.
-    let password_refused = users
-        .set_password(&mallory, admin_id, "mallory-chose-this-password")
-        .await;
-    let email_refused = users
-        .update_account(
-            &mallory,
-            admin_id,
-            version(&sql, admin_id).await?,
-            AccountField::Email,
-            "mallory@example.test",
-        )
-        .await;
-    let delete_refused = users.delete_account(&mallory, admin_id).await;
-    if !matches!(password_refused, Err(AccountError::Outranked))
-        || !matches!(email_refused, Err(AccountError::Outranked))
-        || !matches!(delete_refused, Err(AccountError::Outranked))
-    {
-        return Err(format!(
-            "A User Editor changed a full-access account: password {password_refused:?}, email {:?}, delete {delete_refused:?}",
-            email_refused.map(|account| account.id)
-        )
-        .into());
+    // The User Editor cannot remove the administrator.
+    let delete_refused = users.remove_membership(&mallory, admin_id).await;
+    if !matches!(delete_refused, Err(AccountError::Outranked)) {
+        return Err(
+            format!("A User Editor deleted a full-access account: {delete_refused:?}").into(),
+        );
     }
     users
         .login("admin@example.test", password)
         .await
         .map_err(|error| format!("The administrator's own password stopped working: {error}"))?;
-    println!("PASS: a User Editor cannot set the password or sign-in email of, or delete, a full-access account; its password still signs in");
-
-    // #530: setting another person's password or email asks for step-up,
-    // which is on by default (this database's instance role is Production).
-    let step_up = app
-        .services
-        .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?;
-    if !step_up.required(&mallory, SET_CREDENTIALS).await? {
-        return Err("Setting another person's password is not guarded by step-up by default; run on a freshly migrated database".into());
-    }
-    let password_step_up = users
-        .set_password(&mallory, contractor_id, "covered-new-password")
-        .await;
-    let email_step_up = users
-        .update_account(
-            &mallory,
-            contractor_id,
-            version(&sql, contractor_id).await?,
-            AccountField::Email,
-            "contractor-moved@example.test",
-        )
-        .await;
-    for (what, refused) in [
-        ("password", password_step_up.as_ref().err()),
-        ("email", email_step_up.as_ref().err()),
-    ] {
-        if !matches!(
-            refused,
-            Some(AccountError::Access(Error::StepUpRequired {
-                operation: SET_CREDENTIALS,
-                ..
-            }))
-        ) {
-            return Err(format!(
-                "Setting another person's {what} did not ask for step-up: {refused:?}"
-            )
-            .into());
-        }
-    }
-    users
-        .login("contractor@example.test", password)
-        .await
-        .map_err(|error| format!("A refused password change still took effect: {error}"))?;
-    println!("PASS: setting another person's password or sign-in email is refused until step-up passes ({SET_CREDENTIALS})");
-
-    // With enforcement off, as on a Dev server, a covered account's credentials change.
-    step_up.set_enforced(false);
-    users
-        .set_password(&mallory, contractor_id, "covered-new-password")
-        .await
-        .map_err(|error| format!("A User Editor could not set a covered password: {error:?}"))?;
-    let new_password_signs_in = users
-        .login("contractor@example.test", "covered-new-password")
-        .await
-        .is_ok();
-    users
-        .update_account(
-            &mallory,
-            contractor_id,
-            version(&sql, contractor_id).await?,
-            AccountField::Email,
-            "contractor-moved@example.test",
-        )
-        .await
-        .map_err(|error| format!("A User Editor could not set a covered email: {error:?}"))?;
-    if !new_password_signs_in {
-        return Err("The covered account's new password does not sign in".into());
-    }
-    println!("PASS: once step-up passes, a User Editor sets the password and sign-in email of an account holding nothing more");
+    println!("PASS: a User Editor cannot remove a full-access membership and has no shared-credential operation");
 
     // #531: impersonation reaches only an account holding nothing the
     // operator lacks, and the impersonated session changes no account.
@@ -823,9 +722,6 @@ async fn account_bounds(
     if viewing.user() != staff_id || viewing.impersonator().is_none() {
         return Err("The impersonation did not switch the session".into());
     }
-    let set = users
-        .set_password(&viewing, contractor_id, "impersonated-password")
-        .await;
     let renamed = users
         .update_account(
             &viewing,
@@ -835,18 +731,7 @@ async fn account_bounds(
             "Renamed while impersonating",
         )
         .await;
-    let deleted = users.delete_account(&viewing, contractor_id).await;
-    let created = users
-        .create_account(
-            &viewing,
-            &AccountInput {
-                name: "Created while impersonating".into(),
-                email: "impersonated-create@example.test".into(),
-                password: "impersonated-create-password".into(),
-                ..AccountInput::default()
-            },
-        )
-        .await;
+    let deleted = users.remove_membership(&viewing, contractor_id).await;
     let invited = users
         .invite_member(
             &viewing,
@@ -857,28 +742,28 @@ async fn account_bounds(
             },
         )
         .await;
-    if !matches!(set, Err(AccountError::Impersonating))
-        || !matches!(renamed, Err(AccountError::Impersonating))
+    if !matches!(renamed, Err(AccountError::Impersonating))
         || !matches!(deleted, Err(AccountError::Impersonating))
-        || !matches!(created, Err(AccountError::Impersonating))
-        || !matches!(invited, Err(InvitationError::Access(Error::Refused(_))))
+        || !matches!(
+            invited,
+            Err(InvitationError::Access(bilibi_database::Error::Refused(_)))
+        )
     {
         return Err(format!(
-            "An impersonated session changed an account: password {set:?}, name {:?}, delete {deleted:?}, create {:?}, invite {:?}",
+            "An impersonated session changed an account: name {:?}, delete {deleted:?}, invite {:?}",
             renamed.map(|account| account.id),
-            created.map(|account| account.id),
             invited.map(|invitation| invitation.user)
         )
         .into());
     }
     users
-        .login("contractor-moved@example.test", "covered-new-password")
+        .login("contractor@example.test", password)
         .await
-        .map_err(|error| format!("An impersonated password change took effect: {error}"))?;
+        .map_err(|error| format!("The contractor's password stopped working: {error}"))?;
     users
         .leave_impersonation(&mallory_login.token, &csrf, &RequestInfo::default())
         .await?;
-    println!("PASS: impersonating a full-access account is refused; an impersonated session cannot set a password, edit, delete, create or invite an account");
+    println!("PASS: impersonating a full-access account is refused; an impersonated session cannot edit, delete or invite an account");
 
     // Back as herself, Mallory may delete the covered account.
     let mallory = app.security.guard(&mallory_login.token).await?;
@@ -886,10 +771,9 @@ async fn account_bounds(
         return Err("Leaving impersonation did not restore the operator".into());
     }
     users
-        .delete_account(&mallory, contractor_id)
+        .remove_membership(&mallory, contractor_id)
         .await
         .map_err(|error| format!("A User Editor could not delete a covered account: {error:?}"))?;
-    step_up.set_enforced(true);
     println!("PASS: a User Editor deletes an account holding nothing more");
     Ok(())
 }

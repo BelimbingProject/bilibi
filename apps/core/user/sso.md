@@ -2,6 +2,14 @@
 
 Connect each company to its identity provider with OpenID Connect (OIDC); leave it unconfigured to keep password sign-in unchanged.
 
+## Tenant-bound proof
+
+**A company provider proves only its tenant and company; it never proves the installation-owned portable identity in another customer tenant.** [ADR 21](../../../docs/architecture/decisions/21-one-sign-in-several-tenant-memberships.md) is the authority boundary.
+
+Every browser admission through a provider stores `tenant_sso` authority with the connection's tenant, provider and company, including JIT creation and a pending local-factor challenge. Provider reauthentication can satisfy that tenant's step-up policy but cannot promote the session to portable proof. Such a session cannot change the shared email or 2FA and cannot switch directly into another tenant.
+
+When the holder selects another tenant, Bilibi starts target-bound admission. The person must use the portable password (and its factor) or an enabled provider belonging to the target tenant; successful admission replaces the old session. Provider links remain membership-local. An identity first created through SSO can use verified-mail recovery to establish a portable password for a tenant without a suitable provider.
+
 ## Connect Keycloak
 
 Register Bilibi as a confidential OIDC client in your Keycloak realm, then configure the connection in Bilibi.

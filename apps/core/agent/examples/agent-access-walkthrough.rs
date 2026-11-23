@@ -115,7 +115,7 @@ async fn sign_in_session(client: &Client, tenant: i64, user: i64) -> Result<()> 
     let id = bilibi_base::session::session_id(&format!("walkthrough-{tenant}-{user}"));
     client
         .execute(
-            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,'walkthrough',now()+interval '24 hours') ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) VALUES($1,$2,$3,'walkthrough',now()+interval '24 hours','portable') ON CONFLICT (id) DO NOTHING",
             &[&id, &tenant, &user],
         )
         .await?;
@@ -156,9 +156,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     let actor = authentication
         .authenticate(&**client, 1, 1, "walkthrough".into())
-        .await?;
-    let admin = authentication
-        .authenticate(&**client, 1, 4, "walkthrough".into())
         .await?;
     let other = authentication
         .authenticate(&**client, 2, 5, "walkthrough".into())
@@ -746,29 +743,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!(
         "password reset: next bearer refused invalid_token; {}",
         connection_state(&client, reset_id).await?
-    );
-
-    sign_in_session(&client, 1, 3).await?;
-    let (admin_id, admin_connection) =
-        connect(&grants, &client, &staff, "Admin password agent").await?;
-    // Setting another person's password asks for step-up, which this
-    // fixture's administrator has no authenticator to pass on a migrate-only
-    // (Production) database; the identity walkthrough proves that refusal.
-    services
-        .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?
-        .set_enforced(false);
-    users
-        .set_password(&admin, 3, "walkthrough-admin-secret")
-        .await?;
-    let admin_refused = grants
-        .authenticate(&admin_connection.access_token, None)
-        .await;
-    if !matches!(admin_refused, Err(OAuthError::InvalidToken)) {
-        return Err(Error::Internal.into());
-    }
-    println!(
-        "admin-set password: next bearer refused invalid_token; {}",
-        connection_state(&client, admin_id).await?
     );
 
     sign_in_session(&client, 1, 3).await?;

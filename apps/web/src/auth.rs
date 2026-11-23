@@ -208,6 +208,33 @@ fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .split(';')
         .find_map(|cookie| cookie.trim().strip_prefix(name)?.strip_prefix('='))
 }
+fn tenant_entry(headers: &HeaderMap) -> Option<i64> {
+    cookie(headers, "bilibi_tenant_entry")?
+        .parse()
+        .ok()
+        .filter(|id| *id > 0)
+}
+pub(crate) fn set_tenant_entry(
+    app: &App,
+    response: &mut Response,
+    tenant: i64,
+) -> Result<(), Error> {
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&format!(
+            "bilibi_tenant_entry={tenant}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600{}",
+            secure(app)
+        ))
+        .map_err(|_| Error::Internal)?,
+    );
+    Ok(())
+}
+fn clear_tenant_entry(response: &mut Response) {
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static("bilibi_tenant_entry=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"),
+    );
+}
 pub(crate) fn secure(app: &App) -> &'static str {
     if app.origin.starts_with("https://") {
         "; Secure"
@@ -420,12 +447,20 @@ pub async fn home(
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
 ) -> std::result::Result<Response, HttpError> {
-    if signed_in(&app, &headers).await {
+    let target = tenant_entry(&headers);
+    let signed_in = signed_in(&app, &headers).await;
+    if target.is_some() && query.contains_key("cancel-tenant-entry") && signed_in {
+        let mut response = Redirect::to(WORKSPACE).into_response();
+        clear_tenant_entry(&mut response);
+        return Ok(response);
+    }
+    if target.is_none() && signed_in {
         return Ok(Redirect::to(WORKSPACE).into_response());
     }
     let key = flash_key(&headers);
     let mut form = LoginForm {
         session_expired: key == Some(FLASH_EXPIRED),
+        reauthenticating: target.is_some() && signed_in,
         ..LoginForm::default()
     };
     if let Some(public) = query.get("sso") {
@@ -491,6 +526,7 @@ pub struct LoginSubmission {
 pub async fn login(
     State(app): State<App>,
     headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Form(submission): Form<LoginSubmission>,
 ) -> std::result::Result<Response, HttpError> {
@@ -500,8 +536,13 @@ pub async fn login(
         // A rejected attempt re-renders the card at the address it was posted
         // from, password kept.
         password: submission.password.clone(),
+        reauthenticating: tenant_entry(&headers).is_some(),
         ..LoginForm::default()
     };
+    if let Some(public) = query.get("sso") {
+        form.sso_label = app.user.identity_label(public).await?;
+        form.sso_public = public.clone();
+    }
     form.email_errors = validate_email(&form.email);
     form.password_errors = validate_required(&submission.password);
     if !(form.email_errors.is_empty() && form.password_errors.is_empty()) {
@@ -531,16 +572,29 @@ pub async fn login(
         )
         .await;
     }
-    match app.user.login(&form.email, &submission.password).await {
+    let admission = match tenant_entry(&headers) {
+        Some(target) => {
+            app.user
+                .login_to_tenant(target, &form.email, &submission.password)
+                .await
+        }
+        None => app.user.login(&form.email, &submission.password).await,
+    };
+    match admission {
         Ok(session) if session.pending => {
             let mut response = Redirect::to("/login/challenge").into_response();
             set_pending(&app, &mut response, &session.token)?;
-            response.headers_mut().append(
-                header::SET_COOKIE,
-                HeaderValue::from_static(
-                    "bilibi_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
-                ),
-            );
+            // Keep the old session cookie during target-bound
+            // reauthentication so admission can retire that exact session.
+            // A normal sign-in has no old session to preserve.
+            if tenant_entry(&headers).is_none() {
+                response.headers_mut().append(
+                    header::SET_COOKIE,
+                    HeaderValue::from_static(
+                        "bilibi_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
+                    ),
+                );
+            }
             Ok(response)
         }
         Ok(session) => admitted(&app, &headers, peer, session).await,
@@ -605,6 +659,11 @@ async fn admitted(
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     session: bilibi_user::Login,
 ) -> std::result::Result<Response, HttpError> {
+    if let Some(target) = tenant_entry(headers) {
+        if app.security.guard(&session.token).await?.tenant() != target {
+            return Err(Error::Forbidden.into());
+        }
+    }
     {
         // Release the connection before `landing_route` takes its own, or
         // concurrent logins can hold the whole pool while waiting for a second.
@@ -655,6 +714,7 @@ async fn admitted(
         HeaderValue::from_str(&cookie).map_err(|_| Error::Internal)?,
     );
     clear_pending(app, &mut response);
+    clear_tenant_entry(&mut response);
     clear_return(&mut response);
     Ok(response)
 }
@@ -765,7 +825,7 @@ pub async fn forgot_page(
     State(app): State<App>,
     headers: HeaderMap,
 ) -> std::result::Result<Response, HttpError> {
-    if signed_in(&app, &headers).await {
+    if tenant_entry(&headers).is_none() && signed_in(&app, &headers).await {
         return Ok(Redirect::to(WORKSPACE).into_response());
     }
     forgot_card(&app, &ForgotForm::default(), StatusCode::OK).await
@@ -827,7 +887,7 @@ pub async fn reset_page(
     Path(token): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> std::result::Result<Response, HttpError> {
-    if signed_in(&app, &headers).await {
+    if tenant_entry(&headers).is_none() && signed_in(&app, &headers).await {
         return Ok(Redirect::to(WORKSPACE).into_response());
     }
     let form = ResetForm {

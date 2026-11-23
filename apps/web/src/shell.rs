@@ -803,6 +803,14 @@ pub async fn choose_tenant(
                 header::CACHE_CONTROL,
                 "no-store".parse().map_err(|_| Error::Internal)?,
             );
+            crate::auth::set_tenant_entry(&app, &mut response, form.tenant)?;
+            Ok(response)
+        }
+        Ok(bilibi_user::TenantEntry::Reauthenticate { tenant, provider }) => {
+            let location =
+                provider.map_or_else(|| "/login".into(), |public| format!("/login?sso={public}"));
+            let mut response = Redirect::to(&location).into_response();
+            crate::auth::set_tenant_entry(&app, &mut response, tenant)?;
             Ok(response)
         }
         Err(bilibi_user::TenantChoiceRefusal::Unavailable) => {

@@ -143,7 +143,13 @@ impl ResetMail {
     /// bounded; an expired token only fails to redeem until it is replaced.
     /// Audited as `user.reset_requested` by the `sign-in` principal; the
     /// token and its digest never enter the change.
-    async fn issue_token(&self, tenant: i64, user: i64) -> Result<Option<String>, Error> {
+    async fn issue_token(
+        &self,
+        tenant: i64,
+        user: i64,
+        address: &str,
+        verified: bool,
+    ) -> Result<Option<String>, Error> {
         let token = random_token()?;
         let hash = digest(&token);
         let mut client = self.db.get().await?;
@@ -161,13 +167,14 @@ impl ResetMail {
             .as_i64()
             .ok_or(Error::Internal)? as f64
             * 60.0;
+        let address = address.to_owned();
         let issued = tx
             .mutate(move |sql| {
                 Box::pin(async move {
                     let identity: i64 = sql
                         .query_opt(
-                            "INSERT INTO password_reset_tokens(identity_id,token_hash,created_at,expires_at) SELECT identity_id,$3,now(),now()+make_interval(secs => $4::double precision) FROM users WHERE tenant_id=$1 AND id=$2 ON CONFLICT (identity_id) DO UPDATE SET token_hash=excluded.token_hash,created_at=excluded.created_at,expires_at=excluded.expires_at WHERE password_reset_tokens.created_at<=now()-make_interval(secs => $5::double precision) RETURNING identity_id",
-                            &[&tenant, &user, &hash, &lifetime, &RESET_THROTTLE_SECONDS],
+                            "INSERT INTO password_reset_tokens(identity_id,token_hash,created_at,expires_at) SELECT i.id,$3,now(),now()+make_interval(secs => $4::double precision) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active' AND i.deleted_at IS NULL AND i.status='active' AND i.email=$6 AND (NOT $7 OR i.email_verified_at IS NOT NULL) ON CONFLICT (identity_id) DO UPDATE SET token_hash=excluded.token_hash,created_at=excluded.created_at,expires_at=excluded.expires_at WHERE password_reset_tokens.created_at<=now()-make_interval(secs => $5::double precision) RETURNING identity_id",
+                            &[&tenant, &user, &hash, &lifetime, &RESET_THROTTLE_SECONDS, &address, &verified],
                         )
                         .await?
                         .ok_or(Error::Conflict)?
@@ -272,7 +279,7 @@ impl ResetMail {
             crate::wording::SIGN_IN_LOCKED,
             &[("duration", Fact::Text(&duration))],
         )?;
-        let token = self.issue_token(tenant, user).await?;
+        let token = self.issue_token(tenant, user, &address, false).await?;
         let link = match &token {
             Some(token) => format!(
                 "{}\n\n{}\n",
@@ -285,6 +292,47 @@ impl ResetMail {
             Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
             wording["subject"].clone(),
             format!("{}\n\n{link}", wording["intro"]),
+        );
+        self.deliver(tenant, user, message, token.as_deref());
+        Ok(())
+    }
+
+    /// Mails `text` to the verified account with a reset link appended. A
+    /// failed delivery releases the token, as for a requested reset.
+    pub(crate) async fn mail_with_reset_link(
+        &self,
+        tenant: i64,
+        user: i64,
+        subject: &str,
+        text: &str,
+        verified: bool,
+    ) -> Result<(), Error> {
+        let client = self.db.get().await?;
+        let Some(row) = client
+            .query_opt(
+                "SELECT u.name,i.email FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active' AND (NOT $3 OR i.email_verified_at IS NOT NULL)",
+                &[&tenant, &user, &verified],
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        drop(client);
+        let (name, address): (String, String) = (row.get(0), row.get(1));
+        let token = self.issue_token(tenant, user, &address, verified).await?;
+        let link = match &token {
+            Some(token) => format!(
+                "Reset your password with this link:\n\n{}\n",
+                reset_link(&self.origin, &address, token)
+            ),
+            None => {
+                "Reset your password with \"Forgot your password?\" on the sign-in page.\n".into()
+            }
+        };
+        let message = Message::text(
+            Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
+            subject,
+            format!("{text}\n\n{link}"),
         );
         self.deliver(tenant, user, message, token.as_deref());
         Ok(())
@@ -317,10 +365,10 @@ async fn finish_reset_request() -> Result<(), CredentialError> {
 }
 /// The account a forgotten-password request mails and its link redeems for:
 /// per sign-in under the address, the one `identity::password_identity`
-/// signs in to (last used, then home, then the lowest tenant), so a removed
+/// signs in to (last used, then the lowest live tenant), so a removed
 /// or suspended last tenant never strands the request. Columns: account,
 /// tenant, account name, address, identity, live token digest.
-const RESET_ACCOUNT: &str = "SELECT DISTINCT ON (i.id) u.id,u.tenant_id,u.name,i.email,i.id,r.token_hash FROM user_identities i JOIN users u ON u.identity_id=i.id JOIN tenants t ON t.id=u.tenant_id LEFT JOIN password_reset_tokens r ON r.identity_id=i.id AND r.expires_at>now() WHERE lower(i.email)=$1 AND i.kind=$2 AND u.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' ORDER BY i.id,(u.tenant_id=i.last_tenant_id) DESC,(u.tenant_id=i.home_tenant_id) DESC,u.tenant_id LIMIT 2";
+const RESET_ACCOUNT: &str = "SELECT DISTINCT ON (i.id) u.id,u.tenant_id,u.name,i.email,i.id,r.token_hash FROM user_identities i JOIN users u ON u.identity_id=i.id JOIN tenants t ON t.id=u.tenant_id LEFT JOIN password_reset_tokens r ON r.identity_id=i.id AND r.expires_at>now() WHERE lower(i.email)=$1 AND i.kind=$2 AND u.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' ORDER BY i.id,(u.tenant_id=i.last_tenant_id) DESC,u.tenant_id LIMIT 2";
 
 fn encode_component(value: &str) -> String {
     value
@@ -361,6 +409,9 @@ impl UserService {
         if scope.csrf != csrf {
             return Err(Error::Forbidden.into());
         }
+        self.sessions
+            .require_portable_authority(&**client, &scope)
+            .await?;
         check_policy(new).map_err(CredentialError::Policy)?;
         let (tenant, user) = (scope.tenant(), scope.user());
         let credential = client
@@ -379,6 +430,9 @@ impl UserService {
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("user.change_password"))
+            .await?;
+        self.sessions
+            .require_portable_authority(tx.sql(), &scope)
             .await?;
         tx.mutate(move |sql| {
             Box::pin(async move {
@@ -443,7 +497,7 @@ impl UserService {
         let email = normalize_email(email)?;
         let client = self.db.get().await.map_err(Error::from)?;
         // The account sign-in would choose (`identity::password_identity`):
-        // last used, then home, then any live membership. Ambiguity (two
+        // last used, then the lowest live membership. Ambiguity (two
         // sign-ins under one address, possible only for customers) is
         // treated as unknown rather than guessed; a frozen account
         // (archived company, retired identity) is unknown here too.
@@ -474,7 +528,7 @@ impl UserService {
         let wording = self
             .templates
             .platform_wording(crate::wording::PASSWORD_RESET, &[])?;
-        let Some(token) = mail.issue_token(tenant, user).await? else {
+        let Some(token) = mail.issue_token(tenant, user, &address, false).await? else {
             return finish_reset_request().await;
         };
         let link = match site {

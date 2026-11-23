@@ -35,7 +35,7 @@ fn escape_like(text: &str) -> String {
 
 const STATEMENT: &str = "WITH filtered_users AS (
   SELECT u.id,u.name,COALESCE(i.email,v.email) AS email,u.created_at,
-    CASE WHEN u.status='invited' THEN 'invited' WHEN i.home_tenant_id=u.tenant_id THEN 'home' ELSE 'outside' END AS membership,
+    u.status AS membership,
     v.id AS invitation_id,
     (SELECT string_agg(c.name || CASE WHEN c.status='archived' THEN ' (archived)' ELSE '' END,', ' ORDER BY c.name) FROM user_desks d JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id WHERE d.tenant_id=u.tenant_id AND d.person_id=u.person_id AND c.deleted_at IS NULL) AS desks
   FROM users u
@@ -46,7 +46,7 @@ const STATEMENT: &str = "WITH filtered_users AS (
     AND ($2::text IS NULL OR u.name ILIKE $2 OR COALESCE(i.email,v.email) ILIKE $2)
     AND (cardinality($3::bigint[]) = 0 OR EXISTS (
       SELECT 1 FROM effective_principal_roles pr WHERE pr.tenant_id = u.tenant_id AND pr.user_id = u.id AND pr.role_id = ANY($3)))
-    AND ($7::text IS NULL OR CASE WHEN u.status='invited' THEN 'invited' WHEN i.home_tenant_id=u.tenant_id THEN 'home' ELSE 'outside' END=$7)
+    AND ($7::text IS NULL OR u.status=$7)
 ), user_total AS (
   SELECT count(*) AS total FROM filtered_users
 ), page_users AS (
@@ -143,12 +143,7 @@ pub async fn list(
             created_at: row.get(4),
             desks: row.get(5),
             roles,
-            membership: match row.get::<_, &str>(6) {
-                "home" => Membership::Home,
-                "outside" => Membership::Outside,
-                "invited" => Membership::Invited,
-                _ => return Err(Error::Internal),
-            },
+            membership: Membership::parse(row.get(6)).ok_or(Error::Internal)?,
             invitation: row.get(7),
         });
     }

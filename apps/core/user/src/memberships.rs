@@ -659,11 +659,11 @@ async fn finish_new_acceptance(
                 .get(0);
             let identity: i64 = sql
                 .query_opt(
-                    "INSERT INTO user_identities(kind,email,password_hash,email_verified_at,home_tenant_id,home_user_id,last_tenant_id)
-                     VALUES('staff',$1,$2,now(),$3,$4,$3)
+                    "INSERT INTO user_identities(kind,email,password_hash,email_verified_at,last_tenant_id)
+                     VALUES('staff',$1,$2,now(),$3)
                      ON CONFLICT (lower(email)) WHERE deleted_at IS NULL AND kind='staff' DO NOTHING
                      RETURNING id",
-                    &[&email, &hash, &tenant, &user],
+                    &[&email, &hash, &tenant],
                 )
                 .await?
                 .ok_or(Error::Conflict)?
@@ -688,8 +688,6 @@ async fn finish_new_acceptance(
                             "kind": "staff",
                             "email": email,
                             "password_hash": "set",
-                            "home_tenant_id": tenant,
-                            "home_user_id": user,
                         }),
                     },
                     Change {

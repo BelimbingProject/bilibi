@@ -1,19 +1,18 @@
 //! Neutral sign-in admission. Pending credentials live outside sessions;
 //! only this facade can turn their freshly proved identity into a session.
 use crate::{
-    accounts::AccountError,
     credential_attempts::{self, Kind, Limits},
     identity::Audience,
     CredentialError, Login, UserService,
 };
 use bilibi_database::{Change, Context, Error, MutationTransaction, Result};
 use bilibi_module_registry::{Contribution, Provenance};
+use bilibi_session::AuthenticationAuthority;
 use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
 use bilibi_step_up::{Availability, Challenge, Method, Purpose, Spent};
 use bilibi_tenancy::{AccountKind, Channel, Scope};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::time::SystemTime;
 use tokio_postgres::GenericClient;
 
 pub const SIGN_IN: &str = "core.user.sign_in";
@@ -55,6 +54,7 @@ struct Pending {
 struct HeldPending {
     scope: Scope,
     password_origin: bool,
+    authority: AuthenticationAuthority,
 }
 fn fingerprint(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
@@ -86,13 +86,20 @@ async fn transition(
         Ok(((), vec![change(id, "pending", state)]))
     })).await
 }
-async fn admit(tx: &mut MutationTransaction<'_>, scope: &Scope, login: &Login) -> Result<()> {
+async fn admit(
+    tx: &mut MutationTransaction<'_>,
+    scope: &Scope,
+    login: &Login,
+    authority: AuthenticationAuthority,
+) -> Result<()> {
     let (tenant, user) = (scope.tenant(), scope.user());
     let company = scope.current_company().map(|company| company.get());
     // The row keeps only the token's digest (`bilibi_session::session_id`).
     let (id, csrf) = (bilibi_session::session_id(&login.token), login.csrf.clone());
+    let (authority_kind, authority_tenant, authority_provider, authority_company) =
+        authority.stored();
     tx.mutate(move |sql| Box::pin(async move {
-        sql.execute("INSERT INTO sessions(id,tenant_id,user_id,csrf,company_id,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '24 hours')", &[&id,&tenant,&user,&csrf,&company]).await?;
+        sql.execute("INSERT INTO sessions(id,tenant_id,user_id,csrf,company_id,expires_at,authentication_authority,authentication_tenant_id,authentication_provider_id,authentication_company_id) VALUES($1,$2,$3,$4,$5,now()+interval '24 hours',$6,$7,$8,$9)", &[&id,&tenant,&user,&csrf,&company,&authority_kind,&authority_tenant,&authority_provider,&authority_company]).await?;
         let row=sql.query_one("SELECT i.id,i.last_tenant_id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2 FOR UPDATE OF i", &[&tenant,&user]).await?;
         let identity:i64=row.get(0);
         let previous:Option<i64>=row.get(1);
@@ -123,7 +130,7 @@ impl UserService {
         let (token_hash, csrf) = (fingerprint(&login.token), login.csrf.clone());
         let credential_hash = fingerprint(stored);
         tx.mutate(move |sql| Box::pin(async move {
-            let id = sql.query_one("INSERT INTO user_sign_ins(tenant_id,user_id,identity_id,token_hash,csrf,credential_hash,state,expires_at,audience) VALUES($1,$2,$3,$4,$5,$6,'pending',now()+make_interval(mins => $7::int),$8) RETURNING id", &[&tenant,&user,&identity,&token_hash,&csrf,&credential_hash,&(minutes as i32),&kind]).await?.get(0);
+            let id = sql.query_one("INSERT INTO user_sign_ins(tenant_id,user_id,identity_id,token_hash,csrf,credential_hash,state,expires_at,audience,authentication_authority) VALUES($1,$2,$3,$4,$5,$6,'pending',now()+make_interval(mins => $7::int),$8,'portable') RETURNING id", &[&tenant,&user,&identity,&token_hash,&csrf,&credential_hash,&(minutes as i32),&kind]).await?.get(0);
             Ok(((), vec![change(id, "password_verified", "pending")]))
         })).await
     }
@@ -132,11 +139,13 @@ impl UserService {
     pub(crate) async fn begin_sign_in(
         &self,
         audience: Audience,
+        target_tenant: Option<i64>,
         email: &str,
         password: &str,
     ) -> std::result::Result<Login, CredentialError> {
         let (tenant, user, stored) =
-            crate::identity::password_identity(self, audience, email, password).await?;
+            crate::identity::password_identity(self, audience, target_tenant, email, password)
+                .await?;
         let operation = match audience {
             Audience::Staff => SIGN_IN,
             Audience::Customer { .. } => PORTAL_SIGN_IN,
@@ -182,7 +191,7 @@ impl UserService {
             )
             .await?;
         } else {
-            admit(&mut tx, &scope, &login).await?;
+            admit(&mut tx, &scope, &login, AuthenticationAuthority::portable()).await?;
         }
         tx.commit().await?;
         Ok(login)
@@ -219,12 +228,20 @@ impl UserService {
                 .await?
                 .as_i64()
                 .ok_or(Error::Internal)? as i32;
+            let company = scope.current_company().ok_or(Error::Unauthorized)?.get();
             tx.mutate(move|sql|Box::pin(async move{
-                let id=sql.query_one("INSERT INTO user_sign_ins(tenant_id,user_id,identity_id,token_hash,csrf,credential_hash,state,expires_at,identity_provider_id) VALUES($1,$2,$3,$4,$5,$6,'pending',now()+make_interval(mins=>$7),$8) RETURNING id",&[&tenant,&user,&identity,&token_hash,&csrf,&credential_hash,&minutes,&provider]).await?.get(0);
+                let id=sql.query_one("INSERT INTO user_sign_ins(tenant_id,user_id,identity_id,token_hash,csrf,credential_hash,state,expires_at,identity_provider_id,authentication_authority,authentication_tenant_id,authentication_provider_id,authentication_company_id) VALUES($1,$2,$3,$4,$5,$6,'pending',now()+make_interval(mins=>$7),$8,'tenant_sso',$1,$8,$9) RETURNING id",&[&tenant,&user,&identity,&token_hash,&csrf,&credential_hash,&minutes,&provider,&company]).await?.get(0);
                 Ok(((),vec![change(id,"external_identity_verified","pending")]))
             })).await?;
         } else {
-            admit(tx, scope, &login).await?;
+            let company = scope.current_company().ok_or(Error::Unauthorized)?.get();
+            admit(
+                tx,
+                scope,
+                &login,
+                AuthenticationAuthority::tenant_sso(scope.tenant(), provider, company)?,
+            )
+            .await?;
         }
         Ok(login)
     }
@@ -347,7 +364,7 @@ impl UserService {
         if csrf != pending.scope.csrf {
             return Err(Error::Forbidden);
         }
-        let row = tx.sql().query_opt("SELECT i.password_hash,p.credential_hash,p.identity_provider_id FROM user_sign_ins p JOIN user_identities i ON i.id=p.identity_id WHERE p.tenant_id=$1 AND p.id=$2 AND p.token_hash=$3 AND p.state='pending' AND p.expires_at>clock_timestamp() FOR UPDATE OF p", &[&pending.scope.tenant(),&pending.id,&pending.hash]).await?.ok_or(Error::Unauthorized)?;
+        let row = tx.sql().query_opt("SELECT i.password_hash,p.credential_hash,p.identity_provider_id,p.authentication_authority,p.authentication_tenant_id,p.authentication_provider_id,p.authentication_company_id FROM user_sign_ins p JOIN user_identities i ON i.id=p.identity_id WHERE p.tenant_id=$1 AND p.id=$2 AND p.token_hash=$3 AND p.state='pending' AND p.expires_at>clock_timestamp() FOR UPDATE OF p", &[&pending.scope.tenant(),&pending.id,&pending.hash]).await?.ok_or(Error::Unauthorized)?;
         if fingerprint(&row.get::<_, String>(0)) != row.get::<_, Vec<u8>>(1) {
             return Err(Error::Unauthorized);
         }
@@ -360,6 +377,17 @@ impl UserService {
         Ok(HeldPending {
             scope,
             password_origin: row.get::<_, Option<i64>>(2).is_none(),
+            authority: match row.get::<_, &str>(3) {
+                "portable" if row.get::<_, Option<i64>>(4).is_none() => {
+                    AuthenticationAuthority::portable()
+                }
+                "tenant_sso" => AuthenticationAuthority::tenant_sso(
+                    row.get::<_, Option<i64>>(4).ok_or(Error::Unauthorized)?,
+                    row.get::<_, Option<i64>>(5).ok_or(Error::Unauthorized)?,
+                    row.get::<_, Option<i64>>(6).ok_or(Error::Unauthorized)?,
+                )?,
+                _ => return Err(Error::Unauthorized),
+            },
         })
     }
 
@@ -532,7 +560,7 @@ impl UserService {
         // Delivery/verification can take time. Expiry and standing still win.
         let login = credential(false);
         transition(&mut tx, &held.scope, pending.id, "admitted").await?;
-        admit(&mut tx, &held.scope, &login).await?;
+        admit(&mut tx, &held.scope, &login, held.authority).await?;
         let tenant = held.scope.tenant();
         let id = pending.id;
         let session_hash = crate::sso::hash(&login.token);
@@ -585,7 +613,7 @@ impl UserService {
 }
 
 /// Called by Core User's always-installed factor lifecycle adapter, in the
-/// owner's transaction, so reset, deletion and sign-out revoke pending entry.
+/// owner's transaction, so reset, membership removal and sign-out revoke pending entry.
 pub(crate) async fn revoke(
     sql: &tokio_postgres::Transaction<'_>,
     tenant: i64,
@@ -760,80 +788,13 @@ impl UserService {
             Err(error) => Err(error),
         }
     }
-
-    /// When the account's sign-in lock ends, for an administrator's view of
-    /// the account (`admin.user.view` is the page's own access).
-    pub async fn sign_in_locked_until(
-        &self,
-        scope: &Scope,
-        user: i64,
-    ) -> Result<Option<SystemTime>> {
-        let client = self.db.get().await?;
-        // Only a staff account of this tenant the reader can see.
-        if crate::identity::read_account(&**client, scope, user, false)
-            .await?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        Ok(client
-            .query_opt(
-                "SELECT locked_until FROM user_credential_attempts WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND kind='sign_in' AND locked_until>now()",
-                &[&scope.tenant(), &user],
-            )
-            .await?
-            .map(|row| row.get(0)))
-    }
-
-    /// An administrator lifts another account's sign-in lock
-    /// (`admin.user.update`, rechecked here; `user.sign_in.unlocked`).
-    pub async fn unlock_sign_in(
-        &self,
-        scope: &Scope,
-        user: i64,
-    ) -> std::result::Result<(), AccountError> {
-        let mut client = self.db.get().await.map_err(Error::from)?;
-        let mut tx = self
-            .mutations
-            .begin(&mut client, scope.mutation_context("user.sign_in.unlocked"))
-            .await?;
-        // The capability and a staff account of this tenant, as every
-        // account write opens.
-        self.open_account_write(&tx, scope, user, None, crate::contributions::UPDATE)
-            .await?;
-        let tenant = scope.tenant();
-        let unlocked = tx
-            .mutate(move |sql| {
-                Box::pin(async move {
-                    if !credential_attempts::forget(sql, tenant, user, KIND).await? {
-                        return Err(Error::NotFound);
-                    }
-                    let change = credential_attempts::change(
-                        user,
-                        KIND,
-                        json!({}),
-                        json!({"cleared_by": "administrator"}),
-                    );
-                    Ok(((), vec![change]))
-                })
-            })
-            .await;
-        match unlocked {
-            Ok(()) => Ok(tx.commit().await?),
-            Err(Error::NotFound) => {
-                tx.rollback().await?;
-                Err(AccountError::NotFound)
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
 }
 
 impl crate::reset::ResetMail {
     /// Counts one wrong password (`user.sign_in.failed`); the one that
     /// reaches the limit locks sign-in (`user.sign_in.locked`). The first
     /// lock of a run mails the owner a reset link; later locks of the same
-    /// run (it ends at a sign-in, a reset or an unlock) mail nothing, so a
+    /// run (it ends at a sign-in or reset) mail nothing, so a
     /// stranger repeating wrong passwords cannot flood the owner's inbox.
     /// Nothing is counted while locked. The sign-in form runs this after it
     /// answers (`identity::password_identity`), so a wrong password on a
