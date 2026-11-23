@@ -23,6 +23,8 @@ host's part are in `apps/base/agent_api/README.md`). A person's own view state
 (list columns, arrangement, theme, pins) opens `begin_view_state` instead,
 which the check leaves alone; never use it for business data.
 
+`commit_checked` applies a caller’s admission check after action capture and before PostgreSQL commit. A successful commit runs its post-commit callbacks before returning.
+
 The authoritative API is [src/transaction.rs](src/transaction.rs). Audit binds its
 `Capture` implementation once through `MutationBoundary::bind_capture` during
 service installation; a readiness check refuses boot, and `begin` refuses a

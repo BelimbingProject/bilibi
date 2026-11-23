@@ -403,8 +403,7 @@ fn script_schema() -> Value {
             "facts":{"type":"object","additionalProperties":true},
             "expect":{"type":"array","items":call}
         }}},
-        "language":{"type":"string","enum":["javascript"]},
-        "source_digest":{"type":"string","description":"SHA-256 of the exact source. Filled in by Bilibi when omitted."}
+        "language":{"type":"string","enum":["javascript"]}
     }})
 }
 

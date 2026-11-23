@@ -3,6 +3,7 @@
 use crate::definition::Definition;
 use crate::review::Draft;
 use crate::run::{evaluate, event_subject, logical_event, record_revision, set_action_identity};
+use crate::script::{ScriptBudget, MAX_SCRIPT_TIME};
 use crate::store::Watchers;
 use bilibi_agent_api::Result;
 use bilibi_database::{Change, Error};
@@ -23,10 +24,36 @@ impl Watchers {
         days: i64,
         limit: i64,
     ) -> Result<Value> {
-        let mut client = self.db.get().await.map_err(Error::from)?;
-        let result = self
-            .trial_on(&mut client, scope, draft, problems, days, limit)
-            .await;
+        let started = tokio::time::Instant::now();
+        let scripted = draft
+            .definition
+            .as_ref()
+            .is_some_and(|definition| definition.scripts().next().is_some());
+        let prelude = ScriptBudget::new(scripted.then_some(started + MAX_SCRIPT_TIME));
+        let timeout =
+            || bilibi_agent_api::invalid("draft", "The scripted trial reached its time limit.");
+        let mut client = prelude
+            .within(self.db.get())
+            .await
+            .map_err(|_| timeout())?
+            .map_err(Error::from)?;
+        let result = match self
+            .script_deadline(&**client, scope, scripted, started)
+            .await
+        {
+            Ok(budget) => budget
+                .within(self.trial_on(&mut client, scope, draft, problems, (days, limit), &budget))
+                .await
+                .unwrap_or_else(|error| Err(error.into())),
+            Err(error) => Err(error.into()),
+        };
+        if let Err(bilibi_agent_api::Error::Backend(error)) = &result {
+            if crate::script::timed_out(error) {
+                crate::script::cancel_sql(&client).await;
+                drop(bilibi_database::Connection::take(client));
+                return Err(timeout());
+            }
+        }
         if matches!(
             result,
             Err(bilibi_agent_api::Error::Backend(
@@ -44,8 +71,8 @@ impl Watchers {
         scope: &Scope,
         draft: Draft,
         problems: crate::definition::Problems,
-        days: i64,
-        limit: i64,
+        (days, limit): (i64, i64),
+        budget: &ScriptBudget,
     ) -> Result<Value> {
         let review = self.review_draft(client, scope, &draft, problems).await?;
         if !review.ok() {
@@ -92,7 +119,8 @@ impl Watchers {
             let id: i64 = sql.query_one("INSERT INTO base_watcher_trials (tenant_id,trigger,definition_digest,window_days,event_limit) VALUES ($1,$2,$3,$4,$5) RETURNING id", &[&tenant,&trigger_name,&digest,&(days as i32),&(limit as i32)]).await?.get(0);
             Ok((id, vec![Change { kind:"base/watchers.trial".into(), id, old:Value::Null, new:json!({"trigger":trigger_name,"definition_digest":digest,"window_days":days,"event_limit":limit}) }]))
         })).await?;
-        tx.commit().await?;
+        budget.commit(tx).await?;
+        budget.check()?;
         let end: String = client
             .query_one("SELECT now()::text", &[])
             .await
@@ -107,6 +135,7 @@ impl Watchers {
         let mut stopped_early = false;
         let mut candidates = 0usize;
         'scan: loop {
+            budget.check()?;
             if candidates == MAX_CANDIDATES {
                 stopped_early = true;
                 break;
@@ -136,6 +165,7 @@ impl Watchers {
                 break;
             }
             for row in rows {
+                budget.check()?;
                 candidates += 1;
                 let id: i64 = row.get(0);
                 let version: i32 = row.get(1);
@@ -155,129 +185,112 @@ impl Watchers {
                 else {
                     continue;
                 };
-                let deadline = self.script_deadline(client, scope, definition).await?;
                 let base = |state: &str| json!({"event_id":id,"recorded_at":at,"subject":subject,"state":state});
-                let mut readable = false;
-                let item = crate::script::before_deadline(deadline, async {
-                    let tx = client
-                        .build_transaction()
-                        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-                        .start()
-                        .await
-                        .map_err(Error::from)?;
-                    let evidence: Result<Option<Value>> = async {
-                        if tx.query_opt(
-                            "SELECT id FROM base_events WHERE tenant_id=$1 AND id=$2 AND erased_at IS NULL",
-                            &[&tenant, &id],
-                        ).await.map_err(Error::from)?.is_none() {
-                            return Ok(None);
-                        }
-                        let reader = self.read_facts(&tx, scope, trigger.definition.table, &subject, &fields).await?;
-                        if reader.is_err() {
-                            return Ok(None);
-                        }
-                        bilibi_authz::authorize_key(&tx, scope, crate::MANAGE).await?;
-                        bilibi_authz::authorize_key(&tx, scope, crate::VIEW).await?;
-                        if results.len() == limit as usize {
-                            truncated = true;
-                            return Ok(None);
-                        }
-                        readable = true;
-                        let principal = match self.principal(&tx, tenant).await {
-                            Ok(principal) => principal,
-                            Err(Error::Forbidden | Error::Unauthorized) => return Ok(Some(base("automation_unavailable"))),
-                            Err(error) => return Err(error.into()),
-                        };
-                        let automated = self.read_facts(&tx, &principal, trigger.definition.table, &subject, &fields).await?;
-                        let Ok((facts, types)) = automated else {
-                            return Ok(Some(base("automation_read_refused")));
-                        };
-                        let (matched, outcomes) = evaluate(definition, &facts, &types);
-                        let mut effects = Vec::new();
-                        if matched {
-                            let revision = record_revision(facts.get(trigger.definition.version))?;
-                            let authority = bilibi_authz::effective_grants(&tx, scope).await?;
-                            let unrestricted = scope.impersonator().is_none()
-                                && authority.grant_all
-                                && authority.direct_denied.is_empty()
-                                && bilibi_authz::fields::restricted(&tx, scope).await?.is_empty()
-                                && bilibi_authz::fields::masked(&tx, scope).await?.is_empty();
-                            if deadline.is_some() {
-                                let fields = definition.script_fact_fields(trigger.definition.version);
-                                if self.read_facts(&tx, scope, trigger.definition.table, &subject, &fields).await?.is_err() {
-                                    return Ok(Some(base("script_facts_restricted")));
-                                }
+                let tx = client
+                    .build_transaction()
+                    .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+                    .start()
+                    .await
+                    .map_err(Error::from)?;
+                let evidence: Result<Option<Value>> = async {
+                    if tx.query_opt(
+                        "SELECT id FROM base_events WHERE tenant_id=$1 AND id=$2 AND erased_at IS NULL",
+                        &[&tenant, &id],
+                    ).await.map_err(Error::from)?.is_none() {
+                        return Ok(None);
+                    }
+                    let reader = self.read_facts(&tx, scope, trigger.definition.table, &subject, &fields).await?;
+                    if reader.is_err() {
+                        return Ok(None);
+                    }
+                    bilibi_authz::authorize_key(&tx, scope, crate::MANAGE).await?;
+                    bilibi_authz::authorize_key(&tx, scope, crate::VIEW).await?;
+                    if results.len() == limit as usize {
+                        truncated = true;
+                        return Ok(None);
+                    }
+                    let principal = match self.principal(&tx, tenant).await {
+                        Ok(principal) => principal,
+                        Err(Error::Forbidden | Error::Unauthorized) => return Ok(Some(base("automation_unavailable"))),
+                        Err(error) => return Err(error.into()),
+                    };
+                    let automated = self.read_facts(&tx, &principal, trigger.definition.table, &subject, &fields).await?;
+                    let Ok((facts, types)) = automated else {
+                        return Ok(Some(base("automation_read_refused")));
+                    };
+                    let (matched, outcomes) = evaluate(definition, &facts, &types);
+                    let mut effects = Vec::new();
+                    if matched {
+                        let revision = record_revision(facts.get(trigger.definition.version))?;
+                        let authority = bilibi_authz::effective_grants(&tx, scope).await?;
+                        let unrestricted = scope.impersonator().is_none()
+                            && authority.grant_all
+                            && authority.direct_denied.is_empty()
+                            && bilibi_authz::fields::restricted(&tx, scope).await?.is_empty()
+                            && bilibi_authz::fields::masked(&tx, scope).await?.is_empty();
+                        if budget.deadline.is_some() {
+                            let fields = definition.script_fact_fields(trigger.definition.version);
+                            if self.read_facts(&tx, scope, trigger.definition.table, &subject, &fields).await?.is_err() {
+                                return Ok(Some(base("script_facts_restricted")));
                             }
-                            let calls = match self.plan_steps(&tx, &principal, definition, (trigger, &subject, revision), deadline).await? {
-                                Ok(calls) => calls,
-                                Err(reason) => return Ok(Some(base(reason))),
-                            };
-                            for (position, call) in calls.iter().enumerate() {
-                                let action = self.action(&call.operation).ok_or(Error::Invalid)?;
-                                let visible = unrestricted && std::iter::once(action.capability)
-                                    .chain(action.definition.approval_capabilities.iter().copied())
-                                    .all(|key| authority.reaches(key, bilibi_authz::Reach::All));
-                                let mut effect = json!({"operation":action.key,"title":action.title,"preview":"restricted"});
-                                if visible {
-                                    let input = crate::run::action_input(
-                                        action.definition, &action.input, &subject, &call.input, revision,
-                                    ).ok_or(Error::Invalid)?;
-                                    set_action_identity(&tx, None, position as i32, &logical).await?;
-                                    match self.jobs.preview_principal(&tx, &principal, action.key, &input, &reservations).await {
-                                        Ok(output) => {
-                                            effect["preview"] = json!("allowed");
-                                            effect["effect"] = output["result"].clone();
-                                        }
-                                        Err(error) => {
-                                            crate::run::refusal(error)?;
-                                            effect["preview"] = json!("refused");
-                                        }
+                        }
+                        let calls = match self.plan_steps(&tx, &principal, definition, (trigger, &subject, revision), budget.deadline).await? {
+                            Ok(calls) => calls,
+                            Err(reason) => return Ok(Some(base(reason))),
+                        };
+                        for (position, call) in calls.iter().enumerate() {
+                            let action = self.action(&call.operation).ok_or(Error::Invalid)?;
+                            let visible = unrestricted && std::iter::once(action.capability)
+                                .chain(action.definition.approval_capabilities.iter().copied())
+                                .all(|key| authority.reaches(key, bilibi_authz::Reach::All));
+                            let mut effect = json!({"operation":action.key,"title":action.title,"preview":"restricted"});
+                            if visible {
+                                let input = crate::run::action_input(
+                                    action.definition, &action.input, &subject, &call.input, revision,
+                                ).ok_or(Error::Invalid)?;
+                                set_action_identity(&tx, None, position as i32, &logical).await?;
+                                budget.check()?;
+                                match self.jobs.preview_principal(&tx, &principal, action.key, &input, &reservations).await {
+                                    Ok(output) => {
+                                        effect["preview"] = json!("allowed");
+                                        effect["effect"] = output["result"].clone();
+                                    }
+                                    Err(error) => {
+                                        crate::run::refusal(error)?;
+                                        effect["preview"] = json!("refused");
                                     }
                                 }
-                                effects.push(effect);
                             }
+                            effects.push(effect);
                         }
-                        let shown_facts: serde_json::Map<String, Value> = facts.into_iter().map(|(key, value)| {
-                            let value = if serde_json::to_vec(&value).map_or(true, |v| v.len() > 4096) {
-                                json!({"omitted":"value exceeds 4 KiB"})
-                            } else {
-                                value
-                            };
-                            (key, value)
-                        }).collect();
-                        let mut item = base(if matched { "match" } else { "near_miss" });
-                        item["current_record"] = json!({"facts":shown_facts,"condition_outcomes":outcomes});
-                        item["would_be_effects"] = json!(effects);
-                        Ok(Some(item))
-                    }.await;
-                    let item = match evidence {
-                        Err(
-                            error @ bilibi_agent_api::Error::Backend(Error::UnrecoveredTransaction(_)),
-                        ) => {
-                            let _ = tokio::time::timeout(
-                                std::time::Duration::from_millis(250),
-                                tx.rollback(),
-                            )
-                            .await;
-                            return Err(error);
-                        }
-                        other => other?,
-                    };
-                    tx.commit().await.map_err(Error::from)?;
-                    Ok::<_, bilibi_agent_api::Error>(item)
-                })
-                .await;
-                let item = match item {
-                    Ok(result) => result?,
-                    Err(_) => {
-                        crate::script::cancel_sql(client).await;
-                        if !readable {
-                            stopped_early = true;
-                            break 'scan;
-                        }
-                        Some(base("script_timeout"))
                     }
+                    let shown_facts: serde_json::Map<String, Value> = facts.into_iter().map(|(key, value)| {
+                        let value = if serde_json::to_vec(&value).map_or(true, |v| v.len() > 4096) {
+                            json!({"omitted":"value exceeds 4 KiB"})
+                        } else {
+                            value
+                        };
+                        (key, value)
+                    }).collect();
+                    let mut item = base(if matched { "match" } else { "near_miss" });
+                    item["current_record"] = json!({"facts":shown_facts,"condition_outcomes":outcomes});
+                    item["would_be_effects"] = json!(effects);
+                    Ok(Some(item))
+                }.await;
+                let item = match evidence {
+                    Err(
+                        error @ bilibi_agent_api::Error::Backend(Error::UnrecoveredTransaction(_)),
+                    ) => {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(250),
+                            tx.rollback(),
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                    other => other?,
                 };
+                budget.commit_trial(tx).await?;
                 if truncated {
                     break 'scan;
                 }

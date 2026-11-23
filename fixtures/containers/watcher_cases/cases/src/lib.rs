@@ -24,7 +24,7 @@ use bilibi_events::{EventType, Events, NewEvent, On, EVENTS};
 use bilibi_grid::{Field, FieldType, GridContribution, LinkDecl, LinkKind, Source, TableDecl};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance, Service};
 use bilibi_tenancy::Scope;
-use bilibi_watchers::{Action, Trigger, ACTIONS, LOCAL_SCRIPT_ACTIONS, TRIGGERS};
+use bilibi_watchers::{Action, Trigger, ACTIONS, TRIGGERS};
 use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 
@@ -124,7 +124,6 @@ inventory::submit! { Contribution::new(TRIGGERS, ROUTED, provenance!(), &Trigger
 inventory::submit! { Contribution::new(TRIGGERS, FLAGGED, provenance!(), &Trigger {
     on: On { event: FLAGGED, versions: &[1] }, title: "A case is flagged", table: TABLE, subject: "/case", logical_event: None, version: "version",
 }) }
-inventory::submit! { Contribution::new(LOCAL_SCRIPT_ACTIONS, "watcher_cases.cases.route", provenance!(), &()) }
 inventory::submit! { Contribution::new(ACTIONS, "watcher_cases.cases.route", provenance!(), &Action {
     title: "Send the case to a queue", table: TABLE, subject: "case_id", version: "expected_version", records: &[ROUTED], approval_capabilities: &[],
 }) }
@@ -266,6 +265,10 @@ impl Change2 {
     }
 }
 impl WriteHandler for Change2 {
+    fn local_script_action(&self) -> bool {
+        matches!(self, Self::Route)
+    }
+
     fn owner(&self) -> &'static str {
         MODULE
     }

@@ -330,7 +330,11 @@ impl Editor {
             .into_iter()
             .flatten()
             .map(|a| Act {
-                script: a.get("script").cloned(),
+                script: a.get("script").and_then(Value::as_object).map(|script| {
+                    let mut script = script.clone();
+                    script.remove("source_digest");
+                    Value::Object(script)
+                }),
                 operation: text(&a["operation"]),
                 params: a["input"]
                     .as_object()

@@ -16,7 +16,6 @@ pub const TRIGGERS: &str = "base/watchers.triggers";
 /// The catalog an owner offers a watcher action in:
 /// `Contribution::new(ACTIONS, "<its write contract key>", provenance, &Action { .. })`.
 pub const ACTIONS: &str = "base/watchers.actions";
-pub const LOCAL_SCRIPT_ACTIONS: &str = "base/watchers.local_script_actions";
 
 /// An event of the contributor's own, offered as a watcher trigger. The watcher
 /// engine subscribes to it through Base Events, so it is recorded in the
@@ -171,10 +170,8 @@ impl Offers {
                 },
             );
         }
-        let local = catalog.entries::<()>(LOCAL_SCRIPT_ACTIONS)?;
-        let action_entries = catalog.entries::<Action>(ACTIONS)?;
         let mut actions = BTreeMap::new();
-        for entry in action_entries {
+        for entry in catalog.entries::<Action>(ACTIONS)? {
             let action = entry.get::<Action>()?;
             if NEVER.iter().any(|prefix| entry.id.starts_with(prefix)) {
                 return Err(refuse(
@@ -252,18 +249,9 @@ impl Offers {
                     summary: op.summary,
                     capability: op.capability,
                     input: registered.input.clone(),
-                    local_script: local.iter().any(|offer| {
-                        offer.id == entry.id && offer.provenance.module == entry.provenance.module
-                    }),
+                    local_script: matches!(op.handler, bilibi_agent_api::Handler::SafeWrite(handler) if handler.local_script_action()),
                 },
             );
-        }
-        for offer in local {
-            if !action_entries.iter().any(|action| {
-                action.id == offer.id && action.provenance.module == offer.provenance.module
-            }) {
-                return Err(refuse(offer, "requires the same owner’s watcher action"));
-            }
         }
         Ok(Self { triggers, actions })
     }
@@ -280,5 +268,3 @@ pub(crate) fn trigger_events(catalog: &Catalog) -> Result<Vec<&'static On>> {
 
 inventory::submit! { Consumer::new::<Trigger>(TRIGGERS, "base/watchers", |entries| entries.iter().try_for_each(|entry| entry.get::<Trigger>().map(|_| ()))) }
 inventory::submit! { Consumer::new::<Action>(ACTIONS, "base/watchers", |entries| entries.iter().try_for_each(|entry| entry.get::<Action>().map(|_| ()))) }
-
-inventory::submit! { Consumer::new::<()>(LOCAL_SCRIPT_ACTIONS, "base/watchers", |_| Ok(())) }

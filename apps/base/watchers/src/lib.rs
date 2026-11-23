@@ -25,7 +25,7 @@ mod transfer;
 mod trial;
 mod web;
 
-pub use catalog::{Action, Trigger, ACTIONS, LOCAL_SCRIPT_ACTIONS, TRIGGERS};
+pub use catalog::{Action, Trigger, ACTIONS, TRIGGERS};
 pub use review::Review;
 pub use store::{
     EffectView, RunView, VersionView, WatcherState, WatcherSummary, WatcherView, Watchers,
@@ -152,7 +152,7 @@ const fn limit(
 inventory::submit! { Contribution::new(DEFINITIONS, ACTIONS_PER_RUN, provenance!(), &limit(
 "Actions per run", "The most actions one watcher may take each time it runs. A watcher with more cannot be approved.", || json!(3), 10.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, SCRIPT_TIME, provenance!(), &limit(
-"Script time per run", "Maximum milliseconds for a scripted run or trial event, including its operation calls.", || json!(250), 1000.0)) }
+"Script time per run", "Maximum milliseconds for a scripted run or a whole trial, including preparation and operation calls.", || json!(250), 1000.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, SCRIPT_HEAP, provenance!(), &limit(
 "Script memory", "Maximum QuickJS heap in MiB for a script invocation.", || json!(8), 32.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, CHAIN_DEPTH, provenance!(), &limit(

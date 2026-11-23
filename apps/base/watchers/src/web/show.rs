@@ -160,6 +160,7 @@ fn outcomes_empty(run: &RunView) -> bool {
 }
 fn outcome_badge(run: &RunView) -> Result<Html> {
     render(match run.state.as_str() {
+        "restricted" => Badge::status(BadgeKind::Plain, "Restricted"),
         "done" => Badge::status(BadgeKind::Success, "Acted"),
         "no_match" => Badge::status(BadgeKind::Neutral, "No match"),
         "partial" => Badge::status(BadgeKind::Warning, "Partly done"),

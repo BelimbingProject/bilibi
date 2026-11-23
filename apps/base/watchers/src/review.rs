@@ -64,7 +64,7 @@ impl Draft {
         if name.is_empty() || name.chars().count() > 120 {
             problems.push(("name".into(), "give a name of 1 to 120 characters".into()));
         }
-        let definition = Definition::parse(input, problems);
+        let definition = Definition::parse_draft(input, problems);
         let examples = definition::parse_examples(&input["examples"], problems);
         let explanation = bilibi_agent_api::optional_text_field(input, "explanation")
             .map(|text| text.chars().take(2000).collect());
@@ -521,8 +521,9 @@ impl Watchers {
                 for (path, value) in &example.facts {
                     let column = catalog.resolve(table, path).map_err(|_| Error::Invalid)?;
                     let field = column.field.ok_or(Error::Invalid)?;
-                    if !value.is_null() {
-                        if let Err(why) = definition::typed(column.ty, field.values, value) {
+                    let value = match definition::script_fact(column.ty, field.values, value) {
+                        Ok(value) => value,
+                        Err(why) => {
                             problems.push((
                                 "do".into(),
                                 format!(
@@ -534,12 +535,6 @@ impl Watchers {
                             valid = false;
                             continue;
                         }
-                    }
-                    let value = match column.ty {
-                        _ if value.is_null() => Value::Null,
-                        ty if ty.number() && value.is_number() => json!(value.to_string()),
-                        FieldType::Boolean => json!(definition::boolean(value)),
-                        _ => value.clone(),
                     };
                     facts.insert(path.clone(), value);
                 }
@@ -556,8 +551,8 @@ impl Watchers {
                     ));
                     return Ok(());
                 }
-                let actual = crate::script::before_deadline(
-                    Some(tokio::time::Instant::now() + std::time::Duration::from_millis(time)),
+                let actual = tokio::time::timeout(
+                    std::time::Duration::from_millis(time),
                     script.capture(&facts, time, heap),
                 )
                 .await
@@ -664,6 +659,18 @@ impl Watchers {
         watcher: i64,
         number: i32,
     ) -> Result<Review> {
+        self.review_activation(client, scope, watcher, number, false)
+            .await
+    }
+
+    async fn review_activation(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        watcher: i64,
+        number: i32,
+        reenable: bool,
+    ) -> Result<Review> {
         bilibi_authz::authorize_key(client, scope, APPROVE).await?;
         let tenant = scope.tenant();
         let row = client.query_opt(
@@ -672,13 +679,13 @@ impl Watchers {
         ).await?.ok_or(Error::NotFound)?;
         let mut problems = Problems::new();
         let latest: i32 = row.get(5);
-        if latest != number {
+        if !reenable && latest != number {
             problems.push((
                 "version".into(),
                 format!("version {latest} is newer; review and approve that one"),
             ));
         }
-        if row.get::<_, Option<bool>>(6) == Some(true) {
+        if !reenable && row.get::<_, Option<bool>>(6) == Some(true) {
             problems.push(("version".into(), "this version already runs".into()));
         }
         let trigger: String = row.get(1);
@@ -976,16 +983,9 @@ impl Watchers {
         let mut review = None;
         if enabled {
             let checked = self
-                .review_approval(tx.sql(), scope, watcher, running)
+                .review_activation(tx.sql(), scope, watcher, running, true)
                 .await?;
-            // The version was approved already; only what changed since counts.
-            let problems: Problems = checked
-                .problems
-                .iter()
-                .filter(|(_, why)| why != "this version already runs" && !why.contains("is newer"))
-                .cloned()
-                .collect();
-            if !problems.is_empty() {
+            if !checked.ok() {
                 return Err(Error::Invalid);
             }
             review = Some(checked);

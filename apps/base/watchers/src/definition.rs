@@ -176,6 +176,14 @@ impl Definition {
     }
     /// Reads a stored or submitted definition; shape problems are listed by path.
     pub(crate) fn parse(value: &Value, problems: &mut Problems) -> Option<Self> {
+        Self::parse_definition(value, problems, true)
+    }
+
+    pub(crate) fn parse_draft(value: &Value, problems: &mut Problems) -> Option<Self> {
+        Self::parse_definition(value, problems, false)
+    }
+
+    fn parse_definition(value: &Value, problems: &mut Problems, stored: bool) -> Option<Self> {
         let filter = value.get("if");
         if filter.is_some_and(|filter| !filter.is_object()) {
             problems.push(("if".into(), "must be an object".into()));
@@ -256,12 +264,16 @@ impl Definition {
         }
         for (i, item) in listed.iter().take(MAX_ACTIONS).enumerate() {
             if let Some(value) = item.get("script") {
-                match serde_json::from_value::<crate::script::Script>(value.clone()) {
-                    Ok(mut script) if item.as_object().is_some_and(|item| item.len() == 1) && script.validate() => {
-                        script.pin_source();
+                match crate::script::Script::parse(value, stored) {
+                    Some(script) if item.as_object().is_some_and(|item| item.len() == 1) => {
                         steps.push(Step::Script { script });
                     }
-                    _ => problems.push((format!("do.{i}.script"), "Supply a named script with its source, fields, allowed calls and examples.".into())),
+                    _ => {
+                        problems.push((format!("do.{i}.script"), "Supply a named script with its source, fields, allowed calls and examples.".into()));
+                        if stored {
+                            return None;
+                        }
+                    }
                 }
                 continue;
             }
@@ -445,8 +457,62 @@ fn scalar(value: &Value) -> bool {
     }
 }
 
+pub(crate) fn script_fact(ty: FieldType, choices: &[&str], value: &Value) -> Result<Value, String> {
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+    let number = || {
+        value
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| value.as_number().map(ToString::to_string))
+    };
+    let text = match ty {
+        FieldType::Integer => number()
+            .and_then(|text| text.parse::<i64>().ok())
+            .map(|n| n.to_string()),
+        FieldType::Float => number()
+            .and_then(|text| text.parse::<f64>().ok())
+            .filter(|n| n.is_finite())
+            .map(|n| n.to_string()),
+        FieldType::Decimal => number().filter(|text| {
+            let digits = text.strip_prefix('-').unwrap_or(text);
+            let (whole, fraction) = digits
+                .split_once('.')
+                .map_or((digits, None), |(whole, fraction)| (whole, Some(fraction)));
+            !whole.is_empty()
+                && whole.bytes().all(|byte| byte.is_ascii_digit())
+                && (whole.len() == 1 || !whole.starts_with('0'))
+                && fraction.is_none_or(|part| {
+                    !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                && (!text.starts_with('-')
+                    || digits.bytes().any(|byte| matches!(byte, b'1'..=b'9')))
+        }),
+        FieldType::Date => value
+            .as_str()
+            .and_then(|text| text.parse::<jiff::civil::Date>().ok())
+            .map(|date| date.to_string()),
+        FieldType::DateTime => value
+            .as_str()
+            .and_then(|text| text.parse::<jiff::Timestamp>().ok())
+            .map(|timestamp| timestamp.to_string()),
+        FieldType::Boolean => {
+            return boolean(value)
+                .map(Value::Bool)
+                .ok_or_else(|| "must be true or false".into())
+        }
+        FieldType::String | FieldType::Enum => {
+            typed(ty, choices, value)?;
+            return Ok(value.clone());
+        }
+    };
+    text.map(Value::String)
+        .ok_or_else(|| format!("must be a valid {ty:?} field value"))
+}
+
 /// Whether `value` is a value of a field of type `ty`.
-pub(crate) fn typed(ty: FieldType, choices: &[&str], value: &Value) -> Result<(), String> {
+fn typed(ty: FieldType, choices: &[&str], value: &Value) -> Result<(), String> {
     match ty {
         FieldType::Integer | FieldType::Float | FieldType::Decimal => decimal(value)
             .map(|_| ())
@@ -473,7 +539,7 @@ pub(crate) fn typed(ty: FieldType, choices: &[&str], value: &Value) -> Result<()
 }
 
 /// `true`/`false`, as JSON or as the text the agent schema carries.
-pub(crate) fn boolean(value: &Value) -> Option<bool> {
+fn boolean(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(b) => Some(*b),
         Value::String(text) => match text.as_str() {

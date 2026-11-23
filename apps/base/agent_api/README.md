@@ -13,6 +13,8 @@ with the registry's `Contribution` and source `Provenance`. No central host list
 or module-specific endpoint is needed. [src/reference.rs](src/reference.rs) is a
 complete non-business contribution example.
 
+A reviewed write handler can declare `local_script_action` if its effects stay within the installation. Watchers also requires the owner’s registered Watcher action and checks its normal contract and permissions.
+
 Keys start with the contributing module ID with `/` changed to `.`. Operations
 need an additional segment; guides may use the module prefix itself. Keys must
 be unique across operations and guides. Discovery rejects malformed metadata,

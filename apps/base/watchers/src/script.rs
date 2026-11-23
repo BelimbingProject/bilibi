@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use tokio::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -44,26 +45,36 @@ impl Script {
             .collect()
     }
 
-    pub(crate) fn pin_source(&mut self) {
-        self.source_digest = self.digest();
+    pub(crate) fn parse(value: &Value, stored: bool) -> Option<Self> {
+        if value.get("source_digest").is_some() != stored {
+            return None;
+        }
+        let mut script: Self = serde_json::from_value(value.clone()).ok()?;
+        let digest = script.digest();
+        if (stored && script.source_digest != digest) || !script.validate() {
+            return None;
+        }
+        script.source_digest = digest;
+        Some(script)
     }
 
     pub(crate) fn describe(&self) -> String {
         format!(
-            "Run {} as {} (JavaScript, SHA-256 {}). {}",
+            "Run {} as {} (JavaScript, SHA-256 {}). Reads {}. Allowed calls {}. Source: {}",
             self.name,
             crate::PRINCIPAL,
             self.source_digest,
+            serde_json::json!(self.fields),
+            serde_json::json!(self.calls),
             self.source
         )
     }
 
-    pub(crate) fn validate(&self) -> bool {
+    fn validate(&self) -> bool {
         !self.name.trim().is_empty()
             && self.name.len() <= 120
             && !self.source.trim().is_empty()
             && self.source.len() <= 16 * 1024
-            && (self.source_digest.is_empty() || self.source_digest == self.digest())
             && self.fields.len() <= MAX_FACTS
             && self
                 .fields
@@ -111,14 +122,73 @@ impl Script {
     }
 }
 
-pub(crate) async fn before_deadline<T>(
-    deadline: Option<Instant>,
-    work: impl Future<Output = T>,
-) -> std::result::Result<T, tokio::time::error::Elapsed> {
-    match deadline {
-        Some(deadline) => tokio::time::timeout_at(deadline, work).await,
-        None => Ok(work.await),
+pub(crate) const MAX_SCRIPT_TIME: Duration = Duration::from_millis(1000);
+
+pub(crate) struct ScriptBudget {
+    pub deadline: Option<Instant>,
+    committing: AtomicBool,
+}
+
+impl ScriptBudget {
+    pub(crate) fn new(deadline: Option<Instant>) -> Self {
+        Self {
+            deadline,
+            committing: AtomicBool::new(false),
+        }
     }
+
+    pub(crate) fn check(&self) -> Result<()> {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(bilibi_database::Error::Refused("script_timeout".into()));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn within<T>(&self, work: impl Future<Output = T>) -> Result<T> {
+        let Some(deadline) = self.deadline else {
+            return Ok(work.await);
+        };
+        self.check()?;
+        tokio::pin!(work);
+        tokio::select! {
+            biased;
+            result = &mut work => Ok(result),
+            _ = tokio::time::sleep_until(deadline) => {
+                if self.committing.load(Relaxed) {
+                    Ok(work.await)
+                } else {
+                    Err(bilibi_database::Error::Refused("script_timeout".into()))
+                }
+            }
+        }
+    }
+
+    fn begin_commit(&self) -> Result<()> {
+        self.check()?;
+        self.committing.store(true, Relaxed);
+        Ok(())
+    }
+
+    pub(crate) async fn commit(&self, tx: bilibi_database::MutationTransaction<'_>) -> Result<()> {
+        self.check()?;
+        let result = tx.commit_checked(|| self.begin_commit()).await;
+        self.committing.store(false, Relaxed);
+        result
+    }
+
+    pub(crate) async fn commit_trial(&self, tx: tokio_postgres::Transaction<'_>) -> Result<()> {
+        self.begin_commit()?;
+        let result = tx.commit().await;
+        self.committing.store(false, Relaxed);
+        Ok(result?)
+    }
+}
+
+pub(crate) fn timed_out(error: &bilibi_database::Error) -> bool {
+    matches!(error, bilibi_database::Error::Refused(reason) if reason == "script_timeout")
 }
 
 pub(crate) async fn cancel_sql(client: &tokio_postgres::Client) {
@@ -134,14 +204,16 @@ impl crate::Watchers {
         &self,
         sql: &(impl tokio_postgres::GenericClient + Sync),
         scope: &Scope,
-        definition: &Definition,
-    ) -> Result<Option<Instant>> {
-        if definition.scripts().next().is_none() {
-            return Ok(None);
+        scripted: bool,
+        start: Instant,
+    ) -> Result<ScriptBudget> {
+        if !scripted {
+            return Ok(ScriptBudget::new(None));
         }
-        let start = Instant::now();
-        let ms = self.limit(sql, scope, crate::SCRIPT_TIME).await? as u64;
-        Ok(Some(start + Duration::from_millis(ms)))
+        let ms = ScriptBudget::new(Some(start + MAX_SCRIPT_TIME))
+            .within(self.limit(sql, scope, crate::SCRIPT_TIME))
+            .await?? as u64;
+        Ok(ScriptBudget::new(Some(start + Duration::from_millis(ms))))
     }
 
     pub(crate) fn local_script_plan(&self, definition: &Definition) -> bool {
@@ -176,15 +248,24 @@ impl crate::Watchers {
         let (heap, limit) = self.script_limits(sql, scope).await?;
         let (trigger, subject, revision) = record;
         let fields = definition.script_fact_fields(trigger.definition.version);
-        let facts = match self
+        let (mut facts, types) = match self
             .read_facts(sql, scope, trigger.definition.table, subject, &fields)
             .await?
         {
-            Ok((facts, _)) => facts,
+            Ok(facts) => facts,
             Err(reason) => return Ok(Err(reason)),
         };
         if crate::run::record_revision(facts.get(trigger.definition.version))? != revision {
             return Ok(Err("record_changed"));
+        }
+        for (path, ty) in types {
+            let fact = facts
+                .get_mut(&path)
+                .ok_or(bilibi_database::Error::Invalid)?;
+            let Ok(value) = crate::definition::script_fact(ty, &[], fact) else {
+                return Ok(Err("script_input"));
+            };
+            *fact = value;
         }
         let mut selected = Vec::new();
         for step in &definition.steps {

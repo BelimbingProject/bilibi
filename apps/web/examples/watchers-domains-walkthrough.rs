@@ -224,8 +224,13 @@ async fn snapshot_tasks(
     }
     Ok(())
 }
+fn main() -> Result<()> {
+    bilibi_base::watchers::enter_worker();
+    walkthrough()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn walkthrough() -> Result<()> {
     bilibi_base::link();
     bilibi_core::link();
     bilibi_domains::link();
@@ -298,6 +303,7 @@ async fn main() -> Result<()> {
         .await?;
     for key in [
         "watchers.run.execute",
+        "watchers.script.execute",
         read,
         manage,
         "core.activity.system.create",
@@ -351,6 +357,15 @@ async fn main() -> Result<()> {
     for name in ["First follow-up watcher", "Independent follow-up watcher"] {
         let mut draft = draft.clone();
         draft["name"] = json!(name);
+        if domain == "commerce" && !watcher_ids.is_empty() {
+            let call = draft["do"][0].clone();
+            draft["do"] = json!([{"script":{
+                "name":"Create a private order follow-up",
+                "source":format!("return facts.id === '{source}' ? [{}] : [];", call),
+                "fields":["id"], "calls":[call],
+                "examples":[{"facts":{"id":source},"expect":[call]}, {"facts":{},"expect":[]}]
+            }}]);
+        }
         let watcher = write(&plans, &admin, "base.watchers.draft", draft).await?;
         if watcher_ids.is_empty() {
             let client = db.get().await?;

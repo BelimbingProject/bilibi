@@ -125,6 +125,10 @@ async fn existing(
 }
 
 impl WriteHandler for FollowUp {
+    fn local_script_action(&self) -> bool {
+        true
+    }
+
     fn owner(&self) -> &'static str {
         self.module
     }

@@ -363,7 +363,7 @@ impl Watchers {
         bilibi_authz::authorize_key(client, scope, VIEW).await?;
         let tenant = scope.tenant();
         let rows = client.query(
-            "SELECT u.id,u.watcher_id,v.number,u.event_id,u.event_name,u.subject,u.depth,u.state,u.reason,u.facts,u.outcomes,u.created_at,u.finished_at,v.definition,v.catalog_digest,u.planned_calls IS NOT NULL FROM base_watcher_runs u JOIN base_watcher_versions v ON v.tenant_id=u.tenant_id AND v.id=u.version_id WHERE u.tenant_id=$1 AND ($2::bigint IS NULL OR u.watcher_id=$2) ORDER BY u.id DESC LIMIT $3",
+            "SELECT u.id,u.watcher_id,v.number,u.event_id,u.event_name,u.subject,u.depth,u.state,u.reason,u.facts,u.outcomes,u.created_at,u.finished_at,v.definition,v.catalog_digest FROM base_watcher_runs u JOIN base_watcher_versions v ON v.tenant_id=u.tenant_id AND v.id=u.version_id WHERE u.tenant_id=$1 AND ($2::bigint IS NULL OR u.watcher_id=$2) ORDER BY u.id DESC LIMIT $3",
             &[&tenant, &watcher, &limit.clamp(1, 200)],
         ).await?;
         let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
@@ -394,9 +394,7 @@ impl Watchers {
             let allowed = match self.trigger(event).filter(|_| compatible) {
                 Some(trigger) => {
                     let fields = match definition {
-                        Some(definition)
-                            if definition.scripts().next().is_some() && row.get::<_, bool>(15) =>
-                        {
+                        Some(definition) if definition.scripts().next().is_some() => {
                             definition.fact_fields(trigger.definition.version, true)
                         }
                         _ => fields,
@@ -409,7 +407,7 @@ impl Watchers {
             };
             let scripted = definition
                 .as_ref()
-                .is_some_and(|definition| definition.scripts().next().is_some());
+                .is_none_or(|definition| definition.scripts().next().is_some());
             readable.insert(row.get::<_, i64>(0), (allowed, scripted));
         }
         let hidden = json!({"restricted": true});
@@ -421,6 +419,7 @@ impl Watchers {
                     .copied()
                     .unwrap_or_default();
                 let id: i64 = row.get(0);
+                let hidden_outcome = scripted && !shown;
                 RunView {
                     id,
                     watcher_id: row.get(1),
@@ -429,8 +428,12 @@ impl Watchers {
                     event_name: row.get(4),
                     subject: if shown { row.get(5) } else { String::new() },
                     depth: row.get(6),
-                    state: row.get(7),
-                    reason: row.get(8),
+                    state: if hidden_outcome {
+                        "restricted".into()
+                    } else {
+                        row.get(7)
+                    },
+                    reason: if hidden_outcome { None } else { row.get(8) },
                     facts: if shown {
                         row.get::<_, Option<Value>>(9).unwrap_or(Value::Null)
                     } else {
@@ -442,7 +445,11 @@ impl Watchers {
                         hidden.clone()
                     },
                     created_at: time(row, 11),
-                    finished_at: time_opt(row, 12),
+                    finished_at: if hidden_outcome {
+                        None
+                    } else {
+                        time_opt(row, 12)
+                    },
                     effects: effects
                         .iter()
                         .filter(|e| (shown || !scripted) && e.get::<_, i64>(0) == id)
