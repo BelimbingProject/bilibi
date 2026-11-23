@@ -195,7 +195,7 @@ impl ReadHandler for Read {
                 let catalog = Catalog::for_scope(client.sql_client().await?, scope)
                     .await
                     .map_err(Error::from)?
-                    .without_custom_references();
+                    .without_record_fields();
                 let search = input["search"].as_str().unwrap_or_default();
                 let offset = input["offset"].as_u64().unwrap_or(0).min(4096) as usize;
                 let mut page_columns =
@@ -299,7 +299,7 @@ impl WriteHandler for Write {
                         let catalog = Catalog::for_scope(sql, scope)
                             .await
                             .map_err(Error::from)?
-                            .without_custom_references();
+                            .without_record_fields();
                         let mut page = page_columns(sql, scope, metadata).await?;
                         Some(
                             page.preview_columns(&catalog, view)

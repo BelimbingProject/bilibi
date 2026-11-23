@@ -127,9 +127,9 @@ pub struct Catalog {
     names: Arc<bilibi_labels::FieldLabels>,
 }
 impl Catalog {
-    pub(crate) fn without_custom_references(mut self) -> Self {
+    pub(crate) fn without_record_fields(mut self) -> Self {
         for table in self.tables.values_mut() {
-            table.remove_custom_references();
+            table.remove_record_fields();
         }
         self
     }
@@ -658,7 +658,7 @@ fn truncated(spec: &str) -> String {
 fn field_specs(table: &Table, prefix: &str) -> Vec<String> {
     table
         .visible_fields()
-        .filter(|field| table.custom_reference(field.id).is_none())
+        .filter(|field| table.reference(field.id).is_none())
         .map(|field| format!("{prefix}{}", field.id))
         .collect()
 }
@@ -666,7 +666,7 @@ fn rollup_specs(target: &Table, path: &str, out: &mut Vec<String>) {
     out.push(format!("{path}:count"));
     for field in target
         .visible_fields()
-        .filter(|field| target.custom_reference(field.id).is_none())
+        .filter(|field| target.reference(field.id).is_none())
     {
         let id = field.id;
         match field.ty {

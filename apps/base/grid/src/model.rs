@@ -65,6 +65,22 @@ pub struct TableDecl {
     /// The field holding the Core team a row is filed under (a case's queue
     /// team), which "my team's" reach also admits. Needs `owner`.
     pub team: Option<&'static str>,
+    /// The record each row is about; see [`Subject`].
+    pub subject: Option<Subject>,
+}
+
+/// The record a table's rows are about (an escalation's customer): the field
+/// holding its id and its Base Records kind (#877). The field then reads as
+/// the record that id names now, so rows about records merged since group and
+/// filter under their survivor, and the report builder's reads
+/// ([`crate::summarize`], [`crate::page_keys`]) keep a reader to the rows
+/// whose subject they may read, as the kind's own table decides it: its
+/// capability, tenant and soft-delete filters and record reach. A row
+/// without a subject stays.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Subject {
+    pub field: &'static str,
+    pub kind: &'static str,
 }
 impl TableDecl {
     pub const fn new(
@@ -88,6 +104,15 @@ impl TableDecl {
             record_types: &[],
             owner: None,
             team: None,
+            subject: None,
+        }
+    }
+    /// Names the integer or text field holding the id of the record each
+    /// row is about, and that record's Base Records kind. See [`Subject`].
+    pub const fn subject(self, field: &'static str, kind: &'static str) -> Self {
+        Self {
+            subject: Some(Subject { field, kind }),
+            ..self
         }
     }
     pub const fn list_address(self, address: &'static str) -> Self {
@@ -330,7 +355,23 @@ impl Table {
     pub fn custom_reference(&self, id: &str) -> Option<&'static str> {
         self.custom.get(id).and_then(|custom| custom.reference)
     }
-    pub(crate) fn remove_custom_references(&mut self) {
+    /// The record each row is about, when the owner declares one.
+    pub fn subject(&self) -> Option<Subject> {
+        self.decl.subject
+    }
+    /// The Base Records kind a field's value names: a tenant's custom record
+    /// field, or the table's subject field.
+    pub fn reference(&self, id: &str) -> Option<&'static str> {
+        self.custom_reference(id).or_else(|| {
+            self.decl
+                .subject
+                .filter(|subject| subject.field == id)
+                .map(|subject| subject.kind)
+        })
+    }
+    /// Leaves record fields out of what a list may pick: custom record
+    /// fields are removed, and the subject field stays only for joins.
+    pub(crate) fn remove_record_fields(&mut self) {
         self.fields.retain(|field| {
             !self
                 .custom
@@ -338,6 +379,13 @@ impl Table {
                 .is_some_and(|custom| custom.reference.is_some())
         });
         self.custom.retain(|_, custom| custom.reference.is_none());
+        if let Some(subject) = self.decl.subject {
+            for field in &mut self.fields {
+                if field.id == subject.field {
+                    field.hidden = true;
+                }
+            }
+        }
     }
     pub(crate) fn custom_sql(&self, id: &str, alias: &str) -> Option<String> {
         self.custom
@@ -705,6 +753,27 @@ impl Table {
         }
         if decl.team.is_some() && decl.owner.is_none() {
             return Err(bad("a team field needs an owner field".into()));
+        }
+        if let Some(subject) = decl.subject {
+            // The kind is written into statements as a literal, and the
+            // survivor lookup binds the tenant as `$1`.
+            let kind_valid = !subject.kind.is_empty()
+                && subject.kind.len() <= 200
+                && subject.kind.bytes().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'.'
+                });
+            let field_valid = subject.field != decl.key
+                && decl
+                    .fields
+                    .iter()
+                    .find(|f| f.id == subject.field)
+                    .is_some_and(|f| matches!(f.ty, FieldType::Integer | FieldType::String));
+            if !kind_valid || !field_valid || !decl.source.tenant_scoped {
+                return Err(bad(
+                    "a subject names a declared integer or text field other than the key, a record kind key, and needs a tenant source"
+                        .into(),
+                ));
+            }
         }
         let mut kinds = BTreeSet::new();
         if !decl

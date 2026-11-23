@@ -17,6 +17,7 @@ pub mod page_views;
 pub mod query;
 pub mod reference;
 mod shared_views;
+mod subject;
 mod summary;
 mod transfer;
 pub mod view;
@@ -34,6 +35,7 @@ pub use query::{
     MAX_ESTIMATED_COST,
 };
 pub use shared_views::{Audience, SharedView, SHARE as SHARE_VIEWS};
+pub use subject::{bind_survivors, Survivors};
 pub use summary::{
     page_keys, summarize, validate_page_on, validate_summary_on, Bounds, Bucket, Filter, Grouping,
     KeyPage, Line, Measure, PageSpec, Period, Sort, Summary, SummarySpec, Test, MAX_CHOICES,
@@ -56,7 +58,7 @@ pub use custom::{
 };
 pub use model::{
     id_valid, GridContribution, Installed, Join, Link, LinkDecl, LinkKind, RecordFields, Source,
-    Table, TableDecl, MAX_FIELDS, MAX_LINKS_PER_TABLE, MAX_TABLES,
+    Subject, Table, TableDecl, MAX_FIELDS, MAX_LINKS_PER_TABLE, MAX_TABLES,
 };
 
 #[doc(hidden)]

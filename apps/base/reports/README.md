@@ -23,8 +23,9 @@ Draft checks, write previews and saves use [Grid's audited oversight probe](../g
 - Columns, groupings, measures and sorts the reader cannot see are **left out** and named in `left_out`.
 - A **filter** on a column the reader cannot see **refuses the run** (`HiddenFilter`), so a filter cannot be used to infer a hidden value.
 - A tenant's **custom fields** are columns like built-in fields (`cf_<key>`, from Grid's scoped catalog: [Custom Fields](../custom_fields/README.md#reports-lists-and-search)). An archived field leaves the columns, so a saved report that uses it leaves it out for every reader, as any column they cannot see.
+- A source that declares its **subject** ([Grid: Record subjects](../grid/README.md#record-subjects)), the record each row is about, is counted per record and read per subject: rows about records merged since group, filter and drill under the survivor, and a reader gets only the rows whose subject they may read (its table's capability and record reach), in every line, total, list, drill-down, file and panel. A subject they cannot read is no line, not a Restricted one. The owner declares it on the Grid table; a report needs nothing.
 
-Custom record fields are named through Base Records with the reader’s scope on every page and export. Reference grouping keys carry `{stored_id, label}` so drill filters and chart groups retain the stored id as identity while labels follow merges and show Restricted when unavailable; equal labels do not combine distinct records. Reference aggregation limits follow [Grid's measure rules](../grid/README.md#grouped-summaries-and-row-pages-g5).
+Custom record fields and subject fields are named through Base Records with the reader’s scope on every page and export. Reference grouping keys carry `{stored_id, label}` so drill filters and chart groups retain the stored id as identity while labels follow merges and show Restricted when unavailable; equal labels do not combine distinct records. Reference aggregation limits follow [Grid's measure rules](../grid/README.md#grouped-summaries-and-row-pages-g5).
 
 Reports include each custom reference field’s target kind and its table’s readability in their stable access revision. Dashboard revisions and prepared-export downloads use the same fingerprint.
 
@@ -127,6 +128,8 @@ A module contributes one in code with `bilibi_reports::builtin!` (key, name, des
 ## Proof
 
 `apps/web/examples/r1-reports.rs` on a disposable database (`BILIBI_GRID_DEMO=disposable`): build, run against plain SQL, share, a field restriction, another tenant, stale version, copy, rows, CSV and PDF and their audit, totals, drill into records, matrix, built-ins, a prepared export's queue job, and a subscription's next run, pause and removal.
+
+`apps/web/examples/report-subjects.rs` on an empty disposable database (`BILIBI_REPORT_SUBJECTS=disposable`): a merged pair counted once under its survivor with the total unchanged, the drill-down behind it, a reader whose reach leaves one subject out of the lines, the total, the list and a filter by its id, a reader with no grant on the subject's table, wider reach, and another tenant's merge.
 
 ## Not yet
 

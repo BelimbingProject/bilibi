@@ -416,6 +416,14 @@ fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Reco
             Err(_) => '0',
         })
         .collect();
+    // A source's subject decides which rows the reader gets, whatever the
+    // report names: gaining or losing its table changes the result.
+    if let Some(subject) = root.subject() {
+        let readable = catalog
+            .tables()
+            .any(|table| table.decl.record_types.contains(&subject.kind));
+        references.insert(format!("subject:{}:{}", subject.kind, u8::from(readable)));
+    }
     format!(
         "{}:{seen}:{}",
         report.version,

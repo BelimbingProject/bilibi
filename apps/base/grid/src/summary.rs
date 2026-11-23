@@ -668,7 +668,8 @@ fn local(value: &str, ty: FieldType) -> String {
     }
 }
 
-/// Every filter, joined with AND (`true` when there are none).
+/// Every filter and the root's subject check, joined with AND (`true` when
+/// there are none).
 fn filters(
     catalog: &Catalog,
     root: &Table,
@@ -686,6 +687,9 @@ fn filters(
         let value = cell(catalog, root, &column);
         predicates.push(test(&column, &value, &filter.test, today, binds)?);
     }
+    // Whatever the question names, it reads only rows whose subject the
+    // reader may read (#877).
+    predicates.extend(crate::subject::readable(catalog, root, "r"));
     Ok(if predicates.is_empty() {
         "true".into()
     } else {

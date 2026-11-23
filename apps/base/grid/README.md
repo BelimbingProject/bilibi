@@ -65,6 +65,19 @@ A table whose capability supports record reach (`CapabilityDefinition::with_reac
 - A child table guarded by the same key (lines of a deal) selects its parent's owner, or every line would show.
 - A parent's oversight read skips a table it reaches only partly.
 
+## Record subjects
+
+A table whose rows are each about one record of another kind (a case about a customer) names the field holding that record's id and its Base Records kind: `TableDecl::new(...).subject("customer_id", "company")`. Reports over the table then count per record, not per stored id, and show a reader only the rows about records they may read (#877).
+
+- **Merges:** the field reads as the record its stored id names now, wherever Grid reads it (a grouping, filter, sort, cell or join). Rows stored under a record merged since group and filter under its survivor; no row is rewritten. Base Records owns merges and binds the lookup (`bind_survivors`); Grid never reads its storage by name.
+- **Readable subjects only:** `summarize` and `page_keys`, the report builder's reads, keep the rows whose subject is a row of the kind's own table in the reader's catalog, through its `scoped_source()`: its capability, tenant and soft-delete filters and record reach. This applies whatever the question names, so a total or a count by another column never includes a hidden subject's rows. A row without a subject stays. A kind whose table the reader cannot read, or whose module is not mounted, leaves only the rows without a subject.
+- **Not a second permission model:** the check is the subject table's own source. Field masks and withheld fields of the subject follow that table's restrictions as for any linked column; a table's label field is protected, so a readable subject always has its name.
+- **Declaration:** one subject per table; an integer or text field other than the key, on a tenant source. The kind is the audit kind its owner registers with [Base Records](../records/README.md); boot refuses a malformed declaration. The field is a record field: it filters by `equals`, `one_of`, `empty` and `not_empty`, counts but takes no other aggregate, and list column pickers leave it out (show it as a pill).
+- **Owner lists** that page their own rows and call `project` are not narrowed; apply your own rule there. An oversight read sees only rows whose subject table is in the granted catalog.
+- **Index** the subject field with the tenant, as any filtered field. The check is one semi-join against the subject table's key.
+
+Proof: `BILIBI_REPORT_SUBJECTS=disposable cargo run -p bilibi-web --example report-subjects` on an empty disposable database (`scripts/run-walkthroughs.sh report-subjects`).
+
 ## Tenant custom fields
 
 A tenant's custom fields (`base/custom_fields`, ADR 21) are data, not declarations, so Grid adds them to each fresh scoped catalog through one hook (`bind_custom_columns`, a `CustomColumns` that `base/custom_fields` binds at boot). Grid does not depend on that module.

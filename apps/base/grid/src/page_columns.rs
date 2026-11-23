@@ -337,7 +337,7 @@ impl PageColumns {
             let client = self.views.db().get().await?;
             Catalog::for_scope(&**client, scope)
                 .await?
-                .without_custom_references()
+                .without_record_fields()
         };
         if let Some(root) = catalog.table(&self.table) {
             self.record_fields = root.record_fields.clone();
@@ -610,7 +610,7 @@ impl PageColumns {
                 let client = self.views.db().get().await?;
                 Catalog::for_scope(&**client, scope)
                     .await?
-                    .without_custom_references()
+                    .without_record_fields()
             };
             let requested = get("sort");
             let path = self

@@ -96,6 +96,10 @@ let page = format!("SELECT id FROM notes WHERE {predicate} ORDER BY id LIMIT $4 
 - **Connection and snapshot:** pass your existing PostgreSQL transaction. `matching` takes no pooled connection and starts, commits or rolls back nothing. It refuses `READ COMMITTED`/`READ UNCOMMITTED` with `Error::Invalid`; use `REPEATABLE READ` or `SERIALIZABLE`, then execute the subquery immediately on that same transaction and scope. Source access, redirects, count and pages see that transaction's snapshot, including its own holder writes. Merges never run in such a transaction (`redirect` requires `READ COMMITTED`); concurrent merges become visible in a fresh transaction. Do not cache a match or reuse it after the transaction. The transaction must allow owner authorization decision-log writes; use `READ WRITE` even for these business reads.
 - **Cost:** the reverse redirect index serves the predecessor relation; no holder or tenant scan is required to discover aliases. The holder owns admission for its complete SQL: use Grid's `BOUNDS` (statement/lock timeouts), `MAX_ESTIMATED_COST`, `MAX_ROWS` and `MAX_OFFSET`, as in [`text_search_sql`](../grid/README.md). A timeout, cost refusal or database error must fail the read, never produce a partial count/page. `matching` does not change transaction settings or admit arbitrary holder SQL for you.
 
+## Report on a subject
+
+When each row of your table is about one record (a case about a customer) and people will count rows per record, declare that field as the table's subject instead of reading redirects yourself: [Grid: Record subjects](../grid/README.md#record-subjects). Reports then count merged records under their survivor and show a reader only the rows about records they may read.
+
 ## Behaviour
 
 ### Portal step-up

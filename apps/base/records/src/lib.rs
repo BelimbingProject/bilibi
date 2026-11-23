@@ -224,6 +224,8 @@ inventory::submit! {
         migrations: &[("base-records-001-redirects", include_str!("../migrations/001-redirects.sql"))],
         services: &[Service { id: SERVICE, factory: |services| {
             let records = Arc::new(build(services)?);
+            // Grid reads a table's subject as its survivor (#877).
+            bilibi_grid::bind_survivors(bilibi_grid::Survivors { relation: matching::SURVIVORS_SQL })?;
             operations::bind(records.clone())?;
             Ok(records)
         } }],

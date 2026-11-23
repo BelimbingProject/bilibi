@@ -626,7 +626,7 @@ pub const BOUNDS: &str = "SET LOCAL statement_timeout = '2000ms'; SET LOCAL lock
 
 // Only catalog-owned identifiers enter SQL. Quote them even though declaration
 // validation limits them to lowercase ASCII. Values always use bind parameters.
-fn ident(name: &str) -> String {
+pub(crate) fn ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
@@ -773,6 +773,12 @@ pub(crate) fn field(alias: &str, table: &Table, id: &str) -> String {
     // A tenant custom field reads its value from the row's JSON column.
     if let Some(sql) = table.custom_sql(id, alias) {
         return sql;
+    }
+    // A subject field reads as the record its stored id names now (#877).
+    if table.subject().is_some_and(|subject| subject.field == id) {
+        if let Some(sql) = crate::subject::survivor(table, alias) {
+            return sql;
+        }
     }
     format!(
         "{alias}.{}",
