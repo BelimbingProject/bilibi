@@ -477,7 +477,7 @@ create() {
     else
         password=$(openssl rand -hex 24)
     fi
-    [[ -n $password ]] || fail "$env has no DATABASE_URL password" "remove the file to generate a new one"
+    [[ -n $password ]] || fail "$env has no DATABASE_URL password" "restore the original database credentials in $env before retrying"
     local token_key; token_key=$(cloudflare_env_key "$instance")
     if [[ $tls == cloudflare && -n $cloudflare_token_stdin ]]; then
         IFS= read -r cloudflare_token || true
@@ -1014,6 +1014,10 @@ json_command() {
 import json, pathlib, sys
 step, result, code, fix, output = sys.argv[1:]
 detail = pathlib.Path(output).read_text(encoding="utf-8", errors="replace")
+if result != "0":
+    fixes = [line.removeprefix("Next: ") for line in detail.splitlines() if line.startswith("Next: ")]
+    if fixes:
+        fix = fixes[-1]
 print(json.dumps({"step": step, "state": "completed" if result == "0" else "failed",
                   "code": code, "fix": fix, "detail": detail}))
 PYJSON
