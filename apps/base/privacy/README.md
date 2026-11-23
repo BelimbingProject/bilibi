@@ -122,7 +122,7 @@ bilibi_privacy::record_class! {
 **A field restricted in mask mode shows a partial value; revealing the full value needs `privacy.field.reveal`, a reason, and is recorded.**
 
 - Mode per restricted field on `/authz/field-restrictions`; only Grid-marked personal fields can be masked.
-- Reveal: `Privacy::reveal_field`, the contact page's Reveal (through the page contract `base.privacy.field.reveal`), or the agent operation. Capability, reason and Step-up `base.privacy.field.reveal` (off until the tenant turns it on) come first; Grid reads only with the sealed `Reveal` grant; the value is read next, then `privacy.field.revealed` is recorded without the value, in a transaction that rechecks the capability and commits before the value is returned. An export download is checked before its bytes are read and recorded (`privacy.export.revealed`) the same way after. Each step takes one connection at a time.
+- Reveal: `Privacy::reveal_field`, the contact page's Reveal (through the page contract `base.privacy.field.reveal`), or the agent operation. Capability, reason and Step-up `base.privacy.field.reveal` (off until the tenant turns it on) come first; Grid reads only with the sealed `Reveal` grant; the value is read next, then `privacy.field.revealed` is recorded without the value, in a transaction that rechecks the capability and commits before the value is returned. An export download is checked before its bytes are read and recorded (`privacy.export.revealed`) the same way after. `reveal_field_in` reads on the caller’s transaction and commits disclosure evidence separately, so it survives an outer rollback; it refuses immediately if the separate connection is unavailable.
 - A revealed value stays only in that page view, only while the reader may still reveal and the record is unchanged. Embedded contact panels show no Reveal.
 
 ## Failure handling
@@ -146,7 +146,7 @@ bilibi_privacy::record_class! {
 | Evidence inside the strictest company's legal minimum | Kept with a deferral naming the person | Retry: the daily run once due, unless held |
 | Audit erasure with an undeclared kind or field, another person, a record the transaction did not change, or a cause that is not running, owing cleanup or an open sweep in the tenant | Refused by the database | Stop: a code or data defect, fix it |
 | A declaration or cause checker changed outside a migration | Refused at commit (a guard against mistakes; code running as the application's database role can also write the ledger) | Stop: ship a migration |
-| A reveal's value cannot be read, or its record cannot commit | Nothing returned: the reveal is recorded only after the value or export is read, and returned only once that record commits, one connection at a time | Manual: retry the reveal |
+| A reveal's value cannot be read, or its record cannot commit | Nothing returned: the reveal is recorded only after the value or export is read, and returned only once that record commits | Manual: retry the reveal |
 | Code and `base_personal_data_kinds` disagree on a kind | `Internal`, the erasure step rolls back | Stop: ship the migration that matches the code |
 | A refused setting in a save | The whole save rolls back (the transaction is poisoned) | Manual: correct the values |
 | A committed evidence row without a chain link, or a removed or changed row | Verify audit log reports `unsealed`, `missing`, `changed` or `tail` | Manual: investigate; evidence is never repaired in place |

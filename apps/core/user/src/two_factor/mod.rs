@@ -41,8 +41,8 @@ pub const CONFIRM_PATH: &str = "/settings/two-factor/confirm";
 pub const PORTAL_SETTINGS_PATH: &str = "/portal/account/two-factor";
 /// A customer's step-up prompt on the portal, mounted by Core Portal.
 pub const PORTAL_CONFIRM_PATH: &str = "/portal/account/two-factor/confirm";
-/// Why checking a code takes its connection detached (`Db::get_detached`).
-const STEP_UP_CONNECTION: &str = "a code is checked from inside the caller's write (step-up), and the spent code and failure count must stay when that write rolls back";
+/// Why checking a code takes its connection detached.
+const STEP_UP_CONNECTION: &str = "step-up proof and failure evidence must survive the caller's rollback; refuse immediately if the pool is full";
 /// The owner the sealed secret is bound to (`Settings::seal_owned`), with
 /// installation scope `0` and the identity id ([`SignIn`]).
 const OWNER: &str = "core/user.two_factor";
@@ -222,6 +222,7 @@ impl UserService {
         let matched = current.len() <= password::MAX_LENGTH
             && password::verify(current, Some(&stored)).await?;
         if !matched {
+            drop(client);
             self.failed(scope, "password").await?;
             return Err(TwoFactorError::IncorrectPassword);
         }
@@ -486,7 +487,7 @@ impl UserService {
         let (tenant, user) = (scope.tenant(), scope.user());
         let client = self
             .db
-            .get_detached(STEP_UP_CONNECTION)
+            .try_get_detached(STEP_UP_CONNECTION)
             .await
             .map_err(Error::from)?;
         let row = client
@@ -523,7 +524,7 @@ impl UserService {
         let session = scope.clone();
         let mut client = self
             .db
-            .get_detached(STEP_UP_CONNECTION)
+            .try_get_detached(STEP_UP_CONNECTION)
             .await
             .map_err(Error::from)?;
         let mut tx = self
@@ -556,6 +557,7 @@ impl UserService {
             Ok(()) => Ok(tx.commit().await?),
             Err(Error::Conflict) => {
                 tx.rollback().await?;
+                drop(client);
                 self.failed(scope, "code").await?;
                 Err(TwoFactorError::InvalidCode)
             }
@@ -567,7 +569,7 @@ impl UserService {
     async fn unlocked(&self, scope: &Scope) -> Outcome<()> {
         let client = self
             .db
-            .get_detached(STEP_UP_CONNECTION)
+            .try_get_detached(STEP_UP_CONNECTION)
             .await
             .map_err(Error::from)?;
         let remaining = credential_attempts::locked(
@@ -600,7 +602,7 @@ impl UserService {
     /// `user.two_factor.locked`. The shared rule is `credential_attempts`.
     async fn failed(&self, scope: &Scope, check: &'static str) -> Result<()> {
         let (tenant, user) = (scope.tenant(), scope.user());
-        let mut client = self.db.get().await?;
+        let mut client = self.db.try_get_detached(STEP_UP_CONNECTION).await?;
         let mut tx = self
             .mutations
             .begin(

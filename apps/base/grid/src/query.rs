@@ -262,6 +262,44 @@ pub async fn reveal(
         .and_then(|mut row| row.cells.remove(field)))
 }
 
+/// Reveal on the caller's transaction, preserving its bounded read and scope.
+pub async fn reveal_on(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    grant: &bilibi_personal_data::Reveal,
+    table: &str,
+    field: &str,
+    key: &Value,
+) -> Result<Option<Value>, QueryError> {
+    grant
+        .check(scope, table, field)
+        .map_err(QueryError::Database)?;
+    let bounds = Bounds::default();
+    bounded(tx, bounds, async {
+        let catalog = Catalog::for_scope(tx, scope).await?;
+        if !catalog.masked(table, field) {
+            return Err(QueryError::Database(Error::Forbidden));
+        }
+        let catalog = Catalog::revealing(tx, scope, table, field).await?;
+        let projection = project_catalog(
+            tx,
+            &catalog,
+            table,
+            std::slice::from_ref(key),
+            &[field],
+            &Lenses::default(),
+            bounds,
+        )
+        .await?;
+        Ok(projection
+            .rows
+            .into_iter()
+            .next()
+            .and_then(|mut row| row.cells.remove(field)))
+    })
+    .await
+}
+
 async fn read<S: AsRef<str>>(
     db: &Db,
     scope: &Scope,

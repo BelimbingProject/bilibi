@@ -518,6 +518,24 @@ async fn main() -> Result<()> {
         write(&app, &viewer_token, "base.privacy.field.reveal", json!({"table": "person_affiliations", "field": "work_email", "record": 1, "reason": "Ticket 4412"}))
             .await?,
     );
+    let tx = client.transaction().await?;
+    let disclosed = privacy
+        .reveal_field_in(
+            &tx,
+            &viewer,
+            "persons",
+            "email",
+            &record,
+            "Ticket rollback proof",
+        )
+        .await?;
+    assert!(disclosed.is_some());
+    tx.rollback().await?;
+    let survived: i64 = client.query_one("SELECT count(*) FROM base_audit_actions WHERE event='privacy.field.revealed' AND payload->>'reason'='Ticket rollback proof'", &[]).await?.get(0);
+    assert_eq!(
+        survived, 1,
+        "the disclosure audit must survive outer rollback"
+    );
     for row in client
         .query(
             "SELECT event||' by '||actor_type||':'||actor_id||' '||payload::text FROM base_audit_actions WHERE event='privacy.field.revealed' ORDER BY id",

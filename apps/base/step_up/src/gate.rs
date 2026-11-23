@@ -414,7 +414,7 @@ impl StepUp {
     async fn connection(&self) -> Result<bilibi_database::Connection> {
         Ok(self
             .db
-            .get_detached(
+            .try_get_detached(
                 "step-up is asked from inside the caller's write and keeps its evidence when \
                  that write rolls back; each call returns the connection before the next",
             )

@@ -33,7 +33,7 @@ impl SessionProvider for Authenticator {
         proof: SessionProof,
     ) -> ProofFuture<'a, WindowState> {
         Box::pin(async move {
-            let client = self.0.db.get().await?;
+            let client = self.0.db.try_get_detached("session proof is consumed independently so it survives the caller's rollback; refuse immediately if the pool is full").await?;
             Ok(match proof {
                 SessionProof::Window {
                     window_seconds,
