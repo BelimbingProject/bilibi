@@ -296,8 +296,8 @@ impl WriteHandler for Write {
             match client.transaction() {
                 Some(tx) => self.preview_on(tx, scope, input).await,
                 None => {
-                    let pooled = privacy()?.db.get().await.map_err(Error::from)?;
-                    self.preview_on(&**pooled, scope, input).await
+                    self.preview_on(client.sql_client().await?, scope, input)
+                        .await
                 }
             }
         })
@@ -380,7 +380,7 @@ impl WriteHandler for Write {
                     .await
                     .map_err(refusal)?),
                 Self::Reveal => json!({"value": privacy
-                    .reveal_field(scope, text(input, "table")?, text(input, "field")?, &reveal_record(input)?, text(input, "reason")?)
+                    .reveal_field_in(tx.sql(), scope, text(input, "table")?, text(input, "field")?, &reveal_record(input)?, text(input, "reason")?)
                     .await?}),
             };
             Ok(result.into())

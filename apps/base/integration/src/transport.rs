@@ -7,7 +7,7 @@ use crate::{
 use bilibi_database::{Error, Result};
 use reqwest::{header::HeaderMap, Method};
 use serde_json::{Map, Value};
-use std::{sync::Arc, sync::OnceLock, time::Duration, time::Instant};
+use std::{future::Future, sync::Arc, sync::OnceLock, time::Duration, time::Instant};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 /// Default response bound for buffered calls; raise it per call when needed.
@@ -263,16 +263,31 @@ impl Integration {
         call: &Call,
         outgoing: Outgoing,
     ) -> std::result::Result<Reply, Failure> {
-        let (id, observed, sink) = self
-            .perform(origin, call, outgoing, Sink::Buffer(Vec::new()))
-            .await?;
+        self.send_if(origin, call, outgoing, std::future::ready(true))
+            .await?
+            .ok_or(Failure::Invalid)
+    }
+
+    pub(crate) async fn send_if(
+        &self,
+        origin: Origin<'_>,
+        call: &Call,
+        outgoing: Outgoing,
+        admit: impl Future<Output = bool> + Send,
+    ) -> std::result::Result<Option<Reply>, Failure> {
+        let Some((id, observed, sink)) = self
+            .perform(origin, call, outgoing, Sink::Buffer(Vec::new()), admit)
+            .await?
+        else {
+            return Ok(None);
+        };
         match (observed.error, observed.status, sink) {
-            (None, Some(status), Sink::Buffer(body)) => Ok(Reply {
+            (None, Some(status), Sink::Buffer(body)) => Ok(Some(Reply {
                 exchange_id: id,
                 status,
                 headers: observed.headers.unwrap_or_default(),
                 body,
-            }),
+            })),
             (class, status, _) => Err(Failure::Transport {
                 class: class.unwrap_or("transport"),
                 status,
@@ -292,8 +307,15 @@ impl Integration {
         sink: &mut (dyn AsyncWrite + Unpin + Send),
     ) -> std::result::Result<Streamed, Failure> {
         let (id, observed, written) = self
-            .perform(origin, call, outgoing, Sink::Writer(sink, 0))
-            .await?;
+            .perform(
+                origin,
+                call,
+                outgoing,
+                Sink::Writer(sink, 0),
+                std::future::ready(true),
+            )
+            .await?
+            .ok_or(Failure::Invalid)?;
         let bytes = match written {
             Sink::Writer(_, bytes) => bytes,
             Sink::Buffer(_) => 0,
@@ -319,7 +341,8 @@ impl Integration {
         call: &Call,
         outgoing: Outgoing,
         mut sink: Sink<'s>,
-    ) -> std::result::Result<(String, Observed, Sink<'s>), Failure> {
+        admit: impl Future<Output = bool> + Send,
+    ) -> std::result::Result<Option<(String, Observed, Sink<'s>)>, Failure> {
         if !valid_call(call) {
             return Err(Failure::Invalid);
         }
@@ -372,6 +395,9 @@ impl Integration {
         let mut hop_headers = outgoing.headers.clone();
         let mut hops_done: u8 = 0;
         let mut request_headers = Value::Null;
+        if !admit.await {
+            return Ok(None);
+        }
         loop {
             let mut builder = http
                 .request(outgoing.method.clone(), hop_url.clone())
@@ -519,13 +545,13 @@ impl Integration {
             })
             .await
             .map_err(|_| Failure::Unrecorded)?;
-        Ok((id, observed, sink))
+        Ok(Some((id, observed, sink)))
     }
 }
 
 // Conservative global-unicast ranges for untrusted metadata fetches. IPv4
 // mapped IPv6 is classified as IPv4, including private/link-local addresses.
-fn public_address(ip: std::net::IpAddr) -> bool {
+pub(crate) fn public_address(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(ip) => {
             let [a, b, _, _] = ip.octets();

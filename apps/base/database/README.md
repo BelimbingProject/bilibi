@@ -76,7 +76,7 @@ Proof, on any reachable PostgreSQL database (it runs only `SELECT 1`):
 cargo run -p bilibi-database --example pool-walkthrough
 ```
 
-It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six callers each holding one connection and asking for a second all answered (the shape that used to lock a process), and the environment limits with their refusals. It also prints the second-connection check: the one log line with both call sites and the cases that are not logged.
+It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six tracked callers whose nested checkouts are refused immediately while both pool slots remain occupied, and the environment limits with their refusals. It also proves that a second checkout is refused with both call sites and that independent checkouts still work.
 
 ## One connection per task
 
@@ -91,15 +91,13 @@ Why: once more callers than connections each hold one and ask for a second, ever
 | A connection | `db.get().await?` |
 | To read while you already hold one | Pass the one you hold: `&(impl ProofClient + ?Sized)`, a `&Transaction`, or the `OperationClient` you were given |
 | To call a service that takes its own | Drop your connection first |
-| A real exception: a single, named connection that must be separate, never a whole job | `db.get_detached("why")`, with the reason the pool cannot be starved by it |
-| That exception, but refused at once when the pool has none free instead of waiting behind the connection you hold | `db.try_get_detached("why")` |
+| An independent checkout from either standalone or nested service work | `db.get_independent("why")`, which waits for a first tracked slot and refuses immediately for a second when the pool is full |
+| A single, named connection that must be separate while you hold a pool slot | `db.try_get_detached("why")`, which refuses immediately when the pool is full |
+| A single, named connection that must be separate and can safely wait for admission | `db.get_detached("why")`, with the reason the pool cannot be starved by it |
 | A connection that carries session state (a session lock, a session setting) | `Connection::take(db.get().await?)`: closed when dropped, never returned to the pool, and no longer counted |
 
 - **What counts as a task:** the Tokio task, or the thread for the future a `block_on` drives (a walkthrough's `main`). `tokio::join!` branches are one task. A spawned task starts with none.
-- **A second ask warns, then attempts the checkout** under the normal pool limits; it can still time out. Each pool logs once per pair of call sites: `warning: second pooled connection: this task already holds a pooled connection (taken at A) and asked for another at B. …`
-- Set `RUST_BACKTRACE=1` to print the stack at the warning site under the line; it does not reconstruct the async await chain or the first checkout's stack.
-- `scripts/run-walkthroughs.sh` lists every warning of a run in the job summary under "Second pooled connections" and raises one annotation. It does not fail the run during this warning-only pilot.
-- The switch to refusals requires fixing the outstanding sites and then two weeks of CI walkthrough runs on `main` without a real second checkout. [Issue #758](https://github.com/BelimbingProject/bilibi/issues/758) tracks the switch.
+- **A second ask is refused immediately** with a pool error naming both call sites; it never waits for a pool slot.
 
 # Schema ownership
 

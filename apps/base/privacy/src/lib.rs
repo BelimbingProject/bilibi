@@ -408,7 +408,7 @@ fn build(services: &bilibi_module_registry::Services) -> RegistryResult<Privacy>
         )
     })?;
     let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
-    bilibi_personal_data::bind_holds(Arc::new(holds::Source { db: db.clone() }))?;
+    bilibi_personal_data::bind_holds(Arc::new(holds::Source))?;
     Ok(Privacy {
         db,
         boundary: services.get("base/database.mutations")?,

@@ -53,6 +53,16 @@ inventory::submit! { Contribution::new(DEFINITIONS, EXCHANGE_RETENTION_DAYS, pro
     editor: Some(Editor { group: "Integration", label: "API exchange retention (days)",
         help: "Days to keep the record of an API call. Older calls are deleted, except those under a legal hold.", capability: Some(DELETE), reveal_duration_ms: 5_000 }),
 })) }
+inventory::submit! { Contribution::new(DEFINITIONS, crate::CONNECTOR_DESTINATIONS, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Array, scopes: &[ScopeKind::Global], default: || json!([]), nullable: false, encrypted: false,
+    minimum: None, maximum: None,
+    validator: Some(bilibi_settings::Validator {
+        accepts: crate::scorer::valid_destination_policy,
+        message: "Give distinct exact public HTTPS destination URLs in a JSON array.",
+    }),
+    editor: Some(Editor { group: "Integration", label: "Connector destinations",
+        help: "Exact public HTTPS addresses customer-hosted connectors may call.", capability: Some(DELETE), reveal_duration_ms: 5_000 }),
+})) }
 // Deleting an exchange is audited with metadata only; these names never carry
 // a second copy of a payload or a raw endpoint into the audit ledger.
 inventory::submit! { Contribution::new(REDACTIONS, "base/integration.exchange", provenance!(), &Redaction {
