@@ -151,10 +151,6 @@ impl Definition {
         })
     }
 
-    pub(crate) fn script_calls(&self) -> impl Iterator<Item = &ActionCall> {
-        self.scripts().flat_map(|script| &script.calls)
-    }
-
     pub(crate) fn script_fact_fields(&self, version: &str) -> Vec<String> {
         let mut fields = vec![version.to_owned()];
         for field in self.scripts().flat_map(|script| &script.fields) {

@@ -944,6 +944,23 @@ impl Worker {
             .await?;
         set_action_identity(tx.sql(), Some(run.version), position, logical_event).await?;
         budget.check()?;
+        // An outbound send is checked against its approved terms on this
+        // transaction, right before the owner's commit: the destination and
+        // data it resolves now, not the ones seen at approval.
+        if action.outbound.is_some() {
+            let terms = crate::Watchers::outbound_terms(&definition, action.key);
+            if let Err(error) = watchers
+                .registry
+                .check_outbound_call(tx.sql(), &scope, action.key, &input, terms.as_ref())
+                .await
+            {
+                if let bilibi_agent_api::Error::Backend(error) = error {
+                    return Err(error);
+                }
+                tx.rollback().await?;
+                return Ok(Acted::Stopped("script_outbound_refused"));
+            }
+        }
         let outcome = watchers
             .jobs
             .commit(&mut tx, execution, action.key, &input)

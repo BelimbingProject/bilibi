@@ -61,6 +61,7 @@ fn reason(code: &str) -> &'static str {
         "script_refused" => "The script failed inside its sandbox.",
         "script_call_refused" => "The script requested a call outside its approved list.",
         "script_lookup_refused" => "The script requested a read outside its approved lookups, or the read owner refused it.",
+        "script_outbound_refused" => "Not sent: the destination or data did not match the approved outbound terms.",
         "script_permission_refused" => "This watcher is not permitted to run that particular script version.",
         "script_output" | "script_input" => "The script input or result exceeded its contract.",
         "script_unavailable" => "The script worker could not start.",
@@ -344,6 +345,13 @@ impl Show {
                 self.flash = Some((
                     StatusKind::Error,
                     format!("Nothing changed: {}.", problems.join("; ")),
+                ))
+            }
+            // A script refusal names its reason, as the run receipts do.
+            Err(ContractError::Backend(Error::Refused(code))) if code.starts_with("script_") => {
+                self.flash = Some((
+                    StatusKind::Error,
+                    format!("Nothing changed. {}", reason(&code)),
                 ))
             }
             Err(_) => {

@@ -93,6 +93,16 @@ pub(crate) struct OfferedAction {
     pub capability: &'static str,
     pub input: Value,
     pub local_script: bool,
+    /// The owner's outbound declaration: what it can send outside.
+    pub outbound: Option<&'static bilibi_agent_api::Outbound>,
+}
+
+impl OfferedAction {
+    /// A script may select this action when its owner certified it local, or
+    /// when it is outbound and the script approves terms for it.
+    pub(crate) fn script_callable(&self, script: &crate::script::Script) -> bool {
+        self.local_script || (self.outbound.is_some() && script.terms(self.key).is_some())
+    }
 }
 
 pub(crate) struct OfferedLookup {
@@ -259,6 +269,28 @@ impl Offers {
                     format!("{event} is not a declared event type"),
                 ));
             }
+            let (local_script, outbound) = match op.handler {
+                bilibi_agent_api::Handler::SafeWrite(handler) => {
+                    (handler.local_script_action(), handler.outbound())
+                }
+                _ => (false, None),
+            };
+            if local_script && outbound.is_some() {
+                return Err(refuse(
+                    entry,
+                    "an action is either local or outbound, not both",
+                ));
+            }
+            if outbound.is_some_and(|declared| {
+                declared.destination.trim().is_empty()
+                    || declared.data.is_empty()
+                    || declared.data.iter().any(|field| field.trim().is_empty())
+            }) {
+                return Err(refuse(
+                    entry,
+                    "an outbound action names its destination and every data field it can send",
+                ));
+            }
             actions.insert(
                 entry.id,
                 OfferedAction {
@@ -268,7 +300,8 @@ impl Offers {
                     summary: op.summary,
                     capability: op.capability,
                     input: registered.input.clone(),
-                    local_script: matches!(op.handler, bilibi_agent_api::Handler::SafeWrite(handler) if handler.local_script_action()),
+                    local_script,
+                    outbound,
                 },
             );
         }
