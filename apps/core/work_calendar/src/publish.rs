@@ -111,6 +111,9 @@ impl WorkCalendars {
             .iter()
             .map(|row| row.get(0))
             .collect();
+        if tenants.is_empty() {
+            return Ok(0);
+        }
         let mut failed = 0;
         let mut fenced = self
             .db

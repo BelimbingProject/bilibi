@@ -202,7 +202,7 @@ impl UserService {
             return Err(TwoFactorError::Unavailable);
         }
         let (tenant, user) = (scope.tenant(), scope.user());
-        let client = self.db.get().await.map_err(Error::from)?;
+        let mut client = self.db.get().await.map_err(Error::from)?;
         self.sessions
             .require_portable_authority(&**client, scope)
             .await?;
@@ -222,18 +222,15 @@ impl UserService {
         let matched = current.len() <= password::MAX_LENGTH
             && password::verify(current, Some(&stored)).await?;
         if !matched {
-            drop(client);
-            self.failed(scope, "password").await?;
+            self.failed(&mut client, scope, "password").await?;
             return Err(TwoFactorError::IncorrectPassword);
         }
         let issuer = self.issuer()?;
-        drop(client);
         let secret = totp::generate_secret()?;
         let encoded = totp::encode_secret(&secret);
         let sealed = self
             .settings
             .seal_owned(OWNER, 0, sign_in.identity, &json!(encoded))?;
-        let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
             .begin(
@@ -279,7 +276,7 @@ impl UserService {
     pub async fn confirm_two_factor(&self, scope: &Scope, code: &str) -> Outcome<()> {
         refuse_impersonation(scope)?;
         let (tenant, user) = (scope.tenant(), scope.user());
-        let client = self.db.get().await.map_err(Error::from)?;
+        let mut client = self.db.get().await.map_err(Error::from)?;
         self.sessions
             .require_portable_authority(&**client, scope)
             .await?;
@@ -297,12 +294,10 @@ impl UserService {
         }
         let secret = self.open_secret(SignIn::of(&row, 3), &row.get(0))?;
         let step = totp::verify(&secret, code, now_unix(&**client).await?, row.get(2))?;
-        drop(client);
         let Some(step) = step else {
-            self.failed(scope, "authenticator").await?;
+            self.failed(&mut client, scope, "authenticator").await?;
             return Err(TwoFactorError::InvalidCode);
         };
-        let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
             .begin(
@@ -355,8 +350,10 @@ impl UserService {
     /// Step-up: a current authenticator code marks this session as having
     /// confirmed access just now.
     pub async fn step_up(&self, scope: &Scope, code: &str) -> Outcome<()> {
-        let step = self.prove(scope, code).await?;
-        self.consume(scope, step, Spend::StepUp).await
+        refuse_impersonation(scope)?;
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        let step = self.prove(&mut client, scope, code).await?;
+        self.consume(&mut client, scope, step, Spend::StepUp).await
     }
 
     /// Step one of moving to a new phone: a current code from the old
@@ -367,7 +364,7 @@ impl UserService {
         if !self.settings.encryption_available() {
             return Err(TwoFactorError::Unavailable);
         }
-        let client = self.db.get().await.map_err(Error::from)?;
+        let mut client = self.db.get().await.map_err(Error::from)?;
         self.sessions
             .require_portable_authority(&**client, scope)
             .await?;
@@ -381,9 +378,9 @@ impl UserService {
             .ok_or(Error::Unauthorized)?
             .get(0);
         let issuer = self.issuer()?;
-        drop(client);
-        let step = self.prove(scope, code).await?;
+        let step = self.prove(&mut client, scope, code).await?;
         self.consume(
+            &mut client,
             scope,
             step,
             Spend::Purpose {
@@ -404,7 +401,7 @@ impl UserService {
         let secret = data_encoding::BASE32_NOPAD
             .decode(to.secret.as_bytes())
             .map_err(|_| Error::Internal)?;
-        let client = self.db.get().await.map_err(Error::from)?;
+        let mut client = self.db.get().await.map_err(Error::from)?;
         self.sessions
             .require_portable_authority(&**client, scope)
             .await?;
@@ -419,15 +416,13 @@ impl UserService {
             .map_err(Error::from)?
             .map(|row| SignIn::of(&row, 0))
             .ok_or(Error::Unauthorized)?;
-        drop(client);
         let Some(step) = step else {
-            self.failed(scope, "authenticator").await?;
+            self.failed(&mut client, scope, "authenticator").await?;
             return Err(TwoFactorError::InvalidCode);
         };
         let sealed = self
             .settings
             .seal_owned(OWNER, 0, sign_in.identity, &json!(to.secret))?;
-        let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("user.two_factor.moved"))
@@ -481,14 +476,14 @@ impl UserService {
 
     /// Checks a code against the confirmed authenticator without consuming
     /// it. A miss counts as a failure.
-    async fn prove(&self, scope: &Scope, code: &str) -> Outcome<i64> {
+    async fn prove(
+        &self,
+        client: &mut tokio_postgres::Client,
+        scope: &Scope,
+        code: &str,
+    ) -> Outcome<i64> {
         refuse_impersonation(scope)?;
-        let client = self
-            .db
-            .try_get_detached(STEP_UP_CONNECTION)
-            .await
-            .map_err(Error::from)?;
-        self.unlocked(&**client, scope).await?;
+        self.unlocked(&*client, scope).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
         let row = client
             .query_opt(
@@ -499,12 +494,11 @@ impl UserService {
             .map_err(Error::from)?
             .ok_or(TwoFactorError::NotEnabled)?;
         let secret = self.open_secret(SignIn::of(&row, 2), &row.get(0))?;
-        let step = totp::verify(&secret, code, now_unix(&**client).await?, row.get(1))?;
-        drop(client);
+        let step = totp::verify(&secret, code, now_unix(&*client).await?, row.get(1))?;
         match step {
             Some(step) => Ok(step),
             None => {
-                self.failed(scope, "code").await?;
+                self.failed(client, scope, "code").await?;
                 Err(TwoFactorError::InvalidCode)
             }
         }
@@ -513,7 +507,13 @@ impl UserService {
     /// Spends a proved step inside one audited transaction with what it was
     /// for. The step moves forward by compare-and-set, so a racing reuse of
     /// the same code loses, and failures reset.
-    async fn consume(&self, scope: &Scope, step: i64, spend: Spend) -> Outcome<()> {
+    async fn consume(
+        &self,
+        client: &mut tokio_postgres::Client,
+        scope: &Scope,
+        step: i64,
+        spend: Spend,
+    ) -> Outcome<()> {
         let (tenant, user) = (scope.tenant(), scope.user());
         let event = "user.two_factor.verified";
         let purpose = match &spend {
@@ -522,14 +522,9 @@ impl UserService {
         };
         let sessions = self.sessions.clone();
         let session = scope.clone();
-        let mut client = self
-            .db
-            .try_get_detached(STEP_UP_CONNECTION)
-            .await
-            .map_err(Error::from)?;
         let mut tx = self
             .mutations
-            .begin(&mut client, scope.mutation_context(event))
+            .begin(client, scope.mutation_context(event))
             .await?;
         let spent = tx
             .mutate(move |sql| {
@@ -557,8 +552,7 @@ impl UserService {
             Ok(()) => Ok(tx.commit().await?),
             Err(Error::Conflict) => {
                 tx.rollback().await?;
-                drop(client);
-                self.failed(scope, "code").await?;
+                self.failed(client, scope, "code").await?;
                 Err(TwoFactorError::InvalidCode)
             }
             Err(error) => Err(error.into()),
@@ -595,15 +589,16 @@ impl UserService {
     /// code), audited as `user.two_factor.failed`; the failure that
     /// reaches the limit then locks the account's checks, audited as
     /// `user.two_factor.locked`. The shared rule is `credential_attempts`.
-    async fn failed(&self, scope: &Scope, check: &'static str) -> Result<()> {
+    async fn failed(
+        &self,
+        client: &mut tokio_postgres::Client,
+        scope: &Scope,
+        check: &'static str,
+    ) -> Result<()> {
         let (tenant, user) = (scope.tenant(), scope.user());
-        let mut client = self.db.try_get_detached(STEP_UP_CONNECTION).await?;
         let mut tx = self
             .mutations
-            .begin(
-                &mut client,
-                scope.mutation_context("user.two_factor.failed"),
-            )
+            .begin(client, scope.mutation_context("user.two_factor.failed"))
             .await?;
         let counted = tx
             .mutate(move |sql| {
@@ -635,10 +630,7 @@ impl UserService {
         }
         let mut tx = self
             .mutations
-            .begin(
-                &mut client,
-                scope.mutation_context("user.two_factor.locked"),
-            )
+            .begin(client, scope.mutation_context("user.two_factor.locked"))
             .await?;
         tx.mutate(move |sql| {
             Box::pin(async move {

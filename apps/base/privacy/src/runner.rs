@@ -745,38 +745,43 @@ async fn finish_failed(
     tx.commit().await
 }
 
-/// Holds the request's finish guard on its own connection; dropping it
+/// Holds the request's finish guard on the working connection; dropping it
 /// without `release` closes the connection, which ends the guard.
-struct FinishGuard(Option<bilibi_database::Connection>, i64);
+struct FinishGuard(Option<bilibi_database::Connection>, i32);
 impl FinishGuard {
     async fn take(db: &Db, id: i64) -> Result<Self> {
-        let client = db
-            .get_detached(
-                "holds the request's finish guard, a session lock, while the finish reads and \
-                 writes on other connections; one per request being finished",
-            )
-            .await?;
-        let taken: bool = client
-            .query_one(
-                "SELECT pg_try_advisory_lock($1,$2::bigint::int)",
-                &[&FINISH_GUARD, &(id % i64::from(i32::MAX))],
-            )
+        let key = (id % i64::from(i32::MAX)) as i32;
+        let mut guard = Self(Some(db.get().await?), key);
+        let taken: bool = guard
+            .client()?
+            .query_one("SELECT pg_try_advisory_lock($1,$2)", &[&FINISH_GUARD, &key])
             .await?
             .get(0);
         if !taken {
+            drop(guard.0.take());
             return Err(Error::Conflict);
         }
-        Ok(Self(Some(client), id))
+        Ok(guard)
     }
+
+    fn client(&mut self) -> Result<&mut tokio_postgres::Client> {
+        self.0
+            .as_mut()
+            .map(|client| &mut ***client)
+            .ok_or(Error::Internal)
+    }
+
     async fn release(mut self) -> Result<()> {
-        if let Some(client) = self.0.take() {
-            client
-                .execute(
-                    "SELECT pg_advisory_unlock($1,$2::bigint::int)",
-                    &[&FINISH_GUARD, &(self.1 % i64::from(i32::MAX))],
-                )
-                .await?;
+        let key = self.1;
+        let released: bool = self
+            .client()?
+            .query_one("SELECT pg_advisory_unlock($1,$2)", &[&FINISH_GUARD, &key])
+            .await?
+            .get(0);
+        if !released {
+            return Err(Error::Internal);
         }
+        drop(self.0.take());
         Ok(())
     }
 }
@@ -801,13 +806,13 @@ async fn finish(
     scope: &Scope,
     id: i64,
 ) -> Result<Finish> {
-    let guard = match FinishGuard::take(&privacy.db, id).await {
+    let mut guard = match FinishGuard::take(&privacy.db, id).await {
         Ok(guard) => guard,
         Err(Error::Conflict) => return Ok(Finish::Busy),
         Err(error) => return Err(error),
     };
-    let mut client = privacy.db.get().await?;
-    let request = privacy.request(&**client, scope, id).await?;
+    let client = guard.client()?;
+    let request = privacy.request(&*client, scope, id).await?;
     if request.status != "running" {
         guard.release().await?;
         return Ok(Finish::Done);
@@ -816,12 +821,11 @@ async fn finish(
         guard.release().await?;
         return Ok(Finish::Busy);
     }
-    requests::eligible(privacy, &**client, scope, request.company).await?;
+    requests::eligible(privacy, &*client, scope, request.company).await?;
     let access = request.kind != RequestKind::Erasure;
-    if access && !current_export(&**client, scope, &request).await? {
+    if access && !current_export(&*client, scope, &request).await? {
         // An erasure of the person was approved since the stores read: read again.
-        drop(client);
-        restart_export(privacy, execution, scope, &request).await?;
+        restart_export(privacy, client, execution, scope, &request).await?;
         guard.release().await?;
         return Ok(Finish::Done);
     }
@@ -842,7 +846,7 @@ async fn finish(
         // files another retained certificate on each retry; deleting an
         // already deleted one is a no-op, so a retry is safe.
         if forget {
-            documents::delete_exports(privacy, &mut client, scope, &grant, request.person).await?;
+            documents::delete_exports(privacy, client, scope, &grant, request.person).await?;
         }
         holds = Some(session);
     }
@@ -854,40 +858,31 @@ async fn finish(
         RequestKind::Access | RequestKind::Portability => match &request.export_artifact {
             Some(id) => id.clone(),
             None => {
-                documents::delete_unfiled_exports(privacy, &mut client, scope, &request).await?;
-                Box::pin(documents::export(privacy, &mut client, scope, &request)).await?
+                documents::delete_unfiled_exports(privacy, client, scope, &request).await?;
+                Box::pin(documents::export(privacy, client, scope, &request)).await?
             }
         },
         RequestKind::Erasure => match &request.certificate_artifact {
             Some(id) => id.clone(),
             None => {
-                match documents::unfiled_certificate(privacy, &client, scope, &request).await? {
+                match documents::unfiled_certificate(privacy, &*client, scope, &request).await? {
                     Some(id) => id,
                     None => {
-                        Box::pin(documents::certificate(
-                            privacy,
-                            &mut client,
-                            scope,
-                            &request,
-                        ))
-                        .await?
+                        Box::pin(documents::certificate(privacy, client, scope, &request)).await?
                     }
                 }
             }
         },
     };
-    let mut tx = execution
-        .begin(&mut client, "privacy.request.complete")
-        .await?;
+    let mut tx = execution.begin(client, "privacy.request.complete").await?;
     if access {
         // Publication takes turns with erasure approval: check once more
         // under the guard, and never publish what an erasure has overtaken.
         requests::person_guard(tx.sql(), scope.tenant(), request.person, false).await?;
         if !current_export(tx.sql(), scope, &request).await? {
             tx.rollback().await?;
-            documents::discard_export(privacy, &mut client, scope, &request, &artifact).await?;
-            drop(client);
-            restart_export(privacy, execution, scope, &request).await?;
+            documents::discard_export(privacy, client, scope, &request, &artifact).await?;
+            restart_export(privacy, client, execution, scope, &request).await?;
             guard.release().await?;
             return Ok(Finish::Done);
         }
@@ -939,13 +934,13 @@ async fn current_export(
 /// Drops the staged exports and asks every store again, in one transaction.
 async fn restart_export(
     privacy: &Privacy,
+    client: &mut tokio_postgres::Client,
     execution: &Execution,
     scope: &Scope,
     request: &RequestView,
 ) -> Result<()> {
-    let mut client = privacy.db.get().await?;
     let mut tx = execution
-        .begin(&mut client, "privacy.request.export_restarted")
+        .begin(client, "privacy.request.export_restarted")
         .await?;
     let (tenant, id) = (scope.tenant(), request.id);
     let stores = tx.mutate(move |sql| {

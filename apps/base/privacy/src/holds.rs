@@ -74,16 +74,16 @@ impl HoldSource for Source {
             let key = tenant_key(tenant)?;
             let client = self
                 .db
-                .get_detached(
+                .try_get_detached(
                     "holds the shared hold guard in an open transaction while the erasure it \
                      protects runs on other connections; one per running erasure",
                 )
                 .await?;
-            client.batch_execute("BEGIN").await?;
             let session = Session {
                 client: Some(client),
                 tenant,
             };
+            session.client()?.batch_execute("BEGIN").await?;
             session
                 .client()?
                 .execute(
@@ -139,11 +139,9 @@ impl HoldSession for Session {
         })
     }
     fn release(mut self: Box<Self>) -> HandlerFuture<'static, ()> {
-        let client = self.client.take();
         Box::pin(async move {
-            if let Some(client) = client {
-                client.batch_execute("COMMIT").await?;
-            }
+            self.client()?.batch_execute("COMMIT").await?;
+            drop(self.client.take());
             Ok(())
         })
     }
