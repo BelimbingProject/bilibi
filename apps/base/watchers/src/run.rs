@@ -658,11 +658,30 @@ impl Worker {
                         .finish(execution, &mut client, run.id, (&budget, Stop::NoMatch), Some(decided))
                         .await;
                 }
+                let permits = match watchers
+                    .approved_script_permits(&**client, scope, run.version, &definition)
+                    .await?
+                {
+                    Ok(permits) => permits,
+                    Err(code) => {
+                        return self
+                            .finish(
+                                execution,
+                                &mut client,
+                                run.id,
+                                (&budget, Stop::Refused(code)),
+                                Some(decided),
+                            )
+                            .await
+                    }
+                };
                 let calls = match watchers
                     .plan_steps(
                         &**client,
                         scope,
+                        scope,
                         &definition,
+                        &permits,
                         (offered, &run.subject, subject_version),
                         budget.deadline,
                     )

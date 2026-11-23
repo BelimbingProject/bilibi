@@ -60,6 +60,8 @@ fn reason(code: &str) -> &'static str {
         "script_timeout" => "The script reached its time limit.",
         "script_refused" => "The script failed inside its sandbox.",
         "script_call_refused" => "The script requested a call outside its approved list.",
+        "script_lookup_refused" => "The script requested a read outside its approved lookups, or the read owner refused it.",
+        "script_permission_refused" => "This watcher is not permitted to run that particular script version.",
         "script_output" | "script_input" => "The script input or result exceeded its contract.",
         "script_unavailable" => "The script worker could not start.",
         "read_refused" => "Not run: automation may not read these records yet. An administrator allows it in Automation access.",
@@ -670,13 +672,13 @@ impl Show {
                 can_approve,
             )?);
         }
-        if let Some(running) = view
+        if let Some(version) = view
             .versions
             .iter()
             .skip(1)
-            .find(|v| Some(v.number) == view.summary.running)
+            .find(|version| Some(version.number) == view.summary.running)
         {
-            versions.push(self.version_card(&view, running, &display, None, true, can_approve)?);
+            versions.push(self.version_card(&view, version, &display, None, true, can_approve)?);
         }
         let mut rows = Vec::new();
         for run in &view.runs {

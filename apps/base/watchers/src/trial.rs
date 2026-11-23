@@ -379,6 +379,10 @@ impl Watchers {
             .await?;
         let trigger = self.trigger(&draft.trigger).ok_or(Error::Invalid)?;
         let definition: &Definition = draft.definition.as_ref().ok_or(Error::Invalid)?;
+        let permits = self
+            .reviewed_script_permits(client, scope, definition)
+            .await?
+            .map_err(|reason| bilibi_database::Error::Refused(reason.into()))?;
         let fields = definition.fact_fields(trigger.definition.version, false);
         // An observation tells about the fields it sends: the reader sees an
         // event only when they may read those too.
@@ -538,7 +542,7 @@ impl Watchers {
                                 return Ok(Some(base("script_facts_restricted")));
                             }
                         }
-                        let calls = match self.plan_steps(&tx, &principal, definition, (trigger, &subject, revision), budget.deadline).await? {
+                        let calls = match self.plan_steps(&tx, &principal, scope, definition, &permits, (trigger, &subject, revision), budget.deadline).await? {
                             Ok(calls) => calls,
                             Err(reason) => return Ok(Some(base(reason))),
                         };

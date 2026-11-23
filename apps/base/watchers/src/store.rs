@@ -1,7 +1,7 @@
 //! The `Watchers` facade and the reads the page and agents share: the tenant's
 //! watchers, one watcher with its versions and receipts, and what watchers may use
 //! here. Writing a watcher is `review.rs`.
-use crate::catalog::{OfferedAction, OfferedTrigger, Offers};
+use crate::catalog::{OfferedAction, OfferedLookup, OfferedTrigger, Offers};
 use crate::definition;
 use crate::{
     ACTIONS_PER_RUN, ACTIVE_PER_TRIGGER, CHAIN_DEPTH, CONDITIONS, EXAMPLES, FACTS_READ,
@@ -22,6 +22,7 @@ use tokio_postgres::GenericClient;
 pub struct Watchers {
     pub(crate) db: Db,
     pub(crate) jobs: Arc<JobContracts>,
+    pub(crate) registry: Arc<bilibi_agent_api::Registry>,
     pub(crate) mutations: Arc<bilibi_database::MutationBoundary>,
     pub(crate) events: Arc<bilibi_events::Events>,
     pub(crate) queue: Arc<bilibi_queue::Queue>,
@@ -151,6 +152,9 @@ impl Watchers {
     }
     pub(crate) fn action(&self, key: &str) -> Option<&OfferedAction> {
         self.offers.actions.get(key)
+    }
+    pub(crate) fn lookup(&self, key: &str) -> Option<&OfferedLookup> {
+        self.offers.lookups.get(key)
     }
     fn summary(&self, row: &tokio_postgres::Row) -> WatcherSummary {
         let trigger: String = row.get(2);
@@ -667,9 +671,20 @@ impl Watchers {
                     "subject": a.definition.subject, "records": a.definition.records, "local_script": a.local_script, "input": input})
             })
             .collect();
+        let mut lookups = Vec::new();
+        for lookup in self.offers.lookups.values() {
+            lookups.push(json!({
+                "operation": lookup.key,
+                "title": lookup.title,
+                "input": lookup.input,
+                "output": lookup.output,
+                "available": bilibi_authz::decide(client, scope, lookup.capability).await?.allowed,
+            }));
+        }
         Ok(json!({
             "triggers": triggers,
             "actions": actions,
+            "lookups": lookups,
             "operators": definition::Op::ALL,
             "observation": {
                 "facts": [
