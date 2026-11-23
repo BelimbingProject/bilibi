@@ -1042,7 +1042,7 @@ impl Editor {
                 let field = vocab.field(&self.trigger, path);
                 let label = field.map_or(path.as_str(), |f| f.label.as_str());
                 body.push(&Self::typed(
-                    format!("{dom}-f-{path}"),
+                    format!("{dom}-f-{}", path.replace('.', "-")),
                     format!("e[f_{path}]"),
                     label,
                     field,

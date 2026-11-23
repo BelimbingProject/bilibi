@@ -332,12 +332,14 @@ impl Show {
         view: &WatcherView,
         version: &VersionView,
         display: &DisplayContext,
+        labels: Option<&bilibi_grid::Catalog>,
         review: Option<&crate::Review>,
         running: bool,
         can_approve: bool,
     ) -> Result<Html> {
         let watchers = &self.pages.watchers;
         let described = watchers.describe(
+            labels,
             &view.summary.trigger,
             &version.definition,
             &version.examples,
@@ -519,6 +521,10 @@ impl Show {
             ),
             _ => None,
         };
+        // Conditions read in the reader's own words: a tenant custom field by
+        // its label, a linked record's field by its link.
+        let labels = bilibi_grid::Catalog::for_scope(&**client, scope).await.ok();
+        let labels = labels.as_ref();
         drop(client);
         let header = render(Header {
             title: Html::text(&view.summary.name),
@@ -620,6 +626,7 @@ impl Show {
                 &view,
                 version,
                 &display,
+                labels,
                 review.as_ref(),
                 running,
                 can_approve,
@@ -631,104 +638,12 @@ impl Show {
             .skip(1)
             .find(|version| Some(version.number) == view.summary.running)
         {
-            versions.push(self.version_card(&view, version, &display, None, true, can_approve)?);
-        }
-        let mut rows = Vec::new();
-        for run in &view.runs {
-            let described = latest
-                .filter(|v| v.number == run.version)
-                .or_else(|| view.versions.iter().find(|v| v.number == run.version))
-                .map(|v| {
-                    pages
-                        .watchers
-                        .describe(&view.summary.trigger, &v.definition, &v.examples)
-                });
-            let lines = described.as_ref().map(|d| why(run, d)).unwrap_or_default();
-            let id = run.id.to_string();
-            let mut row = FlexRow::new(id.clone())
-                .slot(
-                    "at",
-                    render(InstantCell {
-                        id: &format!("watcher-run-at-{id}"),
-                        i: instant(&display, run.created_at),
-                    })?,
-                )
-                .slot("record", Html::text(&run.subject))
-                .slot("version", Html::text(&run.version.to_string()))
-                .slot("outcome", outcome_badge(run)?)
-                .slot("why", render(Lines { lines: &lines })?);
-            row.dom_id = Some(format!("watcher-run-{id}"));
-            rows.push(row);
-        }
-        self.columns.load(&view.runs, |run| run.id.to_string());
-        let mut table = FlexTable::new("watcher-runs", self.columns.flex_columns(), rows);
-        table.zoom = self.columns.zoom;
-        table.caption = "Recent runs";
-        table.framed = false;
-        if view.runs.is_empty() {
-            table.empty = Some(TableEmpty::Content(Html::text(
-                "No runs yet. Each new event this watcher's trigger records shows here with why it matched and what it did.",
-            )));
-        }
-        let runs = render(Card {
-            id: "watcher-runs-card",
-            title: "Recent runs",
-            inner_class: "p-0",
-            body: render(table)?,
-            ..Card::default()
-        })?;
-        let mut dialog = match &self.request {
-            Some(request) => {
-                let consequence = format!(
-                    "Approve version {} of \u{201c}{}\u{201d}?",
-                    request.number, view.summary.name
-                );
-                let detail = format!(
-                    "From now on it runs each time \u{201c}{}\u{201d}, without AI. A run still waiting for an earlier version will not act.",
-                    view.summary.trigger_title
-                );
-                render(ConfirmDialog {
-                    id: "watcher-approve-confirm",
-                    consequence: &consequence,
-                    detail: &detail,
-                    confirm: "Approve",
-                    working: "Approving…",
-                    confirm_event: "approve",
-                    cancel_event: "cancel_approve",
-                })?
-            }
-            None => Html::EMPTY,
-        };
-        if let Some(editor) = &self.editor {
-            dialog.push(&editor.dialog(&pages, scope).await?);
-        }
-        ShowView {
-            flash: flash_map(&self.flash),
-            watcher_id: self.id.to_string(),
-            header,
-            summary,
-            versions,
-            runs,
-            dialog,
-        }
-        .render()
-        .map_err(|_| Error::Internal)
-    }
-}
-impl LiveState<Scope, Error> for Show {
-    fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
-        Box::pin(async move {
-            match request.input {
-                LiveInput::Refresh | LiveInput::Params(_) => {}
-                LiveInput::Event(value) => {
-                    self.event(request.scope, request.credential, value).await?
-                }
-            }
-            let html = self.render(request.scope).await?;
-            Ok(LiveBody {
-                html,
-                ..LiveBody::default()
-            })
-        })
-    }
-}
+            versions.push(self.version_card(
+                &view,
+                version,
+                &display,
+                labels,
+                None,
+                true,
+                can_approve,
+            )?);

@@ -1211,7 +1211,9 @@ pub(crate) fn bind(
 
 /// A stored version in words, for reading: conditions with their fields'
 /// labels, actions with their titles and parameters, examples. Labels come
-/// from the installed catalogs; values from the version itself.
+/// from the reader's catalog when one is given (a tenant custom field's label,
+/// a linked record's field as `Company › Segment`), else from the installed
+/// catalogs; values from the version itself.
 pub(crate) struct Described {
     pub scripted: bool,
     pub matching: &'static str,
@@ -1222,6 +1224,7 @@ pub(crate) struct Described {
 impl Watchers {
     pub(crate) fn describe(
         &self,
+        reader: Option<&Catalog>,
         trigger: &str,
         definition: &Value,
         examples: &Value,
@@ -1232,9 +1235,17 @@ impl Watchers {
             .trigger(trigger)
             .and_then(|t| bilibi_grid::installed().ok()?.table(t.definition.table));
         let label = |path: &str| {
-            table
-                .and_then(|t| t.field(path))
-                .map_or_else(|| path.to_owned(), |f| f.label.to_owned())
+            reader
+                .and_then(|catalog| {
+                    let root = catalog.table(table?.id())?;
+                    catalog.resolve(root, path).ok().map(|column| column.label)
+                })
+                .or_else(|| {
+                    table
+                        .and_then(|t| t.field(path))
+                        .map(|f| f.label.to_owned())
+                })
+                .unwrap_or_else(|| path.to_owned())
         };
         let Some(parsed) = parsed else {
             return Described {

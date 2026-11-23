@@ -743,6 +743,16 @@ async fn linked_custom_field_proof(proof: &Proof) -> Result<()> {
         .await?;
 
     println!("\n== A trial reads the linked field the same way");
+    proof
+        .open(
+            &one,
+            5,
+            "Silver company's earlier question",
+            "low",
+            "800.00",
+        )
+        .await?;
+    proof.settled().await?;
     let registry = proof
         .services
         .get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
