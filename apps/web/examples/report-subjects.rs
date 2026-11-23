@@ -9,22 +9,22 @@
 //!
 //! BILIBI_REPORT_SUBJECTS=disposable cargo run -p bilibi-web --example report-subjects
 use bilibi_authz::{
-    CapabilityDefinition, Reach, RoleDefinition, VOCABULARY, VocabularyContribution,
     grants::{CreatedRole, Grants},
     roles::NewRole,
+    CapabilityDefinition, Reach, RoleDefinition, VocabularyContribution, VOCABULARY,
 };
 use bilibi_base::reports::{
     Definition, Draft, FilterDef, Format, GroupingDef, Kind, MeasureDef, ReportError, Reports,
     RunInput, RunResult,
 };
-use bilibi_database::{Db, MutationBoundary, pool};
+use bilibi_database::{pool, Db, MutationBoundary};
 use bilibi_grid::{
     Bounds, Field, FieldType, GridContribution, LinkDecl, LinkKind, PageSpec, Source, TableDecl,
 };
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance};
 use bilibi_records::{Access, RecordKind, RecordOwner, Records};
 use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();

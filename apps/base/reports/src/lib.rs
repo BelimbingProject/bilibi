@@ -17,10 +17,10 @@ mod wording;
 
 #[doc(hidden)]
 pub use bilibi_module_registry::{Contribution, Provenance};
-pub use builtin::{BUILTINS, Builtin};
+pub use builtin::{Builtin, BUILTINS};
 pub use contributions::{AUTHOR, EXPORT, MANAGE, SCHEDULE, SHARE, VIEW};
 pub use definition::{
-    CHARTS, Definition, FilterDef, GroupingDef, Kind, MAX_COLUMNS, MeasureDef, SortDef,
+    Definition, FilterDef, GroupingDef, Kind, MeasureDef, SortDef, CHARTS, MAX_COLUMNS,
 };
 pub use export::{File, Format};
 pub use exports::Prepared;
@@ -37,7 +37,7 @@ use bilibi_grid::{Catalog, Column, FieldType, Filter, PageSpec, QueryError, Summ
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::Scope;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const SERVICE: &str = "base/reports.reports";

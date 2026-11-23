@@ -1,4 +1,4 @@
-use crate::{Bounds, Catalog, FieldType, QueryError, Table, query::ident};
+use crate::{query::ident, Bounds, Catalog, FieldType, QueryError, Table};
 use bilibi_module_registry::RegistryError;
 use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
 use serde_json::Value;
@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::Duration,
 };
-use tokio_postgres::{Transaction, types::ToSql};
+use tokio_postgres::{types::ToSql, Transaction};
 
 pub trait SubjectAccess: Send + Sync {
     fn integer_key(&self, kind: &str) -> bool;

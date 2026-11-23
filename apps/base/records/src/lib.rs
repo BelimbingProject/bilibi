@@ -11,14 +11,14 @@ mod operations;
 mod records;
 
 pub use declaration::{
-    Access, HOLDERS, Holder, KINDS, PORTAL_STEP_UP, PortalProtection, PortalStepUp, RecordKind,
-    RecordOwner,
+    Access, Holder, PortalProtection, PortalStepUp, RecordKind, RecordOwner, HOLDERS, KINDS,
+    PORTAL_STEP_UP,
 };
-pub use drops::{AddTo, DROP_EVENT, DROP_PARAM, DROP_TARGETS, DropRefusal, DropTarget, MAX_DROP};
+pub use drops::{AddTo, DropRefusal, DropTarget, DROP_EVENT, DROP_PARAM, DROP_TARGETS, MAX_DROP};
 pub use matching::ReferenceMatch;
 pub use records::{
-    Hit, MAX_PER_KIND, MAX_SEARCH_KINDS, PICKER_HITS, Records, Reference, Referrers, Refusal,
-    Resolved,
+    Hit, Records, Reference, Referrers, Refusal, Resolved, MAX_PER_KIND, MAX_SEARCH_KINDS,
+    PICKER_HITS,
 };
 #[doc(hidden)]
 pub use {
@@ -26,12 +26,12 @@ pub use {
     inventory,
 };
 
-use bilibi_authz::{CapabilityDefinition, RoleDefinition, VOCABULARY, VocabularyContribution};
+use bilibi_authz::{CapabilityDefinition, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::{
+    contributions::{Method, Route, ROUTES},
     Catalog, Module, RegistryError, Service,
-    contributions::{Method, ROUTES, Route},
 };
-use bilibi_settings::{DEFINITIONS, Definition, Editor, ScopeKind, Setting, ValueType};
+use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 

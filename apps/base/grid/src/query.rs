@@ -1,10 +1,10 @@
 //! Page-only projections. Every table and edge comes from its owner's scoped
 //! source. The caller supplies specs, never trusted resolved columns or SQL.
 use crate::lens::{self, Range, TREND_MONTHS};
-use crate::{Agg, Bounds, Catalog, Column, ColumnError, Join, Link, LinkKind, MAX_COLUMNS, Table};
+use crate::{Agg, Bounds, Catalog, Column, ColumnError, Join, Link, LinkKind, Table, MAX_COLUMNS};
 use bilibi_database::{Db, Error};
 use bilibi_tenancy::Scope;
-use jiff::{ToSpan, civil};
+use jiff::{civil, ToSpan};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},

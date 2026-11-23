@@ -11,12 +11,12 @@
 use crate::declaration::{Access, Holder, PortalStepUp, RecordKind};
 use bilibi_database::{Change, Db, Error, MutationTransaction, Result};
 use bilibi_grid::{
-    BOUNDS, FieldType, Filter, MAX_CHOICES, QueryError, SummarySpec, Test, query::text_search_sql,
+    query::text_search_sql, FieldType, Filter, QueryError, SummarySpec, Test, BOUNDS, MAX_CHOICES,
 };
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{ReadClient, Scope};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,

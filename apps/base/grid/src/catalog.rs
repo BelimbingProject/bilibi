@@ -14,7 +14,7 @@ use std::{
     fmt,
     sync::{Arc, Mutex, OnceLock},
 };
-use tokio_postgres::{GenericClient, types::Type};
+use tokio_postgres::{types::Type, GenericClient};
 
 pub const MAX_COLUMNS: usize = 32;
 pub const MAX_SUGGESTIONS: usize = 50;

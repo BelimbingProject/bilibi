@@ -2,11 +2,11 @@
 use crate::{
     Agg, Bounds, Catalog, Lenses, Line, PageSpec, Projection, QueryError, Summary, SummarySpec,
 };
-use bilibi_audit::{Attribution, OversightRead, record_action, record_oversight_read};
+use bilibi_audit::{record_action, record_oversight_read, Attribution, OversightRead};
 use bilibi_database::{Connection, Db, Error};
-use bilibi_settings::{DEFINITIONS, Definition, Editor, ScopeKind, Setting, Settings, ValueType};
+use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Settings, ValueType, DEFINITIONS};
 use bilibi_tenancy::{ChildGrant, Oversight, OversightScope, Scope};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::{
     task::JoinSet,
-    time::{Instant, timeout, timeout_at},
+    time::{timeout, timeout_at, Instant},
 };
 
 pub const OVERSIGHT_QUERIES: &str = "base/grid.oversight";

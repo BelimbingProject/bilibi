@@ -1,5 +1,5 @@
 //! A row report's resolved filters, sorts, columns, bounds and time zone.
-use crate::{Outcome, grid};
+use crate::{grid, Outcome};
 use bilibi_grid::{Bounds, Column, Filter, PageSpec, Sort};
 use bilibi_tenancy::Scope;
 use serde_json::Value;
