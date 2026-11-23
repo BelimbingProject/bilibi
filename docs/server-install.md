@@ -12,11 +12,15 @@ sudo scripts/install-server.sh release production /path/to/bilibi-setup-v1.0.0-x
 ```
 
 ```sh
-sudo scripts/install-server.sh create-owner production
+printf '%s\n' "$RELAY_PASSWORD" | sudo scripts/install-server.sh mail production --host smtp.example.net --port 587 \
+    --tls starttls --username relay-user --from-address bilibi@example.com --password-stdin
+sudo scripts/install-server.sh create-owner production --email owner@example.com --company-name "Example Operations"
 sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
 ```
 
-The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and the proxy site, and prints what to do next. The second copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The third asks you for your organisation's name, your email and a password, and creates the first account: the server owner. The fourth starts the installer, the service that puts later releases into service when the owner asks on the Software page. Open `https://erp.example.com`, sign in with that email, and Caddy serves the app, with a certificate it fetched itself.
+The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and the proxy site, and prints what to do next. The second copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The third sets the mail relay. The fourth creates the first account, the server owner, and emails the owner a claim link: the owner chooses a password there and sets up 2FA. The fifth starts the installer, the service that puts later releases into service when the owner asks on the Software page. Open `https://erp.example.com`, sign in with that email, and Caddy serves the app, with a certificate it fetched itself.
+
+Letting an AI assistant do the install? Give it [the Install Bilibi skill](install-with-ai/SKILL.md). Every command takes `--json` for one machine-readable line per step, with a stable error code and what to do next.
 
 ### Verify the server tools first
 
@@ -190,7 +194,7 @@ sudo scripts/install-server.sh switch production 1
 > [!WARNING]
 > Migrations are forward-only. Switching back to an older release after a newer one changed tables leaves those changes in place; the older program may not expect them. That case is the Software page's Undo, which restores the backup the installer took first and says what would be lost, with a count. Use `switch` only for releases that share the same database shape.
 
-`status` names the server's GitHub App, if any, then lists every instance, its role, address, service and installer states, and releases.
+`status` names the server's GitHub App, if any, then lists every instance, its role, address, service, installer and mail states, and releases. It says so first when another run is still working: only one run goes at a time, a rerun waits for the earlier one, and a dropped connection does not stop a run on the server.
 
 ## Private application repositories
 
@@ -250,53 +254,53 @@ The installer unit is skipped quietly while `/opt/bilibi/build/bin/bilibi-instal
 
 ## The first account
 
-A fresh database has no accounts, so nobody can sign in. `create-owner` creates the platform operator's first account. This server owner is a Core Administrator of the organisation that runs the server. Run it once, after the first release is in service:
+A fresh database has no accounts, so nobody can sign in. `create-owner` creates the platform operator's first account, the server owner (a Core Administrator of the organisation that runs the server), and emails the owner a link to claim it. No password passes through the command: the owner chooses it from the link, then sets up 2FA. Set up [outgoing mail](#outgoing-mail) first, then run it after the first release is in service:
 
 ```sh
-sudo scripts/install-server.sh create-owner production
+sudo scripts/install-server.sh create-owner production --email owner@example.com --name "Ng Kiat Siong" --company-name "Example Operations"
 ```
 
-It asks at the terminal, and what you type for the password is not shown:
-
 ```
-Operator company name (your organisation): Example Operations
-Operator company code [example_operations]:
-Owner email: owner@example.com
-Owner name [owner]: Ng Kiat Siong
-Password:
-Confirm password:
 Platform operator ready: tenant 1 “Example Operations”, company 1 “Example Operations”.
 Owner created: owner@example.com (account 1), Core Administrator of the platform operator.
 The owner now has a Person, business affiliation and desk in the platform operator's company.
-Sign in at https://erp.example.com/login as owner@example.com.
+A claim link was emailed to owner@example.com. The owner opens it, chooses a password, signs in at https://erp.example.com/login and sets up 2FA.
+Next: when the owner has done both, rerun the same command to confirm.
+Owner claim: sent
 ```
 
-Notice that the company questions come first only on a database that has no operator company yet. If you ran `bilibi-web platform-provision` before, the command finds that company and asks only about the account. The password must be at least 8 characters; a shorter one is refused and asked for again.
+- `--company-name` (and optional `--company-code`, `--tenant-name`) is needed only while no operator company exists; `bilibi-web platform-provision` may have made one.
+- `--name` defaults to the part of the email before `@`.
+- **Run it again at any time.** It never creates a second owner. It finishes an unfinished Person, affiliation and desk, resends the link while the owner has not chosen a password, and reports the claim. The last line is always `Owner claim: <state>`:
 
-**Run it a second time and it refuses**, because the server already has an owner:
+| State | Meaning |
+| --- | --- |
+| `sent` | The link was emailed now |
+| `recently-sent` | A link went out less than a minute ago and still works |
+| `password-chosen` | The owner chose a password; 2FA is not set up yet |
+| `claimed` | Password and 2FA are set up: the install is finished |
+| `mail-not-ready`, `not-delivered` | Mail cannot be sent; fix [outgoing mail](#outgoing-mail) and rerun |
 
-```
-Not created: this install already has an owner. The platform operator holds 1 account(s); the first is owner@example.com.
-Sign in as one of them at https://erp.example.com/login. To add people, use Users > Invite user there.
-If nobody can sign in any more, that is account recovery, which this command does not do. If an owner only lost their phone, see [Lost phone](#lost-phone).
-```
+The link is a password-reset link and expires with the **Password reset link lifetime** setting (three days by default). The command has no option to create or claim the owner without that email, on purpose: whoever runs the install never holds the owner's sign-in. Root on the server can still change anything; this guards against mistakes and shortcuts, not a malicious administrator.
 
-If the earlier run left the existing owner's Person, business affiliation and first desk unfinished, rerunning completes that setup.
-
-The command is the same `bilibi-web create-owner` the script runs for you, in the instance's environment. From a script with no terminal, give every answer as a flag and the password on standard input:
-
-```sh
-printf '%s\n' "$PASSWORD" | sudo scripts/install-server.sh create-owner production \
-    --company-name "Example Operations" --company-code example_operations \
-    --email owner@example.com --name "Ng Kiat Siong" --password-stdin
-```
-
-> [!WARNING]
-> There is no `--password` flag, on purpose: an argument lands in your shell history and in the process list. Type it, or pipe it in with `--password-stdin`.
-
-Everything the command creates is written the way the app writes it, so it shows in the audit log under Administration → Audit Log → Actions as **System · create-owner**: the retained `user.bootstrap.completed` action with the account, email and role, and the data changes for the account, its Core Administrator role and the bootstrap receipt that marks the account as the server owner. The command works with any `BILIBI_ENV`; on Dev, the development seed's `ai@agent.my` already exists and the command refuses, which is the point.
+Everything the command creates is written the way the app writes it, so it shows in the audit log under Administration → Audit Log → Actions as **System · create-owner**: the retained `user.bootstrap.completed` action with the account, email and role, and the data changes for the account, its Core Administrator role and the bootstrap receipt that marks the account as the server owner. The emailed link is recorded as `user.reset_requested`. On Dev, the development seed's `ai@agent.my` already exists and the command reports that owner instead.
 
 Behind the scenes this is the development seed's bootstrap with your details instead of the seed's, through the same owners: Company provisions the operator company, User creates the account and receipt, Authz grants the role, and User gives the owner a Person, business affiliation and first desk ([`apps/core/user/README.md`](../apps/core/user/README.md), Bootstrap administrator).
+
+## Outgoing mail
+
+Staging and Production send no mail until the instance has an SMTP relay, and the owner's claim link is the first mail. `mail` writes the relay into the instance's `env` and restarts a running service. The password comes on standard input:
+
+```sh
+printf '%s\n' "$RELAY_PASSWORD" | sudo scripts/install-server.sh mail production --host smtp.example.net --port 587 \
+    --tls starttls --username relay-user --from-address bilibi@example.com --from-name "Example Operations" --password-stdin
+```
+
+Use `--tls implicit_tls` for port 465. Rerun it to change any value. The variables are described in [Mail](../apps/base/mail/README.md#choosing-the-transport).
+
+## Machine-readable mode
+
+Put `--json` before any command (`create`, `release`, `installer`, `mail`, `create-owner`, `switch`, `status`) to get one JSON object per line instead of text, for an AI assistant or script: a `started` line, then the result with `state` (`completed` or `failed`), `code` (`OK` or a stable error name), `next` (what to do), `claim` (from `create-owner`) and `detail` (the full text output). The codes are listed in [the Install Bilibi skill](install-with-ai/SKILL.md#error-codes). Every command is safe to rerun after a failure or interruption: `create` keeps what exists and reuses the saved database password, `release` completes without changes when the same verified release is already in service, and `create-owner` never creates a second owner. A public site (no `--tls`) is refused with `DNS_NOT_FOUND` until its name resolves.
 
 ### The first owner of a customer tenant
 
@@ -403,7 +407,9 @@ Script commands:
 | --- | --- |
 | `create <instance> --role dev\|staging\|production --site <host> [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy site. Rerun to change the site; the saved role is preserved and the port stays fixed. Change the role in Instance settings with 2FA |
 | `release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance and checksums, copy into `releases/<n>`, migrate, switch, check |
-| `create-owner <instance> [--email <address>] [--name <name>] [--password-stdin] [--company-name <name> --company-code <code>]` | [Server owner setup](#the-first-account) |
+| `mail <instance> --host <relay> --port <n> --username <user> --tls starttls\|implicit_tls --from-address <address> [--from-name <name>] --password-stdin` | [Outgoing mail](#outgoing-mail) relay in `env`; restarts a running service |
+| `create-owner <instance> --email <address> [--name <name>] [--company-name <name> [--company-code <code>] [--tenant-name <name>]]` | [Server owner setup](#the-first-account): creates the owner and emails the claim link; rerun to resend or check the claim |
+| `--json <command> ...` | [Machine-readable mode](#machine-readable-mode) |
 | `tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>` | [Customer tenant and first-owner setup](#the-first-owner-of-a-customer-tenant) |
 | `two-factor-reset <instance> --email <address>` | Turn off one staff account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
 | `identity-recover <instance> --email <old> --new-email <new>` | Recover an installation-wide staff sign-in address and sign it out everywhere |

@@ -1,33 +1,31 @@
 //! `bilibi-web create-owner`: the first owner account of an install, for a
-//! production database the development seed never touches. The account takes the
-//! operator's own attributes instead of the seed's. Everything is written by
-//! the owners: Company provisions the operator tenant and its company, User
+//! production database the development seed never touches. The account takes
+//! the operator's own attributes instead of the seed's. Everything is written
+//! by the owners: Company provisions the operator tenant and its company, User
 //! creates the account and the bootstrap receipt on the audited mutation
 //! boundary, Authz grants the role, and User then gives the account its
-//! Person, business affiliation and first desk. The host only asks the
-//! questions.
+//! Person, business affiliation and first desk. The host only reads flags.
 //!
-//! The password never comes from an argument, so it never lands in a shell
-//! history or a process list: it is typed at the terminal with echo off, or
-//! read from the first line of standard input with `--password-stdin`.
-use bilibi_authz::grants::Grants;
+//! No password passes through this command. The owner claims the account
+//! from an emailed link (choose a password), then sets up 2FA; rerunning the
+//! command resends the link until the password is chosen and reports the
+//! claim afterwards, so whoever runs the install never holds the owner's
+//! sign-in. The last line is always `Owner claim: <state>`.
 use bilibi_company::{self as primary, NewCompany, ProvisionOutcome};
 use bilibi_database::{Db, Error, Result};
 use bilibi_user::{
     validate_first_administrator, BootstrapAffiliation, FieldError, FirstAdministrator,
-    FirstAdministratorError, OperatorAccounts, OperatorCompany,
+    FirstAdministratorError, OperatorCompany, OwnerClaim, OwnerClaimError,
 };
-use std::io::{BufRead, IsTerminal, Write};
 
-const USAGE: &str =
-    "usage: bilibi-web create-owner [--email ADDRESS] [--name NAME] [--password-stdin]
-                               [--company-name NAME --company-code CODE [--tenant-name NAME]]
-Creates the first owner account of this install (the platform operator's administrator).
-Asks at the terminal for anything not given. The password is typed with echo off, or is the
-first line of standard input with --password-stdin (typed once, with echo off, at a terminal);
-it is never an argument. Once an owner exists it creates no other; it only finishes that
-owner's unfinished Person, business affiliation and first desk setup.
-The company flags are needed only while no platform-operator company exists yet.";
+const USAGE: &str = "usage: bilibi-web create-owner --email ADDRESS [--name NAME]
+                               [--company-name NAME [--company-code CODE] [--tenant-name NAME]]
+Creates the first owner account of this install (the platform operator's administrator) and
+emails the owner a link to claim it: they choose their password there, then set up 2FA.
+Safe to repeat: once an owner exists it creates no other, finishes that owner's unfinished
+Person, business affiliation and first desk, resends the claim link while no password has
+been chosen, and reports the claim. --company-name is needed only while no
+platform-operator company exists yet.";
 
 #[derive(Default)]
 struct Options {
@@ -36,20 +34,12 @@ struct Options {
     company_name: Option<String>,
     company_code: Option<String>,
     tenant_name: Option<String>,
-    password_stdin: bool,
 }
 
 fn parse(args: &[String]) -> Option<Options> {
     let mut options = Options::default();
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
-        if flag == "--password-stdin" {
-            if options.password_stdin {
-                return None;
-            }
-            options.password_stdin = true;
-            continue;
-        }
         let slot = match flag.as_str() {
             "--email" => &mut options.email,
             "--name" => &mut options.name,
@@ -71,86 +61,71 @@ fn usage() -> Error {
     Error::Invalid
 }
 
-/// The operator company to provision when the database has none yet.
-struct NewOperator {
-    name: String,
-    code: String,
-    tenant_name: String,
-}
-
 pub async fn create_owner(db: &Db, args: &[String]) -> Result<()> {
     let options = parse(args).ok_or_else(usage)?;
-    let interactive = std::io::stdin().is_terminal();
-    if !interactive && !options.password_stdin {
-        eprintln!("No terminal to ask for the password: pass --password-stdin and write it on the first line of standard input.");
-        return Err(usage());
-    }
     let origin = std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into());
     let app = crate::App::new(db.clone(), &origin)?;
-    let grants = app.services.get::<Grants>("base/authz.grants")?;
+    let grants = app
+        .services
+        .get::<bilibi_authz::grants::Grants>("base/authz.grants")?;
 
-    // Whether an owner exists is settled before any question. Then every
-    // question first, then the validation, so nothing is provisioned for an
-    // answer that is refused.
+    // Whether an owner exists is settled first: then no account is created,
+    // and the claim of the real owner is reported, never one typed here.
     let existing = existing_operator(db).await?;
     if let Some(operator) = &existing {
         if let Some(accounts) = app.user.operator_accounts(operator.tenant).await? {
-            return finish_existing_owner(&app, &origin, accounts).await;
-        }
-    }
-    let new_operator = match existing {
-        Some(_) => {
-            if options.company_name.is_some() || options.company_code.is_some() {
-                println!("The platform operator's company already exists; the company flags are not used.");
+            if options
+                .email
+                .as_deref()
+                .is_some_and(|email| !email.eq_ignore_ascii_case(&accounts.first))
+            {
+                println!(
+                    "This install already has an owner, {}; no second owner was created.",
+                    accounts.first
+                );
             }
-            None
+            settle(&app).await?;
+            return claim(&app, &origin).await;
         }
-        None => {
-            let name = match &options.company_name {
-                Some(name) => name.clone(),
-                None => ask("Operator company name (your organisation): ", interactive)?,
-            };
-            let code = match &options.company_code {
-                Some(code) => code.clone(),
-                None => ask_or_default("Operator company code", suggest_code(&name), interactive)?,
-            };
-            Some(NewOperator {
-                name,
-                code,
-                tenant_name: options.tenant_name.clone().unwrap_or_default(),
-            })
-        }
-    };
-    let mut input = FirstAdministrator {
-        email: options.email.clone().unwrap_or_default(),
-        name: options.name.clone().unwrap_or_default(),
-        password: String::new(),
-    };
-    if input.email.is_empty() {
-        input.email = ask("Owner email: ", interactive)?;
     }
-    if input.name.is_empty() {
-        let suggested = input.email.split('@').next().unwrap_or_default().to_owned();
-        input.name = ask_or_default("Owner name", suggested, interactive)?;
-    }
-    input.password = if options.password_stdin {
-        if interactive {
-            hidden("Password: ")?
-        } else {
-            read_raw_line()?
-        }
-    } else {
-        ask_password()?
+    let input = FirstAdministrator {
+        email: options.email.clone().ok_or_else(usage)?,
+        name: options.name.clone().unwrap_or_else(|| {
+            let email = options.email.as_deref().unwrap_or_default();
+            email.split('@').next().unwrap_or_default().to_owned()
+        }),
     };
     let errors = validate_first_administrator(&input);
     if !errors.is_empty() {
         return Err(report(&errors));
     }
-
-    let operator = match (existing, new_operator) {
-        (Some(operator), _) => operator,
-        (None, Some(new)) => provision_operator(db, &new).await?,
-        (None, None) => return Err(Error::Internal),
+    let operator = match existing {
+        Some(operator) => {
+            if options.company_name.is_some() || options.company_code.is_some() {
+                println!("The platform operator's company already exists; the company flags are not used.");
+            }
+            operator
+        }
+        None => {
+            let Some(name) = options.company_name.clone() else {
+                eprintln!("No platform-operator company exists yet: pass --company-name.");
+                println!("Next: rerun with --company-name \"<your organisation>\".");
+                return Err(usage());
+            };
+            let code = options
+                .company_code
+                .clone()
+                .unwrap_or_else(|| suggest_code(&name));
+            provision_operator(
+                db,
+                &NewOperator {
+                    name,
+                    code,
+                    tenant_name: options.tenant_name.clone().unwrap_or_default(),
+                },
+            )
+            .await?
+        }
     };
     match app
         .user
@@ -169,8 +144,9 @@ pub async fn create_owner(db: &Db, args: &[String]) -> Result<()> {
                 }
             );
         }
-        Err(FirstAdministratorError::AccountsExist { count, first }) => {
-            return finish_existing_owner(&app, &origin, OperatorAccounts { count, first }).await;
+        // Another run created the owner meanwhile: report that one.
+        Err(FirstAdministratorError::AccountsExist { first, .. }) => {
+            println!("This install already has an owner, {first}; no second owner was created.");
         }
         Err(FirstAdministratorError::Validation(errors)) => return Err(report(&errors)),
         Err(FirstAdministratorError::NotOperator) => {
@@ -179,69 +155,94 @@ pub async fn create_owner(db: &Db, args: &[String]) -> Result<()> {
         }
         Err(FirstAdministratorError::Access(error)) => return Err(error),
     }
+    settle(&app).await?;
+    claim(&app, &origin).await
+}
+
+/// The owner's Person, business affiliation and first desk, finished when an
+/// earlier run left them unfinished.
+async fn settle(app: &crate::App) -> Result<()> {
     match app.user.settle_bootstrap_affiliation().await {
         Ok(BootstrapAffiliation::Linked { .. }) => {
             println!(
                 "The owner now has a Person, business affiliation and desk in the platform operator's company."
             );
+            Ok(())
         }
         Ok(BootstrapAffiliation::Deferred(reason)) => {
-            println!(
-                "The owner's Person, business affiliation and first desk are not ready yet: {reason}. Run this command again to finish the setup."
-            );
+            eprintln!("The owner's Person, business affiliation and first desk are not ready yet: {reason}.");
+            println!("Next: fix that, then rerun the same command.");
+            Err(Error::Invalid)
         }
-        Ok(_) => {}
+        Ok(_) => Ok(()),
         Err(error) => {
-            eprintln!("The owner was created, but their Person, business affiliation and first desk could not be set up. Run this command again to finish the setup.");
-            return Err(error);
+            eprintln!(
+                "The owner's Person, business affiliation and first desk could not be set up."
+            );
+            println!("Next: rerun the same command.");
+            Err(error)
         }
     }
-    println!("Sign in at {origin}/login as {}.", input.email);
-    Ok(())
 }
 
-/// An owner exists, so none is created: finish the owner's Person, business
-/// affiliation and first desk when the bootstrap is unfinished, and name the
-/// real owner, never an address typed here.
-async fn finish_existing_owner(
-    app: &crate::App,
-    origin: &str,
-    accounts: OperatorAccounts,
-) -> Result<()> {
-    let OperatorAccounts { count, first } = accounts;
-    let settled = app.user.settle_bootstrap_affiliation().await;
-    match &settled {
-        Ok(BootstrapAffiliation::Linked { .. }) => {
-            println!(
-                "This install already has an owner, {first}, whose Person, business affiliation and first desk setup was unfinished; that setup is finished now, and no second owner was created.\n\
-                 Sign in at {origin}/login as {first}."
-            );
-            return Ok(());
+/// Sends or reports the owner's claim. The last line names its state.
+async fn claim(app: &crate::App, origin: &str) -> Result<()> {
+    match app.user.claim_owner().await {
+        Ok(OwnerClaim::Sent { email }) => {
+            println!("A claim link was emailed to {email}. The owner opens it, chooses a password, signs in at {origin}/login and sets up 2FA.");
+            println!("Next: when the owner has chosen a password and set up 2FA, rerun the same command to confirm.");
+            println!("Owner claim: sent");
+            Ok(())
         }
-        Ok(BootstrapAffiliation::AlreadyLinked) => {
+        Ok(OwnerClaim::RecentlySent { email }) => {
+            println!("A claim link went to {email} less than a minute ago; it still works.");
             println!(
-                "This install already has an owner, {first}. The account already named a Person, so its existing workplace links were kept and the bootstrap was marked finished; no second owner was created.\n\
-                 Sign in at {origin}/login as {first}."
+                "Next: ask the owner to open it, or wait a minute and rerun to send a new one."
             );
-            return Ok(());
+            println!("Owner claim: recently-sent");
+            Ok(())
         }
-        _ => {}
+        Ok(OwnerClaim::PasswordChosen { email }) => {
+            println!("{email} chose a password but has not set up 2FA yet.");
+            println!("Next: the owner signs in at {origin}/login and sets up 2FA at {origin}/settings/two-factor; then rerun to confirm.");
+            println!("Owner claim: password-chosen");
+            Ok(())
+        }
+        Ok(OwnerClaim::Claimed { email }) => {
+            println!("{email} holds this server: password chosen and 2FA set up. Sign in at {origin}/login.");
+            println!("Owner claim: claimed");
+            Ok(())
+        }
+        Err(OwnerClaimError::MailNotReady(detail)) => {
+            eprintln!("The claim link cannot be emailed: {detail}");
+            println!("Next: set up outgoing mail with the server installer's mail command, then rerun the same command.");
+            println!("Code: MAIL_NOT_READY");
+            println!("Owner claim: mail-not-ready");
+            Err(Error::Invalid)
+        }
+        Err(OwnerClaimError::Delivery(detail)) => {
+            eprintln!("The claim link was not delivered: {detail}");
+            println!(
+                "Next: check the mail relay settings and the address, then rerun the same command."
+            );
+            println!("Code: MAIL_NOT_DELIVERED");
+            println!("Owner claim: not-delivered");
+            Err(Error::Invalid)
+        }
+        Err(OwnerClaimError::NoOwner) => {
+            eprintln!("This install has no owner account to claim.");
+            println!("Next: rerun the same command.");
+            Err(Error::Invalid)
+        }
+        Err(OwnerClaimError::Access(error)) => Err(error),
     }
-    eprintln!(
-        "Not created: this install already has an owner. The platform operator holds {count} account(s); the first is {first}.\n\
-         Sign in as one of them at {origin}/login. To add people, use Users > Invite user there.\n\
-         If nobody can sign in any more, that is account recovery, which this command does not do."
-    );
-    match settled {
-        Ok(BootstrapAffiliation::Deferred(reason)) => eprintln!(
-            "The owner's Person, business affiliation and first desk setup is still unfinished: {reason}. Fix that, then run this command again."
-        ),
-        Err(error) => eprintln!(
-            "The owner's Person, business affiliation and first desk setup could not be checked: {error}."
-        ),
-        Ok(_) => {}
-    }
-    Err(Error::Invalid)
+}
+
+/// The operator company to provision when the database has none yet.
+struct NewOperator {
+    name: String,
+    code: String,
+    tenant_name: String,
 }
 
 /// The marked operator tenant with its primary company, when both exist.
@@ -306,109 +307,4 @@ fn report(errors: &[FieldError]) -> Error {
         eprintln!("{}: {}", error.field, error.message);
     }
     Error::Invalid
-}
-
-/// One answer from the terminal. Without a terminal a missing value is a
-/// usage error, so a script never hangs on a prompt.
-fn ask(prompt: &str, interactive: bool) -> Result<String> {
-    if !interactive {
-        eprintln!("No terminal to ask for a value: pass every flag.");
-        return Err(usage());
-    }
-    print!("{prompt}");
-    std::io::stdout().flush().map_err(|_| Error::Internal)?;
-    Ok(read_raw_line()?.trim().to_owned())
-}
-
-/// A value with a default: shown in the prompt and taken on an empty answer,
-/// and taken without asking when there is no terminal.
-fn ask_or_default(prompt: &str, default: String, interactive: bool) -> Result<String> {
-    if !interactive {
-        return Ok(default);
-    }
-    let answer = ask(&format!("{prompt} [{default}]: "), interactive)?;
-    Ok(if answer.is_empty() { default } else { answer })
-}
-
-/// One line exactly as entered, minus its line terminator: a password is
-/// taken as sign-in takes it, with no whitespace trimmed.
-fn read_raw_line() -> Result<String> {
-    let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|_| Error::Internal)?;
-    Ok(line.trim_end_matches(['\n', '\r']).to_owned())
-}
-
-/// The password typed twice with echo off; the policy is checked here so the
-/// operator can retype at once rather than start over.
-fn ask_password() -> Result<String> {
-    for _ in 0..3 {
-        let password = hidden("Password: ")?;
-        if let Err(violation) = bilibi_user::password::check_policy(&password) {
-            eprintln!("password {violation}");
-            continue;
-        }
-        if hidden("Confirm password: ")? == password {
-            return Ok(password);
-        }
-        eprintln!("The two entries differ; try again.");
-    }
-    eprintln!("No password was set.");
-    Err(Error::Invalid)
-}
-
-/// Reads one line from the terminal without echoing it. Echo comes back
-/// on every way out: a return, an error or a panic.
-fn hidden(prompt: &str) -> Result<String> {
-    print!("{prompt}");
-    std::io::stdout().flush().map_err(|_| Error::Internal)?;
-    let echo_off = EchoOff::start()?;
-    let line = read_raw_line();
-    drop(echo_off);
-    println!();
-    line
-}
-
-/// Terminal echo is off on standard input while this value lives. Dropping
-/// it puts back the settings read at the start, so a panic while the
-/// password is typed cannot leave the operator's terminal without echo.
-struct EchoOff(libc::termios);
-
-#[expect(
-    unsafe_code,
-    reason = "the standard library has no terminal settings call; these are the only unsafe lines of the host"
-)]
-impl EchoOff {
-    fn start() -> Result<Self> {
-        // SAFETY: termios on the process's own standard input, with a
-        // zero-initialised struct the kernel fills in before it is read.
-        unsafe {
-            let mut term: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(libc::STDIN_FILENO, &mut term) != 0 {
-                return Err(Error::Internal);
-            }
-            // The guard exists before echo goes off, so a failed or partial
-            // change is undone as well.
-            let guard = Self(term);
-            term.c_lflag &= !libc::ECHO;
-            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &term) != 0 {
-                return Err(Error::Internal);
-            }
-            Ok(guard)
-        }
-    }
-}
-
-#[expect(
-    unsafe_code,
-    reason = "the standard library has no terminal settings call; these are the only unsafe lines of the host"
-)]
-impl Drop for EchoOff {
-    fn drop(&mut self) {
-        // SAFETY: restores the settings read in `start` on the same
-        // descriptor; nothing here can panic, so it is safe while unwinding.
-        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
-    }
 }

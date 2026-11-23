@@ -7,7 +7,8 @@
 #
 #   install-server.sh create <instance> --role dev|staging|production --site <host> [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
 #   install-server.sh release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
-#   install-server.sh create-owner <instance> [bilibi-web create-owner flags]
+#   install-server.sh mail <instance> --host <relay> --port <n> --username <user> --tls starttls|implicit_tls --from-address <address> [--from-name <name>] --password-stdin
+#   install-server.sh create-owner <instance> --email <owner address> [--name <name>] [--company-name <name>]
 #   install-server.sh tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>
 #   install-server.sh two-factor-reset <instance> --email <address>
 #   install-server.sh identity-recover <instance> --email <old> --new-email <new>
@@ -19,6 +20,7 @@
 #   install-server.sh verify <file> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
 #   install-server.sh switch <instance> <release number>
 #   install-server.sh status [<instance>]
+#   install-server.sh --json <command> ...   one JSON line per step, for an AI agent or script
 #
 # Only the layout, the first release and the installer service live here.
 # Build releases in a separate development checkout, then install a tested release here.
@@ -46,12 +48,19 @@ pg_bin=
 pg_service=
 
 usage() {
-    sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,/^set /p' "${BASH_SOURCE[0]}" | sed -n 's/^# \{0,1\}//p' >&2
     exit 2
 }
-fail() { printf 'install-server: %s\n' "$1" >&2; [[ -n ${2:-} ]] && printf 'Next: %s\n' "$2" >&2; exit 1; }
+# fail <message> [<what to do next>] [<CODE>]: the code is the stable name
+# `--json` reports, documented in docs/install-with-ai/SKILL.md.
+fail() {
+    printf 'install-server: %s\n' "$1" >&2
+    [[ -n ${2:-} ]] && printf 'Next: %s\n' "$2" >&2
+    [[ -n ${3:-} ]] && printf 'Code: %s\n' "$3" >&2
+    exit 1
+}
 say() { printf '%s\n' "$*"; }
-need_root() { [[ $(id -u) -eq 0 ]] || fail 'run this as root' "sudo $0 $*"; }
+need_root() { [[ $(id -u) -eq 0 ]] || fail 'run this as root' "sudo $0 $*" NOT_ROOT; }
 valid_name() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]; }
 valid_repository() { [[ $1 =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; }
 valid_setup_tag() { [[ $1 =~ ^setup-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
@@ -111,6 +120,21 @@ ensure_current_link() {
 service_state() { systemctl is-active "$unit_name$1" 2>/dev/null || true; }
 installer_state() { systemctl is-active "$installer_unit$1" 2>/dev/null || true; }
 
+# check_dns <site>: a public site gets its certificate from Let's Encrypt,
+# which needs the name to reach this server. Refuse before installing
+# anything while the name does not resolve; warn when it resolves to an
+# address this machine does not hold (normal behind a cloud NAT).
+check_dns() {
+    local site=$1 resolved local_addresses address
+    resolved=$({ getent ahosts "$site" 2>/dev/null || true; } | awk '{print $1}' | sort -u)
+    [[ -n $resolved ]] || fail "DNS for $site does not resolve yet" "add an A (and AAAA, if the server has IPv6) record for $site pointing at this server's public address, wait until it resolves, then rerun the same command" DNS_NOT_FOUND
+    local_addresses=$(ip -o addr show 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}')
+    while IFS= read -r address; do
+        grep -qxF -- "$address" <<<"$local_addresses" && return 0
+    done <<<"$resolved"
+    say "Warning: $site resolves to $(tr '\n' ' ' <<<"$resolved")which is not an address of this machine. That is fine behind a provider's NAT; otherwise fix the DNS record, or the certificate cannot be issued."
+}
+
 # ---------------------------------------------------------------- packages
 detect_os() {
     [[ -r /etc/os-release ]] || fail 'cannot detect this operating system: /etc/os-release is missing'
@@ -119,10 +143,10 @@ detect_os() {
     case " ${ID:-} ${ID_LIKE:-} " in
         *' debian '*) os_family=debian; pg_bin=/usr/bin; pg_service=postgresql ;;
         *' rocky '*|*' rhel '*|*' centos '*|*' almalinux '*)
-            [[ ${VERSION_ID%%.*} == 10 ]] || fail "${PRETTY_NAME:-This RHEL-family system} is not supported" 'use Rocky Linux 10 or RHEL 10'
+            [[ ${VERSION_ID%%.*} == 10 ]] || fail "${PRETTY_NAME:-This RHEL-family system} is not supported" 'use Rocky Linux 10 or RHEL 10' OS_UNSUPPORTED
             os_family=rhel; pg_bin="/usr/pgsql-$pg/bin"; pg_service="postgresql-$pg"
             ;;
-        *) fail "${PRETTY_NAME:-This operating system} is not supported" 'use Ubuntu, Debian, Rocky Linux 10 or RHEL 10' ;;
+        *) fail "${PRETTY_NAME:-This operating system} is not supported" 'use Ubuntu, Debian, Rocky Linux 10 or RHEL 10' OS_UNSUPPORTED ;;
     esac
 }
 apt_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q '^install ok installed$'; }
@@ -137,15 +161,17 @@ apt_install() {
     say "installing ${missing[*]} (details in $log)"
     apt_update
     apt-get install -y -qq --no-install-recommends "${missing[@]}" >>"$log" 2>&1 ||
-        fail "could not install ${missing[*]}" "see $log"
+        fail "could not install ${missing[*]}" "see $log, then rerun the same command" PACKAGE_INSTALL_FAILED
 }
-# apt_repo <name> <key url> <sources line with @KEYRING@>
+# apt_repo <name> <key url> <sources line with @KEYRING@> [asc|gpg]: the key file extension matches its format
 apt_repo() {
-    local ring=/usr/share/keyrings/$1.asc
+    # The key's own format decides the name: apt (sqv on Ubuntu 26.04) reads
+    # an .asc file only when it is ASCII-armored, a binary key only as .gpg.
+    local ring=/usr/share/keyrings/$1.${4:-asc}
     [[ -f /etc/apt/sources.list.d/$1.list ]] && return 0
     apt_install ca-certificates curl gnupg lsb-release
     install -d /usr/share/keyrings
-    curl -fsSL -o "$ring" "$2" || fail "could not download the signing key for $1" "check the server's internet access"
+    curl -fsSL -o "$ring" "$2" || fail "could not download the signing key for $1" "check the server's internet access, then rerun the same command" NETWORK_UNREACHABLE
     echo "${3//@KEYRING@/$ring}" >"/etc/apt/sources.list.d/$1.list"
     apt_updated=
     apt_update
@@ -169,20 +195,20 @@ dnf_install() {
     for p in "$@"; do rpm -q "$p" >/dev/null 2>&1 || missing+=("$p"); done
     ((${#missing[@]})) || return 0
     say "installing ${missing[*]} (details in $log)"
-    dnf install -y -q "${missing[@]}" >>"$log" 2>&1 || fail "could not install ${missing[*]}" "see $log"
+    dnf install -y -q "${missing[@]}" >>"$log" 2>&1 || fail "could not install ${missing[*]}" "see $log, then rerun the same command" PACKAGE_INSTALL_FAILED
 }
 install_rhel_packages() {
     dnf_install ca-certificates curl openssl python3 iproute sudo policycoreutils-python-utils firewalld dnf-plugins-core
     if ! rpm -q pgdg-redhat-repo >/dev/null 2>&1; then
         say "installing the PostgreSQL PGDG repository (details in $log)"
         dnf install -y -q "https://download.postgresql.org/pub/repos/yum/reporpms/EL-10-$(uname -m)/pgdg-redhat-repo-latest.noarch.rpm" >>"$log" 2>&1 ||
-            fail 'could not install the PostgreSQL PGDG repository' "see $log"
+            fail 'could not install the PostgreSQL PGDG repository' "see $log, then rerun the same command" PACKAGE_INSTALL_FAILED
     fi
     # Migrations use trusted extensions such as btree_gist from PGDG's contrib package.
     dnf_install "postgresql${pg}" "postgresql${pg}-server" "postgresql${pg}-contrib"
     if ! rpm -q caddy >/dev/null 2>&1; then
         say "enabling the official Caddy COPR repository (details in $log)"
-        dnf copr enable -y @caddy/caddy >>"$log" 2>&1 || fail 'could not enable the Caddy repository' "see $log"
+        dnf copr enable -y @caddy/caddy >>"$log" 2>&1 || fail 'could not enable the Caddy repository' "see $log, then rerun the same command" PACKAGE_INSTALL_FAILED
         dnf_install caddy
     fi
 }
@@ -198,19 +224,19 @@ ensure_github_cli() {
     case $os_family in
         debian)
             apt_repo github-cli https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-                "deb [arch=$(dpkg --print-architecture) signed-by=@KEYRING@] https://cli.github.com/packages stable main"
+                "deb [arch=$(dpkg --print-architecture) signed-by=@KEYRING@] https://cli.github.com/packages stable main" gpg
             apt-get install -y -qq --no-install-recommends gh >>"$log" 2>&1 ||
-                fail 'could not install GitHub CLI' "see $log"
+                fail 'could not install GitHub CLI' "see $log, then rerun the same command" PACKAGE_INSTALL_FAILED
             ;;
         rhel)
             [[ -f /etc/yum.repos.d/gh-cli.repo ]] ||
                 dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo >>"$log" 2>&1 ||
-                fail 'could not add the GitHub CLI repository' "see $log"
-            dnf install -y -q gh >>"$log" 2>&1 || fail 'could not install GitHub CLI' "see $log"
+                fail 'could not add the GitHub CLI repository' "see $log, then rerun the same command" PACKAGE_INSTALL_FAILED
+            dnf install -y -q gh >>"$log" 2>&1 || fail 'could not install GitHub CLI' "see $log, then rerun the same command" PACKAGE_INSTALL_FAILED
             ;;
     esac
     gh attestation verify --help >/dev/null 2>&1 ||
-        fail 'the installed GitHub CLI cannot verify release provenance' 'update GitHub CLI, then rerun this command'
+        fail 'the installed GitHub CLI cannot verify release provenance' "install a current gh from https://cli.github.com/packages (see $log), then rerun the same command" PACKAGE_INSTALL_FAILED
 }
 hold_caddy_package() {
     if [[ $os_family == debian ]]; then
@@ -246,12 +272,25 @@ ensure_users() {
     install -d -m 0750 -o bilibi-build -g bilibi-build "$root/build"
     install_sudoers
 }
-# install_sudoers: the rule for bilibi-build, replaced only when it differs.
+# install_sudoers: the rule for bilibi-build, naming every instance (and the
+# one `create` is making), replaced only when it differs. The new rule is
+# validated before it is moved in, so a refused rule never reaches
+# /etc/sudoers.d where it would break sudo.
 install_sudoers() {
     [[ -d /etc/sudoers.d ]] || return 0
-    cmp -s "$here/server/sudoers" /etc/sudoers.d/bilibi-build && return 0
-    install -m 0440 "$here/server/sudoers" /etc/sudoers.d/bilibi-build
-    visudo -cf /etc/sudoers.d/bilibi-build >/dev/null || fail 'the sudoers rule for bilibi-build did not validate'
+    local name commands='/usr/bin/systemctl reload caddy' rendered
+    for name in $({ instances; [[ -z ${creating_instance:-} ]] || echo "$creating_instance"; } | sort -u); do
+        commands+=", /usr/bin/systemctl start bilibi@$name, /usr/bin/systemctl stop bilibi@$name, /usr/bin/systemctl restart bilibi@$name"
+    done
+    rendered=$(mktemp /etc/sudoers.d/.bilibi-build.XXXXXX)
+    sed "s|@COMMANDS@|$commands|" "$here/server/sudoers" >"$rendered"
+    chmod 0440 "$rendered"
+    if cmp -s "$rendered" /etc/sudoers.d/bilibi-build; then rm -f -- "$rendered"; return 0; fi
+    if ! visudo -cf "$rendered" >/dev/null 2>>"$log"; then
+        rm -f -- "$rendered"
+        fail 'the sudoers rule for bilibi-build did not validate; nothing was changed' "see $log" SUDOERS_INVALID
+    fi
+    mv -T "$rendered" /etc/sudoers.d/bilibi-build
 }
 # retire_worker: servers that once built software ran bilibi-worker@<instance>.
 # Stop and disable each, then remove the unit template and the old sudoers
@@ -455,14 +494,16 @@ create() {
             *) usage ;;
         esac
     done
-    valid_name "$instance" || fail "instance name must be 1 to 32 lower-case letters, digits or hyphens: $instance"
-    [[ $role =~ ^(dev|staging|production)$ ]] || fail '--role must be dev, staging or production'
-    [[ $site =~ ^[a-z0-9.-]+$ ]] || fail '--site must be a host name, like erp.example.com'
-    [[ -z $port || $port =~ ^[0-9]+$ ]] || fail '--port must be a number'
-    [[ -z $tls || $tls == internal || $tls == cloudflare ]] || fail '--tls takes "internal" or "cloudflare"'
-    [[ -z $cloudflare_token_stdin || $tls == cloudflare ]] || fail '--cloudflare-token-stdin requires --tls cloudflare'
+    valid_name "$instance" || fail "instance name must be 1 to 32 lower-case letters, digits or hyphens: $instance" '' INVALID_INPUT
+    [[ $role =~ ^(dev|staging|production)$ ]] || fail '--role must be dev, staging or production' '' INVALID_INPUT
+    [[ $site =~ ^[a-z0-9.-]+$ ]] || fail '--site must be a host name, like erp.example.com' '' INVALID_INPUT
+    [[ -z $port || $port =~ ^[0-9]+$ ]] || fail '--port must be a number' '' INVALID_INPUT
+    [[ -z $tls || $tls == internal || $tls == cloudflare ]] || fail '--tls takes "internal" or "cloudflare"' '' INVALID_INPUT
+    [[ -z $cloudflare_token_stdin || $tls == cloudflare ]] || fail '--cloudflare-token-stdin requires --tls cloudflare' '' INVALID_INPUT
     need_root create "$@"
+    creating_instance=$instance
     [[ -f $here/waiting-page.html && -f $here/server/site.caddy ]] || fail "run this from a Bilibi checkout: $here/server is missing"
+    [[ -n $tls ]] || check_dns "$site"
 
     install_packages
     ensure_github_cli
@@ -487,8 +528,7 @@ create() {
     else
         password=$(openssl rand -hex 24)
     fi
-    [[ -n $password ]] || fail "$env has no DATABASE_URL password" "remove the file to generate a new one"
-    ensure_database "$instance" "$password"
+    [[ -n $password ]] || fail "$env has no DATABASE_URL password" "restore the original database credentials in $env before retrying"
     local token_key; token_key=$(cloudflare_env_key "$instance")
     if [[ $tls == cloudflare && -n $cloudflare_token_stdin ]]; then
         IFS= read -r cloudflare_token || true
@@ -500,11 +540,13 @@ create() {
     if [[ ! -f $env ]]; then
         created=1
         [[ -n $port ]] || port=$(free_port)
-        port_in_use "$port" && fail "port $port is in use" 'pick another with --port'
+        port_in_use "$port" && fail "port $port is in use" 'pick another with --port' PORT_IN_USE
         local bilibi_env
         case $role in dev) bilibi_env=development ;; *) bilibi_env=$role ;; esac
         umask 027
-        cat >"$env" <<EOF
+        local env_new
+        env_new=$(mktemp "$dir/.env.XXXXXX")
+        cat >"$env_new" <<EOF
 # Bilibi instance "$instance". Read by bilibi@$instance.service and the release commands.
 # BILIBI_ENV initializes the role at install. Later changes use Instance settings.
 # The saved Dev role skips ordinary 2FA checks; role and software changes always ask.
@@ -519,6 +561,9 @@ BILIBI_MAIL_DIR=$dir/data/mailbox
 # Where the program receives releases and the installer keeps them.
 BILIBI_INSTANCE_DIR=$dir
 EOF
+        chown root:bilibi "$env_new"
+        chmod 0640 "$env_new"
+        mv -T "$env_new" "$env"
         umask 022
     else
         local kept_role; kept_role=$(role_of "$instance")
@@ -530,6 +575,9 @@ EOF
         # Older layouts gain the instance path used by release transport.
         grep -q '^BILIBI_INSTANCE_DIR=' "$env" || printf 'BILIBI_INSTANCE_DIR=%s\n' "$dir" >>"$env"
     fi
+    # Persist the generated credentials before creating the database role. A
+    # retry after interruption must use the same password as an existing role.
+    ensure_database "$instance" "$password"
     if [[ -n $cloudflare_token ]]; then
         [[ $(cat "$caddy_env" 2>/dev/null) == "$token_key=$cloudflare_token" ]] || caddy_restart=1
         umask 027
@@ -576,7 +624,7 @@ expected_repository_id() {
         BelimbingProject/bilibi-app-maker) pinned=1426391840 ;;
     esac
     if [[ -n $given ]]; then
-        [[ $given =~ ^[1-9][0-9]*$ ]] || fail '--repo-id must be the GitHub repository number'
+        [[ $given =~ ^[1-9][0-9]*$ ]] || fail '--repo-id must be the GitHub repository number' '' INVALID_INPUT
         [[ -z $pinned || $given == "$pinned" ]] || fail "--repo-id $given is not the official number for $repository; nothing was installed"
         printf '%s' "$given"
     elif [[ -n $pinned ]]; then
@@ -608,8 +656,8 @@ stage_source() {
 verify_provenance() {
     local artifact=$1 repository=$2 repository_id=$3 tag=$4 ids id found=0
     command -v gh >/dev/null || fail 'GitHub CLI is not installed, so release provenance cannot be checked' 'rerun create to install the server packages, then retry'
-    valid_repository "$repository" || fail 'the release repository must be owner/name'
-    valid_setup_tag "$tag" || fail 'the release tag must be setup-vX.Y.Z'
+    valid_repository "$repository" || fail 'the release repository must be owner/name' '' INVALID_INPUT
+    valid_setup_tag "$tag" || fail 'the release tag must be setup-vX.Y.Z' '' INVALID_INPUT
     repository_id=$(expected_repository_id "$repository" "$repository_id")
     local check=(gh attestation verify "$artifact" --repo "$repository"
         --signer-workflow "$repository/.github/workflows/release.yml"
@@ -617,17 +665,17 @@ verify_provenance() {
         --format json --jq '.[].verificationResult.signature.certificate.sourceRepositoryIdentifier')
     if [[ -z ${GH_TOKEN:-} && -f $github_app ]]; then
         ids=$(python3 "$here/lib/github-app.py" run "$github_app" --repo "$repository" --log "$log" -- "${check[@]}") ||
-            fail "GitHub build provenance did not verify for $repository tag $tag with the server's GitHub App; nothing was installed" "check the App with: $0 github-app --check, then download the asset from the official Release setup workflow and retry"
+            fail "GitHub build provenance did not verify for $repository tag $tag with the server's GitHub App; nothing was installed" "check the App with: $0 github-app --check, then download the asset from the official Release setup workflow and retry" SIGNATURE_INVALID
     else
         ids=$("${check[@]}" 2>>"$log") ||
-            fail "GitHub build provenance did not verify for $repository tag $tag; nothing was installed" 'download the asset from the official Release setup workflow and retry'
+            fail "GitHub build provenance did not verify for $repository tag $tag; nothing was installed" 'download the asset from the official Release setup workflow and retry' SIGNATURE_INVALID
     fi
     while IFS= read -r id; do
         [[ -n $id ]] || continue
         found=1
-        [[ $id == "$repository_id" ]] || fail "the release was signed by a different GitHub repository number than $repository_id; nothing was installed" 'use the asset from the repository you intend, or check the --repo-id you gave'
+        [[ $id == "$repository_id" ]] || fail "the release was signed by a different GitHub repository number than $repository_id; nothing was installed" 'use the asset from the repository you intend, or check the --repo-id you gave' SIGNATURE_WRONG_REPOSITORY
     done <<<"$ids"
-    ((found)) || fail "GitHub returned no verified provenance for $repository tag $tag; nothing was installed" 'download the asset from the official Release setup workflow and retry'
+    ((found)) || fail "GitHub returned no verified provenance for $repository tag $tag; nothing was installed" 'download the asset from the official Release setup workflow and retry' SIGNATURE_INVALID
 }
 
 # unpack_release <archive> <folder>: accept only the release archive's plain
@@ -902,19 +950,29 @@ release() {
     done
     [[ -n $repository && -n $tag ]] || usage
     need_root release "$@"
-    instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role ... --site ..."
+    instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
     retire_worker
     [[ -f $source ]] || fail "$source is not a setup release archive"
     stage_source "$source"
     verify_provenance "$staged" "$repository" "$repository_id" "$tag"
-    local unpacked binary dir n previous
-    unpacked=$staging/unpacked
-    if ! unpack_release "$staged" "$unpacked"; then
-        fail 'the setup release archive or its checksum is invalid; nothing was installed' 'download the asset again and retry'
-    fi
-    binary=$unpacked/bilibi-web
+    local unpacked binary dir n previous source_digest
+    source_digest=$(sha256sum "$staged" | cut -d' ' -f1)
     dir=$(instance_dir "$instance")
     previous=$(current_release "$instance")
+    if [[ -n $previous && -f $dir/releases/$previous/source.sha256 ]] &&
+        [[ $(cat "$dir/releases/$previous/source.sha256") == "$source_digest" ]]; then
+        (cd "$dir/releases/$previous" && sha256sum -c --quiet SHA256SUMS) ||
+            fail "current release $previous does not match its checksum" "restore the release before retrying"
+        [[ $(service_state "$instance") == active ]] && wait_healthy "$instance" ||
+            fail "current release $previous is not healthy" "check systemctl status $unit_name$instance and retry" UNHEALTHY
+        say "$instance: the verified release is already in service"
+        return 0
+    fi
+    unpacked=$staging/unpacked
+    if ! unpack_release "$staged" "$unpacked"; then
+        fail 'the setup release archive or its checksum is invalid; nothing was installed' 'download the asset again and retry' ARCHIVE_INVALID
+    fi
+    binary=$unpacked/bilibi-web
     n=$(( $(release_numbers "$instance" | tail -n1) + 1 ))
     install -d -m 0755 -o bilibi-build -g bilibi "$dir/releases/$n"
     install -m 0755 -o bilibi-build -g bilibi "$binary" "$dir/releases/$n/bilibi-web"
@@ -928,6 +986,9 @@ release() {
         cp -R -- "$unpacked/plugins" "$dir/releases/$n/plugins"
         chown -R bilibi-build:bilibi "$dir/releases/$n/plugins"
     fi
+    printf '%s\n' "$source_digest" >"$dir/releases/$n/source.sha256"
+    chown bilibi-build:bilibi "$dir/releases/$n/source.sha256"
+    chmod 0644 "$dir/releases/$n/source.sha256"
     rm -rf -- "$unpacked"
     say "$instance: release $n copied to $dir/releases/$n"
     (
@@ -946,27 +1007,81 @@ release() {
                 admit_release "$instance" "$previous" || exit 1
                 systemctl start "$unit_name$instance"
             fi
-            fail "release $n could not update the database" "see the output above; the previous release is back in service"
+            fail "release $n could not update the database" "see the output above; the previous release is back in service" MIGRATION_FAILED
         fi
-        put_in_service "$instance" "$n" "$previous"
+        put_in_service "$instance" "$n" "$previous" ||
+            fail "release $n did not start" "read journalctl -u $unit_name$instance; any previous release is back in service. Fix the cause and rerun the same command" UNHEALTHY
     )
     if [[ -z $previous ]]; then
-        say "Next: create the first account with: $0 create-owner $instance"
+        say "Next: set up outgoing mail with $0 mail $instance ..., then send the owner's claim link with: $0 create-owner $instance --email <owner address> --company-name <organisation>"
     fi
+}
+# ================================================================ mail
+# plain_value <text>: no single quote and no line break, so the value can be
+# written single-quoted into the env file.
+plain_value() { [[ $1 != *"'"* && $1 != *$'\n'* ]]; }
+# The SMTP relay a Staging or Production instance sends mail through (the
+# owner's claim link first). Written into the instance's env; the password
+# comes on standard input so it never enters shell history or the process
+# list. Rerunning replaces the settings and restarts a running service.
+mail() {
+    local instance=${1:-} host='' port='' username='' tls='' from_address='' from_name='Bilibi' password_stdin='' password=''
+    [[ -n $instance ]] || usage
+    shift
+    while (($#)); do
+        case $1 in
+            --host) host=${2:-}; shift 2 ;;
+            --port) port=${2:-}; shift 2 ;;
+            --username) username=${2:-}; shift 2 ;;
+            --tls) tls=${2:-}; shift 2 ;;
+            --from-address) from_address=${2:-}; shift 2 ;;
+            --from-name) from_name=${2:-}; shift 2 ;;
+            --password-stdin) password_stdin=1; shift ;;
+            *) usage ;;
+        esac
+    done
+    [[ $host =~ ^[A-Za-z0-9.-]+$ ]] || fail '--host must be the relay host name, like smtp.example.com' '' INVALID_INPUT
+    [[ $port =~ ^[0-9]+$ ]] || fail '--port must be the relay port, usually 587 or 465' '' INVALID_INPUT
+    [[ $tls == starttls || $tls == implicit_tls ]] || fail '--tls must be starttls (port 587) or implicit_tls (port 465)' '' INVALID_INPUT
+    [[ -n $username ]] && plain_value "$username" || fail '--username is required and cannot contain quotes or line breaks' '' INVALID_INPUT
+    [[ $from_address =~ ^[^@[:space:]\']+@[^@[:space:]\']+$ ]] || fail '--from-address must be an email address' '' INVALID_INPUT
+    plain_value "$from_name" || fail '--from-name cannot contain quotes or line breaks' '' INVALID_INPUT
+    [[ -n $password_stdin ]] || fail 'the relay password comes on standard input' 'pipe it to this command and add --password-stdin' INVALID_INPUT
+    need_root mail "$instance"
+    instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
+    IFS= read -r password || true
+    [[ -n $password ]] && plain_value "$password" || fail 'the relay password on standard input is empty or contains a quote or line break' 'pipe the password on one line' INVALID_INPUT
+    local dir env env_new
+    dir=$(instance_dir "$instance"); env=$dir/env
+    umask 027
+    env_new=$(mktemp "$dir/.env.XXXXXX")
+    grep -v '^MAIL_' "$env" >"$env_new" || true
+    # Single quotes: read the same way by bash and systemd's EnvironmentFile.
+    printf "MAIL_HOST='%s'\nMAIL_PORT='%s'\nMAIL_USERNAME='%s'\nMAIL_PASSWORD='%s'\nMAIL_TLS_MODE='%s'\nMAIL_FROM_NAME='%s'\nMAIL_FROM_ADDRESS='%s'\n" \
+        "$host" "$port" "$username" "$password" "$tls" "$from_name" "$from_address" >>"$env_new"
+    chown root:bilibi "$env_new"; chmod 0640 "$env_new"
+    mv -T "$env_new" "$env"
+    umask 022
+    if [[ $(service_state "$instance") == active ]]; then
+        systemctl restart "$unit_name$instance"
+        wait_healthy "$instance" || fail "$instance did not start with the new mail settings" "read journalctl -u $unit_name$instance, correct the settings and rerun" UNHEALTHY
+    fi
+    say "$instance: mail goes out through $host:$port as $from_address"
 }
 # ================================================================ create-owner
 # The first account of a fresh instance: `bilibi-web create-owner` in the
-# instance's environment, with the terminal attached so it can ask for the
-# password. It refuses on its own once the instance has an owner.
+# instance's environment. No password passes through here: the owner gets an
+# emailed claim link, chooses their own password and sets up 2FA. Safe to
+# repeat; the last line is `Owner claim: <state>`.
 create_owner() {
     local instance=${1:-}
     [[ -n $instance ]] || usage
     need_root create-owner "$@"
     shift
-    instance_exists "$instance" || fail "no instance named $instance"
+    instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
     local dir; dir=$(instance_dir "$instance")
-    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
-    with_env "$instance" bilibi-build "$dir/current/bilibi-web" create-owner "$@"
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>" NO_RELEASE
+    with_env "$instance" bilibi "$dir/current/bilibi-web" create-owner "$@"
 }
 # =========================================================== tenant-provision
 # A customer tenant, primary company and first-owner invitation.
@@ -988,9 +1103,9 @@ tenant_provision() {
     done
     [[ -n ${options[--owner-email]:-} ]] || usage
     need_root tenant-provision "$instance" "${args[@]}"
-    instance_exists "$instance" || fail "no instance named $instance"
+    instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
     local dir; dir=$(instance_dir "$instance")
-    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>" NO_RELEASE
     with_env "$instance" bilibi "$dir/current/bilibi-web" tenant-provision "${args[@]}"
 }
 # ========================================================= two-factor-reset
@@ -1002,10 +1117,10 @@ two_factor_reset() {
     [[ -n $instance ]] || usage
     need_root two-factor-reset "$@"
     shift
-    instance_exists "$instance" || fail "no instance named $instance"
+    instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
     local dir; dir=$(instance_dir "$instance")
-    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
-    with_env "$instance" bilibi-build "$dir/current/bilibi-web" two-factor-reset "$@"
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>" NO_RELEASE
+    with_env "$instance" bilibi "$dir/current/bilibi-web" two-factor-reset "$@"
 }
 # ========================================================= identity lifecycle
 identity_lifecycle() {
@@ -1022,7 +1137,7 @@ switch() {
     local instance=${1:-} n=${2:-}
     [[ -n $instance && $n =~ ^[0-9]+$ ]] || usage
     need_root switch "$@"
-    instance_exists "$instance" || fail "no instance named $instance"
+    instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
     local dir; dir=$(instance_dir "$instance")
     [[ -x $dir/releases/$n/bilibi-web ]] || fail "$instance has no release $n" "list them: $0 status $instance"
     (cd "$dir/releases/$n" && sha256sum -c --quiet SHA256SUMS) || fail "release $n does not match its checksum"
@@ -1036,15 +1151,22 @@ switch() {
 }
 status() {
     local instance list
+    if run_in_progress; then
+        say "A run is in progress: wait until this line is gone, then rerun the step it was doing."
+    fi
     if [[ -n ${1:-} ]]; then list=$1; else list=$(instances); fi
     [[ -n $list ]] || { say "No instances under $root yet."; return; }
     python3 "$here/lib/github-app.py" show "$github_app" || true
     for instance in $list; do
-        instance_exists "$instance" || fail "no instance named $instance"
+        instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
         local dir; dir=$(instance_dir "$instance")
-        printf '%s: role %s, %s, service %s, installer %s, current release %s\n' "$instance" "$(role_of "$instance")" \
+        local role mail_host mail
+        role=$(role_of "$instance")
+        mail_host=$(env_value "$instance" MAIL_HOST | tr -d "'")
+        if [[ -n $mail_host ]]; then mail="via $mail_host"; elif [[ $role == dev ]]; then mail="to the Dev mailbox"; else mail="not set up"; fi
+        printf '%s: role %s, %s, service %s, installer %s, mail %s, current release %s\n' "$instance" "$role" \
             "$(env_value "$instance" APP_ORIGIN)" "$(service_state "$instance")" \
-            "$(installer_state "$instance")" "$(current_release "$instance")"
+            "$(installer_state "$instance")" "$mail" "$(current_release "$instance")"
         local r
         for r in $(release_numbers "$instance"); do
             printf '  release %s  %s\n' "$r" "$(cut -c1-12 "$dir/releases/$r/SHA256SUMS" 2>/dev/null)"
@@ -1052,10 +1174,76 @@ status() {
     done
 }
 
+# JSON mode runs one operation as a step and prints one JSON object per line:
+# {"step","state":"started"}, then {"step","state":"completed"|"failed",
+# "code","next","claim","detail"}. `code` is OK or a stable name from
+# `fail` (the list is in docs/install-with-ai/SKILL.md), `next` is the last
+# "Next:" line, `claim` is create-owner's owner claim state. Child output goes
+# into `detail`, never straight to stdout, so every line parses.
+json_command() {
+    local step=${1:-} output result
+    case $step in
+        create|release|installer|mail|create-owner|switch|status) ;;
+        *) printf '%s\n' '{"step":"input","state":"failed","code":"INVALID_COMMAND","next":"Use create, release, installer, mail, create-owner, switch or status."}'; return 2 ;;
+    esac
+    if ! command -v python3 >/dev/null; then
+        printf '%s\n' '{"step":"preflight","state":"failed","code":"PYTHON_MISSING","next":"Install Python 3 and retry."}'
+        return 1
+    fi
+    output=$(mktemp) || return 1
+    chmod 600 "$output"
+    printf '{"step":"%s","state":"started"}\n' "$step"
+    if "$0" "$@" >"$output" 2>&1; then result=0; else result=$?; fi
+    python3 - "$step" "$result" "$output" <<'PYJSON'
+import json, pathlib, sys
+step, result, output = sys.argv[1:]
+detail = pathlib.Path(output).read_text(encoding="utf-8", errors="replace")
+lines = detail.splitlines()
+def last(prefix):
+    found = [line[len(prefix):].strip() for line in lines if line.startswith(prefix)]
+    return found[-1] if found else None
+failed = result != "0"
+code = "OK" if not failed else (last("Code:") or ("USAGE" if result == "2" else step.upper().replace("-", "_") + "_FAILED"))
+record = {"step": step, "state": "failed" if failed else "completed", "code": code,
+          "next": last("Next:") or ("Read the detail, correct the problem, and rerun the same command." if failed else None)}
+claim = last("Owner claim:")
+if claim:
+    record["claim"] = claim
+record["detail"] = detail
+print(json.dumps(record))
+PYJSON
+    rm -f -- "$output"
+    return "$result"
+}
+
+if [[ ${1:-} == --json ]]; then
+    shift
+    json_command "$@"
+    exit $?
+fi
+
+# One run at a time. A dropped or killed client does not stop a run (its
+# children keep going), so a rerun waits for the earlier one instead of
+# racing it on packages, the database or the release links.
+run_lock=/run/bilibi-install-server.lock
+run_in_progress() { [[ $(id -u) -eq 0 && -e $run_lock ]] && ! flock -n "$run_lock" true; }
+hold_run_lock() {
+    [[ $(id -u) -eq 0 ]] || return 0
+    exec {run_lock_fd}>>"$run_lock"
+    if ! flock -n "$run_lock_fd"; then
+        say "Another run is still working; waiting for it to finish."
+        flock "$run_lock_fd"
+    fi
+}
+
 detect_os
+case ${1:-} in
+    create|release|mail|create-owner|tenant-provision|two-factor-reset|identity-recover|identity-delete|identity-retention|installer|github-app|switch) hold_run_lock ;;
+esac
 case ${1:-} in
     create) shift; create "$@" ;;
     release) shift; release "$@" ;;
+    mail) shift; mail "$@" ;;
     create-owner) shift; create_owner "$@" ;;
     tenant-provision) shift; tenant_provision "$@" ;;
     two-factor-reset) shift; two_factor_reset "$@" ;;
