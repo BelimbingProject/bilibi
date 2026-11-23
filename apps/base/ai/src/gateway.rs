@@ -81,20 +81,15 @@ fn answer_text(reply: &Value) -> Option<String> {
 }
 
 impl Ai {
-    /// The switches, the provider and the time limit, read on `client` for
-    /// the scope's company (`Scope::current_company`); a scope without a
-    /// company has the company switch's default, off. A system principal
-    /// reads the tenant's automation switch instead.
     async fn configured(
         &self,
         client: &dyn ReadClient,
         scope: &Scope,
         requested: Option<&str>,
     ) -> Result<Configured> {
-        // A system principal has no company: the tenant's automation switch
-        // stands in for the company's.
         let (target, switch) = match (scope.principal(), scope.current_company()) {
-            (Some(_), _) => (Target::Tenant, AUTOMATION_ENABLED),
+            (Some("watchers"), _) => (Target::Tenant, AUTOMATION_ENABLED),
+            (Some(_), _) => return Ok(Configured::Unavailable(Reason::Disabled)),
             (None, Some(company)) => (Target::Company(company), COMPANY_ENABLED),
             (None, None) => (Target::Tenant, COMPANY_ENABLED),
         };
@@ -171,7 +166,11 @@ impl Ai {
         let started = Instant::now();
         let (configured, key) = {
             let client = self.db.get().await?;
-            let configured = self.configured(&**client, scope, request.provider).await?;
+            let configured = if scope.principal().is_some() && request.module != "base/watchers" {
+                Configured::Unavailable(Reason::Disabled)
+            } else {
+                self.configured(&**client, scope, request.provider).await?
+            };
             let key = match &configured {
                 Configured::Ready { provider, .. } => {
                     let stored = self

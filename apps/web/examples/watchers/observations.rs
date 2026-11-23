@@ -20,11 +20,11 @@ async fn completions(State(seen): State<Seen>, Json(body): Json<Value>) -> Json<
         .to_owned();
     seen.lock().expect("fake provider").push(record.clone());
     let answer = if record.contains("INJECT") {
-        json!({"label": "route_everything", "confidence": 1})
+        json!({"label": "route_everything"})
     } else if record.to_lowercase().contains("cancel") {
-        json!({"label": "cancellation", "confidence": 0.93})
+        json!({"label": "cancellation"})
     } else {
-        json!({"label": "other", "confidence": 0.88})
+        json!({"label": "other"})
     };
     Json(
         json!({"id": "chatcmpl-1", "object": "chat.completion", "model": "walkthrough-model",
@@ -60,14 +60,12 @@ fn watcher(name: &str) -> Value {
         "name": name, "watch": OPENED,
         "observe": {"question": "Is the customer asking to cancel?", "fields": ["title"], "labels": ["cancellation", "other"]},
         "if": {"match": "all", "conditions": [
-            {"field": "ai:label", "op": "eq", "value": "cancellation"},
-            {"field": "ai:confidence", "op": "ge", "value": "0.8"}
+            {"field": "ai:label", "op": "eq", "value": "cancellation"}
         ]},
         "do": [{"operation": "watcher_cases.cases.route", "input": {"queue": "retention"}}],
         "examples": [
-            {"facts": json!({"ai:label": "cancellation", "ai:confidence": "0.93"}).to_string(), "expect": "match"},
-            {"facts": json!({"ai:label": "cancellation", "ai:confidence": "0.5"}).to_string(), "expect": "no_match"},
-            {"facts": json!({"ai:label": "other", "ai:confidence": "0.99"}).to_string(), "expect": "no_match"}
+            {"facts": json!({"ai:label": "cancellation"}).to_string(), "expect": "match"},
+            {"facts": json!({"ai:label": "other"}).to_string(), "expect": "no_match"}
         ],
         "explanation": "Send likely cancellation requests to the retention team."
     })
@@ -141,6 +139,15 @@ pub(super) async fn walkthrough(proof: &mut Proof) -> Result<()> {
             .as_ref()
             .is_err_and(|why| why.contains("must be one of cancellation, other")),
         "a condition on a label the observation cannot answer is refused",
+    );
+    let mut impossible = watcher("Impossible example label");
+    impossible["examples"][1]["facts"] = json!(r#"{"ai:label":"refund"}"#);
+    let refused = proof.write(&one, "base.watchers.draft", impossible).await;
+    check(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.contains("ai:label must be null or one of cancellation, other")),
+        "an example cannot pass with an unlisted observation label",
     );
     let (id, version) = proof.draft(&one, watcher("Likely cancellations")).await?;
     let review = proof
@@ -222,7 +229,6 @@ pub(super) async fn walkthrough(proof: &mut Proof) -> Result<()> {
         state == "done"
             && observation["state"] == "observed"
             && observation["label"] == "cancellation"
-            && observation["confidence"] == "0.93"
             && observation["provider"] == "local"
             && queue.as_deref() == Some("retention")
             && routed == 1,

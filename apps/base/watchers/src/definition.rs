@@ -357,8 +357,6 @@ impl Definition {
         }
     }
 
-    /// A condition on `ai:label` or `ai:confidence`: only with an `observe`,
-    /// a label from its list, a confidence from 0 to 1.
     fn check_observed(
         &self,
         condition: &Condition,
@@ -377,29 +375,21 @@ impl Definition {
             Value::Null => &[][..],
             value => std::slice::from_ref(value),
         };
-        if condition.field == crate::observe::LABEL {
-            if condition.op.ordered() {
+        if condition.op.ordered() {
+            problems.push((
+                at("op"),
+                "a label takes is, is not, is one of, is none of, empty or not empty".into(),
+            ));
+        }
+        for value in values {
+            if !value
+                .as_str()
+                .is_some_and(|label| observe.accepts_label(label))
+            {
                 problems.push((
-                    at("op"),
-                    "a label takes is, is not, is one of, is none of, empty or not empty".into(),
+                    at("value"),
+                    format!("must be one of {}", observe.labels.join(", ")),
                 ));
-            }
-            for value in values {
-                if !value
-                    .as_str()
-                    .is_some_and(|label| observe.labels.iter().any(|known| known == label))
-                {
-                    problems.push((
-                        at("value"),
-                        format!("must be one of {}", observe.labels.join(", ")),
-                    ));
-                }
-            }
-        } else {
-            for value in values {
-                if !decimal(value).is_some_and(|d| d >= Decimal::ZERO && d <= Decimal::ONE) {
-                    problems.push((at("value"), "a confidence is a number from 0 to 1".into()));
-                }
             }
         }
     }
@@ -450,7 +440,7 @@ impl Definition {
     }
 
     /// The facts examples are written in: every condition's field,
-    /// including the observation's `ai:label` and `ai:confidence`.
+    /// including the observation's `ai:label`.
     pub(crate) fn example_fields(&self) -> Vec<String> {
         let mut fields: Vec<String> = Vec::new();
         for condition in &self.conditions {

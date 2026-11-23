@@ -508,6 +508,25 @@ impl Watchers {
                     format!("{unknown} is not a field the conditions read"),
                 ));
             }
+            if let (Some(observe), Some(label)) = (
+                definition.observe.as_ref(),
+                example.facts.get(crate::observe::LABEL),
+            ) {
+                if !label.is_null()
+                    && !label
+                        .as_str()
+                        .is_some_and(|label| observe.accepts_label(label))
+                {
+                    problems.push((
+                        format!("examples.{i}.facts"),
+                        format!(
+                            "ai:label must be null or one of {}",
+                            observe.labels.join(", ")
+                        ),
+                    ));
+                    continue;
+                }
+            }
             let (matched, _) = definition.evaluate(&example.facts, &types);
             if matched != example.expect {
                 problems.push((
@@ -1071,7 +1090,6 @@ pub(crate) fn bind(
 fn condition_label(path: &str, label: &dyn Fn(&str) -> String) -> String {
     match path {
         crate::observe::LABEL => "AI label".to_owned(),
-        crate::observe::CONFIDENCE => "AI confidence".to_owned(),
         _ => label(path),
     }
 }

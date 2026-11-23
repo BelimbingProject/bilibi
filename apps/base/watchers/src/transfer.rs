@@ -68,17 +68,6 @@ impl WatcherSetup {
             ));
             draft.definition = None;
         }
-        if draft
-            .definition
-            .as_ref()
-            .is_some_and(|definition| definition.observe.is_some())
-        {
-            problems.push((
-                "observe".into(),
-                "Setup packs cannot transfer AI observations.".into(),
-            ));
-            draft.definition = None;
-        }
         draft.watcher_id = None;
         draft.explanation = None;
         if draft.name != self.name
@@ -237,9 +226,10 @@ impl Watchers {
                     "A condition on a record identifier or personal field cannot travel.".into(),
                 ));
             }
-            if column
-                .as_ref()
-                .is_none_or(|column| column.ty == FieldType::String)
+            if !crate::observe::observed(&condition.field)
+                && column
+                    .as_ref()
+                    .is_none_or(|column| column.ty == FieldType::String)
             {
                 let values = condition
                     .value

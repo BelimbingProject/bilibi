@@ -16,7 +16,7 @@ use std::collections::HashMap;
 /// (so both read the same window) and each event's observation.
 struct Observed {
     end: String,
-    observations: HashMap<i64, Value>,
+    observations: HashMap<i64, (i64, Value)>,
 }
 
 /// One page of the window's retained, unerased events, in recorded order.
@@ -149,7 +149,7 @@ impl Watchers {
             return Ok(None);
         };
         let mut asks = Vec::new();
-        let (end, principal) = {
+        let (end, days) = {
             let client = self.db.get().await.map_err(Error::from)?;
             let review = self.review_draft(&**client, scope, draft, problems).await?;
             if !review.ok() {
@@ -165,17 +165,6 @@ impl Watchers {
                 .await
                 .map_err(Error::from)?
                 .get(0);
-            let principal = match self.principal(&**client, scope.tenant()).await {
-                Ok(principal) => principal,
-                Err(Error::Forbidden | Error::Unauthorized) => {
-                    return Ok(Some(Observed {
-                        end,
-                        observations: HashMap::new(),
-                    }))
-                }
-                Err(error) => return Err(error.into()),
-            };
-            let unavailable = self.observation_available(&**client, &principal).await?;
             let reader_fields = definition.fact_fields(trigger.definition.version, true);
             let (mut cursor_at, mut cursor_id, mut candidates, mut shown) =
                 (None::<String>, 0i64, 0usize, 0i64);
@@ -229,62 +218,96 @@ impl Watchers {
                         continue;
                     }
                     shown += 1;
-                    if let Ok((facts, _)) = self
-                        .read_facts(
-                            &**client,
-                            &principal,
-                            trigger.definition.table,
-                            &subject,
-                            &observe.fields,
-                        )
-                        .await?
-                    {
-                        asks.push((id, facts));
-                    }
+                    asks.push(id);
                     if shown == limit || candidates == MAX_CANDIDATES {
                         break 'scan;
                     }
                 }
             }
-            if let Some(reason) = unavailable {
-                // AI is off or unconfigured: every shown event says why,
-                // with nothing spent and nothing asked.
-                let observations = asks
-                    .into_iter()
-                    .map(|(id, _)| (id, crate::observe::unavailable(reason)))
-                    .collect();
-                return Ok(Some(Observed { end, observations }));
-            }
-            (end, principal)
+            (end, days)
         };
-        // One at a time: each ask takes and releases its own short
-        // connections, so the task never holds two.
+        let trigger = self.trigger(&draft.trigger).ok_or(Error::Invalid)?;
+        let version = trigger.definition.version;
+        let table = trigger.definition.table;
+        let reader_fields = definition.fact_fields(version, true);
+        let observation_fields = observe.read_fields(version);
+        let tenant = scope.tenant();
         let mut observations = HashMap::new();
-        for (id, facts) in asks {
-            let spent = {
-                let mut client = self.db.get().await.map_err(Error::from)?;
-                let mut tx = self
-                    .mutations
-                    .begin(
-                        &mut client,
-                        scope.mutation_context("watchers.trial.observing"),
-                    )
-                    .await?;
+        for id in asks {
+            let mut client = self.db.get().await.map_err(Error::from)?;
+            let mut tx = self
+                .mutations
+                .begin(
+                    &mut client,
+                    scope.mutation_context("watchers.trial.observing"),
+                )
+                .await?;
+            let prepared: Result<_> = async {
+                bilibi_authz::authorize_key(tx.sql(), scope, crate::VIEW).await?;
                 bilibi_authz::authorize_key(tx.sql(), scope, crate::MANAGE).await?;
-                let spent = self.spend_observation(&mut tx, scope).await?;
-                if spent {
-                    tx.commit().await?;
-                } else {
-                    tx.rollback().await?;
+                if !bilibi_authz::decide(tx.sql(), scope, crate::APPROVE).await?.allowed {
+                    return Ok(None);
                 }
-                spent
+                let event = tx.sql().query_opt(
+                    "SELECT version,payload FROM base_events
+                     WHERE tenant_id=$1 AND id=$2 AND name=$3 AND erased_at IS NULL
+                       AND recorded_at BETWEEN $4::text::timestamptz - make_interval(days => $5::int)
+                                           AND $4::text::timestamptz FOR SHARE",
+                    &[&tenant, &id, &draft.trigger, &end, &(days as i32)],
+                ).await.map_err(Error::from)?;
+                let Some(event) = event else {
+                    return Ok(None);
+                };
+                if !u16::try_from(event.get::<_, i32>(0))
+                    .is_ok_and(|version| trigger.definition.on.versions.contains(&version)) {
+                    return Ok(None);
+                }
+                let payload: Value = event.get(1);
+                let Some(subject) = event_subject(trigger.definition, &payload) else {
+                    return Ok(None);
+                };
+                if logical_event(trigger.definition, &draft.trigger, id, &payload).is_err() {
+                    return Ok(None);
+                }
+                let Ok((reader, _)) = self.read_facts(tx.sql(), scope, table, &subject, &reader_fields).await? else {
+                    return Ok(None);
+                };
+                let revision = record_revision(reader.get(version))?;
+                let principal = match self.principal(tx.sql(), tenant).await {
+                    Ok(principal) => principal,
+                    Err(Error::Forbidden | Error::Unauthorized) => {
+                        return Ok(Some((revision, Err("automation_unavailable"))));
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let (facts, _) = match self.read_facts(tx.sql(), &principal, table, &subject, &observation_fields).await? {
+                    Ok(read) => read,
+                    Err(code) => return Ok(Some((revision, Err(code)))),
+                };
+                if record_revision(facts.get(version))? != revision {
+                    return Ok(Some((revision, Err("record_changed"))));
+                }
+                if let Some(reason) = self.observation_available(tx.sql(), &principal).await? {
+                    return Ok(Some((revision, Err(reason))));
+                }
+                Ok(Some((revision, Ok((principal, facts)))))
+            }.await;
+            let Some((revision, prepared)) = prepared? else {
+                tx.rollback().await?;
+                continue;
             };
-            let observation = if spent {
-                self.ask(&principal, observe, &facts).await?
-            } else {
-                crate::observe::unavailable("budget_exhausted")
+            let observation = match prepared {
+                Ok((principal, facts)) if self.spend_observation(&mut tx, scope).await? => {
+                    tx.commit().await?;
+                    drop(client);
+                    self.ask(&principal, observe, &facts).await?
+                }
+                other => {
+                    tx.rollback().await?;
+                    crate::observe::unavailable(other.err().unwrap_or("budget_exhausted"))
+                }
             };
-            observations.insert(id, observation);
+            observations.insert(id, (revision, observation));
         }
         Ok(Some(Observed { end, observations }))
     }
@@ -397,7 +420,6 @@ impl Watchers {
                 else {
                     continue;
                 };
-                let base = |state: &str| json!({"event_id":id,"recorded_at":at,"subject":subject,"state":state});
                 let tx = client
                     .build_transaction()
                     .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
@@ -412,14 +434,38 @@ impl Watchers {
                         return Ok(None);
                     }
                     let reader = self.read_facts(&tx, scope, trigger.definition.table, &subject, &reader_fields).await?;
-                    if reader.is_err() {
+                    let Ok((reader, _)) = reader else {
                         return Ok(None);
-                    }
+                    };
                     bilibi_authz::authorize_key(&tx, scope, crate::MANAGE).await?;
                     bilibi_authz::authorize_key(&tx, scope, crate::VIEW).await?;
                     if results.len() == limit as usize {
                         truncated = true;
                         return Ok(None);
+                    }
+                    let observation = match observed {
+                        Some(_) if !bilibi_authz::decide(&tx, scope, crate::APPROVE).await?.allowed => {
+                            Some(crate::observe::unavailable("not_permitted"))
+                        }
+                        Some(observed) => {
+                            let revision = record_revision(reader.get(trigger.definition.version))?;
+                            Some(match observed.observations.get(&id) {
+                                Some((classified, observation)) if *classified == revision => observation.clone(),
+                                Some(_) => crate::observe::unavailable("record_changed"),
+                                None => crate::observe::unavailable("not_observed"),
+                            })
+                        }
+                        None => None,
+                    };
+                    let base = |state: &str| {
+                        let mut row = json!({"event_id":id,"recorded_at":at,"subject":subject,"state":state});
+                        if let Some(observation) = &observation {
+                            row["observation"] = observation.clone();
+                        }
+                        row
+                    };
+                    if observation.as_ref().is_some_and(|answer| answer["reason"] == "record_changed") {
+                        return Ok(Some(base("record_changed")));
                     }
                     let principal = match self.principal(&tx, tenant).await {
                         Ok(principal) => principal,
@@ -430,12 +476,10 @@ impl Watchers {
                     let Ok((facts, types)) = automated else {
                         return Ok(Some(base("automation_read_refused")));
                     };
-                    let observation = observed.map(|observed| {
-                        observed.observations.get(&id).cloned().unwrap_or_else(|| crate::observe::unavailable("not_observed"))
-                    });
                     let mut seen = facts.clone();
                     if let Some(observation) = &observation {
-                        seen.extend(crate::observe::facts(observation));
+                        let (field, value) = crate::observe::fact(observation);
+                        seen.insert(field, value);
                     }
                     let (matched, outcomes) = evaluate(definition, &seen, &types);
                     let mut effects = Vec::new();
@@ -494,9 +538,6 @@ impl Watchers {
                     let mut item = base(if matched { "match" } else { "near_miss" });
                     item["current_record"] = json!({"facts":shown_facts,"condition_outcomes":outcomes});
                     item["would_be_effects"] = json!(effects);
-                    if let Some(observation) = observation {
-                        item["observation"] = observation;
-                    }
                     Ok(Some(item))
                 }.await;
                 let item = match evidence {

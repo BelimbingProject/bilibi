@@ -94,9 +94,8 @@ fn observed(run: &RunView) -> Option<String> {
     }
     Some(match observation["state"].as_str() {
         Some("observed") => format!(
-            "AI answered {} with confidence {} ({}, {}).",
+            "AI answered {} ({}, {}).",
             observation["label"].as_str().unwrap_or_default(),
-            observation["confidence"].as_str().unwrap_or_default(),
             observation["provider"].as_str().unwrap_or_default(),
             observation["model"].as_str().unwrap_or_default(),
         ),
@@ -113,7 +112,7 @@ fn observation_reason(code: &str) -> &'static str {
         "not_configured" => "the AI provider is not configured",
         "timeout" => "the AI provider did not answer in time",
         "provider_error" => "the AI provider failed",
-        "invalid_answer" => "the answer was not one of the labels with a confidence",
+        "invalid_answer" => "the answer was not one of the labels",
         "budget_exhausted" => "today's AI observations are used up",
         "interrupted" => "the call was interrupted and is not asked twice",
         "not_observed" => "this event was not asked about",

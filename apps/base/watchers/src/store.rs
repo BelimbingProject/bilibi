@@ -674,7 +674,6 @@ impl Watchers {
             "observation": {
                 "facts": [
                     {"field": crate::observe::LABEL, "type": "enum", "values": "the draft's observe.labels"},
-                    {"field": crate::observe::CONFIDENCE, "type": "decimal", "values": "0 to 1"},
                 ],
                 "available_to_automation": match self.principal(client, scope.tenant()).await {
                     Ok(principal) => self.observation_available(client, &principal).await?.map_or_else(|| json!(true), |reason| json!(reason)),

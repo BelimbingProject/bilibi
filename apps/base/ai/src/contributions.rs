@@ -15,9 +15,7 @@ pub const LIST: &str = "admin.system.ai-interaction.list";
 pub const ENABLED: &str = "ai.enabled";
 /// The company switch, off by default: a company uses AI only when both are on.
 pub const COMPANY_ENABLED: &str = "ai.company_enabled";
-/// The tenant switch for automation, off by default: a system principal
-/// (such as `watchers`) has no company, so it uses AI only when this and the
-/// installation switch are both on.
+/// The tenant switch for Watchers AI observations, off by default.
 pub const AUTOMATION_ENABLED: &str = "ai.automation_enabled";
 /// The configured providers, a list of `{name, base_url, model}` with an
 /// optional `local: true`; the first is the default.
@@ -84,7 +82,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, AUTOMATION_ENABLED, provenan
     value_type: ValueType::Boolean, scopes: &[ScopeKind::Tenant], default: || json!(false), nullable: false, encrypted: false,
     minimum: None, maximum: None, validator: None,
     editor: Some(Editor { group: "AI", label: "AI for automation",
-        help: "Lets this tenant's automation, such as an approved watcher's AI observation, send the record fields it declares to the configured AI providers. It works only while AI is on for the installation.",
+        help: "Lets Watchers send the record fields declared in approved observations and trials run by an approver to the configured AI providers. It works only while AI is on for the installation.",
         capability: None, reveal_duration_ms: 5_000 }),
 })) }
 inventory::submit! { Contribution::new(DEFINITIONS, PROVIDERS, provenance!(), &Setting::Definition(Definition {

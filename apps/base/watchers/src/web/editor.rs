@@ -190,12 +190,6 @@ impl Vocab {
                     .map(text)
                     .collect(),
             });
-            trigger.fields.push(FieldV {
-                id: crate::observe::CONFIDENCE.into(),
-                label: "AI confidence".into(),
-                ty: "decimal".into(),
-                values: Vec::new(),
-            });
         }
         self
     }
@@ -1258,7 +1252,7 @@ impl Editor {
             parts.push(Self::section(
                 "AI observation",
                 "watcher-draft-observe",
-                "Asked once per event before the conditions; conditions read AI label and AI confidence. Your AI agent drafts a change to it.",
+                "Asked once per event before the conditions; conditions can use the AI label. Your AI agent drafts a change to it.",
                 vec![
                     shown("question", "Question", text(&observe["question"]), "")?,
                     shown("labels", "Answers", words("labels"), "The only answers kept.")?,
