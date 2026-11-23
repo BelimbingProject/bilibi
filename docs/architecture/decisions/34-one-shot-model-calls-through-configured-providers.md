@@ -4,7 +4,7 @@
 **Status:** Accepted; implemented
 **Agents:** claude-code/opus-5.5
 **Scope:** When Bilibi itself may call a model, and the one small service every such call goes through
-**Last Updated:** 2026-11-19
+**Last Updated:** 2026-11-23
 
 > The contract is [`apps/base/ai/README.md`](../../../apps/base/ai/README.md). This record amends one sentence of [ADR 01](./01-agent-first-operations.md) ("Bilibi runs no model").
 
@@ -20,10 +20,10 @@ The owner decided on 2026-11-19 to keep this small: a Base service for one-shot 
 - **One service, `base/ai`.** No Domain, Extension or Core module calls a model's HTTP API itself.
 - **Providers are settings, not code.** An operator lists providers in System Settings: a name, an OpenAI-compatible base URL and a model, with an optional API key that is encrypted and never shown back, not even through the stored-secret reveal. Several are allowed. The service sends through `base/integration`, the only HTTP client.
 - **Hosted providers are public HTTPS; local ones are an explicit choice.** A provider reaches a private address (a local Ollama, vLLM or LM Studio) only when the operator marks it local. Every other provider goes through Integration's public-HTTPS path, so a hosted name cannot resolve to an internal service.
-- **Off by default.** AI works only when the installation switch and the company's switch are both on.
+- **Off by default.** AI works only when the installation switch and the company's switch are both on. Automation (a system principal such as `watchers`) has no company, so a tenant switch for automation stands in for the company's (#863).
 - **Each call is logged as metadata:** who asked, the calling module, the provider, input and output size, the outcome and the duration. Instructions, text and replies are never stored.
 - **Unavailable is an answer, not an error.** AI switched off, no provider, a timeout or a provider failure all return "unavailable", so the page carries on without AI. Every call has a deadline bounded by a setting.
-- **Output is untrusted text.** It is shown escaped and never applied, sent or published without a person's reviewed write through the owner's operation contract.
+- **Output is untrusted text.** It is shown escaped and never applied, sent or published without a person's reviewed write through the owner's operation contract. One exception (#863): an approved watcher may ask one declared question about its trigger record and keep only a label from a fixed list with a confidence. The label can only decide whether actions a person approved run; it never names an action, an input or a record, and only the fields shown at approval are sent.
 
 ## Not in scope
 

@@ -10,6 +10,7 @@ rquickjs.workspace = true
 libc.workspace = true
 rlimit.workspace = true
 seccompiler.workspace = true
+bilibi-ai.workspace = true
 bilibi-custom-fields.workspace = true
 askama.workspace = true
 bilibi-agent-api.workspace = true

@@ -251,6 +251,7 @@ WALKTHROUGHS=(
   # The reference owner (watcher_cases) mounted; the heading is printed only then.
   'mounted|setup-packs-watchers|apps/base/setup_packs|setup-packs-walkthrough|none|BILIBI_SETUP_PACKS_DEMO=disposable|@mount:watcher_cases;-;@expect:ok  A repeat draft import is empty'
   'mounted|watcher-scripts|apps/web|watchers-walkthrough|seed||@mount:watcher_cases;--scripts;@expect:the script checks passed'
+  'mounted|watcher-observations|apps/web|watchers-walkthrough|seed||@mount:watcher_cases;--observations;@expect:the observation checks passed'
   'mounted|watchers-mounted|apps/web|watchers-walkthrough|seed||@mount:watcher_cases;-;@expect:== Same facts, two tenants, two destinations'
   # `end`, then `deliver` in a new process: the notices outlive the first one.
   'mounted|session-ended|apps/web|session-ended-walkthrough|none||@mount:session_listener;end;@expect:session_listener/presence.sessions;deliver;@expect:session_listener/presence.sessions'

@@ -68,6 +68,17 @@ impl WatcherSetup {
             ));
             draft.definition = None;
         }
+        if draft
+            .definition
+            .as_ref()
+            .is_some_and(|definition| definition.observe.is_some())
+        {
+            problems.push((
+                "observe".into(),
+                "Setup packs cannot transfer AI observations.".into(),
+            ));
+            draft.definition = None;
+        }
         draft.watcher_id = None;
         draft.explanation = None;
         if draft.name != self.name

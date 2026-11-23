@@ -481,7 +481,7 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let refused_before: i64 = client
         .query_one("SELECT count(*) FROM base_audit_actions WHERE event='settings.secret.reveal' AND payload->>'setting_key'=$1 AND payload->>'result'='refused'", &[&PROVIDER_KEYS])
         .await?.get(0);
-    let forged = json!({"type": "request_secret_reveal", "key": PROVIDER_KEYS, "code": ""});
+    let forged = json!({"type": "request_secret_reveal", "key": PROVIDER_KEYS});
     let body = live
         .update(LiveRequest {
             scope: &admin,
@@ -513,7 +513,7 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .collect();
     checks.check(
         "every setting has a System Settings editor",
-        editors.len() == 6,
+        editors.len() == 7,
         editors.join(","),
     );
 

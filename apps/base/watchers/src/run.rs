@@ -400,6 +400,30 @@ impl Worker {
             state: row.get(4),
             logical_event: row.get(5),
         };
+        // The AI observation comes first, outside the script budget, with no
+        // pooled connection held while the provider works.
+        let (client, started) = if run.state == "queued" {
+            match crate::observe::before_conditions(
+                &self.watchers,
+                execution,
+                scope,
+                crate::observe::Queued {
+                    id: run.id,
+                    watcher: run.watcher,
+                    version: run.version,
+                    depth: run.depth,
+                    subject: &run.subject,
+                },
+                client,
+            )
+            .await?
+            {
+                Some(client) => (client, started),
+                None => (self.watchers.db.get().await?, tokio::time::Instant::now()),
+            }
+        } else {
+            (client, started)
+        };
         self.run(execution, scope, run, started, client).await
     }
 
@@ -608,7 +632,25 @@ impl Worker {
                     }
                 };
                 let subject_version = record_revision(facts.get(offered.definition.version))?;
-                let (matched, outcomes) = evaluate(&definition, &facts, &types);
+                // The observation is a condition fact only: the receipt keeps
+                // it on its own, apart from the record's values.
+                let mut seen = facts.clone();
+                if definition.observe.is_some() {
+                    let saved: Option<Value> = client
+                        .query_one(
+                            "SELECT observation FROM base_watcher_runs WHERE tenant_id=$1 AND id=$2",
+                            &[&tenant, &run.id],
+                        )
+                        .await?
+                        .get(0);
+                    if let Some(code) = crate::observe::refusal(saved.as_ref()) {
+                        return self
+                            .finish(execution, &mut client, run.id, (&budget, Stop::Refused(code)), None)
+                            .await;
+                    }
+                    seen.extend(crate::observe::facts(saved.as_ref().unwrap_or(&Value::Null)));
+                }
+                let (matched, outcomes) = evaluate(&definition, &seen, &types);
                 let decided = (Value::Object(facts), json!(outcomes));
                 if !matched {
                     return self

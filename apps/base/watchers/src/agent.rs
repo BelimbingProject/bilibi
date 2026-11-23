@@ -71,7 +71,7 @@ pub(crate) fn run_json(run: &RunView) -> Value {
     json!({
         "run_id": run.id, "watcher_id": run.watcher_id, "version": run.version, "event_id": run.event_id,
         "event": run.event_name, "subject": run.subject, "depth": run.depth, "state": run.state,
-        "reason": run.reason, "facts": run.facts, "outcomes": run.outcomes,
+        "reason": run.reason, "facts": run.facts, "outcomes": run.outcomes, "observation": run.observation,
         "at": run.created_at.to_string(), "finished_at": run.finished_at.map(|at| at.to_string()),
         "effects": run.effects.iter().map(|e| json!({"position": e.position, "operation": e.operation, "state": e.state, "reason": e.reason, "result": e.result})).collect::<Vec<_>>(),
     })
@@ -263,10 +263,16 @@ impl WriteHandler for Approve {
                 return Err(refused(&review));
             }
             let mut facts = review.to_json();
-            facts["summary"] = json!(format!(
-                "Approve version {number}: from now on it runs on every new \u{201c}{}\u{201d}, without AI.",
-                review.trigger_title
-            ));
+            facts["summary"] = json!(match &review.observation {
+                None => format!(
+                    "Approve version {number}: from now on it runs on every new \u{201c}{}\u{201d}, without AI.",
+                    review.trigger_title
+                ),
+                Some(observation) => format!(
+                    "Approve version {number}: from now on it runs on every new \u{201c}{}\u{201d}. {observation} The answer only decides whether the approved actions run.",
+                    review.trigger_title
+                ),
+            });
             Ok(facts.into())
         })
     }
@@ -407,14 +413,23 @@ fn script_schema() -> Value {
     }})
 }
 
+fn observe_schema() -> Value {
+    json!({"type":"object","required":["question","fields","labels"],"description":"One AI observation, asked once per event before the conditions, through the AI provider chosen in settings. Conditions read its answer as ai:label (one of labels) and ai:confidence (0 to 1); the answer can only decide whether the approved actions run.","properties":{
+        "question":{"type":"string","maxLength":1000,"description":"What to ask about the record, e.g. Is the customer asking to cancel?"},
+        "fields":{"type":"array","items":{"type":"string","maxLength":160},"description":"1 to 10 of the trigger record's fields, sent with the question; nothing else of the record is sent"},
+        "labels":{"type":"array","items":{"type":"string","maxLength":40},"description":"2 to 20 unique labels of lower-case letters, digits and _, the only answers kept, e.g. cancellation, other"}
+    }})
+}
+
 fn draft_schema() -> Value {
     json!({"type":"object","required":["name","watch","do"],"properties":{
+        "observe":observe_schema(),
         "watcher_id":{"type":"integer","minimum":1,"description":"The watcher this is the next version of; leave out for a new watcher"},
         "name":{"type":"string","maxLength":120},
         "watch":{"type":"string","maxLength":200,"description":"An installed trigger, from base.watchers.vocabulary"},
         "if":{"type":"object","description":"Omit to act on every event of the watched kind.","required":["conditions"],"properties":{"match":{"type":"string","enum":["all","any"],"description":"all (default): every condition must hold; any: one is enough"},
         "conditions":{"type":"array","description":"At least one condition.","items":{"type":"object","required":["field","op"],"properties":{
-            "field":{"type":"string","maxLength":160,"description":"A field of the trigger's record, from base.watchers.vocabulary"},
+            "field":{"type":"string","maxLength":160,"description":"A field of the trigger's record, from base.watchers.vocabulary, or ai:label or ai:confidence when the draft has observe"},
             "op":{"type":"string","enum":crate::definition::Op::ALL},
             "value":{"type":"string","maxLength":500,"nullable":true,"description":"One value for eq, ne, lt, le, gt, ge; leave out for empty and not_empty"},
             "values":{"type":"array","items":scalar(),"description":"The values for in and not_in"}
@@ -425,7 +440,7 @@ fn draft_schema() -> Value {
             "input":{"type":"object","additionalProperties":true,"description":"The action's parameters as a JSON object, without its subject field (the runner binds the trigger's record)"}
         }}},
         "examples":{"type":"array","items":{"type":"object","required":["facts","expect"],"properties":{
-            "facts":{"type":"string","maxLength":4000,"description":"A record's field values as a JSON object (field → value)"},
+            "facts":{"type":"string","maxLength":4000,"description":"A record's field values as a JSON object (field → value); with observe, ai:label and ai:confidence stand for the AI's answer"},
             "expect":{"type":"string","enum":["match","no_match"]}
         }}},
         "explanation":{"type":"string","maxLength":2000,"description":"The person's request in their own words"}
@@ -539,7 +554,7 @@ impl WriteHandler for Normalised {
 }
 static DRAFT: Normalised = Normalised(&DraftWatcher);
 
-const GUIDE: &str = "A watcher is data: when a trigger event happens to a record, if its conditions hold, run its actions. Read base.watchers.vocabulary first: it lists the installed triggers with the fields their record offers, the actions with their parameters, the operators and the tenant's limits. Turn the person's plain words into one draft: a name, watch (the event), optional if (match all or any, conditions with field, op, value; values for in and not_in), do (operation and its input as a JSON object, leaving out the record field the runner binds) and up to 10 examples of records that should and should not match (facts as a JSON object of the fields the conditions read, expect match or no_match). Use base.watchers.trial to examine past events before saving; its event evidence and current record facts have different times, and it takes no action. Plan base.watchers.draft and show the person its review: the conditions in words, the actions, how each example comes out and any warnings. Without if, every event of the watched kind matches. A draft never runs. Tell the person an administrator approves the version on the Watchers page (or with base.watchers.approve after reviewing it there); the approved version then runs on every new event without AI. To change a running watcher, draft its next version with watcher_id; it runs only once approved. Read base.watchers.runs to explain what a watcher did: each receipt says which conditions held, the facts read and each action's outcome.";
+const GUIDE: &str = "A watcher is data: when a trigger event happens to a record, if its conditions hold, run its actions. Read base.watchers.vocabulary first: it lists the installed triggers with the fields their record offers, the actions with their parameters, the operators and the tenant's limits. Turn the person's plain words into one draft: a name, watch (the event), optional if (match all or any, conditions with field, op, value; values for in and not_in), do (operation and its input as a JSON object, leaving out the record field the runner binds) and up to 10 examples of records that should and should not match (facts as a JSON object of the fields the conditions read, expect match or no_match). When a condition needs judgement a field cannot give (\u{201c}the customer seems to ask to cancel\u{201d}), add observe: a question, the fewest record fields the question needs, and 2 to 20 labels; conditions then read ai:label and ai:confidence, and examples give those as facts. Only the listed fields are sent, approval shows them, the answer is kept only when it is one of the labels, and it only decides whether the approved actions run. Each event asks once, within the tenant's daily AI budget; AI for automation must be on. Use base.watchers.trial to examine past events before saving; its event evidence and current record facts have different times, and it takes no action. Plan base.watchers.draft and show the person its review: the conditions in words, the actions, how each example comes out and any warnings. Without if, every event of the watched kind matches. A draft never runs. Tell the person an administrator approves the version on the Watchers page (or with base.watchers.approve after reviewing it there); the approved version then runs on every new event, with no AI beyond its declared observation. To change a running watcher, draft its next version with watcher_id; it runs only once approved. Read base.watchers.runs to explain what a watcher did: each receipt says which conditions held, the facts read and each action's outcome.";
 
 inventory::submit! { Contribution::new(DEFINITIONS, "base/watchers", Provenance { module: "base/watchers", source: file!(), line: line!() }, &Definitions {
     operations: &[
@@ -549,7 +564,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/watchers", Provenance 
         Operation { key:"base.watchers.runs", title:"List watcher runs", summary:"Receipts of watcher runs: which conditions held, the facts read, each action's outcome, or why the run was refused.", keywords:&["watcher","run","receipt","why","automation"], capability:VIEW, input:runs_schema, output, handler:Handler::Read(&Read::Runs), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.trial", title:"Trial a draft watcher", summary:"Evaluate a draft against bounded past events and preview its actions without acting. Current record facts are marked separately from event evidence.", keywords:&["watcher","trial","preview","replay"], capability:VIEW, input:trial_schema, output, handler:Handler::Read(&Read::Trial), channels:Channels::Only { channels:&[Channel::Api,Channel::Mcp,Channel::Web], reason:"The audited trial requires a detached read." }, step_up:&[] },
         Operation { key:"base.watchers.draft", title:"Draft a watcher", summary:"Save a watcher, or a watcher's next version, for an administrator to approve. The review shows the conditions, the actions and how each example comes out. Nothing runs until approved.", keywords:&["watcher","automation","draft","when","then"], capability:MANAGE, input:draft_schema, output, handler:Handler::SafeWrite(&DRAFT), channels:Channels::Every, step_up:&[] },
-        Operation { key:"base.watchers.approve", title:"Approve a watcher version", summary:"Approve one fixed version of a watcher; from then on it runs on every new trigger event, without AI, as the watchers automation principal.", keywords:&["watcher","approve","activate","automation"], capability:APPROVE, input:approve_schema, output, handler:Handler::SafeWrite(&Approve), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.watchers.approve", title:"Approve a watcher version", summary:"Approve one fixed version of a watcher; from then on it runs on every new trigger event as the watchers automation principal, with no AI beyond the version's declared observation.", keywords:&["watcher","approve","activate","automation"], capability:APPROVE, input:approve_schema, output, handler:Handler::SafeWrite(&Approve), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.switch", title:"Switch a watcher on or off", summary:"Stop a watcher's approved version from running, or let it run again.", keywords:&["watcher","disable","enable","off","on","automation"], capability:APPROVE, input:switch_schema, output, handler:Handler::SafeWrite(&Switch), channels:Channels::Every, step_up:&[] },
     ],
     guides: &[Guide { key:"base.watchers", title:"Tenant watchers", summary:"Draft a \u{201c}when this happens, do that\u{201d} watcher from a person's words for an administrator to approve.", keywords:&["watcher","automation","when","then","trigger"], capability:VIEW, body:GUIDE }],

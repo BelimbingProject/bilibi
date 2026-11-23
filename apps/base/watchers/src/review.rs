@@ -24,6 +24,11 @@ pub struct Review {
     /// Each example: what it expects and what the conditions answer.
     pub examples: Vec<(bool, bool)>,
     pub script_examples: Vec<String>,
+    /// The AI observation in words: the question, its labels and the
+    /// fields sent, which nothing else of the record joins.
+    pub observation: Option<String>,
+    /// The fields the observation sends, as field and label.
+    pub observation_fields: Vec<(String, String)>,
     pub warnings: Vec<String>,
     pub trigger_title: String,
 }
@@ -42,6 +47,8 @@ impl Review {
                 "passes": expect == got,
             })).collect::<Vec<_>>(),
             "script_examples": self.script_examples,
+            "observation": self.observation,
+            "observation_fields": self.observation_fields.iter().map(|(field, label)| json!({"field": field, "label": label})).collect::<Vec<_>>(),
             "warnings": self.warnings,
             "problems": self.problems.iter().map(|(field, why)| json!({"field": field, "problem": why})).collect::<Vec<_>>(),
         })
@@ -375,25 +382,47 @@ impl Watchers {
             |path| field(path).map(|(ty, values, _)| (ty, values)),
             problems,
         );
+        // A script or an observation reads a field as a condition would:
+        // readable, unmasked, and a custom field only when offered.
+        let allowed = |path: &str| {
+            table
+                .and_then(|table| catalog.resolve(table, path).ok())
+                .is_some_and(|column| {
+                    field(path).is_some()
+                        && column.field.is_some_and(|f| {
+                            catalog.table(column.table).is_some_and(|owner| {
+                                !owner.is_custom(f.id)
+                                    || (column.hops.is_empty()
+                                        && owner.custom_watcher_condition(f.id))
+                            })
+                        })
+                })
+        };
         for script in definition.scripts() {
             for path in &script.fields {
-                let allowed = table
-                    .and_then(|table| catalog.resolve(table, path).ok())
-                    .is_some_and(|column| {
-                        field(path).is_some()
-                            && column.field.is_some_and(|f| {
-                                catalog.table(column.table).is_some_and(|owner| {
-                                    !owner.is_custom(f.id)
-                                        || (column.hops.is_empty()
-                                            && owner.custom_watcher_condition(f.id))
-                                })
-                            })
-                    });
-                if !allowed {
+                if !allowed(path) {
                     problems.push(("do".into(), format!("{} cannot read {path}.", script.name)));
                 }
             }
             review.actions.push(script.describe());
+        }
+        if let Some(observe) = &definition.observe {
+            for (i, path) in observe.fields.iter().enumerate() {
+                if !allowed(path) {
+                    problems.push((
+                        format!("observe.fields.{i}"),
+                        format!("{path} is not a field of this trigger's record you may read"),
+                    ));
+                }
+            }
+            let label =
+                |path: &str| field(path).map_or_else(|| path.to_owned(), |(_, _, label)| label);
+            review.observation_fields = observe
+                .fields
+                .iter()
+                .map(|path| (path.clone(), label(path)))
+                .collect();
+            review.observation = Some(observe.describe(label));
         }
         review.conditions = definition
             .conditions
@@ -401,7 +430,9 @@ impl Watchers {
             .map(|c| {
                 definition::sentence(
                     c,
-                    &field(&c.field).map_or_else(|| c.field.clone(), |(_, _, label)| label),
+                    &condition_label(&c.field, &|path: &str| {
+                        field(path).map_or_else(|| path.to_owned(), |(_, _, label)| label)
+                    }),
                 )
             })
             .collect();
@@ -469,7 +500,7 @@ impl Watchers {
             });
         }
         let types = |path: &str| field(path).map_or(FieldType::String, |(ty, _, _)| ty);
-        let fields = definition.condition_fields();
+        let fields = definition.example_fields();
         for (i, example) in examples.iter().enumerate() {
             if let Some(unknown) = example.facts.keys().find(|key| !fields.contains(key)) {
                 problems.push((
@@ -822,6 +853,13 @@ impl Watchers {
                         }
                     }
                 }
+                if definition.observe.is_some() {
+                    if let Some(reason) = self.observation_available(client, &principal).await? {
+                        review.warnings.push(format!(
+                            "AI is unavailable for automation here ({reason}): until an administrator turns on AI for the installation and AI for automation, and lists the provider, every observation is unavailable and conditions on it see no answer."
+                        ));
+                    }
+                }
             }
             Err(Error::Unauthorized) => return Err(Error::Unauthorized),
             Err(_) => review
@@ -1029,8 +1067,19 @@ pub(crate) fn bind(
 /// A stored version in words, for reading: conditions with their fields'
 /// labels, actions with their titles and parameters, examples. Labels come
 /// from the installed catalogs; values from the version itself.
+/// A condition's subject in words: a record field's label, or the AI's answer.
+fn condition_label(path: &str, label: &dyn Fn(&str) -> String) -> String {
+    match path {
+        crate::observe::LABEL => "AI label".to_owned(),
+        crate::observe::CONFIDENCE => "AI confidence".to_owned(),
+        _ => label(path),
+    }
+}
+
 pub(crate) struct Described {
     pub scripted: bool,
+    /// The AI observation in words, with the fields it sends.
+    pub observation: Option<String>,
     pub matching: &'static str,
     pub conditions: Vec<String>,
     pub actions: Vec<String>,
@@ -1056,6 +1105,7 @@ impl Watchers {
         let Some(parsed) = parsed else {
             return Described {
                 scripted: false,
+                observation: None,
                 matching: "all",
                 conditions: Vec::new(),
                 actions: Vec::new(),
@@ -1065,8 +1115,12 @@ impl Watchers {
         let conditions = parsed
             .conditions
             .iter()
-            .map(|c| definition::sentence(c, &label(&c.field)))
+            .map(|c| definition::sentence(c, &condition_label(&c.field, &label)))
             .collect();
+        let observation = parsed
+            .observe
+            .as_ref()
+            .map(|observe| observe.describe(label));
         let actions = parsed
             .steps
             .iter()
@@ -1098,7 +1152,13 @@ impl Watchers {
                 let facts: Vec<String> = e
                     .facts
                     .iter()
-                    .map(|(field, value)| format!("{} {}", label(field), definition::shown(value)))
+                    .map(|(field, value)| {
+                        format!(
+                            "{} {}",
+                            condition_label(field, &label),
+                            definition::shown(value)
+                        )
+                    })
                     .collect();
                 format!(
                     "{}: {}",
@@ -1129,6 +1189,7 @@ impl Watchers {
         let scripted = parsed.scripts().next().is_some();
         Described {
             scripted,
+            observation,
             matching: parsed.matching.key(),
             conditions,
             actions,

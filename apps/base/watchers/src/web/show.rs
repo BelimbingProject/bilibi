@@ -65,6 +65,7 @@ fn reason(code: &str) -> &'static str {
         "read_refused" => "Not run: automation may not read these records yet. An administrator allows it in Automation access.",
         "restricted_field" => "Not run: a condition reads a field that is hidden from automation.",
         "subject_unavailable" => "Not run: the record is gone or out of reach.",
+        "observation_missing" => "Not run: its AI observation was not asked.",
         "action_refused" => "An action was refused; see its outcome.",
         "actor_refused" => "Not run: automation was stopped here (the workspace is suspended or Automation access was withdrawn).",
         _ => "Not run.",
@@ -82,8 +83,48 @@ fn effect_reason(code: &str) -> &'static str {
         _ => "refused",
     }
 }
+/// What the AI answered for a run, in words; nothing when none was asked.
+fn observed(run: &RunView) -> Option<String> {
+    let observation = &run.observation;
+    if observation.is_null() {
+        return None;
+    }
+    if observation.get("restricted").is_some() {
+        return Some("The AI observation is hidden: you may not read the fields it sent.".into());
+    }
+    Some(match observation["state"].as_str() {
+        Some("observed") => format!(
+            "AI answered {} with confidence {} ({}, {}).",
+            observation["label"].as_str().unwrap_or_default(),
+            observation["confidence"].as_str().unwrap_or_default(),
+            observation["provider"].as_str().unwrap_or_default(),
+            observation["model"].as_str().unwrap_or_default(),
+        ),
+        Some("pending") => "Waiting for the AI observation.".into(),
+        _ => format!(
+            "No AI answer: {}. Conditions on it saw no answer.",
+            observation_reason(observation["reason"].as_str().unwrap_or_default())
+        ),
+    })
+}
+fn observation_reason(code: &str) -> &'static str {
+    match code {
+        "disabled" => "AI is off for automation here",
+        "not_configured" => "the AI provider is not configured",
+        "timeout" => "the AI provider did not answer in time",
+        "provider_error" => "the AI provider failed",
+        "invalid_answer" => "the answer was not one of the labels with a confidence",
+        "budget_exhausted" => "today's AI observations are used up",
+        "interrupted" => "the call was interrupted and is not asked twice",
+        "not_observed" => "this event was not asked about",
+        "read_refused" | "restricted_field" | "subject_unavailable" => {
+            "automation could not read the fields it sends"
+        }
+        _ => "unavailable",
+    }
+}
 fn why(run: &RunView, described: &crate::review::Described) -> Vec<String> {
-    let mut lines = Vec::new();
+    let mut lines: Vec<String> = observed(run).into_iter().collect();
     match run.state.as_str() {
         _ if run.outcomes.get("restricted").is_some() => {
             lines.push("Which conditions held is hidden: you may not read these records.".into());
@@ -397,12 +438,19 @@ impl Show {
                 .render(version.drafted_at, Format::DateTime, Precision::Minute)
                 .text
         );
-        let mut items = vec![
-            Fact {
-                title: "Watch",
+        let mut items = vec![Fact {
+            title: "Watch",
+            id: "",
+            value: Html::text(&view.summary.trigger_title),
+        }];
+        if let Some(observation) = &described.observation {
+            items.push(Fact {
+                title: "AI observation",
                 id: "",
-                value: Html::text(&view.summary.trigger_title),
-            },
+                value: Html::text(observation),
+            });
+        }
+        items.extend([
             Fact {
                 title: "If",
                 id: "",
@@ -422,7 +470,7 @@ impl Show {
                     lines: &described.examples,
                 })?,
             },
-        ];
+        ]);
         if let Some(review) = review.filter(|review| !review.script_examples.is_empty()) {
             items.push(Fact {
                 title: "Script example results",
@@ -681,10 +729,30 @@ impl Show {
                     "Approve version {} of \u{201c}{}\u{201d}?",
                     request.number, view.summary.name
                 );
-                let detail = format!(
-                    "From now on it runs each time \u{201c}{}\u{201d}, without AI. A run still waiting for an earlier version will not act.",
-                    view.summary.trigger_title
-                );
+                let observation = view
+                    .versions
+                    .iter()
+                    .find(|version| version.number == request.number)
+                    .and_then(|version| {
+                        self.pages
+                            .watchers
+                            .describe(
+                                &view.summary.trigger,
+                                &version.definition,
+                                &version.examples,
+                            )
+                            .observation
+                    });
+                let detail = match observation {
+                    None => format!(
+                        "From now on it runs each time \u{201c}{}\u{201d}, without AI. A run still waiting for an earlier version will not act.",
+                        view.summary.trigger_title
+                    ),
+                    Some(observation) => format!(
+                        "From now on it runs each time \u{201c}{}\u{201d}. {observation} The answer only decides whether the approved actions run. A run still waiting for an earlier version will not act.",
+                        view.summary.trigger_title
+                    ),
+                };
                 render(ConfirmDialog {
                     id: "watcher-approve-confirm",
                     consequence: &consequence,
