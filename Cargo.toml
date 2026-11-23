@@ -20,6 +20,9 @@ allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 
 [workspace.dependencies]
+rquickjs = "0.14"
+seccompiler = "0.5"
+rlimit = "0.11"
 icu_datetime = "2.3.0"
 icu_locale = "2.3.1"
 icu_properties = "2.4.0"

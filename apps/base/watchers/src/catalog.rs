@@ -82,6 +82,7 @@ pub(crate) struct OfferedAction {
     pub summary: &'static str,
     pub capability: &'static str,
     pub input: Value,
+    pub local_script: bool,
 }
 
 /// The mounted triggers and actions, checked against the Events, Grid,
@@ -248,6 +249,7 @@ impl Offers {
                     summary: op.summary,
                     capability: op.capability,
                     input: registered.input.clone(),
+                    local_script: matches!(op.handler, bilibi_agent_api::Handler::SafeWrite(handler) if handler.local_script_action()),
                 },
             );
         }

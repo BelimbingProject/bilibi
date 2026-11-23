@@ -1,8 +1,13 @@
 use bilibi_database::{pool, Error, Result};
 use std::io::IsTerminal;
 use std::sync::Arc;
+fn main() -> Result<()> {
+    bilibi_base::watchers::enter_worker();
+    serve()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn serve() -> Result<()> {
     bilibi_web::verify_descriptors()?;
     // What this program is made of needs no database (docs/versions.md).
     if std::env::args().nth(1).as_deref() == Some("status") {

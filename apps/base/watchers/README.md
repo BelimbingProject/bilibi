@@ -2,7 +2,7 @@
 
 **Use it for:** a tenant's own "when this happens, do that" with no release: offer an event of yours as a watcher trigger and a write contract of yours as a watcher action.
 
-**Not for:** a check that must stop a save (keep it in your operation), tenant scripts or per-tenant code branches, or a workflow or approval engine of your own.
+**Not for:** a check that must stop a save (keep it in your operation), per-tenant code branches, or a workflow or approval engine of your own.
 
 A watcher is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customisation-is-data-on-shared-servers.md), [ADR 31](../../../docs/architecture/decisions/31-tenant-watchers-run-after-commit-as-one-bounded-principal.md), #682). It says: when a trigger event happens to a record, if these conditions over the record's fields hold, run these actions. Omit `if` to act on every event of the watched kind. A person drafts it on the Watchers page or through an AI agent; an administrator approves one fixed version; that version runs on every new event, without AI.
 
@@ -23,6 +23,31 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 - **Operators**: `eq`, `ne`, `in`, `not_in`, `lt`, `le`, `gt`, `ge` (numbers and dates), `empty`, `not_empty`.
 - **Values compare exactly**: numbers as exact decimals (integer JSON numbers or decimal strings; fractional JSON numbers and values beyond decimal precision are refused), dates and times as instants, text as written, true/false as such. A missing value matches only `empty`; every other comparison with it is false.
 - **No "update any record" action.** An action is one owner's contract with its own schema, preview, checks and audit. The runner binds the action's subject field to the trigger's record; a watcher never names a record, tenant, principal or operation outside the installed set.
+
+## JavaScript steps
+
+A `do` step can carry a named JavaScript function body under `script`. The connector drafts it as part of the watcher version. Its approval pins the source, language, SHA-256 source digest, fields, examples, permitted calls and inputs together. Each invocation receives only its declared fields from the scoped trigger record. A script can branch, calculate and return an ordered array of calls. An empty array skips the actions. [ADR 34](../../../docs/architecture/decisions/34-tenant-scripts-run-through-operation-contracts.md)
+
+```json
+{
+  "script": {
+    "name": "Route urgent cases",
+    "source": "return facts.priority === 'urgent' ? [{operation:'watcher_cases.cases.route',input:{queue:'priority'}}] : [];",
+    "fields": ["priority"],
+    "calls": [{"operation":"watcher_cases.cases.route","input":{"queue":"priority"}}],
+    "examples": [
+      {"facts":{"priority":"normal"},"expect":[]},
+      {"facts":{"priority":"urgent"},"expect":[{"operation":"watcher_cases.cases.route","input":{"queue":"priority"}}]}
+    ]
+  }
+}
+```
+
+- The tenant grants `watchers.script.execute` separately in Automation access. The named watcher principal checks its live grant before planning and before each effect. The draft and approval reviewer needs the same capability to run examples. The record owner binds the subject and checks each write through its normal operation.
+- The host accepts only complete operation and input pairs in the declaration. An owner certifies a watcher action as local through its reviewed write handler, which declares that its effects stay within the installation. The private Activities follow-up handler is eligible. The worker receives no connector credentials and has no filesystem, network or database interface.
+- The optional watcher filter runs first. QuickJS executes in a fresh process under a Linux syscall allowlist. The tenant can lower `watchers.script_heap_mib` and `watchers.script_milliseconds`. The time budget covers preparation, the whole run or historical trial, and owner operations. After a commit starts, Bilibi waits for it and its callbacks. The host also limits the action count, and validates the full plan before saving it and starting any effect. Retries use the saved calls and existing effect receipts.
+- Draft and approval present expected and captured calls for each example. Use the record representation for facts, including text for numbers. Omitted fields are null. Trial evaluates the script and previews the selected effects. Use `base.watchers.get` to inspect the exact version and `base.watchers.switch` to stop it.
+- With the reference owner mounted, run `cargo run -p bilibi-web --example watchers-walkthrough -- --scripts` on a fresh walkthrough database. The proof checks a successful route, refused file and network access, an attempted write to another company's record, and the worker's heap and time limits.
 
 ## Versions and approval
 
@@ -140,7 +165,7 @@ For a match, the watcher principal calls the action owner's preview at the curre
 
 ## Setup packs
 
-Export a latest unapproved version and preview it as a new destination draft through [Setup packs](../setup_packs/README.md). Reverse an initial unapproved draft through Customisations. The draft discard operation refuses a watcher after it has been revised or approved.
+Export a latest unapproved version and preview it as a new destination draft through [Setup packs](../setup_packs/README.md). Setup packs refuse scripts. Reverse an initial unapproved draft through Customisations. The draft discard operation refuses a watcher after it has been revised or approved.
 
 ## Tables
 
@@ -155,4 +180,4 @@ The official Domain companion walkthrough is `apps/web/examples/watchers-domains
 ## Not yet
 
 - Custom fields of a linked record (`company.cf_segment`) as conditions.
-- A bounded text formula, AI observations as inputs and script or Wasm tooling for isolated installations: later items of [#682](https://github.com/BelimbingProject/bilibi/issues/682).
+- Standalone script versions, contract lookups and person-initiated runs are covered by [ADR 34](../../../docs/architecture/decisions/34-tenant-scripts-run-through-operation-contracts.md). The current execution path is a watcher event.
