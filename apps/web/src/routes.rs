@@ -426,13 +426,24 @@ pub fn install_public(
             on(
                 method_filter(bound.route.method),
                 move |State(app): State<App>,
+                      method: axum::http::Method,
                       uri: Uri,
                       headers: HeaderMap,
                       peer: Option<Extension<ConnectInfo<SocketAddr>>>,
                       Path(path): Path<HashMap<String, String>>,
                       Query(query): Query<HashMap<String, String>>,
                       body: Bytes| {
-                    dispatch(app, bound, uri, headers, peer, path, query, body)
+                    dispatch(
+                        app,
+                        bound,
+                        uri,
+                        headers,
+                        peer,
+                        path,
+                        query,
+                        body,
+                        method == axum::http::Method::HEAD,
+                    )
                 },
             ),
         );
