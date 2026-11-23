@@ -33,7 +33,7 @@ impl SessionProvider for Authenticator {
         proof: SessionProof,
     ) -> ProofFuture<'a, WindowState> {
         Box::pin(async move {
-            let client = self.0.db.try_get_detached("session proof is consumed independently so it survives the caller's rollback; refuse immediately if the pool is full").await?;
+            let client = self.0.db.get_independent("session proof is consumed independently so it survives the caller's rollback; refuse immediately if the pool is full").await?;
             Ok(match proof {
                 SessionProof::Window {
                     window_seconds,
@@ -146,7 +146,7 @@ impl Provider for Authenticator {
                 operation: purpose.operation.to_owned(),
                 channel: purpose.channel.as_str(),
             };
-            let mut client = self.0.db.try_get_detached(STEP_UP_CONNECTION).await?;
+            let mut client = self.0.db.get_independent(STEP_UP_CONNECTION).await?;
             let outcome = match self.0.prove(&mut client, scope, code).await {
                 Ok(step) => self.0.consume(&mut client, scope, step, spend).await,
                 Err(error) => Err(error),

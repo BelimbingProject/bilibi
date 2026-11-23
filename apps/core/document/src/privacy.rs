@@ -228,17 +228,20 @@ async fn shared_documents(
 /// the document, or one of its revisions or file ledger rows (document →
 /// hold).
 async fn held(
+    client: &dyn bilibi_tenancy::ReadClient,
     holds: &Holds,
     grant: &Erasure,
     files: &BTreeMap<i64, Files>,
 ) -> Result<BTreeMap<i64, i64>> {
-    let person = holds.person_hold(grant).await?;
+    let person = holds.person_hold(client, grant).await?;
     let ids: Vec<i64> = files.keys().copied().collect();
     let revisions: Vec<i64> = files.values().flat_map(|f| f.revisions.clone()).collect();
     let ledger: Vec<i64> = files.values().flat_map(|f| f.ledger.clone()).collect();
-    let documents = holds.records(grant, RECORD, &ids).await?;
-    let revisions = holds.records(grant, REVISION_RECORD, &revisions).await?;
-    let ledger = holds.records(grant, FILE_RECORD, &ledger).await?;
+    let documents = holds.records(client, grant, RECORD, &ids).await?;
+    let revisions = holds
+        .records(client, grant, REVISION_RECORD, &revisions)
+        .await?;
+    let ledger = holds.records(client, grant, FILE_RECORD, &ledger).await?;
     Ok(files
         .iter()
         .filter_map(|(id, f)| {
@@ -432,7 +435,7 @@ impl Handler for DocumentData {
             let protected_ids = protected_documents(tx.sql(), tenant, &ids).await?;
             let shared_ids = shared_documents(tx.sql(), tenant, person, &ids).await?;
             let files = files_of(tx.sql(), tenant, &ids).await?;
-            let held = held(holds, grant, &files).await?;
+            let held = held(tx.sql(), holds, grant, &files).await?;
             let mut erased = Erased::default();
             for row in rows {
                 let (id, company): (i64, i64) = (row.get(0), row.get(1));
@@ -565,7 +568,7 @@ impl Handler for DocumentData {
                     remove_bytes(client, scope, grant, file).await?;
                 }
             }
-            let held = held(holds, grant, &files).await?;
+            let held = held(&*client, holds, grant, &files).await?;
             let bound = bound()?;
             for row in rows {
                 let (id, company, marked): (i64, i64, bool) = (row.get(0), row.get(1), row.get(2));

@@ -38,7 +38,7 @@ Stores, record kinds, grants and the hold guard are contracts in [`base/personal
 
 - A record is named by a kind some module declared (`RECORD_KINDS`); another kind is `Invalid`.
 - A reason is 1–255 characters, no control characters: a case reference.
-- **Guard:** erasures and sweeps hold the tenant's hold guard (a shared advisory lock on its own connection) from before their transaction until after it commits; placement takes it exclusively. A hold placed meanwhile waits up to 5 seconds, then is refused with "try again"; the next erasure sees it.
+- **Guard:** erasures and sweeps hold the tenant's hold guard (a shared advisory lock on the working connection) from before their transaction until after it commits; placement takes it exclusively. A hold placed meanwhile waits up to 5 seconds, then is refused with "try again"; the next erasure sees it.
 - Erasure and sweep reads ask only about the records in hand (`Holds::records`, `persons`), never every hold in the tenant.
 - **A hold on the person also keeps what their requests recorded and their earlier exports.** Completing their erasure under that hold leaves every request's identifiers, verification and refusal reason, and their exports, in place, and owes the cleanup; the daily run forgets them after the hold is released.
 - The database refuses a second target, re-release, edits, deletes and truncates (`migrations/001-holds.sql`).

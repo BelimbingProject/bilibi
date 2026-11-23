@@ -89,6 +89,7 @@ Why: once more callers than connections each hold one and ask for a second, ever
 | A connection | `db.get().await?` |
 | To read while you already hold one | Pass the one you hold: `&(impl ProofClient + ?Sized)`, a `&Transaction`, or the `OperationClient` you were given |
 | To call a service that takes its own | Drop your connection first |
+| An independent checkout from either standalone or nested service work | `db.get_independent("why")`, which waits for a first tracked slot and refuses immediately for a second when the pool is full |
 | A single, named connection that must be separate while you hold a pool slot | `db.try_get_detached("why")`, which refuses immediately when the pool is full |
 | A single, named connection that must be separate and can safely wait for admission | `db.get_detached("why")`, with the reason the pool cannot be starved by it |
 | A connection that carries session state (a session lock, a session setting) | `Connection::take(db.get().await?)`: closed when dropped, never returned to the pool, and no longer counted |

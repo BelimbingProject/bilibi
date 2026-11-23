@@ -246,7 +246,7 @@ impl Handler for Payloads {
             ids.sort_unstable();
             ids.dedup();
             let mut erased = Erased::default();
-            let held = holds.records(grant, KIND, &ids).await?;
+            let held = holds.records(tx.sql(), grant, KIND, &ids).await?;
             let tenant = scope.tenant();
             let declared = declared()?;
             let mut count = 0;

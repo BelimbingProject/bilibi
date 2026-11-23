@@ -141,6 +141,21 @@ impl Db {
         let object = self.pool.timeout_get(&timeouts).await?;
         Ok(Connection { object, mark: None })
     }
+    /// Checks out an independent connection, waiting only if this task holds no tracked slot.
+    #[track_caller]
+    pub fn get_independent(
+        &self,
+        why: &'static str,
+    ) -> impl Future<Output = Result<Connection, PoolError>> + Send + '_ {
+        let first = self.get();
+        async move {
+            if lock(&self.held.by).contains_key(&Holder::current()) {
+                self.try_get_detached(why).await
+            } else {
+                first.await
+            }
+        }
+    }
     pub fn status(&self) -> Status {
         self.pool.status()
     }

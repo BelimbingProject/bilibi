@@ -379,10 +379,9 @@ async fn answer(
                     .erasure(scope.tenant(), Cause::Request(id), Some(request.person));
             let minimum = privacy.evidence_minimum(&client, scope).await?;
             if state == "pending" {
-                let holds = Holds::acquire(scope, &grant).await?;
-                let mut tx = execution
-                    .begin(&mut client, "privacy.request.erase")
-                    .await?;
+                let (holds, mut hold_guard) = Holds::acquire(&mut client, scope, &grant).await?;
+                let client = hold_guard.client();
+                let mut tx = execution.begin(client, "privacy.request.erase").await?;
                 let locked = tx
                     .sql()
                     .query_opt(
@@ -409,11 +408,12 @@ async fn answer(
                     tx.rollback().await?;
                 }
                 // Released only now: the erasure is committed.
-                holds.release().await?;
+                hold_guard.release().await?;
             } else if finished {
                 return Ok(());
             }
-            let holds = Holds::acquire(scope, &grant).await?;
+            let (holds, mut hold_guard) = Holds::acquire(&mut client, scope, &grant).await?;
+            let guarded = hold_guard.client();
             let progress = Steps {
                 execution,
                 scope,
@@ -423,9 +423,9 @@ async fn answer(
                 minimum: &minimum,
             };
             data.handler
-                .after_erase(&mut client, scope, &subject, &grant, &holds, &progress)
+                .after_erase(guarded, scope, &subject, &grant, &holds, &progress)
                 .await?;
-            holds.release().await?;
+            hold_guard.release().await?;
             let mut tx = execution
                 .begin(&mut client, "privacy.request.erase_finished")
                 .await?;
@@ -832,24 +832,23 @@ async fn finish(
     // A hold on the person keeps their earlier exports and what their
     // requests recorded; the owed cleanup forgets them once it is released.
     // The guard stays until the completion commits.
-    let mut holds = None;
-    let mut forget = false;
-    if request.kind == RequestKind::Erasure {
+    let mut hold_guard = None;
+    let (client, forget) = if access {
+        (client, false)
+    } else {
         let grant =
             privacy
                 .issuer
                 .erasure(scope.tenant(), Cause::Request(id), Some(request.person));
-        let session = Holds::acquire(scope, &grant).await?;
-        forget = session.person_hold(&grant).await?.is_none();
-        // The person's earlier exports go before their requests forget them,
-        // and before the certificate is filed, so a failing deletion never
-        // files another retained certificate on each retry; deleting an
-        // already deleted one is a no-op, so a retry is safe.
+        let (holds, guard) = Holds::acquire(client, scope, &grant).await?;
+        let guard = hold_guard.insert(guard);
+        let client = guard.client();
+        let forget = holds.person_hold(&*client, &grant).await?.is_none();
         if forget {
             documents::delete_exports(privacy, client, scope, &grant, request.person).await?;
         }
-        holds = Some(session);
-    }
+        (client, forget)
+    };
     // An earlier attempt may have stored its document and failed before
     // filing it (#562): its export goes before another is built, so no copy
     // of the person's data is left unreferenced; its certificate, retained
@@ -883,6 +882,7 @@ async fn finish(
             tx.rollback().await?;
             documents::discard_export(privacy, client, scope, &request, &artifact).await?;
             restart_export(privacy, client, execution, scope, &request).await?;
+            drop(hold_guard);
             guard.release().await?;
             return Ok(Finish::Done);
         }
@@ -900,9 +900,10 @@ async fn finish(
         )
         .await?;
     tx.commit().await?;
-    if let Some(holds) = holds {
-        holds.release().await?;
+    if let Some(hold_guard) = hold_guard.take() {
+        hold_guard.release().await?;
     }
+    drop(hold_guard);
     guard.release().await?;
     Ok(Finish::Done)
 }
@@ -1224,22 +1225,29 @@ impl Privacy {
                 continue;
             }
             let subject = requests::subject_for(&request, key);
-            let holds = Holds::acquire(scope, &grant).await?;
-            let mut tx = self
-                .boundary
-                .begin(client, scope.mutation_context("privacy.request.resume"))
-                .await?;
-            requests::person_guard(tx.sql(), tenant, request.person, true).await?;
-            let mut erased = data
-                .handler
-                .erase(&mut tx, scope, &subject, &grant, &holds)
-                .await?;
-            clear_evidence(&tx, &grant, &mut erased, minimum).await?;
-            count_erasure(&mut tx, tenant, id).await?;
-            tx.commit().await?;
-            holds.release().await?;
+            let (holds, mut hold_guard) = Holds::acquire(client, scope, &grant).await?;
+            let guarded = hold_guard.client();
+            let erased = async {
+                let mut tx = self
+                    .boundary
+                    .begin(guarded, scope.mutation_context("privacy.request.resume"))
+                    .await?;
+                requests::person_guard(tx.sql(), tenant, request.person, true).await?;
+                let mut erased = data
+                    .handler
+                    .erase(&mut tx, scope, &subject, &grant, &holds)
+                    .await?;
+                clear_evidence(&tx, &grant, &mut erased, minimum).await?;
+                count_erasure(&mut tx, tenant, id).await?;
+                tx.commit().await?;
+                Ok::<_, Error>(erased)
+            }
+            .await;
+            hold_guard.release().await?;
+            let erased = erased?;
             answer.lock().map_err(|_| Error::Internal)?.add(&erased);
-            let holds = Holds::acquire(scope, &grant).await?;
+            let (holds, mut hold_guard) = Holds::acquire(client, scope, &grant).await?;
+            let guarded = hold_guard.client();
             let steps = Resumed {
                 privacy: self,
                 scope,
@@ -1247,43 +1255,51 @@ impl Privacy {
                 minimum,
                 answer: &answer,
             };
-            data.handler
-                .after_erase(client, scope, &subject, &grant, &holds, &steps)
-                .await?;
-            holds.release().await?;
+            let cleaned = data
+                .handler
+                .after_erase(guarded, scope, &subject, &grant, &holds, &steps)
+                .await;
+            hold_guard.release().await?;
+            cleaned?;
         }
         // As at the request's completion: what an access request disclosed
         // or staged while records were kept goes too. The person's exports
         // are deleted and every request about them forgets its personal text
         // (a staged export is then read again), unless a hold on the person
         // still keeps them: the cleanup then stays owed.
-        let holds = Holds::acquire(scope, &grant).await?;
-        if let Some(hold) = holds.person_hold(&grant).await? {
-            holds.release().await?;
-            let mut answer = answer.into_inner().map_err(|_| Error::Internal)?;
+        let (holds, mut hold_guard) = Holds::acquire(client, scope, &grant).await?;
+        let guarded = hold_guard.client();
+        let cleanup = async {
+            if let Some(hold) = holds.person_hold(&*guarded, &grant).await? {
+                return Ok(Some(hold));
+            }
+            documents::delete_exports(self, guarded, scope, &grant, request.person).await?;
+            let mut tx = self
+                .boundary
+                .begin(guarded, scope.mutation_context("privacy.request.resume"))
+                .await?;
+            requests::person_guard(tx.sql(), tenant, request.person, true).await?;
+            let person = request.person;
+            tx.mutate(move |sql| {
+                Box::pin(async move {
+                    let mut changes = requests::forget_person(sql, tenant, person).await?;
+                    changes.extend(forget_exports(sql, tenant, person).await?);
+                    Ok(((), changes))
+                })
+            })
+            .await?;
+            tx.commit().await?;
+            Ok::<_, Error>(None)
+        }
+        .await;
+        hold_guard.release().await?;
+        let mut answer = answer.into_inner().map_err(|_| Error::Internal)?;
+        if let Some(hold) = cleanup? {
             answer
                 .kept
                 .push(Kept::held(requests::REQUEST_KIND, id, hold));
-            return Ok(answer);
         }
-        documents::delete_exports(self, client, scope, &grant, request.person).await?;
-        let mut tx = self
-            .boundary
-            .begin(client, scope.mutation_context("privacy.request.resume"))
-            .await?;
-        requests::person_guard(tx.sql(), tenant, request.person, true).await?;
-        let person = request.person;
-        tx.mutate(move |sql| {
-            Box::pin(async move {
-                let mut changes = requests::forget_person(sql, tenant, person).await?;
-                changes.extend(forget_exports(sql, tenant, person).await?);
-                Ok(((), changes))
-            })
-        })
-        .await?;
-        tx.commit().await?;
-        holds.release().await?;
-        answer.into_inner().map_err(|_| Error::Internal)
+        Ok(answer)
     }
 }
 

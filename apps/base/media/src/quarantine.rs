@@ -327,9 +327,10 @@ impl Media {
     /// gone count as removed, so a retry after a lost record finishes it.
     async fn remove_purged(&self, execution: &Execution, id: i64) -> Result<Outcome> {
         let mut client = self.db.get().await.map_err(bilibi_database::Error::from)?;
-        let holds = RecordHolds::acquire(execution.tenant()).await?;
-        let removed = self.remove_unheld(&mut client, execution, id, &holds).await;
-        holds.release().await?;
+        let (holds, mut hold_guard) = RecordHolds::acquire(&mut client, execution.tenant()).await?;
+        let client = hold_guard.client();
+        let removed = self.remove_unheld(client, execution, id, &holds).await;
+        hold_guard.release().await?;
         removed
     }
     /// A legal hold on the file, or on the attachment it is bound to, keeps
@@ -352,8 +353,11 @@ impl Media {
             .iter()
             .map(|row| row.get(0))
             .collect();
-        if !holds.records(ASSET_KIND, &[id]).await?.is_empty()
-            || !holds.records(ATTACHMENT_KIND, &bindings).await?.is_empty()
+        if !holds.records(&*client, ASSET_KIND, &[id]).await?.is_empty()
+            || !holds
+                .records(&*client, ATTACHMENT_KIND, &bindings)
+                .await?
+                .is_empty()
         {
             return Ok(Outcome::Cancel("legal_hold"));
         }

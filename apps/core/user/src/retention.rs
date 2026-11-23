@@ -23,6 +23,7 @@ const NOTIFICATION_KIND: &str = "notification";
 
 /// Which of `rows` (record ID, its person) a hold keeps.
 async fn held(
+    client: &dyn bilibi_tenancy::ReadClient,
     holds: &Holds,
     grant: &Erasure,
     kind: &str,
@@ -30,8 +31,8 @@ async fn held(
 ) -> bilibi_database::Result<Vec<i64>> {
     let ids: Vec<i64> = rows.iter().map(|(id, _)| *id).collect();
     let persons: Vec<i64> = rows.iter().filter_map(|(_, person)| *person).collect();
-    let records = holds.records(grant, kind, &ids).await?;
-    let people: BTreeMap<i64, i64> = holds.persons(grant, &persons).await?;
+    let records = holds.records(client, grant, kind, &ids).await?;
+    let people: BTreeMap<i64, i64> = holds.persons(client, grant, &persons).await?;
     Ok(rows
         .iter()
         .filter(|(id, person)| {
@@ -77,7 +78,7 @@ impl Sweeper for ClosedAccounts {
                 .await?;
             let keys: Vec<(i64, Option<i64>)> =
                 rows.iter().map(|row| (row.get(0), row.get(1))).collect();
-            let mut kept = held(holds, grant, USER_KIND, &keys).await?;
+            let mut kept = held(tx.sql(), holds, grant, USER_KIND, &keys).await?;
             // A held accepted invitation keeps its account.
             let open: Vec<i64> = keys
                 .iter()
@@ -126,7 +127,12 @@ impl Sweeper for ClosedAccounts {
                 .map(|row| row.get(0))
                 .collect();
             let keep_identities: Vec<i64> = holds
-                .records(grant, crate::privacy::EXTERNAL_IDENTITY_KIND, &identities)
+                .records(
+                    tx.sql(),
+                    grant,
+                    crate::privacy::EXTERNAL_IDENTITY_KIND,
+                    &identities,
+                )
                 .await?
                 .into_keys()
                 .collect();
@@ -216,7 +222,14 @@ impl Sweeper for LapsedInvitations {
                 )
                 .await?;
             let keys: Vec<(i64, Option<i64>)> = rows.iter().map(|row| (row.get(0), None)).collect();
-            let mut kept = held(holds, grant, crate::privacy::INVITATION_KIND, &keys).await?;
+            let mut kept = held(
+                tx.sql(),
+                holds,
+                grant,
+                crate::privacy::INVITATION_KIND,
+                &keys,
+            )
+            .await?;
             // A held prepared account keeps its invitation.
             let open: Vec<i64> = keys
                 .iter()
@@ -301,7 +314,7 @@ impl Sweeper for Notifications {
                 .await?;
             let keys: Vec<(i64, Option<i64>)> =
                 rows.iter().map(|row| (row.get(0), row.get(1))).collect();
-            let kept = held(holds, grant, NOTIFICATION_KIND, &keys).await?;
+            let kept = held(tx.sql(), holds, grant, NOTIFICATION_KIND, &keys).await?;
             let due: Vec<i64> = keys
                 .iter()
                 .map(|(id, _)| *id)

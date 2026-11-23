@@ -142,7 +142,7 @@ impl bilibi_step_up::Enforcement for EnforcementPolicy {
         Box::pin(async move {
             let client = self
                 .db
-                .try_get_detached(
+                .get_independent(
                     "step-up asks this from inside the caller's write, through a hook that \
                      carries no client; one short read",
                 )

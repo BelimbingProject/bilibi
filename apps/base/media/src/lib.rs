@@ -746,9 +746,10 @@ impl Media {
     /// `CleanupFailed` and needs operator reconciliation. A legal hold on any
     /// asset of the tree refuses it (`Held`).
     pub async fn delete_asset(&self, client: &mut Client, scope: &Scope, id: i64) -> Result<()> {
-        let holds = RecordHolds::acquire(scope.tenant()).await?;
+        let (holds, mut hold_guard) = RecordHolds::acquire(client, scope.tenant()).await?;
+        let client = hold_guard.client();
         let deleted = self.delete_tree(client, scope, id, &holds).await;
-        holds.release().await?;
+        hold_guard.release().await?;
         deleted
     }
     async fn delete_tree(
@@ -795,7 +796,7 @@ impl Media {
             tree.extend(rows.iter().map(stored));
         }
         let ids: Vec<i64> = tree.iter().map(|row| row.asset.id).collect();
-        if !holds.records(ASSET_KIND, &ids).await?.is_empty() {
+        if !holds.records(tx.sql(), ASSET_KIND, &ids).await?.is_empty() {
             return Err(Error::Held);
         }
         let changes: Vec<Change> = tree
