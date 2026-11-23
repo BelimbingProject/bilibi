@@ -110,6 +110,9 @@ static GRID: GridContribution = GridContribution {
          ]).owner("owner_user_id").label_field("title").time_field("created_at").record_types(&["watcher_cases/cases.case"])],
     links: &[
         LinkDecl::on("parent", "Parent", LinkKind::One, TABLE, "parent_id", TABLE, "id"),
+        // The case's company, so a condition can read the company's fields
+        // (`company.cf_segment`); the tenant grants the principal its read key.
+        LinkDecl::on("company", "Company", LinkKind::One, TABLE, "company_id", "companies", "id"),
         LinkDecl::edge("parent_edge", "Parent through an edge", LinkKind::One, TABLE, TABLE, Source::tenant("SELECT id AS from_key,parent_id AS to_key FROM watcher_cases_cases WHERE tenant_id=$1 AND parent_id IS NOT NULL")),
     ],
 };

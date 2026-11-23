@@ -8,7 +8,7 @@ use crate::definition::{self, Definition, Example, Problems};
 use crate::store::Watchers;
 use crate::{ACTIVE_PER_TRIGGER, APPROVE, MANAGE};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
-use bilibi_grid::{Catalog, CustomTable, FieldType};
+use bilibi_grid::{Catalog, CustomTable, FieldType, Installed, Link, LinkKind, Table};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -79,6 +79,38 @@ impl Draft {
     }
 }
 
+/// A condition path that ends in a tenant custom field: the one-links walked
+/// before it (empty on the trigger's own record) and the field's key. So
+/// `cf_segment` is `("", "segment")` and `company.cf_segment` is
+/// `("company", "segment")`.
+pub(crate) fn custom_path(path: &str) -> Option<(&str, &str)> {
+    let (links, field) = path.rsplit_once('.').unwrap_or(("", path));
+    bilibi_grid::custom_key(field).map(|key| (links, key))
+}
+
+/// The one-links `links` walks from `root` in the installed catalog, and the
+/// table they reach: where a linked record's custom field lives. The installed
+/// catalog holds no tenant field, so its own resolver stops at `cf_<key>`.
+pub(crate) fn linked<'g>(
+    grid: &'g Installed,
+    root: &'g Table,
+    links: &str,
+) -> Option<(Vec<Link>, &'g Table)> {
+    let mut table = root;
+    let mut hops = Vec::new();
+    if links.is_empty() {
+        return Some((hops, table));
+    }
+    for segment in links.split('.') {
+        let link = table
+            .link(segment)
+            .filter(|link| link.kind() == LinkKind::One)?;
+        table = grid.table(link.to())?;
+        hops.push(*link);
+    }
+    Some((hops, table))
+}
+
 fn digest(definition: &Value, examples: &Value) -> String {
     let bytes = serde_json::to_vec(&json!({"definition": definition, "examples": examples}))
         .unwrap_or_default();
@@ -102,7 +134,7 @@ impl Watchers {
             definition
                 .fields()
                 .iter()
-                .any(|path| bilibi_grid::custom_key(path).is_some())
+                .any(|path| custom_path(path).is_some())
         });
         if !custom {
             return Ok(Vec::new());
@@ -111,9 +143,10 @@ impl Watchers {
     }
 
     /// The installed bindings a version runs on. A condition on a tenant
-    /// custom field of the trigger's table pins the field's type and value SQL
-    /// from `custom` (`custom_tables`); a field that is archived, gone or no
-    /// longer offered to watchers has no fingerprint, so the version is refused.
+    /// custom field, of the trigger's table or of a record one-links reach,
+    /// pins the field's type and value SQL from `custom` (`custom_tables`) and
+    /// the links walked to it; a field that is archived, gone or no longer
+    /// offered to watchers has no fingerprint, so the version is refused.
     pub(crate) fn catalog_digest(
         &self,
         event: &str,
@@ -125,29 +158,40 @@ impl Watchers {
         let root = grid.table(trigger.table)?;
         let mut paths = definition.fields();
         paths.push(trigger.version.to_owned());
+        let hop = |link: &Link| -> Option<Value> {
+            let from = grid.table(link.decl.from)?;
+            let to = grid.table(link.to())?;
+            let join = match link.decl.join {
+                bilibi_grid::Join::On {
+                    from_field,
+                    to_field,
+                } => json!({
+                    "from": from.field(from_field)?.source_key(),
+                    "to": to.field(to_field)?.source_key(),
+                }),
+                bilibi_grid::Join::Edge(source) => {
+                    json!({"edge": source.sql, "tenant_scoped": source.tenant_scoped})
+                }
+            };
+            Some(
+                json!({"id": link.id(), "from": from.id(), "to": to.id(), "kind": format!("{:?}", link.kind()),
+                "join": join, "source": to.source().sql, "tenant_scoped": to.source().tenant_scoped,
+                "key": to.key(), "key_column": to.key_field().source_key(), "capability": to.capability()}),
+            )
+        };
         let fields: Option<Vec<Value>> = paths.iter().map(|path| {
             let Ok(column) = bilibi_grid::column::resolve(path, root, &|id| grid.table(id)) else {
-                let (table, column) = custom.iter().filter(|table| table.table == trigger.table).find_map(|table| {
-                    table.columns.iter().find(|column| bilibi_grid::custom_key(path) == Some(column.key.as_str())).map(|column| (table, column))
+                let (links, key) = custom_path(path)?;
+                let (hops, owner) = linked(grid, root, links)?;
+                let (table, column) = custom.iter().filter(|table| table.table == owner.id()).find_map(|table| {
+                    table.columns.iter().find(|column| column.key == key).map(|column| (table, column))
                 })?;
-                return column.watcher_condition.then(|| json!({"path": path, "table": table.table, "type": format!("{:?}", column.ty),
-                    "custom": {"column": table.column, "value": column.value}}));
+                let hops: Option<Vec<Value>> = hops.iter().map(hop).collect();
+                return column.watcher_condition.then_some(hops?).map(|hops| json!({"path": path, "table": table.table, "type": format!("{:?}", column.ty),
+                    "custom": {"column": table.column, "value": column.value}, "hops": hops}));
             };
             let field = column.field?;
-            let hops: Option<Vec<Value>> = column.hops.iter().map(|link| {
-                let from = grid.table(link.decl.from)?;
-                let to = grid.table(link.to())?;
-                let join = match link.decl.join {
-                    bilibi_grid::Join::On { from_field, to_field } => json!({
-                        "from": from.field(from_field)?.source_key(),
-                        "to": to.field(to_field)?.source_key(),
-                    }),
-                    bilibi_grid::Join::Edge(source) => json!({"edge": source.sql, "tenant_scoped": source.tenant_scoped}),
-                };
-                Some(json!({"id": link.id(), "from": from.id(), "to": to.id(), "kind": format!("{:?}", link.kind()),
-                    "join": join, "source": to.source().sql, "tenant_scoped": to.source().tenant_scoped,
-                    "key": to.key(), "key_column": to.key_field().source_key(), "capability": to.capability()}))
-            }).collect();
+            let hops: Option<Vec<Value>> = column.hops.iter().map(hop).collect();
             Some(json!({"path": path, "table": column.table, "type": format!("{:?}", column.ty), "values": field.values, "column": field.source_key(), "hops": hops?}))
         }).collect();
         let actions: Option<Vec<Value>> = definition.actions().map(|call| {
@@ -196,21 +240,24 @@ impl Watchers {
             )
             .await?;
         let may_name = bilibi_authz::holds_proof(client, scope, crate::VIEW).await?;
+        let grid = bilibi_grid::installed()?;
         let mut affected = Vec::new();
         for row in rows {
-            if !self
+            let Some(root) = self
                 .trigger(row.get(1))
-                .is_some_and(|trigger| trigger.definition.table == table)
-            {
+                .and_then(|trigger| grid.table(trigger.definition.table))
+            else {
                 continue;
-            }
+            };
             let definition =
                 Definition::parse(&row.get(2), &mut Vec::new()).ok_or(Error::Invalid)?;
-            if definition
-                .fields()
-                .iter()
-                .any(|path| bilibi_grid::custom_key(path) == Some(key))
-            {
+            // The field's own table is the trigger's, or one its links reach.
+            if definition.fields().iter().any(|path| {
+                custom_path(path).is_some_and(|(links, used)| {
+                    used == key
+                        && linked(grid, root, links).is_some_and(|(_, owner)| owner.id() == table)
+                })
+            }) {
                 affected.push(if may_name {
                     row.get(0)
                 } else {
@@ -341,7 +388,8 @@ impl Watchers {
             ));
         }
         // A tenant custom field is a condition only when the tenant offered
-        // it to watchers, and only on the trigger's own record (#730).
+        // it to watchers (#730), on the trigger's own record or on a record
+        // one-links reach (#862).
         for (i, condition) in definition.conditions.iter().enumerate() {
             let Some(column) =
                 table.and_then(|table| catalog.resolve(table, &condition.field).ok())
@@ -354,14 +402,9 @@ impl Watchers {
             let Some(field) = column.field.filter(|field| owner.is_custom(field.id)) else {
                 continue;
             };
-            let why = if !column.hops.is_empty() {
-                format!("{} is a custom field of a linked record; a watcher reads custom fields of the trigger's own record only", condition.field)
-            } else if !owner.custom_watcher_condition(field.id) {
-                format!("{} is a custom field not offered to watchers; an administrator turns on Watcher condition for it on Custom fields", condition.field)
-            } else {
-                continue;
-            };
-            problems.push((format!("if.conditions.{i}.field"), why));
+            if !owner.custom_watcher_condition(field.id) {
+                problems.push((format!("if.conditions.{i}.field"), format!("{} is a custom field not offered to watchers; an administrator turns on Watcher condition for it on Custom fields", condition.field)));
+            }
         }
         let field = |path: &str| -> Option<(FieldType, &'static [&'static str], String)> {
             let table = table?;
@@ -815,16 +858,20 @@ impl Watchers {
             .unwrap_or_default();
         if let Some(root) = grid.table(offered.definition.table) {
             for path in definition.fields() {
-                if let Ok(column) = bilibi_grid::column::resolve(&path, root, &|id| grid.table(id))
-                {
-                    needed.extend(
-                        column
-                            .hops
-                            .iter()
-                            .filter_map(|hop| grid.table(hop.to()))
-                            .map(|table| table.capability()),
-                    );
-                }
+                // A linked record's custom field walks the same links a
+                // declared field does; the installed resolver knows no `cf_`.
+                let hops = match bilibi_grid::column::resolve(&path, root, &|id| grid.table(id)) {
+                    Ok(column) => column.hops,
+                    Err(_) => custom_path(&path)
+                        .and_then(|(links, _)| linked(grid, root, links))
+                        .map(|(hops, _)| hops)
+                        .unwrap_or_default(),
+                };
+                needed.extend(
+                    hops.iter()
+                        .filter_map(|hop| grid.table(hop.to()))
+                        .map(|table| table.capability()),
+                );
             }
         }
         if definition.scripts().next().is_some() {

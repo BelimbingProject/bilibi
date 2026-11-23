@@ -91,10 +91,10 @@ Owner operations take values as `{key, value, values}` pairs: `value` (text or n
 
 ## Watcher conditions
 
-**A tenant decides which of its fields its watchers may read** (#730). A field is a Base Watchers condition only while it is offered (`watcher_condition`, the **Watcher condition** switch on the page), on a record type with a `GridSource`, and only on the trigger's own record.
+**A tenant decides which of its fields its watchers may read** (#730). A field is a Base Watchers condition only while it is offered (`watcher_condition`, the **Watcher condition** switch on the page), on a record type with a `GridSource`. The watcher reads it on the trigger's own record (`cf_segment`) or on a record that one links to (`company.cf_segment`, #862); the switch is the same one, on the field's own record type.
 
 - **Offered:** the field joins the watcher vocabulary under its label, and a watcher on it is drafted and approved like one on a declared field. Grid carries the flag (`Table::custom_watcher_condition`).
-- **Withdrawn or archived:** an approved rule that reads it is refused at run time (`catalog_changed`) and marked Needs review; a new draft on it is refused. A missing field never reads as an empty value.
+- **Withdrawn or archived:** an approved watcher that reads it, on its own record or through a link, is refused at run time (`catalog_changed`) and marked Needs review; a new draft on it is refused. A missing field never reads as an empty value.
 - **Restricted:** the `watchers` principal holds every restriction in its tenant, so a restricted field refuses approval ("hidden from automation") and each run (`restricted_field`).
 - Core invariants stay in the owner's code: a condition routes, it never validates a save.
 

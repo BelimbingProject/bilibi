@@ -198,6 +198,12 @@ static GRID: GridContribution = GridContribution {
     ],
 };
 bilibi_grid::contribute!("core/company", "company.grid", &GRID);
+// A watcher on a record that links to its company (an order, a case) may read
+// the company's fields as conditions, such as `company.cf_segment`. Bounds
+// only: each tenant grants the watchers principal this key on Automation access.
+inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "watchers:core/company", provenance!(), &bilibi_authz::OfferedCapabilities {
+    principal: bilibi_watchers::PRINCIPAL, capabilities: &[LIST],
+}) }
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_custom_fields::GRID_SOURCES, "company", bilibi_module_registry::Provenance { module: "core/company", source: file!(), line: line!() },
 &bilibi_custom_fields::GridSource { record_type: "company", table: "companies", column: "custom_fields" }) }
 

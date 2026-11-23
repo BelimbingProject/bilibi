@@ -620,6 +620,7 @@ impl Watchers {
         let catalog = Catalog::for_scope(client, scope)
             .await
             .map_err(Error::from)?;
+        let catalog = &catalog;
         let triggers: Vec<Value> = self
             .offers
             .triggers
@@ -630,11 +631,25 @@ impl Watchers {
                     .map(|table| {
                         // A tenant custom field is offered only when the tenant
                         // opted it into watcher conditions.
-                        table
+                        let own = table
                             .visible_fields()
                             .filter(|f| !table.is_custom(f.id) || table.custom_watcher_condition(f.id))
-                            .map(|f| json!({"field": f.id, "label": table.field_label(f), "type": format!("{:?}", f.ty).to_lowercase(), "values": f.values, "masked": catalog.masked(table.id(), f.id), "custom": table.is_custom(f.id)}))
-                            .collect()
+                            .map(|f| json!({"field": f.id, "label": table.field_label(f), "type": format!("{:?}", f.ty).to_lowercase(), "values": f.values, "masked": catalog.masked(table.id(), f.id), "custom": table.is_custom(f.id)}));
+                        // So are the offered custom fields of a record one
+                        // link away (`company.cf_segment`, #862), when the
+                        // reader may read that record's table.
+                        let linked = table
+                            .links()
+                            .iter()
+                            .filter(|link| link.kind() == bilibi_grid::LinkKind::One)
+                            .filter_map(|link| Some((link, catalog.table(link.to())?)))
+                            .flat_map(|(link, target)| {
+                                target
+                                    .visible_fields()
+                                    .filter(|f| target.custom_watcher_condition(f.id))
+                                    .map(move |f| json!({"field": format!("{}.{}", link.id(), f.id), "label": format!("{} \u{203a} {}", link.label(), target.field_label(f)), "type": format!("{:?}", f.ty).to_lowercase(), "values": f.values, "masked": catalog.masked(target.id(), f.id), "custom": true, "link": link.id()}))
+                            });
+                        own.chain(linked).collect()
                     })
                     .unwrap_or_default();
                 json!({"trigger": t.event, "title": t.definition.title, "table": t.definition.table, "fields": fields,
