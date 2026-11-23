@@ -100,7 +100,9 @@ pub(crate) fn custom_owner<'g>(
     let Some(link) = link else {
         return Some((None, root));
     };
-    let link = root.link(link).filter(|link| link.kind() == LinkKind::One)?;
+    let link = root
+        .link(link)
+        .filter(|link| link.kind() == LinkKind::One)?;
     Some((Some(*link), grid.table(link.to())?))
 }
 
@@ -267,7 +269,8 @@ impl Watchers {
             if definition.fields().iter().any(|path| {
                 custom_path(path).is_some_and(|(link, used)| {
                     used == key
-                        && custom_owner(grid, root, link).is_some_and(|(_, owner)| owner.id() == table)
+                        && custom_owner(grid, root, link)
+                            .is_some_and(|(_, owner)| owner.id() == table)
                 })
             }) {
                 affected.push(if may_name {
