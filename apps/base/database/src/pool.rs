@@ -8,10 +8,9 @@
 //! for the future a `block_on` drives (a walkthrough's `main`), so no caller
 //! has to install a scope and a spawned task is covered like a request. The
 //! note is dropped with the connection, wherever that happens.
-use deadpool_postgres::{ClientWrapper, Object, Pool, PoolError, Status, Timeouts};
+use deadpool_postgres::{ClientWrapper, HookError, Object, Pool, PoolError, Status, Timeouts};
 use std::{
-    backtrace::{Backtrace, BacktraceStatus},
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     future::Future,
     ops::{Deref, DerefMut},
     panic::Location,
@@ -36,8 +35,6 @@ impl Holder {
 struct Held {
     /// Where each holder took the connections it still has, oldest first.
     by: Mutex<HashMap<Holder, Vec<Site>>>,
-    /// The pairs of call sites already logged, so a hot path logs one line.
-    reported: Mutex<HashSet<(Site, Site)>>,
 }
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -45,12 +42,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 impl Held {
-    fn ask(&self, holder: Holder, asked: Site) {
+    fn ask(&self, holder: Holder, asked: Site) -> Result<(), PoolError> {
         let Some(held) = lock(&self.by)
             .get(&holder)
             .and_then(|sites| sites.first().copied())
         else {
-            return;
+            return Ok(());
         };
         let message = format!(
             "this task already holds a pooled connection (taken at {held}) and asked for another at {asked}. \
@@ -58,10 +55,9 @@ impl Held {
              when more callers than connections do this, each waits out the pool and is refused (#406, #539). \
              A real exception takes `Db::get_detached(\"why\")`"
         );
-        if lock(&self.reported).insert((held, asked)) {
-            eprintln!("warning: second pooled connection: {message}");
-            trace();
-        }
+        // Deadpool's message-bearing pool error retains the existing public
+        // checkout error type while carrying both call sites to the caller.
+        Err(PoolError::PostCreateHook(HookError::message(message)))
     }
     fn mark(self: &Arc<Self>, holder: Holder, site: Site) -> Mark {
         lock(&self.by).entry(holder).or_default().push(site);
@@ -72,15 +68,6 @@ impl Held {
         }
     }
 }
-/// The stack at the warning site when backtraces are enabled
-/// (`RUST_BACKTRACE=1`); it does not reconstruct the async await chain.
-fn trace() {
-    let trace = Backtrace::capture();
-    if trace.status() == BacktraceStatus::Captured {
-        eprintln!("{trace}");
-    }
-}
-
 /// One holder's note of one connection, erased when the connection goes.
 struct Mark {
     held: Arc<Held>,
@@ -116,14 +103,14 @@ impl Db {
         }
     }
     /// A pooled connection, returned to the pool when dropped. A task that
-    /// still holds one and asks again is logged with both call sites:
+    /// still holds one and asks again is refused with both call sites:
     /// pass the connection you hold instead.
     #[track_caller]
     pub fn get(&self) -> impl Future<Output = Result<Connection, PoolError>> + Send + '_ {
         let site = Location::caller();
         async move {
             let holder = Holder::current();
-            self.held.ask(holder, site);
+            self.held.ask(holder, site)?;
             let object = self.pool.get().await?;
             Ok(Connection {
                 object,
@@ -131,7 +118,7 @@ impl Db {
             })
         }
     }
-    /// A pooled connection the check leaves alone: it is neither logged when
+    /// A pooled connection the check leaves alone: it is neither refused when
     /// the task holds another, nor counted against the task's later asks.
     /// For a single, named connection that must be separate, never a whole
     /// job's working connection. `why` is the reason, written for the reader

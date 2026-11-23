@@ -29,11 +29,18 @@ async fn second_connection(url: &str) -> Result<()> {
         },
     )?;
     let held = db.get().await?;
-    // Asked three times from one line: logged once.
+    // Each second ask is refused immediately with both sites.
     for _ in 0..3 {
-        drop(db.get().await?);
+        let started = Instant::now();
+        let error = match db.get().await {
+            Ok(_) => return Err(Error::Internal),
+            Err(error) => error.to_string(),
+        };
+        assert!(started.elapsed() < WAIT, "the refusal waited for the pool");
+        assert_eq!(error.matches(concat!(file!(), ":")).count(), 2, "{error}");
+        assert!(error.contains("get_detached"));
     }
-    println!("second=served");
+    println!("second=refused");
     // None of these is a second connection of this task.
     let detached = db.get_detached(BY_HAND).await?;
     let other_task = tokio::spawn({
@@ -209,18 +216,13 @@ async fn main() -> Result<()> {
         assert_eq!(limits_of(&url, size, wait)?, None);
     }
 
-    let here = concat!(file!(), ":");
     let (ok, verdict, log) = second_connection_of(&url)?;
-    let warnings: Vec<&str> = log
-        .lines()
-        .filter(|line| line.starts_with("warning: second pooled connection: "))
-        .collect();
-    assert!(ok && verdict.contains("second=served") && verdict.contains("others=served"));
-    assert_eq!(warnings.len(), 1, "{log}");
-    assert_eq!(warnings[0].matches(here).count(), 2, "{log}");
-    assert!(warnings[0].contains("get_detached"));
-    println!("PASS a task that holds a connection and asks for another is served and logged once, with both call sites:\n  {}", warnings[0]);
-    println!("PASS not logged: another task, a detached connection, a connection taken out of the pool, an ask after the first was returned");
+    assert!(
+        ok && verdict.contains("second=refused") && verdict.contains("others=served"),
+        "{log}"
+    );
+    println!("PASS a second checkout is refused immediately with both call sites");
+    println!("PASS served: another task, a detached connection, a connection taken out of the pool, an ask after the first was returned");
     println!("PASS environment: defaults 16 and 5 s, DATABASE_POOL_SIZE=3 and DATABASE_POOL_WAIT_SECONDS=2 are used, values outside the range refuse the start");
     Ok(())
 }
