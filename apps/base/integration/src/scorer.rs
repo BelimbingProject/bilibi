@@ -8,12 +8,13 @@
 use crate::{Call, Failure, Integration, Origin, Outgoing};
 use bilibi_module_registry::{Catalog, Composition, Consumer, ExtensionCode, RegistryError};
 use bilibi_settings::{ScopeKind, Setting, Target, ValueType};
-use bilibi_tenancy::Scope;
+use bilibi_tenancy::{ReadClient, Scope};
 use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio_postgres::GenericClient;
 
 /// Registry of customer-hosted scorer contracts contributed by reviewed code.
 pub const SCORERS: &str = "base/integration.scorers";
@@ -249,7 +250,14 @@ impl Integration {
         {
             return Err(ScoreFailure::Invalid);
         }
-        let configuration = self.configuration(scope, contract).await?;
+        let configuration = {
+            let client = self
+                .db
+                .get()
+                .await
+                .map_err(|_| ScoreFailure::NotConfigured)?;
+            self.configuration(&**client, scope, contract).await?
+        };
         let delivery_id = delivery_id(&configuration.secret, scope.tenant(), scorer, event.key)?;
         if !self
             .begin_delivery(scope.tenant(), scorer, event.key, &delivery_id)
@@ -296,29 +304,39 @@ impl Integration {
             .header("bilibi-signature", format!("v1={signature}"))
             .bytes(bytes)
             .public_https()
-            .no_redirects()
             .timeout(Duration::from_millis(contract.contract.timeout_ms))
             .max_body_bytes(16_384);
         let deadline = UNIX_EPOCH + Duration::from_secs(expires_at);
+        let mut expired = false;
         let reply = match self
             .send_if(origin, &call, outgoing, async {
-                self.configuration(scope, contract).await.as_ref().ok() == Some(&configuration)
+                let live = match self.db.get().await {
+                    Ok(client) => self.configuration(&**client, scope, contract).await.ok(),
+                    Err(_) => None,
+                };
+                expired = SystemTime::now() >= deadline;
+                !expired && live.as_ref() == Some(&configuration)
             })
             .await
         {
             Ok(Some(reply)) => reply,
             Ok(None) => {
+                let (state, reason, failure) = if expired {
+                    ("refused", "expired", ScoreFailure::Expired)
+                } else {
+                    ("revoked", "revoked", ScoreFailure::Revoked)
+                };
                 self.finish_delivery(
                     scope.tenant(),
                     &delivery_id,
-                    "revoked",
+                    state,
                     None,
                     None,
                     None,
-                    Some("revoked"),
+                    Some(reason),
                 )
                 .await?;
-                return Err(ScoreFailure::Revoked);
+                return Err(failure);
             }
             Err(error) => {
                 let (exchange_id, status) = match &error {
@@ -391,74 +409,66 @@ impl Integration {
             .await?;
             return Err(ScoreFailure::InvalidReply);
         };
-        // Consent, destination policy and secret are live. A revocation or
-        // rotation while the request was in flight withholds the action.
-        if self.configuration(scope, contract).await.as_ref().ok() != Some(&configuration) {
-            self.finish_delivery(
-                scope.tenant(),
-                &delivery_id,
-                "revoked",
-                Some(&reply.exchange_id),
-                Some(reply.status),
-                Some(result),
-                Some("revoked"),
-            )
-            .await?;
-            return Err(ScoreFailure::Revoked);
-        }
-        self.finish_delivery(
-            scope.tenant(),
+        let mut client = self.db.get().await.map_err(|_| ScoreFailure::Unrecorded)?;
+        let tx = (**client)
+            .transaction()
+            .await
+            .map_err(|_| ScoreFailure::Unrecorded)?;
+        let tenant = scope.tenant();
+        tx.query_opt(
+            "SELECT 1 FROM base_integration_scorer_deliveries WHERE tenant_id=$1 AND delivery_id=$2 AND state='sending' FOR UPDATE",
+            &[&tenant, &delivery_id],
+        )
+        .await
+        .map_err(|_| ScoreFailure::Unrecorded)?
+        .ok_or(ScoreFailure::Unrecorded)?;
+
+        let live = self.configuration(&tx, scope, contract).await;
+        let (state, reason, failure) = if SystemTime::now() >= deadline {
+            ("refused", Some("expired"), Some(ScoreFailure::Expired))
+        } else if live.as_ref().ok() != Some(&configuration) {
+            ("revoked", Some("revoked"), Some(ScoreFailure::Revoked))
+        } else {
+            ("done", None, None)
+        };
+        Self::write_delivery(
+            &tx,
+            tenant,
             &delivery_id,
-            "done",
+            state,
             Some(&reply.exchange_id),
             Some(reply.status),
-            Some(result),
-            None,
+            failure.is_none().then_some(*result),
+            reason,
         )
         .await?;
-
-        let live = self.configuration(scope, contract).await;
-        let (state, reason, failure) = if live.as_ref().ok() != Some(&configuration) {
-            ("revoked", "revoked", ScoreFailure::Revoked)
-        } else if SystemTime::now() >= deadline {
-            ("refused", "expired", ScoreFailure::Expired)
-        } else {
-            return Ok(ScoreDecision {
-                delivery_id,
-                result: (*result).to_owned(),
-                action: contract.contract.action,
-                input: choice.clone(),
-            });
-        };
-        let client = self.db.get().await.map_err(|_| ScoreFailure::Unrecorded)?;
-        let changed = client.execute(
-            "UPDATE base_integration_scorer_deliveries SET state=$3,reason=$4,result=NULL,finished_at=now() WHERE tenant_id=$1 AND delivery_id=$2 AND state='done'",
-            &[&scope.tenant(), &delivery_id, &state, &reason],
-        ).await.map_err(|_| ScoreFailure::Unrecorded)?;
-        if changed != 1 {
-            return Err(ScoreFailure::Unrecorded);
+        tx.commit().await.map_err(|_| ScoreFailure::Unrecorded)?;
+        if let Some(failure) = failure {
+            return Err(failure);
         }
-        Err(failure)
+        Ok(ScoreDecision {
+            delivery_id,
+            result: (*result).to_owned(),
+            action: contract.contract.action,
+            input: choice.clone(),
+        })
     }
 
     async fn configuration(
         &self,
+        client: &dyn ReadClient,
         scope: &Scope,
         scorer: &BoundScorer,
     ) -> std::result::Result<Configuration, ScoreFailure> {
-        let client = self
-            .db
-            .get()
-            .await
-            .map_err(|_| ScoreFailure::NotConfigured)?;
         let keys = [
             scorer.contract.consent_setting,
             scorer.contract.destination_setting,
             scorer.contract.secret_setting,
+            CONNECTOR_DESTINATIONS,
         ];
         let values = self
             .settings
-            .resolve_many(&**client, scope, Target::Tenant, &keys)
+            .resolve_many(client, scope, Target::Tenant, &keys)
             .await
             .map_err(|_| ScoreFailure::NotConfigured)?;
         let consent = values
@@ -479,12 +489,7 @@ impl Integration {
             .and_then(|value| value.value.as_str())
             .filter(|secret| secret.len() >= 32)
             .map(str::to_owned);
-        let policy = self
-            .settings
-            .resolve_many(&**client, scope, Target::Global, &[CONNECTOR_DESTINATIONS])
-            .await
-            .map_err(|_| ScoreFailure::NotConfigured)?;
-        let allowed = policy
+        let allowed = values
             .get(CONNECTOR_DESTINATIONS)
             .and_then(|value| value.value.as_array());
         match (consent, destination, secret, allowed) {
@@ -533,12 +538,35 @@ impl Integration {
         reason: Option<&str>,
     ) -> std::result::Result<(), ScoreFailure> {
         let client = self.db.get().await.map_err(|_| ScoreFailure::Unrecorded)?;
+        Self::write_delivery(
+            &**client,
+            tenant,
+            delivery_id,
+            state,
+            exchange_id,
+            response_status,
+            result,
+            reason,
+        )
+        .await
+    }
+
+    async fn write_delivery(
+        client: &(impl GenericClient + Sync),
+        tenant: i64,
+        delivery_id: &str,
+        state: &str,
+        exchange_id: Option<&str>,
+        response_status: Option<u16>,
+        result: Option<&str>,
+        reason: Option<&str>,
+    ) -> std::result::Result<(), ScoreFailure> {
         let response_status = response_status
             .filter(|status| (100..=599).contains(status))
             .map(|status| status as i16);
         let changed = client
             .execute(
-                "UPDATE base_integration_scorer_deliveries SET state=$3,exchange_id=$4,response_status=$5,result=$6,reason=$7,finished_at=now() WHERE tenant_id=$1 AND delivery_id=$2 AND state='sending'",
+                "UPDATE base_integration_scorer_deliveries SET state=$3,exchange_id=$4,response_status=$5,result=$6,reason=$7,finished_at=clock_timestamp() WHERE tenant_id=$1 AND delivery_id=$2 AND state='sending'",
                 &[&tenant, &delivery_id, &state, &exchange_id, &response_status, &result, &reason],
             )
             .await
