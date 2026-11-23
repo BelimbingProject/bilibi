@@ -2202,7 +2202,6 @@ dependencies = [
  "icu_properties",
  "inventory",
  "jiff",
- "libc",
  "mmdb-writer",
  "rust_decimal",
  "serde",

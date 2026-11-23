@@ -44,7 +44,7 @@ Run the product installer inside the lab:
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create production --role production --site prod.10.77.61.2.sslip.io --tls internal'
 docs/server-proof/lab.sh run "/src/scripts/install-server.sh release production /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
-docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner production --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner" --password-stdin < /data/private/password'
+docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner production --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner"'
 docs/server-proof/lab.sh run "/src/scripts/install-server.sh installer /data/assets/bilibi-installer-x86_64-unknown-linux-gnu --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
 docs/server-proof/lab.sh run 'if command -v cargo || command -v rustc; then exit 1; fi'
 docs/server-proof/drive.py login
@@ -53,7 +53,7 @@ docs/server-proof/drive.py authorize
 docs/server-proof/drive.py read base.software.status
 ```
 
-The driver uses the browser to enroll the lab owner's authenticator and approve an API connection. Inspect the Dashboard and Software page in that browser.
+`create-owner` emails the owner's claim link. Production sends mail only through a relay, so first run `install-server.sh mail production …` with a relay whose inbox you can read; a Dev instance writes the email to `/opt/bilibi/dev/data/mailbox`. Open the link and choose the password stored in `/data/private/password` before `drive.py login`. The driver uses the browser to enroll the lab owner's authenticator and approve an API connection. Inspect the Dashboard and Software page in that browser.
 
 ## Retire the old worker
 
@@ -72,7 +72,7 @@ Add Finance to the disposable application's saved composition before you publish
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create dev --role dev --site dev.10.77.61.2.sslip.io --tls internal'
 docs/server-proof/lab.sh run "/src/scripts/install-server.sh release dev /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
-docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner dev --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner" --password-stdin < /data/private/password'
+docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner dev --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner"'
 LAB_ORIGIN=https://dev.10.77.61.2.sslip.io docs/server-proof/drive.py login
 chrome-devtools-axi open https://dev.10.77.61.2.sslip.io/finance/payroll
 ```
