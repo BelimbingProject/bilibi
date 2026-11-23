@@ -56,6 +56,58 @@ impl Pages {
 fn render(template: impl askama::Template) -> Result<Html> {
     Html::render(&template).map_err(|_| Error::Internal)
 }
+async fn action_gate(
+    step_up: &bilibi_step_up::StepUp,
+    scope: &Scope,
+    title: &str,
+    event: &str,
+    notice: Option<&str>,
+) -> Result<String> {
+    use bilibi_ui::{
+        Alert, Button, ButtonVariant, Card, Form, Header, ProofInput, ProofMethod, StatusKind,
+        StepUpGate,
+    };
+
+    let methods = step_up
+        .enrolled_methods(scope)
+        .await?
+        .into_iter()
+        .map(|method| ProofMethod::new(method.id, method.label, method.code_length, method.numeric))
+        .collect::<Vec<_>>();
+    let mut body = render(Header {
+        title: Html::text("Confirm access"),
+        ..Default::default()
+    })?;
+    if let Some(notice) = notice {
+        body.push(&render(Alert {
+            kind: StatusKind::Warning,
+            body: Html::text(notice),
+            ..Default::default()
+        })?);
+    }
+    if methods.is_empty() {
+        body.push(&Html::text("No 2FA method is available."));
+    } else {
+        body.push(&render(Form {
+            id: "step-up-action-form",
+            event,
+            body: render(ProofInput::new("step-up-action-code", "proof", methods))?,
+            actions: render(Button {
+                button_type: "submit",
+                variant: ButtonVariant::Primary,
+                body: Html::text("Verify and save"),
+                ..Default::default()
+            })?,
+            ..Default::default()
+        })?);
+    }
+    let card = render(Card {
+        body,
+        ..Default::default()
+    })?;
+    Ok(render(StepUpGate::new("", "", title, card))?.to_string())
+}
+
 impl Page<Scope, Error> for Pages {
     fn title(&self, operation: &str) -> Option<&'static str> {
         Some(match operation {

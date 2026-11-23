@@ -683,8 +683,11 @@ impl<S: Side> Session<S> {
     }
     async fn scope(&mut self, app: &App, token: &str) -> Result<S::Context> {
         let page = self.page.as_ref().ok_or(Error::Invalid)?;
-        let path = self.path.clone();
-        let scope = self.admit(app, page.access, token, path).await?;
+        let address = self.step_up.as_ref().map_or_else(
+            || params::address(&self.path, &self.query),
+            |gate| gate.return_to.clone(),
+        );
+        let scope = self.admit(app, page.access, token, address).await?;
         self.bound(scope)
     }
     /// A page route's access for this socket. A step-up the session owes
@@ -696,7 +699,7 @@ impl<S: Side> Session<S> {
         app: &App,
         access: bilibi_module_registry::contributions::Access,
         token: &str,
-        path: String,
+        address: String,
     ) -> Result<S::Context> {
         let admission = S::admit(app, access, token).await;
         match admission {
@@ -704,14 +707,14 @@ impl<S: Side> Session<S> {
                 // Unlike a page-owned refusal, an ended session must leave the
                 // live error view. Reload through HTTP, whose route guard sends
                 // the browser to sign-in and preserves the expiry feedback.
-                self.path = path;
+                self.path = address;
                 self.stale = true;
                 Err(Error::Unauthorized)
             }
             Err(error) => Err(error),
             Ok(Gate::Open(scope)) => scope.ok_or(Error::Forbidden),
             Ok(Gate::StepUp) => {
-                self.path = path;
+                self.path = address;
                 self.stale = true;
                 Err(Error::Unauthorized)
             }
@@ -758,7 +761,12 @@ impl<S: Side> Session<S> {
             return Err(Error::Forbidden);
         }
         let scope = self
-            .admit(app, bound.route.access, token, path.clone())
+            .admit(
+                app,
+                bound.route.access,
+                token,
+                params::address(&path, &query),
+            )
             .await?;
         let scope = self.bound(scope)?;
         let step_up = if let Some(return_to) = step_up_return {
@@ -769,11 +777,27 @@ impl<S: Side> Session<S> {
                 .await
                 .ok_or(Error::Forbidden)?;
             let (expected_path, expected_query) = routes::local_address(&expected)?;
-            if expected_path != path || expected_query != query {
-                return Err(Error::Forbidden);
-            }
+            let prompt = if expected_path == path && expected_query == query {
+                expected
+            } else {
+                let methods = app.step_up.methods(S::scope(&scope), &return_to).await?;
+                methods
+                    .into_iter()
+                    .map(|method| {
+                        if method.enrolled {
+                            method.prompt
+                        } else {
+                            method.setup
+                        }
+                    })
+                    .find(|destination| {
+                        routes::local_address(destination)
+                            .is_ok_and(|(candidate, values)| candidate == path && values == query)
+                    })
+                    .ok_or(Error::Forbidden)?
+            };
             Some(StepUpView {
-                prompt: expected,
+                prompt,
                 return_to,
                 path: return_path,
                 title: requested
@@ -839,7 +863,12 @@ impl<S: Side> Session<S> {
             return Ok(None);
         }
         let scope = self
-            .admit(app, bound.route.access, token, path.to_owned())
+            .admit(
+                app,
+                bound.route.access,
+                token,
+                params::address(path, &self.query),
+            )
             .await?;
         self.bound(scope)?;
         self.path = path.to_owned();

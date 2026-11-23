@@ -14,39 +14,51 @@
   window.BilibiUI.registerHook("StepUpGate", {
     mounted() {
       this.card = this.el.querySelector("#step-up-card")
-      this.focusCode = () => this.card.querySelector('input:not([type="hidden"]), select, button, a[href]')?.focus()
+      this.controls = () => [...this.card.querySelectorAll(
+        'a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]'
+      )].filter(control => control.tabIndex >= 0 && !control.matches(":disabled") && control.getClientRects().length)
+      this.focusCode = () => {
+        if (!this.el.isConnected) return
+        const controls = this.controls()
+        const target = controls.find(control => control.matches("input")) || controls[0] || this.card
+        target.focus()
+      }
       this.keydown = event => {
         if (event.key === "Escape") {
           event.preventDefault()
-          if (history.length > 1) history.back()
-          else location.assign("/")
+          const navigation = window.navigation
+          const previous = navigation?.entries().find(entry => entry.index === navigation.currentEntry?.index - 1)
+          const here = location.origin + location.pathname + location.search
+          if (previous?.url && new URL(previous.url).origin === location.origin && previous.url.split("#")[0] !== here) {
+            history.back()
+          } else {
+            location.assign(this.el.closest('[data-live-socket="/portal/live"]') ? "/portal" : "/")
+          }
           return
         }
         if (event.key !== "Tab") return
-        const controls = [...this.card.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
-          .filter(control => !control.hidden && control.getClientRects().length)
-        if (!controls.length) return
-        const first = controls[0]
-        const last = controls[controls.length - 1]
-        if (event.shiftKey && document.activeElement === first) {
+        const controls = this.controls()
+        const active = controls.indexOf(document.activeElement)
+        if (active < 0 || (event.shiftKey ? active === 0 : active === controls.length - 1)) {
           event.preventDefault()
-          last.focus()
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault()
-          first.focus()
+          const target = (event.shiftKey ? controls.at(-1) : controls[0]) || this.card
+          target.focus()
         }
       }
-      this.el.addEventListener("keydown", this.keydown)
+      this.focusin = event => {
+        if (!this.card.contains(event.target)) this.focusCode()
+      }
+      document.addEventListener("keydown", this.keydown, true)
+      document.addEventListener("focusin", this.focusin)
       this.focusCode()
-      requestAnimationFrame(() => requestAnimationFrame(this.focusCode))
-      this.focusTimer = setTimeout(this.focusCode, 100)
     },
     updated() {
-      if (!this.card.querySelector('input:not([type="hidden"])')?.matches(':focus')) requestAnimationFrame(this.focusCode)
+      this.card = this.el.querySelector("#step-up-card")
+      if (!this.card.contains(document.activeElement)) this.focusCode()
     },
     destroyed() {
-      clearTimeout(this.focusTimer)
-      this.el.removeEventListener("keydown", this.keydown)
+      document.removeEventListener("keydown", this.keydown, true)
+      document.removeEventListener("focusin", this.focusin)
     },
   })
 

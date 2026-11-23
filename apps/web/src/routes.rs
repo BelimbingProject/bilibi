@@ -722,6 +722,9 @@ async fn dispatch(
         headers.get("sec-fetch-dest").and_then(|h| h.to_str().ok()),
         Some("iframe" | "frame")
     );
+    if framed && !bound.route.framed {
+        return Err(Error::Forbidden.into());
+    }
     let scope = match admit(
         &app,
         bound.route.access,
@@ -754,9 +757,6 @@ async fn dispatch(
                 return Err(Error::Forbidden.into());
             }
         }
-    }
-    if framed && !bound.route.framed {
-        return Err(Error::Forbidden.into());
     }
     let rendered = crate::render_fields(
         &app,

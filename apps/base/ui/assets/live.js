@@ -67,16 +67,18 @@
   const params = () => Object.fromEntries(new URLSearchParams(location.search));
   const address = () => location.pathname + location.search;
   let shown = address(); // The path and query the page on screen was mounted for.
+  const addressIntent = () => ({type: 'mount', path: location.pathname, params: params()});
+  const gateSelector = '[data-hook="StepUpGate"]';
+  const promptIntent = (prompt, returnTo) => ({
+    type: 'mount',
+    path: prompt.pathname,
+    params: Object.fromEntries(prompt.searchParams),
+    step_up_return: returnTo,
+  });
   const mountIntent = () => {
-    const gate = document.querySelector('[data-hook="StepUpGate"]');
-    if (!gate) return {type: 'mount', path: location.pathname, params: params()};
-    const prompt = new URL(gate.dataset.stepUpPrompt, location.href);
-    return {
-      type: 'mount',
-      path: prompt.pathname,
-      params: Object.fromEntries(prompt.searchParams),
-      step_up_return: gate.dataset.stepUpReturn,
-    };
+    const gate = document.querySelector(gateSelector);
+    if (!gate?.dataset.stepUpPrompt || shown !== address()) return addressIntent();
+    return promptIntent(new URL(gate.dataset.stepUpPrompt, location.href), gate.dataset.stepUpReturn);
   };
 
   function connect() {
@@ -304,11 +306,13 @@
       loading();
       return;
     }
-    const gate = document.querySelector('[data-hook="StepUpGate"]');
-    if (message.type === 'page' && message.redirect && gate) {
+    const gate = document.querySelector(gateSelector);
+    if (message.type === 'page' && message.redirect && gate && entry) {
       const destination = new URL(message.redirect, location.href);
-      const expected = new URL(gate.dataset.stepUpReturn, location.href);
-      if (destination.pathname === expected.pathname && destination.search === expected.search) {
+      const expected = new URL(gate.dataset.stepUpReturn || location.href, location.href);
+      const sameQuery = destination.search === expected.search;
+      const actionCompleted = !gate.dataset.stepUpPrompt && !destination.search;
+      if (destination.origin === expected.origin && destination.pathname === expected.pathname && (sameQuery || actionCompleted)) {
         enqueue({type: 'navigate', path: expected.pathname, params: Object.fromEntries(expected.searchParams)}, {loading: true});
         loading();
         return;
@@ -768,11 +772,19 @@
   window.addEventListener('popstate', () => {
     if (address() === shown) return;
     shown = address();
-    if (panelPath === location.pathname || document.querySelector('#app [data-history="params"]')) {
+    if (!document.querySelector(gateSelector) && (panelPath === location.pathname || document.querySelector('#app [data-history="params"]'))) {
       enqueue({type: 'params', path: location.pathname, params: params()}, {loading: true});
       return;
     }
-    enqueue(mountIntent(), {loading: true, navigation: true});
+    enqueue(addressIntent(), {loading: true, navigation: true});
+  });
+
+  document.addEventListener('click', event => {
+    const link = event.target instanceof Element && event.target.closest('[data-step-up-methods] a[href]');
+    const gate = link && link.closest(gateSelector);
+    if (!gate?.dataset.stepUpPrompt) return;
+    event.preventDefault();
+    enqueue(promptIntent(new URL(link.href), gate.dataset.stepUpReturn), {loading: true});
   });
 
   document.addEventListener('bilibi:navigate', ({detail}) => {

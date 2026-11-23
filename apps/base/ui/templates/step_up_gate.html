@@ -4,7 +4,7 @@
 {% call ui::header(subtitle="", title_actions=bilibi_ui::Html::EMPTY, actions=bilibi_ui::Html::EMPTY, pin=false) %}{{ title }}{% endcall %}
 <div class="space-y-3 rounded-xl border border-line bg-surface p-3"><div class="h-7 w-2/5 rounded-md bg-surface-sunken"></div><div class="h-8 rounded-md bg-surface-sunken"></div><div class="h-8 rounded-md bg-surface-sunken"></div><div class="h-8 w-4/5 rounded-md bg-surface-sunken"></div></div>
 </div>
-<div class="absolute inset-0 z-20 flex items-start justify-center bg-canvas/50 px-3 py-8 backdrop-blur-[1px]" data-step-up-cover>
-<section id="step-up-card" role="dialog" aria-modal="true" aria-label="Confirm access" class="w-full max-w-md">{{ body }}</section>
+<div class="absolute inset-0 z-20 flex items-start justify-center overflow-y-auto bg-canvas/50 px-3 py-8 backdrop-blur-[1px]" data-step-up-cover>
+<section id="step-up-card" role="dialog" aria-modal="true" tabindex="-1" aria-label="Confirm access" class="w-full max-w-md">{{ body }}</section>
 </div>
 </div>

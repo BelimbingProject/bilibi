@@ -455,18 +455,20 @@ impl ConfirmPage {
         scope: &Scope,
         query: &HashMap<String, String>,
     ) -> Result<Self, Error> {
+        let portal = scope.actor().kind() == bilibi_tenancy::AccountKind::Customer;
+        let return_to = return_to(query).filter(|path| !portal || portal_path(path));
         let enabled = users.two_factor_status(scope).await?.enabled;
         Ok(Self {
             users,
             enabled,
-            return_to: return_to(query),
+            return_to,
             errors: Vec::new(),
             notice: if scope.impersonator().is_some() {
                 TwoFactorError::Impersonating.to_string()
             } else {
                 String::new()
             },
-            portal: false,
+            portal,
         })
     }
 
@@ -596,7 +598,7 @@ impl PortalTwoFactor {
 /// also written `%2e`) and an encoded slash or backslash (`%2f`, `%5c`) are
 /// refused: the browser or a proxy may resolve them before the request, so
 /// the address would leave the portal.
-fn portal_path(path: &str) -> bool {
+pub(crate) fn portal_path(path: &str) -> bool {
     let address = path
         .split(['?', '#'])
         .next()
@@ -615,17 +617,16 @@ fn portal_path(path: &str) -> bool {
 /// (`/portal/account/two-factor/confirm`): the staff prompt over the
 /// customer's own sealed scope, in the portal's words. A current code opens
 /// the portal session's window and returns to `return`, a portal address.
-pub struct PortalConfirm(ConfirmPage);
+pub struct PortalConfirm(Box<dyn LiveState<Scope, Error>>);
 impl PortalConfirm {
     pub async fn new(
         users: Arc<UserService>,
         portal: &bilibi_tenancy::PortalScope,
         query: &HashMap<String, String>,
     ) -> Result<Self, Error> {
-        let mut page = ConfirmPage::new(users, portal.scope(), query).await?;
-        page.return_to = page.return_to.filter(|path| portal_path(path));
-        page.portal = true;
-        Ok(Self(page))
+        Ok(Self(
+            crate::factor_choice::state(users, portal.scope(), query, true).await?,
+        ))
     }
 }
 impl LiveState<bilibi_tenancy::PortalScope, Error> for PortalConfirm {
