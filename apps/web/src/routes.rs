@@ -706,7 +706,8 @@ async fn step_up_page(
         bilibi_ui::Html::EMPTY,
     )
     .await?;
-    let mut response = crate::document_themed(&title, &shell.html, shell.theme)?.into_response();
+    let mut response =
+        crate::document_themed(&title, &shell.html, shell.theme, &shell.brand)?.into_response();
     response
         .headers_mut()
         .insert(STEP_UP_HEADER, HeaderValue::from_static("required"));

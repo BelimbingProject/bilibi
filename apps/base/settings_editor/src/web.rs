@@ -20,7 +20,7 @@
 use crate::{
     form::{self, Field, Plan, Step},
     reveal::{self, Refusal, Reveal},
-    ImageSetting, COMPANY_MANAGE, GLOBAL_MANAGE,
+    ImageSetting, StagedImage, COMPANY_MANAGE, GLOBAL_MANAGE,
 };
 use askama::Template;
 use bilibi_authz::authorize_operator;
@@ -150,6 +150,7 @@ pub struct Core {
     pub step_up: Arc<StepUp>,
     pub media: Arc<bilibi_media::Media>,
     pub images: HashMap<&'static str, &'static ImageSetting>,
+    pub staged_images: HashMap<&'static str, &'static StagedImage>,
 }
 pub struct Pages(Arc<Core>);
 impl Pages {
@@ -195,9 +196,8 @@ impl Editor {
             .unwrap_or(1);
         let uploads = Uploads::new(
             std::iter::once(UploadSpec::new(IMAGE_UPLOAD, upload_limit).accept(IMAGE_TYPES)).chain(
-                core.images.values().filter_map(|image| {
-                    let stage = image.staging.as_ref()?;
-                    Some(UploadSpec::new(stage.input, image.max_bytes).accept(IMAGE_TYPES))
+                core.staged_images.values().map(|stage| {
+                    UploadSpec::new(stage.input, stage.image.max_bytes).accept(IMAGE_TYPES)
                 }),
             ),
         );
@@ -492,23 +492,21 @@ impl Editor {
             return Ok(());
         }
         let plan = self.plan(scope).await?;
-        let Some((&key, &image)) = self.core.images.get_key_value(key) else {
-            return Ok(());
-        };
         let mut client = self.core.db.get().await?;
-        let (field, upload) = if let Some(stage) = &image.staging {
+        let staged = self.core.staged_images.get(key).copied();
+        let (field, upload, image) = if let Some(stage) = staged {
             if !matches!(self.picked, Picked::Global)
                 || !plan.capabilities.contains(stage.capability)
             {
                 return Ok(());
             }
             authorize_operator(&**client, scope, stage.capability).await?;
-            (None, stage.input)
+            (Err(stage.noun), stage.input, &stage.image)
         } else {
-            let Some(field) = plan.field(key) else {
+            let (Some(field), Some(&image)) = (plan.field(key), self.core.images.get(key)) else {
                 return Ok(());
             };
-            (Some(field), IMAGE_UPLOAD)
+            (Ok(field), IMAGE_UPLOAD, image)
         };
         let Some(file) = self.uploads.consume(upload).into_iter().next() else {
             self.flash(StatusKind::Error, "Choose a PNG, JPEG or WebP image first.");
@@ -551,15 +549,18 @@ impl Editor {
                 return Ok(());
             }
         };
-        let Some(field) = field else {
-            self.flash(
-                StatusKind::Success,
-                format!(
-                    "{} stored. Use asset ID {} in the reviewed operation.",
-                    image.noun, asset.id
-                ),
-            );
-            return Ok(());
+        let field = match field {
+            Ok(field) => field,
+            Err(noun) => {
+                self.flash(
+                    StatusKind::Success,
+                    format!(
+                        "{noun} stored. Use asset ID {} in the reviewed operation.",
+                        asset.id
+                    ),
+                );
+                return Ok(());
+            }
         };
         let target = self.target();
         let mut tx = self
@@ -581,7 +582,7 @@ impl Editor {
         if let Err(error) = tx.commit().await {
             return self.refused(error, Some(field));
         }
-        self.flash(StatusKind::Success, format!("{} uploaded.", image.noun));
+        self.flash(StatusKind::Success, "Company image uploaded.");
         self.editing = None;
         self.row_status = CommitStatus::None;
         Ok(())
@@ -621,12 +622,7 @@ impl Editor {
             return self.refused(error, Some(field));
         }
         self.uploads.clear(IMAGE_UPLOAD);
-        let noun = self
-            .core
-            .images
-            .get(field.key)
-            .map_or("Image", |image| image.noun);
-        self.flash(StatusKind::Success, format!("{noun} removed."));
+        self.flash(StatusKind::Success, "Company image removed.");
         self.editing = None;
         Ok(())
     }
@@ -1317,17 +1313,14 @@ impl Editor {
         };
         let mut staged_uploads = Html::EMPTY;
         if matches!(self.picked, Picked::Global) {
-            let mut images: Vec<_> = self.core.images.iter().collect();
+            let mut images: Vec<_> = self.core.staged_images.iter().collect();
             images.sort_unstable_by_key(|(key, _)| **key);
-            for (&key, image) in images {
-                let Some(stage) = &image.staging else {
-                    continue;
-                };
+            for (&key, stage) in images {
                 if !plan.capabilities.contains(stage.capability) {
                     continue;
                 }
                 let mut body = render(self.uploads.input(stage.input, format!("stage-{key}"))
-                    .label(format!("Upload {}", image.noun.to_lowercase()))
+                    .label(format!("Upload {}", stage.noun.to_lowercase()))
                     .hint("PNG, JPEG or WebP, up to 1 MiB. The upload returns an asset ID for review."))?;
                 body.push(&render(
                     Control::named("key").kind(InputKind::Hidden).value(key),

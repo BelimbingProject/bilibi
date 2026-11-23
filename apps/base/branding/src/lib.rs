@@ -69,9 +69,9 @@ inventory::submit! { Contribution::new(DEFINITIONS, LOGO_KEY, provenance!(), &Se
     validator: Some(Validator { accepts: logo_accepts, message: "must name a stored logo image" }),
     editor: None,
 })) }
-inventory::submit! { Contribution::new(bilibi_settings_editor::IMAGE_SETTINGS, LOGO_KEY, provenance!(), &bilibi_settings_editor::ImageSetting {
-    directory: "branding", max_bytes: LOGO_MAX_BYTES, noun: "Logo",
-    staging: Some(bilibi_settings_editor::StagedImage { capability: MANAGE, input: "brand_logo" }),
+inventory::submit! { Contribution::new(bilibi_settings_editor::STAGED_IMAGES, LOGO_KEY, provenance!(), &bilibi_settings_editor::StagedImage {
+    image: bilibi_settings_editor::ImageSetting { directory: "branding", max_bytes: LOGO_MAX_BYTES },
+    noun: "Logo", capability: MANAGE, input: "brand_logo",
 }) }
 inventory::submit! { Contribution::new(DEFINITIONS, ACCENT_KEY, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::String, scopes: &[ScopeKind::Global],

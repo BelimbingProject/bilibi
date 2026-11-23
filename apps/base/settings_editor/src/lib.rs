@@ -44,34 +44,52 @@ pub const IMAGE_SETTINGS: &str = "base/settings_editor.image-settings";
 pub struct ImageSetting {
     pub directory: &'static str,
     pub max_bytes: u64,
-    pub staging: Option<StagedImage>,
-    pub noun: &'static str,
 }
+/// A standalone Media upload for a reviewed operation.
+pub const STAGED_IMAGES: &str = "base/settings_editor.staged-images";
 pub struct StagedImage {
+    pub image: ImageSetting,
+    pub noun: &'static str,
     pub capability: &'static str,
     pub input: &'static str,
 }
 fn validate_images(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
-    let mut upload_names = std::collections::BTreeSet::from([web::IMAGE_UPLOAD]);
     for entry in entries {
-        let image = entry.get::<ImageSetting>()?;
-        if image.directory.is_empty()
-            || image.max_bytes == 0
-            || image.max_bytes > 10 * 1024 * 1024
-            || image.noun.is_empty()
-            || image.staging.as_ref().is_some_and(|stage| {
-                !bilibi_ui::UploadSpec::valid_name(stage.input) || !upload_names.insert(stage.input)
-            })
-        {
-            return Err(RegistryError::Contribution(format!(
-                "invalid image setting {} at {}:{}",
-                entry.id, entry.provenance.source, entry.provenance.line
-            )));
+        if !valid_image(entry.get::<ImageSetting>()?) {
+            return Err(invalid_image(entry));
         }
     }
     Ok(())
 }
+
+fn validate_staged_images(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
+    let mut upload_names = std::collections::BTreeSet::from([web::IMAGE_UPLOAD]);
+    for entry in entries {
+        let stage = entry.get::<StagedImage>()?;
+        if !valid_image(&stage.image)
+            || stage.noun.is_empty()
+            || !bilibi_ui::UploadSpec::valid_name(stage.input)
+            || !upload_names.insert(stage.input)
+        {
+            return Err(invalid_image(entry));
+        }
+    }
+    Ok(())
+}
+
+fn valid_image(image: &ImageSetting) -> bool {
+    !image.directory.is_empty() && (1..=10 * 1024 * 1024).contains(&image.max_bytes)
+}
+
+fn invalid_image(entry: &Entry) -> RegistryError {
+    RegistryError::Contribution(format!(
+        "invalid image setting {} at {}:{}",
+        entry.id, entry.provenance.source, entry.provenance.line
+    ))
+}
+
 inventory::submit! { Consumer::new::<ImageSetting>(IMAGE_SETTINGS, "base/settings_editor", validate_images) }
+inventory::submit! { Consumer::new::<StagedImage>(STAGED_IMAGES, "base/settings_editor", validate_staged_images) }
 
 macro_rules! provenance {
     () => {
@@ -134,6 +152,7 @@ inventory::submit! {
                 step_up: services.get(bilibi_step_up::SERVICE)?,
                 media: services.get(bilibi_media::SERVICE)?,
                 images: catalog.entries::<ImageSetting>(IMAGE_SETTINGS)?.iter().map(|entry| Ok((entry.id, entry.get::<ImageSetting>()?))).collect::<bilibi_module_registry::Result<_>>()?,
+                staged_images: catalog.entries::<StagedImage>(STAGED_IMAGES)?.iter().map(|entry| Ok((entry.id, entry.get::<StagedImage>()?))).collect::<bilibi_module_registry::Result<_>>()?,
             })))))
         } }],
     }
