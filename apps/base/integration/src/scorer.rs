@@ -28,8 +28,6 @@ inventory::submit! { Consumer::new::<Scorer>(SCORERS, "base/integration", |entri
 pub struct ScorerResult {
     /// Stable reply value.
     pub value: &'static str,
-    /// Fixed operation key the reviewed connector may invoke.
-    pub action: &'static str,
     /// Fixed JSON object passed to that operation. The remote service cannot
     /// add to or replace it.
     pub input: &'static str,
@@ -51,21 +49,17 @@ pub struct Scorer {
     pub timeout_ms: u64,
     /// How long a signed request and its answer remain valid.
     pub expires_seconds: u64,
-    /// Typed result values and their fixed actions.
+    /// Fixed operation key the reviewed connector may invoke.
+    pub action: &'static str,
+    /// Typed result values and their fixed inputs.
     pub results: &'static [ScorerResult],
-}
-
-#[derive(Clone)]
-pub(crate) struct BoundResult {
-    action: &'static str,
-    input: Value,
 }
 
 #[derive(Clone)]
 pub(crate) struct BoundScorer {
     pub(crate) id: &'static str,
     contract: &'static Scorer,
-    results: BTreeMap<&'static str, BoundResult>,
+    results: BTreeMap<&'static str, Value>,
 }
 
 pub(crate) struct Scorers(BTreeMap<&'static str, BoundScorer>);
@@ -101,18 +95,8 @@ impl Scorers {
                 })?;
                 if result.value.is_empty()
                     || result.value.len() > 120
-                    || result.action.is_empty()
-                    || result.action.len() > 200
                     || !input.is_object()
-                    || results
-                        .insert(
-                            result.value,
-                            BoundResult {
-                                action: result.action,
-                                input,
-                            },
-                        )
-                        .is_some()
+                    || results.insert(result.value, input).is_some()
                 {
                     return Err(RegistryError::Contribution(format!(
                         "scorer {} at {}:{} has an invalid or duplicate result",
@@ -121,6 +105,8 @@ impl Scorers {
                 }
             }
             if !valid_id
+                || contract.action.is_empty()
+                || contract.action.len() > 200
                 || contract.event.is_empty()
                 || contract.event.len() > 200
                 || fields.len() != contract.fields.len()
@@ -224,6 +210,13 @@ pub enum ScoreFailure {
     Unrecorded,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScorerReply {
+    delivery_id: String,
+    result: String,
+}
+
 #[derive(PartialEq)]
 struct Configuration {
     destination: String,
@@ -306,21 +299,27 @@ impl Integration {
             .no_redirects()
             .timeout(Duration::from_millis(contract.contract.timeout_ms))
             .max_body_bytes(16_384);
-        if self.configuration(scope, contract).await.as_ref().ok() != Some(&configuration) {
-            self.finish_delivery(
-                scope.tenant(),
-                &delivery_id,
-                "revoked",
-                None,
-                None,
-                None,
-                Some("revoked"),
-            )
-            .await?;
-            return Err(ScoreFailure::Revoked);
-        }
-        let reply = match self.send(origin, &call, outgoing).await {
-            Ok(reply) => reply,
+        let deadline = UNIX_EPOCH + Duration::from_secs(expires_at);
+        let reply = match self
+            .send_if(origin, &call, outgoing, async {
+                self.configuration(scope, contract).await.as_ref().ok() == Some(&configuration)
+            })
+            .await
+        {
+            Ok(Some(reply)) => reply,
+            Ok(None) => {
+                self.finish_delivery(
+                    scope.tenant(),
+                    &delivery_id,
+                    "revoked",
+                    None,
+                    None,
+                    None,
+                    Some("revoked"),
+                )
+                .await?;
+                return Err(ScoreFailure::Revoked);
+            }
             Err(error) => {
                 let (exchange_id, status) = match &error {
                     Failure::Transport {
@@ -356,7 +355,6 @@ impl Integration {
             .await?;
             return Err(ScoreFailure::HttpStatus);
         }
-        let deadline = UNIX_EPOCH + Duration::from_secs(expires_at);
         if SystemTime::now() >= deadline {
             self.finish_delivery(
                 scope.tenant(),
@@ -370,30 +368,16 @@ impl Integration {
             .await?;
             return Err(ScoreFailure::Expired);
         }
-        let parsed: Value = match serde_json::from_slice(&reply.body) {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                self.finish_delivery(
-                    scope.tenant(),
-                    &delivery_id,
-                    "refused",
-                    Some(&reply.exchange_id),
-                    Some(reply.status),
-                    None,
-                    Some("invalid_reply"),
-                )
-                .await?;
-                return Err(ScoreFailure::InvalidReply);
-            }
-        };
-        let result = parsed
-            .as_object()
-            .and_then(|object| {
-                (object.get("delivery_id")?.as_str()? == delivery_id)
-                    .then(|| object.get("result")?.as_str())
-                    .flatten()
-            })
-            .and_then(|result| contract.results.get_key_value(result));
+        let result = (reply
+            .body
+            .iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            == Some(b'{'))
+        .then(|| serde_json::from_slice::<ScorerReply>(&reply.body).ok())
+        .flatten()
+        .filter(|reply| reply.delivery_id == delivery_id)
+        .and_then(|reply| contract.results.get_key_value(reply.result.as_str()));
         let Some((result, choice)) = result else {
             self.finish_delivery(
                 scope.tenant(),
@@ -422,26 +406,39 @@ impl Integration {
             .await?;
             return Err(ScoreFailure::Revoked);
         }
-        let expired = SystemTime::now() >= deadline;
         self.finish_delivery(
             scope.tenant(),
             &delivery_id,
-            if expired { "refused" } else { "done" },
+            "done",
             Some(&reply.exchange_id),
             Some(reply.status),
-            (!expired).then_some(*result),
-            expired.then_some("expired"),
+            Some(result),
+            None,
         )
         .await?;
-        if expired || SystemTime::now() >= deadline {
-            return Err(ScoreFailure::Expired);
+
+        let live = self.configuration(scope, contract).await;
+        let (state, reason, failure) = if live.as_ref().ok() != Some(&configuration) {
+            ("revoked", "revoked", ScoreFailure::Revoked)
+        } else if SystemTime::now() >= deadline {
+            ("refused", "expired", ScoreFailure::Expired)
+        } else {
+            return Ok(ScoreDecision {
+                delivery_id,
+                result: (*result).to_owned(),
+                action: contract.contract.action,
+                input: choice.clone(),
+            });
+        };
+        let client = self.db.get().await.map_err(|_| ScoreFailure::Unrecorded)?;
+        let changed = client.execute(
+            "UPDATE base_integration_scorer_deliveries SET state=$3,reason=$4,result=NULL,finished_at=now() WHERE tenant_id=$1 AND delivery_id=$2 AND state='done'",
+            &[&scope.tenant(), &delivery_id, &state, &reason],
+        ).await.map_err(|_| ScoreFailure::Unrecorded)?;
+        if changed != 1 {
+            return Err(ScoreFailure::Unrecorded);
         }
-        Ok(ScoreDecision {
-            delivery_id,
-            result: (*result).to_owned(),
-            action: choice.action,
-            input: choice.input.clone(),
-        })
+        Err(failure)
     }
 
     async fn configuration(

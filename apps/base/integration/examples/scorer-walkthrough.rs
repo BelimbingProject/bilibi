@@ -77,9 +77,10 @@ inventory::submit! { Contribution::new(SCORERS, SCORER, PROVENANCE, &Scorer {
     secret_setting: SECRET,
     timeout_ms: 10_000,
     expires_seconds: 30,
+    action: ACTION,
     results: &[
-        ScorerResult { value: "priority", action: ACTION, input: r#"{"code":"priority","label":"Priority review"}"# },
-        ScorerResult { value: "standard", action: ACTION, input: r#"{"code":"standard","label":"Standard review"}"# },
+        ScorerResult { value: "priority", input: r#"{"code":"priority","label":"Priority review"}"# },
+        ScorerResult { value: "standard", input: r#"{"code":"standard","label":"Standard review"}"# },
     ],
 }) }
 
@@ -114,7 +115,7 @@ async fn receive(
     let priority = body["fields"]["priority"].as_str().expect("priority field");
     let result = match priority {
         "urgent" => "priority",
-        "normal" => "standard",
+        "normal" | "unexpected" => "standard",
         _ => panic!("unexpected priority"),
     };
     assert_eq!(
@@ -135,7 +136,10 @@ async fn receive(
         Hmac::<Sha256>::new_from_slice(SIGNING_SECRET.as_bytes()).expect("fixture key");
     verifier.update(&signed);
     verifier.verify_slice(&digest).expect("request signature");
-    if result == "standard" {
+    if priority == "unexpected" {
+        return Json(json!({"delivery_id": id, "result": result, "input": {}}));
+    }
+    if priority == "normal" {
         receiver.received.notify_one();
         receiver.release.notified().await;
     }
@@ -357,6 +361,14 @@ async fn main() -> Result<()> {
     assert!(matches!(
         connector.run(&admin, "case-opened-42", extra).await,
         Err(ConnectorError::Score(ScoreFailure::Invalid))
+    ));
+
+    println!("== An extra reply field is refused");
+    assert!(matches!(
+        connector
+            .run(&admin, "case-opened-extra-reply", fields("unexpected"))
+            .await,
+        Err(ConnectorError::Score(ScoreFailure::InvalidReply))
     ));
 
     println!("== Clearing the tenant override revokes an in-flight valid reply");
