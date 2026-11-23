@@ -313,7 +313,7 @@
       const sameQuery = destination.search === expected.search;
       const actionCompleted = !gate.dataset.stepUpPrompt && !destination.search;
       if (destination.origin === expected.origin && destination.pathname === expected.pathname && (sameQuery || actionCompleted)) {
-        enqueue({type: 'navigate', path: expected.pathname, params: Object.fromEntries(expected.searchParams)}, {loading: true});
+        enqueue({type: 'navigate', path: expected.pathname, params: Object.fromEntries(expected.searchParams), step_up_complete: true}, {loading: true});
         loading();
         return;
       }
@@ -329,8 +329,8 @@
           released = true;
         }
       }
-      if (released || message.html !== lastHTML) {
-        patch(document.getElementById('app'), message.html, options);
+      if (released || message.flash || message.html !== lastHTML) {
+        patch(document.getElementById('app'), message.html, {...options, flash: message.flash});
         lastHTML = message.html;
       }
       panelPath = message.panel_params ? new URL(message.url || location.href, location.href).pathname : null;
@@ -403,6 +403,7 @@
     template.innerHTML = html;
     const next = template.content.firstElementChild;
     if (!next) return;
+    if (options.flash) next.insertAdjacentHTML('beforeend', options.flash);
     const focus = captureFocus();
     const scroll = captureScroll(root);
     const context = {

@@ -930,7 +930,11 @@ async fn download(
 
 /// The page with one flash group after it, the outlet for a message that
 /// arrived with the visitor.
-pub(crate) fn flash_group(page: &str, kind: StatusKind, message: &str) -> Result<String> {
+fn flash_group(page: &str, kind: StatusKind, message: &str) -> Result<String> {
+    Ok(format!("{page}{}", redirect_flash(kind, message)?))
+}
+
+pub(crate) fn redirect_flash(kind: StatusKind, message: &str) -> Result<bilibi_ui::Html> {
     let mut flash = bilibi_ui::FlashMap::default();
     match kind {
         StatusKind::Error => flash.error = message,
@@ -938,12 +942,11 @@ pub(crate) fn flash_group(page: &str, kind: StatusKind, message: &str) -> Result
         StatusKind::Success => flash.success = message,
         StatusKind::Info => flash.info = message,
     }
-    let group = bilibi_ui::Html::render(&bilibi_ui::FloatingFlashGroup {
+    bilibi_ui::Html::render(&bilibi_ui::FloatingFlashGroup {
         id: "flash-redirect",
         flash,
     })
-    .map_err(|_| Error::Internal)?;
-    Ok(format!("{page}{group}"))
+    .map_err(|_| Error::Internal)
 }
 
 /// Resolve the same discovered GET routes as HTTP, with literal siblings first.

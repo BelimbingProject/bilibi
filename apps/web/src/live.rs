@@ -331,6 +331,8 @@ enum Event {
         path: String,
         #[serde(default)]
         params: HashMap<String, String>,
+        #[serde(default)]
+        step_up_complete: bool,
     },
     /// `path` is the browser's pathname after Back or Forward inside a page
     /// marked `data-history="params"`; the host keeps the mounted state when
@@ -1618,15 +1620,20 @@ impl<S: Side> Session<S> {
                 params,
                 step_up_return,
             } => self.mount(app, token, path, params, step_up_return).await?,
-            Event::Navigate { path, params } => {
+            Event::Navigate {
+                path,
+                params,
+                step_up_complete,
+            } => {
                 let mut messages = self.mount(app, token, path.clone(), params, None).await?;
-                if let Some(page) = messages
-                    .iter_mut()
-                    .find(|message| message["type"] == "page" && message["redirect"].is_null())
-                {
-                    if let Some((kind, message)) = app.landing.take(token, &path) {
-                        let html = page["html"].as_str().ok_or(Error::Internal)?;
-                        page["html"] = json!(routes::flash_group(html, kind, &message)?);
+                if step_up_complete {
+                    if let Some(page) = messages
+                        .iter_mut()
+                        .find(|message| message["type"] == "page" && message["redirect"].is_null())
+                    {
+                        if let Some((kind, message)) = app.landing.take(token, &path) {
+                            page["flash"] = json!(routes::redirect_flash(kind, &message)?.as_str());
+                        }
                     }
                 }
                 messages

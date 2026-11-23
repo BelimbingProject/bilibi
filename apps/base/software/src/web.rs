@@ -644,6 +644,9 @@ impl View {
     }
 
     async fn render(&mut self, scope: &Scope) -> Result<String> {
+        if let Some(gate) = self.releases.github_gate(scope).await? {
+            return Ok(gate.to_string());
+        }
         let pages = self.pages.clone();
         let client = pages.db.get().await?;
         let locale = pages.locales.resolve(&**client, scope, None).await?.locale;
@@ -1704,6 +1707,7 @@ impl LiveState<Scope, Error> for View {
             self.rows_changed = true;
             match request.input {
                 LiveInput::Params(query) => {
+                    self.releases.cancel_github();
                     self.query = query.clone();
                     self.modules.params(query)?;
                     self.backup_list = ListState::parse(
