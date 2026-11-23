@@ -65,7 +65,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
         invalid_page_size: InvalidPageSize::Default,
         filters: BTreeMap::from([(
             MEMBERSHIP.into(),
-            bilibi_ui::Filter::one_of(&["", "home", "outside", "invited"], ""),
+            bilibi_ui::Filter::one_of(&["", "active", "invited"], ""),
         )]),
         param_names: ParamNames {
             sort_by: "sortBy".into(),
@@ -315,7 +315,6 @@ struct CardBody {
 /// What the actor may do, read once per render; each command re-proves it.
 struct Grants {
     view: bool,
-    create: bool,
     invite: bool,
     delete: bool,
     impersonate: bool,
@@ -398,7 +397,6 @@ impl Index {
     async fn grants(&self, scope: &Scope) -> Result<Grants> {
         Ok(Grants {
             view: self.pages.allowed(scope, contributions::VIEW).await?,
-            create: self.pages.allowed(scope, contributions::CREATE).await?,
             invite: self.pages.allowed(scope, contributions::INVITE).await?,
             delete: self.pages.allowed(scope, contributions::DELETE).await?,
             impersonate: self.pages.allowed(scope, IMPERSONATE).await?,
@@ -512,14 +510,14 @@ impl Index {
             Html::EMPTY
         };
         let delete = if grants.delete && !pending {
-            let label = format!("Delete {}", user.name);
+            let label = format!("Remove {}", user.name);
             let id = format!("user-{}-delete", user.id);
             let value = user.id.to_string();
             if !own {
                 render(&IconButton {
                     id: &id,
                     kind: IconKind::Danger,
-                    title: "Delete user",
+                    title: "Remove user",
                     event: "request_delete",
                     name: "id",
                     value: &value,
@@ -530,7 +528,7 @@ impl Index {
                     id: &id,
                     kind: IconKind::Danger,
                     disabled: true,
-                    title: "You cannot delete your own account",
+                    title: "You cannot remove your own membership",
                     ..IconButton::new("delete", &label)
                 })?
             }
@@ -608,8 +606,8 @@ impl Index {
                 Html::text(user.desks.as_deref().unwrap_or("—")),
             );
             let (membership, kind) = match user.membership {
-                Membership::Home => ("Home", BadgeKind::Neutral),
-                Membership::Outside => ("Outside member", BadgeKind::Warning),
+                Membership::Active => ("Active", BadgeKind::Neutral),
+                Membership::Disabled => ("Disabled", BadgeKind::Neutral),
                 Membership::Invited => ("Invited", BadgeKind::Success),
             };
             row.slots.insert(
@@ -649,17 +647,9 @@ impl Index {
             row.actions = self.actions(scope, &grants, user, &add_to)?;
         }
         let mut actions = Html::EMPTY;
-        if grants.create {
-            actions.push(&render(&CreateButton {
-                noun: "User",
-                href: "/users/new",
-                id: "user-new",
-                ..CreateButton::default()
-            })?);
-        }
         if grants.invite {
             actions.push(&render(&CreateButton {
-                noun: "Invitation",
+                noun: "User",
                 href: "/users/invite",
                 id: "user-invite",
                 ..CreateButton::default()
@@ -692,8 +682,8 @@ impl Index {
                         .unwrap_or(""),
                     vec![
                         bilibi_ui::Choice::new("All memberships", ""),
-                        bilibi_ui::Choice::new("Home", "home"),
-                        bilibi_ui::Choice::new("Outside members", "outside"),
+                        bilibi_ui::Choice::new("Active", "active"),
+                        bilibi_ui::Choice::new("Disabled", "disabled"),
                         bilibi_ui::Choice::new("Invited", "invited"),
                     ],
                 ),
@@ -739,14 +729,10 @@ impl Index {
         let dialog = match (&self.pending_delete, &self.pending_revoke) {
             (Some(entry), _) => render(&ConfirmDialog {
                 id: "delete-user-confirm",
-                consequence: &format!("{}'s account will be deleted.", entry.name),
-                detail: if entry.membership == Membership::Outside {
-                    "They lose access to this tenant only. Their sign-in and other tenants are not affected. This cannot be undone."
-                } else {
-                    "They can no longer sign in. This cannot be undone."
-                },
-                confirm: "Delete",
-                working: "Deleting…",
+                consequence: &format!("{}'s membership in this workspace will be removed.", entry.name),
+                detail: "Their portable identity and access to other workspaces remain available.",
+                confirm: "Remove",
+                working: "Removing…",
                 confirm_event: "delete",
                 cancel_event: "cancel_delete",
             })?,
@@ -860,11 +846,11 @@ impl Index {
                 self.flash.0 = None;
                 if !self.pages.allowed(scope, contributions::DELETE).await? {
                     self.flash
-                        .error("You do not have permission to delete users.");
+                        .error("You do not have permission to remove users.");
                 } else if params::positive_id(value.get("id").and_then(Value::as_str))
                     == Some(scope.user())
                 {
-                    self.flash.error("You cannot delete your own account.");
+                    self.flash.error("You cannot remove your own membership.");
                 } else if let Some(entry) = self.listed(value).cloned() {
                     self.pending_delete = Some(entry);
                     self.pending_revoke = None;
@@ -925,31 +911,31 @@ impl Index {
                 let Some(entry) = self.pending_delete.take() else {
                     return Ok(());
                 };
-                match self.pages.users.delete_account(scope, entry.id).await {
+                match self.pages.users.remove_membership(scope, entry.id).await {
                     Ok(()) => self
                         .flash
-                        .success(format!("{}'s account was deleted.", entry.name)),
+                        .success(format!("{}'s membership was removed.", entry.name)),
                     Err(AccountError::Access(Error::Forbidden)) => self
                         .flash
-                        .error("You do not have permission to delete users."),
+                        .error("You do not have permission to remove users."),
                     Err(AccountError::OwnAccount) => {
-                        self.flash.error("You cannot delete your own account.")
+                        self.flash.error("You cannot remove your own membership.")
                     }
                     Err(AccountError::Outranked) => self.flash.error(format!(
-                        "You cannot delete {}: they have permissions you do not have.",
+                        "You cannot remove {}: they have permissions you do not have.",
                         entry.name
                     )),
                     Err(AccountError::Impersonating) => self
                         .flash
                         .error("Accounts cannot be changed while viewing as someone else."),
                     Err(AccountError::Archived) => self.flash.error(format!(
-                        "{} was not deleted because their company is archived.",
+                        "{} was not removed because their company is archived.",
                         entry.name
                     )),
                     Err(AccountError::NotFound) => self.flash.error("That user no longer exists."),
                     Err(AccountError::Access(error)) => return Err(error),
                     Err(_) => self.flash.error(format!(
-                        "{} was not deleted. Reload the page and try again.",
+                        "{} was not removed. Reload the page and try again.",
                         entry.name
                     )),
                 }

@@ -369,23 +369,13 @@ async fn main() -> Result<()> {
     );
 
     println!("== stage 9 regression: real reset action stores no actor identity copy");
-    let manager_login = app
-        .user
-        .login("manager@example.test", bilibi_walkthrough_fixture::PASSWORD)
-        .await?;
-    let manager = app.security.guard(&manager_login.token).await?;
-    let manager_key = enroll(&app, &manager).await?;
     let staff = login(&app, "staff@example.test").await?;
     let _ = enroll(&app, &staff).await?;
-    let reset = write(
-        &app,
-        &manager_login.token,
-        &manager.clone().presenting_step_up(&code(&manager_key, 0)),
-        "core.user.two_factor.reset",
-        json!({"user_id":3}),
-    )
-    .await?;
-    println!("real reset result: {reset}");
+    let reset = app
+        .user
+        .reset_two_factor_by_email("staff@example.test")
+        .await?;
+    println!("installation reset result: {reset:?}");
     rows(&client, "reset target evidence", "SELECT new_values::text FROM base_audit_mutations WHERE tenant_id=1 AND auditable_type='user_two_factor_reset' AND auditable_id='3' ORDER BY id").await?;
 
     // A normalized, non-secret document on the existing subject account.
@@ -1880,7 +1870,7 @@ async fn main() -> Result<()> {
     client
         .batch_execute(
             "INSERT INTO persons(tenant_id,code,name,kind) VALUES(1,'elsewhere_reviewer','Elsewhere Reviewer','human'); \
-             WITH n AS (SELECT nextval(pg_get_serial_sequence('users','id'))::bigint AS user_id), source AS (SELECT i.password_hash FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.id=4), i AS (INSERT INTO user_identities(kind,email,password_hash,home_tenant_id,home_user_id,last_tenant_id) SELECT 'staff','elsewhere@example.test',source.password_hash,1,n.user_id,1 FROM n CROSS JOIN source RETURNING id,home_user_id) INSERT INTO users(id,tenant_id,identity_id,name,person_id) SELECT i.home_user_id,1,i.id,'Elsewhere Reviewer',p.id FROM i CROSS JOIN persons p WHERE p.code='elsewhere_reviewer' AND p.tenant_id=1; \
+             WITH n AS (SELECT nextval(pg_get_serial_sequence('users','id'))::bigint AS user_id), source AS (SELECT i.password_hash FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.id=4), i AS (INSERT INTO user_identities(kind,email,password_hash,last_tenant_id) SELECT 'staff','elsewhere@example.test',source.password_hash,1 FROM n CROSS JOIN source RETURNING id) INSERT INTO users(id,tenant_id,identity_id,name,person_id) SELECT n.user_id,1,i.id,'Elsewhere Reviewer',p.id FROM i CROSS JOIN n CROSS JOIN persons p WHERE p.code='elsewhere_reviewer' AND p.tenant_id=1; \
              INSERT INTO user_desks(tenant_id,person_id,company_id) SELECT 1,id,2 FROM persons WHERE tenant_id=1 AND code='elsewhere_reviewer'; \
              INSERT INTO principal_roles(tenant_id,user_id,role_id) SELECT 1,u.id,3 FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=1 AND i.email='elsewhere@example.test'; \
              INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(1,3,'privacy.request.view'),(1,3,'privacy.request.approve') ON CONFLICT DO NOTHING;",

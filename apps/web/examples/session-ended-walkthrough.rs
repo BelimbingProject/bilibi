@@ -66,7 +66,7 @@ impl Proof {
         let id = session_id(&token);
         let client = self.db.get().await?;
         client.execute(
-            "INSERT INTO sessions(id,tenant_id,user_id,csrf,impersonator_id,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '24 hours')",
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,impersonator_id,expires_at,authentication_authority) VALUES($1,$2,$3,$4,$5,now()+interval '24 hours','portable')",
             &[&id, &tenant, &user, &csrf, &impersonator],
         ).await?;
         let scope = self.sessions.check(&**client, &token).await?;

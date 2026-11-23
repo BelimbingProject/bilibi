@@ -54,6 +54,8 @@ pub struct LoginForm {
     /// The announced failure above the form; the email field repeats it.
     pub form_error: String,
     pub session_expired: bool,
+    /// A signed-in person is proving access to a selected workspace.
+    pub reauthenticating: bool,
     pub sso_public: String,
     pub sso_label: String,
 }
@@ -87,6 +89,7 @@ impl LoginWorkspace {
 #[template(path = "login.html")]
 pub struct LoginPage {
     pub session_expired: bool,
+    pub reauthenticating: bool,
     pub form_error: String,
     pub sso_public: String,
     pub sso_label: String,
@@ -98,6 +101,7 @@ impl LoginPage {
     pub fn new(form: &LoginForm) -> askama::Result<Self> {
         Ok(Self {
             session_expired: form.session_expired,
+            reauthenticating: form.reauthenticating,
             form_error: form.form_error.clone(),
             sso_public: form.sso_public.clone(),
             sso_label: form.sso_label.clone(),

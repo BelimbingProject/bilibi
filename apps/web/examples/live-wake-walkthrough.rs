@@ -254,7 +254,7 @@ async fn open(
     let token = uuid::Uuid::new_v4().simple().to_string();
     let csrf = uuid::Uuid::new_v4().simple().to_string();
     db.get().await?.execute(
-        "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,$4,now()+interval '24 hours')",
+        "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) VALUES($1,$2,$3,$4,now()+interval '24 hours','portable')",
         &[&bilibi_base::session::session_id(&token), &tenant, &user, &csrf],
     ).await?;
     let mut request = format!("ws://{addr}/live?framed=true")

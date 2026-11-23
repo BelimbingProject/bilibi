@@ -1,9 +1,9 @@
 //! User's personal-data store (ADR 05, `base/personal_data`): the accounts linked to
 //! the person, their notifications and action evidence. Erasure closes accounts as
-//! `delete_account` does (sessions ended, step-up factors removed, reset
-//! tokens dropped) and anonymises it: the row, its ID and its links stay, the
-//! name and sign-in email do not. Single sign-on links, pending sign-ins and
-//! failed-attempt counters have no business value and are deleted, as are
+//! `remove_membership` does (membership sessions ended) and anonymises it: the
+//! row and its ID stay, while its tenant-owned name and links do not. The
+//! installation-owned sign-in email, password, factors, pending sign-ins and
+//! failed-attempt counters are outside a customer's erasure. Single sign-on links are deleted, as are
 //! notifications, each unless a legal hold names it. The account's SCIM
 //! document keeps only its resource ID, and a first administrator's receipt
 //! its placeholder email. Accounts that only share an email are counted, never
@@ -56,15 +56,11 @@ const SCIM_FIELDS: [&str; 1] = ["*"];
 
 struct Bound {
     sessions: Arc<Sessions>,
-    step_up: Arc<bilibi_step_up::StepUp>,
 }
 static BOUND: OnceLock<Bound> = OnceLock::new();
 /// Bound once by the User service factory.
-pub(crate) fn bind(
-    sessions: Arc<Sessions>,
-    step_up: Arc<bilibi_step_up::StepUp>,
-) -> bilibi_module_registry::Result<()> {
-    BOUND.set(Bound { sessions, step_up }).map_err(|_| {
+pub(crate) fn bind(sessions: Arc<Sessions>) -> bilibi_module_registry::Result<()> {
+    BOUND.set(Bound { sessions }).map_err(|_| {
         bilibi_module_registry::RegistryError::Service("duplicate user privacy binding".into())
     })
 }
@@ -241,24 +237,21 @@ impl Handler for Accounts {
             let users = tx
                 .sql()
                 .query(
-                    "SELECT u.id,u.name,i.email,u.status,(u.name=$3 AND u.status='deleted' AND (NOT (i.home_tenant_id=u.tenant_id AND i.home_user_id=u.id) OR i.email LIKE 'erased-%@erased.invalid')),i.id,(i.home_tenant_id=u.tenant_id AND i.home_user_id=u.id) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.person_id=$2 ORDER BY u.id FOR UPDATE OF u,i",
+                    "SELECT u.id,u.name,i.email,u.status,(u.name=$3 AND u.status='deleted'),i.id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.person_id=$2 ORDER BY u.id FOR UPDATE OF u",
                     &[&tenant, &subject.person.get(), &ERASED],
                 )
                 .await?;
             let ids: Vec<i64> = users.iter().map(|row| row.get(0)).collect();
             let held_users = holds.records(grant, USER_KIND, &ids).await?;
-            let identities: Vec<i64> = users.iter().map(|row| row.get(5)).collect();
-            let held_identities = holds.records(grant, IDENTITY_KIND, &identities).await?;
             let mut erased = Erased::default();
             for row in users {
-                let (user, name, email, status, done, identity, home): (
+                let (user, name, email, status, done, identity): (
                     i64,
                     String,
                     String,
                     String,
                     bool,
                     i64,
-                    bool,
                 ) = (
                     row.get(0),
                     row.get(1),
@@ -266,8 +259,18 @@ impl Handler for Accounts {
                     row.get(3),
                     row.get(4),
                     row.get(5),
-                    row.get(6),
                 );
+                // The address and credentials belong to the installation,
+                // not this customer privacy store. Name the retained shared
+                // identity on the certificate instead of claiming its email
+                // was erased with this membership.
+                erased.kept.push(Kept {
+                    kind: IDENTITY_KIND.into(),
+                    id: identity.to_string(),
+                    reason: KeptReason::Shared,
+                    until: None,
+                    hold: None,
+                });
                 if bilibi_audit::count_account_actions(tx.sql(), scope, &[user]).await? > 0 {
                     erased.kept.push(Kept {
                         kind: AUDIT_ACTIONS_KIND.into(),
@@ -278,11 +281,6 @@ impl Handler for Accounts {
                     });
                 }
                 if let Some(hold) = held_users.get(&user) {
-                    erased.kept.push(Kept::held(USER_KIND, user, *hold));
-                    continue;
-                }
-                if let Some(hold) = held_identities.get(&identity).filter(|_| home) {
-                    erased.kept.push(Kept::held(IDENTITY_KIND, identity, *hold));
                     erased.kept.push(Kept::held(USER_KIND, user, *hold));
                     continue;
                 }
@@ -431,13 +429,10 @@ impl Handler for Accounts {
                     None => bilibi_audit::holds_values(tx, TWO_FACTOR_RESET_KIND, user).await?,
                 };
                 let user_history = done && bilibi_audit::holds_values(tx, USER_KIND, user).await?;
-                let identity_history =
-                    done && home && bilibi_audit::holds_values(tx, IDENTITY_KIND, identity).await?;
                 let reset_before = json!({"name": name, "email": email});
-                let before = json!({"name": name, "email": email, "status": status});
+                let before = json!({"name": name, "status": status});
                 let writes = !done
                     || user_history
-                    || identity_history
                     || !gone.is_empty()
                     || !scim.is_empty()
                     || bootstrap
@@ -457,14 +452,7 @@ impl Handler for Accounts {
                                     &[&tenant, &user, &ERASED],
                                 )
                                 .await?;
-                                if home {
-                                sql.execute(
-                                    "UPDATE user_identities SET email=$2,password_hash='!erased',status='deleted',deleted_at=coalesce(deleted_at,now()),updated_at=now() WHERE id=$1",
-                                    &[&identity, &placeholder],
-                                )
-                                .await?;
-                                }
-                                let links = remove_links(sql, tenant, user, &[], home).await?;
+                                let links = remove_links(sql, tenant, user, &[]).await?;
                                 other.extend(
                                     links
                                         .iter()
@@ -475,17 +463,8 @@ impl Handler for Accounts {
                                     kind: USER_KIND.into(),
                                     id: user,
                                     old: before,
-                                    new: json!({"name": ERASED, "email": ERASED, "status": "deleted", "links_removed": links.len()}),
+                                    new: json!({"name": ERASED, "status": "deleted", "links_removed": links.len()}),
                                 });
-                                if home {
-                                changes.push(Change {
-                                    kind: IDENTITY_KIND.into(),
-                                    id: identity,
-                                    old: json!({"email": email}),
-                                    new: json!({"email": ERASED, "status": "deleted"}),
-                                });
-                                other.push((IDENTITY_KIND, identity));
-                                }
                                 changes.extend(links);
                                 let (invitation_changes, records) =
                                     anonymise_accepted_invitations(sql, tenant, user).await?;
@@ -503,23 +482,9 @@ impl Handler for Accounts {
                                     kind: USER_KIND.into(),
                                     id: user,
                                     old: before,
-                                    new: json!({"name": ERASED, "email": ERASED, "status": "deleted"}),
+                                    new: json!({"name": ERASED, "status": "deleted"}),
                                 });
                                 other.push((USER_KIND, user));
-                            }
-                            if identity_history {
-                                sql.execute(
-                                    "UPDATE user_identities SET updated_at=now() WHERE id=$1",
-                                    &[&identity],
-                                )
-                                .await?;
-                                changes.push(Change {
-                                    kind: IDENTITY_KIND.into(),
-                                    id: identity,
-                                    old: json!({"email": email}),
-                                    new: json!({"email": ERASED}),
-                                });
-                                other.push((IDENTITY_KIND, identity));
                             }
                             // The identity provider keeps the resource ID; its
                             // document keeps nothing about the person.
@@ -576,12 +541,6 @@ impl Handler for Accounts {
                     .await?
                 };
                 if !done {
-                    if home {
-                        bound
-                            .step_up
-                            .lifecycle(tx, user, bilibi_step_up::Lifecycle::Delete)
-                            .await?;
-                    }
                     let ended = bound.sessions.revoke(tx, user, None).await?;
                     let sessions = bound.sessions.clone();
                     tx.after_commit(move || sessions.announce(ended));
@@ -701,44 +660,21 @@ inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.two_factor_reset
 Provenance { module: "core/user", source: file!(), line: line!() },
 &RecordKind { kind: TWO_FACTOR_RESET_KIND, fields: &["name", "email"], subject_identifier: false, person: false }) }
 
-/// Deletes an account's sign-in and credential rows, one `Change` per row
-/// with its key and owner only: never a token, hash or external subject. A
-/// single sign-on link in `keep_identities` (a legal hold names it) stays.
+/// Deletes a tenant membership's provider links and external sessions, one
+/// `Change` per row. The installation-owned identity and credentials stay.
 pub(crate) async fn remove_links(
     sql: &tokio_postgres::Transaction<'_>,
     tenant: i64,
     user: i64,
     keep_identities: &[i64],
-    home: bool,
 ) -> bilibi_database::Result<Vec<Change>> {
     let mut changes = Vec::new();
-    let identity: i64 = sql
-        .query_one(
-            "SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2",
-            &[&tenant, &user],
-        )
-        .await?
-        .get(0);
-    let identity: Vec<i64> = if home { vec![identity] } else { Vec::new() };
     let removed = |kind: &str, id: i64, old: Value| Change {
         kind: kind.into(),
         id,
         old,
         new: json!({}),
     };
-    for row in sql
-        .query(
-            "DELETE FROM password_reset_tokens WHERE identity_id=ANY($1) RETURNING identity_id",
-            &[&identity],
-        )
-        .await?
-    {
-        changes.push(removed(
-            "password_reset_token",
-            row.get(0),
-            json!({"user": user}),
-        ));
-    }
     for row in sql
         .query(
             "DELETE FROM user_external_sessions WHERE tenant_id=$1 AND user_id=$2 RETURNING id",
@@ -761,28 +697,6 @@ pub(crate) async fn remove_links(
             row.get(0),
             json!({"user": user, "provider": row.get::<_, i64>(1)}),
         ));
-    }
-    for row in sql
-        .query(
-            "DELETE FROM user_credential_attempts WHERE identity_id=ANY($1) RETURNING kind",
-            &[&identity],
-        )
-        .await?
-    {
-        changes.push(removed(
-            "user_credential_attempts",
-            user,
-            json!({"user": user, "kind": row.get::<_, String>(0)}),
-        ));
-    }
-    for row in sql
-        .query(
-            "DELETE FROM user_sign_ins WHERE identity_id=ANY($1) RETURNING id",
-            &[&identity],
-        )
-        .await?
-    {
-        changes.push(removed("user_sign_in", row.get(0), json!({"user": user})));
     }
     Ok(changes)
 }

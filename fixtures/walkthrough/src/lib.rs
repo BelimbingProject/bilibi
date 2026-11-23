@@ -72,7 +72,7 @@ pub async fn install(db: &Db) -> Result<()> {
     tx.batch_execute(include_str!("fixture.sql")).await?;
     for (id, tenant, name, email) in ACCOUNTS {
         tx.execute(
-            "INSERT INTO user_identities(id,kind,email,password_hash,home_tenant_id,home_user_id,last_tenant_id) OVERRIDING SYSTEM VALUE VALUES($1,'staff',$3,$4,$2,$1,$2) ON CONFLICT DO NOTHING",
+            "INSERT INTO user_identities(id,kind,email,password_hash,last_tenant_id) OVERRIDING SYSTEM VALUE VALUES($1,'staff',$3,$4,$2) ON CONFLICT DO NOTHING",
             &[&id, &tenant, &email, &PASSWORD_HASH],
         )
         .await?;

@@ -52,8 +52,6 @@ pub struct Account {
     pub status: String,
     pub email_verified: bool,
     pub email_verified_at: Option<std::time::SystemTime>,
-    /// Whether this tenant owns the installation-wide sign-in credentials.
-    pub home: bool,
     pub links: AccountLinks,
     pub version: i64,
     pub created_at: std::time::SystemTime,
@@ -269,6 +267,7 @@ impl Audience {
 pub(crate) async fn password_identity(
     users: &UserService,
     audience: Audience,
+    target_tenant: Option<i64>,
     email: &str,
     password: &str,
 ) -> std::result::Result<(i64, i64, String), CredentialError> {
@@ -280,8 +279,8 @@ pub(crate) async fn password_identity(
     let tenant = audience.tenant();
     let row = client
         .query_opt(
-            "SELECT u.id,u.tenant_id,i.password_hash,true FROM user_identities i JOIN users u ON u.identity_id=i.id JOIN tenants t ON t.id=u.tenant_id WHERE lower(i.email)=$1 AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' AND i.kind=$2 AND u.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) ORDER BY (u.tenant_id=i.last_tenant_id) DESC,(u.tenant_id=i.home_tenant_id) DESC,u.tenant_id LIMIT 1",
-            &[&email, &audience.kind().as_str(), &tenant],
+            "SELECT u.id,u.tenant_id,i.password_hash,true FROM user_identities i JOIN users u ON u.identity_id=i.id JOIN tenants t ON t.id=u.tenant_id WHERE lower(i.email)=$1 AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' AND i.kind=$2 AND u.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND ($4::bigint IS NULL OR u.tenant_id=$4) ORDER BY (u.tenant_id=i.last_tenant_id) DESC,u.tenant_id LIMIT 1",
+            &[&email, &audience.kind().as_str(), &tenant, &target_tenant],
         )
         .await
         .map_err(Error::from)?;
@@ -343,7 +342,7 @@ pub(crate) async fn read_account(
     lock: bool,
 ) -> Result<Option<Account>> {
     let sql = format!(
-        "SELECT u.id,u.name,i.email,u.status,i.email_verified_at,u.person_id,u.version,u.created_at,u.updated_at,i.home_tenant_id=u.tenant_id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.kind='staff' AND u.deleted_at IS NULL{}",
+        "SELECT u.id,u.name,i.email,u.status,i.email_verified_at,u.person_id,u.version,u.created_at,u.updated_at FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.kind='staff' AND u.deleted_at IS NULL{}",
         if lock { " FOR UPDATE" } else { "" }
     );
     client
@@ -358,7 +357,6 @@ pub(crate) async fn read_account(
                 status: row.get(3),
                 email_verified: email_verified_at.is_some(),
                 email_verified_at,
-                home: row.get(9),
                 links: AccountLinks::from_row(&row, 5)?,
                 version: row.get(6),
                 created_at: row.get(7),

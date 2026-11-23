@@ -425,8 +425,8 @@ async fn main() -> Result<()> {
     let held_pair = client
         .query_one(
             "WITH n AS (SELECT nextval(pg_get_serial_sequence('users','id'))::bigint AS user_id), \
-             i AS (INSERT INTO user_identities(kind,email,password_hash,home_tenant_id,home_user_id,last_tenant_id) SELECT 'staff','held-closed@example.test','walkthrough',1,user_id,1 FROM n RETURNING id,home_user_id), \
-             closed AS (INSERT INTO users(id,tenant_id,identity_id,name,status,deleted_at) SELECT home_user_id,1,id,'Held Closed','deleted',now()-interval '40 days' FROM i RETURNING id), \
+             i AS (INSERT INTO user_identities(kind,email,password_hash,last_tenant_id) SELECT 'staff','held-closed@example.test','walkthrough',1 FROM n RETURNING id), \
+             closed AS (INSERT INTO users(id,tenant_id,identity_id,name,status,deleted_at) SELECT n.user_id,1,i.id,'Held Closed','deleted',now()-interval '40 days' FROM i CROSS JOIN n RETURNING id), \
              accepted AS (INSERT INTO user_invitations(tenant_id,user_id,email,token_hash,invited_by,expires_at,accepted_at) SELECT 1,id,'held-accepted@example.test','\\x04'::bytea,1,now()-interval '60 days',now()-interval '59 days' FROM closed RETURNING id), \
              prepared AS (INSERT INTO users(tenant_id,name,status) VALUES (1,'Held Invitee','invited') RETURNING id), \
              lapsed AS (INSERT INTO user_invitations(tenant_id,user_id,email,token_hash,invited_by,expires_at) SELECT 1,id,'held-lapsed@example.test','\\x05'::bytea,1,now()-interval '40 days' FROM prepared RETURNING id) \
