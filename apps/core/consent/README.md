@@ -111,7 +111,7 @@ The public capability keys are `core.consent.view`, `core.consent.record`, `core
 | --- | --- |
 | Channel | `email`, `sms`, `messaging`, `voice`, `chat`, `postal`, `in_person`; a decision may use `any` |
 | Source | `portal`, `preference_link`, `agent`, `import`, `inbound_keyword`, `api` |
-| Capture channel | A sending channel or `web` |
+| Capture channel | `email`, `sms`, `messaging`, `voice`, `chat`, `web`, `in_person` |
 | Suppression reason | `hard_bounce`, `complaint`, `unsubscribe` |
 | Refusal | `no_consent`, `withdrawn`, `suppressed` |
 

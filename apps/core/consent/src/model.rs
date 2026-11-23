@@ -78,7 +78,6 @@ codes!(
         Messaging => "messaging", "Messaging",
         Voice => "voice", "Voice",
         Chat => "chat", "Chat",
-        Postal => "postal", "Postal",
         Web => "web", "Web",
         InPerson => "in_person", "In person",
     }

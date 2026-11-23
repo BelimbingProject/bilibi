@@ -363,10 +363,7 @@ async fn main() -> Result<()> {
 
     addresses()?;
     // Exercise both manual channels through the same writes and checks as senders.
-    for (channel, captured_on) in [
-        (Channel::Postal, Capture::Postal),
-        (Channel::InPerson, Capture::InPerson),
-    ] {
+    for channel in [Channel::Postal, Channel::InPerson] {
         let who = contact(Some(3), None);
         write(
             &consent,
@@ -380,7 +377,7 @@ async fn main() -> Result<()> {
                 channel,
                 granted: true,
                 source: Source::Agent,
-                captured_on,
+                captured_on: Capture::InPerson,
                 evidence: None,
             }),
         )
