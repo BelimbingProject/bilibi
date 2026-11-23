@@ -192,6 +192,9 @@ inventory::submit! { Contribution::new(bilibi_events::SUBSCRIBERS, SUBSCRIBER, p
     events: &[],
     handler: &run::TRIGGERS,
 }) }
+inventory::submit! { Contribution::new(bilibi_agent_api::job::PRINCIPAL_WRITES, "base.watchers.script.run", provenance!(), &bilibi_agent_api::job::PrincipalWrite {
+    principals: &[PRINCIPAL],
+}) }
 
 fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry::Result<Watchers> {
     let catalog = Catalog::discover(&bilibi_module_registry::discover()?)?;
@@ -264,6 +267,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageW
         ("switch", "base.watchers.switch"),
         ("draft_review", "base.watchers.draft"),
         ("draft_save", "base.watchers.draft"),
+        ("run_script", "base.watchers.script.run"),
     ],
     pending: Pending::None,
 }) }

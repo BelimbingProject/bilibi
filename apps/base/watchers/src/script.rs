@@ -179,6 +179,8 @@ pub(crate) struct ScriptPermit {
     digest: String,
 }
 
+pub(crate) const PERSON_CALLER: &str = "person";
+
 pub(crate) struct ScriptPermits {
     digests: Vec<String>,
 }
@@ -274,6 +276,204 @@ pub(crate) async fn cancel_sql(client: &tokio_postgres::Client) {
 }
 
 impl crate::Watchers {
+    async fn callable_script(
+        &self,
+        sql: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        watcher: i64,
+        version: i32,
+        position: usize,
+    ) -> Result<(Script, ScriptPermit, &OfferedTrigger)> {
+        let row = sql
+            .query_opt(
+                "SELECT v.id,v.definition,w.trigger FROM base_watcher_versions v JOIN base_watchers w ON w.tenant_id=v.tenant_id AND w.id=v.watcher_id WHERE v.tenant_id=$1 AND v.watcher_id=$2 AND v.number=$3 AND v.approved_at IS NOT NULL",
+                &[&scope.tenant(), &watcher, &version],
+            )
+            .await?
+            .ok_or(bilibi_database::Error::NotFound)?;
+        let version_id: i64 = row.get(0);
+        let definition = Definition::parse(&row.get::<_, Value>(1), &mut Vec::new())
+            .ok_or(bilibi_database::Error::Invalid)?;
+        let trigger = self
+            .trigger(row.get::<_, String>(2).as_str())
+            .ok_or(bilibi_database::Error::Invalid)?;
+        let script = definition
+            .scripts()
+            .nth(position)
+            .cloned()
+            .ok_or(bilibi_database::Error::NotFound)?;
+        let caller = scope.principal().unwrap_or(PERSON_CALLER);
+        let digest = script.permission_digest();
+        if sql
+            .query_opt(
+                "SELECT 1 FROM base_watcher_script_permissions WHERE tenant_id=$1 AND version_id=$2 AND script_digest=$3 AND principal=$4",
+                &[&scope.tenant(), &version_id, &digest, &caller],
+            )
+            .await?
+            .is_none()
+        {
+            return Err(bilibi_database::Error::Refused(
+                "script_permission_refused".into(),
+            ));
+        }
+        Ok((script, ScriptPermit { digest }, trigger))
+    }
+
+    async fn selected_script_calls(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+        watcher: i64,
+        version: i32,
+        position: usize,
+        subject: &str,
+        started: Instant,
+    ) -> Result<Vec<(String, Value)>> {
+        let (script, permit, trigger) = self
+            .callable_script(tx, scope, watcher, version, position)
+            .await?;
+        let mut fields = script.fields.clone();
+        if !fields
+            .iter()
+            .any(|field| field == trigger.definition.version)
+        {
+            fields.push(trigger.definition.version.to_owned());
+        }
+        let (mut facts, types) = match self
+            .read_facts(tx, scope, trigger.definition.table, subject, &fields)
+            .await?
+        {
+            Ok(facts) => facts,
+            Err(reason) => return Err(bilibi_database::Error::Refused(reason.into())),
+        };
+        let revision = crate::run::record_revision(facts.get(trigger.definition.version))?;
+        for (path, ty) in types {
+            let fact = facts
+                .get_mut(&path)
+                .ok_or(bilibi_database::Error::Invalid)?;
+            *fact = crate::definition::script_fact(ty, &[], fact)
+                .map_err(|_| bilibi_database::Error::Refused("script_input".into()))?;
+        }
+        let budget = self.script_deadline(tx, scope, true, started).await?;
+        let replies = budget
+            .within(async {
+                let mut replies = Vec::with_capacity(script.lookups.len());
+                for lookup in &script.lookups {
+                    if self.lookup(&lookup.operation).is_none() {
+                        return Err(bilibi_database::Error::Refused(
+                            "script_lookup_refused".into(),
+                        ));
+                    }
+                    let answer = self
+                        .registry
+                        .call_in(
+                            tx,
+                            scope,
+                            &lookup.operation,
+                            &Value::Object(lookup.input.clone()),
+                        )
+                        .await
+                        .map_err(|_| {
+                            bilibi_database::Error::Refused("script_lookup_refused".into())
+                        })?;
+                    replies.push(LookupValue {
+                        operation: lookup.operation.clone(),
+                        input: lookup.input.clone(),
+                        reply: answer.get("result").cloned().ok_or_else(|| {
+                            bilibi_database::Error::Refused("script_lookup_refused".into())
+                        })?,
+                    });
+                }
+                Ok::<_, bilibi_database::Error>(replies)
+            })
+            .await??;
+        let (heap, limit) = self.script_limits(tx, scope).await?;
+        let time = budget
+            .deadline
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u64
+            })
+            .unwrap_or_default();
+        if time == 0 {
+            return Err(bilibi_database::Error::Refused("script_timeout".into()));
+        }
+        let selected = script
+            .capture(&permit, &facts, &replies, time, heap)
+            .await
+            .map_err(|reason| bilibi_database::Error::Refused(reason.into()))?;
+        if selected.len() > limit || !script.permits(&selected) {
+            return Err(bilibi_database::Error::Refused(
+                "script_call_refused".into(),
+            ));
+        }
+        let mut calls = Vec::with_capacity(selected.len());
+        for call in selected {
+            let action = self
+                .action(&call.operation)
+                .filter(|action| action.local_script)
+                .ok_or_else(|| bilibi_database::Error::Refused("script_call_refused".into()))?;
+            let input = crate::run::action_input(
+                action.definition,
+                &action.input,
+                subject,
+                &call.input,
+                revision,
+            )
+            .ok_or_else(|| bilibi_database::Error::Refused("script_input".into()))?;
+            calls.push((call.operation, input));
+        }
+        budget.check()?;
+        Ok(calls)
+    }
+
+    pub(crate) async fn preview_script_call(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+        request: &ScriptCall,
+    ) -> Result<Vec<Value>> {
+        let calls = self
+            .selected_script_calls(
+                tx,
+                scope,
+                request.watcher,
+                request.version,
+                request.position,
+                &request.subject,
+                Instant::now(),
+            )
+            .await?;
+        self.registry
+            .preview_script_calls(tx, scope, &calls)
+            .await
+            .map_err(agent_error)
+    }
+
+    pub(crate) async fn commit_script_call(
+        &self,
+        tx: &mut bilibi_database::MutationTransaction<'_>,
+        scope: &Scope,
+        request: &ScriptCall,
+    ) -> Result<Vec<Value>> {
+        let calls = self
+            .selected_script_calls(
+                tx.sql(),
+                scope,
+                request.watcher,
+                request.version,
+                request.position,
+                &request.subject,
+                Instant::now(),
+            )
+            .await?;
+        self.registry
+            .commit_script_calls(tx, scope, &calls)
+            .await
+            .map_err(agent_error)
+    }
+
     async fn lookup_replies(
         &self,
         client: &dyn bilibi_agent_api::OperationClient,
@@ -469,5 +669,22 @@ impl crate::Watchers {
             self.limit(sql, scope, crate::SCRIPT_HEAP).await? as u64,
             self.limit(sql, scope, crate::ACTIONS_PER_RUN).await? as usize,
         ))
+    }
+}
+
+pub(crate) struct ScriptCall {
+    pub watcher: i64,
+    pub version: i32,
+    pub position: usize,
+    pub subject: String,
+}
+
+fn agent_error(error: bilibi_agent_api::Error) -> bilibi_database::Error {
+    match error {
+        bilibi_agent_api::Error::Backend(error) => error,
+        bilibi_agent_api::Error::Forbidden => bilibi_database::Error::Forbidden,
+        bilibi_agent_api::Error::NotFound => bilibi_database::Error::NotFound,
+        bilibi_agent_api::Error::InvalidInput(_) => bilibi_database::Error::Invalid,
+        other => bilibi_database::Error::Refused(other.to_string()),
     }
 }

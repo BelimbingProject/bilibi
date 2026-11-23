@@ -15,6 +15,8 @@ complete non-business contribution example.
 
 A reviewed write handler can declare `local_script_action` if its effects stay within the installation. Watchers also requires the owner’s registered Watcher action and checks its normal contract and permissions.
 
+An approved tenant script validates its complete selection through `Registry::preview_script_calls` before the first effect and applies it through `commit_script_calls` on the caller's existing `MutationTransaction`. Both methods admit only `local_script_action` owners, reject step-up and unavailable channels, and repeat each operation's schema, capability, preview and owner commit checks. Script engines never call a handler directly or open one transaction per selected action.
+
 Keys start with the contributing module ID with `/` changed to `.`. Operations
 need an additional segment; guides may use the module prefix itself. Keys must
 be unique across operations and guides. Discovery rejects malformed metadata,
