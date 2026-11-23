@@ -34,12 +34,12 @@ pub use query::{
     project_lenses, scalar_access, scalar_expression, scalar_join, stats, validate_projection_on,
 };
 pub use shared_views::{Audience, SHARE as SHARE_VIEWS, SharedView};
-pub use subject::{Survivors, bind_survivors};
+pub use subject::{SubjectAccess, Survivors, bind_survivors};
 pub use summary::{
     Bounds, Bucket, Filter, Grouping, KeyPage, Line, MAX_CHOICES, MAX_COST_BOUND, MAX_FILTERS,
     MAX_GROUPINGS, MAX_MEASURES, MAX_OFFSET, MAX_RESULT_GROUPS, MAX_SORTS, MAX_STATEMENT_MS,
     MAX_TEXT, Measure, PageSpec, Period, Sort, Summary, SummarySpec, Test, page_keys, report_page,
-    summarize, validate_page_on, validate_summary_on,
+    report_summary, summarize, validate_page_on, validate_summary_on,
 };
 pub use transfer::{ViewPreview, ViewSetup, ViewTransfer};
 pub use view::View;

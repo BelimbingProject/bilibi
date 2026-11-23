@@ -11,12 +11,12 @@
 use crate::declaration::{Access, Holder, PortalStepUp, RecordKind};
 use bilibi_database::{Change, Db, Error, MutationTransaction, Result};
 use bilibi_grid::{
-    query::text_search_sql, FieldType, Filter, QueryError, SummarySpec, Test, BOUNDS, MAX_CHOICES,
+    BOUNDS, FieldType, Filter, MAX_CHOICES, QueryError, SummarySpec, Test, query::text_search_sql,
 };
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{ReadClient, Scope};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
@@ -716,5 +716,25 @@ impl Records {
             });
         }
         Ok(counts)
+    }
+}
+
+impl bilibi_grid::SubjectAccess for Records {
+    fn readable<'a>(
+        &'a self,
+        client: &'a dyn bilibi_tenancy::ProofClient,
+        scope: &'a Scope,
+        kind: &'a str,
+        id: &'a str,
+    ) -> bilibi_tenancy::ProofFuture<'a, bool> {
+        Box::pin(async move {
+            let Some(kind) = self.kind(kind) else {
+                return Ok(false);
+            };
+            let Some(id) = Self::canonical(kind, id) else {
+                return Ok(false);
+            };
+            Ok(kind.owner.authorize(client, scope, &id).await? == Access::Readable)
+        })
     }
 }

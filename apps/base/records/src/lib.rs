@@ -236,7 +236,7 @@ inventory::submit! {
         services: &[Service { id: SERVICE, factory: |services| {
             let records = Arc::new(build(services)?);
             // Grid reads a table's subject as its survivor (#877).
-            bilibi_grid::bind_survivors(bilibi_grid::Survivors { relation: matching::SURVIVORS_SQL })?;
+            bilibi_grid::bind_survivors(bilibi_grid::Survivors { relation: matching::SURVIVORS_SQL, access: records.clone() })?;
             operations::bind(records.clone())?;
             Ok(records)
         } }],

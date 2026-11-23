@@ -73,9 +73,8 @@ pub struct TableDecl {
 /// holding its id and its Base Records kind (#877). The field then reads as
 /// the record that id names now, so rows about records merged since group and
 /// filter under their survivor, and the report builder's reads
-/// ([`crate::summarize`], [`crate::page_keys`]) keep a reader to the rows
-/// whose subject they may read, as the kind's own table decides it: its
-/// capability, tenant and soft-delete filters and record reach. A row
+/// ([`crate::report_summary`], [`crate::report_page`]) keep rows whose
+/// subject passes the Base Records owner's read rule. A row
 /// without a subject stays.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Subject {

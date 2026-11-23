@@ -392,14 +392,7 @@ fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Reco
     };
     let d = &report.definition;
     let mut references = std::collections::BTreeSet::new();
-    let reach = |kind: &str| {
-        catalog.record_table(kind).map_or("none", |table| {
-            table.reach().map_or("all", |reach| reach.code())
-        })
-    };
-    if let Some(subject) = root.subject() {
-        references.insert(format!("subject:{}:{}", subject.kind, reach(subject.kind)));
-    }
+    let mut live_subjects = root.subject().is_some();
     let seen: String = d
         .columns
         .iter()
@@ -411,29 +404,24 @@ fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Reco
         // masking it changes what the reader sees (ADR 05).
         .map(|spec| match catalog.resolve(root, spec) {
             Ok(column) => {
-                for link in column
+                live_subjects |= column
                     .hops
                     .iter()
-                    .chain(column.many.iter())
+                    .chain(&column.many)
                     .chain(&column.tail)
-                {
-                    if let Some(subject) = catalog
-                        .table(link.to())
-                        .and_then(bilibi_grid::Table::subject)
-                    {
-                        references.insert(format!(
-                            "subject:{}:{}",
-                            subject.kind,
-                            reach(subject.kind)
-                        ));
-                    }
-                }
-                if catalog.mask(&column).is_some() {
-                    'm'
-                } else if let Some(kind) = column.reference {
-                    let reach = records.kind(kind).map_or("none", |_| reach(kind));
-                    references.insert(format!("ref:{}:{kind}:{reach}", column.spec));
+                    .any(|link| {
+                        catalog
+                            .table(link.to())
+                            .is_some_and(|table| table.subject().is_some())
+                    });
+                if let Some(kind) = column.reference {
+                    let readable = records
+                        .kind(kind)
+                        .is_some_and(|kind| catalog.table(kind.table).is_some());
+                    references.insert(format!("ref:{}:{kind}:{}", column.spec, u8::from(readable)));
                     'r'
+                } else if catalog.mask(&column).is_some() {
+                    'm'
                 } else {
                     '1'
                 }
@@ -441,6 +429,9 @@ fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Reco
             Err(_) => '0',
         })
         .collect();
+    if live_subjects {
+        return format!("{}:subject:live", report.version);
+    }
     format!(
         "{}:{seen}:{}",
         report.version,
@@ -1290,7 +1281,7 @@ impl Reports {
                     let measures: Vec<_> = totals_of.iter().flatten().cloned().collect();
                     let mut values = Vec::with_capacity(measures.len());
                     for chunk in measures.chunks(bilibi_grid::MAX_MEASURES) {
-                        let summary = bilibi_grid::summarize(
+                        let summary = bilibi_grid::report_summary(
                             &self.db,
                             scope,
                             &report.record_type,
@@ -1349,7 +1340,7 @@ impl Reports {
                     .setting(&**client, scope, contributions::MAX_GROUPS_KEY)
                     .await?;
                 drop(client);
-                let mut summary = bilibi_grid::summarize(
+                let mut summary = bilibi_grid::report_summary(
                     &self.db,
                     scope,
                     &report.record_type,

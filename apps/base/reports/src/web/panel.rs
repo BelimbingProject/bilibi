@@ -5,15 +5,15 @@
 //! `PanelCache`, so the dashboard's refreshes are not runs, but only while
 //! the reader's access to the report is unchanged: the provider batches the
 //! access keys and a changed revision remounts the panel.
-use super::{render, report_path, result, Pages};
+use super::{Pages, render, report_path, result};
 use crate::{ReportError, RunInput, RunResult};
 use askama::Template;
 use bilibi_dashboard::{PanelArgs, PanelCache, Provided, ProvidedFuture};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
     ActionLink, Alert, Chart, ChartKind, Html, Series, StatusKind,
+    page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
 };
 
 /// The dashboard id prefix: a report's entry is `report-<id>`.
@@ -181,11 +181,9 @@ impl LiveState<Scope, Error> for Panel {
             if !matches!(request.input, LiveInput::Refresh) {
                 return Err(Error::Invalid);
             }
-            let html = if self
-                .args
-                .revision()
-                .is_some_and(|revision| revision.contains(":ref:"))
-            {
+            let html = if self.args.revision().is_some_and(|revision| {
+                revision.contains(":ref:") || revision.contains(":subject:")
+            }) {
                 self.draw(request.scope).await?
             } else {
                 match self.cache.fresh(&self.args) {

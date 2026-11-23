@@ -295,16 +295,39 @@ pub async fn summarize(
     root: &str,
     spec: &SummarySpec,
 ) -> Result<Summary, QueryError> {
+    summarize_with_mode(db, scope, root, spec, false).await
+}
+
+pub async fn report_summary(
+    db: &Db,
+    scope: &Scope,
+    root: &str,
+    spec: &SummarySpec,
+) -> Result<Summary, QueryError> {
+    summarize_with_mode(db, scope, root, spec, true).await
+}
+
+async fn summarize_with_mode(
+    db: &Db,
+    scope: &Scope,
+    root: &str,
+    spec: &SummarySpec,
+    report: bool,
+) -> Result<Summary, QueryError> {
     let mut client = db.get().await.map_err(Error::from)?;
     let tx = client
         .build_transaction()
-        .read_only(true)
+        .read_only(!report)
         .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
         .start()
         .await?;
     spec.bounds.check()?;
     tx.batch_execute(&spec.bounds.sql()).await?;
-    let catalog = Catalog::for_report(&*tx, scope).await?;
+    let catalog = if report {
+        Catalog::for_report(&*tx, scope).await?
+    } else {
+        Catalog::for_scope(&*tx, scope).await?
+    };
     let result = summarize_catalog(&tx, &catalog, root, spec).await?;
     tx.commit().await?;
     Ok(result)
@@ -419,8 +442,21 @@ pub(crate) async fn summarize_catalog(
     } else {
         selected.join(", ")
     };
+    let subjects = crate::subject::proofs(
+        tx,
+        catalog,
+        root,
+        spec.filters
+            .iter()
+            .map(|f| f.column.as_str())
+            .chain(spec.groupings.iter().map(|g| g.column.as_str()))
+            .chain(spec.measures.iter().map(|m| m.column.as_str())),
+        spec.bounds,
+    )
+    .await?;
+    let subjects = binds.push(subjects);
     let sql = format!(
-        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone), base AS (SELECT {inner} FROM {} r CROSS JOIN actor WHERE {predicate}) SELECT {} FROM base GROUP BY GROUPING SETS ({sets}){order} LIMIT {fetch}",
+        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone, {subjects}::jsonb AS subjects), base AS (SELECT {inner} FROM {} r CROSS JOIN actor WHERE {predicate}) SELECT {} FROM base GROUP BY GROUPING SETS ({sets}){order} LIMIT {fetch}",
         source(root),
         columns.join(", ")
     );
@@ -501,7 +537,7 @@ pub async fn page_keys(
         .await?;
     spec.bounds.check()?;
     tx.batch_execute(&spec.bounds.sql()).await?;
-    let catalog = Catalog::for_report(&*tx, scope).await?;
+    let catalog = Catalog::for_scope(&*tx, scope).await?;
     let result = page_keys_catalog(&tx, &catalog, root, spec).await?;
     tx.commit().await?;
     Ok(result)
@@ -518,7 +554,6 @@ pub async fn report_page<S: AsRef<str>>(
     let mut client = db.get().await.map_err(Error::from)?;
     let tx = client
         .build_transaction()
-        .read_only(true)
         .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
         .start()
         .await?;
@@ -577,7 +612,21 @@ pub(crate) async fn page_keys_catalog(
     order.push(format!("{key} ASC"));
     // Composed from its parts, never by replacing a marker: the owner's
     // source SQL may itself contain `{}` and is copied in untouched.
-    let head = "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone)";
+    let subjects = crate::subject::proofs(
+        tx,
+        catalog,
+        root,
+        spec.filters
+            .iter()
+            .map(|f| f.column.as_str())
+            .chain(spec.sorts.iter().map(|s| s.column.as_str())),
+        spec.bounds,
+    )
+    .await?;
+    let subjects = binds.push(subjects);
+    let head = format!(
+        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone, {subjects}::jsonb AS subjects)"
+    );
     let tail = format!("FROM {} r CROSS JOIN actor WHERE {predicate}", source(root));
     let page = format!(
         "{head} SELECT to_jsonb({key}) {tail} ORDER BY {} LIMIT {} OFFSET {}",
@@ -724,7 +773,7 @@ fn filters(
     }
     // Whatever the question names, it reads only rows whose subject the
     // reader may read (#877).
-    predicates.extend(crate::subject::readable(catalog, root, "r"));
+    predicates.extend(crate::subject::readable(root, "r"));
     Ok(if predicates.is_empty() {
         "true".into()
     } else {
@@ -832,6 +881,17 @@ fn calendar_instant(text: &str) -> Option<Timestamp> {
         .filter(|at| at.to_zoned(TimeZone::UTC).year() >= 1)
 }
 
+fn subject_operand(subject: crate::Subject, ty: FieldType, raw: &str) -> String {
+    if ty == FieldType::Integer {
+        let id = format!(
+            "CASE WHEN ({raw}) = trunc({raw}) AND ({raw}) BETWEEN '-9223372036854775808'::numeric AND '9223372036854775807'::numeric THEN ({raw})::bigint END"
+        );
+        crate::subject::survivor(subject, ty, &id)
+    } else {
+        crate::subject::survivor(subject, ty, raw)
+    }
+}
+
 fn test(
     column: &Column,
     value: &str,
@@ -858,7 +918,7 @@ fn test(
             } else {
                 let raw = format!("{}::text::{cast}", binds.push(text));
                 let wanted = match subject {
-                    Some(subject) => crate::subject::survivor(subject, ty, &raw),
+                    Some(subject) => subject_operand(subject, ty, &raw),
                     None => raw,
                 };
                 format!("({value})::{cast} = {wanted}")
@@ -893,7 +953,7 @@ fn test(
                 }
                 format!("({})", parts.join(" OR "))
             } else if let Some(subject) = subject {
-                let wanted = crate::subject::survivor(subject, ty, &format!("choice.id::{cast}"));
+                let wanted = subject_operand(subject, ty, &format!("choice.id::{cast}"));
                 format!(
                     "({value})::{cast} IN (SELECT {wanted} FROM unnest({}::text[]) choice(id))",
                     binds.push(texts)

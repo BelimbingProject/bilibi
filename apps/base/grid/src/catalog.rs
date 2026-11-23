@@ -118,6 +118,7 @@ async fn describe_source(
 /// What one account may read: the visible tables with restricted fields removed.
 #[derive(Clone, Debug)]
 pub struct Catalog {
+    pub(crate) subject_scope: Option<Scope>,
     tenant: i64,
     user: i64,
     tables: BTreeMap<&'static str, Table>,
@@ -132,15 +133,11 @@ impl Catalog {
         scope: &Scope,
     ) -> Result<Self, CatalogError> {
         let mut catalog = Self::for_scope(client, scope).await?;
+        catalog.subject_scope = Some(scope.clone());
         for table in catalog.tables.values_mut() {
             table.report_subjects = true;
         }
         Ok(catalog)
-    }
-
-    pub fn record_table(&self, kind: &str) -> Option<&Table> {
-        self.tables()
-            .find(|table| table.decl.record_types.contains(&kind))
     }
 
     pub(crate) fn without_custom_references(mut self) -> Self {
@@ -299,6 +296,7 @@ impl Catalog {
             add_custom(&mut tables, custom.clone(), &withheld);
         }
         let catalog = Self {
+            subject_scope: None,
             tenant: scope.tenant(),
             user: scope.user(),
             tables,
@@ -392,6 +390,7 @@ impl Catalog {
             }
             table.retain_links(|link| allowed.contains(link.id()));
         }
+        catalog.subject_scope = None;
         catalog.tenant = grant.tenant();
         catalog.user = 0;
         catalog.tables = tables;

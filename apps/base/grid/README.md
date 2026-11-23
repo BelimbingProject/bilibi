@@ -70,11 +70,11 @@ A table whose capability supports record reach (`CapabilityDefinition::with_reac
 A table whose rows are each about one record of another kind (a case about a customer) names the field holding that record's id and its Base Records kind: `TableDecl::new(...).subject("customer_id", "company")`. Reports over the table then count per record, not per stored id, and show a reader only the rows about records they may read (#877).
 
 - **Merges:** the field reads as the record its stored id names now, in a report grouping, filter, sort, cell or join. Rows stored under a record merged since group and filter under its survivor; no row is rewritten. Base Records owns merges and binds the lookup (`bind_survivors`); Grid never reads its storage by name.
-- **Readable subjects only:** Report summaries, pages and linked reads keep the rows whose subject is a row of the kind's own table in the reader's catalog, through its `scoped_source()`: its capability, tenant and soft-delete filters and record reach. This applies whatever the question names, so a total or a count by another column never includes a hidden subject's rows. A row without a subject stays. A kind whose table the reader cannot read, or whose module is not mounted, leaves only the rows without a subject.
-- **Not a second permission model:** the check is the subject table's own source. Field masks and withheld fields of the subject follow that table's restrictions as for any linked column; a table's label field is protected, so a readable subject always has its name.
+- **Readable subjects only:** Report summaries, pages and linked reads apply the Base Records owner's read rule to each distinct survivor on the same transaction as the report query. Rows with a null subject remain. Unknown record kinds admit no non-null subjects. Subject field masks and naming still follow the scoped Grid and Base Records restrictions.
 - **Declaration:** one subject per table; an integer or text field other than the key, on a tenant source. The kind is the audit kind its owner registers with [Base Records](../records/README.md); boot refuses a malformed declaration. The field is a record field in reports: it filters by `equals`, `one_of`, `empty` and `not_empty` and accepts count as its only aggregate.
-- **Owner lists** read the stored field through their usual Grid projection and apply their own access rules. An oversight report sees only rows whose subject table is in the granted catalog.
-- **Index** the subject field with the tenant, as any filtered field. The check is one semi-join against the subject table's key.
+- **Ordinary Grid reads** use stored values and keep their own access rules. Oversight has no child actor for owner checks and includes only rows with a null subject on a subject-declaring source.
+- **Bounds:** Grid refuses a report when subject discovery or owner decisions exceed its read bounds or require checking more than 1,000 distinct records.
+
 
 Proof: `BILIBI_REPORT_SUBJECTS=disposable cargo run -p bilibi-web --example report-subjects` on an empty disposable database (`scripts/run-walkthroughs.sh report-subjects`).
 
@@ -232,7 +232,7 @@ reference rows on success. No unit tests or test runner are involved.
 
 ## Reads inside an existing transaction
 
-Use `validate_projection_on`, `validate_page_on` and `validate_summary_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction.
+Use `validate_projection_on`, `validate_page_on` and `validate_summary_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction. Report pages and summaries use repeatable read and allow authorization decision logs.
 
 `OversightQueries::builder_catalog_on` and `probe_on` validate saved oversight questions on the caller's transaction. The probe runs bounded child reads serially and returns whether the question is supported, with no child data in the result. Abort the caller's transaction if savepoint setup or recovery cannot be confirmed.
 

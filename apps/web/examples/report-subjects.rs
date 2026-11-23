@@ -14,8 +14,8 @@ use bilibi_authz::{
     roles::NewRole,
 };
 use bilibi_base::reports::{
-    Definition, Draft, FilterDef, GroupingDef, Kind, MeasureDef, ReportError, Reports, RunInput,
-    RunResult,
+    Definition, Draft, FilterDef, Format, GroupingDef, Kind, MeasureDef, ReportError, Reports,
+    RunInput, RunResult,
 };
 use bilibi_database::{Db, MutationBoundary, pool};
 use bilibi_grid::{Bounds, Field, FieldType, GridContribution, PageSpec, Source, TableDecl};
@@ -29,6 +29,7 @@ bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 const MODULE: &str = "extensions/report_subjects";
+const ACCOUNT_LIST: &str = "reference.accounts.list";
 const ACCOUNTS: &str = "reference.accounts.view";
 const CASES: &str = "reference.cases.view";
 const ACCOUNT: &str = "report-subjects.account";
@@ -48,11 +49,11 @@ inventory::submit! {
 // The manager reads every account; the viewer reads cases and runs reports,
 // and reaches accounts only through the role the walkthrough gives them.
 inventory::submit! { Contribution::new(VOCABULARY, MODULE, Provenance { module: MODULE, source: file!(), line: line!() }, &VocabularyContribution {
-    domains: &["reference"], verbs: &["view"],
-    capabilities: &[CapabilityDefinition::tenant(ACCOUNTS).with_reach(), CapabilityDefinition::tenant(CASES)],
+    domains: &["reference"], verbs: &["view", "list"],
+    capabilities: &[CapabilityDefinition::tenant(ACCOUNT_LIST).with_reach(), CapabilityDefinition::tenant(ACCOUNTS).with_reach(), CapabilityDefinition::tenant(CASES)],
     roles: &[
-        RoleDefinition { code: "manager", name: "manager", description: "Walkthrough fixture role", grant_all: false, capabilities: &[ACCOUNTS, CASES, "reports.view", "reports.author", "reports.share"] },
-        RoleDefinition { code: "viewer", name: "viewer", description: "Walkthrough fixture role", grant_all: false, capabilities: &[CASES, "reports.view"] },
+        RoleDefinition { code: "manager", name: "manager", description: "Walkthrough fixture role", grant_all: false, capabilities: &[ACCOUNT_LIST, ACCOUNTS, CASES, "reports.view", "reports.author", "reports.share"] },
+        RoleDefinition { code: "viewer", name: "viewer", description: "Walkthrough fixture role", grant_all: false, capabilities: &[ACCOUNT_LIST, CASES, "reports.view", "reports.export"] },
     ],
     system_principals: &[],
 }) }
@@ -62,7 +63,7 @@ static GRID: GridContribution = GridContribution {
         TableDecl::new(
             "report_subject_accounts",
             "Accounts",
-            ACCOUNTS,
+            ACCOUNT_LIST,
             Source::tenant("SELECT id, name, owner_user_id FROM report_subject_accounts WHERE tenant_id = $1 AND NOT removed"),
             "id",
             &[
@@ -121,6 +122,12 @@ impl RecordOwner for AccountRecords {
             else {
                 return Ok(Access::NotFound);
             };
+            if !bilibi_authz::decide_proof(client, scope, ACCOUNTS)
+                .await?
+                .allowed
+            {
+                return Ok(Access::Forbidden);
+            }
             Ok(
                 if bilibi_authz::reach_admits(client, scope, ACCOUNTS, row.get(0), None).await? {
                     Access::Readable
@@ -234,7 +241,7 @@ async fn main() -> Result<(), Failure> {
     let mut checks = Checks { failed: 0 };
 
     // Northwind was entered twice; the duplicate (2) is Ada's, the record
-    // that survives (1) is Lee's. Contoso is Ada's, Fabrikam is Lee's. One
+    // that survives is Lee's. Contoso is Ada's, Fabrikam is Lee's. One
     // case names no account, and tenant 2 has an account and a case of its own.
     db.get().await?.batch_execute(
         "INSERT INTO report_subject_accounts(id,tenant_id,name,owner_user_id) VALUES \
@@ -370,12 +377,17 @@ async fn main() -> Result<(), Failure> {
         format!("{total} cases"),
     );
 
-    for (test, value) in [("equals", json!("2")), ("one_of", json!(["2", "4"]))] {
+    for (test, value, expected_total) in [
+        ("equals", json!("2"), 3),
+        ("equals", json!(2.0), 3),
+        ("equals", json!(2.4), 0),
+        ("one_of", json!([2.0, 4]), 4),
+        ("one_of", json!([2.4, 4]), 1),
+    ] {
         let mut older = drill.clone();
         older.drill[0].test = test.into();
         older.drill[0].value = value;
         let result = reports.run(&manager, report, &older).await?;
-        let expected_total = if test == "equals" { 3 } else { 4 };
         checks.check(
             "a drill filter saved before the merge still matches the survivor",
             matches!(result.result, RunResult::Rows { total, .. } if total == expected_total),
@@ -399,7 +411,7 @@ async fn main() -> Result<(), Failure> {
     println!("== A reader gets only the rows whose subject they may read");
     let none = run(&viewer).await?;
     checks.check(
-        "a reader with no grant on accounts sees only the case without an account",
+        "a reader with list access but no owner read grant sees only the case without an account",
         none == (expected(&[("-", "-", 1, 70)]), (1, 70)),
         format!("{none:?}"),
     );
@@ -518,8 +530,8 @@ async fn main() -> Result<(), Failure> {
     )
     .await?;
     checks.check(
-        "Grid's row page agrees: cases 1, 2, 3, 6 and 7",
-        keys.keys == [json!(1), json!(2), json!(3), json!(6), json!(7)] && keys.total == 5,
+        "ordinary Grid paging still lists all seven cases",
+        keys.keys.len() == 7 && keys.total == 7,
         format!("{:?}", keys.keys),
     );
 
@@ -532,16 +544,76 @@ async fn main() -> Result<(), Failure> {
         },
     ))
     .await?;
-    let own_access = reports.access(&viewer, title_only).await?;
+    let artifact_root = std::env::current_dir()?
+        .join(".local")
+        .join(format!("report-subjects-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&artifact_root)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&artifact_root, std::fs::Permissions::from_mode(0o700))?;
+    db.get().await?.execute(
+        "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES('artifacts.storage_root',0,'global',0,$1,false)",
+        &[&json!(artifact_root)],
+    ).await?;
+    let mut client = db.get().await?;
+    let mut tx = boundary
+        .begin(
+            &mut client,
+            viewer.mutation_context("reports.prepare_export"),
+        )
+        .await?;
+    let export = reports
+        .prepare_export(&mut tx, &viewer, title_only, &BTreeMap::new(), Format::Csv)
+        .await?;
+    tx.commit().await?;
+    drop(client);
+    let executor =
+        bilibi_queue::Executor::from_services(&app.services, bilibi_queue::Config::default())?;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(executor.run(stopped));
+    let prepared = async {
+        for _ in 0..60 {
+            let exports = reports.exports(&viewer, Some(title_only)).await?;
+            if let Some(prepared) = exports
+                .into_iter()
+                .find(|entry| entry.id == export && entry.state != "queued")
+            {
+                return Ok::<_, Failure>(prepared);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Err("report export did not finish".into())
+    }
+    .await;
+    stop.send(true)?;
+    worker.await??;
+    let prepared = prepared?;
+    if prepared.state != "ready" {
+        return Err(format!("prepare export: {prepared:?}").into());
+    }
+    let before = reports.exported(&viewer, export).await?;
+    db.get()
+        .await?
+        .execute(
+            "UPDATE report_subject_accounts SET owner_user_id=1 WHERE tenant_id=1 AND id=$1",
+            &[&SURVIVOR.parse::<i64>()?],
+        )
+        .await?;
+    let after = reports.exported(&viewer, export).await?;
+    checks.check(
+        "a prepared title-only CSV reflects a subject reassignment under the same Own grant",
+        before.rows == 5
+            && String::from_utf8(before.bytes)?.contains("Late delivery")
+            && after.rows == 2
+            && !String::from_utf8(after.bytes)?.contains("Late delivery"),
+        format!("{} rows before, {} rows after", before.rows, after.rows),
+    );
+
+    std::fs::remove_dir_all(&artifact_root)?;
+
     println!("== Wider reach and other tenants");
     grants
         .set_role_capability(&admin, readers, ACCOUNTS, Some(Reach::All))
         .await?;
-    checks.check(
-        "the title-only report access revision changes with subject reach",
-        own_access != reports.access(&viewer, title_only).await?,
-        "Own to All",
-    );
     let all = run(&viewer).await?;
     checks.check(
         "reach all: the reader sees what the manager sees, never another tenant's case",

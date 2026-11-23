@@ -8,7 +8,7 @@
 //! finishing it (the requester lost the right first, or it ran out of
 //! attempts) moves its export to `failed` through Queue's ending hook, as the
 //! `reports-monitor` principal. Each export is audited like a download.
-use crate::{authorize, contributions, export::Format, store, ReportError, Reports, EXPORT};
+use crate::{EXPORT, ReportError, Reports, authorize, contributions, export::Format, store};
 use bilibi_artifacts::{Metadata, Operation, Owner, Reference};
 use bilibi_database::{Change, Error, MutationTransaction};
 use bilibi_notifications::Notice;
@@ -18,7 +18,7 @@ use bilibi_queue::{
 };
 use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// The queue worker that prepares one export.
@@ -257,7 +257,7 @@ impl Reports {
         let current = scope.current_company().ok_or(ReportError::NotFound)?.get();
         let row = client
             .query_opt(
-                "SELECT artifact_id, filename, format, rows, company_id, report_id, access, reference_names FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND company_id=$4 AND state='ready'",
+                "SELECT artifact_id, filename, format, rows, company_id, report_id, access, reference_names, answers FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND company_id=$4 AND state='ready' AND (expires_at IS NULL OR expires_at > now())",
                 &[&scope.tenant(), &export, &scope.user(), &current],
             )
             .await
@@ -269,11 +269,26 @@ impl Reports {
         let (report, made): (i64, Option<String>) = (row.get(5), row.get(6));
         let reference_names: Vec<crate::ReferenceName> =
             serde_json::from_value(row.get(7)).map_err(|_| Error::Internal)?;
+        let answers: Value = row.get(8);
         drop(client);
         let now = match self.access(scope, report).await {
             Err(ReportError::Database(error)) => return Err(error.into()),
             other => other.ok(),
         };
+        if now
+            .as_deref()
+            .is_some_and(|access| access.contains(":subject:"))
+        {
+            let format = Format::from_key(&format).ok_or(Error::Internal)?;
+            let cap = self.queued_rows(scope).await?;
+            let input = crate::RunInput {
+                answers: serde_json::from_value(answers).map_err(|_| Error::Internal)?,
+                ..crate::RunInput::default()
+            };
+            return self
+                .export_within(scope, report, &input, format, cap, true)
+                .await;
+        }
         if made.is_none()
             || now != made
             || !self

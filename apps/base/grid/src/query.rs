@@ -331,8 +331,17 @@ pub(crate) async fn project_catalog<S: AsRef<str>>(
     let trend_from = iso(months[0]);
     let trend_to = iso(today.first_of_month().saturating_add(1.month()));
     let since = iso(lenses.since.unwrap_or_else(|| default_since(today)));
-    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] =
-        &[&tenant, &user, &ids, &trend_from, &trend_to, &since];
+    let subjects =
+        crate::subject::proofs(tx, catalog, root, specs.iter().map(AsRef::as_ref), bounds).await?;
+    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[
+        &tenant,
+        &user,
+        &ids,
+        &trend_from,
+        &trend_to,
+        &since,
+        &subjects,
+    ];
     let explain: Value = tx
         .query_one(&format!("EXPLAIN (FORMAT JSON) {sql}"), params)
         .await?
@@ -889,7 +898,7 @@ fn walk<'c>(catalog: &'c Catalog, root: &'c Table, column: &Column) -> Option<Wa
     for (i, link) in links.iter().enumerate() {
         let target = catalog.table(link.to()).expect("resolved target");
         let t = format!("t{i}");
-        let target_source = match crate::subject::readable(catalog, target, "linked") {
+        let target_source = match crate::subject::readable(target, "linked") {
             Some(predicate) => format!(
                 "(SELECT linked.* FROM {} linked WHERE {predicate})",
                 source(target)
@@ -952,7 +961,7 @@ fn statement(
     // key bare, allowing its index to bound the page lookup. Type identifiers
     // come from PostgreSQL metadata, never from a request.
     format!(
-        "WITH input AS (SELECT (id #>> '{{}}')::{key_cast} AS key, min(ord) AS ord FROM jsonb_array_elements($3::jsonb) WITH ORDINALITY AS x(id,ord) GROUP BY 1), actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $4::text::date AS trend_from, $5::text::date AS trend_to, $6::text::date AS since) SELECT {select} FROM input JOIN {} r ON {} = input.key CROSS JOIN actor ORDER BY input.ord LIMIT 101",
+        "WITH input AS (SELECT (id #>> '{{}}')::{key_cast} AS key, min(ord) AS ord FROM jsonb_array_elements($3::jsonb) WITH ORDINALITY AS x(id,ord) GROUP BY 1), actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $4::text::date AS trend_from, $5::text::date AS trend_to, $6::text::date AS since, $7::jsonb AS subjects) SELECT {select} FROM input JOIN {} r ON {} = input.key CROSS JOIN actor ORDER BY input.ord LIMIT 101",
         source(root),
         field("r", root, root.key())
     )
