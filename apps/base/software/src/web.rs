@@ -32,8 +32,8 @@ use bilibi_ui::{
     },
     params, Alert, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, Choice,
     ColumnType, ColumnsOutcome, ConfirmDialog, Fact, Facts, Field, FlashMap, FlexRow, FlexTable,
-    Fold, Header, Html, InputKind, Instant, ListColumns, ListSpec, ListState, Modal, ModalWidth,
-    SectionHeading, StatusKind, Tab, TableEmpty, Tabs, NO_FLASH,
+    Fold, Header, Html, InputKind, Instant, ListColumns, ListSpec, ListState, SectionHeading,
+    StatusKind, Tab, TableEmpty, Tabs, NO_FLASH,
 };
 use jiff::Timestamp;
 use serde_json::{json, Value};
@@ -656,13 +656,6 @@ impl View {
             .await?
             .contains(MANAGE);
         drop(client);
-        let status = read(&pages.contracts, scope, "base.software.status").await?;
-        let releases = self.query.get("tab").is_some_and(|tab| tab == "releases");
-        let catalogue = if releases {
-            Value::Null
-        } else {
-            self.catalogue(scope).await?
-        };
         let lost = match &self.dialog {
             Some(Dialog::Review(review)) if review.kind == Kind::Undo => {
                 match review.facts["job"].as_i64() {
@@ -671,6 +664,26 @@ impl View {
                 }
             }
             _ => None,
+        };
+        if let Some(Dialog::Review(review)) = &self.dialog {
+            let methods = pages
+                .software
+                .step_up
+                .enrolled_methods(scope)
+                .await?
+                .into_iter()
+                .map(|m| bilibi_ui::ProofMethod::new(m.id, m.label, m.code_length, m.numeric))
+                .collect::<Vec<_>>();
+            return Ok(self
+                .review_dialog(&instance, lost, review, &methods)?
+                .to_string());
+        }
+        let status = read(&pages.contracts, scope, "base.software.status").await?;
+        let releases = self.query.get("tab").is_some_and(|tab| tab == "releases");
+        let catalogue = if releases {
+            Value::Null
+        } else {
+            self.catalogue(scope).await?
         };
         let transfer = if releases {
             let active = status["job"]["state"] == "queued" || status["job"]["state"] == "running";
@@ -714,24 +727,10 @@ impl View {
         } else {
             content.push(&self.modules.body(&status, &catalogue, &self.propose)?);
         }
-        let methods = pages
-            .software
-            .step_up
-            .enrolled_methods(scope)
-            .await?
-            .into_iter()
-            .map(|m| bilibi_ui::ProofMethod::new(m.id, m.label, m.code_length, m.numeric))
-            .collect::<Vec<_>>();
-        self.page(&instance, lost, content, &methods)
+        self.page(&instance, content)
     }
 
-    fn page(
-        &mut self,
-        instance: &Instance,
-        lost: Option<u64>,
-        content: Html,
-        methods: &[bilibi_ui::ProofMethod],
-    ) -> Result<String> {
+    fn page(&mut self, instance: &Instance, content: Html) -> Result<String> {
         let label = instance.label.clone();
         let subtitle = "Browse domains and extensions, or get an update for this server.";
         let header = render(Header {
@@ -765,7 +764,7 @@ impl View {
             ],
         })?;
         let dialog = match &self.dialog {
-            Some(Dialog::Review(review)) => self.review_dialog(instance, lost, review, methods)?,
+            Some(Dialog::Review(_)) => Html::EMPTY,
             Some(Dialog::Cancel { job, running }) => {
                 let consequence = if *running {
                     format!("Stop job {job}?")
@@ -1569,16 +1568,9 @@ impl View {
             step_up,
             error,
         })?;
-        render(Modal {
-            id: "software-review",
-            title: &title,
-            cancel_event: "cancel_dialog",
-            width: ModalWidth::Narrow,
-            description: "Nothing changes until you confirm with your code.",
-            role: "",
-            flash: None,
-            body,
-        })
+        render(
+            bilibi_ui::StepUpGate::action("Software", &title, body).map_err(|_| Error::Internal)?,
+        )
     }
 }
 

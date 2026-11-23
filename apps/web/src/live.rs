@@ -1618,7 +1618,19 @@ impl<S: Side> Session<S> {
                 params,
                 step_up_return,
             } => self.mount(app, token, path, params, step_up_return).await?,
-            Event::Navigate { path, params } => self.mount(app, token, path, params, None).await?,
+            Event::Navigate { path, params } => {
+                let mut messages = self.mount(app, token, path.clone(), params, None).await?;
+                if let Some(page) = messages
+                    .iter_mut()
+                    .find(|message| message["type"] == "page" && message["redirect"].is_null())
+                {
+                    if let Some((kind, message)) = app.landing.take(token, &path) {
+                        let html = page["html"].as_str().ok_or(Error::Internal)?;
+                        page["html"] = json!(routes::flash_group(html, kind, &message)?);
+                    }
+                }
+                messages
+            }
             // Back or Forward inside a `data-history="params"` page: the
             // historical path stays this page's state (its route parameters
             // join the params, after the query so the path wins) or, when it

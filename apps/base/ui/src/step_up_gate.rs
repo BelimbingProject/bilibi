@@ -16,6 +16,15 @@ pub struct StepUpGate {
 }
 
 impl StepUpGate {
+    pub fn action(title: &str, heading: &str, body: Html) -> askama::Result<Self> {
+        let body = Html::render(&crate::Card {
+            title: heading,
+            body,
+            ..crate::Card::default()
+        })?;
+        Ok(Self::new("", "", title, body))
+    }
+
     pub fn new(
         prompt: impl Into<String>,
         return_to: impl Into<String>,

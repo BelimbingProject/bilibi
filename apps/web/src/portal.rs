@@ -175,6 +175,10 @@ async fn step_up_page(
     })
     .map_err(|_| Error::Internal)?;
     let mut response = axum::response::Html(html.as_str().to_owned()).into_response();
+    response.headers_mut().insert(
+        routes::STEP_UP_HEADER,
+        axum::http::HeaderValue::from_static("required"),
+    );
     *response.status_mut() = StatusCode::OK;
     Ok(response)
 }

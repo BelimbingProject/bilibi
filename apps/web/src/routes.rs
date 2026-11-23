@@ -421,13 +421,24 @@ pub fn install(mut router: Router<App>, routes: &Pages, downloads: &Downloads) -
             on(
                 method_filter(bound.route.method),
                 move |State(app): State<App>,
+                      method: axum::http::Method,
                       uri: Uri,
                       headers: HeaderMap,
                       peer: Option<Extension<ConnectInfo<SocketAddr>>>,
                       Path(path): Path<HashMap<String, String>>,
                       Query(query): Query<HashMap<String, String>>,
                       body: Bytes| {
-                    dispatch(app, bound, uri, headers, peer, path, query, body)
+                    dispatch(
+                        app,
+                        bound,
+                        uri,
+                        headers,
+                        peer,
+                        path,
+                        query,
+                        body,
+                        method == axum::http::Method::HEAD,
+                    )
                 },
             ),
         );
@@ -626,6 +637,8 @@ pub(crate) fn local_address(address: &str) -> Result<(&str, HashMap<String, Stri
     ))
 }
 
+pub(crate) const STEP_UP_HEADER: &str = "x-bilibi-step-up";
+
 /// Draws the factor provider's prompt over placeholders inside the requested
 /// page's shell. The protected page service is deliberately not called.
 async fn step_up_page(
@@ -694,6 +707,9 @@ async fn step_up_page(
     )
     .await?;
     let mut response = crate::document_themed(&title, &shell.html, shell.theme)?.into_response();
+    response
+        .headers_mut()
+        .insert(STEP_UP_HEADER, HeaderValue::from_static("required"));
     *response.status_mut() = StatusCode::OK;
     Ok(response)
 }
@@ -707,6 +723,7 @@ async fn dispatch(
     path: HashMap<String, String>,
     query: HashMap<String, String>,
     body: Bytes,
+    head: bool,
 ) -> std::result::Result<Response, HttpError> {
     if let Some(admission) = &bound.sender_admission {
         let sender = crate::api::sender_key(crate::api::client_address(
@@ -820,9 +837,9 @@ async fn dispatch(
     // A missing record or a refused action elsewhere sent the visitor here with
     // its message (a one-shot cookie), or a live action redirected here with a
     // success of its own (held by `landing`).
-    let waiting = crate::auth::waiting_flash(&headers).filter(|_| !framed);
+    let waiting = crate::auth::waiting_flash(&headers).filter(|_| !framed && !head);
     let landed = match (&waiting, credential.as_deref()) {
-        (None, Some(credential)) if !framed && crate::auth::navigating(&headers) => {
+        (None, Some(credential)) if !framed && !head && crate::auth::navigating(&headers) => {
             app.landing.take(credential, uri.path())
         }
         _ => None,
@@ -913,7 +930,7 @@ async fn download(
 
 /// The page with one flash group after it, the outlet for a message that
 /// arrived with the visitor.
-fn flash_group(page: &str, kind: StatusKind, message: &str) -> Result<String> {
+pub(crate) fn flash_group(page: &str, kind: StatusKind, message: &str) -> Result<String> {
     let mut flash = bilibi_ui::FlashMap::default();
     match kind {
         StatusKind::Error => flash.error = message,

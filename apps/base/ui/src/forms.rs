@@ -1072,7 +1072,6 @@ pub struct CodeInput {
     pub group_size: Option<usize>,
     pub numeric: bool,
     pub optional: bool,
-    pub autofocus: bool,
     pub hint: bool,
     pub errors: Vec<String>,
 }
@@ -1094,7 +1093,6 @@ impl CodeInput {
             group_size: None,
             numeric: false,
             optional: false,
-            autofocus: false,
             hint: true,
             errors: Vec::new(),
         }
@@ -1114,10 +1112,6 @@ impl CodeInput {
     }
 
     /// Move keyboard focus here when this field is the page's immediate task.
-    pub fn autofocus(mut self) -> Self {
-        self.autofocus = true;
-        self
-    }
 
     pub fn errors(mut self, errors: Vec<String>) -> Self {
         self.errors = errors;

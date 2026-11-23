@@ -23,17 +23,27 @@
         const target = controls.find(control => control.matches("input")) || controls[0] || this.card
         target.focus()
       }
-      this.keydown = event => {
+      this.keydown = async event => {
         if (event.key === "Escape") {
           event.preventDefault()
+          if (this.leaving) return
+          this.leaving = true
           const navigation = window.navigation
-          const previous = navigation?.entries().find(entry => entry.index === navigation.currentEntry?.index - 1)
+          const current = navigation?.currentEntry
+          const previous = navigation?.entries().find(entry => entry.index === current?.index - 1)
           const here = location.origin + location.pathname + location.search
           if (previous?.url && new URL(previous.url).origin === location.origin && previous.url.split("#")[0] !== here) {
-            history.back()
-          } else {
-            location.assign(this.el.closest('[data-live-socket="/portal/live"]') ? "/portal" : "/")
+            const response = await fetch(previous.url, {method: "HEAD", cache: "no-store"}).catch(() => null)
+            if (!this.el.isConnected || navigation.currentEntry !== current) {
+              this.leaving = false
+              return
+            }
+            if (response?.ok && !response.headers.has("x-bilibi-step-up")) {
+              history.back()
+              return
+            }
           }
+          location.assign(this.el.closest('[data-live-socket="/portal/live"]') ? "/portal" : "/")
           return
         }
         if (event.key !== "Tab") return

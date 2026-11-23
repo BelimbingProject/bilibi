@@ -64,8 +64,7 @@ async fn action_gate(
     notice: Option<&str>,
 ) -> Result<String> {
     use bilibi_ui::{
-        Alert, Button, ButtonVariant, Card, Form, Header, ProofInput, ProofMethod, StatusKind,
-        StepUpGate,
+        Alert, Button, ButtonVariant, Form, ProofInput, ProofMethod, StatusKind, StepUpGate,
     };
 
     let methods = step_up
@@ -74,10 +73,7 @@ async fn action_gate(
         .into_iter()
         .map(|method| ProofMethod::new(method.id, method.label, method.code_length, method.numeric))
         .collect::<Vec<_>>();
-    let mut body = render(Header {
-        title: Html::text("Confirm access"),
-        ..Default::default()
-    })?;
+    let mut body = Html::EMPTY;
     if let Some(notice) = notice {
         body.push(&render(Alert {
             kind: StatusKind::Warning,
@@ -101,11 +97,8 @@ async fn action_gate(
             ..Default::default()
         })?);
     }
-    let card = render(Card {
-        body,
-        ..Default::default()
-    })?;
-    Ok(render(StepUpGate::new("", "", title, card))?.to_string())
+    let gate = StepUpGate::action(title, "Confirm access", body).map_err(|_| Error::Internal)?;
+    Ok(render(gate)?.to_string())
 }
 
 impl Page<Scope, Error> for Pages {

@@ -46,7 +46,6 @@ fn confirm_code_field(id: &str, errors: &[String]) -> Result<Html, Error> {
     fragment(Html::render(
         &CodeInput::new(id, "two_factor[code]", "Authentication code", 6)
             .numeric()
-            .autofocus()
             .hidden_label()
             .without_hint()
             .errors(errors.to_vec()),
