@@ -178,7 +178,7 @@ it expires. Verification is constant-time, then the row, its tenant, the
 private-tree rule and the disk are rechecked. Invalid, expired or private-bound
 requests answer 403; missing or unreadable assets 404.
 
-Only JPEG, PNG, GIF and WebP render inline. Everything else is an
+Only JPEG, PNG, GIF and WebP render inline, with no source filename in the response. Everything else is an
 `application/octet-stream` attachment. Every stream sends `nosniff`,
 `Content-Security-Policy: default-src 'none'; sandbox` and `private, no-store`;
 build headers with `StreamFile::delivery`, never by hand. The Web host's

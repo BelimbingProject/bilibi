@@ -39,7 +39,7 @@ With `base.labels.customisations.view`, search for **Customise my tenant** (`bas
 
 ## Customisations page
 
-Open **Administration › Customisations** (`/admin/customisations`, `base.labels.customisations.view`) to see tenant label overrides, active and archived custom fields, shared workspaces, and your saved pins, landing page and dashboard arrangement. Use **Restore default** on a label override, **Archive** on an active field or **Restore** on an archived field, **Withdraw workspace** on a published layout, **Remove pin** on a shortcut or **Restore default** on a personal landing page or dashboard region. Each action requires the owning module's write permission. A notice names any sections you lack permission to read.
+Open **Administration › Customisations** (`/admin/customisations`, `base.labels.customisations.view`) to see tenant label overrides, active and archived custom fields, shared workspaces, and your saved pins, landing page and dashboard arrangement. The page also shows [installation branding](../branding/README.md#change-it) where access allows. Use **Restore default** on a label override, **Archive** on an active field or **Restore** on an archived field, **Withdraw workspace** on a published layout, **Remove pin** on a shortcut or **Restore default** on a personal landing page or dashboard region. Each action requires the owning module's write permission. A notice names any sections you lack permission to read.
 
 The page shows the recorded change time when [Audit can match the current revision](../audit/README.md#record-revision-attribution). The **Changed by** column requires `admin.audit.log.list` and otherwise displays **Restricted**. Use the owner’s editor or agent operations to create or edit a customisation.
 
@@ -47,10 +47,10 @@ A module contributes one `CustomisationSection` under `SECTIONS` for each kind o
 
 | Part | Feeds | Declares |
 | --- | --- | --- |
-| `undo` (`Undo`) | The page's rows and their one action | The read operation and input, row projection, reviewed write operation and page event |
+| `undo` (`Undo`) | The page's rows | The read operation and input, row projection, and an optional `UndoAction` for a reviewed write |
 | `changes` (`Changes`) | [What can be changed](#what-can-be-changed-agents) | Purpose, limits, guide, the reads that list every choice, and the change, preview, verify and restore operations |
 
-Each page row supplies a stable audit kind, record ID and revision plus the versioned input for the write. The page retains that input server-side and accepts confirmation only for the displayed action, record and revision. The confirmed action calls `PageContracts::submit`, then the page reads the sections again. Register the event and write contract with a [contributed page binding](../agent_api/README.md#shared-pages-with-contributed-owner-contracts) for `base/labels.customisations`. Project rows through the owner's read operation so its access checks apply.
+Each page row supplies a stable audit kind, record ID and revision. A section with no `UndoAction` supplies inspection-only rows. For a section with an action, each row also supplies the versioned input for the write. The page retains that input server-side and accepts confirmation only for the displayed action, record and revision. The confirmed action calls `PageContracts::submit`, then the page reads the sections again. For a section with an action, register the event and write contract with a [contributed page binding](../agent_api/README.md#shared-pages-with-contributed-owner-contracts) for `base/labels.customisations`. Project rows through the owner's read operation so its access checks apply.
 
 ## What can be changed (agents)
 

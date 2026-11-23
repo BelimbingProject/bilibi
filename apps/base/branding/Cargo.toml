@@ -1,0 +1,24 @@
+[package]
+name = "bilibi-branding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bilibi-agent-api.workspace = true
+bilibi-authz.workspace = true
+bilibi-database.workspace = true
+bilibi-labels.workspace = true
+bilibi-media.workspace = true
+bilibi-module-registry.workspace = true
+bilibi-settings.workspace = true
+bilibi-settings-editor.workspace = true
+bilibi-tenancy.workspace = true
+bilibi-ui.workspace = true
+inventory.workspace = true
+serde_json.workspace = true
+tokio-postgres.workspace = true
+
+[lints]
+workspace = true

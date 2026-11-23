@@ -41,6 +41,9 @@ pub const SERVICE: &str = "base/mail.mailer";
 /// `base/system`'s stored instance role, read by key: System Info shows this
 /// mailer, so mail cannot depend on that module.
 const INSTANCE_ROLE: &str = "instance.role";
+/// `base/branding`'s display name, read by key for the same reason: Branding
+/// stands above this module. Blank keeps the configured sender name.
+const INSTALLATION_NAME: &str = "branding.name";
 use std::{future::Future, pin::Pin, sync::Arc};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -148,7 +151,28 @@ impl Mailer {
         Ok(self.limits().await?.into())
     }
     pub async fn render(&self, message: &Message) -> Result<Rendered> {
-        render(message, &self.sender, self.limits().await?)
+        render(message, &self.sender().await, self.limits().await?)
+    }
+    /// The installation sender: the configured address under the adopter's
+    /// display name when one is set, else under the configured name. A name
+    /// that cannot be read or does not fit a header keeps the configured one,
+    /// so branding never stops mail.
+    async fn sender(&self) -> Address {
+        let Some((db, settings)) = &self.settings else {
+            return self.sender.clone();
+        };
+        let name = async {
+            let client = db.get().await.ok()?;
+            let value = settings
+                .get_global(&**client, INSTALLATION_NAME)
+                .await
+                .ok()?;
+            value.as_str().map(str::to_owned)
+        };
+        name.await
+            .filter(|name| !name.trim().is_empty())
+            .and_then(|name| Address::new(Some(&name), &self.sender.email).ok())
+            .unwrap_or_else(|| self.sender.clone())
     }
     pub async fn deliver(&self, message: &Message) -> Result<Sent> {
         self.deliver_rendered(self.render(message).await?).await
@@ -157,7 +181,8 @@ impl Mailer {
     /// carries that workspace's `mail.sender_name` at the installation
     /// address. `tenant` is one the caller proved from its own record or
     /// session. A blank name, and a standalone mailer, use the installation
-    /// sender; a settings read failure refuses delivery, as for limits.
+    /// sender (the adopter's display name when one is set); a settings read
+    /// failure refuses delivery, as for limits.
     pub async fn deliver_for(&self, tenant: i64, message: &Message) -> Result<Sent> {
         if message.from.is_some() {
             return self.deliver(message).await;

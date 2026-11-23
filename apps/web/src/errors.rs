@@ -306,7 +306,7 @@ pub async fn pages(
         // A customer never sees the staff application's way back (ADR 16).
         bilibi_ui::portal_error_document(status.as_u16())
     } else {
-        bilibi_ui::error_document(status.as_u16())
+        bilibi_ui::error_document(status.as_u16(), &app.branding.current().await)
     };
     let Ok(document) = document else {
         return response;

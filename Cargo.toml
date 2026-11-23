@@ -95,6 +95,7 @@ bilibi-extensions = { path = "apps/extensions" }
 bilibi-notifications = { path = "apps/base/notifications" }
 bilibi-menu = { path = "apps/base/menu" }
 bilibi-menu-order = { path = "apps/base/menu_order" }
+bilibi-branding = { path = "apps/base/branding" }
 bilibi-principal-directory = { path = "apps/base/principal_directory" }
 bilibi-agent-api = { path = "apps/base/agent_api" }
 bilibi-ai = { path = "apps/base/ai" }

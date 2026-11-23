@@ -4,7 +4,7 @@
 <div id="app-shell" data-hook="FramedDisplay" data-framed="false" data-csrf="{{ csrf }}" data-impersonating="{{ impersonating }}" data-tenant-id="{{ tenant_id }}" data-user-id="{{ user_id }}" data-company-id="{% if let Some(id) = company_id %}{{ id }}{% endif %}" data-theme-choice="{{ preferences.theme }}" data-display-mode="{{ preferences.mode }}" class="min-h-svh bg-canvas">
 <main id="app-content" class="flex min-h-svh flex-col items-center justify-center px-4 py-8">
 {% call credential::column(class="max-w-2xl") %}
-{% call credential::masthead() %}{% call ui::wordmark(size=bilibi_ui::WordmarkSize::Credential, href="/") %}{% endcall %}{% endcall %}
+{% call credential::masthead() %}{% call ui::wordmark(size=bilibi_ui::WordmarkSize::Credential, brand=brand, href="/") %}{% endcall %}{% endcall %}
 <div class="flex justify-center">{{ instance|safe }}</div>
 {% call credential::card(id="standalone-review-card", class="px-5 py-5 sm:px-7") %}{{ body|safe }}{% endcall %}
 {% endcall %}

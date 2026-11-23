@@ -6,6 +6,7 @@ pub use bilibi_audit as audit;
 pub use bilibi_audit_views as audit_views;
 pub use bilibi_authz as authz;
 pub use bilibi_authz_agent as authz_agent;
+pub use bilibi_branding as branding;
 pub use bilibi_bulk_data as bulk_data;
 pub use bilibi_custom_fields as custom_fields;
 pub use bilibi_dashboard as dashboard;

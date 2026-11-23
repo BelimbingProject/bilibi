@@ -30,10 +30,10 @@ pub fn device_page(instance: &Instance) -> String {
 pub fn identity(instance: &Instance) -> String {
     let role = instance.role;
     if instance.label.eq_ignore_ascii_case(role.label()) {
-        format!("This Bilibi is {}. {}", role.kind(), role.effect())
+        format!("This installation is {}. {}", role.kind(), role.effect())
     } else {
         format!(
-            "This Bilibi is called \"{}\" and is {}. {}",
+            "This installation is called \"{}\" and is {}. {}",
             instance.label,
             role.kind(),
             role.effect()
@@ -45,7 +45,7 @@ pub fn prompt(instance: &Instance) -> String {
     let (address, name) = (address(instance), server_name(instance));
     let settings = format!("{}/settings/ai-connections", instance.origin);
     format!(
-        "Connect to my Bilibi business application over MCP.\n\n\
+        "Connect to my business application over MCP.\n\n\
 {identity}\n\
 Server name: {name}\n\
 Server URL: {address}\n\

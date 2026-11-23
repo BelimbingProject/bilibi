@@ -1,7 +1,8 @@
 //! Read-only inventory of customisations contributed by their owners.
 use crate::receipt_display::{preview_text, receipt_columns, receipt_value, receipt_where};
 use crate::{
-    CustomisationRow, CustomisationSection, ReceiptCorrection, ReceiptSource, Undo, CUSTOMISATIONS,
+    CustomisationRow, CustomisationSection, ReceiptCorrection, ReceiptSource, UndoAction,
+    CUSTOMISATIONS,
 };
 use askama::Template;
 use bilibi_agent_api::{
@@ -67,7 +68,7 @@ pub(crate) struct Pages {
 #[derive(Clone)]
 struct Item {
     section: &'static CustomisationSection,
-    undo: &'static Undo,
+    action: Option<&'static UndoAction>,
     row: CustomisationRow,
 }
 impl Item {
@@ -81,12 +82,12 @@ impl Item {
 }
 #[derive(Template)]
 #[template(
-    source = r#"{% import "dialog.html" as dialog %}{% call dialog::confirm_dialog(id="customisations-confirm", consequence=title, detail=detail, body=banner, confirm=item.undo.action, working="Working…", confirm_event=item.undo.event, cancel_event="cancel_confirm", confirm_key=key) %}{% endcall %}"#,
+    source = r#"{% import "dialog.html" as dialog %}{% call dialog::confirm_dialog(id="customisations-confirm", consequence=title, detail=detail, body=banner, confirm=action.label, working="Working…", confirm_event=action.event, cancel_event="cancel_confirm", confirm_key=key) %}{% endcall %}"#,
     ext = "html"
 )]
 struct UndoDialog<'a> {
     title: String,
-    item: &'a Item,
+    action: &'a UndoAction,
     key: String,
     detail: String,
     banner: Html,
@@ -178,18 +179,18 @@ impl Index {
             }
             "request_undo" => {
                 let key = value["key"].as_str().ok_or(Error::Invalid)?;
-                if let Some(item) = self
+                if let Some((item, action)) = self
                     .items
                     .iter()
                     .find(|item| item.action_key() == key)
-                    .cloned()
+                    .and_then(|item| Some((item.clone(), item.action?)))
                 {
                     let call = Call {
                         scope,
                         credential,
                         service: CUSTOMISATIONS,
-                        event: item.undo.event,
-                        contract: item.undo.operation,
+                        event: action.event,
+                        contract: action.operation,
                     };
                     match self.pages.contracts.preview(&call, item.row.input.clone()).await {
                         Ok(reply) if reply["valid"] == true && reply["results"][0]["valid"] == true => {
@@ -310,17 +311,18 @@ impl Index {
             }
             event if event.starts_with("customisation.") => {
                 let Some((item, _)) = self.confirm.take_if(|(item, _)| {
-                    event == item.undo.event
+                    item.action.is_some_and(|action| event == action.event)
                         && value["key"].as_str() == Some(item.action_key().as_str())
                 }) else {
                     return Ok(());
                 };
+                let action = item.action.ok_or(Error::Internal)?;
                 let call = Call {
                     scope,
                     credential,
                     service: CUSTOMISATIONS,
-                    event: item.undo.event,
-                    contract: item.undo.operation,
+                    event: action.event,
+                    contract: action.operation,
                 };
                 let message = match self.pages.contracts.commit(&call, item.row.input).await {
                     Ok(_) => {
@@ -564,7 +566,7 @@ impl Index {
             };
             items.extend((undo.rows)(&value["result"]).into_iter().map(|row| Item {
                 section,
-                undo,
+                action: undo.action.as_ref(),
                 row,
             }));
         }
@@ -691,12 +693,14 @@ impl Index {
                 .slot("change", change)
                 .slot("actor", Html::text(&actor))
                 .cell("when", when);
-            row.actions = render(IconButton {
-                event: "request_undo",
-                name: "key",
-                value: &item.action_key(),
-                ..IconButton::new("unarchive", item.undo.action)
-            })?;
+            if let Some(action) = item.action {
+                row.actions = render(IconButton {
+                    event: "request_undo",
+                    name: "key",
+                    value: &item.action_key(),
+                    ..IconButton::new("unarchive", action.label)
+                })?;
+            }
             rows.push(row);
         }
         let mut table = FlexTable::new("customisations-table", self.columns.flex_columns(), rows);
@@ -740,15 +744,16 @@ impl Index {
                 banner,
             })?
         } else if let Some((item, preview)) = &self.confirm {
+            let action = item.action.ok_or(Error::Internal)?;
             render(UndoDialog {
                 title: format!(
                     "{}: {}?",
-                    item.undo.action,
+                    action.label,
                     item.row.description.lines().next().unwrap_or_default()
                 ),
-                item,
+                action,
                 key: item.action_key(),
-                detail: format!("{} {}", item.undo.detail, preview),
+                detail: format!("{} {}", action.detail, preview),
                 banner,
             })?
         } else {
