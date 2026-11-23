@@ -14,6 +14,8 @@ use askama::Template;
 #[template(path = "auth.html")]
 pub struct AuthLayout<'a> {
     pub body: Html,
+    /// Whose name the page carries: the installation's own, or Bilibi's.
+    pub brand: &'a crate::Brand,
     /// Whose installation this is, right after the brand: the platform
     /// operator's company, or that none is provisioned yet. `None` leaves the
     /// line out for cards other than sign-in.

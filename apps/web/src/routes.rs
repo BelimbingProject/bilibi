@@ -833,7 +833,7 @@ async fn dispatch(
         .title
         .as_deref()
         .or_else(|| bound.page.0.title(bound.route.operation))
-        .unwrap_or("Bilibi");
+        .unwrap_or(shell.brand.product());
     // A missing record or a refused action elsewhere sent the visitor here with
     // its message (a one-shot cookie), or a live action redirected here with a
     // success of its own (held by `landing`).
@@ -849,7 +849,8 @@ async fn dispatch(
         (None, Some((kind, message))) => flash_group(&shell.html, *kind, message)?,
         (None, None) => shell.html,
     };
-    let mut response = crate::document_themed(title, &html, shell.theme)?.into_response();
+    let mut response =
+        crate::document_themed(title, &html, shell.theme, &shell.brand)?.into_response();
     if waiting.is_some() {
         crate::auth::clear_flash(&mut response);
     }

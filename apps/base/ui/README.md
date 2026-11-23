@@ -77,16 +77,18 @@ The running specimen at `/assets/ui-components.html#specimen-markdown` pairs the
 
 ## Wordmark and credential pages
 
-`ui::wordmark` draws Bilibi's name: the mark, then "bilibi" in lowercase in its own face.
+`ui::wordmark` draws the brand: the installation's own logo and name when its `Brand` has them, otherwise Bilibi's mark, then "bilibi" in lowercase in its own face.
+
+- **Brand:** pass the `Brand` the host put on the layout (`ShellContext::brand`, `AuthLayout::brand`). `Brand::default()` is Bilibi's own. [Branding](../branding/README.md) owns the settings behind it; `Document` uses the same brand for the tab title, the tab icon and the accent.
 
 - **Sizes:** `WordmarkSize::Bar` for the workspace top bar, with a smaller one-line wordmark below `sm`. Use `WordmarkSize::Credential` above a credential card.
-- **Link:** pass the home or dashboard address as `href`. The `label` names the destination for assistive technology.
+- **Link:** pass the home or dashboard address as `href`. The `label` says where it goes after the brand's name ("home", "dashboard") for assistive technology.
 - **Font:** `static/fonts/lexend-wordmark.woff2` holds only the letters b, i and l. See [assets](assets/README.md#pinned-sources-and-licenses).
 - **Credential pages:** `AuthLayout` wraps one card body with the wordmark and instance badge. On sign-in, the installation owner's company (`LoginWorkspace`) appears between them. Card bodies use the macros in `templates/credential.html` (`heading`, `link`, `back`).
 
 ## Signed-in standalone reviews
 
-Return `PageChrome::StandaloneReview` from a page operation that needs the signed-in credential layout instead of the workspace shell. Web keeps the normal route guard, session binding, CSRF and live transport, then `StandaloneReview` draws the Bilibi wordmark, the installation banner and one review card. OAuth consent is the running use. The page supplies only the card body; it never draws its own logo, instance banner or shell.
+Return `PageChrome::StandaloneReview` from a page operation that needs the signed-in credential layout instead of the workspace shell. Web keeps the normal route guard, session binding, CSRF and live transport, then `StandaloneReview` draws the wordmark, the installation banner and one review card. OAuth consent is the running use. The page supplies only the card body; it never draws its own logo, instance banner or shell.
 
 ## Embedded application frames
 

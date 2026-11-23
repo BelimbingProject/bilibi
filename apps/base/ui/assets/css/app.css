@@ -486,6 +486,202 @@
   --color-day-holiday-ink: var(--color-orange-300);
 }
 
+/* Adopter accent (`bilibi_ui::Accent`, stamped on <html> as data-accent): an
+ * installation may draw the orientation roles (brand, action, selection) in
+ * one of these palettes instead of lime. A light page keeps the lime steps.
+ * A dark page takes the 400 step for the action and strong roles with dark
+ * text on the button: the 600 step of indigo or violet is too dim to read
+ * as a page heading on the dark canvas. A fixed set: the Content
+ * Security Policy allows no inline style, and none is a status colour.
+ * These rules follow the theme blocks above and repeat their selectors'
+ * weight, so they win in source order; as there, the media block and the
+ * attribute block of one accent must stay identical. */
+:root[data-accent='teal'] {
+  --color-action: var(--color-teal-950);
+  --color-action-ink: var(--color-teal-50);
+  --color-brand: var(--color-teal-300);
+  --color-brand-surface: var(--color-teal-50);
+  --color-brand-strong: var(--color-teal-600);
+  --color-brand-ink: var(--color-teal-950);
+  --color-selection-line: var(--color-teal-300);
+  --color-selection-ink: var(--color-teal-950);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-accent='teal']:not([data-theme='light']) {
+    --color-action: var(--color-teal-400);
+    --color-action-hover: var(--color-teal-300);
+    --color-action-ink: var(--color-teal-950);
+    --color-brand: var(--color-teal-400);
+    --color-brand-surface: var(--color-teal-950);
+    --color-brand-strong: var(--color-teal-400);
+    --color-brand-ink: var(--color-teal-100);
+    --color-selection-line: var(--color-teal-800);
+    --color-selection-ink: var(--color-teal-950);
+  }
+}
+
+:root[data-accent='teal'][data-theme='dark'] {
+  --color-action: var(--color-teal-400);
+  --color-action-hover: var(--color-teal-300);
+  --color-action-ink: var(--color-teal-950);
+  --color-brand: var(--color-teal-400);
+  --color-brand-surface: var(--color-teal-950);
+  --color-brand-strong: var(--color-teal-400);
+  --color-brand-ink: var(--color-teal-100);
+  --color-selection-line: var(--color-teal-800);
+  --color-selection-ink: var(--color-teal-950);
+}
+
+:root[data-accent='cyan'] {
+  --color-action: var(--color-cyan-950);
+  --color-action-ink: var(--color-cyan-50);
+  --color-brand: var(--color-cyan-300);
+  --color-brand-surface: var(--color-cyan-50);
+  --color-brand-strong: var(--color-cyan-600);
+  --color-brand-ink: var(--color-cyan-950);
+  --color-selection-line: var(--color-cyan-300);
+  --color-selection-ink: var(--color-cyan-950);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-accent='cyan']:not([data-theme='light']) {
+    --color-action: var(--color-cyan-400);
+    --color-action-hover: var(--color-cyan-300);
+    --color-action-ink: var(--color-cyan-950);
+    --color-brand: var(--color-cyan-400);
+    --color-brand-surface: var(--color-cyan-950);
+    --color-brand-strong: var(--color-cyan-400);
+    --color-brand-ink: var(--color-cyan-100);
+    --color-selection-line: var(--color-cyan-800);
+    --color-selection-ink: var(--color-cyan-950);
+  }
+}
+
+:root[data-accent='cyan'][data-theme='dark'] {
+  --color-action: var(--color-cyan-400);
+  --color-action-hover: var(--color-cyan-300);
+  --color-action-ink: var(--color-cyan-950);
+  --color-brand: var(--color-cyan-400);
+  --color-brand-surface: var(--color-cyan-950);
+  --color-brand-strong: var(--color-cyan-400);
+  --color-brand-ink: var(--color-cyan-100);
+  --color-selection-line: var(--color-cyan-800);
+  --color-selection-ink: var(--color-cyan-950);
+}
+
+:root[data-accent='indigo'] {
+  --color-action: var(--color-indigo-950);
+  --color-action-ink: var(--color-indigo-50);
+  --color-brand: var(--color-indigo-300);
+  --color-brand-surface: var(--color-indigo-50);
+  --color-brand-strong: var(--color-indigo-600);
+  --color-brand-ink: var(--color-indigo-950);
+  --color-selection-line: var(--color-indigo-300);
+  --color-selection-ink: var(--color-indigo-950);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-accent='indigo']:not([data-theme='light']) {
+    --color-action: var(--color-indigo-400);
+    --color-action-hover: var(--color-indigo-300);
+    --color-action-ink: var(--color-indigo-950);
+    --color-brand: var(--color-indigo-400);
+    --color-brand-surface: var(--color-indigo-950);
+    --color-brand-strong: var(--color-indigo-400);
+    --color-brand-ink: var(--color-indigo-100);
+    --color-selection-line: var(--color-indigo-800);
+    --color-selection-ink: var(--color-indigo-950);
+  }
+}
+
+:root[data-accent='indigo'][data-theme='dark'] {
+  --color-action: var(--color-indigo-400);
+  --color-action-hover: var(--color-indigo-300);
+  --color-action-ink: var(--color-indigo-950);
+  --color-brand: var(--color-indigo-400);
+  --color-brand-surface: var(--color-indigo-950);
+  --color-brand-strong: var(--color-indigo-400);
+  --color-brand-ink: var(--color-indigo-100);
+  --color-selection-line: var(--color-indigo-800);
+  --color-selection-ink: var(--color-indigo-950);
+}
+
+:root[data-accent='violet'] {
+  --color-action: var(--color-violet-950);
+  --color-action-ink: var(--color-violet-50);
+  --color-brand: var(--color-violet-300);
+  --color-brand-surface: var(--color-violet-50);
+  --color-brand-strong: var(--color-violet-600);
+  --color-brand-ink: var(--color-violet-950);
+  --color-selection-line: var(--color-violet-300);
+  --color-selection-ink: var(--color-violet-950);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-accent='violet']:not([data-theme='light']) {
+    --color-action: var(--color-violet-400);
+    --color-action-hover: var(--color-violet-300);
+    --color-action-ink: var(--color-violet-950);
+    --color-brand: var(--color-violet-400);
+    --color-brand-surface: var(--color-violet-950);
+    --color-brand-strong: var(--color-violet-400);
+    --color-brand-ink: var(--color-violet-100);
+    --color-selection-line: var(--color-violet-800);
+    --color-selection-ink: var(--color-violet-950);
+  }
+}
+
+:root[data-accent='violet'][data-theme='dark'] {
+  --color-action: var(--color-violet-400);
+  --color-action-hover: var(--color-violet-300);
+  --color-action-ink: var(--color-violet-950);
+  --color-brand: var(--color-violet-400);
+  --color-brand-surface: var(--color-violet-950);
+  --color-brand-strong: var(--color-violet-400);
+  --color-brand-ink: var(--color-violet-100);
+  --color-selection-line: var(--color-violet-800);
+  --color-selection-ink: var(--color-violet-950);
+}
+
+:root[data-accent='fuchsia'] {
+  --color-action: var(--color-fuchsia-950);
+  --color-action-ink: var(--color-fuchsia-50);
+  --color-brand: var(--color-fuchsia-300);
+  --color-brand-surface: var(--color-fuchsia-50);
+  --color-brand-strong: var(--color-fuchsia-600);
+  --color-brand-ink: var(--color-fuchsia-950);
+  --color-selection-line: var(--color-fuchsia-300);
+  --color-selection-ink: var(--color-fuchsia-950);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-accent='fuchsia']:not([data-theme='light']) {
+    --color-action: var(--color-fuchsia-400);
+    --color-action-hover: var(--color-fuchsia-300);
+    --color-action-ink: var(--color-fuchsia-950);
+    --color-brand: var(--color-fuchsia-400);
+    --color-brand-surface: var(--color-fuchsia-950);
+    --color-brand-strong: var(--color-fuchsia-400);
+    --color-brand-ink: var(--color-fuchsia-100);
+    --color-selection-line: var(--color-fuchsia-800);
+    --color-selection-ink: var(--color-fuchsia-950);
+  }
+}
+
+:root[data-accent='fuchsia'][data-theme='dark'] {
+  --color-action: var(--color-fuchsia-400);
+  --color-action-hover: var(--color-fuchsia-300);
+  --color-action-ink: var(--color-fuchsia-950);
+  --color-brand: var(--color-fuchsia-400);
+  --color-brand-surface: var(--color-fuchsia-950);
+  --color-brand-strong: var(--color-fuchsia-400);
+  --color-brand-ink: var(--color-fuchsia-100);
+  --color-selection-line: var(--color-fuchsia-800);
+  --color-selection-ink: var(--color-fuchsia-950);
+}
+
+
 [data-phx-session],
 [data-phx-teleported-src] {
   display: contents;
@@ -538,6 +734,56 @@ body {
 
 .ui-wordmark-credential {
   font-size: 2rem;
+}
+
+/* An installation's own brand in the wordmark's place (`Brand::custom`): its
+ * logo at the line's height, whatever its shape, then its name in the
+ * interface face. A long name is cut with an ellipsis in the top bar and
+ * wraps under the logo on a credential page; neither widens its page. */
+.ui-wordmark-own {
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--font-sans);
+  letter-spacing: -0.01em;
+}
+
+.ui-wordmark-own > img {
+  width: auto;
+  max-width: 8em;
+  height: 1.3em;
+}
+
+.ui-wordmark-own > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ui-wordmark-bar.ui-wordmark-own {
+  max-width: 16rem;
+  font-size: 0.875rem;
+}
+
+@media (width < 40rem) {
+  .ui-wordmark-bar.ui-wordmark-own {
+    max-width: 9rem;
+    font-size: 0.8125rem;
+  }
+}
+
+.ui-wordmark-credential.ui-wordmark-own {
+  flex-direction: column;
+  gap: 0.5rem;
+  font-size: 1.5rem;
+  line-height: 1.25;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ui-wordmark-credential.ui-wordmark-own > img {
+  max-width: min(100%, 15rem);
+  height: 3rem;
 }
 
 /* The shared button is one size everywhere: 24 px with 8 px side padding

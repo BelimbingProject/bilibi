@@ -93,6 +93,8 @@ fn account_session_security(
 pub struct Rendered {
     pub html: String,
     pub theme: &'static str,
+    /// The brand the chrome was drawn under, for the document around it.
+    pub brand: bilibi_ui::Brand,
 }
 
 /// Renders `body` inside the full shell, the chromeless framed root, or as is
@@ -114,6 +116,7 @@ pub async fn render(
         .as_ref()
         .map_or_else(DisplayPreferences::default, preferences);
     let theme = presentation.as_ref().map_or("system", |p| p.theme);
+    let brand = app.branding.current().await;
     let html = if chrome == PageChrome::Framed {
         Framed {
             body,
@@ -134,6 +137,7 @@ pub async fn render(
             .map_err(|_| Error::Internal)?;
         StandaloneReview {
             body,
+            brand: &brand,
             instance: &instance,
             live,
             tenant_id: scope.tenant(),
@@ -151,7 +155,16 @@ pub async fn render(
             timezone: presentation.timezone.clone(),
             locale: presentation.locale,
         };
-        let context = context(app, scope, path, preferences, display, topbar_actions).await?;
+        let context = context(
+            app,
+            scope,
+            path,
+            &brand,
+            preferences,
+            display,
+            topbar_actions,
+        )
+        .await?;
         AppShell {
             context: &context,
             live,
@@ -162,12 +175,11 @@ pub async fn render(
         return Ok(Rendered {
             html: body.to_owned(),
             theme,
+            brand,
         });
     };
-    Ok(Rendered {
-        html: html.map_err(|_| Error::Internal)?,
-        theme,
-    })
+    let html = html.map_err(|_| Error::Internal)?;
+    Ok(Rendered { html, theme, brand })
 }
 
 /// The account's theme and time display: its own saved choices over the
@@ -184,6 +196,7 @@ async fn context<'a>(
     app: &'a App,
     scope: &'a Scope,
     path: &str,
+    brand: &'a bilibi_ui::Brand,
     preferences: DisplayPreferences,
     display: bilibi_base::datetime::DisplayContext,
     topbar_actions: Html,
@@ -376,6 +389,7 @@ async fn context<'a>(
         .to_uppercase();
     let composition = crate::composition();
     Ok(ShellContext {
+        brand,
         user: &scope.user_name,
         email: &scope.email,
         tenant: &scope.tenant_name,
@@ -838,7 +852,13 @@ pub async fn tenant_changed(
         Html::EMPTY,
     )
     .await?;
-    Ok(crate::document_themed("Tenant changed", &rendered.html, rendered.theme)?.into_response())
+    Ok(crate::document_themed(
+        "Tenant changed",
+        &rendered.html,
+        rendered.theme,
+        &rendered.brand,
+    )?
+    .into_response())
 }
 /// The account's pins for a client that must refresh: the shell renders the
 /// same list into `data-pins`.

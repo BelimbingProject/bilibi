@@ -81,6 +81,11 @@ pub struct ComponentsSpecimen {
     mail_frame: Html,
     /// A file preview in its frame (the sample is a served stylesheet).
     file_preview: Html,
+    /// The wordmark's brands: Bilibi's own, an installation's name, and an
+    /// installation's logo with its name.
+    brand: crate::Brand,
+    own_brand: crate::Brand,
+    own_logo_brand: crate::Brand,
 }
 
 sections! {
@@ -745,6 +750,16 @@ impl ComponentsSpecimen {
                 src: "/assets/mail-frame.css",
                 title: "Preview of mail-frame.css",
             })?,
+            brand: crate::Brand::default(),
+            own_brand: crate::Brand {
+                name: "Acme Trading".into(),
+                ..crate::Brand::default()
+            },
+            own_logo_brand: crate::Brand {
+                name: "Acme Trading".into(),
+                logo: Some(crate::Assets::url("/favicon.svg").to_string()),
+                ..crate::Brand::default()
+            },
         })
     }
 

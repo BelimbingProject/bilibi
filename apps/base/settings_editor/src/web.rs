@@ -554,7 +554,7 @@ impl Editor {
         if let Err(error) = tx.commit().await {
             return self.refused(error, Some(field));
         }
-        self.flash(StatusKind::Success, "Company image uploaded.");
+        self.flash(StatusKind::Success, format!("{} uploaded.", image.noun));
         self.editing = None;
         self.row_status = CommitStatus::None;
         Ok(())
@@ -594,7 +594,12 @@ impl Editor {
             return self.refused(error, Some(field));
         }
         self.uploads.clear(IMAGE_UPLOAD);
-        self.flash(StatusKind::Success, "Company image removed.");
+        let noun = self
+            .core
+            .images
+            .get(field.key)
+            .map_or("Image", |image| image.noun);
+        self.flash(StatusKind::Success, format!("{noun} removed."));
         self.editing = None;
         Ok(())
     }
@@ -995,17 +1000,28 @@ impl Editor {
                         .ok(),
                     None => None,
                 };
-                let preview = render(IdentityImage::company(url.as_deref()).preview())?;
+                let preview = if url.is_some() || image.is_some_and(|image| image.placeholder) {
+                    render(IdentityImage::company(url.as_deref()).preview())?
+                } else {
+                    Html::EMPTY
+                };
                 let input = render(
                     self.uploads
                         .input(IMAGE_UPLOAD, format!("input-{}", field.dom()))
                         .label("Replacement image")
                         .hint("PNG, JPEG or WebP, up to 1 MiB."),
                 )?;
+                let state = image.map_or("", |image| {
+                    if field.value.as_i64().is_some() {
+                        image.current
+                    } else {
+                        image.unset
+                    }
+                });
                 render(ImageControl {
                     preview,
                     input,
-                    has_image: field.value.as_i64().is_some(),
+                    state,
                 })?
             } else {
                 control(
@@ -1400,13 +1416,13 @@ struct Withheld {
 }
 #[derive(Template)]
 #[template(
-    source = r#"<div class="flex items-center gap-3"><span class="shrink-0">{{ preview|safe }}</span><span class="text-xs text-ink-muted">{% if has_image %}Current company image{% else %}The default building icon is in use{% endif %}</span></div><div class="mt-2">{{ input|safe }}</div>"#,
+    source = r#"<div class="flex items-center gap-3">{% if !preview.is_empty() %}<span class="shrink-0">{{ preview|safe }}</span>{% endif %}<span class="text-xs text-ink-muted">{{ state }}</span></div><div class="mt-2">{{ input|safe }}</div>"#,
     ext = "html"
 )]
 struct ImageControl {
     preview: Html,
     input: Html,
-    has_image: bool,
+    state: &'static str,
 }
 fn render(fragment: impl Template) -> Result<Html> {
     Html::render(&fragment).map_err(|_| Error::Internal)

@@ -36,7 +36,7 @@ A field is every `base/settings.definitions` contribution with `editor` metadata
 
 Values are read with `Settings::resolve_masked`, so an encrypted value is never decrypted to draw the page; a stored secret shows the keep-current mask. Without a valid `BILIBI_SETTINGS_KEY` an encrypted field is read-only (it can still be cleared by Restore Defaults, which needs no key).
 
-A module can contribute `ImageSetting` under `base/settings_editor.image-settings` with the same ID as a company-scoped setting. Its Value editor becomes a PNG/JPEG/WebP file input backed by Media, with Upload and Remove actions; real bytes are inspected and the stored setting is the Media asset ID.
+A module can contribute `ImageSetting` under `base/settings_editor.image-settings` with the same ID as a company-scoped or global setting (a company image, the installation's logo). Its Value editor becomes a PNG/JPEG/WebP file input backed by Media, with Upload and Remove actions; real bytes are inspected and the stored setting is the Media asset ID. The contribution names the image (`noun`) and the line shown while one is set or not.
 
 Saved overrides and runtime state live in `base_settings`; inherited module defaults have no stored row.
 

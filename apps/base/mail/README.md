@@ -43,7 +43,7 @@ Read each attachment through the owning service's authorised `download_attachmen
 
 **Send a workspace's mail with `mailer.deliver_for(tenant, &message)`.** From then shows that workspace's **Sender name** (`mail.sender_name`) at the installation address. `deliver` always uses the installation sender.
 
-- The setting is per workspace and blank by default, which keeps the installation name (`MAIL_FROM_NAME`). It takes up to 100 characters and 200 UTF-8 bytes and refuses `@`, quotes and angle brackets, so a name cannot pose as an address.
+- The setting is per workspace and blank by default, which keeps the installation name: the adopter's display name ([Branding](../branding/README.md), `branding.name`) when one is set, else `MAIL_FROM_NAME`. `deliver` uses that installation name too. It takes up to 100 characters and 200 UTF-8 bytes and refuses `@`, quotes and angle brackets, so a name cannot pose as an address.
 - A workspace administrator changes it through the delegated tenant setting operations ([Settings editor](../settings_editor/README.md#tenant-agent-operations)); the operator sets its own on **System Settings → This tenant**.
 - A message that names its own `from` keeps it. A standalone `Mailer` has no settings and uses its sender.
 - The message text comes from [Templates](../templates/README.md#word-a-modules-own-mail), never from a string in code.
