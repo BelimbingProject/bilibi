@@ -49,8 +49,6 @@ pub const WORKSPACE_UNAVAILABLE: &str = "This account is not attached to an acti
 #[derive(Clone, Debug, Default)]
 pub struct LoginForm {
     pub email: String,
-    /// Kept (masked) across a failed attempt.
-    pub password: String,
     pub email_errors: Vec<String>,
     pub password_errors: Vec<String>,
     /// The announced failure above the form; the email field repeats it.
@@ -124,7 +122,6 @@ impl LoginPage {
                     .kind(InputKind::Password)
                     .reveal(Reveal::Subject("password".into()))
                     .label("Password")
-                    .value(&form.password)
                     .errors(form.password_errors.clone())
                     .autocomplete("current-password")
                     .required(),

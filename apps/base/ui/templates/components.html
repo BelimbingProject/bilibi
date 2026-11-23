@@ -15,12 +15,10 @@
 {% endmacro %}
 
 {#- The Bilibi wordmark (DESIGN.md, Character): the mark, then "bilibi" in
-    lowercase in its own face, on one line. With `href` it is the way home and
-    `label` names where it goes; without, it is an image named "Bilibi". Only
-    Bilibi's own name is drawn with it: a tenant's portal title is not. The
-    look is `.ui-wordmark` in assets/css/app.css. -#}
-{% macro wordmark(size=bilibi_ui::WordmarkSize::Bar, href="", id="", label="Bilibi home") %}
-{% if !href.is_empty() %}<a href="{{ href }}"{% if !id.is_empty() %} id="{{ id }}"{% endif %} aria-label="{{ label }}" class="ui-wordmark {{ size.class() }} rounded-sm transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong">{% else %}<span{% if !id.is_empty() %} id="{{ id }}"{% endif %} role="img" aria-label="Bilibi" class="ui-wordmark {{ size.class() }}">{% endif %}<img src="{{ bilibi_ui::Assets::url("/favicon.svg") }}" alt="" width="{{ size.mark_pixels() }}" height="{{ size.mark_pixels() }}" decoding="async" loading="eager" aria-hidden="true"><span aria-hidden="true">bilibi</span>{% if !href.is_empty() %}</a>{% else %}</span>{% endif %}
+    lowercase in its own face, on one line. `href` is the way home and
+    `label` names where it goes. The look is `.ui-wordmark` in assets/css/app.css. -#}
+{% macro wordmark(href, size=bilibi_ui::WordmarkSize::Bar, id="", label="Bilibi home") %}
+<a href="{{ href }}"{% if !id.is_empty() %} id="{{ id }}"{% endif %} aria-label="{{ label }}" class="ui-wordmark {{ size.class() }} rounded-sm transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong"><img src="{{ bilibi_ui::Assets::url("/favicon.svg") }}" alt="" width="{{ size.mark_pixels() }}" height="{{ size.mark_pixels() }}" decoding="async" loading="eager" aria-hidden="true"><span aria-hidden="true">bilibi</span></a>
 {% endmacro %}
 
 {#- One fixed-size company mark or account picture. Uploaded raster images and

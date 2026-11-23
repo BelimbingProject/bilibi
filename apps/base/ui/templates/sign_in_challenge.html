@@ -1,12 +1,12 @@
-{#- The 2FA step of sign-in, method-neutral: the heading, what happened so
-    far, the method choice when there are several, the explicit start or
+{#- The 2FA step of sign-in, method-neutral: the heading, the method choice
+    when there are several, the explicit start or
     resend, then the code with the one primary action, and Cancel demoted at
     the foot. Reading the card sends no challenge. -#}
 {% import "components.html" as ui %}
 {% import "feedback.html" as feedback %}
 {% import "credential.html" as credential %}
 <div class="flex flex-col gap-4">
-{% call credential::heading(title="Confirm sign-in", intro="Your password was accepted. Enter your 2FA code to finish signing in.") %}{% endcall %}
+{% call credential::heading(title="Confirm sign-in") %}{% endcall %}
 {% if !message.is_empty() %}{% call feedback::alert(kind=bilibi_ui::StatusKind::Info) %}{{ message }}{% endcall %}{% endif %}
 {% if !error.is_empty() %}{% call feedback::alert(kind=bilibi_ui::StatusKind::Error) %}{{ error }}{% endcall %}{% endif %}
 {% if has_methods %}

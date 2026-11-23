@@ -500,9 +500,6 @@ pub async fn login(
     origin(&app, &headers)?;
     let mut form = LoginForm {
         email: bounded(&submission.email),
-        // A rejected attempt re-renders the card at the address it was posted
-        // from, password kept.
-        password: submission.password.clone(),
         ..LoginForm::default()
     };
     form.email_errors = validate_email(&form.email);

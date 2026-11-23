@@ -2,20 +2,22 @@
 {% import "feedback.html" as feedback %}
 <div id="app"{% if live %} data-live{% endif %}>
 <div id="app-shell" data-hook="AppShell" data-tenant-id="{{ context.tenant_id }}" data-user-id="{{ context.user_id }}" data-company-id="{% if let Some(id) = context.company_id %}{{ id }}{% endif %}" data-theme-choice="{{ context.preferences.theme }}" data-display-mode="{{ context.preferences.mode }}" data-impersonating="{{ context.impersonator.is_some() }}" data-served-routes="{{ context.served_routes }}" data-pins="{{ context.pins }}" data-sidebar-mode="desktop" data-sidebar-hidden="false" data-sidebar-open="false" class="flex h-screen flex-col overflow-hidden bg-canvas">
-<header id="app-topbar" class="flex h-7 shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-3 max-sm:gap-1 max-sm:px-2">
-<button type="button" id="app-sidebar-toggle" class="inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-action transition hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong" aria-label="Hide menu" title="Hide menu" aria-controls="app-sidebar" aria-expanded="true">{% call ui::icon(name="text-indent-left", class="app-toggle-hide size-5") %}{% endcall %}{% call ui::icon(name="text-indent-right", class="app-toggle-show size-5") %}{% endcall %}</button>
-<div id="app-topbar-main" class="flex min-w-0 flex-1 items-center justify-between gap-3 max-sm:gap-1">
+<header id="app-topbar" class="flex h-7 shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-3 max-sm:h-auto max-sm:gap-1 max-sm:px-2 max-sm:py-0.5">
+<button type="button" id="app-sidebar-toggle" class="inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-action transition hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong max-sm:self-start" aria-label="Hide menu" title="Hide menu" aria-controls="app-sidebar" aria-expanded="true">{% call ui::icon(name="text-indent-left", class="app-toggle-hide size-5") %}{% endcall %}{% call ui::icon(name="text-indent-right", class="app-toggle-show size-5") %}{% endcall %}</button>
+<div id="app-topbar-main" class="flex min-w-0 flex-1 items-center justify-between gap-3 max-sm:flex-wrap max-sm:gap-1">
+<div class="flex h-6 w-full min-w-0 items-center gap-1 sm:contents">
 {% call ui::wordmark(href=context.home, id="app-brand", label="Bilibi dashboard") %}{% endcall %}
 {{ context.instance|safe }}
 {{ context.tenant_bar|safe }}
 {{ context.company_bar|safe }}
-<nav id="app-pinned" aria-label="Pinned pages" class="app-pinned relative flex min-w-0 flex-1 items-center" hidden>
+</div>
+<nav id="app-pinned" aria-label="Pinned pages" class="app-pinned relative flex min-w-0 flex-1 items-center max-sm:flex-none" hidden>
 <button type="button" id="app-pinned-button" class="inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-action transition hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong lg:hidden" aria-label="Pinned pages" title="Pinned pages" aria-controls="app-pinned-items" aria-expanded="false">{% call ui::icon(name="pin", class="size-4") %}{% endcall %}</button>
 <template id="app-pinned-tile-icon">{% call ui::icon(name="tile", class="size-3.5") %}{% endcall %}</template>{% for name in context.pin_icons %}<template data-pin-icon="{{ name }}">{% call ui::icon(name=name, class="app-nav-icon size-[1.125rem] shrink-0") %}{% endcall %}</template>{% endfor %}
 <div id="app-pinned-items" data-live-ignore class="app-pinned-items absolute top-full left-0 z-50 mt-1 hidden w-64 max-w-[calc(100vw-1.5rem)] flex-col gap-0.5 rounded-md border border-line bg-surface p-1 shadow-lg data-[open=true]:flex lg:static lg:mt-0 lg:flex lg:w-auto lg:max-w-none lg:flex-row lg:items-center lg:gap-1 lg:overflow-x-auto lg:rounded-none lg:border-0 lg:bg-transparent lg:p-0 lg:shadow-none"></div>
 <p id="app-pinned-announcement" data-live-ignore class="sr-only" role="status" aria-live="polite"></p>
 </nav>
-<div class="ml-auto flex shrink-0 items-center justify-end gap-3 max-sm:gap-1">
+<div class="ml-auto flex shrink-0 items-center justify-end gap-3 max-sm:min-w-0 max-sm:shrink max-sm:flex-wrap max-sm:gap-1">
 {{ context.topbar_actions|safe }}
 <button type="button" id="app-search-toggle" data-page-search-toggle aria-haspopup="dialog" aria-controls="app-search" aria-keyshortcuts="/" aria-label="Search" title="Search (/)" class="inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-action transition hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong">{% call ui::icon(name="search", class="size-4") %}{% endcall %}</button>
 {{ context.notifications|safe }}
