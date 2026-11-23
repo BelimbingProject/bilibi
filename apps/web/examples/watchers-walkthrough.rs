@@ -861,6 +861,20 @@ async fn linked_custom_field_proof(proof: &Proof) -> Result<()> {
         );
     }
     drop(client);
+    proof.setting(&one, "watchers.facts_read", json!(1)).await?;
+    let over_budget = proof
+        .open(&one, 1, "Gold over the fact budget", "low", "800.00")
+        .await?;
+    proof.settled().await?;
+    check(
+        proof.receipts(over_budget).await?.iter().any(|r| {
+            r.0 == watcher_id && r.1 == "refused" && r.2.as_deref() == Some("watcher_limit")
+        }) && proof.case(over_budget).await?.0.is_none(),
+        "the linked condition and trigger version exceed a one-fact budget, so no action runs",
+    );
+    proof
+        .setting(&one, "watchers.facts_read", json!(21))
+        .await?;
     segment(5, "Gold").await?;
     let promoted = proof
         .open(&one, 5, "Promoted company's question", "low", "800.00")

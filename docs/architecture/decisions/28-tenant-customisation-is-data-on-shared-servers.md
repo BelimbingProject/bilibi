@@ -29,7 +29,7 @@ A shared Bilibi server runs one program for many tenants. A release is the right
 - Shared-server clients get quick, tenant-local changes within the vocabulary Bilibi offers. A new trigger, action, record type or connector still needs a shared release.
 - On-prem and dedicated-server clients keep full code customisation.
 - Code admission is implemented through the [installation policy](../../../apps/base/system/README.md#installation-policy-srcinstallation_editorrs). Operators remain responsible for real process, credential and secret isolation; the setting does not create it.
-- The watcher engine is built: [`base/watchers`](../../../apps/base/watchers/README.md), a structured watcher record with approved versions, run after commit as one bounded principal ([ADR 31](./31-tenant-watchers-run-after-commit-as-one-bounded-principal.md)). The internal operation caller admits a principal only where the contract's owner says so (`apps/base/agent_api/README.md`, "Queued jobs as callers"). Watchers read an owner's typed fields, and a tenant custom field of the trigger's own record once the tenant offers it to watcher conditions ([#730](https://github.com/BelimbingProject/bilibi/issues/730)).
+- The watcher engine is built: [`base/watchers`](../../../apps/base/watchers/README.md), a structured watcher record with approved versions, run after commit as one bounded principal ([ADR 31](./31-tenant-watchers-run-after-commit-as-one-bounded-principal.md)). The internal operation caller admits a principal only where the contract's owner says so (`apps/base/agent_api/README.md`, "Queued jobs as callers"). See [Watcher conditions](../../../apps/base/watchers/README.md#what-a-watcher-is) for supported field paths and access checks.
 
 ## Why not the alternatives
 
