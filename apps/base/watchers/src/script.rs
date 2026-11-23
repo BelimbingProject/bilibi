@@ -22,6 +22,8 @@ pub(crate) struct Script {
     pub name: String,
     pub source: String,
     pub fields: Vec<String>,
+    #[serde(default)]
+    pub lookups: Vec<LookupCall>,
     pub calls: Vec<ActionCall>,
     pub examples: Vec<ScriptExample>,
     #[serde(default)]
@@ -34,10 +36,36 @@ pub(crate) struct Script {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ScriptExample {
     pub facts: Map<String, Value>,
+    #[serde(default)]
+    pub lookup_fixtures: Vec<LookupValue>,
     pub expect: Vec<ActionCall>,
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LookupCall {
+    pub operation: String,
+    #[serde(default)]
+    pub input: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LookupValue {
+    pub operation: String,
+    #[serde(default)]
+    pub input: Map<String, Value>,
+    pub reply: Value,
+}
+
 impl Script {
+    pub(crate) fn permission_digest(&self) -> String {
+        let value = serde_json::to_vec(self).unwrap_or_default();
+        Sha256::digest(value)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
     fn digest(&self) -> String {
         Sha256::digest(self.source.as_bytes())
             .iter()
@@ -60,11 +88,12 @@ impl Script {
 
     pub(crate) fn describe(&self) -> String {
         format!(
-            "Run {} as {} (JavaScript, SHA-256 {}). Reads {}. Allowed calls {}. Source: {}",
+            "Run {} as {} (JavaScript, SHA-256 {}). Reads fields {} and lookups {}. Allowed calls {}. Source: {}",
             self.name,
             crate::PRINCIPAL,
             self.source_digest,
             serde_json::json!(self.fields),
+            serde_json::json!(self.lookups),
             serde_json::json!(self.calls),
             self.source
         )
@@ -80,6 +109,11 @@ impl Script {
                 .fields
                 .iter()
                 .all(|field| bilibi_grid::column::parse(field).is_ok())
+            && self.lookups.len() <= MAX_ACTIONS
+            && self
+                .lookups
+                .iter()
+                .all(|lookup| !lookup.operation.is_empty())
             && (1..=MAX_ACTIONS).contains(&self.calls.len())
             && self.calls.iter().all(|call| !call.operation.is_empty())
             && (1..=MAX_EXAMPLES).contains(&self.examples.len())
@@ -89,15 +123,28 @@ impl Script {
                         .facts
                         .keys()
                         .all(|field| self.fields.contains(field))
+                    && example.lookup_fixtures.len() == self.lookups.len()
+                    && self
+                        .lookups
+                        .iter()
+                        .zip(&example.lookup_fixtures)
+                        .all(|(lookup, reply)| {
+                            lookup.operation == reply.operation && lookup.input == reply.input
+                        })
             })
     }
 
     pub(crate) async fn capture(
         &self,
+        permit: &ScriptPermit,
         facts: &Map<String, Value>,
+        replies: &[LookupValue],
         milliseconds: u64,
         heap_mib: u64,
     ) -> std::result::Result<Vec<ActionCall>, &'static str> {
+        if permit.digest != self.permission_digest() {
+            return Err("script_permission_refused");
+        }
         let input = self
             .fields
             .iter()
@@ -110,8 +157,14 @@ impl Script {
             .collect();
         let answer = match self.language {
             Language::JavaScript => {
-                crate::sandbox::evaluate(&self.source, Value::Object(input), milliseconds, heap_mib)
-                    .await?
+                crate::sandbox::evaluate(
+                    &self.source,
+                    Value::Object(input),
+                    serde_json::to_value(replies).map_err(|_| "script_input")?,
+                    milliseconds,
+                    heap_mib,
+                )
+                .await?
             }
         };
         serde_json::from_value(answer).map_err(|_| "script_output")
@@ -119,6 +172,27 @@ impl Script {
 
     pub(crate) fn permits(&self, calls: &[ActionCall]) -> bool {
         calls.len() <= MAX_ACTIONS && calls.iter().all(|call| self.calls.contains(call))
+    }
+}
+
+pub(crate) struct ScriptPermit {
+    digest: String,
+}
+
+pub(crate) struct ScriptPermits {
+    digests: Vec<String>,
+}
+
+impl ScriptPermits {
+    pub(crate) fn for_script(
+        &self,
+        script: &Script,
+    ) -> std::result::Result<ScriptPermit, &'static str> {
+        let digest = script.permission_digest();
+        self.digests
+            .contains(&digest)
+            .then_some(ScriptPermit { digest })
+            .ok_or("script_permission_refused")
     }
 }
 
@@ -200,6 +274,90 @@ pub(crate) async fn cancel_sql(client: &tokio_postgres::Client) {
 }
 
 impl crate::Watchers {
+    async fn lookup_replies(
+        &self,
+        client: &dyn bilibi_agent_api::OperationClient,
+        scope: &Scope,
+        script: &Script,
+    ) -> std::result::Result<Vec<LookupValue>, &'static str> {
+        let mut replies = Vec::with_capacity(script.lookups.len());
+        for lookup in &script.lookups {
+            if self.lookup(&lookup.operation).is_none() {
+                return Err("script_lookup_refused");
+            }
+            let answer = self
+                .registry
+                .call_on(
+                    client,
+                    scope,
+                    &lookup.operation,
+                    &Value::Object(lookup.input.clone()),
+                )
+                .await
+                .map_err(|_| "script_lookup_refused")?;
+            replies.push(LookupValue {
+                operation: lookup.operation.clone(),
+                input: lookup.input.clone(),
+                reply: answer
+                    .get("result")
+                    .cloned()
+                    .ok_or("script_lookup_refused")?,
+            });
+        }
+        Ok(replies)
+    }
+
+    pub(crate) async fn reviewed_script_permits(
+        &self,
+        sql: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        definition: &Definition,
+    ) -> Result<std::result::Result<ScriptPermits, &'static str>> {
+        if definition.scripts().next().is_none() {
+            return Ok(Ok(ScriptPermits {
+                digests: Vec::new(),
+            }));
+        }
+        if !bilibi_authz::decide(sql, scope, crate::RUN_SCRIPT)
+            .await?
+            .allowed
+        {
+            return Ok(Err("script_run_refused"));
+        }
+        Ok(Ok(ScriptPermits {
+            digests: definition
+                .scripts()
+                .map(Script::permission_digest)
+                .collect(),
+        }))
+    }
+
+    pub(crate) async fn approved_script_permits(
+        &self,
+        sql: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        version_id: i64,
+        definition: &Definition,
+    ) -> Result<std::result::Result<ScriptPermits, &'static str>> {
+        let permits = match self.reviewed_script_permits(sql, scope, definition).await? {
+            Ok(permits) => permits,
+            Err(reason) => return Ok(Err(reason)),
+        };
+        for digest in &permits.digests {
+            if sql
+                .query_opt(
+                    "SELECT 1 FROM base_watcher_script_permissions WHERE tenant_id=$1 AND version_id=$2 AND script_digest=$3 AND principal=$4",
+                    &[&scope.tenant(), &version_id, digest, &crate::PRINCIPAL],
+                )
+                .await?
+                .is_none()
+            {
+                return Ok(Err("script_permission_refused"));
+            }
+        }
+        Ok(Ok(permits))
+    }
+
     pub(crate) async fn script_deadline(
         &self,
         sql: &(impl tokio_postgres::GenericClient + Sync),
@@ -227,7 +385,9 @@ impl crate::Watchers {
         &self,
         sql: &(impl tokio_postgres::GenericClient + Sync),
         scope: &Scope,
+        lookup_scope: &Scope,
         definition: &Definition,
+        permits: &ScriptPermits,
         record: (&OfferedTrigger, &str, i64),
         deadline: Option<Instant>,
     ) -> Result<std::result::Result<Vec<ActionCall>, &'static str>> {
@@ -272,19 +432,21 @@ impl crate::Watchers {
             match step {
                 Step::Operation(call) => selected.push(call.clone()),
                 Step::Script { script } => {
-                    if !bilibi_authz::decide(sql, scope, crate::RUN_SCRIPT)
-                        .await?
-                        .allowed
-                    {
-                        return Ok(Err("script_run_refused"));
-                    }
+                    let permit = match permits.for_script(script) {
+                        Ok(permit) => permit,
+                        Err(reason) => return Ok(Err(reason)),
+                    };
                     let time = deadline
                         .saturating_duration_since(Instant::now())
                         .as_millis() as u64;
                     if time == 0 {
                         return Ok(Err("script_timeout"));
                     }
-                    match script.capture(&facts, time, heap).await {
+                    let replies = match self.lookup_replies(sql, lookup_scope, script).await {
+                        Ok(replies) => replies,
+                        Err(reason) => return Ok(Err(reason)),
+                    };
+                    match script.capture(&permit, &facts, &replies, time, heap).await {
                         Ok(calls) if script.permits(&calls) => selected.extend(calls),
                         Ok(_) => return Ok(Err("script_call_refused")),
                         Err(code) => return Ok(Err(code)),

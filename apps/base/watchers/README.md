@@ -32,18 +32,20 @@ A `do` step can carry a named JavaScript function body under `script`. The conne
 {
   "script": {
     "name": "Route urgent cases",
-    "source": "return facts.priority === 'urgent' ? [{operation:'watcher_cases.cases.route',input:{queue:'priority'}}] : [];",
+    "source": "const desk = lookup('watcher_cases.cases.lookup', {case_id: 7}); return facts.priority === 'urgent' ? [{operation:'watcher_cases.cases.route',input:{queue:desk.title}}] : [];",
     "fields": ["priority"],
+    "lookups": [{"operation":"watcher_cases.cases.lookup","input":{"case_id":7}}],
     "calls": [{"operation":"watcher_cases.cases.route","input":{"queue":"priority"}}],
     "examples": [
-      {"facts":{"priority":"normal"},"expect":[]},
-      {"facts":{"priority":"urgent"},"expect":[{"operation":"watcher_cases.cases.route","input":{"queue":"priority"}}]}
+      {"facts":{"priority":"normal"},"lookup_fixtures":[{"operation":"watcher_cases.cases.lookup","input":{"case_id":7},"reply":{"title":"priority"}}],"expect":[]},
+      {"facts":{"priority":"urgent"},"lookup_fixtures":[{"operation":"watcher_cases.cases.lookup","input":{"case_id":7},"reply":{"title":"priority"}}],"expect":[{"operation":"watcher_cases.cases.route","input":{"queue":"priority"}}]}
     ]
   }
 }
 ```
 
-- The tenant grants `watchers.script.execute` separately in Automation access. The named watcher principal checks its live grant before planning and before each effect. The draft and approval reviewer needs the same capability to run examples. The record owner binds the subject and checks each write through its normal operation.
+- The tenant grants `watchers.script.execute` separately in Automation access. Approval also records permission for the named watcher principal to run each exact script declaration in that version. Runtime checks both before starting that script, so permission for one digest never admits another. The draft and approval reviewer needs the execution capability to run that particular version's examples. The record owner binds the subject and checks each write through its normal operation.
+- An owner offers one of its read contracts with `LOOKUPS`. A script declares an exact operation and input; its examples carry captured replies. Approval fingerprints the schemas and requires the approver's authority. Runtime calls each declaration through Agent API as the current caller, with its live capability, field restrictions and record reach, then exposes only the reply to `lookup(operation, input)`. Another operation or input is refused.
 - The host accepts only complete operation and input pairs in the declaration. An owner certifies a watcher action as local through its reviewed write handler, which declares that its effects stay within the installation. The private Activities follow-up handler is eligible. The worker receives no connector credentials and has no filesystem, network or database interface.
 - The optional watcher filter runs first. QuickJS executes in a fresh process under a Linux syscall allowlist. The tenant can lower `watchers.script_heap_mib` and `watchers.script_milliseconds`. The time budget covers preparation, the whole run or historical trial, and owner operations. After a commit starts, Bilibi waits for it and its callbacks. The host also limits the action count, and validates the full plan before saving it and starting any effect. Retries use the saved calls and existing effect receipts.
 - Draft and approval present expected and captured calls for each example. Use the record representation for facts, including text for numbers. Omitted fields are null. Trial evaluates the script and previews the selected effects. Use `base.watchers.get` to inspect the exact version and `base.watchers.switch` to stop it.
@@ -57,12 +59,14 @@ A `do` step can carry a named JavaScript function body under `script`. The conne
 | --- | --- | --- | --- |
 | Draft | `base.watchers.draft` | `admin.watchers.manage` | Installed trigger; fields the drafter may read, values of their type; installed actions on the trigger's record with inputs their contract accepts; examples come out as stated |
 | Approve | `base.watchers.approve` | `admin.watchers.approve` | The draft checks again as the approver, plus: it is the latest version; the approver holds All reach for the trigger table, every table its conditions walk and every action's capability and declared human prerequisites; no condition field is restricted or masked for the `watchers` principal; its actions close no cycle in the active watchers' declared events; the tenant's limits hold |
+| Restore | `base.watchers.restore` | `admin.watchers.approve` | An earlier approved version repeats its current permissions, bindings, examples, limits and cycle checks before it replaces the active version |
 | Switch | `base.watchers.switch` | `admin.watchers.approve` | On again re-runs the approval checks on the running version |
 
 - **Versions never change.** Each stores its definition, examples, the person's words, a SHA-256 fingerprint, how it was drafted (`person` or `agent`), who drafted it and who approved it.
 - **Drafting runs nothing.** A new version of a running watcher runs only once approved; until then the earlier version keeps running.
 - **A queued run keeps its pinned version.** If another version is approved, the watcher is switched off, or it is switched off and on before the run acts, the run is refused (`stale_version`, `watcher_off`, `stale_activation`); nothing silently swaps in the new watcher or activation.
 - **Installed bindings are pinned.** Approval stores a fingerprint of the condition fields' types, choices and source mappings (for a custom field, its type and value SQL while it is offered to watchers), every linked table's join and key bindings, the trigger bindings and the action schemas. A changed catalog refuses execution (`catalog_changed`) and marks the watcher **Needs review** until a new version is approved.
+- **Earlier approved versions can be restored.** Undo an activation from Customisations. A refusal leaves the version running now active.
 - **Approval never delegates more.** The approver must hold All reach for every capability the watcher reads or acts on, including linked tables; Own or Team reach cannot approve or switch on tenant-wide automation; a watcher cannot reach a field the principal may not read.
 
 ## How a run works
@@ -90,6 +94,9 @@ A `do` step can carry a named JavaScript function body under `script`. The conne
 | `catalog_changed` | Installed fields, trigger bindings or action schemas changed, a condition's custom field was archived or withdrawn from watchers, or an owner was unmounted; draft and approve a new version |
 | `record_changed` | Skipped: the record changed after the watcher matched |
 | `action_refused` | An action's owner refused it; the effect's receipt keeps the owner's own words |
+| `script_call_refused` | A script requested an operation outside its approved list |
+| `script_lookup_refused` | A script requested a read outside its approved operation and input, or the read owner refused it |
+| `script_permission_refused` | The caller has no permission for this exact script declaration and version |
 
 ## Authority
 
@@ -136,6 +143,9 @@ inventory::submit! { Contribution::new(bilibi_watchers::TRIGGERS, CASE_OPENED, p
 inventory::submit! { Contribution::new(bilibi_watchers::ACTIONS, "cx.cases.route", provenance!(), &bilibi_watchers::Action {
     title: "Send the case to a queue", table: "cases", subject: "case_id", version: "expected_version", records: &[CASE_ROUTED], approval_capabilities: &[],
 }) }
+inventory::submit! { Contribution::new(bilibi_watchers::LOOKUPS, "cx.cases.get", provenance!(), &bilibi_watchers::Lookup {
+    title: "Read a case",
+}) }
 inventory::submit! { Contribution::new(bilibi_agent_api::job::PRINCIPAL_WRITES, "cx.cases.route", provenance!(), &PrincipalWrite { principals: &["watchers"] }) }
 inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "watchers:cx/cases", provenance!(), &OfferedCapabilities {
     principal: "watchers", capabilities: &[CASES_VIEW, CASES_ROUTE],
@@ -158,10 +168,10 @@ For a match, the watcher principal calls the action owner's preview at the curre
 
 ## Pages and agents
 
-- **Administration › Watchers** (`/watchers`, `admin.watchers.view`): every watcher, its trigger, whether it is on, the running version and the last run. **New watcher** (`admin.watchers.manage`) opens the drafting dialog; `/watchers/{id}` has **Draft next version** (same dialog, filled from the latest version; a watcher keeps its trigger). `/watchers/{id}`: the watcher, the version awaiting approval (with the approval review's problems and warnings, and Approve through a confirmation), the running version, the on/off switch and the latest 25 receipts (which conditions held, what each action did or why it was refused). Both call the contracts agents call.
+- **Administration › Watchers** (`/watchers`, `admin.watchers.view`): every watcher, its trigger, whether it is on, the running version and the last run. **New watcher** (`admin.watchers.manage`) opens the drafting dialog; `/watchers/{id}` has **Draft next version** (same dialog, filled from the latest version; a watcher keeps its trigger). The watcher page shows the latest version and, when different, the running version with their declared fields, lookups and actions. An administrator can approve the latest draft, use the on/off switch and read the latest 25 receipts. Restore an earlier activation from Customisations.
 - **Drafting on the page** builds the input of `base.watchers.draft` (page events `draft_review` and `draft_save`, the one write path) and nothing else: the trigger and actions are searchable comboboxes from `base.watchers.vocabulary` (actions limited to the trigger's table), conditions pick a field of the trigger's Grid table with the operators and a value control of the field's type (a choice list for enums, Yes/No for true/false, a date, a number; lists take one value per line), and each example is a row of the condition fields' values with matches or does not match. **Review** previews the draft through the contract and shows its conditions in words, actions, each example's result, warnings and problems; **Save draft** is enabled only for a reviewed draft, and any edit discards the review. Saving lands on the watcher, where a holder of `admin.watchers.approve` approves it.
 - **Receipts and privacy**: a receipt's facts and condition outcomes are the record's values; current record reach and field restrictions apply to every read, including values collected before a restriction changed. A reader who cannot read the subject or any recorded field sees the evidence as restricted. Protected facts and condition outcomes are kept out of audit metadata.
-- **Agents**: `base.watchers.vocabulary` (installed triggers with their fields, actions with their inputs, operators, limits), `base.watchers.list`, `base.watchers.get`, `base.watchers.runs`, `base.watchers.trial`, `base.watchers.draft`, `base.watchers.approve`, `base.watchers.switch`, and the guide `base.watchers`. An agent's draft records `drafted_via: agent`; it runs only once a person approves it.
+- **Agents**: `base.watchers.vocabulary` (installed triggers with their fields, lookups, actions, operators and limits), `base.watchers.list`, `base.watchers.get`, `base.watchers.runs`, `base.watchers.trial`, `base.watchers.draft`, `base.watchers.approve`, `base.watchers.restore`, `base.watchers.switch`, and the guide `base.watchers`. An agent's draft records `drafted_via: agent`; it runs only once a person approves it.
 
 ## Setup packs
 
@@ -169,7 +179,7 @@ Export a latest unapproved version and preview it as a new destination draft thr
 
 ## Tables
 
-`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects`, `base_watcher_buckets` and `base_watcher_trials` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events`, `base-watchers-004-watchers`, `base-watchers-005-token-bucket`, `base-watchers-006-activation`, `base-watchers-007-trials`, and `base-watchers-008-name-lookup`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
+`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects`, `base_watcher_buckets`, `base_watcher_trials` and `base_watcher_script_permissions`. Account IDs on versions and script permissions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 
@@ -180,4 +190,4 @@ The official Domain companion walkthrough is `apps/web/examples/watchers-domains
 ## Not yet
 
 - Custom fields of a linked record (`company.cf_segment`) as conditions.
-- Standalone script versions, contract lookups and person-initiated runs are covered by [ADR 34](../../../docs/architecture/decisions/34-tenant-scripts-run-through-operation-contracts.md). The current execution path is a watcher event.
+- Standalone script versions and person-initiated runs are covered by [ADR 34](../../../docs/architecture/decisions/34-tenant-scripts-run-through-operation-contracts.md). The current execution path is a watcher event.

@@ -290,9 +290,9 @@ async fn main() -> Result<(), Failure> {
         "INSERT INTO report_subject_accounts(id,tenant_id,name,owner_user_id) VALUES \
          (9223372036854775807,1,'Northwind',2),(2,1,'Northwind Ltd',1),(3,1,'Contoso',1),(4,1,'Fabrikam',2),(5,2,'Other tenant account',5); \
          INSERT INTO report_subject_cases(id,tenant_id,title,account_id,minutes,opened_on) VALUES \
-         (1,1,'Late delivery',9223372036854775807,10,CURRENT_DATE),(2,1,'Wrong invoice',2,20,CURRENT_DATE),(3,1,'Missing part',2,30,CURRENT_DATE), \
-         (4,1,'Broken seal',3,40,CURRENT_DATE),(5,1,'No reply',3,50,CURRENT_DATE),(6,1,'Slow refund',4,60,CURRENT_DATE), \
-         (7,1,'General question',NULL,70,CURRENT_DATE),(8,2,'Other tenant case',5,80,CURRENT_DATE)",
+         (1,1,'Late delivery',9223372036854775807,10,(now() AT TIME ZONE 'UTC')::date),(2,1,'Wrong invoice',2,20,(now() AT TIME ZONE 'UTC')::date),(3,1,'Missing part',2,30,(now() AT TIME ZONE 'UTC')::date), \
+         (4,1,'Broken seal',3,40,(now() AT TIME ZONE 'UTC')::date),(5,1,'No reply',3,50,(now() AT TIME ZONE 'UTC')::date),(6,1,'Slow refund',4,60,(now() AT TIME ZONE 'UTC')::date), \
+         (7,1,'General question',NULL,70,(now() AT TIME ZONE 'UTC')::date),(8,2,'Other tenant case',5,80,(now() AT TIME ZONE 'UTC')::date)",
     ).await?;
 
     let by_account = Definition {
@@ -751,7 +751,7 @@ async fn main() -> Result<(), Failure> {
     );
 
     db.get().await?.execute(
-        "INSERT INTO report_subject_cases(id,tenant_id,title,account_id,minutes,opened_on) SELECT id,1,'Historical case',id,1,CURRENT_DATE - 120 FROM generate_series(100,1100) id",
+        "INSERT INTO report_subject_cases(id,tenant_id,title,account_id,minutes,opened_on) SELECT id,1,'Historical case',id,1,(now() AT TIME ZONE 'UTC')::date - 120 FROM generate_series(100,1100) id",
         &[],
     ).await?;
     let mut recent = draft(
@@ -793,7 +793,7 @@ async fn main() -> Result<(), Failure> {
     );
 
     db.get().await?.execute(
-        "INSERT INTO report_subject_cases(id,tenant_id,title,account_id,minutes,opened_on) SELECT id,1,'Export case ' || id,$1,1,CURRENT_DATE FROM generate_series(1200,1301) id",
+        "INSERT INTO report_subject_cases(id,tenant_id,title,account_id,minutes,opened_on) SELECT id,1,'Export case ' || id,$1,1,(now() AT TIME ZONE 'UTC')::date FROM generate_series(1200,1301) id",
         &[&SURVIVOR.parse::<i64>()?],
     ).await?;
     let mut export_draft = draft(

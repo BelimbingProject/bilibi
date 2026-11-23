@@ -173,6 +173,19 @@ impl Proof {
         )
         .await
     }
+    async fn restore(
+        &self,
+        scope: &Scope,
+        watcher: i64,
+        version: i64,
+    ) -> std::result::Result<Value, String> {
+        self.write(
+            scope,
+            "base.watchers.restore",
+            json!({"watcher_id": watcher, "version": version}),
+        )
+        .await
+    }
     async fn switch(
         &self,
         scope: &Scope,
@@ -1555,6 +1568,30 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         proof.case(mid).await?.0.is_none()
             && proof.case(large).await?.0.as_deref() == Some("priority-desk"),
         "version 2 runs: 3000 stays, 6000 goes to the priority desk",
+    );
+    check(
+        proof.restore(&one, r1, 1).await.is_ok(),
+        "an earlier approved version is restored after its checks pass again",
+    );
+    let restored = proof
+        .open(&one, 1, "Restored threshold", "urgent", "3000.00")
+        .await?;
+    proof.settled().await?;
+    check(
+        proof.case(restored).await?.0.as_deref() == Some("priority-desk"),
+        "the restored version 1 is active",
+    );
+    check(
+        proof.restore(&one, r1, 2).await.is_ok(),
+        "version 2 can be restored after version 1",
+    );
+    let current = proof
+        .open(&one, 1, "Current threshold again", "urgent", "3000.00")
+        .await?;
+    proof.settled().await?;
+    check(
+        proof.case(current).await?.0.is_none(),
+        "restoring version 2 makes its higher threshold active again",
     );
 
     println!("\n== Watchers share a tenant bucket and resume in order");

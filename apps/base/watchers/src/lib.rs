@@ -25,7 +25,7 @@ mod transfer;
 mod trial;
 mod web;
 
-pub use catalog::{Action, Trigger, ACTIONS, TRIGGERS};
+pub use catalog::{Action, Lookup, Trigger, ACTIONS, LOOKUPS, TRIGGERS};
 pub use review::Review;
 pub use store::{
     EffectView, RunView, VersionView, WatcherState, WatcherSummary, WatcherView, Watchers,
@@ -206,6 +206,7 @@ fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry:
             .as_ref()
             .clone(),
         jobs,
+        registry,
         mutations: services.get("base/database.mutations")?,
         events,
         queue: services.get(bilibi_queue::SERVICE)?,
@@ -220,7 +221,7 @@ inventory::submit! {
     Module {
         id: "base/watchers", layer: Layer::Base,
         dependencies: &["base/custom_fields", "base/labels", "base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/events", "base/grid", "base/settings", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql")), ("base-watchers-005-token-bucket", include_str!("../migrations/005-token-bucket.sql")), ("base-watchers-006-activation", include_str!("../migrations/006-activation.sql")), ("base-watchers-007-trials", include_str!("../migrations/007-trials.sql")), ("base-watchers-008-name-lookup", include_str!("../migrations/008-name-lookup.sql")), ("base-watchers-009-script-plan", include_str!("../migrations/009-script-plan.sql"))],
+        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql")), ("base-watchers-005-token-bucket", include_str!("../migrations/005-token-bucket.sql")), ("base-watchers-006-activation", include_str!("../migrations/006-activation.sql")), ("base-watchers-007-trials", include_str!("../migrations/007-trials.sql")), ("base-watchers-008-name-lookup", include_str!("../migrations/008-name-lookup.sql")), ("base-watchers-009-script-plan", include_str!("../migrations/009-script-plan.sql")), ("base-watchers-010-script-permissions", include_str!("../migrations/010-script-permissions.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let watchers = Arc::new(build(services)?);

@@ -242,7 +242,7 @@ impl Handler for Accounts {
                 )
                 .await?;
             let ids: Vec<i64> = users.iter().map(|row| row.get(0)).collect();
-            let held_users = holds.records(grant, USER_KIND, &ids).await?;
+            let held_users = holds.records(tx.sql(), grant, USER_KIND, &ids).await?;
             let mut erased = Erased::default();
             for row in users {
                 let (user, name, email, status, done, identity): (
@@ -326,7 +326,9 @@ impl Handler for Accounts {
                     .iter()
                     .map(|row| row.get(0))
                     .collect();
-                let held_notices = holds.records(grant, NOTIFICATION_KIND, &notices).await?;
+                let held_notices = holds
+                    .records(tx.sql(), grant, NOTIFICATION_KIND, &notices)
+                    .await?;
                 for (notice, hold) in &held_notices {
                     erased
                         .kept
@@ -352,6 +354,7 @@ impl Handler for Accounts {
                     .collect();
                 let held_scim = holds
                     .records(
+                        tx.sql(),
                         grant,
                         SCIM_KIND,
                         &scim_rows.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
@@ -376,7 +379,7 @@ impl Handler for Accounts {
                     .map(|row| row.get(0))
                     .collect();
                 let held_identities = holds
-                    .records(grant, EXTERNAL_IDENTITY_KIND, &identities)
+                    .records(tx.sql(), grant, EXTERNAL_IDENTITY_KIND, &identities)
                     .await?;
                 // Ending an account removes every sign-in link it has (the
                 // sign-in factor's lifecycle), so a hold on one keeps the
@@ -401,7 +404,11 @@ impl Handler for Accounts {
                 let bootstrap = match receipt {
                     None => false,
                     Some(clean) => {
-                        match holds.records(grant, BOOTSTRAP_KIND, &[1]).await?.get(&1) {
+                        match holds
+                            .records(tx.sql(), grant, BOOTSTRAP_KIND, &[1])
+                            .await?
+                            .get(&1)
+                        {
                             Some(hold) => {
                                 erased.kept.push(Kept::held(BOOTSTRAP_KIND, 1, *hold));
                                 false
@@ -416,7 +423,7 @@ impl Handler for Accounts {
                 // kind: an erasure change of that kind lets the database clear
                 // that history too.
                 let reset = match holds
-                    .records(grant, TWO_FACTOR_RESET_KIND, &[user])
+                    .records(tx.sql(), grant, TWO_FACTOR_RESET_KIND, &[user])
                     .await?
                     .get(&user)
                 {
@@ -586,7 +593,9 @@ impl Handler for Accounts {
                 .iter()
                 .map(|row| row.get(0))
                 .collect();
-            let held_invitations = holds.records(grant, INVITATION_KIND, &invitations).await?;
+            let held_invitations = holds
+                .records(tx.sql(), grant, INVITATION_KIND, &invitations)
+                .await?;
             for (id, hold) in &held_invitations {
                 erased.kept.push(Kept::held(INVITATION_KIND, id, *hold));
             }

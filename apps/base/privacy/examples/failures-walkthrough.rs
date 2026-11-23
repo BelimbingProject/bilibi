@@ -2287,6 +2287,26 @@ async fn main() -> Result<()> {
         erasure.status, erasure.approval_request
     );
     let target = format!("approval:{}", erasure.approval_request.unwrap_or_default());
+    let refused_audits: i64 = client.query_one(
+        "SELECT count(*) FROM base_audit_actions WHERE event='step_up.refused' AND payload->>'target'=$1",
+        &[&target],
+    ).await?.get(0);
+    assert!(
+        refused_audits > 0,
+        "step-up refusal audit must survive the approval rollback"
+    );
+    let invalid_scope = admin.scope.clone().presenting_step_up("invalid");
+    assert!(erasure_approval::vote(&app, &invalid_scope, &erasure, true)
+        .await
+        .is_err());
+    let failed_audits: i64 = client.query_one(
+        "SELECT count(*) FROM base_audit_actions WHERE event='step_up.failed' AND payload->>'target'=$1",
+        &[&target],
+    ).await?.get(0);
+    assert!(
+        failed_audits > 0,
+        "failed-code audit must survive the approval rollback"
+    );
     // The browser's Step-up page: a fresh code marks the web session.
     let code = admin.code().await;
     show(

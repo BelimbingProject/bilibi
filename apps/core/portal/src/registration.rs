@@ -266,8 +266,10 @@ impl PortalService {
         if ids.is_empty() {
             return Ok(());
         }
-        let holds = bilibi_personal_data::RecordHolds::acquire(tenant).await?;
-        let held = holds.records(crate::privacy::KIND, &ids).await?;
+        let (holds, mut hold_guard) =
+            bilibi_personal_data::RecordHolds::acquire(client, tenant).await?;
+        let client = hold_guard.client();
+        let held = holds.records(&*client, crate::privacy::KIND, &ids).await?;
         let ids: Vec<i64> = ids
             .into_iter()
             .filter(|id| !held.contains_key(id))
@@ -277,7 +279,7 @@ impl PortalService {
         } else {
             self.purge_in(client, tenant, ids).await
         };
-        holds.release().await?;
+        hold_guard.release().await?;
         purged
     }
 

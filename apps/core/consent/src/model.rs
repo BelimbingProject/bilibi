@@ -40,6 +40,8 @@ codes!(
         Messaging => "messaging", "Messaging",
         Voice => "voice", "Voice",
         Chat => "chat", "Chat",
+        Postal => "postal", "Postal",
+        InPerson => "in_person", "In person",
         Any => "any", "Any channel",
     }
 );
@@ -51,6 +53,8 @@ impl Channel {
         Self::Messaging,
         Self::Voice,
         Self::Chat,
+        Self::Postal,
+        Self::InPerson,
     ];
 }
 

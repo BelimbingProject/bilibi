@@ -259,6 +259,7 @@ WALKTHROUGHS=(
 
 # Examples no line above runs, each with the reason. `module folder|example|reason`.
 NOT_RUN=(
+  'apps/base/integration|scorer-walkthrough|needs public HTTPS ingress to its local fixture and BILIBI_SETTINGS_KEY; run manually on a fresh database'
   'apps/web|watchers-domains-walkthrough|needs official Domain mounts; run each Domain source walkthrough first'
   # They only serve the app, with a reference page, for a person to use in a browser.
   'apps/core/document|upload-resume-proof|serves the New document dialog for a browser upload'
@@ -766,8 +767,6 @@ known=()
 fixed=()
 passed=0
 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
-second_connections="$logs/second-connections.txt"
-: >"$second_connections"
 printf '| Walkthrough | Result | Seconds |\n| --- | --- | --- |\n' >>"$summary"
 
 # One module at a time: build its examples, run them, remove them.
@@ -804,11 +803,6 @@ for folder in "${folders[@]}"; do
     started=$SECONDS
     run_one "$name" "$example" "$prepare" "$environment" "${steps:--}" "${kind:-}"
     elapsed=$((SECONDS - started))
-    # A task that held a pooled connection and asked for another
-    # (bilibi_database::Db logs it once per pair of call sites). Not a failure
-    # while the check only warns: every hit of the run is listed at the end.
-    awk -v name="$name" '/^warning: second pooled connection: / && !seen[$0]++ { print name ": " $0 }' \
-      "$logs/$name.log" >>"$second_connections" 2>/dev/null || true
     if [[ $entry_group == mounted ]]; then
       # Whatever the verdict, the next walkthrough starts unmounted. A checkout
       # that cannot be restored ends the run: nothing after it can be trusted.
@@ -851,18 +845,6 @@ for folder in "${folders[@]}"; do
     done
   fi
 done
-
-if [[ -s $second_connections ]]; then
-  hits=$(wc -l <"$second_connections")
-  echo "::warning title=Second pooled connections::$hits in this run; fix each or name it with Db::get_detached (apps/base/database/README.md). They are listed in the job summary."
-  printf '\nSecond pooled connections (%s):\n' "$hits"
-  cat "$second_connections"
-  {
-    printf '\n### Second pooled connections (%s)\n\n' "$hits"
-    printf 'A task held a pooled connection and asked for another. Pass the held one, release it first, or name a real exception with `Db::get_detached`.\n\n'
-    sed -e 's/: warning: second pooled connection: this task already holds a pooled connection / /' -e 's/\. Pass the one you hold.*$//' -e 's/^/- /' "$second_connections"
-  } >>"$summary"
-fi
 
 printf '\n%s passed' "$passed"
 [[ ${#known[@]} -gt 0 ]] && printf '; known failures, still failing: %s' "${known[*]}"
