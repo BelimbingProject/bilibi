@@ -2,17 +2,18 @@
 //! tenant wants "send new urgent cases to the priority queue" without a
 //! release. It owns one table (a case of a company, with a priority, an
 //! amount, a margin some readers must not see and a queue), three events
-//! (`opened`, `routed`, `flagged`) and three contracts (`open`, `route`,
-//! `flag`). It offers the events as watcher triggers and `route` and `flag` as
-//! watcher actions, admits the `watchers` principal to those two contracts and
+//! (`opened`, `routed`, `flagged`) and four contracts (`open`, `route`,
+//! `flag`, `notify`). It offers the events as watcher triggers and `route`,
+//! `flag` and the outbound `notify` (a send to the case's partner address,
+//! recorded in its outbox) as watcher actions, admits the `watchers` principal to those two contracts and
 //! offers it the capabilities they need. A case takes tenant custom fields
 //! (record type `watcher_case`), so a tenant can offer one to watcher conditions.
 //! Mount it only to prove `base/watchers`
 //! (`apps/web/examples/watchers-walkthrough.rs`); it is never a Platform member.
 use bilibi_agent_api::{
     job::{PrincipalWrite, PRINCIPAL_WRITES},
-    Channels, Definitions, Handler, Operation, OperationClient, OperationFuture, ReadHandler,
-    WriteHandler, DEFINITIONS,
+    Channels, Definitions, Handler, Operation, OperationClient, OperationFuture, Outbound,
+    OutboundFuture, OutboundSend, ReadHandler, WriteHandler, DEFINITIONS,
 };
 use bilibi_authz::{
     CapabilityDefinition, OfferedCapabilities, VocabularyContribution, OFFERED_CAPABILITIES,
@@ -33,6 +34,7 @@ pub const VIEW: &str = "watcher-cases.case.view";
 pub const OPEN: &str = "watcher-cases.case.open";
 pub const ROUTE: &str = "watcher-cases.case.route";
 pub const FLAG: &str = "watcher-cases.case.flag";
+pub const NOTIFY: &str = "watcher-cases.case.notify";
 pub const OPENED: &str = "watcher_cases/cases.opened";
 pub const ROUTED: &str = "watcher_cases/cases.routed";
 pub const FLAGGED: &str = "watcher_cases/cases.flagged";
@@ -53,7 +55,7 @@ inventory::submit! {
     Module {
         id: MODULE, layer: Layer::Domains,
         dependencies: &["base/agent_api", "base/authz", "base/custom_fields", "base/database", "base/events", "base/grid", "base/watchers", "base/tenancy", "core/company"],
-        migrations: &[("watcher-cases-cases-001-cases", include_str!("../migrations/001-cases.sql")), ("watcher-cases-cases-002-links", include_str!("../migrations/002-links.sql")), ("watcher-cases-cases-003-custom-fields", include_str!("../migrations/003-custom-fields.sql"))],
+        migrations: &[("watcher-cases-cases-001-cases", include_str!("../migrations/001-cases.sql")), ("watcher-cases-cases-002-links", include_str!("../migrations/002-links.sql")), ("watcher-cases-cases-003-custom-fields", include_str!("../migrations/003-custom-fields.sql")), ("watcher-cases-cases-004-partner-notices", include_str!("../migrations/004-partner-notices.sql"))],
         services: &[Service { id: "watcher_cases/cases.events", factory: |services| {
             let events: Arc<Events> = services.get(bilibi_events::SERVICE)?;
             let _ = EVENT_STORE.set(events.clone());
@@ -75,14 +77,14 @@ inventory::submit! { Contribution::new(RECORD_TYPES, RECORD_TYPE, provenance!(),
 inventory::submit! { Contribution::new(GRID_SOURCES, RECORD_TYPE, provenance!(), &GridSource { record_type: RECORD_TYPE, table: TABLE, column: "custom_fields" }) }
 
 inventory::submit! { Contribution::new(VOCABULARY, "watcher_cases/cases.vocabulary", provenance!(), &VocabularyContribution {
-    domains: &["watcher-cases"], verbs: &["open", "route", "flag"],
-    capabilities: &[CapabilityDefinition::tenant(VIEW).with_reach(), CapabilityDefinition::tenant(OPEN), CapabilityDefinition::tenant(ROUTE), CapabilityDefinition::tenant(FLAG)],
+    domains: &["watcher-cases"], verbs: &["open", "route", "flag", "notify"],
+    capabilities: &[CapabilityDefinition::tenant(VIEW).with_reach(), CapabilityDefinition::tenant(OPEN), CapabilityDefinition::tenant(ROUTE), CapabilityDefinition::tenant(FLAG), CapabilityDefinition::tenant(NOTIFY)],
     roles: &[], system_principals: &[],
 }) }
 // The watchers principal may read cases and route and flag them; a tenant still
 // grants each of these to it by name.
 inventory::submit! { Contribution::new(OFFERED_CAPABILITIES, "watchers:watcher_cases/cases", provenance!(), &OfferedCapabilities {
-    principal: "watchers", capabilities: &[VIEW, ROUTE, FLAG],
+    principal: "watchers", capabilities: &[VIEW, ROUTE, FLAG, NOTIFY],
 }) }
 inventory::submit! { Contribution::new(EVENTS, OPENED, provenance!(), &EventType { version: 1 }) }
 inventory::submit! { Contribution::new(EVENTS, ROUTED, provenance!(), &EventType { version: 1 }) }
@@ -133,6 +135,10 @@ inventory::submit! { Contribution::new(ACTIONS, "watcher_cases.cases.route", pro
 inventory::submit! { Contribution::new(ACTIONS, "watcher_cases.cases.flag", provenance!(), &Action {
     title: "Flag the case", table: TABLE, subject: "case_id", version: "expected_version", records: &[FLAGGED], approval_capabilities: &[],
 }) }
+inventory::submit! { Contribution::new(ACTIONS, "watcher_cases.cases.notify", provenance!(), &Action {
+    title: "Send the case to its partner", table: TABLE, subject: "case_id", version: "expected_version", records: &[], approval_capabilities: &[],
+}) }
+inventory::submit! { Contribution::new(PRINCIPAL_WRITES, "watcher_cases.cases.notify", provenance!(), &PrincipalWrite { principals: &["watchers"] }) }
 inventory::submit! { Contribution::new(PRINCIPAL_WRITES, "watcher_cases.cases.route", provenance!(), &PrincipalWrite { principals: &["watchers"] }) }
 inventory::submit! { Contribution::new(PRINCIPAL_WRITES, "watcher_cases.cases.flag", provenance!(), &PrincipalWrite { principals: &["watchers"] }) }
 
@@ -199,6 +205,7 @@ impl WriteHandler for Open {
             let (company, title, priority, amount, margin) = Self::read(input)?;
             let tenant = scope.tenant();
             let parent = input["parent_id"].as_i64();
+            let partner = bilibi_agent_api::optional_text_field(input, "partner_address");
             let owner = scope.user();
             writable(tx.sql(), tenant, company).await?;
             let patch: serde_json::Map<String, Value> = input["custom"]
@@ -232,8 +239,8 @@ impl WriteHandler for Open {
             };
             let id = tx.mutate(move |sql| Box::pin(async move {
                 let id: i64 = sql.query_one(
-                    "INSERT INTO watcher_cases_cases(tenant_id,company_id,title,priority,amount,margin,parent_id,owner_user_id,custom_fields) VALUES($1,$2,$3,$4,$5::text::numeric,$6::text::numeric,$7,$8,$9) RETURNING id",
-                    &[&tenant, &company, &title, &priority, &amount, &margin, &parent, &owner, &custom],
+                    "INSERT INTO watcher_cases_cases(tenant_id,company_id,title,priority,amount,margin,parent_id,owner_user_id,custom_fields,partner_address) VALUES($1,$2,$3,$4,$5::text::numeric,$6::text::numeric,$7,$8,$9,$10) RETURNING id",
+                    &[&tenant, &company, &title, &priority, &amount, &margin, &parent, &owner, &custom, &partner],
                 ).await.map_err(|_| Error::Invalid)?.get(0);
                 Ok((id, vec![Change { kind: "watcher_cases/cases.case".into(), id, old: Value::Null, new: json!({"title": title, "priority": priority, "amount": amount, "company": company}) }]))
             })).await?;
@@ -363,6 +370,123 @@ impl WriteHandler for Change2 {
     }
 }
 
+/// The outbound reference action: send chosen fields of a case to the
+/// partner address on the case. It resolves the destination from the locked
+/// case, so the approved terms are checked against the address it will use.
+struct Notify;
+static NOTIFY_TERMS: Outbound = Outbound {
+    destination: "The case's partner address",
+    data: &["title", "priority", "amount", "margin"],
+};
+impl Notify {
+    fn data(input: &Value) -> Vec<String> {
+        input["include"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    }
+    /// The partner address and expected version, read under the case lock.
+    async fn locked(
+        sql: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<(String, i64, Value)> {
+        if Self::data(input).is_empty() {
+            return Err(invalid("include", "needs at least one field"));
+        }
+        let id = input["case_id"].as_i64().unwrap_or_default();
+        let row = sql
+            .query_opt(
+                "SELECT partner_address,version,company_id,json_build_object('title',title,'priority',priority,'amount',amount::text,'margin',margin::text) FROM watcher_cases_cases WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                &[&scope.tenant(), &id],
+            )
+            .await
+            .map_err(Error::from)?
+            .ok_or_else(|| invalid("case_id", "is not a case of this tenant"))?;
+        if input["expected_version"]
+            .as_i64()
+            .is_some_and(|expected| expected != i64::from(row.get::<_, i32>(1)))
+        {
+            return Err(Error::Conflict.into());
+        }
+        let address: Option<String> = row.get(0);
+        let address = address.ok_or_else(|| invalid("case_id", "has no partner address"))?;
+        Ok((address, row.get(2), row.get(3)))
+    }
+}
+impl WriteHandler for Notify {
+    fn outbound(&self) -> Option<&'static Outbound> {
+        Some(&NOTIFY_TERMS)
+    }
+    fn resolve_outbound<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OutboundFuture<'a> {
+        Box::pin(async move {
+            let sql = client.sql_client().await?;
+            let (destination, _, _) = Self::locked(sql, scope, input).await?;
+            Ok(OutboundSend {
+                destination,
+                data: Self::data(input),
+            })
+        })
+    }
+    fn owner(&self) -> &'static str {
+        MODULE
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let sql = client.sql_client().await?;
+            let (destination, _, _) = Self::locked(sql, scope, input).await?;
+            Ok(json!({"summary": format!("Send {} to {destination}", Self::data(input).join(", "))}).into())
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            bilibi_authz::authorize_key(tx.sql(), scope, NOTIFY).await?;
+            let tenant = scope.tenant();
+            let id = input["case_id"].as_i64().unwrap_or_default();
+            let (destination, company, fields) = Self::locked(tx.sql(), scope, input).await?;
+            writable(tx.sql(), tenant, company).await?;
+            let payload: serde_json::Map<String, Value> = Self::data(input)
+                .into_iter()
+                .map(|field| (field.clone(), fields[&field].clone()))
+                .collect();
+            let notice = tx.mutate(move |sql| Box::pin(async move {
+                let notice: i64 = sql.query_one(
+                    "INSERT INTO watcher_cases_notices(tenant_id,case_id,destination,payload) VALUES($1,$2,$3,$4) RETURNING id",
+                    &[&tenant, &id, &destination, &Value::Object(payload.clone())],
+                ).await?.get(0);
+                Ok((notice, vec![Change { kind: "watcher_cases/cases.notice".into(), id: notice, old: Value::Null, new: json!({"case": id, "destination": destination, "fields": payload.keys().collect::<Vec<_>>()}) }]))
+            })).await?;
+            Ok(json!({"case_id": id, "notice_id": notice}).into())
+        })
+    }
+}
+
+fn notify_schema() -> Value {
+    json!({"type":"object","required":["case_id","include"],"properties":{
+        "case_id":{"type":"integer","minimum":1},
+        "expected_version":{"type":"integer","minimum":1},
+        "include":{"type":"array","description":"The case fields to send, at least one","items":{"type":"string","enum":["title","priority","amount","margin"]}}
+    }})
+}
+
 fn open_schema() -> Value {
     json!({"type":"object","required":["company_id","title","priority","amount"],"properties":{
         "company_id":{"type":"integer","minimum":1},
@@ -371,6 +495,7 @@ fn open_schema() -> Value {
         "priority":{"type":"string","enum":["low","normal","urgent"]},
         "amount":{"type":"string","maxLength":24,"description":"A decimal amount, such as 1500.00"},
         "margin":{"type":"string","maxLength":24},
+        "partner_address":{"type":"string","maxLength":320,"description":"Where the case is shared outside Bilibi"},
         "custom":{"type":"array","description":"Tenant custom field values as {key, value} pairs","items":{"type":"object","required":["key"],"properties":{
             "key":{"type":"string","maxLength":40},
             "value":{"type":"string","maxLength":1000,"nullable":true}
@@ -444,6 +569,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, MODULE, provenance!(), &Defi
         Operation { key: "watcher_cases.cases.lookup", title: "Read a case", summary: "Read a case's current queue.", keywords: &["case", "lookup", "queue"], capability: VIEW, input: lookup_schema, output, handler: Handler::Read(&LookupCase), channels: Channels::Every, step_up: &[] },
         Operation { key: "watcher_cases.cases.open", title: "Open a case", summary: "Open a case for a company.", keywords: &["case"], capability: OPEN, input: open_schema, output, handler: Handler::SafeWrite(&Open), channels: Channels::Every, step_up: &[] },
         Operation { key: "watcher_cases.cases.route", title: "Route a case", summary: "Send a case to a queue.", keywords: &["case", "queue"], capability: ROUTE, input: route_schema, output, handler: Handler::SafeWrite(&ROUTE_CASE), channels: Channels::Every, step_up: &[] },
+        Operation { key: "watcher_cases.cases.notify", title: "Send a case to its partner", summary: "Send chosen fields of a case to its partner address.", keywords: &["case", "partner", "send"], capability: NOTIFY, input: notify_schema, output, handler: Handler::SafeWrite(&Notify), channels: Channels::Every, step_up: &[] },
         Operation { key: "watcher_cases.cases.flag", title: "Flag a case", summary: "Raise a flag on a case.", keywords: &["case", "flag"], capability: FLAG, input: flag_schema, output, handler: Handler::SafeWrite(&FLAG_CASE), channels: Channels::Every, step_up: &[] },
     ],
     guides: &[],

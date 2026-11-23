@@ -25,6 +25,9 @@ pub(crate) struct Script {
     #[serde(default)]
     pub lookups: Vec<LookupCall>,
     pub calls: Vec<ActionCall>,
+    /// Approved terms for each outbound operation among `calls`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outbound: Vec<OutboundTerms>,
     pub examples: Vec<ScriptExample>,
     #[serde(default)]
     language: Language,
@@ -47,6 +50,25 @@ pub(crate) struct LookupCall {
     pub operation: String,
     #[serde(default)]
     pub input: Map<String, Value>,
+}
+
+/// The one destination and the data fields an outbound operation selected by
+/// this script may send. A new recipient or a broader payload is a new version.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutboundTerms {
+    pub operation: String,
+    pub destination: String,
+    pub data: Vec<String>,
+}
+
+impl OutboundTerms {
+    pub(crate) fn terms(&self) -> bilibi_agent_api::OutboundTerms {
+        bilibi_agent_api::OutboundTerms {
+            destination: self.destination.clone(),
+            data: self.data.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -87,16 +109,37 @@ impl Script {
     }
 
     pub(crate) fn describe(&self) -> String {
+        let sends: Vec<String> = self
+            .outbound
+            .iter()
+            .map(|terms| {
+                format!(
+                    "{} sends only {} to {}",
+                    terms.operation,
+                    terms.data.join(", "),
+                    terms.destination
+                )
+            })
+            .collect();
         format!(
-            "Run {} as {} (JavaScript, SHA-256 {}). Reads fields {} and lookups {}. Allowed calls {}. Source: {}",
+            "Run {} as {} (JavaScript, SHA-256 {}). Reads fields {} and lookups {}. Allowed calls {}. Outbound: {}. Source: {}",
             self.name,
             crate::PRINCIPAL,
             self.source_digest,
             serde_json::json!(self.fields),
             serde_json::json!(self.lookups),
             serde_json::json!(self.calls),
+            if sends.is_empty() { "none".to_owned() } else { sends.join("; ") },
             self.source
         )
+    }
+
+    /// The approved terms for one outbound operation of this script.
+    pub(crate) fn terms(&self, operation: &str) -> Option<bilibi_agent_api::OutboundTerms> {
+        self.outbound
+            .iter()
+            .find(|terms| terms.operation == operation)
+            .map(OutboundTerms::terms)
     }
 
     fn validate(&self) -> bool {
@@ -116,6 +159,23 @@ impl Script {
                 .all(|lookup| !lookup.operation.is_empty())
             && (1..=MAX_ACTIONS).contains(&self.calls.len())
             && self.calls.iter().all(|call| !call.operation.is_empty())
+            && self.outbound.len() <= MAX_ACTIONS
+            && self.outbound.iter().enumerate().all(|(index, terms)| {
+                self.calls
+                    .iter()
+                    .any(|call| call.operation == terms.operation)
+                    && !self.outbound[..index]
+                        .iter()
+                        .any(|earlier| earlier.operation == terms.operation)
+                    && !terms.destination.trim().is_empty()
+                    && terms.destination.len() <= 320
+                    && (1..=20).contains(&terms.data.len())
+                    && terms.data.iter().enumerate().all(|(at, field)| {
+                        !field.trim().is_empty()
+                            && field.len() <= 120
+                            && !terms.data[..at].contains(field)
+                    })
+            })
             && (1..=MAX_EXAMPLES).contains(&self.examples.len())
             && self.examples.iter().all(|example| {
                 example.expect.len() <= MAX_ACTIONS
@@ -328,7 +388,7 @@ impl crate::Watchers {
         position: usize,
         subject: &str,
         started: Instant,
-    ) -> Result<Vec<(String, Value)>> {
+    ) -> Result<Vec<bilibi_agent_api::ScriptCall>> {
         let (script, permit, trigger) = self
             .callable_script(tx, scope, watcher, version, position)
             .await?;
@@ -412,7 +472,7 @@ impl crate::Watchers {
         for call in selected {
             let action = self
                 .action(&call.operation)
-                .filter(|action| action.local_script)
+                .filter(|action| action.script_callable(&script))
                 .ok_or_else(|| bilibi_database::Error::Refused("script_call_refused".into()))?;
             let input = crate::run::action_input(
                 action.definition,
@@ -422,7 +482,11 @@ impl crate::Watchers {
                 revision,
             )
             .ok_or_else(|| bilibi_database::Error::Refused("script_input".into()))?;
-            calls.push((call.operation, input));
+            calls.push(bilibi_agent_api::ScriptCall {
+                terms: script.terms(&call.operation),
+                key: call.operation,
+                input,
+            });
         }
         budget.check()?;
         Ok(calls)
@@ -574,11 +638,27 @@ impl crate::Watchers {
         Ok(ScriptBudget::new(Some(start + Duration::from_millis(ms))))
     }
 
+    /// Every call a script may select is either certified local by its owner
+    /// or outbound under that script's approved terms.
     pub(crate) fn local_script_plan(&self, definition: &Definition) -> bool {
-        definition.script_calls().all(|call| {
-            self.action(&call.operation)
-                .is_some_and(|action| action.local_script)
+        definition.scripts().all(|script| {
+            script.calls.iter().all(|call| {
+                self.action(&call.operation)
+                    .is_some_and(|action| action.script_callable(script))
+            })
         })
+    }
+
+    /// The approved terms for an outbound action of this definition: the
+    /// definition's scripts declare one set per operation (review refuses
+    /// differing ones), and an operation step never sends outside.
+    pub(crate) fn outbound_terms(
+        definition: &Definition,
+        operation: &str,
+    ) -> Option<bilibi_agent_api::OutboundTerms> {
+        definition
+            .scripts()
+            .find_map(|script| script.terms(operation))
     }
 
     pub(crate) async fn plan_steps(
@@ -681,6 +761,9 @@ pub(crate) struct ScriptCall {
 
 fn agent_error(error: bilibi_agent_api::Error) -> bilibi_database::Error {
     match error {
+        bilibi_agent_api::Error::PlanRejected(reason) if reason["reason"].is_string() => {
+            bilibi_database::Error::Refused(reason["reason"].as_str().unwrap_or_default().into())
+        }
         bilibi_agent_api::Error::Backend(error) => error,
         bilibi_agent_api::Error::Forbidden => bilibi_database::Error::Forbidden,
         bilibi_agent_api::Error::NotFound => bilibi_database::Error::NotFound,

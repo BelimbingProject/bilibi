@@ -1,7 +1,7 @@
 //! Run with the watcher_cases fixture mounted and --scripts on a disposable database.
 use super::{check, Proof, DELIVER, DELIVERY_PRINCIPAL, OPENED, WATCHER_CAPABILITIES};
 use bilibi_database::{Error, Result};
-use serde_json::json;
+use serde_json::{json, Value};
 
 pub(super) async fn walkthrough(proof: &Proof) -> Result<()> {
     let one = &proof.one;
@@ -286,6 +286,171 @@ pub(super) async fn walkthrough(proof: &Proof) -> Result<()> {
         }) && proof.case(refused).await?.1 == 0,
         "revoking one script's permission refuses that script before effects",
     );
+    outbound(proof).await?;
     println!("the script checks passed");
+    Ok(())
+}
+
+/// Outbound terms: approval names the one destination and the data an
+/// outbound action may send; every run checks the owner's resolved send.
+async fn outbound(proof: &Proof) -> Result<()> {
+    let one = &proof.one;
+    proof
+        .grant(one, "watchers", "watcher-cases.case.notify", Some(true))
+        .await?;
+    let notify = |include: Value| json!({"operation":"watcher_cases.cases.notify","input":{"include":include}});
+    let narrow = notify(json!(["title", "priority"]));
+    let broad = notify(json!(["title", "margin"]));
+    let terms = json!([{"operation":"watcher_cases.cases.notify","destination":"desk@partner.example","data":["title","priority"]}]);
+    let source = "if (facts.priority === 'urgent') return [{operation:'watcher_cases.cases.notify',input:{include:['title','priority']}}]; if (facts.priority === 'low') return [{operation:'watcher_cases.cases.notify',input:{include:['title','margin']}}]; return [];";
+    let script = |outbound: Value| {
+        json!({"name":"Share with the partner desk","fields":["priority"],"calls":[narrow, broad],"outbound":outbound,"source":source,
+        "examples":[
+            {"facts":{"priority":"normal"},"expect":[]},
+            {"facts":{"priority":"urgent"},"expect":[narrow]},
+            {"facts":{"priority":"low"},"expect":[broad]}
+        ]})
+    };
+    let plain = proof
+        .review(
+            one,
+            "base.watchers.draft",
+            json!({"name":"Plain send","watch":OPENED,"do":[narrow]}),
+        )
+        .await;
+    check(
+        plain["valid"] == false && plain.to_string().contains("sends outside Bilibi"),
+        "an outbound action is refused as a plain step: only a script with approved terms may send",
+    );
+    let unnamed = proof
+        .review(
+            one,
+            "base.watchers.draft",
+            json!({"name":"Send without terms","watch":OPENED,"do":[{"script":script(json!([]))}]}),
+        )
+        .await;
+    check(
+        unnamed["valid"] == false
+            && unnamed
+                .to_string()
+                .contains("must name its destination and data"),
+        "a script that selects an outbound action without terms is refused at draft",
+    );
+    let wider = proof
+        .review(one, "base.watchers.draft", json!({"name":"Send an unknown field","watch":OPENED,"do":[{"script":script(json!([{"operation":"watcher_cases.cases.notify","destination":"desk@partner.example","data":["title","notes"]}]))}]}))
+        .await;
+    check(
+        wider["valid"] == false && wider.to_string().contains("never sends notes"),
+        "terms naming data the owner never sends are refused at draft",
+    );
+    let (id, version) = proof
+        .draft(
+            one,
+            json!({"name":"Share urgent cases","watch":OPENED,"do":[{"script":script(terms)}]}),
+        )
+        .await?;
+    let review = proof
+        .review(
+            one,
+            "base.watchers.approve",
+            json!({"watcher_id": id, "version": version}),
+        )
+        .await
+        .to_string();
+    check(
+        review.contains("sends only title, priority to desk@partner.example"),
+        "approval shows the outbound destination and data",
+    );
+    proof.approve(one, id, version).await.map_err(|why| {
+        println!("     outbound approval refused: {why}");
+        Error::Invalid
+    })?;
+    let open = |title: &'static str, priority: &'static str, address: &'static str| async move {
+        let opened = proof
+            .write(one, "watcher_cases.cases.open", json!({"company_id":1,"title":title,"priority":priority,"amount":"10","margin":"250.00","partner_address":address}))
+            .await
+            .map_err(|why| {
+                println!("     open refused: {why}");
+                Error::Invalid
+            })?;
+        opened["case_id"].as_i64().ok_or(Error::Invalid)
+    };
+    let notices = |case: i64| async move {
+        let rows = proof
+            .db
+            .get()
+            .await?
+            .query(
+                "SELECT destination,payload FROM watcher_cases_notices WHERE case_id=$1",
+                &[&case],
+            )
+            .await?;
+        Ok::<_, Error>(
+            rows.iter()
+                .map(|row| (row.get::<_, String>(0), row.get::<_, Value>(1)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let approved_send = |sent: &[(String, Value)]| {
+        sent.len() == 1
+            && sent[0].0 == "desk@partner.example"
+            && sent[0].1.as_object().is_some_and(|payload| {
+                let mut keys: Vec<&str> = payload.keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                keys == ["priority", "title"]
+            })
+    };
+    let refused = |case: i64| async move {
+        Ok::<_, Error>(proof.receipts(case).await?.iter().any(|receipt| {
+            receipt.0 == id
+                && receipt.1 == "refused"
+                && receipt.2.as_deref() == Some("script_outbound_refused")
+        }))
+    };
+    // Queued watcher runs, as the watchers principal.
+    let good = open("Urgent shared case", "urgent", "desk@partner.example").await?;
+    let hostile = open("Redirected case", "urgent", "drop@attacker.example").await?;
+    let wide = open("Wide payload case", "low", "desk@partner.example").await?;
+    proof.settled().await?;
+    check(
+        approved_send(&notices(good).await?),
+        "a queued run sends only the approved data to the approved destination",
+    );
+    check(
+        refused(hostile).await? && notices(hostile).await?.is_empty(),
+        "a queued send whose resolved destination is not the approved one is refused with no effect",
+    );
+    check(
+        refused(wide).await? && notices(wide).await?.is_empty(),
+        "a queued send of data beyond the approved fields is refused with no effect",
+    );
+    // The person door (page action, command line, delegated agent), off the queue.
+    proof
+        .switch(one, id, false)
+        .await
+        .map_err(|_| Error::Invalid)?;
+    let person = open("Person-shared case", "urgent", "desk@partner.example").await?;
+    let person_hostile = open("Person-redirected case", "urgent", "drop@attacker.example").await?;
+    let person_wide = open("Person wide payload", "low", "desk@partner.example").await?;
+    let run = |case: i64| {
+        proof.write(
+            one,
+            "base.watchers.script.run",
+            json!({"watcher_id":id,"version":version,"script":1,"subject":case.to_string()}),
+        )
+    };
+    let sent = run(person).await;
+    check(
+        sent.is_ok() && approved_send(&notices(person).await?),
+        "a person-run script sends only the approved data to the approved destination",
+    );
+    for (case, what) in [(person_hostile, "destination"), (person_wide, "data")] {
+        let answer = run(case).await;
+        check(
+            answer.is_err_and(|why| why.contains("script_outbound_refused"))
+                && notices(case).await?.is_empty(),
+            &format!("the person door refuses {what} outside the approved terms before any effect"),
+        );
+    }
     Ok(())
 }
