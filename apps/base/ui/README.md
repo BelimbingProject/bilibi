@@ -77,7 +77,7 @@ The running specimen at `/assets/ui-components.html#specimen-markdown` pairs the
 
 ## Wordmark and credential pages
 
-`ui::wordmark` draws the brand: the installation's own logo and name when its `Brand` has them, otherwise Bilibi's mark, then "bilibi" in lowercase in its own face.
+`ui::wordmark` draws the [installation wordmark](../branding/README.md#where-it-shows).
 
 - **Brand:** pass the `Brand` the host put on the layout (`ShellContext::brand`, `AuthLayout::brand`). `Brand::default()` is Bilibi's own. [Branding](../branding/README.md) owns the settings behind it; `Document` uses the same brand for the tab title, the tab icon and the accent.
 

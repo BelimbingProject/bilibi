@@ -69,7 +69,7 @@ pub struct Brand {
     /// The installation's display name; empty keeps "Bilibi".
     pub name: String,
     /// A link to the installation's logo, already authorized by its owner
-    /// (a signed Media link); `None` draws the name alone.
+    /// (a signed Media link). A custom name can render without a logo.
     pub logo: Option<String>,
     pub accent: Accent,
 }
