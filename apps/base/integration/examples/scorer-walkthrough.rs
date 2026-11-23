@@ -13,7 +13,7 @@ use bilibi_authz::{
     grants::Grants, SystemAuthentication, SystemPrincipalDefinition, SystemScope,
     VocabularyContribution, VOCABULARY,
 };
-use bilibi_base::picklists::{self, NewValue, PickList, PickLists};
+use bilibi_base::picklists::{self, NewValue, PickLists};
 use bilibi_database::{pool, Db, Error, MutationBoundary, Result};
 use bilibi_integration::{
     Integration, Origin, ScoreDecision, ScoreEvent, ScoreFailure, Scorer, ScorerResult,
@@ -34,7 +34,7 @@ const DESTINATION: &str = "walkthrough.scorer.destination";
 const SECRET: &str = "walkthrough.scorer.secret";
 const SCORER: &str = "walkthrough.case-score";
 const PRINCIPAL: &str = "scorer-walkthrough";
-const QUEUE_LIST: &str = "base.integration.scorer_queues";
+const QUEUE_LIST: &str = "core.team.kind";
 const ACTION: &str = "base.picklists.value.create";
 const EVENT: &str = "walkthrough.case.opened";
 const SIGNING_SECRET: &str = "0123456789abcdef0123456789abcdef";
@@ -45,10 +45,6 @@ const PROVENANCE: Provenance = Provenance {
     line: line!(),
 };
 
-picklists::declare!(
-    "base/integration",
-    PickList::new(QUEUE_LIST, "Scorer queues", &[])
-);
 inventory::submit! { Contribution::new(VOCABULARY, PRINCIPAL, PROVENANCE, &VocabularyContribution {
     domains: &[], verbs: &[], capabilities: &[], roles: &[],
     system_principals: &[SystemPrincipalDefinition { name: PRINCIPAL, capabilities: &[picklists::MANAGE] }],
@@ -263,6 +259,7 @@ async fn main() -> Result<()> {
     let modules = bilibi_module_registry::discover()?;
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
+    bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
     let mut services = Services::default();
     services.provide("bootstrap.database", Arc::new(db.clone()))?;
     services.provide("bootstrap.composition", Arc::new(bilibi_web::composition()))?;
@@ -332,10 +329,10 @@ async fn main() -> Result<()> {
     tx.commit().await?;
 
     println!("== Approved fields and signed request drive the fixed owner action");
-    assert!(owner
-        .values(&**client, &admin, QUEUE_LIST, false)
-        .await?
-        .is_empty());
+    let initial_values = owner.values(&**client, &admin, QUEUE_LIST, false).await?;
+    assert!(initial_values
+        .iter()
+        .all(|value| &*value.code != "priority"));
     let decision = connector
         .run(&admin, first_key, fields("urgent"))
         .await
@@ -343,11 +340,12 @@ async fn main() -> Result<()> {
     let first_delivery = decision.delivery_id;
     assert_eq!(decision.result, "priority");
     let values = owner.values(&**client, &admin, QUEUE_LIST, false).await?;
-    assert_eq!(values.len(), 1);
-    assert_eq!(
-        (&*values[0].code, &*values[0].label),
-        ("priority", "Priority review")
-    );
+    assert_eq!(values.len(), initial_values.len() + 1);
+    let priority = values
+        .iter()
+        .find(|value| &*value.code == "priority")
+        .expect("fixed owner action created the priority value");
+    assert_eq!(&*priority.label, "Priority review");
 
     println!("== Deduplication withholds a second delivery and action");
     assert!(matches!(
