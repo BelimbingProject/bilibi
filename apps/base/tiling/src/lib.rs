@@ -5,6 +5,7 @@
 //! URL form; the page in `web` holds only the tree, the focused tile and
 //! monocle, and writes the tree back into `?t=` after every change, so a
 //! reload or a copied address restores the screen. This module owns no tables.
+mod agent;
 mod layout;
 mod layouts;
 mod shared_web;
@@ -16,7 +17,7 @@ use std::sync::Arc;
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/tiling", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/ui", "base/database", "base/tenancy", "base/authz", "base/menu", "base/settings"],
+        dependencies: &["base/module_registry", "base/ui", "base/database", "base/tenancy", "base/authz", "base/menu", "base/settings", "base/agent_api", "base/labels"],
         migrations: &[("base-tiling-001-remove-personal-layouts", include_str!("../migrations/001-remove-personal-layouts.sql"))], services: &[
             bilibi_module_registry::Service { id: "base/tiling.pages", factory: |services| {
                 // Services installs its catalog only after every factory has
@@ -29,9 +30,10 @@ inventory::submit! {
                     .map(|entry| Ok((entry.provenance.module, entry.get::<Route>()?)))
                     .collect::<bilibi_module_registry::Result<Vec<_>>>()?;
                 let db = services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone();
-                let layouts = Arc::new(layouts::Layouts::new(db.clone(), services.get("base/settings.store")?, services.get("base/database.mutations")?));
+                let layouts = Arc::new(layouts::Layouts::new(services.get("base/settings.store")?, routes));
+                agent::bind(layouts.clone())?;
                 Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(web::Pages::new(
-                    db, Arc::new(menu), routes, layouts,
+                    db, Arc::new(menu), layouts, services.get(bilibi_agent_api::page::SERVICE)?,
                 )))))
             }},
         ],
@@ -53,10 +55,8 @@ inventory::submit! { bilibi_module_registry::Contribution::new(ROUTES, "tiling.s
 bilibi_module_registry::Provenance { module: "base/tiling", source: file!(), line: line!() },
 &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Company, method: Method::Get, path: "/workspace/shared-layouts", service: "base/tiling.pages", operation: "shared_layouts", access: Access::Capability(layouts::PUBLISH), framed: true }) }
 
-// ADR 01 gap, listed so it stays visible: these pages still write through
-// the facade rather than an operation contract (`base/agent_api` page).
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "base/tiling.pages", bilibi_module_registry::Provenance { module: "base/tiling", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
     service: "base/tiling.pages",
-    contracts: &[],
-    pending: bilibi_module_registry::contributions::Pending::Every { reason: "Workspace and shared layouts write through the Tiling facade; no contract yet." },
+    contracts: &[("publish_layout", agent::PUBLISH), ("confirm_delete_layout", agent::WITHDRAW)],
+    pending: bilibi_module_registry::contributions::Pending::None,
 }) }

@@ -14,6 +14,7 @@ pub struct CustomisationRow {
     pub description: String,
     pub audit_kind: &'static str,
     pub audit_id: i64,
+    /// Zero when the owner uses a storage identity shared by multiple choices.
     pub revision: i64,
     pub input: Value,
 }

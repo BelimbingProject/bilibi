@@ -328,7 +328,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, SERVICE, provenance!(), &Pag
 }) }
 ```
 
-- **Boot.** Module Registry refuses a malformed declaration (a service of another module, an event named twice, an allowance without a reason). `PageContracts` refuses a contract that is not a registered write, and a service no route or embed serves.
+- **Boot.** Module Registry refuses a malformed declaration (a service of another module, a duplicate contract or allowance, an allowance without a reason). `PageContracts` refuses a contract that is not a registered write, and a service no route or embed serves.
 - **Every live event.** The host dispatches a page or panel event under the permit its declaration gives (`bilibi_database::page_write`). `MutationBoundary::begin` then refuses a business transaction the permit does not cover: only the event's contracts (marked by `PageContracts`), or anything for an event listed as pending. An undeclared service or event may write nothing. The refusal is `Error::Internal`, logged with the service, event and action.
 - **The call.** `PageContracts` refuses a contract the page did not declare for that event.
 - A person's own view state (list columns, dashboard arrangement, theme, pins) is not business data: its owner opens `MutationBoundary::begin_view_state`, which the check leaves alone.
@@ -336,7 +336,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, SERVICE, provenance!(), &Pag
 
 ### Allowance: pages not yet migrated
 
-Each gap is a `Pending` declaration in the owning module, with its reason. Remove it when the event calls its contract. `grep -rn "Pending::Every\|Pending::Events" apps` lists them.
+Each gap is a `Pending` declaration in the owning module, with its reason. A form that saves several values may list its migrated contracts and keep an explicit `Pending::Events` allowance for writes still handled by its facade. Remove the allowance once the remaining writes use contracts. `grep -rn "Pending::Every\|Pending::Events" apps` lists them.
 
 | Service | Why it is pending |
 |---|---|
@@ -349,7 +349,6 @@ Each gap is a `Pending` declaration in the owning module, with its reason. Remov
 | `base/session.pages` | Ending sessions |
 | `base/settings_editor.pages` | Saving and restoring settings |
 | `base/system.pages` | Localization changes |
-| `base/tiling.pages` | Workspace and shared layouts |
 | `base/workflow.pages` | The workflow reference page |
 | `core/agent.pages` | Device approval and connection revocation |
 | `core/company.pages` | Company edits, lifecycle, activities, departments, reference types; the create form records activities `core.company.create` does not take |

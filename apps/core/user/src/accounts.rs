@@ -483,45 +483,57 @@ impl UserService {
         Ok(resolved.value.as_str().unwrap_or("").to_owned())
     }
 
-    /// Stores the landing choice; an empty value clears the override so the
-    /// default resolves again. A page the actor cannot open is refused.
-    pub async fn save_landing(
+    /// Prepare the account's landing choice using its reachable menu.
+    pub(crate) async fn check_landing(
         &self,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         value: &str,
-    ) -> std::result::Result<(), AccountError> {
-        let mut client = self.db.get().await.map_err(Error::from)?;
-        let scope = self.fresh(&**client, scope).await?;
+    ) -> Result<()> {
+        if scope.impersonator().is_some() {
+            return Err(Error::Forbidden);
+        }
         if !value.is_empty()
             && !self
-                .landing_pages(&**client, &scope)
+                .landing_pages(client, scope)
                 .await?
                 .iter()
                 .any(|page| page.id == value)
         {
-            return Err(AccountError::Validation(vec![field_error(
-                "landing_menu_id",
-                "is not a page you can open",
-            )]));
+            return Err(Error::Invalid);
         }
-        let mut tx = self
-            .mutations
-            .begin(
-                &mut client,
-                scope.mutation_context("user.preference.landing"),
+        Ok(())
+    }
+
+    pub(crate) async fn lock_landing(
+        tx: &bilibi_database::MutationTransaction<'_>,
+        scope: &Scope,
+    ) -> Result<()> {
+        let lock = format!("core/user:landing:{}:{}", scope.tenant(), scope.user());
+        tx.sql()
+            .execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                &[&lock],
             )
             .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn apply_landing(
+        &self,
+        tx: &mut bilibi_database::MutationTransaction<'_>,
+        scope: &Scope,
+        value: &str,
+    ) -> Result<()> {
+        self.check_landing(tx.sql(), scope, value).await?;
         let own = Target::User { company: None };
         if value.is_empty() {
+            self.settings.delete(tx, scope, own, LANDING_KEY).await?;
+        } else if self.landing_choice(tx.sql(), scope).await? != value {
             self.settings
-                .delete(&mut tx, &scope, own, LANDING_KEY)
-                .await?;
-        } else {
-            self.settings
-                .put(&mut tx, &scope, own, LANDING_KEY, json!(value))
+                .put(tx, scope, own, LANDING_KEY, json!(value))
                 .await?;
         }
-        tx.commit().await?;
         Ok(())
     }
 

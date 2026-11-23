@@ -22,11 +22,16 @@ pub const PREFIX: &str = "report";
 /// The reports the reader has placed and may still run (each by id, however
 /// many reports sort before it), then the first of the others by name to
 /// offer only when Customize asks for them.
-pub fn entries<'a>(scope: &'a Scope, placed: &'a [String], offers: bool) -> ProvidedFuture<'a> {
+pub fn entries<'a>(
+    client: &'a tokio_postgres::Client,
+    scope: &'a Scope,
+    placed: &'a [String],
+    offers: bool,
+) -> ProvidedFuture<'a> {
     Box::pin(async move {
         let reports = crate::agent_operations::facade().ok_or(Error::Internal)?;
         let entries = reports
-            .dashboard_entries(scope, placed, offers)
+            .dashboard_entries(client, scope, placed, offers)
             .await
             .map_err(super::page_error)?;
         Ok(entries

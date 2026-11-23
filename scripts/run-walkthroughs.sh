@@ -228,6 +228,7 @@ WALKTHROUGHS=(
   'web|authz|apps/web|p6-authz|seed|BILIBI_AUTHZ_DEMO=disposable|-'
   'web|picklists|apps/web|picklists-reference|none||-'
   'web|customisations|apps/web|customisations-walkthrough|none|BILIBI_CUSTOMISATIONS_DEMO=disposable|-'
+  'web|workspace|apps/web|workspace-walkthrough|none|BILIBI_WORKSPACE_DEMO=disposable|-'
   'web|records|apps/web|records-reference|none|-APP_ORIGIN|-'
   'web|records-equivalence|apps/web|records-equivalence|none||-'
   'web|role-assignment-bounds|apps/web|role-assignment-bounds|seed|BILIBI_ASSIGNMENT_PROOF=disposable|-'
