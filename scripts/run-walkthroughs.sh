@@ -188,6 +188,7 @@ WALKTHROUGHS=(
   'core|user-credentials|apps/core/user|credentials-walkthrough|migrate|BILIBI_DISPOSABLE_CREDENTIALS_DEMO=yes|-'
   'core|user-database-queries|apps/core/user|database-queries-walkthrough|migrate|BILIBI_DISPOSABLE_QUERY_DEMO=yes|-'
   'core|user-identity|apps/core/user|identity-walkthrough|migrate|BILIBI_IDENTITY_DEMO=disposable|-'
+  'core|user-identity-lifecycle|apps/core/user|identity-lifecycle-walkthrough|migrate|BILIBI_IDENTITY_LIFECYCLE_DEMO=disposable|-'
   'core|user-impersonation-capabilities|apps/core/user|impersonation-capabilities-walkthrough|migrate|BILIBI_IMPERSONATION_CAPABILITIES_DEMO=disposable|-'
   'core|user-memberships|apps/core/user|memberships-walkthrough|migrate|BILIBI_MEMBERSHIPS_DEMO=disposable|-'
   'core|user-tenant-owner-bootstrap|apps/core/user|tenant-owner-bootstrap-walkthrough|migrate|BILIBI_TENANT_OWNER_DEMO=disposable DATABASE_POOL_SIZE=1 BILIBI_MAIL_DIR=@/mailbox -MAIL_HOST|-'

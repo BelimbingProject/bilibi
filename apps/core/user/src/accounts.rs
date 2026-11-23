@@ -330,17 +330,29 @@ impl UserService {
         tx
             .mutate(move |sql| {
                 Box::pin(async move {
+                    let identity: i64 = sql
+                        .query_one(
+                            "SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                            &[&tenant, &user],
+                        )
+                        .await?
+                        .get(0);
                     sql.execute(
                         "UPDATE users SET deleted_at=now(),status='deleted',version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2",
                         &[&tenant, &user],
                     )
                     .await?;
-                    let changes = vec![Change {
+                    let mut changes = vec![Change {
                         kind: "user".into(),
                         id: user,
                         old: json!({"email": account.email, "deleted_at": null}),
                         new: json!({"email": account.email, "deleted_at": "now"}),
                     }];
+                    if let Some(change) =
+                        crate::identity_lifecycle::mark_orphaned(sql, identity).await?
+                    {
+                        changes.push(change);
+                    }
                     Ok(((), changes))
                 })
             })

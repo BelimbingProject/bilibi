@@ -9,6 +9,7 @@ mod composition;
 mod create_owner;
 mod endpoints;
 mod errors;
+mod identity_lifecycle;
 mod impersonation;
 mod landing;
 mod live;
@@ -43,6 +44,9 @@ use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
 pub use create_owner::create_owner;
+pub use identity_lifecycle::{
+    delete as delete_identity, recover as recover_identity, retention as retain_identities,
+};
 pub use provision::provision;
 pub use two_factor_reset::two_factor_reset;
 
