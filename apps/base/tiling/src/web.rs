@@ -61,6 +61,7 @@ pub(crate) struct Core {
     /// Every discovered route with the module that contributes it.
     routes: Vec<(&'static str, &'static Route)>,
     pub(crate) layouts: Arc<Layouts>,
+    pub(crate) contracts: Arc<bilibi_agent_api::page::PageContracts>,
 }
 pub struct Pages(Arc<Core>);
 impl Pages {
@@ -69,12 +70,14 @@ impl Pages {
         menu: Arc<Menu>,
         routes: Vec<(&'static str, &'static Route)>,
         layouts: Arc<Layouts>,
+        contracts: Arc<bilibi_agent_api::page::PageContracts>,
     ) -> Self {
         Self(Arc::new(Core {
             db,
             menu,
             routes,
             layouts,
+            contracts,
         }))
     }
 }

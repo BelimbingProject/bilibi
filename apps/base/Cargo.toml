@@ -16,6 +16,7 @@ bilibi-authz-agent = { path = "authz_agent" }
 bilibi-bulk-data = { path = "bulk_data" }
 bilibi-custom-fields = { path = "custom_fields" }
 bilibi-dashboard = { path = "dashboard" }
+bilibi-dashboard-agent = { path = "dashboard_agent" }
 bilibi-database = { path = "database" }
 bilibi-datetime = { path = "datetime" }
 bilibi-design-library = { path = "design_library" }

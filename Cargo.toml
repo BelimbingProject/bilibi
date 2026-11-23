@@ -99,6 +99,7 @@ bilibi-bulk-data = { path = "apps/base/bulk_data" }
 bilibi-audit-views = { path = "apps/base/audit_views" }
 bilibi-authz = { path = "apps/base/authz" }
 bilibi-dashboard = { path = "apps/base/dashboard" }
+bilibi-dashboard-agent = { path = "apps/base/dashboard_agent" }
 bilibi-datetime = { path = "apps/base/datetime" }
 bilibi-events = { path = "apps/base/events" }
 bilibi-design-library = { path = "apps/base/design_library" }

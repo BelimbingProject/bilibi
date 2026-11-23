@@ -347,7 +347,6 @@ Each gap is a `Pending` declaration in the owning module, with its reason. Remov
 | `base/session.pages` | Ending sessions |
 | `base/settings_editor.pages` | Saving and restoring settings |
 | `base/system.pages` | Localization changes |
-| `base/tiling.pages` | Workspace and shared layouts |
 | `base/workflow.pages` | The workflow reference page |
 | `core/agent.pages` | Device approval and connection revocation |
 | `core/company.pages` | Company edits, lifecycle, activities, departments, reference types; the create form records activities `core.company.create` does not take |

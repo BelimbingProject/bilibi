@@ -3,7 +3,7 @@
 //! Published trees live in company settings and are filtered by role. Every
 //! tile still checks the viewer's own access to its page.
 use crate::layout::Layout;
-use bilibi_database::{Db, Error, MutationBoundary, Result};
+use bilibi_database::{Error, Result};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_settings::{
     Definition, ScopeKind, Setting, Settings, Target, Validator, ValueType, DEFINITIONS,
@@ -34,7 +34,7 @@ macro_rules! provenance {
 }
 
 /// One shared layout as stored.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Entry {
     pub slug: String,
     pub label: String,
@@ -46,8 +46,8 @@ impl Entry {
     fn read(value: &Value) -> Option<Self> {
         let slug = value.get("slug")?.as_str()?;
         let label = value.get("label")?.as_str()?;
-        let tree = clean_tree(value.get("tree")?.as_str()?).ok()?;
-        if !valid_slug(slug) || clean_label(label).is_err() {
+        let tree = clean_tree(value.get("tree")?.as_str()?)?;
+        if !valid_slug(slug) || clean_label(label).is_none() {
             return None;
         }
         let roles = match value.get("roles") {
@@ -68,54 +68,7 @@ impl Entry {
             roles,
         })
     }
-    fn write(&self, shared: bool) -> Value {
-        let mut value = json!({
-            "slug": self.slug,
-            "label": self.label,
-            "tree": self.tree,
-        });
-        if shared {
-            value["roles"] = json!(self.roles);
-        }
-        value
-    }
 }
-
-/// Why a layout write was refused; a refusal is the person's to read, never a
-/// fatal error of the page.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Refusal {
-    /// The label is empty or over 60 bytes once whitespace is collapsed.
-    Label,
-    /// The tree does not decode to at least one tile.
-    Tree,
-    /// A role code is not lower-case letters, digits and underscores.
-    Roles,
-    /// The actor may not publish or delete shared layouts.
-    Forbidden,
-}
-
-#[derive(Debug)]
-pub enum LayoutError {
-    Refused(Refusal),
-    Storage(Error),
-}
-impl From<Error> for LayoutError {
-    fn from(error: Error) -> Self {
-        // A write the storage refused for its own reasons (a company target the
-        // proof provider does not know) reads as forbidden, not as a crash.
-        match error {
-            Error::Forbidden => Self::Refused(Refusal::Forbidden),
-            other => Self::Storage(other),
-        }
-    }
-}
-impl From<Refusal> for LayoutError {
-    fn from(refusal: Refusal) -> Self {
-        Self::Refused(refusal)
-    }
-}
-pub type Outcome<T> = std::result::Result<T, LayoutError>;
 
 /// A role an audience can be limited to: its display name and the code
 /// stored in a shared layout.
@@ -126,18 +79,12 @@ pub struct RoleOption {
 }
 
 pub struct Layouts {
-    db: Db,
-    settings: Arc<Settings>,
-    boundary: Arc<MutationBoundary>,
+    pub(crate) settings: Arc<Settings>,
 }
 
 impl Layouts {
-    pub fn new(db: Db, settings: Arc<Settings>, boundary: Arc<MutationBoundary>) -> Self {
-        Self {
-            db,
-            settings,
-            boundary,
-        }
+    pub fn new(settings: Arc<Settings>) -> Self {
+        Self { settings }
     }
 
     // ---- The company's shared layouts ---------------------------------
@@ -173,117 +120,10 @@ impl Layouts {
             })
             .collect())
     }
-
-    /// Publishes `tree` under `label` for the company, limited to `roles` (none
-    /// is everyone). A label already published replaces that layout's tree and
-    /// audience and keeps its slug.
-    pub async fn publish(
-        &self,
-        scope: &Scope,
-        label: &str,
-        tree: &str,
-        roles: &[String],
-    ) -> Outcome<Entry> {
-        let label = clean_label(label)?;
-        let tree = clean_tree(tree)?;
-        if !roles.iter().all(|code| valid_role(code)) {
-            return Err(Refusal::Roles.into());
-        }
-        let roles: Vec<String> = roles
-            .iter()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .cloned()
-            .collect();
-        let client = self.db.get().await.map_err(Error::from)?;
-        self.authorize(&**client, scope).await?;
-        let mut entries = self.shared(&**client, scope).await?;
-        drop(client);
-        let entry = match entries.iter_mut().find(|entry| entry.label == label) {
-            Some(entry) => {
-                entry.tree = tree;
-                entry.roles = roles;
-                entry.clone()
-            }
-            None => {
-                let entry = Entry {
-                    slug: unique_slug(&slug(&label), &entries),
-                    label,
-                    tree,
-                    roles,
-                };
-                entries.push(entry.clone());
-                entry
-            }
-        };
-        self.put_shared(scope, &entries).await?;
-        Ok(entry)
-    }
-
-    /// Unpublishes the shared layout with `slug` for everyone in the company.
-    pub async fn unpublish(&self, scope: &Scope, slug: &str) -> Outcome<()> {
-        let client = self.db.get().await.map_err(Error::from)?;
-        self.authorize(&**client, scope).await?;
-        let entries: Vec<_> = self
-            .shared(&**client, scope)
-            .await?
-            .into_iter()
-            .filter(|entry| entry.slug != slug)
-            .collect();
-        drop(client);
-        self.put_shared(scope, &entries).await?;
-        Ok(())
-    }
-
-    // The screen's route capability is presentation. This is the write: the
-    // same `ui.workspace.publish` key, asked of the scope the edge sealed.
-    async fn authorize(&self, client: &(impl GenericClient + Sync), scope: &Scope) -> Outcome<()> {
-        match bilibi_authz::authorize_key(client, scope, PUBLISH).await {
-            Ok(()) => Ok(()),
-            Err(Error::Forbidden) => Err(Refusal::Forbidden.into()),
-            Err(error) => Err(LayoutError::Storage(error)),
-        }
-    }
-
-    async fn put_shared(&self, scope: &Scope, entries: &[Entry]) -> Result<()> {
-        let value: Vec<_> = entries.iter().map(|entry| entry.write(true)).collect();
-        self.write(
-            scope,
-            shared_target(scope)?,
-            SHARED,
-            Some(Value::Array(value)),
-        )
-        .await
-    }
-
-    /// A self-service write to the account's own preference, or a company
-    /// write the caller has authorized; audited like any other mutation.
-    async fn write(
-        &self,
-        scope: &Scope,
-        target: Target,
-        key: &str,
-        value: Option<Value>,
-    ) -> Result<()> {
-        let mut client = self.db.get().await.map_err(Error::from)?;
-        let mut tx = self
-            .boundary
-            .begin(&mut client, scope.mutation_context("tiling.layouts"))
-            .await?;
-        match value {
-            Some(value) => {
-                self.settings
-                    .put(&mut tx, scope, target, key, value)
-                    .await?
-            }
-            None => self.settings.delete(&mut tx, scope, target, key).await?,
-        }
-        tx.commit().await
-    }
 }
 
 /// Where the current company's shared layouts live.
-fn shared_target(scope: &Scope) -> Result<Target> {
+pub(crate) fn shared_target(scope: &Scope) -> Result<Target> {
     scope
         .current_company()
         .map(Target::Company)
@@ -369,7 +209,7 @@ pub fn unique_slug(base: &str, entries: &[Entry]) -> String {
         .expect("an unused numbered slug")
 }
 
-fn valid_slug(slug: &str) -> bool {
+pub(crate) fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 90
         && slug
@@ -378,24 +218,23 @@ fn valid_slug(slug: &str) -> bool {
 }
 
 /// A label with whitespace collapsed, when it is one to 60 bytes.
-pub fn clean_label(label: &str) -> std::result::Result<String, Refusal> {
+pub fn clean_label(label: &str) -> Option<String> {
     let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
     if label.is_empty() || label.len() > MAX_LABEL {
-        return Err(Refusal::Label);
+        return None;
     }
-    Ok(label)
+    Some(label)
 }
 
 /// The encoded tree, when it decodes to at least one tile.
-pub fn clean_tree(tree: &str) -> std::result::Result<String, Refusal> {
+pub fn clean_tree(tree: &str) -> Option<String> {
     if tree.len() > MAX_TREE {
-        return Err(Refusal::Tree);
+        return None;
     }
     Layout::decode(tree)
         .filter(|layout| !layout.is_empty())
         .map(|layout| layout.encode())
         .filter(|encoded| encoded.len() <= MAX_TREE)
-        .ok_or(Refusal::Tree)
 }
 
 pub fn valid_role(code: &str) -> bool {
@@ -410,7 +249,7 @@ pub fn valid_role(code: &str) -> bool {
 
 /// A stored list is a bounded array of complete entries, each decoding to at
 /// least one tile; an entry Settings would refuse never reaches storage.
-fn valid_entries(value: &Value) -> bool {
+pub(crate) fn valid_entries(value: &Value) -> bool {
     value.as_array().is_some_and(|entries| {
         entries.len() <= MAX_ENTRIES
             && entries.iter().all(|entry| Entry::read(entry).is_some())
