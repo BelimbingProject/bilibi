@@ -36,7 +36,7 @@ Set the name and logo independently. A name alone draws a text wordmark. An avai
 | Who | How |
 | --- | --- |
 | An agent | `base.branding.get`, `base.branding.set` (`name`, `accent`, `logo_asset_id`) and `base.branding.restore` (`item`: `name`, `logo` or `accent`). Writes are reviewed first. The guide is `base.branding` |
-| A person | **System Settings → Upload logo** stages an image through Media and returns its asset ID for the reviewed set operation |
+| A person | **System Settings → Global → Upload logo** stages an image through Media and returns its asset ID for the reviewed set operation |
 | Inspection | **Administration → Customisations → Brand** lets branding managers inspect changed settings, including an unavailable logo |
 
 - Changing it needs `admin.system.branding.manage`, a platform capability: only the platform operator's administrators hold it. `base.branding.get` is open to every signed-in person, as the brand is on the sign-in page; `can_manage` says whether the caller may change it.

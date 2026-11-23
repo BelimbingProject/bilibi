@@ -39,7 +39,7 @@ Professional, compact, warm, trustworthy. Dense enough for operations, calm enou
 - Controls use `rounded-md`. Surfaces use `rounded-xl`.
 - The accent marks orientation only: card top edge, active navigation, selection, unseen markers. Accent colours never report status.
 - Font: Instrument Sans, vendored locally (SIL OFL). No remote font requests.
-- **Default wordmark:** the mark, then "bilibi" in lowercase Lexend SemiBold (600), on one line. Use the shared `wordmark` macro on credential pages and in the workspace top bar. On phones the top bar uses a smaller wordmark and keeps the company label readable. Sentences, page titles and the browser tab keep "Bilibi" with its capital. No other text uses Lexend: the vendored file holds only the letters b, i and l (SIL OFL, `OFL-Lexend.txt`). A tenant's portal shows its own title in the interface font, never the wordmark.
+- **Default wordmark:** the mark, then "bilibi" in lowercase Lexend SemiBold (600), on one line. Use the shared `wordmark` macro on credential pages and in the workspace top bar. On phones the top bar uses a smaller wordmark and keeps the company label readable. Capitalise "Bilibi" when using the default product name outside the wordmark. No other text uses Lexend: the vendored file holds only the letters b, i and l (SIL OFL, `OFL-Lexend.txt`). A tenant's portal shows its own title in the interface font, never the wordmark.
 - **Adopter brand:** use the shared wordmark and the installation accent. The account menu footer is small and muted. See [Branding](apps/base/branding/README.md#where-it-shows).
 - Tailwind CSS 4.3.0 builds one generated stylesheet, embedded by Cargo. Commit its sources only; Node is needed on build machines.
 
