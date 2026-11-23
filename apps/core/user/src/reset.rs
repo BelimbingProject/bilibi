@@ -337,6 +337,50 @@ impl ResetMail {
         self.deliver(tenant, user, message, token.as_deref());
         Ok(())
     }
+
+    /// Mails the server owner the one-time link that claims the account: the
+    /// owner chooses its password there, so only the holder of the address
+    /// can sign in. Waits for delivery so the server command can report it.
+    /// A link issued within the last minute stands ([`ClaimMail::RecentlySent`]);
+    /// a failed delivery withdraws the token so a retry can send again.
+    pub(crate) async fn mail_owner_claim(
+        &self,
+        tenant: i64,
+        user: i64,
+        name: &str,
+        address: &str,
+    ) -> Result<ClaimMail, Error> {
+        let Some(token) = self.issue_token(tenant, user, address, false).await? else {
+            return Ok(ClaimMail::RecentlySent);
+        };
+        let origin = &self.origin;
+        let message = Message::text(
+            Address::new(Some(name), address).map_err(|_| Error::Invalid)?,
+            "Claim your Bilibi server",
+            format!(
+                "You are the owner of the Bilibi server at {origin}.\n\n\
+                 1. Choose your password with this link:\n\n{}\n\n\
+                 2. Sign in, then set up two-factor authentication with your phone:\n\n{origin}/settings/two-factor?method=core.user.authenticator\n\n\
+                 The server is yours once both are done. The link works once. If you did not expect this email, ignore it: nobody can sign in as you without it.\n",
+                reset_link(origin, address, &token)
+            ),
+        );
+        match self.mailer.deliver_for(tenant, &message).await {
+            Ok(_) => Ok(ClaimMail::Sent),
+            Err(error) => {
+                self.withdraw(tenant, user, digest(&token)).await?;
+                Ok(ClaimMail::NotDelivered(error.to_string()))
+            }
+        }
+    }
+}
+
+/// What [`ResetMail::mail_owner_claim`] did.
+pub(crate) enum ClaimMail {
+    Sent,
+    RecentlySent,
+    /// The transport refused; the detail is for the operator.
+    NotDelivered(String),
 }
 
 /// The audit change of a reset token: only that it was issued or withdrawn.
