@@ -1192,7 +1192,7 @@ impl Editor {
             "If",
             "watcher-draft-if",
             if trigger_chosen {
-                "Conditions on the record the event is about. Leave none for every event."
+                "Conditions on the record the event is about, or on a record it links to. Leave none for every event."
             } else {
                 "Choose what happens first; the fields of its record appear here."
             },

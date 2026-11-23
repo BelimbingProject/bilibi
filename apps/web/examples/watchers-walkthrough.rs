@@ -732,11 +732,19 @@ async fn linked_custom_field_proof(proof: &Proof) -> Result<()> {
         "the offered field is in the vocabulary by its path, under the link and the tenant label",
     );
     let (watcher_id, number) = proof.draft(&one, watcher.clone()).await?;
-    let refused = proof.approve(&one, watcher_id, number).await;
-    println!("     approval before automation may read companies: {refused:?}");
+    let client = proof.db.get().await?;
+    let review = proof
+        .watchers
+        .review_approval(&**client, &one, watcher_id, number as i32)
+        .await?;
+    drop(client);
+    println!("     approval review: {:?}", review.warnings);
     check(
-        refused.is_err_and(|why| why.contains("hidden from automation")),
-        "the watcher is not approved while automation may not read companies",
+        review
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Automation may not read Companies yet")),
+        "the approval review warns that automation may not read companies yet",
     );
     proof
         .grant(&one, "watchers", "admin.company.list", Some(true))
@@ -855,12 +863,9 @@ async fn linked_custom_field_proof(proof: &Proof) -> Result<()> {
     proof.settled().await?;
     proof.show(unreachable).await?;
     check(
-        proof
-            .receipts(unreachable)
-            .await?
-            .iter()
-            .any(|r| r.0 == watcher_id && r.1 == "refused")
-            && proof.case(unreachable).await?.0.is_none(),
+        proof.receipts(unreachable).await?.iter().any(|r| {
+            r.0 == watcher_id && r.1 == "refused" && r.2.as_deref() == Some("read_refused")
+        }) && proof.case(unreachable).await?.0.is_none(),
         "when automation may no longer read companies, the run is refused and the case stays",
     );
     proof

@@ -84,7 +84,7 @@ fn effect_reason(code: &str) -> &'static str {
         _ => "refused",
     }
 }
-fn why(run: &RunView, described: &crate::review::Described) -> Vec<String> {
+fn why(run: &RunView, described: &crate::describe::Described) -> Vec<String> {
     let mut lines = Vec::new();
     match run.state.as_str() {
         _ if run.outcomes.get("restricted").is_some() => {

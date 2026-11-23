@@ -511,7 +511,23 @@ impl Watchers {
                     {
                         column
                     }
-                    _ => return Ok(Err("restricted_field")),
+                    _ => {
+                        // A linked table the reader may not read at all is a
+                        // refused read, as the trigger's own table is.
+                        let closed = bilibi_grid::installed()
+                            .ok()
+                            .and_then(|grid| Some((grid, grid.table(table)?)))
+                            .is_some_and(|(grid, root)| {
+                                crate::review::hops(grid, root, path)
+                                    .iter()
+                                    .any(|hop| catalog.table(hop.to()).is_none())
+                            });
+                        return Ok(Err(if closed {
+                            "read_refused"
+                        } else {
+                            "restricted_field"
+                        }));
+                    }
                 };
                 reached.push(
                     bilibi_grid::scalar_access(&catalog, table, path)
