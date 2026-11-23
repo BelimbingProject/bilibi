@@ -367,7 +367,7 @@ pub(crate) async fn summarize_catalog(
     for (i, grouping) in spec.groupings.iter().enumerate() {
         let column = resolve(catalog, root, &grouping.column, &mut hops)?;
         let dated = matches!(column.ty, FieldType::Date | FieldType::DateTime);
-        let value = cell(catalog, root, &column);
+        let value = crate::query::column_value(catalog, root, &column, true);
         let key = match (grouping.bucket, dated) {
             (Some(bucket), true) => format!(
                 "to_jsonb(date_trunc('{}', {})::date)",
@@ -560,6 +560,7 @@ pub async fn report_page<S: AsRef<str>>(
     spec: &PageSpec,
     columns: &[S],
     measures: &[Measure],
+    file_cap: Option<usize>,
 ) -> Result<(KeyPage, crate::Projection, Vec<Value>), QueryError> {
     spec.bounds.check()?;
     let mut client = db.get().await.map_err(Error::from)?;
@@ -571,7 +572,7 @@ pub async fn report_page<S: AsRef<str>>(
     tx.batch_execute(&spec.bounds.sql()).await?;
     let catalog = Catalog::for_report(&*tx, scope).await?;
     let keys = page_keys_catalog(&tx, &catalog, root, spec).await?;
-    let projection = crate::query::project_catalog(
+    let mut projection = crate::query::project_catalog(
         &tx,
         &catalog,
         root,
@@ -598,6 +599,26 @@ pub async fn report_page<S: AsRef<str>>(
         )
         .await?;
         totals.extend(summary.total.values);
+    }
+    if file_cap.is_some_and(|cap| keys.total as usize <= cap) {
+        let mut next = spec.clone();
+        next.offset += spec.limit;
+        next.limit = MAX_ROWS;
+        while next.offset < keys.total as usize {
+            let batch = page_keys_catalog(&tx, &catalog, root, &next).await?;
+            let page = crate::query::project_catalog(
+                &tx,
+                &catalog,
+                root,
+                &batch.keys,
+                columns,
+                &crate::Lenses::default(),
+                spec.bounds,
+            )
+            .await?;
+            projection.rows.extend(page.rows);
+            next.offset += next.limit;
+        }
     }
     tx.commit().await?;
     Ok((keys, projection, totals))
@@ -805,10 +826,21 @@ fn filters(
     let mut predicates = Vec::with_capacity(filters.len());
     for filter in filters {
         let column = resolve(catalog, root, &filter.column, hops)?;
-        if !authorize && column.depth != 0 {
+        if !authorize
+            && column
+                .hops
+                .iter()
+                .chain(&column.many)
+                .chain(&column.tail)
+                .any(|link| {
+                    catalog
+                        .table(link.to())
+                        .is_some_and(|table| table.report_subjects && table.subject().is_some())
+                })
+        {
             continue;
         }
-        let value = cell(catalog, root, &column);
+        let value = crate::query::column_value(catalog, root, &column, true);
         let subject = column
             .field
             .and_then(|field| catalog.table(column.table)?.report_subject(field.id));

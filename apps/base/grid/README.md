@@ -69,11 +69,11 @@ A table whose capability supports record reach (`CapabilityDefinition::with_reac
 
 A table whose rows are each about one record of another kind (a case about a customer) names the field holding that record's id and its Base Records kind: `TableDecl::new(...).subject("customer_id", "company")`. Reports over the table then count per record, not per stored id, and show a reader only the rows about records they may read (#877).
 
-- **Merges:** the field reads as the record its stored id names now, in a report grouping, filter, sort, cell or join. Rows stored under a record merged since group and filter under its survivor; no row is rewritten. Base Records owns merges and binds the lookup (`bind_survivors`); Grid never reads its storage by name.
+- **Merges:** the field reads as the record its stored id names now, in report grouping and filtering. Rows stored under a record merged since group and filter under its survivor; no row is rewritten. Base Records owns merges and binds the lookup (`bind_survivors`); Grid never reads its storage by name.
 - **Readable subjects only:** Reports resolve canonical IDs before following redirects. Report summaries, pages and linked reads apply the Base Records owner's read rule to each distinct survivor on the same transaction as the report query. Rows with a null subject remain. Unknown record kinds admit no non-null subjects. Subject field masks and naming still follow the scoped Grid and Base Records restrictions.
 - **Declaration:** one subject per table; an integer or text field other than the key, on a tenant source. The kind is the audit kind its owner registers with [Base Records](../records/README.md); boot refuses a malformed declaration. The field is a record field in reports: it filters by `equals`, `one_of`, `empty` and `not_empty` and accepts count as its only aggregate.
-- **Ordinary Grid reads** use stored values and keep their own access rules. Oversight has no child actor for owner checks and includes only rows with a null subject on a subject-declaring source.
-- **Bounds:** Grid refuses a report when subject candidates within the root filters or selected page keys, including reachable links, or owner decisions exceed its read bounds or require checking more than 1,000 distinct records.
+- **Ordinary Grid reads** use stored values and keep their own access rules. Oversight excludes subject-declaring sources from its catalog and refuses a report built on one.
+- **Bounds:** Grid refuses a report when subject candidates within filters independent of subject authorization or selected page keys, including reachable links, or owner decisions exceed its read bounds or require checking more than 1,000 distinct records.
 
 
 Proof: `BILIBI_REPORT_SUBJECTS=disposable cargo run -p bilibi-web --example report-subjects` on an empty disposable database (`scripts/run-walkthroughs.sh report-subjects`).

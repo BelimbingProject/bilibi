@@ -317,12 +317,13 @@ impl Catalog {
         rows: bool,
     ) -> Result<Self, CatalogError> {
         let parent = oversight.verify(client, grant).await?;
-        let mut catalog = Self::for_report(client, &parent).await?;
+        let mut catalog = Self::for_scope(client, &parent).await?;
         let mut tables = BTreeMap::new();
         for table in catalog.tables.values() {
             // A child's rows have no owner in the parent's teams: a parent
             // that reaches a table only partly reads none of it (#683).
-            if !table.oversight_classified() || table.reach().is_some() {
+            if table.subject().is_some() || !table.oversight_classified() || table.reach().is_some()
+            {
                 continue;
             }
             let rule = &grant.tables()[table.id()];
@@ -390,7 +391,6 @@ impl Catalog {
             }
             table.retain_links(|link| allowed.contains(link.id()));
         }
-        catalog.subject_scope = None;
         catalog.tenant = grant.tenant();
         catalog.user = 0;
         catalog.tables = tables;
@@ -404,7 +404,7 @@ impl Catalog {
         oversight: &bilibi_tenancy::OversightScope,
         rows: bool,
     ) -> Result<Self, CatalogError> {
-        let mut catalog = Self::for_report(client, oversight.parent()).await?;
+        let mut catalog = Self::for_scope(client, oversight.parent()).await?;
         let mut children = Vec::new();
         for grant in oversight.children() {
             children.push(Self::for_oversight(client, oversight, grant, rows).await?);

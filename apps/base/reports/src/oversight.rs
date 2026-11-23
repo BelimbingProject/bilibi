@@ -67,6 +67,9 @@ impl Reports {
         report: Report,
         input: &RunInput,
     ) -> Outcome<Run> {
+        self.oversight
+            .check_source(&report.record_type)
+            .map_err(grid)?;
         if input.background {
             return Err(ReportError::Refused("Oversight results are live reads. Download them directly; they cannot be retained or scheduled in the parent.".into()));
         }

@@ -1,8 +1,4 @@
-//! A list result's question as the run resolved it for the reader: the
-//! record type, filters, sorts, columns, read bounds and time zone. A run
-//! reads its one page through it; a file keeps it and reads the remaining
-//! pages with only the keys and the cells (`export::tabulate`), never a
-//! whole run per page.
+//! A row report's resolved filters, sorts, columns, bounds and time zone.
 use crate::{Outcome, grid};
 use bilibi_grid::{Bounds, Column, Filter, PageSpec, Sort};
 use bilibi_tenancy::Scope;
@@ -38,6 +34,7 @@ impl Listing {
         offset: usize,
         limit: usize,
         measures: &[bilibi_grid::Measure],
+        file_cap: Option<usize>,
     ) -> Outcome<ListPage> {
         let (keys, projection, totals) = bilibi_grid::report_page(
             &reports.db,
@@ -53,6 +50,7 @@ impl Listing {
             },
             &self.specs,
             measures,
+            file_cap,
         )
         .await
         .map_err(grid)?;

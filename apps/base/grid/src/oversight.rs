@@ -2,11 +2,11 @@
 use crate::{
     Agg, Bounds, Catalog, Lenses, Line, PageSpec, Projection, QueryError, Summary, SummarySpec,
 };
-use bilibi_audit::{record_action, record_oversight_read, Attribution, OversightRead};
+use bilibi_audit::{Attribution, OversightRead, record_action, record_oversight_read};
 use bilibi_database::{Connection, Db, Error};
-use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Settings, ValueType, DEFINITIONS};
+use bilibi_settings::{DEFINITIONS, Definition, Editor, ScopeKind, Setting, Settings, ValueType};
 use bilibi_tenancy::{ChildGrant, Oversight, OversightScope, Scope};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::{
     task::JoinSet,
-    time::{timeout, timeout_at, Instant},
+    time::{Instant, timeout, timeout_at},
 };
 
 pub const OVERSIGHT_QUERIES: &str = "base/grid.oversight";
@@ -159,12 +159,27 @@ impl OversightQueries {
         }
         result
     }
+    pub fn check_source(&self, root: &str) -> Result<(), QueryError> {
+        if crate::installed()
+            .map_err(Error::from)?
+            .table(root)
+            .is_some_and(|table| table.subject().is_some())
+        {
+            return Err(QueryError::Unsupported(
+                root.into(),
+                "oversight does not support sources with record subjects",
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn read(
         &self,
         scope: &OversightScope,
         root: &str,
         spec: &OversightSpec,
     ) -> Result<OversightResult, QueryError> {
+        self.check_source(root)?;
         // Bound even pool admission and settings lookup; an unavailable policy
         // cannot leave an unbounded request or return unaudited data.
         timeout(Duration::from_secs(60), async {
@@ -536,6 +551,7 @@ impl OversightQueries {
         root: &str,
         spec: &OversightSpec,
     ) -> Result<bool, QueryError> {
+        self.check_source(root)?;
         let deadline = self.deadline_on(tx).await?;
         let (scope, child_ms) = budgeted(tx, deadline, TOTAL_TIMEOUT, None, async {
             let scope = self.tenancy.prove(tx, scope).await?;

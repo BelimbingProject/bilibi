@@ -605,6 +605,9 @@ impl Reports {
         draft: &Draft,
     ) -> Outcome<()> {
         let catalog = if draft.definition.oversight {
+            self.oversight
+                .check_source(&draft.record_type)
+                .map_err(grid)?;
             let tx = tx.ok_or(Error::Internal)?;
             self.oversight
                 .builder_catalog_on(tx, scope, draft.kind == Kind::Rows)
@@ -1146,7 +1149,7 @@ impl Reports {
     }
 
     async fn run_report(&self, scope: &Scope, report: Report, input: &RunInput) -> Outcome<Run> {
-        Ok(self.run_report_for(scope, report, input, false).await?.0)
+        self.run_report_for(scope, report, input, None).await
     }
 
     async fn run_report_for(
@@ -1154,10 +1157,10 @@ impl Reports {
         scope: &Scope,
         report: Report,
         input: &RunInput,
-        file: bool,
-    ) -> Outcome<(Run, Option<listing::Listing>)> {
+        file_cap: Option<usize>,
+    ) -> Outcome<Run> {
         if report.definition.oversight {
-            return Ok((self.run_oversight(scope, report, input).await?, None));
+            return self.run_oversight(scope, report, input).await;
         }
         let bounds = self.bounds(scope, input.background).await?;
         let client = self.db.get().await.map_err(Error::from)?;
@@ -1198,7 +1201,6 @@ impl Reports {
             filters.extend(typed);
         }
         let as_rows = report.kind == Kind::Rows || input.as_rows;
-        let mut kept = None;
         let reference_names;
         let result = match report.kind {
             _ if as_rows => {
@@ -1262,12 +1264,13 @@ impl Reports {
                         input.page.saturating_mul(page_size),
                         page_size,
                         &measures,
+                        file_cap,
                     )
                     .await?;
                 reference_names = page.reference_names;
                 let rows = page.rows;
                 // A file holds no links: the reader opens records from the page.
-                let pages = if file {
+                let pages = if file_cap.is_some() {
                     Vec::new()
                 } else {
                     self.record_pages(scope, root, &rows).await?
@@ -1289,7 +1292,6 @@ impl Reports {
                 } else {
                     None
                 };
-                kept = Some(listing);
                 RunResult::Rows {
                     columns: page.columns.iter().map(info).collect(),
                     rows,
@@ -1369,7 +1371,7 @@ impl Reports {
             timezone,
             result,
         };
-        Ok((run, kept))
+        Ok(run)
     }
 
     /// Saves a new report owned by the actor, inside the caller's audited

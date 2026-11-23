@@ -783,10 +783,17 @@ pub(crate) fn field(alias: &str, table: &Table, id: &str) -> String {
     if let Some(sql) = table.custom_sql(id, alias) {
         return sql;
     }
-    let field = table.field(id).expect("resolved field");
-    let raw = format!("{alias}.{}", ident(field.source_key()));
-    match table.report_subject(id) {
-        Some(subject) => crate::subject::survivor(subject, field.ty, &raw),
+    format!(
+        "{alias}.{}",
+        ident(table.field(id).expect("resolved field").source_key())
+    )
+}
+fn subject_value(alias: &str, table: &Table, id: &str, resolve_subject: bool) -> String {
+    let raw = field(alias, table, id);
+    match table.report_subject(id).filter(|_| resolve_subject) {
+        Some(subject) => {
+            crate::subject::survivor(subject, table.field(id).expect("resolved field").ty, &raw)
+        }
         None => raw,
     }
 }
@@ -817,15 +824,31 @@ fn condition(link: &Link, parent: &Table, target: &Table, p: &str, t: &str) -> S
 // owner declaration returning two targets fails instead of silently inflating
 // aggregates. Edge duplicates are set membership, not duplicate business rows.
 pub(crate) fn cell(catalog: &Catalog, root: &Table, column: &Column) -> String {
+    column_value(catalog, root, column, false)
+}
+
+pub(crate) fn column_value(
+    catalog: &Catalog,
+    root: &Table,
+    column: &Column,
+    resolve_subject: bool,
+) -> String {
     let Some(Walked {
         suffix,
         alias: p,
         table: parent,
     }) = walk(catalog, root, column)
     else {
-        return field("r", root, column.field.expect("field column").id);
+        return subject_value(
+            "r",
+            root,
+            column.field.expect("field column").id,
+            resolve_subject,
+        );
     };
-    let value = column.field.map(|f| field(&p, parent, f.id));
+    let value = column
+        .field
+        .map(|f| subject_value(&p, parent, f.id, resolve_subject));
     match column.agg {
         None => format!("(SELECT {} {suffix})", value.unwrap()),
         Some(Agg::Count) => format!(

@@ -111,10 +111,32 @@ static GRID: GridContribution = GridContribution {
         )
         .label_field("title")
         .subject("account_id", ACCOUNT),
+        TableDecl::new(
+            "report_subject_events", "Events", CASES,
+            Source::tenant("SELECT id, opened_on FROM report_subject_cases WHERE tenant_id = $1"),
+            "id",
+            &[Field::new("id", "ID", FieldType::Integer),
+              Field::new("opened_on", "Opened", FieldType::Date)],
+        ),
+        TableDecl::new(
+            "report_subject_details", "Account details", CASES,
+            Source::tenant("SELECT DISTINCT account_id AS id, account_id, account_id::text AS title FROM report_subject_cases WHERE tenant_id = $1 AND account_id IS NOT NULL"),
+            "id",
+            &[Field::new("id", "ID", FieldType::Integer),
+              Field::new("account_id", "Account", FieldType::Integer),
+              Field::new("title", "Details", FieldType::String)],
+        )
+        .subject("account_id", ACCOUNT),
     ],
     links: &[LinkDecl::on(
         "text_case", "Text case", LinkKind::One,
         "report_subject_cases", "id", "report_subject_text_cases", "id",
+    ), LinkDecl::on(
+        "event", "Event", LinkKind::One,
+        "report_subject_text_cases", "id", "report_subject_events", "id",
+    ), LinkDecl::on(
+        "detail", "Detail", LinkKind::One,
+        "report_subject_cases", "account_id", "report_subject_details", "id",
     )],
 };
 bilibi_grid::contribute!("extensions/report_subjects", "report_subjects.grid", &GRID);
@@ -693,6 +715,41 @@ async fn main() -> Result<(), Failure> {
         format!("{still:?}"),
     );
 
+    let linked = write(&draft(
+        "Stored account links",
+        Kind::Rows,
+        Definition {
+            columns: vec!["title".into(), "detail.title".into()],
+            ..Definition::default()
+        },
+    ))
+    .await?;
+    let linked = reports.run(&viewer, linked, &RunInput::default()).await?;
+    checks.check(
+        "a One link keeps the duplicate's original detail after a merge",
+        matches!(&linked.result, RunResult::Rows { rows, .. } if rows.iter().any(|(_, cells)| cells == &[json!("Wrong invoice"), json!("2")])),
+        "case 2 still joins by stored account ID 2",
+    );
+    let rejected = reports
+        .check(
+            &manager,
+            &draft(
+                "Oversight cases",
+                Kind::Rows,
+                Definition {
+                    oversight: true,
+                    columns: vec!["title".into()],
+                    ..Definition::default()
+                },
+            ),
+        )
+        .await;
+    checks.check(
+        "oversight refuses a subject-declaring source",
+        matches!(&rejected, Err(ReportError::Refused(message)) if message.contains("record subjects")),
+        format!("{rejected:?}"),
+    );
+
     db.get().await?.execute(
         "INSERT INTO report_subject_cases(id,tenant_id,title,account_id,minutes,opened_on) SELECT id,1,'Historical case',id,1,CURRENT_DATE - 120 FROM generate_series(100,1100) id",
         &[],
@@ -710,7 +767,7 @@ async fn main() -> Result<(), Failure> {
                 agg: "sum".into(),
             }],
             filters: vec![FilterDef {
-                column: "opened_on".into(),
+                column: "event.opened_on".into(),
                 test: "within".into(),
                 value: json!("last_30_days"),
                 ask: false,
@@ -733,6 +790,42 @@ async fn main() -> Result<(), Failure> {
         "a padded text operand drills into all three survivor cases",
         matches!(recent_drill.result, RunResult::Rows { total: 3, .. }),
         "stored alias 0002",
+    );
+
+    db.get().await?.execute(
+        "INSERT INTO report_subject_cases(id,tenant_id,title,account_id,minutes,opened_on) SELECT id,1,'Export case ' || id,$1,1,CURRENT_DATE FROM generate_series(1200,1301) id",
+        &[&SURVIVOR.parse::<i64>()?],
+    ).await?;
+    let mut export_draft = draft(
+        "Recent rows file",
+        Kind::Rows,
+        Definition {
+            columns: vec!["title".into(), "minutes".into()],
+            filters: vec![FilterDef {
+                column: "event.opened_on".into(),
+                test: "within".into(),
+                value: json!("last_30_days"),
+                ask: false,
+            }],
+            totals: true,
+            ..Definition::default()
+        },
+    );
+    export_draft.record_type = "report_subject_text_cases".into();
+    let export_report = write(&export_draft).await?;
+    let file = reports
+        .export(&viewer, export_report, &RunInput::default(), Format::Csv)
+        .await?;
+    let csv = String::from_utf8(file.bytes)?;
+    checks.check(
+        "the multi-page CSV contains every recent row and its totals line",
+        file.rows == 109
+            && (1200..=1301).all(|id| csv.matches(&format!("Export case {id},")).count() == 1)
+            && csv
+                .lines()
+                .last()
+                .is_some_and(|line| line.ends_with(",382")),
+        format!("{} data rows", file.rows),
     );
 
     if checks.failed > 0 {
