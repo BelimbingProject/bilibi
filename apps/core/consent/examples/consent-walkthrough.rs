@@ -362,6 +362,66 @@ async fn main() -> Result<()> {
     let workers = tokio::spawn(executor.run(stopped));
 
     addresses()?;
+    // Exercise both manual channels through the same writes and checks as senders.
+    for channel in [Channel::Postal, Channel::InPerson] {
+        let who = contact(Some(3), None);
+        write(
+            &consent,
+            &boundary,
+            &mut client,
+            &admin,
+            Write::Decide(DecisionInput {
+                company_id: 1,
+                contact: who.clone(),
+                purpose: "marketing".into(),
+                channel,
+                granted: true,
+                source: Source::Agent,
+                captured_on: Capture::InPerson,
+                evidence: None,
+            }),
+        )
+        .await?;
+        let q = question(1, who.clone(), channel);
+        let (_, answer) = write(
+            &consent,
+            &boundary,
+            &mut client,
+            &admin,
+            Write::Check(q.clone(), "manual-grant"),
+        )
+        .await?;
+        ensure(
+            answer == Some(Answer::Allowed),
+            "manual channel decision allows contact",
+        )?;
+        write(
+            &consent,
+            &boundary,
+            &mut client,
+            &admin,
+            Write::Suppress(SuppressionInput {
+                company_id: 1,
+                contact: who,
+                channel,
+                reason: Reason::Unsubscribe,
+                evidence: None,
+            }),
+        )
+        .await?;
+        let (_, answer) = write(
+            &consent,
+            &boundary,
+            &mut client,
+            &admin,
+            Write::Check(q, "manual-stop"),
+        )
+        .await?;
+        ensure(
+            answer == Some(Answer::Refused(Refusal::Suppressed)),
+            "manual channel suppression refuses contact",
+        )?;
+    }
     println!(
         "== consent for person 1, their two addresses, another person's address, and tenant 2"
     );
