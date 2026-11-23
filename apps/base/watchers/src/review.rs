@@ -407,11 +407,16 @@ impl Watchers {
             review.actions.push(script.describe());
         }
         if let Some(observe) = &definition.observe {
+            // Only the trigger record's own fields: the run binds its answer
+            // to that record's revision, which a linked record does not move.
             for (i, path) in observe.fields.iter().enumerate() {
-                if !allowed(path) {
+                let own = table
+                    .and_then(|table| catalog.resolve(table, path).ok())
+                    .is_some_and(|column| column.hops.is_empty());
+                if !allowed(path) || !own {
                     problems.push((
                         format!("observe.fields.{i}"),
-                        format!("{path} is not a field of this trigger's record you may read"),
+                        format!("{path} is not a field of this trigger's own record you may read"),
                     ));
                 }
             }

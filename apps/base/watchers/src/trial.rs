@@ -16,6 +16,8 @@ use std::collections::HashMap;
 /// (so both read the same window) and each event's observation.
 struct Observed {
     end: String,
+    /// The audited start receipt, written before any provider call.
+    trial_id: i64,
     observations: HashMap<i64, (i64, Value)>,
 }
 
@@ -149,8 +151,8 @@ impl Watchers {
             return Ok(None);
         };
         let mut asks = Vec::new();
-        let (end, days) = {
-            let client = self.db.get().await.map_err(Error::from)?;
+        let (end, days, trial_id) = {
+            let mut client = self.db.get().await.map_err(Error::from)?;
             let review = self.review_draft(&**client, scope, draft, problems).await?;
             if !review.ok() {
                 return Err(super::agent::refused(&review));
@@ -160,6 +162,11 @@ impl Watchers {
                 .trial_window(&**client, scope, (days, limit), true)
                 .await?;
             let trigger = self.trigger(&draft.trigger).ok_or(Error::Invalid)?;
+            // The audited start comes first, so any provider call or budget
+            // spend below is tied to this person, trigger and draft.
+            let trial_id = self
+                .start_trial(&mut client, scope, draft, definition, (days, limit))
+                .await?;
             let end: String = client
                 .query_one("SELECT now()::text", &[])
                 .await
@@ -224,13 +231,20 @@ impl Watchers {
                     }
                 }
             }
-            (end, days)
+            (end, days, trial_id)
         };
         let trigger = self.trigger(&draft.trigger).ok_or(Error::Invalid)?;
         let version = trigger.definition.version;
         let table = trigger.definition.table;
         let reader_fields = definition.fact_fields(version, true);
-        let observation_fields = observe.read_fields(version);
+        // Automation must read every field the trial evaluates, not only
+        // the ones sent; only the declared fields go into the question.
+        let mut observation_fields = observe.read_fields(version);
+        for field in definition.fact_fields(version, true) {
+            if !observation_fields.contains(&field) {
+                observation_fields.push(field);
+            }
+        }
         let tenant = scope.tenant();
         let mut observations = HashMap::new();
         for id in asks {
@@ -309,7 +323,42 @@ impl Watchers {
             };
             observations.insert(id, (revision, observation));
         }
-        Ok(Some(Observed { end, observations }))
+        Ok(Some(Observed {
+            end,
+            trial_id,
+            observations,
+        }))
+    }
+
+    /// The audited start receipt of a trial: who, which trigger, the draft's
+    /// digest, the window and the limit. Kept even if the trial is
+    /// interrupted, without its facts or previews.
+    async fn start_trial(
+        &self,
+        client: &mut tokio_postgres::Client,
+        scope: &Scope,
+        draft: &Draft,
+        definition: &Definition,
+        (days, limit): (i64, i64),
+    ) -> Result<i64> {
+        let digest: String =
+            Sha256::digest(serde_json::to_vec(&definition.to_json()).map_err(|_| Error::Internal)?)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+        let tenant = scope.tenant();
+        let trigger_name = draft.trigger.clone();
+        let mut tx = self
+            .mutations
+            .begin(client, scope.mutation_context("watchers.trial.started"))
+            .await?;
+        bilibi_authz::authorize_key(tx.sql(), scope, crate::MANAGE).await?;
+        let trial_id = tx.mutate(move |sql| Box::pin(async move {
+            let id: i64 = sql.query_one("INSERT INTO base_watcher_trials (tenant_id,trigger,definition_digest,window_days,event_limit) VALUES ($1,$2,$3,$4,$5) RETURNING id", &[&tenant,&trigger_name,&digest,&(days as i32),&(limit as i32)]).await?.get(0);
+            Ok((id, vec![Change { kind:"base/watchers.trial".into(), id, old:Value::Null, new:json!({"trigger":trigger_name,"definition_digest":digest,"window_days":days,"event_limit":limit}) }]))
+        })).await?;
+        tx.commit().await?;
+        Ok(trial_id)
     }
 
     async fn trial_on(
@@ -338,25 +387,17 @@ impl Watchers {
         } else {
             fields.clone()
         };
-        let digest: String =
-            Sha256::digest(serde_json::to_vec(&definition.to_json()).map_err(|_| Error::Internal)?)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
         let tenant = scope.tenant();
-        let trigger_name = draft.trigger.clone();
         // Log the start before reading events, so a failed or interrupted trial
-        // remains visible without storing its facts or action preview.
-        let mut tx = self
-            .mutations
-            .begin(client, scope.mutation_context("watchers.trial.started"))
-            .await?;
-        bilibi_authz::authorize_key(tx.sql(), scope, crate::MANAGE).await?;
-        let trial_id = tx.mutate(move |sql| Box::pin(async move {
-            let id: i64 = sql.query_one("INSERT INTO base_watcher_trials (tenant_id,trigger,definition_digest,window_days,event_limit) VALUES ($1,$2,$3,$4,$5) RETURNING id", &[&tenant,&trigger_name,&digest,&(days as i32),&(limit as i32)]).await?.get(0);
-            Ok((id, vec![Change { kind:"base/watchers.trial".into(), id, old:Value::Null, new:json!({"trigger":trigger_name,"definition_digest":digest,"window_days":days,"event_limit":limit}) }]))
-        })).await?;
-        budget.commit(tx).await?;
+        // remains visible without storing its facts or action preview. An
+        // observing trial logged it before its first provider call.
+        let trial_id = match observed {
+            Some(observed) => observed.trial_id,
+            None => {
+                self.start_trial(client, scope, &draft, definition, (days, limit))
+                    .await?
+            }
+        };
         budget.check()?;
         let end: String = match observed {
             Some(observed) => observed.end.clone(),

@@ -459,7 +459,15 @@ pub(crate) async fn before_conditions(
     }
     let trigger = watchers.trigger(row.get(0)).ok_or(Error::Invalid)?;
     let version = trigger.definition.version;
-    let fields = observe.read_fields(version);
+    // Automation must read every field the run will, not only the ones
+    // sent, so nothing leaves for a run that will be refused at its
+    // conditions; only the declared fields go into the question.
+    let mut fields = observe.read_fields(version);
+    for field in definition.fact_fields(version, true) {
+        if !fields.contains(&field) {
+            fields.push(field);
+        }
+    }
     let (facts, _) = match watchers
         .read_facts(
             tx.sql(),
