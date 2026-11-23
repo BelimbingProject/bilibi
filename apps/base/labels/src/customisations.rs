@@ -33,12 +33,16 @@ pub struct CustomisationSection {
 pub struct Undo {
     pub read: &'static str,
     pub read_input: fn() -> Value,
+    pub action: Option<UndoAction>,
+    pub rows: fn(&Value) -> Vec<CustomisationRow>,
+}
+
+pub struct UndoAction {
     /// The reviewed write a confirmed row calls with its `input`.
     pub operation: &'static str,
     pub event: &'static str,
-    pub action: &'static str,
+    pub label: &'static str,
     pub detail: &'static str,
-    pub rows: fn(&Value) -> Vec<CustomisationRow>,
 }
 
 /// What an agent may change in a section: the owner's read that lists every
@@ -152,7 +156,7 @@ fn label_choices(reads: &[Value]) -> Vec<Choice> {
 
 inventory::submit! { bilibi_module_registry::Contribution::new(SECTIONS, "base/labels.customisations", bilibi_module_registry::Provenance { module: "base/labels", source: file!(), line: line!() }, &CustomisationSection {
     title: "Labels",
-    undo: Some(Undo { read: "base.labels.list", read_input: empty_input, operation: "base.labels.clear", event: "customisation.labels", action: "Restore default", detail: "The module's original word will be shown again.", rows: label_rows }),
+    undo: Some(Undo { read: "base.labels.list", read_input: empty_input, action: Some(UndoAction { operation: "base.labels.clear", event: "customisation.labels", label: "Restore default", detail: "The module's original word will be shown again." }), rows: label_rows }),
     changes: Some(Changes {
         purpose: "Show your own word for a menu item, a record type or a field.",
         limits: "1 to 60 characters of plain text. Operation keys, routes and permission keys never change.",

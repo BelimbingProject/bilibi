@@ -12,7 +12,7 @@ mod web;
 
 pub use customisations::{
     Changes, Choice, CustomisationRow, CustomisationSection, Read, ReceiptCorrection,
-    ReceiptFuture, ReceiptSource, ReceiptUndo, Undo, RECEIPT_SOURCES, SECTIONS,
+    ReceiptFuture, ReceiptSource, ReceiptUndo, Undo, UndoAction, RECEIPT_SOURCES, SECTIONS,
 };
 
 pub use store::{
@@ -116,7 +116,7 @@ bilibi_menu::contribute!(
 inventory::submit! { bilibi_module_registry::Consumer::new::<CustomisationSection>(SECTIONS, "base/labels", |entries| {
     for entry in entries {
         let section = entry.get::<CustomisationSection>()?;
-        let undo_valid = section.undo.as_ref().is_none_or(|undo| !undo.read.is_empty() && !undo.operation.is_empty() && undo.event.starts_with("customisation."));
+        let undo_valid = section.undo.as_ref().is_none_or(|undo| !undo.read.is_empty() && undo.action.as_ref().is_none_or(|action| !action.operation.is_empty() && action.event.starts_with("customisation.")));
         if section.title.is_empty() || !undo_valid || (section.undo.is_none() && section.changes.is_none()) {
             return Err(bilibi_module_registry::RegistryError::Contribution(format!("invalid customisation section {}", entry.id)));
         }

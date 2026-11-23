@@ -45,6 +45,7 @@ pub struct ImageSetting {
     pub directory: &'static str,
     pub max_bytes: u64,
     /// What the image is, to start a sentence: "Company image", "Logo".
+    pub staging_capability: Option<&'static str>,
     pub noun: &'static str,
     /// The line beside the preview while an image is set, and while none is.
     pub current: &'static str,
@@ -59,8 +60,8 @@ fn validate_images(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
             || image.max_bytes == 0
             || image.max_bytes > 10 * 1024 * 1024
             || image.noun.is_empty()
-            || image.current.is_empty()
-            || image.unset.is_empty()
+            || (image.staging_capability.is_none()
+                && (image.current.is_empty() || image.unset.is_empty()))
         {
             return Err(RegistryError::Contribution(format!(
                 "invalid image setting {} at {}:{}",

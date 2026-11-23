@@ -63,7 +63,7 @@ impl Item {
     fn default_text(self) -> &'static str {
         match self {
             Self::Name => PRODUCT,
-            Self::Logo => "the Bilibi mark",
+            Self::Logo => "Built-in logo",
             Self::Accent => "Lime",
         }
     }
@@ -74,13 +74,13 @@ impl Item {
             Self::Accent => stored.accent != Accent::default(),
         }
     }
-    /// The value in effect, as people read it.
+    /// The configured value, as people read it.
     fn shown(self, stored: &Stored) -> String {
         match self {
             Self::Name if stored.name.is_empty() => PRODUCT.into(),
             Self::Name => stored.name.clone(),
             Self::Logo if stored.logo.is_some() => "Uploaded image".into(),
-            Self::Logo => "The Bilibi mark".into(),
+            Self::Logo => "Default logo".into(),
             Self::Accent => stored.accent.label().into(),
         }
     }
@@ -109,7 +109,7 @@ async fn may_manage(
     }
 }
 
-fn brand_json(stored: &Stored, can_manage: bool) -> Value {
+fn brand_json(stored: &Stored, logo_active: bool, can_manage: bool) -> Value {
     let items: Vec<Value> = Item::ALL
         .into_iter()
         .map(|item| {
@@ -118,10 +118,13 @@ fn brand_json(stored: &Stored, can_manage: bool) -> Value {
                 "title": item.title(),
                 "value": match item {
                     Item::Name => json!(if stored.name.is_empty() { PRODUCT } else { &stored.name }),
-                    Item::Logo => json!(stored.logo.is_some()),
+                    Item::Logo => json!(logo_active),
                     Item::Accent => json!(stored.accent.as_str()),
                 },
-                "shown": item.shown(stored),
+                "shown": match item {
+                    Item::Logo if !logo_active && stored.logo.is_some() => "Configured image unavailable".into(),
+                    _ => item.shown(stored),
+                },
                 "default": item.default_text(),
                 "customised": item.customised(stored),
             })
@@ -131,7 +134,6 @@ fn brand_json(stored: &Stored, can_manage: bool) -> Value {
         "items": items,
         "accents": accents(),
         "can_manage": can_manage,
-        "powered_by": "The account menu always says \"Powered by Bilibi\".",
     })
 }
 
@@ -148,9 +150,12 @@ impl ReadHandler for Get {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let sql = client.sql_client().await?;
-            let stored = bound()?.stored(sql).await?;
+            let branding = bound()?;
+            let stored = branding.stored(sql).await?;
+            let logo_active = branding.logo_url(sql, stored.logo).await?.is_some();
             Ok(Output::from(brand_json(
                 &stored,
+                logo_active,
                 may_manage(sql, scope).await?,
             )))
         })
@@ -171,7 +176,7 @@ fn change(input: &Value) -> bilibi_agent_api::Result<Change> {
             if name.is_empty() {
                 return Err(bilibi_agent_api::invalid(
                     "name",
-                    "must not be blank; use base.branding.restore to return to Bilibi",
+                    "must not be blank; use base.branding.restore to return to the default",
                 ));
             }
             if !valid_name(name) {
@@ -193,7 +198,17 @@ fn change(input: &Value) -> bilibi_agent_api::Result<Change> {
         })?),
         None => None,
     };
-    let logo = input.get("logo_asset_id").and_then(Value::as_i64);
+    let logo = input
+        .get("logo_asset_id")
+        .map(|value| {
+            value.as_i64().filter(|id| *id > 0).ok_or_else(|| {
+                bilibi_agent_api::invalid(
+                    "logo_asset_id",
+                    "must be a positive signed 64-bit integer",
+                )
+            })
+        })
+        .transpose()?;
     if name.is_none() && accent.is_none() && logo.is_none() {
         return Err(bilibi_agent_api::invalid(
             "name",
@@ -213,7 +228,7 @@ async fn check_logo(
     let refused = || {
         bilibi_agent_api::invalid(
             "logo_asset_id",
-            "must be a PNG, JPEG or WebP image of this workspace that passed its file check",
+            "must be a PNG, JPEG or WebP image of this workspace, at most 1 MiB, that passed its file check",
         )
     };
     let media = &bound()?.media;
@@ -226,12 +241,18 @@ async fn check_logo(
         .mime_type
         .as_deref()
         .is_some_and(|mime| ["image/png", "image/jpeg", "image/webp"].contains(&mime));
+    let allowed_size = asset.file_size.is_some_and(|bytes| {
+        (1..=crate::LOGO_MAX_BYTES).contains(&u64::try_from(bytes).unwrap_or_default())
+    });
+    if !image || !allowed_size {
+        return Err(refused());
+    }
     let servable = match media.tenant_stream_url(client, scope.tenant(), id).await {
         Ok(_) => true,
         Err(bilibi_media::Error::Database(error)) => return Err(error.into()),
         Err(_) => false,
     };
-    if image && servable {
+    if servable {
         Ok(())
     } else {
         Err(refused())
@@ -247,6 +268,13 @@ fn review(before: &Stored, after: &Stored, summary: &str) -> Value {
         let (was, now) = (item.shown(before), item.shown(after));
         let replaced = item == Item::Logo && before.logo != after.logo;
         if was != now {
+            plan.insert(item.as_str().into(), json!(format!("{was} → {now}")));
+        } else if item == Item::Name && before.name != after.name {
+            let (was, now) = if before.name.is_empty() {
+                ("Built-in wordmark", "Custom display name")
+            } else {
+                ("Custom display name", "Built-in wordmark")
+            };
             plan.insert(item.as_str().into(), json!(format!("{was} → {now}")));
         } else if replaced {
             plan.insert(item.as_str().into(), json!("A new image replaces the logo"));
@@ -320,7 +348,7 @@ impl Write {
     fn summary(&self) -> &'static str {
         match self {
             Self::Set => "Set this installation's brand",
-            Self::Restore => "Restore Bilibi's own brand",
+            Self::Restore => "Restore the default brand",
         }
     }
 }
@@ -392,14 +420,14 @@ fn empty_input() -> Value {
 }
 fn set_input() -> Value {
     json!({"type":"object","properties":{
-        "name":{"type":"string","maxLength":NAME_MAX_CHARS * 4,"description":"The display name shown in place of Bilibi: up to 40 characters, no @, quotes or angle brackets."},
+        "name":{"type":"string","maxLength":NAME_MAX_CHARS * 4,"description":"The installation's display name: up to 40 characters, no @, quotes or angle brackets."},
         "accent":{"type":"string","enum":accents(),"description":"The colour of primary buttons, the current menu item and selections."},
-        "logo_asset_id":{"type":"integer","minimum":1,"description":"A PNG, JPEG or WebP image already stored in Media as this workspace's own. A person uploads one on System Settings, Branding, Logo. Leave it out to keep the logo."}
+        "logo_asset_id":{"type":"integer","minimum":1,"maximum":i64::MAX,"description":"A PNG, JPEG or WebP image already stored in Media as this workspace's own. Use the asset ID returned by Upload logo in System Settings. Leave it out to keep the logo."}
     }})
 }
 fn restore_input() -> Value {
     json!({"type":"object","required":["item"],"properties":{
-        "item":{"type":"string","enum":["name","logo","accent"],"description":"The part of the brand to return to Bilibi's own."}
+        "item":{"type":"string","enum":["name","logo","accent"],"description":"The part of the brand to restore to its default."}
     }})
 }
 fn get_output() -> Value {
@@ -423,12 +451,12 @@ const fn provenance(line: u32) -> Provenance {
 
 inventory::submit! { Contribution::new(DEFINITIONS, "base/branding.agent", provenance(line!()), &Definitions {
     operations: &[
-        Operation { key:"base.branding.get", title:"Read this installation's brand", summary:"Read the display name, logo and accent colour shown in place of Bilibi, and whether each was changed.", keywords:&["brand","branding","logo","name","accent","colour","white label"], capability:SIGNED_IN, input:empty_input, output:get_output, handler:Handler::Read(&GET), channels:Channels::Every, step_up:&[] },
-        Operation { key:"base.branding.set", title:"Set this installation's brand", summary:"Review and set the display name, accent colour or logo shown in place of Bilibi on staff sign-in, the top bar, tab titles and email.", keywords:&["brand","branding","logo","name","accent","colour","white label","rename"], capability:MANAGE, input:set_input, output:write_output, handler:Handler::SafeWrite(&SET), channels:Channels::Every, step_up:&[] },
-        Operation { key:"base.branding.restore", title:"Restore Bilibi's own brand", summary:"Review and return the display name, the logo or the accent colour to Bilibi's own.", keywords:&["brand","branding","logo","name","accent","restore","default","undo"], capability:MANAGE, input:restore_input, output:write_output, handler:Handler::SafeWrite(&RESTORE), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.branding.get", title:"Read this installation's brand", summary:"Read the display name, logo and accent colour in effect, and whether each was changed.", keywords:&["brand","branding","logo","name","accent","colour","white label"], capability:SIGNED_IN, input:empty_input, output:get_output, handler:Handler::Read(&GET), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.branding.set", title:"Set this installation's brand", summary:"Review and set the display name, accent colour or logo shown on staff sign-in, the top bar, tab titles and email.", keywords:&["brand","branding","logo","name","accent","colour","white label","rename"], capability:MANAGE, input:set_input, output:write_output, handler:Handler::SafeWrite(&SET), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.branding.restore", title:"Restore the default brand", summary:"Review and return the display name, the logo or the accent colour to its default.", keywords:&["brand","branding","logo","name","accent","restore","default","undo"], capability:MANAGE, input:restore_input, output:write_output, handler:Handler::SafeWrite(&RESTORE), channels:Channels::Every, step_up:&[] },
     ],
-    guides: &[Guide { key:"base.branding", title:"Installation brand", summary:"Show this installation's own name, logo and accent colour in place of Bilibi.", keywords:&["brand","branding","logo","accent","white label"], capability:MANAGE,
-        body:"Use base.branding.get to read the display name, logo and accent colour in effect; `can_manage` says whether this person may change them (the platform operator's administrators). Plan base.branding.set with any of `name` (up to 40 characters), `accent` (one of the listed accents) and `logo_asset_id`, show the returned before and after, then wait for approval. A logo is an image already stored in Media: a person uploads one on System Settings (/system/settings), group Branding, row Logo; you cannot send image bytes. Plan base.branding.restore with `item` (name, logo or accent) to return one part to Bilibi's own; Administration, Customisations offers the same restore without AI. The brand shows on staff sign-in, the top bar, tab titles and as the email sender name. A workspace's own email sender name and each customer portal's title and logo are separate and unchanged. The account menu always says Powered by Bilibi." }],
+    guides: &[Guide { key:"base.branding", title:"Installation brand", summary:"Show this installation's own name, logo and accent colour.", keywords:&["brand","branding","logo","accent","white label"], capability:MANAGE,
+        body:"Use base.branding.get to read the display name, logo and accent colour in effect; `can_manage` says whether this person may change them (the platform operator's administrators). Plan base.branding.set with any of `name` (up to 40 characters), `accent` (one of the listed accents) and `logo_asset_id`, show the returned before and after, then wait for approval. A logo is an image already stored in Media: a person stages one with Upload logo on System Settings (/system/settings) and shares the returned asset ID; you cannot send image bytes. Plan base.branding.restore with `item` (name, logo or accent) to return one part to its default. The brand shows on staff sign-in, the top bar, tab titles and as the email sender name. A workspace's own email sender name and each customer portal's title and logo are separate and unchanged." }],
 }) }
 
 fn customised_items(value: &Value) -> impl Iterator<Item = (Item, &Value)> {
@@ -472,7 +500,7 @@ fn choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
                 title: format!("Brand: {}", item.title()),
                 keywords: "brand branding logo name accent colour color white label installation sign-in top bar email sender restore",
                 value: Some(row["value"].clone()),
-                default: Some(json!(item.default_text())),
+                default: Some(row["default"].clone()),
                 source: Some(if customised { "global" } else { "default" }.into()),
                 customised,
                 input: json!({"item": item.as_str()}),
@@ -490,9 +518,9 @@ fn choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
 
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/branding.customisations", provenance(line!()), &bilibi_labels::CustomisationSection {
     title: "Brand",
-    undo: Some(bilibi_labels::Undo { read: "base.branding.get", read_input: empty_input_value, operation: "base.branding.restore", event: "customisation.branding", action: "Restore default", detail: "Bilibi's own will be shown again.", rows }),
+    undo: Some(bilibi_labels::Undo { read: "base.branding.get", read_input: empty_input_value, action: None, rows }),
     changes: Some(bilibi_labels::Changes {
-        purpose: "Show this installation's own name, logo and accent colour in place of Bilibi.",
+        purpose: "Show this installation's own name, logo and accent colour.",
         limits: "A name of up to 40 characters, one of the listed accent colours, and a PNG, JPEG or WebP logo of at most 1 MiB that a person uploads on System Settings. Only the platform operator's administrators may change it, for every workspace of the installation.",
         guide: "base.branding",
         reads: &[bilibi_labels::Read { operation: "base.branding.get", input: empty_input_value }],
@@ -506,4 +534,3 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/branding.c
 fn empty_input_value() -> Value {
     json!({})
 }
-inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.branding.restore", provenance(line!()), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.branding", contract: "base.branding.restore" }) }

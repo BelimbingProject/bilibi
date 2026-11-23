@@ -193,6 +193,14 @@ impl Editor {
             .map(|image| image.max_bytes)
             .max()
             .unwrap_or(1);
+        let uploads = Uploads::new(
+            std::iter::once(UploadSpec::new(IMAGE_UPLOAD, upload_limit).accept(IMAGE_TYPES)).chain(
+                core.images.iter().filter_map(|(&key, image)| {
+                    image.staging_capability?;
+                    Some(UploadSpec::new(key, image.max_bytes).accept(IMAGE_TYPES))
+                }),
+            ),
+        );
         Ok(Self {
             core,
             flash: None,
@@ -212,9 +220,7 @@ impl Editor {
             row_status: CommitStatus::None,
             pending_proof: None,
             draft: None,
-            uploads: Uploads::new(
-                [UploadSpec::new(IMAGE_UPLOAD, upload_limit).accept(IMAGE_TYPES)],
-            ),
+            uploads,
         })
     }
     fn flash(&mut self, kind: StatusKind, message: impl Into<String>) {
@@ -486,18 +492,27 @@ impl Editor {
             return Ok(());
         }
         let plan = self.plan(scope).await?;
-        let Some(field) = plan.field(key) else {
+        let Some((&key, &image)) = self.core.images.get_key_value(key) else {
             return Ok(());
         };
-        let Some(image) = self.core.images.get(field.key) else {
-            return Ok(());
+        let mut client = self.core.db.get().await?;
+        let (field, upload) = if let Some(capability) = image.staging_capability {
+            if !matches!(self.picked, Picked::Global) || !plan.capabilities.contains(capability) {
+                return Ok(());
+            }
+            authorize_operator(&**client, scope, capability).await?;
+            (None, key)
+        } else {
+            let Some(field) = plan.field(key) else {
+                return Ok(());
+            };
+            (Some(field), IMAGE_UPLOAD)
         };
-        let Some(file) = self.uploads.consume(IMAGE_UPLOAD).into_iter().next() else {
+        let Some(file) = self.uploads.consume(upload).into_iter().next() else {
             self.flash(StatusKind::Error, "Choose a PNG, JPEG or WebP image first.");
             self.row_status = CommitStatus::Error("Choose a PNG, JPEG or WebP image first.".into());
             return Ok(());
         };
-        let mut client = self.core.db.get().await?;
         let stored = self
             .core
             .media
@@ -533,6 +548,16 @@ impl Editor {
                 self.row_status = CommitStatus::Error("The image could not be stored.".into());
                 return Ok(());
             }
+        };
+        let Some(field) = field else {
+            self.flash(
+                StatusKind::Success,
+                format!(
+                    "{} stored. Use asset ID {} in the reviewed operation.",
+                    image.noun, asset.id
+                ),
+            );
+            return Ok(());
         };
         let target = self.target();
         let mut tx = self
@@ -1299,7 +1324,40 @@ impl Editor {
             Some((k, text)) if *k == kind => text.as_str(),
             _ => "",
         };
+        let mut staged_uploads = Html::EMPTY;
+        if matches!(self.picked, Picked::Global) {
+            let mut images: Vec<_> = self.core.images.iter().collect();
+            images.sort_unstable_by_key(|(key, _)| **key);
+            for (&key, image) in images {
+                if !image
+                    .staging_capability
+                    .is_some_and(|capability| plan.capabilities.contains(capability))
+                {
+                    continue;
+                }
+                let mut body = render(self.uploads.input(key, format!("stage-{key}"))
+                    .label(format!("Upload {}", image.noun.to_lowercase()))
+                    .hint("PNG, JPEG or WebP, up to 1 MiB. The upload returns an asset ID for review."))?;
+                body.push(&render(
+                    Control::named("key").kind(InputKind::Hidden).value(key),
+                )?);
+                staged_uploads.push(&render(Form {
+                    id: &format!("stage-form-{key}"),
+                    event: "save_image_setting",
+                    class: "ui-compact-controls",
+                    body,
+                    actions: render(Button {
+                        variant: ButtonVariant::Primary,
+                        button_type: "submit",
+                        body: Html::text("Upload"),
+                        ..Button::default()
+                    })?,
+                    ..Form::default()
+                })?);
+            }
+        }
         let view = SettingsView {
+            staged_uploads,
             flash: FlashMap {
                 error: message(StatusKind::Error),
                 warning: message(StatusKind::Warning),
@@ -1400,6 +1458,7 @@ struct SettingsView<'a> {
     flash: FlashMap<'a>,
     header: Html,
     scopes: Html,
+    staged_uploads: Html,
     table: Html,
     toolbar: Html,
     pagination: Html,

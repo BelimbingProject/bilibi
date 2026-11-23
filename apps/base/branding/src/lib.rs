@@ -8,7 +8,7 @@ use bilibi_database::Db;
 use bilibi_media::Media;
 use bilibi_module_registry::{Contribution, Module, Provenance, Service};
 use bilibi_settings::{
-    Definition, Editor, ScopeKind, Setting, Settings, Validator, ValueType, DEFINITIONS,
+    Definition, ScopeKind, Setting, Settings, Validator, ValueType, DEFINITIONS,
 };
 use bilibi_ui::{Accent, Brand};
 use serde_json::{json, Value};
@@ -60,31 +60,25 @@ inventory::submit! { Contribution::new(DEFINITIONS, NAME_KEY, provenance!(), &Se
     default: || json!(""), nullable: false, encrypted: false,
     minimum: None, maximum: None,
     validator: Some(Validator { accepts: name_accepts, message: "Enter a name of up to 40 characters without @, quotes or angle brackets." }),
-    editor: Some(Editor { group: "Branding", label: "Display name",
-        help: "Shown in place of Bilibi on sign-in, in the top bar, in tab titles and as the email sender name. Blank keeps Bilibi.",
-        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
+    editor: None,
 })) }
 inventory::submit! { Contribution::new(DEFINITIONS, LOGO_KEY, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::Integer, scopes: &[ScopeKind::Global],
     default: || Value::Null, nullable: true, encrypted: false,
     minimum: Some(1.0), maximum: None,
     validator: Some(Validator { accepts: logo_accepts, message: "must name a stored logo image" }),
-    editor: Some(Editor { group: "Branding", label: "Logo",
-        help: "Shown in place of the Bilibi mark on sign-in, in the top bar and as the tab icon.",
-        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
+    editor: None,
 })) }
 inventory::submit! { Contribution::new(bilibi_settings_editor::IMAGE_SETTINGS, LOGO_KEY, provenance!(), &bilibi_settings_editor::ImageSetting {
     directory: "branding", max_bytes: LOGO_MAX_BYTES, noun: "Logo",
-    current: "Current logo", unset: "The Bilibi mark is in use", placeholder: false,
+    staging_capability: Some(MANAGE), current: "", unset: "", placeholder: false,
 }) }
 inventory::submit! { Contribution::new(DEFINITIONS, ACCENT_KEY, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::String, scopes: &[ScopeKind::Global],
     default: || json!(Accent::Lime.as_str()), nullable: false, encrypted: false,
     minimum: None, maximum: None,
     validator: Some(Validator { accepts: accent_accepts, message: "Enter one of: lime, teal, cyan, indigo, violet, fuchsia." }),
-    editor: Some(Editor { group: "Branding", label: "Accent colour",
-        help: "The colour of primary buttons, the current menu item and selections: lime, teal, cyan, indigo, violet or fuchsia.",
-        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
+    editor: None,
 })) }
 
 inventory::submit! { Contribution::new(VOCABULARY, "base/branding", provenance!(), &VocabularyContribution {
@@ -128,10 +122,7 @@ impl Branding {
         client: &(impl GenericClient + Sync),
     ) -> bilibi_database::Result<Brand> {
         let stored = self.stored(client).await?;
-        let logo = match stored.logo {
-            Some(asset) => self.logo_url(client, asset).await?,
-            None => None,
-        };
+        let logo = self.logo_url(client, stored.logo).await?;
         Ok(Brand {
             name: stored.name,
             logo,
@@ -160,8 +151,11 @@ impl Branding {
     async fn logo_url(
         &self,
         client: &(impl GenericClient + Sync),
-        asset: i64,
+        asset: Option<i64>,
     ) -> bilibi_database::Result<Option<String>> {
+        let Some(asset) = asset else {
+            return Ok(None);
+        };
         let Some(operator) = bilibi_tenancy::platform_operator(client).await? else {
             return Ok(None);
         };

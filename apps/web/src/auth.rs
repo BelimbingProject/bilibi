@@ -354,8 +354,7 @@ pub(crate) async fn provider_signed_out(
         body: Html::text("Continue signing out"),
         ..Default::default()
     };
-    let mut body =
-        Html::text("You are signed out of Bilibi. Continuing to your company's sign-out page.");
+    let mut body = Html::text("You are signed out. Continuing to your company's sign-out page.");
     body.push(&Html::render(&link).map_err(|_| Error::Internal)?);
     let mut response = card(
         app,
