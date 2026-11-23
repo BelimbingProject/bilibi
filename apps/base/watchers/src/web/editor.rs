@@ -183,6 +183,7 @@ struct Cond {
 }
 #[derive(Clone, Default)]
 struct Act {
+    script: Option<Value>,
     operation: String,
     params: BTreeMap<String, String>,
 }
@@ -329,6 +330,11 @@ impl Editor {
             .into_iter()
             .flatten()
             .map(|a| Act {
+                script: a.get("script").and_then(Value::as_object).map(|script| {
+                    let mut script = script.clone();
+                    script.remove("source_digest");
+                    Value::Object(script)
+                }),
                 operation: text(&a["operation"]),
                 params: a["input"]
                     .as_object()
@@ -404,6 +410,9 @@ impl Editor {
             .actions
             .iter()
             .map(|a| {
+                if let Some(script) = &a.script {
+                    return json!({"script":script});
+                }
                 let mut input = serde_json::Map::new();
                 let params = vocab.action(&a.operation).map(|a| a.params.as_slice());
                 for (key, raw) in &a.params {
@@ -938,20 +947,31 @@ impl Editor {
         for (i, action) in self.actions.iter().enumerate() {
             let dom = format!("watcher-draft-act-{i}");
             let mut body = Self::hidden("a", format!("{dom}-row"), i)?;
-            body.push(&render(
-                Combobox::new(format!("{dom}-operation"), "a[operation]")
-                    .label("Do")
-                    .value(&action.operation)
-                    .placeholder("Search actions…")
-                    .options(
-                        vocab
-                            .actions
-                            .iter()
-                            .filter(|a| Some(a.table.as_str()) == table)
-                            .map(|a| Choice::new(&a.title, &a.operation))
-                            .collect(),
-                    ),
-            )?);
+            if let Some(script) = &action.script {
+                body.push(&render(
+                    Field::named("script_source")
+                        .id(format!("{dom}-source"))
+                        .kind(InputKind::Textarea)
+                        .label(script["name"].as_str().unwrap_or("Script"))
+                        .value(script["source"].as_str().unwrap_or_default())
+                        .readonly(),
+                )?);
+            } else {
+                body.push(&render(
+                    Combobox::new(format!("{dom}-operation"), "a[operation]")
+                        .label("Do")
+                        .value(&action.operation)
+                        .placeholder("Search actions…")
+                        .options(
+                            vocab
+                                .actions
+                                .iter()
+                                .filter(|a| Some(a.table.as_str()) == table)
+                                .map(|a| Choice::new(&a.title, &a.operation))
+                                .collect(),
+                        ),
+                )?);
+            }
             if let Some(chosen) = vocab.action(&action.operation) {
                 for param in &chosen.params {
                     let value = action.params.get(&param.key).cloned().unwrap_or_default();
@@ -1084,7 +1104,7 @@ impl Editor {
                     html.push(&render(Bullets { lines: &conditions })?);
                     html
                 };
-                let examples: Vec<String> = facts["examples"]
+                let mut examples: Vec<String> = facts["examples"]
                     .as_array()
                     .into_iter()
                     .flatten()
@@ -1111,6 +1131,7 @@ impl Editor {
                         )
                     })
                     .collect();
+                examples.extend(list("script_examples"));
                 let mut body = render(SectionHeading {
                     title: "Review",
                     id: "watcher-draft-review-heading",

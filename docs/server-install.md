@@ -38,7 +38,7 @@ gh attestation verify bilibi-server-tools.tar.gz \
   awk -v expected="$EXPECTED_REPOSITORY_ID" 'NF { found=1; if ($0 != expected) exit 1 } END { if (!found) exit 1 }'
 ```
 
-Copy `EXPECTED_REPOSITORY_ID` from the application repository's GitHub **Settings › General** page or another trusted record before you start the install. Never derive it from the repository name during the install. For a private application repository, set a fine-grained read token in `GH_TOKEN` only for this command. Extract and run the tools only after the whole pipeline succeeds. If it fails, delete the archive and download it again from the official release; do not run or repair it by hand. `install-server.sh create` installs the same current GitHub CLI for later release checks.
+Copy `EXPECTED_REPOSITORY_ID` from the application repository's GitHub **Settings › General** page or another trusted record before you start the install. Never derive it from the repository name during the install. For a private application repository, run this check on your own computer, where `gh auth login` already reads the repository, then copy the checked archive to the server. After the first install, the server checks newer tools itself with its GitHub App; see [Private application repositories](#private-application-repositories). Extract and run the tools only after the whole pipeline succeeds. If it fails, delete the archive and download it again from the official release; do not run or repair it by hand. `install-server.sh create` installs the same current GitHub CLI for later release checks.
 
 Want a Dev instance on the same machine to try changes first? Add one:
 
@@ -80,6 +80,7 @@ Each instance lives in one folder:
     site/waiting.html the page Caddy shows while the service is stopped
   dev/                the same, for Dev
   build/              home of bilibi-build: bin/bilibi-installer
+  github-app.json     the GitHub App that reads a private application repository, when you add one (root:bilibi, 0640)
 ```
 
 Two system users share the work, so the program that serves pages can never rewrite itself:
@@ -160,7 +161,7 @@ In code, `bilibi_base::system::Instance::resolve` returns the role, label and co
 
 **Dev and Production on two machines** use the same verified release archive from GitHub, either downloaded directly or saved and uploaded again. Each instance keeps its own local release numbers, database and backup. No instance serves release files to another.
 
-**Install from GitHub**: on Software › Releases, name your application repository (for example your-company/my-bilibi), save a read-only token only when the repository is private, and accept the repository. That asks for your 2FA code. Then review one setup file for this server. The server downloads that file, checks it, backs up, switches and can switch back or Undo, the same way as an upload. Uploading a saved copy of that published asset still works when you do not want GitHub to supply the bytes.
+**Install from GitHub**: on Software › Releases, name your application repository (for example your-company/my-bilibi) and accept the repository. A private repository is read with the server's [GitHub App](#private-application-repositories). That asks for your 2FA code. Then review one setup file for this server. The server downloads that file, checks it, backs up, switches and can switch back or Undo, the same way as an upload. Uploading a saved copy of that published asset still works when you do not want GitHub to supply the bytes.
 
 Staging is optional. When used, install and check the exact GitHub asset there first, then review a separate Production install of that asset with fresh 2FA. See [Staging and Production](../apps/base/software/README.md#staging-and-production) for the agent report and identity checks.
 
@@ -174,7 +175,7 @@ The first release has no program to ask through, so `release` puts a published s
 sudo scripts/install-server.sh release production /home/me/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
 ```
 
-Add `--repo-id <number>` with your application repository's GitHub number, copied beforehand from its GitHub **Settings › General** page or another trusted record. Never look it up from the repository name during the install. The script refuses a release signed by any other number, so a reused repository name cannot pass. The official `BelimbingProject` repositories need no `--repo-id`. The `installer` command takes the same flags. Public repositories need no GitHub login. For a private repository, set a fine-grained read token in `GH_TOKEN` for this command. If the checksum, repository, tag or signer workflow does not match, the command stops before unpacking, migration or service changes. Download the asset from the official release again; never bypass the check.
+Add `--repo-id <number>` with your application repository's GitHub number, copied beforehand from its GitHub **Settings › General** page or another trusted record. Never look it up from the repository name during the install. The script refuses a release signed by any other number, so a reused repository name cannot pass. The official `BelimbingProject` repositories need no `--repo-id`. The `installer` command takes the same flags. Public repositories need no GitHub login. A private repository is read with the server's [GitHub App](#private-application-repositories). If the checksum, repository, tag or signer workflow does not match, the command stops before unpacking, migration or service changes. Download the asset from the official release again; never bypass the check.
 
 Step by step, we:
 
@@ -193,7 +194,49 @@ sudo scripts/install-server.sh switch production 1
 > [!WARNING]
 > Migrations are forward-only. Switching back to an older release after a newer one changed tables leaves those changes in place; the older program may not expect them. That case is the Software page's Undo, which restores the backup the installer took first and says what would be lost, with a count. Use `switch` only for releases that share the same database shape.
 
-`status` lists every instance, its role, address, service, installer and mail states, and releases. It says so first when another run is still working: only one run goes at a time, a rerun waits for the earlier one, and a dropped connection does not stop a run on the server.
+`status` names the server's GitHub App, if any, then lists every instance, its role, address, service, installer and mail states, and releases. It says so first when another run is still working: only one run goes at a time, a rerun waits for the earlier one, and a dropped connection does not stop a run on the server.
+
+## Private application repositories
+
+**Give the server a GitHub App once, and every later check reads your private repository with a new token that expires within the hour.** Nobody makes or renews a token again, so upgrades can run unattended.
+
+On your own computer, in your application workspace, run:
+
+```sh
+./bilibi connect-servers --server admin@erp.example.com
+```
+
+It asks you for two clicks on GitHub, "Create GitHub App" and "Install", and sends the App's private key over ssh, on standard input, to this command on each server. By hand, you pipe the key file GitHub gave you:
+
+```sh
+sudo scripts/install-server.sh github-app --client-id Iv23li0a1b2c3d4e5f6g --repo your-company/my-bilibi < app.pem
+```
+
+```text
+GitHub App Iv23li0a1b2c3d4e5f6g saved in /opt/bilibi/github-app.json for your-company/my-bilibi. It can read your-company/my-bilibi (repository 123456789) and cannot change anything.
+```
+
+The application maker's [guide to connecting servers](https://github.com/BelimbingProject/bilibi-app-maker/blob/main/docs/guides/connecting-servers.md) explains each step, and how to do it by hand. The key arrives on standard input only, so it never enters the shell history or the process list.
+
+From then on:
+
+- `release`, `installer` and `verify` ask GitHub for a token that can only read the `--repo` you name, give it to that one `gh attestation verify` as `GH_TOKEN`, and drop it. It is never printed, logged or written to disk.
+- **Software › Releases** does the same for each list, review, download and upload check. The page's saved read token is used only for a repository the App is not installed on.
+- A repository the App is not installed on, such as the official `BelimbingProject/bilibi` for the installer, is read with the saved read token, or without a login, as before.
+- A `GH_TOKEN` you set yourself for one command still wins.
+
+The App lives in `/opt/bilibi/github-app.json`, one per server, because every instance on the machine serves the same application. Root and the Bilibi services can read it, like each instance's `env`, which already holds the key that unlocks saved secrets.
+
+| Command | What it does |
+| --- | --- |
+| `github-app --client-id <id> --repo <owner/name>` | Check the key on standard input against GitHub, then keep it. Rerun with a new key to replace it |
+| `github-app --check` | Get a token and read the repository, then say whether the App works |
+| `github-app --remove` | Forget the App on this server. Also delete the App, or its key, on GitHub |
+| `verify <file> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Check a file's GitHub provenance without installing it, such as a newer `bilibi-server-tools.tar.gz` before you extract it |
+
+Every use refuses, and says what to change on GitHub, when the App can change anything, cannot read Contents and Attestations, is installed on all of the owner's repositories, or its key was deleted. A server only ever needs to read.
+
+**Why an App and not a token?** A fine-grained token expires, at the latest after a year, and someone has to remember how to make a new one. The App's key does not expire, but it can only ask for tokens that read the repositories you installed it on. Revoke it in one place: delete the key on the App's settings page on GitHub.
 
 ## The installer service
 
@@ -299,6 +342,23 @@ sudo scripts/install-server.sh two-factor-reset production --email owner@example
 - It shows in the audit log as **System · two-factor-reset**.
 - The command is `bilibi-web two-factor-reset --email <address>` in the instance's environment.
 
+## Portable sign-in recovery and retention
+
+Customer administrators can remove memberships but cannot recover or delete the installation-wide sign-in. The server owner handles the exceptional lifecycle from the server.
+
+```sh
+sudo scripts/install-server.sh identity-recover production --email old@example.com --new-email new@example.com
+sudo scripts/install-server.sh identity-delete production --email unused@example.com --confirm unused@example.com
+sudo scripts/install-server.sh identity-retention production
+```
+
+- `identity-recover` is for a person who lost the old mailbox. It treats the new mailbox as operator-verified, revokes pending reset links, signs every membership out, notifies the new address and records **System · identity-recover**. It refuses an address already used by another portable identity.
+- Recovery remains available while an identity is unused but still inside its retention window, so losing the old mailbox does not prevent a later invitation from reactivating it.
+- Removing the last membership starts the **Unused sign-in retention** clock (90 days by default, configurable in Settings › Session). Accepting another invitation before it ends cancels the clock.
+- `identity-retention` anonymises at most 100 due identities per run. Run it repeatedly from the server's ordinary maintenance schedule until it reports zero.
+- `identity-delete` performs the same final anonymisation immediately, but only for an identity with no live membership. Repeating the address in `--confirm` prevents an accidental target typo. It records **System · identity-delete**.
+- Final anonymisation releases the address and removes the password, reset token, credential-attempt state, 2FA and pending sign-ins. Historical tenant memberships and their tenant audit evidence remain under their own privacy and retention rules.
+
 ## The waiting page
 
 While the service is stopped, Caddy answers every request with status 503 and the waiting page, marked with the header `X-Bilibi-Waiting`. The page says which instance is pausing (**PRODUCTION erp.example.com**, "Production is updating", in the role's colour), polls the same address every second or two, and reloads itself once an answer arrives without that header. People land back on what they asked for. A pause that runs long shows how the server owner can check the service.
@@ -352,9 +412,14 @@ Script commands:
 | `--json <command> ...` | [Machine-readable mode](#machine-readable-mode) |
 | `tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>` | [Customer tenant and first-owner setup](#the-first-owner-of-a-customer-tenant) |
 | `two-factor-reset <instance> --email <address>` | Turn off one staff account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
+| `identity-recover <instance> --email <old> --new-email <new>` | Recover an installation-wide staff sign-in address and sign it out everywhere |
+| `identity-delete <instance> --email <address> --confirm <address>` | Immediately anonymise a portable identity after its last membership is gone |
+| `identity-retention <instance>` | Anonymise up to 100 unused portable identities whose configured retention ended |
 | `installer <bilibi-installer> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance, copy the installer to `/opt/bilibi/build/bin` and start `bilibi-installer@<instance>` for every instance; rerun to update it |
+| `github-app --client-id <id> --repo <owner/name>` (key on standard input), `github-app --check`, `github-app --remove` | [The server's GitHub App](#private-application-repositories) for a private application repository |
+| `verify <file> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Check a file's GitHub provenance without installing it |
 | `switch <instance> <n>` | Put a kept release in service |
-| `status [<instance>]` | Roles, addresses, service and installer states, releases |
+| `status [<instance>]` | The GitHub App, then each instance's role, address, service and installer states, releases |
 
 Keys in `env` (the service's environment; `README.md` explains each):
 

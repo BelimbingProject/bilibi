@@ -934,15 +934,15 @@ impl Reports {
     /// Unplaced offers are read only while Customize is open.
     pub(crate) async fn dashboard_entries(
         &self,
+        client: &tokio_postgres::Client,
         scope: &Scope,
         placed: &[String],
         offers: bool,
     ) -> Outcome<Vec<(Report, String)>> {
-        let client = self.db.get().await.map_err(Error::from)?;
-        authorize(&**client, scope, VIEW).await?;
+        authorize(client, scope, VIEW).await?;
         let reports =
-            store::dashboard(&**client, scope.tenant(), scope.user(), placed, offers).await?;
-        let catalog = Catalog::for_scope(&**client, scope)
+            store::dashboard(client, scope.tenant(), scope.user(), placed, offers).await?;
+        let catalog = Catalog::for_scope(client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         Ok(reports

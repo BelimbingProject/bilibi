@@ -217,6 +217,10 @@ pub trait ReadHandler: Send + Sync {
 /// them, enforce owner field policy, and record every mutation through the
 /// supplied transaction. Never open or commit a separate transaction.
 pub trait WriteHandler: Send + Sync {
+    fn local_script_action(&self) -> bool {
+        false
+    }
+
     fn check_review_draft<'a>(
         &'a self,
         _client: &'a dyn OperationClient,

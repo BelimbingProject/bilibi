@@ -530,25 +530,30 @@ impl Privacy {
         let mut stopped = Ok(());
         loop {
             let batch = async {
-                let holds = Holds::acquire(scope, &grant).await?;
-                let mut tx = self
-                    .boundary
-                    .begin(client, scope.mutation_context("privacy.retention.sweep"))
-                    .await?;
-                let mut swept = class
-                    .sweeper
-                    .sweep(
-                        &mut tx, scope, &grant, companies, &cutoff, &holds, after, BATCH,
-                    )
-                    .await?;
-                let mut step = bilibi_personal_data::Erased {
-                    records: std::mem::take(&mut swept.records),
-                    ..Default::default()
-                };
-                runner::clear_evidence(&tx, &grant, &mut step, minimum).await?;
-                tx.commit().await?;
-                holds.release().await?;
-                Ok::<_, Error>(swept)
+                let (holds, mut hold_guard) = Holds::acquire(client, scope, &grant).await?;
+                let client = hold_guard.client();
+                let result = async {
+                    let mut tx = self
+                        .boundary
+                        .begin(client, scope.mutation_context("privacy.retention.sweep"))
+                        .await?;
+                    let mut swept = class
+                        .sweeper
+                        .sweep(
+                            &mut tx, scope, &grant, companies, &cutoff, &holds, after, BATCH,
+                        )
+                        .await?;
+                    let mut step = bilibi_personal_data::Erased {
+                        records: std::mem::take(&mut swept.records),
+                        ..Default::default()
+                    };
+                    runner::clear_evidence(&tx, &grant, &mut step, minimum).await?;
+                    tx.commit().await?;
+                    Ok::<_, Error>(swept)
+                }
+                .await;
+                hold_guard.release().await?;
+                result
             }
             .await;
             let swept = match batch {
@@ -598,48 +603,56 @@ impl Privacy {
         let mut stopped = Ok(());
         loop {
             let batch = async {
-                let holds = Holds::acquire(scope, &grant).await?;
-                let due =
-                    bilibi_audit::due_evidence(&*client, scope.tenant(), after, BATCH).await?;
-                let Some(last) = due.last().map(|d| d.deferral) else {
-                    holds.release().await?;
-                    return Ok::<_, Error>(None);
-                };
-                let persons: Vec<i64> = due.iter().filter_map(|d| d.person).collect();
-                let held_persons = holds.persons(&grant, &persons).await?;
-                let mut by_kind: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
-                for d in &due {
-                    by_kind.entry(d.kind.as_str()).or_default().push(d.id);
-                }
-                let mut held_records = std::collections::BTreeSet::new();
-                for (kind, ids) in &by_kind {
-                    for id in holds.records(&grant, kind, ids).await?.into_keys() {
-                        held_records.insert((*kind, id));
+                let (holds, mut hold_guard) = Holds::acquire(client, scope, &grant).await?;
+                let client = hold_guard.client();
+                let result = async {
+                    let due =
+                        bilibi_audit::due_evidence(&*client, scope.tenant(), after, BATCH).await?;
+                    let Some(last) = due.last().map(|d| d.deferral) else {
+                        return Ok::<_, Error>(None);
+                    };
+                    let persons: Vec<i64> = due.iter().filter_map(|d| d.person).collect();
+                    let held_persons = holds.persons(&*client, &grant, &persons).await?;
+                    let mut by_kind: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
+                    for d in &due {
+                        by_kind.entry(d.kind.as_str()).or_default().push(d.id);
                     }
+                    let mut held_records = std::collections::BTreeSet::new();
+                    for (kind, ids) in &by_kind {
+                        for id in holds
+                            .records(&*client, &grant, kind, ids)
+                            .await?
+                            .into_keys()
+                        {
+                            held_records.insert((*kind, id));
+                        }
+                    }
+                    let free: Vec<i64> = due
+                        .iter()
+                        .filter(|d| {
+                            !d.person.is_some_and(|p| held_persons.contains_key(&p))
+                                && !held_records.contains(&(d.kind.as_str(), d.id))
+                        })
+                        .map(|d| d.deferral)
+                        .collect();
+                    let held = (due.len() - free.len()) as i64;
+                    let mut done = 0;
+                    if !free.is_empty() {
+                        let tx = self
+                            .boundary
+                            .begin(
+                                client,
+                                scope.mutation_context("privacy.retention.audit_evidence"),
+                            )
+                            .await?;
+                        done = bilibi_audit::erase_deferred(&tx, &grant, &free, minimum).await?;
+                        tx.commit().await?;
+                    }
+                    Ok(Some((held, i64::from(done), last, due.len() as i64)))
                 }
-                let free: Vec<i64> = due
-                    .iter()
-                    .filter(|d| {
-                        !d.person.is_some_and(|p| held_persons.contains_key(&p))
-                            && !held_records.contains(&(d.kind.as_str(), d.id))
-                    })
-                    .map(|d| d.deferral)
-                    .collect();
-                let held = (due.len() - free.len()) as i64;
-                let mut done = 0;
-                if !free.is_empty() {
-                    let tx = self
-                        .boundary
-                        .begin(
-                            client,
-                            scope.mutation_context("privacy.retention.audit_evidence"),
-                        )
-                        .await?;
-                    done = bilibi_audit::erase_deferred(&tx, &grant, &free, minimum).await?;
-                    tx.commit().await?;
-                }
-                holds.release().await?;
-                Ok(Some((held, i64::from(done), last, due.len() as i64)))
+                .await;
+                hold_guard.release().await?;
+                result
             }
             .await;
             match batch {

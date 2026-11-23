@@ -20,6 +20,8 @@ Page headers include a pin for the current address in signed-in pages, including
 
 Opening a record from a `FlexTable` carries the grid path and query into the record page when a record opens in the same tab or tile as the grid. `BackLink` restores that address when it matches the link’s same-origin destination. Page pins and workspace layouts omit the grid return address.
 
+`StepUpGate` is the host-owned cover for a page or action that still owes 2FA. It embeds only the factor provider's prompt over shared skeleton placeholders; the protected page owner is not rendered until proof succeeds. `Page::step_up_title` may retain a route-specific title only from route parameters, never a protected read. Its browser hook moves focus into the prompt, traps Tab there and lets Escape leave the page.
+
 ## Phone lists and header actions
 
 Header action labels and row-link touch targets follow [DESIGN.md’s record-page](../../../DESIGN.md#record-pages) and [list rules](../../../DESIGN.md#lists).

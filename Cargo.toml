@@ -20,6 +20,9 @@ allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 
 [workspace.dependencies]
+rquickjs = "0.14"
+seccompiler = "0.5"
+rlimit = "0.11"
 icu_datetime = "2.3.0"
 icu_locale = "2.3.1"
 icu_properties = "2.4.0"
@@ -34,6 +37,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytes = "1.12.1"
 uuid = { version = "1", features = ["v4"] }
+libc = "0.2.190"
 thiserror = "2"
 argon2 = "0.6"
 askama = "0.16"
@@ -93,11 +97,13 @@ bilibi-menu = { path = "apps/base/menu" }
 bilibi-menu-order = { path = "apps/base/menu_order" }
 bilibi-principal-directory = { path = "apps/base/principal_directory" }
 bilibi-agent-api = { path = "apps/base/agent_api" }
+bilibi-ai = { path = "apps/base/ai" }
 bilibi-artifacts = { path = "apps/base/artifacts" }
 bilibi-bulk-data = { path = "apps/base/bulk_data" }
 bilibi-audit-views = { path = "apps/base/audit_views" }
 bilibi-authz = { path = "apps/base/authz" }
 bilibi-dashboard = { path = "apps/base/dashboard" }
+bilibi-dashboard-agent = { path = "apps/base/dashboard_agent" }
 bilibi-datetime = { path = "apps/base/datetime" }
 bilibi-events = { path = "apps/base/events" }
 bilibi-design-library = { path = "apps/base/design_library" }

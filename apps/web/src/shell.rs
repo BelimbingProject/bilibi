@@ -14,7 +14,7 @@ use axum::{
 };
 use bilibi_base::{authz, menu, tenancy};
 use bilibi_database::{Error, Result};
-use bilibi_module_registry::contributions::{Access, Embed, EmbedContext, Method, Viewer, EMBEDS};
+use bilibi_module_registry::contributions::{Access, Embed, EmbedContext, Viewer, EMBEDS};
 use bilibi_security::Scope;
 use bilibi_ui::page::{PageRequest, PageService};
 use bilibi_ui::{
@@ -350,10 +350,10 @@ async fn context<'a>(
         manage_instance,
         operator_company_missing,
     );
-    let served = served_routes(app);
+    let served = app.user.pin_routes();
     let pins: Vec<_> = pins
         .into_iter()
-        .filter(|pin| is_served(&served, &pin.url))
+        .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
         .collect();
     let mut pin_icons: Vec<String> = pins
         .iter()
@@ -400,7 +400,7 @@ async fn context<'a>(
         notifications,
         ai,
         home,
-        served_routes: serde_json::to_string(&served).map_err(|_| Error::Internal)?,
+        served_routes: serde_json::to_string(served).map_err(|_| Error::Internal)?,
         pins: serde_json::to_string(&pins).map_err(|_| Error::Internal)?,
         pin_icons,
         instance: if instance.role == bilibi_base::system::Role::Staging {
@@ -558,22 +558,6 @@ fn nav_node(
             .map(|child| nav_node(child, active, labels))
             .collect(),
     }
-}
-
-/// Whether a normalized pin URL names a page this deployment serves; a route
-/// pattern's `{param}` segments match any one segment. A pin to a page that is
-/// gone stays stored but is not drawn.
-fn is_served(routes: &[&str], url: &str) -> bool {
-    let path = url.split('?').next().unwrap_or("");
-    let actual: Vec<_> = path.split('/').filter(|s| !s.is_empty()).collect();
-    routes.iter().any(|route| {
-        let pattern: Vec<_> = route.split('/').filter(|s| !s.is_empty()).collect();
-        pattern.len() == actual.len()
-            && pattern
-                .iter()
-                .zip(&actual)
-                .all(|(p, a)| p.starts_with('{') || p == a)
-    })
 }
 
 /// The session behind a write of the account's own preferences: same Origin
@@ -864,22 +848,13 @@ pub async fn pins(
 ) -> std::result::Result<Response, HttpError> {
     let scope = app.security.guard(&token(&headers)?).await?;
     let client = app.db.get().await.map_err(Error::from)?;
-    let served = served_routes(&app);
+    let served = app.user.pin_routes();
     let pins: Vec<_> = bilibi_user::list_pins(&**client, &scope)
         .await?
         .into_iter()
-        .filter(|pin| is_served(&served, &pin.url))
+        .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
         .collect();
     Ok(json_response(StatusCode::OK, json!({"pins": pins})))
-}
-
-fn served_routes(app: &App) -> Vec<&'static str> {
-    app.routes
-        .staff
-        .iter()
-        .filter(|bound| bound.route.method == Method::Get)
-        .map(|bound| bound.route.path)
-        .collect()
 }
 
 #[derive(Deserialize)]
@@ -915,10 +890,10 @@ pub async fn toggle_pin(
         .await
     {
         Ok((pinned, pins)) => {
-            let served = served_routes(&app);
+            let served = app.user.pin_routes();
             let pins: Vec<_> = pins
                 .into_iter()
-                .filter(|pin| is_served(&served, &pin.url))
+                .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
                 .collect();
             Ok(json_response(
                 StatusCode::OK,
@@ -967,10 +942,10 @@ pub async fn reorder_pins(
     };
     match app.user.reorder_pins(&credential, &scope.csrf, &ids).await {
         Ok(pins) => {
-            let served = served_routes(&app);
+            let served = app.user.pin_routes();
             let pins: Vec<_> = pins
                 .into_iter()
-                .filter(|pin| is_served(&served, &pin.url))
+                .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
                 .collect();
             Ok(json_response(StatusCode::OK, json!({"pins": pins})))
         }

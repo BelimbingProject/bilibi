@@ -56,6 +56,51 @@ impl Pages {
 fn render(template: impl askama::Template) -> Result<Html> {
     Html::render(&template).map_err(|_| Error::Internal)
 }
+async fn action_gate(
+    step_up: &bilibi_step_up::StepUp,
+    scope: &Scope,
+    title: &str,
+    event: &str,
+    notice: Option<&str>,
+) -> Result<String> {
+    use bilibi_ui::{
+        Alert, Button, ButtonVariant, Form, ProofInput, ProofMethod, StatusKind, StepUpGate,
+    };
+
+    let methods = step_up
+        .enrolled_methods(scope)
+        .await?
+        .into_iter()
+        .map(|method| ProofMethod::new(method.id, method.label, method.code_length, method.numeric))
+        .collect::<Vec<_>>();
+    let mut body = Html::EMPTY;
+    if let Some(notice) = notice {
+        body.push(&render(Alert {
+            kind: StatusKind::Warning,
+            body: Html::text(notice),
+            ..Default::default()
+        })?);
+    }
+    if methods.is_empty() {
+        body.push(&Html::text("No 2FA method is available."));
+    } else {
+        body.push(&render(Form {
+            id: "step-up-action-form",
+            event,
+            body: render(ProofInput::new("step-up-action-code", "proof", methods))?,
+            actions: render(Button {
+                button_type: "submit",
+                variant: ButtonVariant::Primary,
+                body: Html::text("Verify and save"),
+                ..Default::default()
+            })?,
+            ..Default::default()
+        })?);
+    }
+    let gate = StepUpGate::action(title, "Confirm access", body).map_err(|_| Error::Internal)?;
+    Ok(render(gate)?.to_string())
+}
+
 impl Page<Scope, Error> for Pages {
     fn title(&self, operation: &str) -> Option<&'static str> {
         Some(match operation {
@@ -67,6 +112,16 @@ impl Page<Scope, Error> for Pages {
             "tables" | "table" => "Database Tables",
             _ => return None,
         })
+    }
+    fn step_up_title(
+        &self,
+        operation: &str,
+        path: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        if operation == "table" {
+            return path.get("table").cloned();
+        }
+        self.title(operation).map(str::to_owned)
     }
     fn render<'a>(&'a self, request: PageRequest<'a, Scope>) -> PageFuture<'a, Error> {
         Box::pin(async move {

@@ -1,7 +1,7 @@
 //! The authenticator as Base Step-up's provider: Step-up asks, this answers
 //! about the scope's own account holder. It learns only an operation key and
 //! target as data to record, never what the operation is.
-use super::{Spend, TwoFactorError};
+use super::{Spend, TwoFactorError, STEP_UP_CONNECTION};
 use crate::UserService;
 use bilibi_database::Change;
 use bilibi_step_up::{
@@ -33,7 +33,7 @@ impl SessionProvider for Authenticator {
         proof: SessionProof,
     ) -> ProofFuture<'a, WindowState> {
         Box::pin(async move {
-            let client = self.0.db.get().await?;
+            let client = self.0.db.get_independent("session proof is consumed independently so it survives the caller's rollback; refuse immediately if the pool is full").await?;
             Ok(match proof {
                 SessionProof::Window {
                     window_seconds,
@@ -66,17 +66,7 @@ impl SessionProvider for Authenticator {
         })
     }
     fn prompt<'a>(&'a self, scope: &'a Scope, back: &'a str) -> ProofFuture<'a, String> {
-        Box::pin(async move {
-            // The neutral choice page is a staff page. A customer has the
-            // authenticator alone on the portal: its prompt, or its setup
-            // while they have none.
-            if scope.actor().kind() == AccountKind::Customer {
-                let (confirm, setup) = pages(scope);
-                let enrolled = self.0.two_factor_status(scope).await?.enabled;
-                return Ok(selected(if enrolled { confirm } else { setup }, back));
-            }
-            Ok(super::with_return(super::CONFIRM_PATH, Some(back)))
-        })
+        Box::pin(async move { Ok(super::with_return(pages(scope).0, Some(back))) })
     }
 }
 impl Provider for Authenticator {
@@ -146,8 +136,9 @@ impl Provider for Authenticator {
                 operation: purpose.operation.to_owned(),
                 channel: purpose.channel.as_str(),
             };
-            let outcome = match self.0.prove(scope, code).await {
-                Ok(step) => self.0.consume(scope, step, spend).await,
+            let mut client = self.0.db.get_independent(STEP_UP_CONNECTION).await?;
+            let outcome = match self.0.prove(&mut client, scope, code).await {
+                Ok(step) => self.0.consume(&mut client, scope, step, spend).await,
                 Err(error) => Err(error),
             };
             match outcome {

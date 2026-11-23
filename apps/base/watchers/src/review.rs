@@ -23,6 +23,7 @@ pub struct Review {
     pub actions: Vec<String>,
     /// Each example: what it expects and what the conditions answer.
     pub examples: Vec<(bool, bool)>,
+    pub script_examples: Vec<String>,
     pub warnings: Vec<String>,
     pub trigger_title: String,
 }
@@ -40,6 +41,7 @@ impl Review {
                 "result": if *got {"match"} else {"no_match"},
                 "passes": expect == got,
             })).collect::<Vec<_>>(),
+            "script_examples": self.script_examples,
             "warnings": self.warnings,
             "problems": self.problems.iter().map(|(field, why)| json!({"field": field, "problem": why})).collect::<Vec<_>>(),
         })
@@ -62,7 +64,7 @@ impl Draft {
         if name.is_empty() || name.chars().count() > 120 {
             problems.push(("name".into(), "give a name of 1 to 120 characters".into()));
         }
-        let definition = Definition::parse(input, problems);
+        let definition = Definition::parse_draft(input, problems);
         let examples = definition::parse_examples(&input["examples"], problems);
         let explanation = bilibi_agent_api::optional_text_field(input, "explanation")
             .map(|text| text.chars().take(2000).collect());
@@ -148,17 +150,34 @@ impl Watchers {
             }).collect();
             Some(json!({"path": path, "table": column.table, "type": format!("{:?}", column.ty), "values": field.values, "column": field.source_key(), "hops": hops?}))
         }).collect();
-        let actions: Option<Vec<Value>> = definition.actions.iter().map(|call| {
+        let actions: Option<Vec<Value>> = definition.actions().map(|call| {
             let action = self.action(&call.operation)?;
-            Some(json!({"key": action.key, "table": action.definition.table, "subject": action.definition.subject,
-                "version": action.definition.version, "input": action.input, "records": action.definition.records, "capability": action.capability, "approval_capabilities": action.definition.approval_capabilities}))
+            let mut binding = json!({"key": action.key, "table": action.definition.table, "subject": action.definition.subject,
+                "version": action.definition.version, "input": action.input, "records": action.definition.records, "capability": action.capability, "approval_capabilities": action.definition.approval_capabilities});
+            if definition.scripts().next().is_some() {
+                binding["script_local"] = json!(action.local_script);
+            }
+            Some(binding)
         }).collect();
-        Some(digest(
-            &json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
+        let lookups: Option<Vec<Value>> = definition
+            .scripts()
+            .flat_map(|script| &script.lookups)
+            .map(|call| {
+                let lookup = self.lookup(&call.operation)?;
+                Some(
+                    json!({"key": lookup.key, "input": lookup.input, "output": lookup.output,
+                "capability": lookup.capability}),
+                )
+            })
+            .collect();
+        let mut binding = json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
             "subject": trigger.subject, "logical_event": trigger.logical_event, "version": trigger.version, "source": root.source().sql, "key": root.key(), "key_column": root.key_field().source_key(), "tenant_scoped": root.source().tenant_scoped,
-            "capability": root.capability(), "fields": fields?, "actions": actions?}),
-            &Value::Null,
-        ))
+            "capability": root.capability(), "fields": fields?, "actions": actions?});
+        let lookups = lookups?;
+        if !lookups.is_empty() {
+            binding["lookups"] = json!(lookups);
+        }
+        Some(digest(&binding, &Value::Null))
     }
 
     pub(crate) async fn approved_field_uses(
@@ -282,6 +301,14 @@ impl Watchers {
             &mut review,
             &mut problems,
         )?;
+        self.review_script_examples(
+            client,
+            scope,
+            (catalog, trigger, definition),
+            &mut review,
+            &mut problems,
+        )
+        .await?;
         problems.extend(
             self.check_limits(
                 client,
@@ -361,6 +388,44 @@ impl Watchers {
             |path| field(path).map(|(ty, values, _)| (ty, values)),
             problems,
         );
+        for script in definition.scripts() {
+            for path in &script.fields {
+                let allowed = table
+                    .and_then(|table| catalog.resolve(table, path).ok())
+                    .is_some_and(|column| {
+                        field(path).is_some()
+                            && column.field.is_some_and(|f| {
+                                catalog.table(column.table).is_some_and(|owner| {
+                                    !owner.is_custom(f.id)
+                                        || (column.hops.is_empty()
+                                            && owner.custom_watcher_condition(f.id))
+                                })
+                            })
+                    });
+                if !allowed {
+                    problems.push(("do".into(), format!("{} cannot read {path}.", script.name)));
+                }
+            }
+            for (index, call) in script.lookups.iter().enumerate() {
+                let Some(lookup) = self.lookup(&call.operation) else {
+                    problems.push((
+                        "do".into(),
+                        format!("{} lookup {} is not installed", script.name, call.operation),
+                    ));
+                    continue;
+                };
+                if let Err(fields) = bilibi_agent_api::schema::validate(
+                    &lookup.input,
+                    &Value::Object(call.input.clone()),
+                ) {
+                    for (field, why) in fields {
+                        problems
+                            .push((format!("do.{index}.script.lookups.{field}"), why.join("; ")));
+                    }
+                }
+            }
+            review.actions.push(script.describe());
+        }
         review.conditions = definition
             .conditions
             .iter()
@@ -371,7 +436,7 @@ impl Watchers {
                 )
             })
             .collect();
-        for (i, call) in definition.actions.iter().enumerate() {
+        for (i, call) in definition.actions().enumerate() {
             let at = |part: &str| format!("do.{i}.{part}");
             let Some(action) = self.action(&call.operation) else {
                 problems.push((
@@ -380,6 +445,16 @@ impl Watchers {
                 ));
                 continue;
             };
+            if !action.local_script
+                && definition
+                    .script_calls()
+                    .any(|declared| declared.operation == action.key)
+            {
+                problems.push((
+                    at("operation"),
+                    format!("{} is unavailable in scripted watchers", action.key),
+                ));
+            }
             if action.definition.table != trigger.definition.table {
                 problems.push((
                     at("operation"),
@@ -425,7 +500,7 @@ impl Watchers {
             });
         }
         let types = |path: &str| field(path).map_or(FieldType::String, |(ty, _, _)| ty);
-        let fields = definition.fields();
+        let fields = definition.condition_fields();
         for (i, example) in examples.iter().enumerate() {
             if let Some(unknown) = example.facts.keys().find(|key| !fields.contains(key)) {
                 problems.push((
@@ -449,6 +524,93 @@ impl Watchers {
                 ));
             }
             review.examples.push((example.expect, matched));
+        }
+        Ok(())
+    }
+
+    async fn review_script_examples(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        context: (&Catalog, &OfferedTrigger, &Definition),
+        review: &mut Review,
+        problems: &mut Problems,
+    ) -> Result<()> {
+        let (catalog, trigger, definition) = context;
+        if definition.scripts().next().is_none() || !problems.is_empty() {
+            return Ok(());
+        }
+        let table = catalog
+            .table(trigger.definition.table)
+            .ok_or(Error::Invalid)?;
+        let time = self.limit(client, scope, crate::SCRIPT_TIME).await? as u64;
+        let (heap, limit) = self.script_limits(client, scope).await?;
+        let permits = match self
+            .reviewed_script_permits(client, scope, definition)
+            .await?
+        {
+            Ok(permits) => permits,
+            Err(_) => {
+                problems.push((
+                    "do".into(),
+                    "You need the script execution grant to run examples.".into(),
+                ));
+                return Ok(());
+            }
+        };
+        for script in definition.scripts() {
+            let permit = permits.for_script(script).map_err(|_| Error::Invalid)?;
+            for (index, example) in script.examples.iter().enumerate() {
+                let mut facts = serde_json::Map::new();
+                let mut valid = true;
+                for (path, value) in &example.facts {
+                    let column = catalog.resolve(table, path).map_err(|_| Error::Invalid)?;
+                    let field = column.field.ok_or(Error::Invalid)?;
+                    let value = match definition::script_fact(column.ty, field.values, value) {
+                        Ok(value) => value,
+                        Err(why) => {
+                            problems.push((
+                                "do".into(),
+                                format!(
+                                    "{} example {} field {path} {why}.",
+                                    script.name,
+                                    index + 1
+                                ),
+                            ));
+                            valid = false;
+                            continue;
+                        }
+                    };
+                    facts.insert(path.clone(), value);
+                }
+                if !valid {
+                    continue;
+                }
+                let actual = tokio::time::timeout(
+                    std::time::Duration::from_millis(time),
+                    script.capture(&permit, &facts, &example.lookup_fixtures, time, heap),
+                )
+                .await
+                .unwrap_or(Err("script_timeout"));
+                let passes = actual.as_ref().is_ok_and(|calls| {
+                    *calls == example.expect && script.permits(calls) && calls.len() <= limit
+                });
+                let actual = match actual {
+                    Ok(calls) => json!(calls).to_string(),
+                    Err(reason) => reason.to_owned(),
+                };
+                let line = format!(
+                    "{} example {} expected {} and returned {}.",
+                    script.name,
+                    index + 1,
+                    json!(example.expect),
+                    actual
+                );
+                if !passes {
+                    problems.push(("do".into(), line.clone()));
+                }
+                review.script_examples.push(line);
+            }
         }
         Ok(())
     }
@@ -532,6 +694,29 @@ impl Watchers {
         watcher: i64,
         number: i32,
     ) -> Result<Review> {
+        self.review_activation(client, scope, watcher, number, Activation::Approve)
+            .await
+    }
+
+    pub async fn review_restore(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        watcher: i64,
+        number: i32,
+    ) -> Result<Review> {
+        self.review_activation(client, scope, watcher, number, Activation::Restore)
+            .await
+    }
+
+    async fn review_activation(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        watcher: i64,
+        number: i32,
+        activation: Activation,
+    ) -> Result<Review> {
         bilibi_authz::authorize_key(client, scope, APPROVE).await?;
         let tenant = scope.tenant();
         let row = client.query_opt(
@@ -540,24 +725,29 @@ impl Watchers {
         ).await?.ok_or(Error::NotFound)?;
         let mut problems = Problems::new();
         let latest: i32 = row.get(5);
-        if latest != number {
+        if activation == Activation::Approve && latest != number {
             problems.push((
                 "version".into(),
                 format!("version {latest} is newer; review and approve that one"),
             ));
         }
-        if row.get::<_, Option<bool>>(6) == Some(true) {
+        if activation != Activation::Reenable && row.get::<_, Option<bool>>(6) == Some(true) {
             problems.push(("version".into(), "this version already runs".into()));
+        }
+        if activation == Activation::Restore && !row.get::<_, bool>(4) {
+            problems.push((
+                "version".into(),
+                "only an earlier approved version can be restored".into(),
+            ));
         }
         let trigger: String = row.get(1);
         if row.get::<_, bool>(4) {
             let definition = Definition::parse(&row.get::<_, Value>(2), &mut Vec::new())
                 .ok_or(Error::Invalid)?;
             let custom = self.custom_tables(client, scope, [&definition]).await?;
-            let saved = client.query_one("SELECT v.catalog_digest,r.needs_review FROM base_watcher_versions v JOIN base_watchers r ON r.tenant_id=v.tenant_id AND r.id=v.watcher_id WHERE v.tenant_id=$1 AND v.watcher_id=$2 AND v.number=$3", &[&tenant, &watcher, &number]).await?;
+            let saved = client.query_one("SELECT catalog_digest FROM base_watcher_versions WHERE tenant_id=$1 AND watcher_id=$2 AND number=$3", &[&tenant, &watcher, &number]).await?;
             let fingerprint: Option<String> = saved.get(0);
-            if saved.get::<_, bool>(1)
-                || fingerprint.is_none()
+            if fingerprint.is_none()
                 || fingerprint != self.catalog_digest(&trigger, &definition, &custom)
             {
                 problems.push((
@@ -609,6 +799,14 @@ impl Watchers {
             )
             .await?,
         );
+        self.review_script_examples(
+            client,
+            scope,
+            (&catalog, offered, &definition),
+            &mut review,
+            &mut problems,
+        )
+        .await?;
         // The approver's own authority: approving never delegates more.
         let grid = bilibi_grid::installed()?;
         let mut needed: std::collections::BTreeSet<&str> = grid
@@ -629,16 +827,25 @@ impl Watchers {
                 }
             }
         }
+        if definition.scripts().next().is_some() {
+            needed.insert(crate::RUN_SCRIPT);
+        }
         let authority = bilibi_authz::effective_grants(client, scope).await?;
         needed.extend(
             definition
-                .actions
-                .iter()
+                .actions()
                 .filter_map(|a| self.action(&a.operation))
                 .flat_map(|a| {
                     std::iter::once(a.capability)
                         .chain(a.definition.approval_capabilities.iter().copied())
                 }),
+        );
+        needed.extend(
+            definition
+                .scripts()
+                .flat_map(|script| &script.lookups)
+                .filter_map(|lookup| self.lookup(&lookup.operation))
+                .map(|lookup| lookup.capability),
         );
         for key in needed {
             if !bilibi_authz::decide(client, scope, key).await?.allowed {
@@ -663,17 +870,30 @@ impl Watchers {
                         grid.table(offered.definition.table).map_or(offered.definition.table, |t| t.label())
                     )),
                     Some(table) => {
-                        for (i, condition) in definition.conditions.iter().enumerate() {
-                            let readable = theirs.resolve(table, &condition.field).ok().filter(|column| {
+                        for path in definition.fields() {
+                            let readable = theirs.resolve(table, &path).ok().filter(|column| {
                                 column.field.is_some_and(|f| !theirs.masked(column.table, f.id))
                             });
                             if readable.is_none() {
-                                problems.push((format!("if.conditions.{i}.field"), format!(
-                                    "{} is hidden from automation, and a watcher never reads a hidden field",
-                                    condition.field
-                                )));
+                                problems.push(("fields".into(), format!("{path} is hidden from automation, and a watcher never reads a hidden field")));
                             }
                         }
+                    }
+                }
+                for key in definition
+                    .scripts()
+                    .flat_map(|script| &script.lookups)
+                    .filter_map(|lookup| self.lookup(&lookup.operation))
+                    .map(|lookup| lookup.capability)
+                    .collect::<std::collections::BTreeSet<_>>()
+                {
+                    if !bilibi_authz::decide(client, &principal, key).await?.allowed {
+                        problems.push((
+                            "lookups".into(),
+                            format!(
+                                "automation may not use {key}; restore its live grant before activating this version"
+                            ),
+                        ));
                     }
                 }
             }
@@ -683,8 +903,7 @@ impl Watchers {
                 .push("Automation is not available here.".into()),
         }
         let records: Vec<&str> = definition
-            .actions
-            .iter()
+            .actions()
             .filter_map(|a| self.action(&a.operation))
             .flat_map(|a| a.definition.records.iter().copied())
             .collect();
@@ -719,8 +938,7 @@ impl Watchers {
                 let edges = graph.entry(row.get(2)).or_default();
                 edges.extend(
                     other
-                        .actions
-                        .iter()
+                        .actions()
                         .filter_map(|call| self.action(&call.operation))
                         .flat_map(|action| {
                             action
@@ -757,18 +975,56 @@ impl Watchers {
         watcher: i64,
         number: i32,
     ) -> Result<Review> {
+        self.activate(tx, scope, watcher, number, false, None).await
+    }
+
+    /// Restores an earlier approved version only after repeating every current
+    /// permission, binding, example, limit and cycle check. A refusal leaves
+    /// the running version unchanged.
+    pub async fn restore(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        watcher: i64,
+        number: i32,
+        expected_activation: Option<i32>,
+    ) -> Result<Review> {
+        self.activate(tx, scope, watcher, number, true, expected_activation)
+            .await
+    }
+
+    async fn activate(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        watcher: i64,
+        number: i32,
+        restoring: bool,
+        expected_activation: Option<i32>,
+    ) -> Result<Review> {
         let tenant = scope.tenant();
         self.lock_admission(tx.sql(), scope).await?;
-        tx.sql()
+        let locked = tx.sql()
             .query_opt(
-                "SELECT 1 FROM base_watchers WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                "SELECT version,disabled_at IS NULL FROM base_watchers WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
                 &[&tenant, &watcher],
             )
             .await?
             .ok_or(Error::NotFound)?;
-        let review = self
-            .review_approval(tx.sql(), scope, watcher, number)
-            .await?;
+        if restoring
+            && expected_activation.is_some_and(|expected| {
+                locked.get::<_, i32>(0) != expected || !locked.get::<_, bool>(1)
+            })
+        {
+            return Err(Error::Conflict);
+        }
+        let review = if restoring {
+            self.review_restore(tx.sql(), scope, watcher, number)
+                .await?
+        } else {
+            self.review_approval(tx.sql(), scope, watcher, number)
+                .await?
+        };
         if !review.ok() {
             return Err(Error::Invalid);
         }
@@ -787,6 +1043,10 @@ impl Watchers {
         let catalog_digest = self
             .catalog_digest(&event, &definition, &custom)
             .ok_or(Error::Invalid)?;
+        let script_digests: Vec<String> = definition
+            .scripts()
+            .map(|script| script.permission_digest())
+            .collect();
         let user = scope.user();
         tx.mutate(move |sql| Box::pin(async move {
             let previous = sql.query_one("SELECT id,approved_by,approved_at::text,catalog_digest FROM base_watcher_versions WHERE tenant_id=$1 AND watcher_id=$2 AND number=$3", &[&tenant, &watcher, &number]).await?;
@@ -794,17 +1054,30 @@ impl Watchers {
                 "UPDATE base_watcher_versions SET approved_by=COALESCE(approved_by,$4),approved_at=COALESCE(approved_at,clock_timestamp()),catalog_digest=COALESCE(catalog_digest,$5) WHERE tenant_id=$1 AND watcher_id=$2 AND number=$3 RETURNING id",
                 &[&tenant, &watcher, &number, &user, &catalog_digest],
             ).await?.get(0);
-            let old: Option<i64> = sql.query_one(
-                "SELECT active_version_id FROM base_watchers WHERE tenant_id=$1 AND id=$2",
+            let old = sql.query_one(
+                "SELECT r.active_version_id,v.number,r.version,r.disabled_at IS NULL FROM base_watchers r LEFT JOIN base_watcher_versions v ON v.tenant_id=r.tenant_id AND v.id=r.active_version_id WHERE r.tenant_id=$1 AND r.id=$2",
                 &[&tenant, &watcher],
-            ).await?.get(0);
-            sql.execute(
-                "UPDATE base_watchers SET active_version_id=$3,disabled_at=NULL,enabled_at=clock_timestamp(),needs_review=false,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2",
-                &[&tenant, &watcher, &version],
             ).await?;
+            let old_id: Option<i64> = old.get(0);
+            let old_number: Option<i32> = old.get(1);
+            let old_activation: i32 = old.get(2);
+            let old_enabled: bool = old.get(3);
+            for digest in &script_digests {
+                sql.execute(
+                    "INSERT INTO base_watcher_script_permissions(tenant_id,watcher_id,version_id,script_digest,principal,granted_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,version_id,script_digest,principal) DO UPDATE SET granted_by=EXCLUDED.granted_by,granted_at=clock_timestamp()",
+                    &[&tenant, &watcher, &version, digest, &crate::PRINCIPAL, &user],
+                ).await?;
+            }
+            let activation: i32 = sql.query_one(
+                "UPDATE base_watchers SET active_version_id=$3,disabled_at=NULL,enabled_at=clock_timestamp(),needs_review=false,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2 RETURNING version",
+                &[&tenant, &watcher, &version],
+            ).await?.get(0);
             let evidence = sql.query_one("SELECT approved_by,approved_at::text,catalog_digest FROM base_watcher_versions WHERE tenant_id=$1 AND id=$2", &[&tenant, &version]).await?;
             Ok(((), vec![Change { kind: "base/watchers.watcher".into(), id: watcher,
-                old: json!({"active_version": old}), new: json!({"active_version": version, "number": number, "approved": true}) },
+                old: json!({"active_version": old_id}), new: json!({"active_version": version, "number": number, "approved": true}) },
+                Change { kind: "base/watchers.activation".into(), id: watcher,
+                    old: json!({"active_version": old_id, "number": old_number, "activation": old_activation, "enabled": old_enabled}),
+                    new: json!({"active_version": version, "number": number, "activation": activation, "enabled": true}) },
                 Change { kind: "base/watchers.version".into(), id: previous.get(0),
                     old: json!({"approved_by": previous.get::<_, Option<i64>>(1), "approved_at": previous.get::<_, Option<String>>(2), "catalog_digest": previous.get::<_, Option<String>>(3)}),
                     new: json!({"approved_by": evidence.get::<_, Option<i64>>(0), "approved_at": evidence.get::<_, Option<String>>(1), "catalog_digest": evidence.get::<_, Option<String>>(2)}) }]))
@@ -839,16 +1112,9 @@ impl Watchers {
         let mut review = None;
         if enabled {
             let checked = self
-                .review_approval(tx.sql(), scope, watcher, running)
+                .review_activation(tx.sql(), scope, watcher, running, Activation::Reenable)
                 .await?;
-            // The version was approved already; only what changed since counts.
-            let problems: Problems = checked
-                .problems
-                .iter()
-                .filter(|(_, why)| why != "this version already runs" && !why.contains("is newer"))
-                .cloned()
-                .collect();
-            if !problems.is_empty() {
+            if !checked.ok() {
                 return Err(Error::Invalid);
             }
             review = Some(checked);
@@ -862,6 +1128,13 @@ impl Watchers {
         })).await?;
         Ok(review)
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Activation {
+    Approve,
+    Reenable,
+    Restore,
 }
 
 /// A stand-in for the bound subject, typed as the contract's schema wants it,
@@ -893,6 +1166,7 @@ pub(crate) fn bind(
 /// labels, actions with their titles and parameters, examples. Labels come
 /// from the installed catalogs; values from the version itself.
 pub(crate) struct Described {
+    pub scripted: bool,
     pub matching: &'static str,
     pub conditions: Vec<String>,
     pub actions: Vec<String>,
@@ -917,6 +1191,7 @@ impl Watchers {
         };
         let Some(parsed) = parsed else {
             return Described {
+                scripted: false,
                 matching: "all",
                 conditions: Vec::new(),
                 actions: Vec::new(),
@@ -929,9 +1204,15 @@ impl Watchers {
             .map(|c| definition::sentence(c, &label(&c.field)))
             .collect();
         let actions = parsed
-            .actions
+            .steps
             .iter()
-            .map(|a| {
+            .map(|step| {
+                let a = match step {
+                    crate::definition::Step::Script { script } => {
+                        return script.describe();
+                    }
+                    crate::definition::Step::Operation(call) => call,
+                };
                 let title = self
                     .action(&a.operation)
                     .map_or(a.operation.as_str(), |o| o.title);
@@ -947,7 +1228,7 @@ impl Watchers {
                 }
             })
             .collect();
-        let examples = definition::parse_examples(examples, &mut problems)
+        let mut examples: Vec<String> = definition::parse_examples(examples, &mut problems)
             .iter()
             .map(|e| {
                 let facts: Vec<String> = e
@@ -970,7 +1251,20 @@ impl Watchers {
                 )
             })
             .collect();
+        for script in parsed.scripts() {
+            for (index, example) in script.examples.iter().enumerate() {
+                examples.push(format!(
+                    "{} example {} with {} expects {}.",
+                    script.name,
+                    index + 1,
+                    json!(example.facts),
+                    json!(example.expect)
+                ));
+            }
+        }
+        let scripted = parsed.scripts().next().is_some();
         Described {
+            scripted,
             matching: parsed.matching.key(),
             conditions,
             actions,

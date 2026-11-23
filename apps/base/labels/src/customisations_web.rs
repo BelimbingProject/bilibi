@@ -589,6 +589,7 @@ impl Index {
         let refs: Vec<_> = page
             .entries
             .iter()
+            .filter(|item| item.row.revision > 0)
             .map(|item| (item.row.audit_kind, item.row.audit_id, item.row.revision))
             .collect();
         let changes = bilibi_audit::latest_changes(&**client, scope, &refs).await?;
@@ -623,6 +624,7 @@ impl Index {
                     && change.revision == item.row.revision
             });
             let actor = match (names.as_ref(), change) {
+                (_, None) if item.row.revision == 0 => "—".into(),
                 (Some(names), Some(change)) => {
                     let mut label =
                         principal(change)
@@ -656,6 +658,8 @@ impl Index {
                     &value.utc,
                     value.mode.as_str(),
                 ))
+            } else if item.row.revision == 0 {
+                Cell::text("—")
             } else {
                 Cell::text("Unavailable")
             };
@@ -777,7 +781,7 @@ impl Index {
             restricted,
             header: render(Header {
                 title: Html::text("Customisations"),
-                subtitle: "Review and undo changes made for this tenant.",
+                subtitle: "Review and undo shared changes and your own preferences.",
                 ..Header::default()
             })?,
             card,

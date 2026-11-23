@@ -45,8 +45,8 @@ impl Sweeper for DispatchLog {
                 rows.iter().map(|row| (row.get(0), row.get(1))).collect();
             let ids: Vec<i64> = keys.iter().map(|(id, _)| *id).collect();
             let persons: Vec<i64> = keys.iter().filter_map(|(_, person)| *person).collect();
-            let held_records = holds.records(grant, LOG_RECORD, &ids).await?;
-            let held_persons = holds.persons(grant, &persons).await?;
+            let held_records = holds.records(tx.sql(), grant, LOG_RECORD, &ids).await?;
+            let held_persons = holds.persons(tx.sql(), grant, &persons).await?;
             let (kept, due): (Vec<_>, Vec<_>) = keys.iter().partition(|(id, person)| {
                 held_records.contains_key(id)
                     || person.is_some_and(|p| held_persons.contains_key(&p))

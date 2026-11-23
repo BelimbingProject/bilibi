@@ -34,7 +34,7 @@ Base Records kind `user` names and links staff accounts through the same tenant,
 | `link_person(scope, user, person)` / `unlink(scope, user)` | The account binder's commands; `admin.user.update`. See below |
 | `update_account` / `remove_membership` | Tenant membership administration (`src/accounts.rs`): rename with `admin.user.update`, or remove with `admin.user.delete`. Shared credentials are not an administrator operation. See "Account administration" |
 | `invite_member` / `revoke_member_invitation` / `member_invitation` / `accept_member_invitation` / `accept_new_member_invitation` | Prepare or revoke a tenant account, read the safe facts for its emailed page and accept it with an existing or new sign-in. See "Membership invitations" |
-| `update_profile(token, csrf, name, email)` / `landing_pages` / `landing_choice` / `save_landing` / `landing_route` | The signed-in account's own profile and landing page; no capability |
+| `update_profile(token, csrf, name, email)` / `landing_pages` / `landing_choice` / `landing_route` | The signed-in account's own profile and landing page; no capability |
 | `send_email_verification(token, csrf)` / `verify_email(link)` | Signed link to the account's current address; clicking proves mailbox control |
 
 Refusals are `CredentialError` variants a page maps to a field error or flash
@@ -166,7 +166,7 @@ Customer accounts retain their separate portal identity ([ADR 16](../../../docs/
 
 `CompanyAccount` carries id, name, email, verification, Person, the requested organisation and timestamps. It contains no credential or employment affiliation. Staff without a desk are not listed. Business affiliations neither add nor remove workplace access.
 
-## Pages (`core/user.pages`)
+## Pages
 
 `/settings/profile`, `/settings/password` (`src/web.rs`, `templates/password.html`), `/settings/two-factor` (below) and `/settings/appearance` are the signed-in account's own settings inside the shell, on the settings layout of `base/ui/templates/settings.html` with the typed `bilibi_ui::SettingsTab` (adapted to the shared horizontal tabs). Open **My settings** in the account panel at the bottom of the sidebar to start at Profile. AI connections uses the same five-tab layout in `core/agent`. The password page is live: the form submits as the `change-password` event carrying its field values, the state keeps the field errors of the last attempt (`can't be blank`, the password policy, `does not match password`, `is incorrect`), and a success or failure is a flash in the page until dismissed. The route needs a session and no capability; the current password proves the holder inside `change_password`.
 
@@ -178,11 +178,11 @@ unverified, which the saved flash says. A shared-email change requires a portabl
 setting `ui.landing_menu_id` (`accounts::LANDING_KEY`, contributed in
 `contributions.rs`): the select offers exactly the menu pages the account can
 open (`landing_pages`, the menu contributions read through the account's
-effective capabilities), `save_landing` refuses any other value, and the
-Web host's sign-in asks `landing_route` for where to go, falling back to the
-workspace when the choice is unset or no longer reachable.
+effective capabilities). Profile saves the choice through the same reviewed set or restore operation as the connector. The Web host asks `landing_route` where to go after sign-in and opens the workspace when the choice is unset or unreachable.
 
 The same page uploads or removes the account's own `ui.profile_image_asset_id`. Media accepts at most 1 MiB of byte-inspected PNG, JPEG or WebP data and serves it through a signed stream link; the sidebar uses the fixed-size picture and returns to the account's initials when it is absent or unreadable.
+
+Agents use `core.user.landing.read` for the reachable menu pages and current choice, then `core.user.landing.set` or `core.user.landing.restore` with its version. Use `core.user.pins.read` for the account's ordered shortcuts, `core.user.pins.set` to set that list and `core.user.pins.restore` to clear the list or remove one pin by ID. The existing shell and profile actions enforce the same owner rules. The account can remove a pin or restore the landing default on Customisations.
 
 ## Account administration (K16; `src/accounts.rs`, `src/account_ui/`)
 
@@ -393,6 +393,8 @@ Two limits, both operator settings (Settings › Session), with these defaults:
 - The account's SCIM document keeps only its schemas, resource ID and a placeholder `userName`; a first-administrator receipt keeps a placeholder email.
 - Access and portability include every linked account's non-secret SCIM documents, including inactive documents; credentials, sessions, provider secrets and challenges are never exported. The SCIM writer normalizes this document to supported identity attributes, not passwords.
 - Installation-owner 2FA recovery uses the fixed `two-factor-reset` system principal and never gives a customer administrator a factor-reset operation.
+- Removing the last live membership starts the installation-owned identity's configurable **Unused sign-in retention** clock. Accepting a later invitation cancels it. The server owner runs `identity-retention` to anonymise due identities or `identity-delete --email <address> --confirm <address>` to dispose of one unused identity immediately; neither command can touch an identity with a live membership.
+- Lost-mailbox recovery is `identity-recover --email <old> --new-email <new>` on the server. It treats the new address as operator-verified, revokes pending reset links, signs every membership out and notifies the new mailbox. Customer tenants have no route, capability or agent operation for it.
 - **Audit actions are included in access and portability.** The account store resolves every linked account, including inactive accounts, then reads its actions through Audit: direct use, person-backed agents and impersonation, once per action. Where another account impersonated the subject, the row says an administrator acted and withholds that operator's ID, address, URL, browser and payload. Identifier-only matches and actors from another tenant are excluded. Erasure reports each account’s action evidence as kept (`audit.account_actions`, reason `evidence`); it does not clear it immediately and owes no cleanup, so no resumption is scheduled for it. The existing company action-retention policy clears request and payload values, and the operator’s partition policy removes old evidence. Bookmarks still exempt retained actions. No end date is promised: either policy can be disabled and a bookmark can keep evidence indefinitely.
 - **Sign-in history is kept after erasure, for at most 90 days.** Each sign-in (time, IP address, rough place, user agent) is held by [`base/session`](../../base/session/README.md#sign-in-history-and-privacy) as security evidence of where and when an account was used. Erasure leaves it, lists it on the certificate as kept (`session.sign_in_history`, until the newest record's 90th day) and Session's expiry sweep deletes each record 90 days after the sign-in. Access and portability list it for each account (time, IP address, place, user agent, deletion date). Audit rows of sessions keep their IP address and user agent under Audit's own retention.
 - An erasure of an already anonymised account still records its change, so earlier history is cleared too.

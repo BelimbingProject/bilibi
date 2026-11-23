@@ -1,5 +1,6 @@
 // Generated composition links. Runtime inventory owns discovery.
 pub use bilibi_agent_api as agent_api;
+pub use bilibi_ai as ai;
 pub use bilibi_artifacts as artifacts;
 pub use bilibi_audit as audit;
 pub use bilibi_audit_views as audit_views;
@@ -8,6 +9,7 @@ pub use bilibi_authz_agent as authz_agent;
 pub use bilibi_bulk_data as bulk_data;
 pub use bilibi_custom_fields as custom_fields;
 pub use bilibi_dashboard as dashboard;
+pub use bilibi_dashboard_agent as dashboard_agent;
 pub use bilibi_database as database;
 pub use bilibi_datetime as datetime;
 pub use bilibi_design_library as design_library;

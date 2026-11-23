@@ -63,7 +63,7 @@ Tenants decide per operation on **Administration › Authorization › Step-up 2
 
 | Channel | Proof | Window |
 |---|---|---|
-| Web (browser session) | A check on the confirm page (the chosen method’s `Provider::prompt`) | On the session row. Ends on sign-out, termination, expiry or an impersonation switch |
+| Web (browser session) | The chosen method's `Provider::prompt`, floated over placeholders at the requested page address | On the session row. Ends on sign-out, termination, expiry or an impersonation switch |
 | Agent (`/api/v1`, `/mcp`) | `step_up_code`: the holder's current code, sent with the commit | Per agent connection and holder. Not shared with browsers or other agents |
 
 - **Customers.** A customer's portal session proves the same way: the window is on its session row, and the prompt and setup are the portal's pages (`apps/core/portal/README.md`, "Second sign-in step"). An owner writes nothing different for a customer: declare the operation and call `require` with the customer's scope.
@@ -71,6 +71,7 @@ Tenants decide per operation on **Administration › Authorization › Step-up 2
 - **Ask every time:** each action needs its own check. On the web, one check made within 5 minutes covers one such action. For an agent, a code per action.
 - **Codes:** a presented code is verified and used in one step, for the operation and target of the first check that meets it. It then covers the rest of that one request, for example a role change that also gives full access, or every operation in one committed plan. In any later request the same code is refused.
 - **Never:** an impersonating operator or an agent cannot satisfy step-up with anything but the account holder's own code.
+- **Protected browser content:** the host renders the shell and `StepUpGate`, not the protected page owner. After proof, the live transport mounts the requested page in place with its address and filters unchanged. A protected action replaces its source content with the same gate until proof succeeds; the person repeats the action under the owner's normal checks.
 - Signing the holder out everywhere (`Sessions::revoke`) also ends their agent windows.
 
 ## Agent flow

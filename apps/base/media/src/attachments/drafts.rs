@@ -173,11 +173,12 @@ impl Media {
                 break;
             };
             after = last.get("id");
-            let holds = RecordHolds::acquire(tenant).await?;
+            let (holds, mut hold_guard) = RecordHolds::acquire(client, tenant).await?;
+            let client = hold_guard.client();
             let removed = self
                 .remove_batch(client, tenant, age, &candidates, &holds, &mut report)
                 .await;
-            holds.release().await?;
+            hold_guard.release().await?;
             removed?;
             if (candidates.len() as i64) < CLEANUP_BATCH {
                 break;
@@ -199,8 +200,10 @@ impl Media {
             .iter()
             .map(|row| row.get("media_asset_id"))
             .collect();
-        let held = holds.records(super::ATTACHMENT_KIND, &ids).await?;
-        let held_assets = holds.records(super::ASSET_KIND, &assets).await?;
+        let held = holds
+            .records(&*client, super::ATTACHMENT_KIND, &ids)
+            .await?;
+        let held_assets = holds.records(&*client, super::ASSET_KIND, &assets).await?;
         for candidate in candidates {
             if held.contains_key(&candidate.get::<_, i64>("id"))
                 || held_assets.contains_key(&candidate.get::<_, i64>("media_asset_id"))

@@ -1,5 +1,5 @@
 //! Base Watchers: a tenant's "when this happens, do that" as data, with no
-//! program release and no tenant code (ADR 28, #682).
+//! program release, with sandboxed JavaScript steps (ADR 28 and ADR 34).
 //!
 //! A watcher names a trigger (an event an owner offers, recorded in that
 //! owner's transaction), conditions over the trigger record's fields (read
@@ -17,12 +17,15 @@ mod definition;
 mod discard;
 mod review;
 mod run;
+mod sandbox;
+mod script;
+pub use sandbox::enter_worker;
 mod store;
 mod transfer;
 mod trial;
 mod web;
 
-pub use catalog::{Action, Trigger, ACTIONS, TRIGGERS};
+pub use catalog::{Action, Lookup, Trigger, ACTIONS, LOOKUPS, TRIGGERS};
 pub use review::Review;
 pub use store::{
     EffectView, RunView, VersionView, WatcherState, WatcherSummary, WatcherView, Watchers,
@@ -61,6 +64,10 @@ pub const MANAGE: &str = "admin.watchers.manage";
 pub const APPROVE: &str = "admin.watchers.approve";
 /// The principal runs the tenant's approved watchers.
 pub const RUN: &str = "watchers.run.execute";
+/// Separate live consent to execute approved watcher script steps.
+pub(crate) const RUN_SCRIPT: &str = "watchers.script.execute";
+pub(crate) const SCRIPT_TIME: &str = "watchers.script_milliseconds";
+pub(crate) const SCRIPT_HEAP: &str = "watchers.script_heap_mib";
 /// The principal records why a run ended unfinished (a standing grant).
 pub const SETTLE: &str = "watchers.run.settle";
 
@@ -109,10 +116,11 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/watchers.vocabulary", p
         CapabilityDefinition::tenant(MANAGE),
         CapabilityDefinition::tenant(APPROVE),
         CapabilityDefinition::tenant(RUN),
+        CapabilityDefinition::tenant(RUN_SCRIPT),
         CapabilityDefinition::tenant(SETTLE),
     ],
     roles: &[],
-    system_principals: &[SystemPrincipalDefinition { name: PRINCIPAL, capabilities: &[RUN, SETTLE] }],
+    system_principals: &[SystemPrincipalDefinition { name: PRINCIPAL, capabilities: &[RUN, RUN_SCRIPT, SETTLE] }],
 }) }
 // Recording why a run ended is the way out of a refused job, never an effect.
 inventory::submit! { Contribution::new(STANDING_GRANTS, PRINCIPAL, provenance!(), &StandingGrant { principal: PRINCIPAL, capabilities: &[SETTLE] }) }
@@ -143,6 +151,10 @@ const fn limit(
 }
 inventory::submit! { Contribution::new(DEFINITIONS, ACTIONS_PER_RUN, provenance!(), &limit(
 "Actions per run", "The most actions one watcher may take each time it runs. A watcher with more cannot be approved.", || json!(3), 10.0)) }
+inventory::submit! { Contribution::new(DEFINITIONS, SCRIPT_TIME, provenance!(), &limit(
+"Script time per run", "Maximum milliseconds for a scripted run or a whole trial, including preparation and operation calls.", || json!(250), 1000.0)) }
+inventory::submit! { Contribution::new(DEFINITIONS, SCRIPT_HEAP, provenance!(), &limit(
+"Script memory", "Maximum QuickJS heap in MiB for a script invocation.", || json!(8), 32.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, CHAIN_DEPTH, provenance!(), &limit(
 "Watchers in a chain", "How many watchers in a row one change may start, when a watcher's action starts another watcher. The next one is refused, and its receipt says so.", || json!(3), 10.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, RUNS_PER_MINUTE, provenance!(), &limit(
@@ -194,6 +206,7 @@ fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry:
             .as_ref()
             .clone(),
         jobs,
+        registry,
         mutations: services.get("base/database.mutations")?,
         events,
         queue: services.get(bilibi_queue::SERVICE)?,
@@ -208,7 +221,7 @@ inventory::submit! {
     Module {
         id: "base/watchers", layer: Layer::Base,
         dependencies: &["base/custom_fields", "base/labels", "base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/events", "base/grid", "base/settings", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql")), ("base-watchers-005-token-bucket", include_str!("../migrations/005-token-bucket.sql")), ("base-watchers-006-activation", include_str!("../migrations/006-activation.sql")), ("base-watchers-007-trials", include_str!("../migrations/007-trials.sql")), ("base-watchers-008-name-lookup", include_str!("../migrations/008-name-lookup.sql"))],
+        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql")), ("base-watchers-005-token-bucket", include_str!("../migrations/005-token-bucket.sql")), ("base-watchers-006-activation", include_str!("../migrations/006-activation.sql")), ("base-watchers-007-trials", include_str!("../migrations/007-trials.sql")), ("base-watchers-008-name-lookup", include_str!("../migrations/008-name-lookup.sql")), ("base-watchers-009-script-plan", include_str!("../migrations/009-script-plan.sql")), ("base-watchers-010-script-permissions", include_str!("../migrations/010-script-permissions.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let watchers = Arc::new(build(services)?);

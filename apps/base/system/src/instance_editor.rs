@@ -33,6 +33,7 @@ pub struct Instances {
     pub(super) composition: Arc<bilibi_module_registry::Composition>,
 }
 /// One complete settings submission. The expected role fences a stale page.
+#[derive(Clone)]
 pub struct InstanceSettings {
     pub expected_role: Role,
     pub role: Role,
@@ -142,7 +143,7 @@ impl bilibi_step_up::Enforcement for EnforcementPolicy {
         Box::pin(async move {
             let client = self
                 .db
-                .get_detached(
+                .get_independent(
                     "step-up asks this from inside the caller's write, through a hook that \
                      carries no client; one short read",
                 )
@@ -157,6 +158,7 @@ pub(super) struct Editor {
     role: Role,
     flash: Option<String>,
     draft: Option<Value>,
+    pending: Option<InstanceSettings>,
 }
 impl Editor {
     pub(super) async fn new(pages: Pages) -> Result<Self> {
@@ -166,12 +168,23 @@ impl Editor {
             role,
             flash: None,
             draft: None,
+            pending: None,
         })
     }
     pub(super) async fn body(&self, scope: &Scope) -> Result<String> {
         let client = self.pages.db.get().await?;
         Instances::authorize_in(&**client, scope).await?;
         drop(client);
+        if self.pending.is_some() {
+            return super::action_gate(
+                &self.pages.instances.step_up,
+                scope,
+                "Instance settings",
+                "save_instance",
+                self.flash.as_deref(),
+            )
+            .await;
+        }
         let instance = self.pages.instances.resolve().await?;
         let draft = |key: &str| {
             self.draft
@@ -179,16 +192,7 @@ impl Editor {
                 .and_then(|value| value.get(format!("instance[{key}]")))
                 .and_then(Value::as_str)
         };
-        let methods = self
-            .pages
-            .instances
-            .step_up
-            .enrolled_methods(scope)
-            .await?
-            .into_iter()
-            .map(|m| bilibi_ui::ProofMethod::new(m.id, m.label, m.code_length, m.numeric))
-            .collect::<Vec<_>>();
-        let enrolled = !methods.is_empty();
+        let enrolled = self.pages.instances.step_up.enrolled(scope).await?;
         let role_field = render(
             Field::named("instance[role]")
                 .id("instance-role")
@@ -204,9 +208,6 @@ impl Editor {
         let mut role_step = bilibi_ui::StepUp::new(enrolled, "/system/instance");
         role_step.body = role_field;
         role_step.reason = "to change the server role.".into();
-        role_step.code = render(
-            bilibi_ui::ProofInput::new("instance-code", "instance[code]", methods).optional(),
-        )?;
         let mut body = render(role_step)?;
         body.push(&render(bilibi_ui::Alert { kind: StatusKind::Warning, body: Html::text("Production is the live system. Changing to or from Production changes the server's warnings and 2FA rules. It does not copy or remove any data. Every role change needs a fresh 2FA code."), ..Default::default() })?);
         let client = self.pages.db.get().await?;
@@ -288,7 +289,7 @@ impl Editor {
         })?
         .to_string())
     }
-    async fn save(&self, scope: &Scope, value: &Value) -> Result<()> {
+    fn settings(&self, value: &Value) -> Result<InstanceSettings> {
         let text = |name: &str| {
             value
                 .get(format!("instance[{name}]"))
@@ -306,19 +307,12 @@ impl Editor {
         if self.role != Role::Production && !colour.is_empty() && Colour::parse(colour).is_none() {
             return Err(Error::Invalid);
         }
-        let scope = scope.clone().presenting_step_up(text("code"));
-        self.pages
-            .instances
-            .save(
-                &scope,
-                InstanceSettings {
-                    expected_role: self.role,
-                    role,
-                    label: text(INSTANCE_LABEL_KEY).into(),
-                    colour: colour.into(),
-                },
-            )
-            .await
+        Ok(InstanceSettings {
+            expected_role: self.role,
+            role,
+            label: text(INSTANCE_LABEL_KEY).into(),
+            colour: colour.into(),
+        })
     }
 }
 impl LiveState<Scope, Error> for Editor {
@@ -331,19 +325,58 @@ impl LiveState<Scope, Error> for Editor {
                 match value.get("type").and_then(Value::as_str) {
                     Some("clear-flash") => self.flash = None,
                     Some("save_instance") => {
-                        let mut draft = value.clone();
-                        if let Some(fields) = draft.as_object_mut() {
-                            fields.remove("instance[code]");
-                        }
-                        self.draft = Some(draft);
-                        match self.save(request.scope, value).await {
-                        Ok(()) => return Ok(LiveBody { redirect: Some("/system/instance".into()), flash: Some((StatusKind::Success, "Instance settings saved.".into())), ..Default::default() }),
-                        Err(error @ Error::StepUpRequired { reason: "not_enrolled", .. }) | Err(error @ Error::Unauthorized) => return Err(error),
-                        Err(Error::StepUpRequired { reason: "invalid_code" | "locked", .. }) => self.flash = Some("The 2FA code was refused. Enter a new code from your authenticator app.".into()),
-                        Err(Error::StepUpRequired { .. }) => self.flash = Some("Enter a fresh 2FA code to change the server role.".into()),
-                        Err(Error::Forbidden) => self.flash = Some("Only a Core Administrator can change instance settings.".into()),
-                        Err(Error::Invalid) => self.flash = Some("The settings were refused. Check the values, then reload if the server role has changed.".into()),
-                        Err(_) => self.flash = Some("The instance settings could not be saved. Try again.".into()),
+                        let proof = value.get("proof").and_then(Value::as_str);
+                        let input = match (self.pending.take(), proof) {
+                            (Some(input), Some(_)) => Ok(input),
+                            (None, None) => {
+                                self.draft = Some(Value::Object(
+                                    ["role", INSTANCE_LABEL_KEY, INSTANCE_COLOUR_KEY]
+                                        .into_iter()
+                                        .filter_map(|key| {
+                                            let key = format!("instance[{key}]");
+                                            value.get(&key).cloned().map(|value| (key, value))
+                                        })
+                                        .collect(),
+                                ));
+                                self.settings(value)
+                            }
+                            (pending, _) => {
+                                self.pending = pending;
+                                return Err(Error::Invalid);
+                            }
+                        };
+                        let scope = request
+                            .scope
+                            .clone()
+                            .presenting_step_up(proof.unwrap_or(""));
+                        self.flash = None;
+                        let result = match input {
+                            Ok(input) => {
+                                let result = self.pages.instances.save(&scope, input.clone()).await;
+                                if matches!(
+                                    result,
+                                    Err(Error::StepUpRequired {
+                                        reason: "code_required" | "invalid_code" | "locked",
+                                        ..
+                                    })
+                                ) {
+                                    self.pending = Some(input);
+                                }
+                                result
+                            }
+                            Err(error) => Err(error),
+                        };
+                        match result {
+                            Ok(()) => return Ok(LiveBody { redirect: Some("/system/instance".into()), flash: Some((StatusKind::Success, "Instance settings saved.".into())), ..Default::default() }),
+                            Err(Error::StepUpRequired { .. }) if self.pending.is_some() => {
+                                if proof.is_some() {
+                                    self.flash = Some("The 2FA code was refused.".into());
+                                }
+                            }
+                            Err(error @ Error::StepUpRequired { reason: "not_enrolled", .. }) | Err(error @ Error::Unauthorized) => return Err(error),
+                            Err(Error::Forbidden) => self.flash = Some("Only a Core Administrator can change instance settings.".into()),
+                            Err(Error::Invalid) => self.flash = Some("The settings were refused. Check the values, then reload if the server role has changed.".into()),
+                            Err(_) => self.flash = Some("The instance settings could not be saved. Try again.".into()),
                         }
                     }
                     _ => return Err(Error::Invalid),

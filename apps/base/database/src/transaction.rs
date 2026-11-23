@@ -345,6 +345,10 @@ impl<'a> MutationTransaction<'a> {
         Ok(())
     }
     pub async fn commit(self) -> Result<()> {
+        self.commit_checked(|| Ok(())).await
+    }
+
+    pub async fn commit_checked(self, before_commit: impl FnOnce() -> Result<()>) -> Result<()> {
         if self.poisoned
             || self
                 .continuation_failed
@@ -354,6 +358,7 @@ impl<'a> MutationTransaction<'a> {
             return Err(Error::Internal);
         }
         crate::timing::timed(self.capture.action(&self.tx, &self.context)).await?;
+        before_commit()?;
         crate::timing::timed(self.tx.commit()).await?;
         let callbacks = self
             .callbacks

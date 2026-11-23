@@ -301,6 +301,76 @@ impl WriteHandler for Approve {
         })
     }
 }
+
+struct Restore;
+impl WriteHandler for Restore {
+    fn owner(&self) -> &'static str {
+        "base/watchers"
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let watchers = watchers()?;
+            let watcher = input["watcher_id"].as_i64().unwrap_or_default();
+            let number = version(input);
+            let review = match client.transaction() {
+                Some(tx) => watchers.review_restore(tx, scope, watcher, number).await?,
+                None => {
+                    let pooled = watchers.db.get().await.map_err(Error::from)?;
+                    watchers
+                        .review_restore(&**pooled, scope, watcher, number)
+                        .await?
+                }
+            };
+            if !review.ok() {
+                return Err(refused(&review));
+            }
+            let mut facts = review.to_json();
+            facts["summary"] = json!(format!(
+                "Restore version {number} after rechecking its permissions, bindings and examples."
+            ));
+            Ok(facts.into())
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let watchers = watchers()?;
+            let watcher = input["watcher_id"].as_i64().unwrap_or_default();
+            let number = version(input);
+            let expected_activation = input["expected_activation"]
+                .as_i64()
+                .and_then(|value| i32::try_from(value).ok());
+            match watchers
+                .restore(tx, scope, watcher, number, expected_activation)
+                .await
+            {
+                Ok(review) => {
+                    let mut result = review.to_json();
+                    result["watcher_id"] = json!(watcher);
+                    result["version"] = json!(number);
+                    result["state"] = json!("on");
+                    Ok(result.into())
+                }
+                Err(Error::Invalid) => {
+                    let review = watchers
+                        .review_restore(tx.sql(), scope, watcher, number)
+                        .await?;
+                    Err(refused(&review))
+                }
+                Err(error) => Err(error.into()),
+            }
+        })
+    }
+}
 fn version(input: &Value) -> i32 {
     input["version"]
         .as_i64()
@@ -389,6 +459,30 @@ fn runs_schema() -> Value {
 fn scalar() -> Value {
     json!({"type":"string","maxLength":500,"description":"Text, a number written as text (\"1000.50\") or true/false written as text"})
 }
+fn script_schema() -> Value {
+    let call = json!({"type":"object","required":["operation"],"properties":{
+        "operation":{"type":"string","maxLength":200},
+        "input":{"type":"object","additionalProperties":true}
+    }});
+    json!({"type":"object","required":["name","source","fields","calls","examples"],"properties":{
+        "name":{"type":"string","maxLength":120},
+        "source":{"type":"string","maxLength":16384,"description":"JavaScript function body. Return an ordered array of declared calls using facts and lookup(operation, input)."},
+        "fields":{"type":"array","items":{"type":"string","maxLength":160}},
+        "lookups":{"type":"array","items":call},
+        "calls":{"type":"array","items":call},
+        "examples":{"type":"array","items":{"type":"object","required":["facts","expect"],"properties":{
+            "facts":{"type":"object","additionalProperties":true},
+            "lookup_fixtures":{"type":"array","description":"Author-typed test data for every declared lookup. It is never populated from live records.","items":{"type":"object","required":["operation","reply"],"properties":{
+                "operation":{"type":"string","maxLength":200},
+                "input":{"type":"object","additionalProperties":true},
+                "reply":{"type":"object","additionalProperties":true}
+            }}},
+            "expect":{"type":"array","items":call}
+        }}},
+        "language":{"type":"string","enum":["javascript"]}
+    }})
+}
+
 fn draft_schema() -> Value {
     json!({"type":"object","required":["name","watch","do"],"properties":{
         "watcher_id":{"type":"integer","minimum":1,"description":"The watcher this is the next version of; leave out for a new watcher"},
@@ -401,7 +495,8 @@ fn draft_schema() -> Value {
             "value":{"type":"string","maxLength":500,"nullable":true,"description":"One value for eq, ne, lt, le, gt, ge; leave out for empty and not_empty"},
             "values":{"type":"array","items":scalar(),"description":"The values for in and not_in"}
         }}}}},
-        "do":{"type":"array","items":{"type":"object","required":["operation"],"properties":{
+        "do":{"type":"array","items":{"type":"object","description":"Supply either an operation with its input, or a script.","properties":{
+            "script":script_schema(),
             "operation":{"type":"string","maxLength":200,"description":"An installed action, from base.watchers.vocabulary"},
             "input":{"type":"object","additionalProperties":true,"description":"The action's parameters as a JSON object, without its subject field (the runner binds the trigger's record)"}
         }}},
@@ -421,6 +516,9 @@ fn trial_schema() -> Value {
 }
 fn approve_schema() -> Value {
     json!({"type":"object","required":["watcher_id","version"],"properties":{"watcher_id":{"type":"integer","minimum":1},"version":{"type":"integer","minimum":1,"description":"The version number reviewed"}}})
+}
+fn restore_schema() -> Value {
+    json!({"type":"object","required":["watcher_id","version"],"properties":{"watcher_id":{"type":"integer","minimum":1},"version":{"type":"integer","minimum":1,"description":"The version number reviewed"},"expected_activation":{"type":"integer","minimum":1,"description":"The activation marker shown by the receipt being undone"}}})
 }
 fn switch_schema() -> Value {
     json!({"type":"object","required":["watcher_id","enabled"],"properties":{"watcher_id":{"type":"integer","minimum":1},"enabled":{"type":"boolean"}}})
@@ -520,7 +618,7 @@ impl WriteHandler for Normalised {
 }
 static DRAFT: Normalised = Normalised(&DraftWatcher);
 
-const GUIDE: &str = "A watcher is data: when a trigger event happens to a record, if its conditions hold, run its actions. Read base.watchers.vocabulary first: it lists the installed triggers with the fields their record offers, the actions with their parameters, the operators and the tenant's limits. Turn the person's plain words into one draft: a name, watch (the event), optional if (match all or any, conditions with field, op, value; values for in and not_in), do (operation and its input as a JSON object, leaving out the record field the runner binds) and up to 10 examples of records that should and should not match (facts as a JSON object of the fields the conditions read, expect match or no_match). Use base.watchers.trial to examine past events before saving; its event evidence and current record facts have different times, and it takes no action. Plan base.watchers.draft and show the person its review: the conditions in words, the actions, how each example comes out and any warnings. Without if, every event of the watched kind matches. A draft never runs. Tell the person an administrator approves the version on the Watchers page (or with base.watchers.approve after reviewing it there); the approved version then runs on every new event without AI. To change a running watcher, draft its next version with watcher_id; it runs only once approved. Read base.watchers.runs to explain what a watcher did: each receipt says which conditions held, the facts read and each action's outcome.";
+const GUIDE: &str = "A watcher is data: when a trigger event happens to a record, if its conditions hold, run its actions. Read base.watchers.vocabulary first: it lists the installed watcher triggers, fields, actions, script lookups, operators and limits. A script may call only its declared lookup operation and input, and each example supplies author-typed lookup fixtures that are never populated from live records. Drafts never run until approved. Use base.watchers.restore to select an earlier approved version; it becomes active only after its current permissions, bindings and examples all pass again. Read base.watchers.runs to explain what a watcher did: each receipt says which conditions held, the facts read and each action's outcome.";
 
 inventory::submit! { Contribution::new(DEFINITIONS, "base/watchers", Provenance { module: "base/watchers", source: file!(), line: line!() }, &Definitions {
     operations: &[
@@ -531,6 +629,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/watchers", Provenance 
         Operation { key:"base.watchers.trial", title:"Trial a draft watcher", summary:"Evaluate a draft against bounded past events and preview its actions without acting. Current record facts are marked separately from event evidence.", keywords:&["watcher","trial","preview","replay"], capability:VIEW, input:trial_schema, output, handler:Handler::Read(&Read::Trial), channels:Channels::Only { channels:&[Channel::Api,Channel::Mcp,Channel::Web], reason:"The audited trial requires a detached read." }, step_up:&[] },
         Operation { key:"base.watchers.draft", title:"Draft a watcher", summary:"Save a watcher, or a watcher's next version, for an administrator to approve. The review shows the conditions, the actions and how each example comes out. Nothing runs until approved.", keywords:&["watcher","automation","draft","when","then"], capability:MANAGE, input:draft_schema, output, handler:Handler::SafeWrite(&DRAFT), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.approve", title:"Approve a watcher version", summary:"Approve one fixed version of a watcher; from then on it runs on every new trigger event, without AI, as the watchers automation principal.", keywords:&["watcher","approve","activate","automation"], capability:APPROVE, input:approve_schema, output, handler:Handler::SafeWrite(&Approve), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.watchers.restore", title:"Restore a watcher version", summary:"Restore an earlier approved version after rechecking its current permissions, bindings and examples.", keywords:&["watcher","restore","version","automation"], capability:APPROVE, input:restore_schema, output, handler:Handler::SafeWrite(&Restore), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.watchers.switch", title:"Switch a watcher on or off", summary:"Stop a watcher's approved version from running, or let it run again.", keywords:&["watcher","disable","enable","off","on","automation"], capability:APPROVE, input:switch_schema, output, handler:Handler::SafeWrite(&Switch), channels:Channels::Every, step_up:&[] },
     ],
     guides: &[Guide { key:"base.watchers", title:"Tenant watchers", summary:"Draft a \u{201c}when this happens, do that\u{201d} watcher from a person's words for an administrator to approve.", keywords:&["watcher","automation","when","then","trigger"], capability:VIEW, body:GUIDE }],

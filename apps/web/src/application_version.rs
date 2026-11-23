@@ -27,7 +27,12 @@ pub(super) fn application_version(
     let bytes = std::fs::read(exe.parent()?.join("release.json")).ok()?;
     let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let setup = &record["setup"];
-    let version = setup["tag"].as_str()?.strip_prefix("setup-")?;
+    let tag = setup["tag"].as_str()?;
+    let version = if tag.starts_with("nightly-") {
+        tag
+    } else {
+        tag.strip_prefix("setup-")?
+    };
     let date = setup["released"]
         .as_str()?
         .parse::<jiff::civil::Date>()

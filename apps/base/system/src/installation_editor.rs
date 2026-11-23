@@ -100,6 +100,7 @@ impl Instances {
 pub(super) struct Editor {
     pages: Pages,
     mode: InstallationMode,
+    pending: Option<InstallationMode>,
     flash: Option<String>,
 }
 impl Editor {
@@ -108,6 +109,7 @@ impl Editor {
         Ok(Self {
             pages,
             mode,
+            pending: None,
             flash: None,
         })
     }
@@ -116,6 +118,16 @@ impl Editor {
         let client = self.pages.db.get().await?;
         bilibi_tenancy::prove_owner(&**client, scope).await?;
         drop(client);
+        if self.pending.is_some() {
+            return super::action_gate(
+                &self.pages.instances.step_up,
+                scope,
+                "Installation policy",
+                "save_installation_mode",
+                self.flash.as_deref(),
+            )
+            .await;
+        }
         let customer = self.pages.instances.composition.customer_extensions();
         let field = render(
             Field::named("installation[mode]")
@@ -128,30 +140,10 @@ impl Editor {
                     Choice::new("Isolated installation", "isolated"),
                 ]),
         )?;
-        let methods = self
-            .pages
-            .instances
-            .step_up
-            .enrolled_methods(scope)
-            .await?
-            .into_iter()
-            .map(|method| {
-                bilibi_ui::ProofMethod::new(
-                    method.id,
-                    method.label,
-                    method.code_length,
-                    method.numeric,
-                )
-            })
-            .collect::<Vec<_>>();
-        let enrolled = !methods.is_empty();
+        let enrolled = self.pages.instances.step_up.enrolled(scope).await?;
         let mut protected = bilibi_ui::StepUp::new(enrolled, "/system/installation");
         protected.body = field;
         protected.reason = "to change which Extension code this installation admits.".into();
-        protected.code = render(
-            bilibi_ui::ProofInput::new("installation-code", "installation[code]", methods)
-                .optional(),
-        )?;
         let mut body = render(protected)?;
         body.push(&render(Alert {
             kind: StatusKind::Info,
@@ -214,20 +206,35 @@ impl LiveState<Scope, Error> for Editor {
                 match value.get("type").and_then(Value::as_str) {
                     Some("clear-flash") => self.flash = None,
                     Some("save_installation_mode") => {
-                        let mode = match value.get("installation[mode]").and_then(Value::as_str) {
-                            Some("shared") => InstallationMode::Shared,
-                            Some("isolated") => InstallationMode::Isolated,
+                        let proof = value.get("proof").and_then(Value::as_str);
+                        let (mode, scope) = match (self.pending, proof) {
+                            (Some(mode), Some(proof)) => {
+                                (mode, request.scope.clone().presenting_step_up(proof))
+                            }
+                            (None, None) => {
+                                let mode =
+                                    match value.get("installation[mode]").and_then(Value::as_str) {
+                                        Some("shared") => InstallationMode::Shared,
+                                        Some("isolated") => InstallationMode::Isolated,
+                                        _ => return Err(Error::Invalid),
+                                    };
+                                (mode, request.scope.clone())
+                            }
                             _ => return Err(Error::Invalid),
                         };
-                        let code = value
-                            .get("installation[code]")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        let scope = request.scope.clone().presenting_step_up(code);
+                        self.pending = None;
+                        self.flash = None;
                         match self.pages.instances.change_installation_mode(&scope, self.mode, mode).await {
                             Ok(()) => return Ok(LiveBody { redirect: Some("/system/installation".into()), flash: Some((StatusKind::Success, "Installation mode saved.".into())), ..Default::default() }),
-                            Err(Error::StepUpRequired { reason: "invalid_code" | "locked", .. }) => self.flash = Some("The 2FA code was refused. Enter a new code from your authenticator app.".into()),
-                            Err(Error::StepUpRequired { .. }) => self.flash = Some("Enter a fresh 2FA code to change the installation mode.".into()),
+                            Err(Error::StepUpRequired { reason: "code_required" | "invalid_code" | "locked", .. }) => {
+                                self.pending = Some(mode);
+                                if proof.is_some() {
+                                    self.flash = Some("The 2FA code was refused.".into());
+                                }
+                            }
+                            Err(Error::StepUpRequired { reason: "not_enrolled", .. }) => {
+                                self.flash = Some("Set up 2FA to change the installation mode.".into());
+                            }
                             Err(Error::Invalid) if mode == InstallationMode::Shared && !self.pages.instances.composition.customer_extensions().is_empty() => self.flash = Some("Shared service was refused because customer code is still composed. Build and install a code-free release first.".into()),
                             Err(Error::Forbidden) => self.flash = Some("Only the installation owner can change this setting.".into()),
                             Err(error) => return Err(error),

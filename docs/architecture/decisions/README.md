@@ -3,7 +3,7 @@
 **Document Type:** Index of architecture decision records
 **Status:** Active
 **Scope:** Decisions that shape Bilibi's architecture
-**Last Updated:** 2026-11-19
+**Last Updated:** 2026-11-23
 
 Each record states one decision, its context and its consequences. The architecture overview is [`../README.md`](../README.md).
 
@@ -56,6 +56,7 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | [01 Agent-first operations: one contract, four doors](./01-agent-first-operations.md) | Accepted |
 | [33 Pages for business actions and customisations](./33-pages-for-business-actions-and-customisations.md) | Accepted |
 | [21 AI connections need a live browser-session switch](./21-ai-connections-need-live-session-switch.md) | Accepted; implemented |
+| [34 One-shot model calls through configured providers](./34-one-shot-model-calls-through-configured-providers.md) | Accepted; implemented |
 | [10 Queued jobs call operation contracts, and modules opt in to CSV import, export and bulk updates](./10-queued-jobs-call-contracts.md) | Proposed |
 
 ### Scheduled work
@@ -116,7 +117,8 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | [08 Currencies as Core master data, and conversion always names its rate](./08-currencies-as-core-master-data.md) | Accepted; implemented |
 | [11 Record references across modules](./11-record-references.md) | Proposed |
 | [21 Tenant-defined custom fields stay "lite" and live in the owner's row](./21-tenant-defined-custom-fields.md) | Accepted; implemented |
-| [28 Tenant customisation is data on shared servers; customer code needs its own server](./28-tenant-customisation-is-data-on-shared-servers.md) | Accepted; implemented |
+| [28 Tenant customisation on shared servers](./28-tenant-customisation-is-data-on-shared-servers.md) | Accepted |
+| [34 Tenant scripts run through operation contracts](./34-tenant-scripts-run-through-operation-contracts.md) | Accepted |
 | [31 Tenant watchers run after commit as one bounded principal that owners offer their own keys to](./31-tenant-watchers-run-after-commit-as-one-bounded-principal.md) | Proposed |
 | [22 Shared products in Core, selling rules in Domains](./22-shared-products-in-core.md) | Accepted |
 | [23 Shared documents in Core, business workflows in Domains](./23-shared-documents-in-core.md) | Accepted |

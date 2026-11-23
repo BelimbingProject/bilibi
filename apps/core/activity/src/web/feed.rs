@@ -16,9 +16,8 @@ use bilibi_ui::{
     page::*,
     params, Alert, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ColumnsOutcome,
     ConfirmDialog, EmptyState, Fact, Facts, FilterToolbar, FlashGroup, FlexRow, FlexTable, Form,
-    Header, Html, IconButton, IconKind, ListColumns, ListSpec, ListState, Modal, ModalWidth,
-    PageCounts, Pagination, ProofInput, SectionHeading, SortDir, StatusKind, TableEmpty,
-    ToolbarControl, NO_FLASH,
+    Header, Html, IconButton, IconKind, ListColumns, ListSpec, ListState, PageCounts, Pagination,
+    ProofInput, SectionHeading, SortDir, StatusKind, TableEmpty, ToolbarControl, NO_FLASH,
 };
 use serde_json::{json, Value};
 use std::{
@@ -157,6 +156,12 @@ impl Feed {
                 } else {
                     "replace_link"
                 };
+                if !matches!(
+                    (name, &self.confirm),
+                    ("make_link", Some(Confirm::Make)) | ("replace_link", Some(Confirm::Replace))
+                ) {
+                    return Err(Error::Invalid);
+                }
                 let code = value["code"].as_str().unwrap_or_default().trim().to_owned();
                 if code.is_empty() {
                     self.code_error =
@@ -297,6 +302,21 @@ impl Feed {
     }
 
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let proof = match &self.confirm {
+            Some(Confirm::Make) => Some(("make_link", "Make your calendar link", "The link shows what you take part in, read only. Anyone who has it can read that until you revoke it.", "Make link")),
+            Some(Confirm::Replace) => Some(("replace_link", "Replace your calendar link?", "The old link stops working at once, and your calendar app needs the new one.", "Replace link")),
+            _ => None,
+        };
+        if let Some((event, title, description, submit)) = proof {
+            return Ok(LiveBody {
+                html: self
+                    .code_dialog(scope, event, title, description, submit)
+                    .await?
+                    .to_string(),
+                query: self.list.to_params(),
+                ..LiveBody::default()
+            });
+        }
         let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
         let mine = self.pages.activities.feed_key(scope).await?;
         let mut actions = Html::EMPTY;
@@ -385,8 +405,7 @@ impl Feed {
         };
         let dialog = match &self.confirm {
             None => Html::EMPTY,
-            Some(Confirm::Make) => self.code_dialog(scope, "make_link", "Make your calendar link", "The link shows what you take part in, read only. Anyone who has it can read that until you revoke it. Enter your current authenticator code to make it.", "Make link").await?,
-            Some(Confirm::Replace) => self.code_dialog(scope, "replace_link", "Replace your calendar link?", "The old link stops working at once, and your calendar app needs the new one. Enter your current authenticator code to replace it.", "Replace link").await?,
+            Some(Confirm::Make | Confirm::Replace) => Html::EMPTY,
             Some(Confirm::Revoke) => render(ConfirmDialog {
                 id: "feed-confirm",
                 consequence: "Revoke your calendar link?",
@@ -499,15 +518,12 @@ impl Feed {
             actions: Html::EMPTY,
             ..Form::default()
         })?;
-        render(Modal {
-            id: "feed-code-dialog",
-            title,
-            cancel_event: "cancel_confirm",
-            width: ModalWidth::Narrow,
-            description,
-            body: form,
-            ..Modal::default()
-        })
+        let mut body = Html::text(description);
+        body.push(&form);
+        render(
+            bilibi_ui::StepUpGate::action("Calendar feed", title, body)
+                .map_err(|_| Error::Internal)?,
+        )
     }
 
     fn query(&self) -> FeedKeyQuery {

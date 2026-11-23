@@ -102,20 +102,29 @@ pub(crate) struct Condition {
     pub value: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ActionCall {
     /// An installed action: an owner's write contract key.
     pub operation: String,
     /// Its approved parameters. The action's subject field is never here: the
     /// runner binds it to the trigger's record.
+    #[serde(default)]
     pub input: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum Step {
+    Operation(ActionCall),
+    Script { script: crate::script::Script },
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Definition {
     pub matching: Match,
     pub conditions: Vec<Condition>,
-    pub actions: Vec<ActionCall>,
+    pub steps: Vec<Step>,
 }
 
 #[derive(Clone, Debug)]
@@ -128,9 +137,37 @@ pub(crate) struct Example {
 pub(crate) type Problems = Vec<(String, String)>;
 
 impl Definition {
+    pub(crate) fn actions(&self) -> impl Iterator<Item = &ActionCall> {
+        self.steps.iter().flat_map(|step| match step {
+            Step::Operation(action) => std::slice::from_ref(action),
+            Step::Script { script } => script.calls.as_slice(),
+        })
+    }
+
+    pub(crate) fn scripts(&self) -> impl Iterator<Item = &crate::script::Script> {
+        self.steps.iter().filter_map(|step| match step {
+            Step::Script { script } => Some(script),
+            Step::Operation(_) => None,
+        })
+    }
+
+    pub(crate) fn script_calls(&self) -> impl Iterator<Item = &ActionCall> {
+        self.scripts().flat_map(|script| &script.calls)
+    }
+
+    pub(crate) fn script_fact_fields(&self, version: &str) -> Vec<String> {
+        let mut fields = vec![version.to_owned()];
+        for field in self.scripts().flat_map(|script| &script.fields) {
+            if !fields.contains(field) {
+                fields.push(field.clone());
+            }
+        }
+        fields
+    }
+
     pub(crate) fn to_json(&self) -> Value {
         let mut value = json!({
-            "do": self.actions.iter().map(|a| json!({"operation": a.operation, "input": a.input})).collect::<Vec<_>>(),
+            "do": self.steps,
         });
         if !self.conditions.is_empty() {
             value["if"] = json!({"match": self.matching.key(), "conditions": self.conditions.iter().map(|c| json!({"field": c.field, "op": c.op.key(), "value": c.value})).collect::<Vec<_>>()});
@@ -139,6 +176,14 @@ impl Definition {
     }
     /// Reads a stored or submitted definition; shape problems are listed by path.
     pub(crate) fn parse(value: &Value, problems: &mut Problems) -> Option<Self> {
+        Self::parse_definition(value, problems, true)
+    }
+
+    pub(crate) fn parse_draft(value: &Value, problems: &mut Problems) -> Option<Self> {
+        Self::parse_definition(value, problems, false)
+    }
+
+    fn parse_definition(value: &Value, problems: &mut Problems, stored: bool) -> Option<Self> {
         let filter = value.get("if");
         if filter.is_some_and(|filter| !filter.is_object()) {
             problems.push(("if".into(), "must be an object".into()));
@@ -209,7 +254,7 @@ impl Definition {
                 value,
             });
         }
-        let mut actions = Vec::new();
+        let mut steps = Vec::new();
         let listed = value
             .get("do")
             .and_then(Value::as_array)
@@ -218,6 +263,20 @@ impl Definition {
             problems.push(("do".into(), format!("give 1 to {MAX_ACTIONS} actions")));
         }
         for (i, item) in listed.iter().take(MAX_ACTIONS).enumerate() {
+            if let Some(value) = item.get("script") {
+                match crate::script::Script::parse(value, stored) {
+                    Some(script) if item.as_object().is_some_and(|item| item.len() == 1) => {
+                        steps.push(Step::Script { script });
+                    }
+                    _ => {
+                        problems.push((format!("do.{i}.script"), "Supply a named script with its source, fields, allowed calls and examples.".into()));
+                        if stored {
+                            return None;
+                        }
+                    }
+                }
+                continue;
+            }
             let operation = item
                 .get("operation")
                 .and_then(Value::as_str)
@@ -233,15 +292,15 @@ impl Definition {
             if operation.is_empty() {
                 problems.push((format!("do.{i}.operation"), "is required".into()));
             }
-            actions.push(ActionCall {
+            steps.push(Step::Operation(ActionCall {
                 operation: operation.to_owned(),
                 input,
-            });
+            }));
         }
         Some(Self {
             matching,
             conditions,
-            actions,
+            steps,
         })
     }
 
@@ -309,20 +368,33 @@ impl Definition {
         (matched, outcomes)
     }
 
-    pub(crate) fn fact_fields(&self, version: &str) -> Vec<String> {
-        let mut fields = self.fields();
+    pub(crate) fn fact_fields(&self, version: &str, include_script: bool) -> Vec<String> {
+        let mut fields = if include_script {
+            self.fields()
+        } else {
+            self.condition_fields()
+        };
         if !fields.iter().any(|field| field == version) {
             fields.push(version.to_owned());
         }
         fields
     }
 
-    /// The fields the conditions read, each once, in order.
-    pub(crate) fn fields(&self) -> Vec<String> {
+    pub(crate) fn condition_fields(&self) -> Vec<String> {
         let mut fields: Vec<String> = Vec::new();
         for condition in &self.conditions {
             if !fields.contains(&condition.field) {
                 fields.push(condition.field.clone());
+            }
+        }
+        fields
+    }
+
+    pub(crate) fn fields(&self) -> Vec<String> {
+        let mut fields = self.condition_fields();
+        for field in self.scripts().flat_map(|script| &script.fields) {
+            if !fields.contains(field) {
+                fields.push(field.clone());
             }
         }
         fields
@@ -383,6 +455,60 @@ fn scalar(value: &Value) -> bool {
         Value::Number(_) | Value::Bool(_) => true,
         _ => false,
     }
+}
+
+pub(crate) fn script_fact(ty: FieldType, choices: &[&str], value: &Value) -> Result<Value, String> {
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+    let number = || {
+        value
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| value.as_number().map(ToString::to_string))
+    };
+    let text = match ty {
+        FieldType::Integer => number()
+            .and_then(|text| text.parse::<i64>().ok())
+            .map(|n| n.to_string()),
+        FieldType::Float => number()
+            .and_then(|text| text.parse::<f64>().ok())
+            .filter(|n| n.is_finite())
+            .map(|n| n.to_string()),
+        FieldType::Decimal => number().filter(|text| {
+            let digits = text.strip_prefix('-').unwrap_or(text);
+            let (whole, fraction) = digits
+                .split_once('.')
+                .map_or((digits, None), |(whole, fraction)| (whole, Some(fraction)));
+            !whole.is_empty()
+                && whole.bytes().all(|byte| byte.is_ascii_digit())
+                && (whole.len() == 1 || !whole.starts_with('0'))
+                && fraction.is_none_or(|part| {
+                    !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                && (!text.starts_with('-')
+                    || digits.bytes().any(|byte| matches!(byte, b'1'..=b'9')))
+        }),
+        FieldType::Date => value
+            .as_str()
+            .and_then(|text| text.parse::<jiff::civil::Date>().ok())
+            .map(|date| date.to_string()),
+        FieldType::DateTime => value
+            .as_str()
+            .and_then(|text| text.parse::<jiff::Timestamp>().ok())
+            .map(|timestamp| timestamp.to_string()),
+        FieldType::Boolean => {
+            return boolean(value)
+                .map(Value::Bool)
+                .ok_or_else(|| "must be true or false".into())
+        }
+        FieldType::String | FieldType::Enum => {
+            typed(ty, choices, value)?;
+            return Ok(value.clone());
+        }
+    };
+    text.map(Value::String)
+        .ok_or_else(|| format!("must be a valid {ty:?} field value"))
 }
 
 /// Whether `value` is a value of a field of type `ty`.

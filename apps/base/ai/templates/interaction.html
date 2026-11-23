@@ -1,0 +1,10 @@
+{#- AI Interaction record: the metadata facts, rendered by src/web.rs
+    through the shared models. A row holds no text to show. -#}
+{%- import "components.html" as ui -%}
+{% call ui::page(id="interaction-detail", variant=bilibi_ui::PageVariant::Detail) %}
+{% call ui::header(subtitle=interaction_id, actions=all_link) %}AI Interaction{% endcall %}
+{% call ui::card(id="interaction-summary", inner_class="p-5 sm:p-6", role="region", labelledby="interaction-heading") %}
+{% call ui::section_heading(title="Interaction", id="interaction-heading", description="Which module called which provider, and how it ended. Instructions, text and replies are never stored here.") %}{% endcall %}
+{{ facts }}
+{% endcall %}
+{% endcall %}

@@ -1,8 +1,13 @@
 use bilibi_database::{pool, Error, Result};
 use std::io::IsTerminal;
 use std::sync::Arc;
+fn main() -> Result<()> {
+    bilibi_base::watchers::enter_worker();
+    serve()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn serve() -> Result<()> {
     bilibi_web::verify_descriptors()?;
     // What this program is made of needs no database (docs/versions.md).
     if std::env::args().nth(1).as_deref() == Some("status") {
@@ -63,6 +68,18 @@ async fn main() -> Result<()> {
         Some("two-factor-reset") => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             bilibi_web::two_factor_reset(&db, &args).await?;
+        }
+        Some("identity-recover") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            bilibi_web::recover_identity(&db, &args).await?;
+        }
+        Some("identity-delete") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            bilibi_web::delete_identity(&db, &args).await?;
+        }
+        Some("identity-retention") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            bilibi_web::retain_identities(&db, &args).await?;
         }
         Some(command @ ("tenant-provision" | "platform-provision")) => {
             let args: Vec<String> = std::env::args().skip(2).collect();

@@ -303,8 +303,10 @@ impl Media {
         let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
         let assets: Vec<i64> = rows.iter().map(|row| row.asset_id).collect();
         // A hold on the attachment or on its asset keeps both, and the bytes.
-        let held = holds.records(grant, ATTACHMENT_KIND, &ids).await?;
-        let held_assets = holds.records(grant, ASSET_KIND, &assets).await?;
+        let held = holds
+            .records(tx.sql(), grant, ATTACHMENT_KIND, &ids)
+            .await?;
+        let held_assets = holds.records(tx.sql(), grant, ASSET_KIND, &assets).await?;
         let mut done = AttachmentErasure::default();
         for row in rows {
             if let Some(hold) = held.get(&row.id).or_else(|| held_assets.get(&row.asset_id)) {

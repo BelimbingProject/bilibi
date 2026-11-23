@@ -55,6 +55,15 @@ fn reason(code: &str) -> &'static str {
         "watcher_limit" => "Not run: the watcher exceeds a configured size or fact limit in System Settings.",
         "attempt_limit" => "Not run: the watchers job reached its configured attempt limit.",
         "action_limit" => "Not run: it has more actions than allowed per run.",
+        "script_run_refused" => "Automation lacks permission to run this script.",
+        "script_memory" => "The script reached its memory limit.",
+        "script_timeout" => "The script reached its time limit.",
+        "script_refused" => "The script failed inside its sandbox.",
+        "script_call_refused" => "The script requested a call outside its approved list.",
+        "script_lookup_refused" => "The script requested a read outside its approved lookups, or the read owner refused it.",
+        "script_permission_refused" => "This watcher is not permitted to run that particular script version.",
+        "script_output" | "script_input" => "The script input or result exceeded its contract.",
+        "script_unavailable" => "The script worker could not start.",
         "read_refused" => "Not run: automation may not read these records yet. An administrator allows it in Automation access.",
         "restricted_field" => "Not run: a condition reads a field that is hidden from automation.",
         "subject_unavailable" => "Not run: the record is gone or out of reach.",
@@ -107,11 +116,15 @@ fn why(run: &RunView, described: &crate::review::Described) -> Vec<String> {
         }
     }
     for effect in &run.effects {
-        let action = described
-            .actions
-            .get(effect.position as usize)
-            .cloned()
-            .unwrap_or_else(|| effect.operation.clone());
+        let action = if described.scripted {
+            effect.operation.clone()
+        } else {
+            described
+                .actions
+                .get(effect.position as usize)
+                .cloned()
+                .unwrap_or_else(|| effect.operation.clone())
+        };
         lines.push(match effect.state.as_str() {
             "done" => format!("Did: {action}"),
             _ => {
@@ -149,6 +162,7 @@ fn outcomes_empty(run: &RunView) -> bool {
 }
 fn outcome_badge(run: &RunView) -> Result<Html> {
     render(match run.state.as_str() {
+        "restricted" => Badge::status(BadgeKind::Plain, "Restricted"),
         "done" => Badge::status(BadgeKind::Success, "Acted"),
         "no_match" => Badge::status(BadgeKind::Neutral, "No match"),
         "partial" => Badge::status(BadgeKind::Warning, "Partly done"),
@@ -411,6 +425,15 @@ impl Show {
                 })?,
             },
         ];
+        if let Some(review) = review.filter(|review| !review.script_examples.is_empty()) {
+            items.push(Fact {
+                title: "Script example results",
+                id: "",
+                value: render(Lines {
+                    lines: &review.script_examples,
+                })?,
+            });
+        }
         if let Some(words) = &version.explanation {
             items.push(Fact {
                 title: "Asked for",
@@ -602,13 +625,13 @@ impl Show {
                 can_approve,
             )?);
         }
-        if let Some(running) = view
+        if let Some(version) = view
             .versions
             .iter()
             .skip(1)
-            .find(|v| Some(v.number) == view.summary.running)
+            .find(|version| Some(version.number) == view.summary.running)
         {
-            versions.push(self.version_card(&view, running, &display, None, true, can_approve)?);
+            versions.push(self.version_card(&view, version, &display, None, true, can_approve)?);
         }
         let mut rows = Vec::new();
         for run in &view.runs {

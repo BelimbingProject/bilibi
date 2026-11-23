@@ -11,8 +11,8 @@
 //! (`apps/web/examples/watchers-walkthrough.rs`); it is never a Platform member.
 use bilibi_agent_api::{
     job::{PrincipalWrite, PRINCIPAL_WRITES},
-    Channels, Definitions, Handler, Operation, OperationClient, OperationFuture, WriteHandler,
-    DEFINITIONS,
+    Channels, Definitions, Handler, Operation, OperationClient, OperationFuture, ReadHandler,
+    WriteHandler, DEFINITIONS,
 };
 use bilibi_authz::{
     CapabilityDefinition, OfferedCapabilities, VocabularyContribution, OFFERED_CAPABILITIES,
@@ -23,8 +23,8 @@ use bilibi_database::{Change, Error, MutationTransaction};
 use bilibi_events::{EventType, Events, NewEvent, On, EVENTS};
 use bilibi_grid::{Field, FieldType, GridContribution, LinkDecl, LinkKind, Source, TableDecl};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance, Service};
-use bilibi_watchers::{Action, Trigger, ACTIONS, TRIGGERS};
 use bilibi_tenancy::Scope;
+use bilibi_watchers::{Action, Lookup, Trigger, ACTIONS, LOOKUPS, TRIGGERS};
 use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 
@@ -118,6 +118,9 @@ bilibi_grid::contribute!("watcher_cases/cases", "watcher_cases/cases.grid", &GRI
 inventory::submit! { Contribution::new(TRIGGERS, OPENED, provenance!(), &Trigger {
     on: On { event: OPENED, versions: &[1] }, title: "A case is opened", table: TABLE, subject: "/case", logical_event: None, version: "version",
 }) }
+inventory::submit! { Contribution::new(LOOKUPS, "watcher_cases.cases.lookup", provenance!(), &Lookup {
+    title: "Read a case's current queue",
+}) }
 inventory::submit! { Contribution::new(TRIGGERS, ROUTED, provenance!(), &Trigger {
     on: On { event: ROUTED, versions: &[1] }, title: "A case is routed to a queue", table: TABLE, subject: "/case", logical_event: None, version: "version",
 }) }
@@ -202,15 +205,28 @@ impl WriteHandler for Open {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|pair| (bilibi_agent_api::text_field(pair, "key"), pair["value"].clone()))
+                .map(|pair| {
+                    (
+                        bilibi_agent_api::text_field(pair, "key"),
+                        pair["value"].clone(),
+                    )
+                })
                 .collect();
             let custom = match custom_fields()?
-                .validate_locked(tx.sql(), scope, RECORD_TYPE, &patch, &serde_json::Map::new())
+                .validate_locked(
+                    tx.sql(),
+                    scope,
+                    RECORD_TYPE,
+                    &patch,
+                    &serde_json::Map::new(),
+                )
                 .await?
             {
                 Ok(values) => Value::Object(values),
                 Err(errors) => {
-                    let first = errors.first().map_or("is not valid", |error| error.message.as_str());
+                    let first = errors
+                        .first()
+                        .map_or("is not valid", |error| error.message.as_str());
                     return Err(invalid("custom", first));
                 }
             };
@@ -252,6 +268,10 @@ impl Change2 {
     }
 }
 impl WriteHandler for Change2 {
+    fn local_script_action(&self) -> bool {
+        matches!(self, Self::Route)
+    }
+
     fn owner(&self) -> &'static str {
         MODULE
     }
@@ -371,13 +391,57 @@ fn flag_schema() -> Value {
         "note":{"type":"string","maxLength":200}
     }})
 }
+fn lookup_schema() -> Value {
+    json!({"type":"object","required":["case_id"],"properties":{"case_id":{"type":"integer","minimum":1}}})
+}
 fn output() -> Value {
     json!({"type":"object"})
 }
 static ROUTE_CASE: Change2 = Change2::Route;
 static FLAG_CASE: Change2 = Change2::Flag;
+struct LookupCase;
+impl ReadHandler for LookupCase {
+    fn owner(&self) -> &'static str {
+        MODULE
+    }
+    fn call<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let sql = client.sql_client().await?;
+            bilibi_authz::authorize_key(sql, scope, VIEW).await?;
+            let row = sql
+                .query_opt(
+                    "SELECT title,queue,owner_user_id FROM watcher_cases_cases WHERE tenant_id=$1 AND id=$2",
+                    &[&scope.tenant(), &input["case_id"].as_i64().unwrap_or_default()],
+                )
+                .await
+                .map_err(bilibi_database::Error::from)?
+                .ok_or(bilibi_agent_api::Error::NotFound)?;
+            // A named principal's live grant reaches every record; the reach
+            // helper is the additional account-only owner/team restriction.
+            if scope.principal().is_none()
+                && !bilibi_authz::reach_admits(
+                    sql,
+                    scope,
+                    VIEW,
+                    Some(row.get::<_, i64>(2)),
+                    None,
+                )
+                .await?
+            {
+                return Err(bilibi_agent_api::Error::Forbidden);
+            }
+            Ok(json!({"title":row.get::<_, String>(0),"queue":row.get::<_, Option<String>>(1)}).into())
+        })
+    }
+}
 inventory::submit! { Contribution::new(DEFINITIONS, MODULE, provenance!(), &Definitions {
     operations: &[
+        Operation { key: "watcher_cases.cases.lookup", title: "Read a case", summary: "Read a case's current queue.", keywords: &["case", "lookup", "queue"], capability: VIEW, input: lookup_schema, output, handler: Handler::Read(&LookupCase), channels: Channels::Every, step_up: &[] },
         Operation { key: "watcher_cases.cases.open", title: "Open a case", summary: "Open a case for a company.", keywords: &["case"], capability: OPEN, input: open_schema, output, handler: Handler::SafeWrite(&Open), channels: Channels::Every, step_up: &[] },
         Operation { key: "watcher_cases.cases.route", title: "Route a case", summary: "Send a case to a queue.", keywords: &["case", "queue"], capability: ROUTE, input: route_schema, output, handler: Handler::SafeWrite(&ROUTE_CASE), channels: Channels::Every, step_up: &[] },
         Operation { key: "watcher_cases.cases.flag", title: "Flag a case", summary: "Raise a flag on a case.", keywords: &["case", "flag"], capability: FLAG, input: flag_schema, output, handler: Handler::SafeWrite(&FLAG_CASE), channels: Channels::Every, step_up: &[] },
