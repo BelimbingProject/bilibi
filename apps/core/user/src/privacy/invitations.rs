@@ -27,7 +27,7 @@ pub(crate) async fn held_accepted_invitations(
         .map(|row| (row.get(0), row.get(1)))
         .collect();
     let ids: Vec<i64> = rows.iter().map(|(id, _)| *id).collect();
-    let held = holds.records(grant, INVITATION_KIND, &ids).await?;
+    let held = holds.records(sql, grant, INVITATION_KIND, &ids).await?;
     Ok(rows
         .into_iter()
         .filter_map(|(id, user)| held.get(&id).map(|hold| (id, user, *hold)))
@@ -58,8 +58,8 @@ pub(crate) async fn held_prepared_accounts(
         .collect();
     let users: Vec<i64> = rows.iter().map(|(_, user, _)| *user).collect();
     let persons: Vec<i64> = rows.iter().filter_map(|(_, _, person)| *person).collect();
-    let held = holds.records(grant, USER_KIND, &users).await?;
-    let people = holds.persons(grant, &persons).await?;
+    let held = holds.records(sql, grant, USER_KIND, &users).await?;
+    let people = holds.persons(sql, grant, &persons).await?;
     Ok(rows
         .into_iter()
         .filter_map(|(id, user, person)| {

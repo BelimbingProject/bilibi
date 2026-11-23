@@ -801,8 +801,10 @@ impl Integration {
                 by_tenant.entry(row.get(1)).or_default().push(row.get(0));
             }
             for (tenant, ids) in by_tenant {
-                let holds = bilibi_personal_data::RecordHolds::acquire(tenant).await?;
-                let held = holds.records(privacy::KIND, &ids).await?;
+                let (holds, mut hold_guard) =
+                    bilibi_personal_data::RecordHolds::acquire(client, tenant).await?;
+                let client = hold_guard.client();
+                let held = holds.records(&*client, privacy::KIND, &ids).await?;
                 let ids: Vec<i64> = ids
                     .into_iter()
                     .filter(|id| !held.contains_key(id))
@@ -844,7 +846,7 @@ impl Integration {
                         .await?;
                     tx.commit().await?;
                 }
-                holds.release().await?;
+                hold_guard.release().await?;
             }
             if done {
                 return Ok(pruned);
@@ -860,7 +862,7 @@ impl Integration {
     /// is the audited one.
     pub async fn prune_rows(
         &self,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         days: i64,
         now: SystemTime,
     ) -> Result<u64> {
@@ -884,8 +886,10 @@ impl Integration {
                 by_tenant.entry(row.get(1)).or_default().push(row.get(0));
             }
             for (tenant, ids) in by_tenant {
-                let holds = bilibi_personal_data::RecordHolds::acquire(tenant).await?;
-                let held = holds.records(privacy::KIND, &ids).await?;
+                let (holds, mut hold_guard) =
+                    bilibi_personal_data::RecordHolds::acquire(client, tenant).await?;
+                let client = hold_guard.client();
+                let held = holds.records(&*client, privacy::KIND, &ids).await?;
                 held_back += held.len() as i64;
                 let ids: Vec<i64> = ids
                     .into_iter()
@@ -899,7 +903,7 @@ impl Integration {
                         )
                         .await?;
                 }
-                holds.release().await?;
+                hold_guard.release().await?;
             }
             if done {
                 return Ok(pruned);

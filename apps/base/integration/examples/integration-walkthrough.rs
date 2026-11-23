@@ -553,7 +553,7 @@ async fn main() -> DbResult<()> {
         plan.chars().take(160).collect(),
     );
     let pruned = integration
-        .prune_rows(&client, 180, SystemTime::now())
+        .prune_rows(&mut client, 180, SystemTime::now())
         .await?;
     let left: i64 = client
         .query_one(
@@ -568,7 +568,7 @@ async fn main() -> DbResult<()> {
         format!("deleted {pruned}, left {left}"),
     );
     let again = integration
-        .prune_rows(&client, 180, SystemTime::now())
+        .prune_rows(&mut client, 180, SystemTime::now())
         .await?;
     let page = integration.list(&**client, &admin, &bulk, 1, 25).await?;
     check(
@@ -581,7 +581,9 @@ async fn main() -> DbResult<()> {
     );
     show(
         "retention of 0 days is refused",
-        integration.prune_rows(&client, 0, SystemTime::now()).await,
+        integration
+            .prune_rows(&mut client, 0, SystemTime::now())
+            .await,
     );
     let registered = schedule.definition("base/integration-payload-retention");
     println!(

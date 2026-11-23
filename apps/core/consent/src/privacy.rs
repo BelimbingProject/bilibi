@@ -409,7 +409,7 @@ async fn anonymise(
         .query(select, &[&tenant, &person, &addresses])
         .await?;
     let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
-    let held = holds.records(grant, kind, &ids).await?;
+    let held = holds.records(tx.sql(), grant, kind, &ids).await?;
     let mut due = Vec::new();
     let mut changes = Vec::new();
     for row in &rows {
@@ -463,7 +463,7 @@ async fn current(
         )
         .await?;
     let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
-    let held = holds.records(grant, CURRENT_RECORD, &ids).await?;
+    let held = holds.records(tx.sql(), grant, CURRENT_RECORD, &ids).await?;
     let mut due = Vec::new();
     let mut changes = Vec::new();
     for row in &rows {
@@ -522,7 +522,9 @@ async fn suppressions(
         )
         .await?;
     let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
-    let held = holds.records(grant, SUPPRESSION_RECORD, &ids).await?;
+    let held = holds
+        .records(tx.sql(), grant, SUPPRESSION_RECORD, &ids)
+        .await?;
     let mut due = Vec::new();
     for row in &rows {
         let id: i64 = row.get(0);

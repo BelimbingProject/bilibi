@@ -203,9 +203,19 @@ fn valid_public_id(id: &str) -> bool {
 }
 
 /// Whether a record hold names the attachment or its asset.
-async fn held(holds: &RecordHolds, row: &Bound) -> Result<bool> {
-    Ok(!holds.records(ATTACHMENT_KIND, &[row.id]).await?.is_empty()
-        || !holds.records(ASSET_KIND, &[row.asset_id]).await?.is_empty())
+async fn held(
+    client: &dyn bilibi_tenancy::ReadClient,
+    holds: &RecordHolds,
+    row: &Bound,
+) -> Result<bool> {
+    Ok(!holds
+        .records(client, ATTACHMENT_KIND, &[row.id])
+        .await?
+        .is_empty()
+        || !holds
+            .records(client, ASSET_KIND, &[row.asset_id])
+            .await?
+            .is_empty())
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -636,9 +646,10 @@ impl Media {
         if !valid_public_id(public_id) {
             return Err(Error::NotFound);
         }
-        let holds = RecordHolds::acquire(scope.tenant()).await?;
+        let (holds, mut hold_guard) = RecordHolds::acquire(client, scope.tenant()).await?;
+        let client = hold_guard.client();
         let discarded = self.discard(client, scope, public_id, &holds).await;
-        holds.release().await?;
+        hold_guard.release().await?;
         discarded
     }
     async fn discard(
@@ -668,7 +679,7 @@ impl Media {
         if row.summary.uploaded_by != uploader {
             return Err(Error::NotUploader);
         }
-        if held(holds, &row).await? {
+        if held(tx.sql(), holds, &row).await? {
             return Err(Error::Held);
         }
         self.subjects

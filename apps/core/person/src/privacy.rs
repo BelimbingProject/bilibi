@@ -332,7 +332,7 @@ impl Handler for People {
             }
             let id = old.id.get();
             let mut erased = Erased::default();
-            match holds.record(grant, PERSON_KIND, id).await? {
+            match holds.record(tx.sql(), grant, PERSON_KIND, id).await? {
                 Some(hold) => erased.kept.push(Kept::held(PERSON_KIND, id, hold)),
                 None => {
                     services()?
@@ -464,7 +464,7 @@ impl Handler for People {
                 .erasable_documents(client, scope, grant, &FILES, &id)
                 .await
                 .map_err(artifact_error)?;
-            let person_hold = holds.person_hold(grant).await?;
+            let person_hold = holds.person_hold(&*client, grant).await?;
             for (company, document) in documents {
                 let kept = |reason, until, hold| Kept {
                     kind: DOCUMENT_KIND.into(),

@@ -69,7 +69,7 @@ impl Handler for Retention {
                 self.integration
                     .prune_payloads(&mut client, days[0], now)
                     .await?;
-                self.integration.prune_rows(&client, days[1], now).await
+                self.integration.prune_rows(&mut client, days[1], now).await
             }
             .await;
             match pruned {

@@ -152,15 +152,17 @@ impl Events {
                 }
             }
             if !settled.is_empty() {
-                let holds = bilibi_personal_data::RecordHolds::acquire(tenant).await?;
-                let held = holds.records(KIND, &settled).await?;
+                let (holds, mut hold_guard) =
+                    bilibi_personal_data::RecordHolds::acquire(client, tenant).await?;
+                let client = hold_guard.client();
+                let held = holds.records(&*client, KIND, &settled).await?;
                 settled.retain(|id| !held.contains_key(id));
                 if !settled.is_empty() {
                     pruned += self
                         .delete(client, &scope, settled, &readers, &names, days)
                         .await?;
                 }
-                holds.release().await?;
+                hold_guard.release().await?;
             }
             if done {
                 return Ok(pruned);
