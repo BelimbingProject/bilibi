@@ -478,7 +478,6 @@ create() {
         password=$(openssl rand -hex 24)
     fi
     [[ -n $password ]] || fail "$env has no DATABASE_URL password" "remove the file to generate a new one"
-    ensure_database "$instance" "$password"
     local token_key; token_key=$(cloudflare_env_key "$instance")
     if [[ $tls == cloudflare && -n $cloudflare_token_stdin ]]; then
         IFS= read -r cloudflare_token || true
@@ -494,7 +493,9 @@ create() {
         local bilibi_env
         case $role in dev) bilibi_env=development ;; *) bilibi_env=$role ;; esac
         umask 027
-        cat >"$env" <<EOF
+        local env_new
+        env_new=$(mktemp "$dir/.env.XXXXXX")
+        cat >"$env_new" <<EOF
 # Bilibi instance "$instance". Read by bilibi@$instance.service and the release commands.
 # BILIBI_ENV initializes the role at install. Later changes use Instance settings.
 # The saved Dev role skips ordinary 2FA checks; role and software changes always ask.
@@ -509,6 +510,9 @@ BILIBI_MAIL_DIR=$dir/data/mailbox
 # Where the program receives releases and the installer keeps them.
 BILIBI_INSTANCE_DIR=$dir
 EOF
+        chown root:bilibi "$env_new"
+        chmod 0640 "$env_new"
+        mv -T "$env_new" "$env"
         umask 022
     else
         local kept_role; kept_role=$(role_of "$instance")
@@ -520,6 +524,9 @@ EOF
         # Older layouts gain the instance path used by release transport.
         grep -q '^BILIBI_INSTANCE_DIR=' "$env" || printf 'BILIBI_INSTANCE_DIR=%s\n' "$dir" >>"$env"
     fi
+    # Persist the generated credentials before creating the database role. A
+    # retry after interruption must use the same password as an existing role.
+    ensure_database "$instance" "$password"
     if [[ -n $cloudflare_token ]]; then
         [[ $(cat "$caddy_env" 2>/dev/null) == "$token_key=$cloudflare_token" ]] || caddy_restart=1
         umask 027
@@ -837,14 +844,24 @@ release() {
     [[ -f $source ]] || fail "$source is not a setup release archive"
     stage_source "$source"
     verify_provenance "$staged" "$repository" "$repository_id" "$tag"
-    local unpacked binary dir n previous
+    local unpacked binary dir n previous source_digest
+    source_digest=$(sha256sum "$staged" | cut -d' ' -f1)
+    dir=$(instance_dir "$instance")
+    previous=$(current_release "$instance")
+    if [[ -n $previous && -f $dir/releases/$previous/source.sha256 ]] &&
+        [[ $(cat "$dir/releases/$previous/source.sha256") == "$source_digest" ]]; then
+        (cd "$dir/releases/$previous" && sha256sum -c --quiet SHA256SUMS) ||
+            fail "current release $previous does not match its checksum" "restore the release before retrying"
+        [[ $(service_state "$instance") == active ]] && wait_healthy "$instance" ||
+            fail "current release $previous is not healthy" "check systemctl status $unit_name$instance and retry"
+        say "$instance: the verified release is already in service"
+        return 0
+    fi
     unpacked=$staging/unpacked
     if ! unpack_release "$staged" "$unpacked"; then
         fail 'the setup release archive or its checksum is invalid; nothing was installed' 'download the asset again and retry'
     fi
     binary=$unpacked/bilibi-web
-    dir=$(instance_dir "$instance")
-    previous=$(current_release "$instance")
     n=$(( $(release_numbers "$instance" | tail -n1) + 1 ))
     install -d -m 0755 -o bilibi-build -g bilibi "$dir/releases/$n"
     install -m 0755 -o bilibi-build -g bilibi "$binary" "$dir/releases/$n/bilibi-web"
@@ -858,6 +875,9 @@ release() {
         cp -R -- "$unpacked/plugins" "$dir/releases/$n/plugins"
         chown -R bilibi-build:bilibi "$dir/releases/$n/plugins"
     fi
+    printf '%s\n' "$source_digest" >"$dir/releases/$n/source.sha256"
+    chown bilibi-build:bilibi "$dir/releases/$n/source.sha256"
+    chmod 0644 "$dir/releases/$n/source.sha256"
     rm -rf -- "$unpacked"
     say "$instance: release $n copied to $dir/releases/$n"
     (
@@ -969,6 +989,43 @@ status() {
         done
     done
 }
+
+# JSON mode runs one noninteractive operation as a step. Keep child output out
+# of stdout so callers can parse every line, even when a package tool fails.
+json_command() {
+    local step=${1:-} output result code fix
+    case $step in
+        create|release|installer|status) ;;
+        *) printf '%s\n' '{"step":"input","state":"failed","code":"INVALID_COMMAND","fix":"Use create, release, installer or status."}'; return 2 ;;
+    esac
+    if ! command -v python3 >/dev/null; then
+        printf '%s\n' '{"step":"preflight","state":"failed","code":"PYTHON_MISSING","fix":"Install Python 3 and retry."}'
+        return 1
+    fi
+    output=$(mktemp) || return 1
+    chmod 600 "$output"
+    printf '{"step":"%s","state":"started"}\n' "$step"
+    if "$0" "$@" >"$output" 2>&1; then
+        result=0; code=OK; fix=''
+    else
+        result=$?; code="${step^^}_FAILED"; fix='Read the detail, correct the problem, and retry the same command.'
+    fi
+    python3 - "$step" "$result" "$code" "$fix" "$output" <<'PYJSON'
+import json, pathlib, sys
+step, result, code, fix, output = sys.argv[1:]
+detail = pathlib.Path(output).read_text(encoding="utf-8", errors="replace")
+print(json.dumps({"step": step, "state": "completed" if result == "0" else "failed",
+                  "code": code, "fix": fix, "detail": detail}))
+PYJSON
+    rm -f -- "$output"
+    return "$result"
+}
+
+if [[ ${1:-} == --json ]]; then
+    shift
+    json_command "$@"
+    exit $?
+fi
 
 detect_os
 case ${1:-} in
