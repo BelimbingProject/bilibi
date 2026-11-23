@@ -254,6 +254,7 @@ WALKTHROUGHS=(
 
 # Examples no line above runs, each with the reason. `module folder|example|reason`.
 NOT_RUN=(
+  'apps/base/integration|scorer-walkthrough|needs a public customer-style HTTPS endpoint and BILIBI_SETTINGS_KEY; run manually on a fresh database'
   'apps/web|watchers-domains-walkthrough|needs official Domain mounts; run each Domain source walkthrough first'
   # They only serve the app, with a reference page, for a person to use in a browser.
   'apps/core/document|upload-resume-proof|serves the New document dialog for a browser upload'

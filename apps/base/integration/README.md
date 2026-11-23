@@ -60,6 +60,18 @@ The `Location` target, including a signed download query, is not stored.
 
 For URLs supplied by an untrusted caller, use `Outgoing::public_https()`. It accepts HTTPS only, resolves the host once, refuses non-public addresses, pins the accepted addresses for the TLS connection and disables proxies and redirects. Public certificate roots still verify the original host. Set a short timeout and body limit for metadata documents; never fetch an untrusted URL with the ordinary redirecting client.
 
+## Customer-hosted scorers
+
+A reviewed Platform module or reviewed Extension contributes one `Scorer` under `SCORERS`. Customer-code Extensions are refused at boot. The contract fixes one event name, the exact field keys that leave, tenant consent/destination/signing-secret setting keys, a timeout and expiry, and every typed result's action key and JSON input. The three settings must be editable tenant definitions: boolean consent, a plain string destination and an encrypted string secret. This is the reviewed connector boundary; a reply supplies no action name or input.
+
+The installation owner admits exact destinations through the global `integration.connector_destinations` JSON array in System Settings. Each entry must be distinct public HTTPS with no credentials or fragment. `Integration::score` rechecks that policy, live tenant consent, destination and secret before sending and again before releasing a decision. It always uses `Outgoing::public_https`, disables redirects and proxies, pins public DNS answers, applies the contributed whole-call timeout and limits a reply to 16 KiB. Removing the destination, clearing consent, or clearing/rotating the secret revokes later and in-flight decisions.
+
+The JSON request is `{delivery_id, expires_at, event, fields}`. `event` is the contributed event name; internal event keys and record subjects never leave. `fields` contains every contributed key exactly once and no other key. The opaque delivery id is a truncated HMAC of the tenant, scorer and internal deduplication key. Headers are `Bilibi-Delivery`, Unix-seconds `Bilibi-Expires`, and `Bilibi-Signature: v1=<lowercase hex HMAC-SHA256>` over `expires_at + "." + exact_body_bytes`. The customer service rejects an expired request and deduplicates on `delivery_id`.
+
+The typed reply is a JSON object with string `delivery_id` and `result`; other response metadata is ignored. The delivery id must match and the result must be one of the contributed values before `score` returns its fixed `ScoreDecision { action, input }`. The connector invokes that action through its ordinary owner contract and uses the decision's delivery id as the action's idempotency key. A repeated event never sends or releases the choice again.
+
+`base_integration_scorer_deliveries` is the durable delivery receipt: tenant, scorer, a one-way event-key digest, opaque delivery id, exchange id, state, HTTP status, typed result or bounded refusal code. It stores neither the internal event key, event fields nor the secret. Inserting `sending` before the call gives at-most-once delivery; an interrupted or repeated delivery is uncertain and withheld rather than resent. The ordinary Integration exchange row remains the one HTTP measurement and retains no scorer payload.
+
 ## Incoming calls
 
 ```rust
@@ -122,6 +134,8 @@ Recording is a machine measurement on its own pooled connection, outside the cal
 server: retained/redacted preview, HTTP error, body limit, streamed download,
 connect failure, timeout, tenant and system incoming rows, every visibility and
 capability gate, audited deletion and payload pruning.
+
+`examples/scorer-walkthrough.rs` runs against a fresh disposable database and a public HTTPS stand-in. It contributes a reviewed contract, writes the installation destination policy and encrypted tenant configuration through Settings, obtains one typed fixed action, proves duplicate and extra-field refusals, revokes consent live, and reads back the payload-free delivery and exchange receipts. It needs `BILIBI_SETTINGS_KEY`, `BILIBI_DISPOSABLE_SCORER_DEMO=yes`, `DATABASE_URL` and outbound access to `https://httpbin.org`.
 
 ## Inbound webhooks
 
