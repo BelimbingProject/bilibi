@@ -2,7 +2,9 @@
 //! with no admission, execution, or saved record facts.
 use crate::definition::Definition;
 use crate::review::Draft;
-use crate::run::{evaluate, event_subject, logical_event, record_revision, set_action_identity};
+use crate::run::{
+    evaluate, event_subject, evidence_facts, logical_event, record_revision, set_action_identity,
+};
 use crate::script::{ScriptBudget, MAX_SCRIPT_TIME};
 use crate::store::Watchers;
 use bilibi_agent_api::Result;
@@ -268,7 +270,7 @@ impl Watchers {
                             effects.push(effect);
                         }
                     }
-                    let shown_facts: serde_json::Map<String, Value> = facts.into_iter().map(|(key, value)| {
+                    let shown_facts: serde_json::Map<String, Value> = evidence_facts(facts).into_iter().map(|(key, value)| {
                         let value = if serde_json::to_vec(&value).map_or(true, |v| v.len() > 4096) {
                             json!({"omitted":"value exceeds 4 KiB"})
                         } else {

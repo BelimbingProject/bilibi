@@ -1,5 +1,6 @@
 //! A stored watcher version in words, for the pages that read it.
 use crate::definition::{self, Definition};
+use crate::review::is_linked_custom;
 use crate::store::Watchers;
 use bilibi_grid::Catalog;
 use serde_json::{Value, json};
@@ -14,6 +15,19 @@ pub(crate) struct Described {
     pub actions: Vec<String>,
     pub examples: Vec<String>,
 }
+pub(crate) fn needs_linked_labels(definition: &Value, examples: Option<&Value>) -> bool {
+    let mut problems = Vec::new();
+    let Some(parsed) = Definition::parse(definition, &mut problems) else {
+        return false;
+    };
+    parsed.conditions.iter().any(|c| is_linked_custom(&c.field))
+        || examples.is_some_and(|examples| {
+            definition::parse_examples(examples, &mut problems)
+                .iter()
+                .any(|example| example.facts.keys().any(|path| is_linked_custom(path)))
+        })
+}
+
 impl Watchers {
     pub(crate) fn describe(
         &self,
@@ -28,9 +42,8 @@ impl Watchers {
             .trigger(trigger)
             .and_then(|t| bilibi_grid::installed().ok()?.table(t.definition.table));
         let label = |path: &str| {
-            crate::review::custom_path(path)
-                .and_then(|(link, _)| link)
-                .and(reader)
+            reader
+                .filter(|_| is_linked_custom(path))
                 .and_then(|catalog| {
                     let root = catalog.table(table?.id())?;
                     catalog.resolve(root, path).ok().map(|column| column.label)

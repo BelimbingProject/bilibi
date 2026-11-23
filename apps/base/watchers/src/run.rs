@@ -121,6 +121,17 @@ pub(crate) fn record_revision(value: Option<&Value>) -> Result<i64> {
         .ok_or(Error::Invalid)
 }
 
+pub(crate) fn evidence_facts(
+    mut facts: serde_json::Map<String, Value>,
+) -> serde_json::Map<String, Value> {
+    for (path, value) in &mut facts {
+        if crate::review::is_linked_custom(path) {
+            *value = json!({"omitted": "linked custom field"});
+        }
+    }
+    facts
+}
+
 pub(crate) fn evaluate(
     definition: &Definition,
     facts: &serde_json::Map<String, Value>,
@@ -609,7 +620,7 @@ impl Worker {
                 };
                 let subject_version = record_revision(facts.get(offered.definition.version))?;
                 let (matched, outcomes) = evaluate(&definition, &facts, &types);
-                let decided = (Value::Object(facts), json!(outcomes));
+                let decided = (Value::Object(evidence_facts(facts)), json!(outcomes));
                 if !matched {
                     return self
                         .finish(execution, &mut client, run.id, (&budget, Stop::NoMatch), Some(decided))

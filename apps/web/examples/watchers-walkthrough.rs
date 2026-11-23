@@ -740,16 +740,24 @@ async fn linked_custom_field_proof(proof: &Proof) -> Result<()> {
     drop(client);
     println!("     approval review: {:?}", review.problems);
     check(
-        review
-            .problems
-            .iter()
-            .any(|(path, reason)| {
-                path == "if.conditions.0.field" && reason.contains("hidden from automation")
-            }),
+        review.problems.iter().any(|(path, reason)| {
+            path == "if.conditions.0.field" && reason.contains("hidden from automation")
+        }),
         "the approval review refuses the linked field while automation cannot read companies",
     );
     proof
         .grant(&one, "watchers", "admin.company.list", Some(true))
+        .await?;
+
+    proof
+        .grant(&one, "watchers", "watcher-cases.case.view", None)
+        .await?;
+    check(
+        proof.approve(&one, watcher_id, number).await.is_err(),
+        "approval is refused while automation cannot read the trigger table",
+    );
+    proof
+        .grant(&one, "watchers", "watcher-cases.case.view", Some(true))
         .await?;
 
     println!("\n== A trial reads the linked field the same way");
@@ -783,28 +791,28 @@ async fn linked_custom_field_proof(proof: &Proof) -> Result<()> {
         .cloned()
         .unwrap_or_default();
     let silver_subject = silver_subject.to_string();
-    let fact = |row: &Value| row["current_record"]["facts"]["company.cf_segment"].clone();
-    println!(
-        "     trial: {} past events, {} would match",
-        rows.len(),
-        rows.iter().filter(|r| r["state"] == "match").count()
-    );
     check(
-        rows.iter()
-            .any(|r| r["state"] == "match" && fact(r) == "Gold"),
-        "a trial on past events matches a Gold company's case from the company's value",
-    );
-    check(
-        rows.iter()
-            .filter(|r| r["state"] == "match")
-            .all(|r| fact(r) == "Gold"),
-        "every matching case has a Gold company",
+        rows.iter().any(|r| {
+            r["state"] == "match" && r["current_record"]["condition_outcomes"] == json!([true])
+        }),
+        "a trial on past events matches a Gold company's case",
     );
     check(
         rows.iter().any(|r| {
-            r["subject"] == silver_subject && r["state"] == "near_miss" && fact(r) == "Silver"
+            r["subject"] == silver_subject
+                && r["state"] == "near_miss"
+                && r["current_record"]["condition_outcomes"] == json!([false])
         }),
-        "the Silver company's case is a near miss with its current Segment",
+        "the Silver company's case is a near miss with a false condition outcome",
+    );
+    check(
+        rows.iter()
+            .filter(|r| matches!(r["state"].as_str(), Some("match" | "near_miss")))
+            .all(|r| {
+                r["current_record"]["facts"]["company.cf_segment"]
+                    == json!({"omitted": "linked custom field"})
+            }),
+        "trial evidence records the linked path without its value",
     );
 
     println!("\n== The approved watcher routes by the company's value");
@@ -835,20 +843,24 @@ async fn linked_custom_field_proof(proof: &Proof) -> Result<()> {
                 .any(|r| r.0 == watcher_id && r.1 == "no_match"),
         "a Silver company's case does not match, and its receipt says so",
     );
-    let facts: Option<Value> = proof
-        .db
-        .get()
-        .await?
-        .query_one(
-            "SELECT facts FROM base_watcher_runs WHERE watcher_id=$1 AND subject=$2",
-            &[&watcher_id, &gold.to_string()],
-        )
-        .await?
-        .get(0);
-    check(
-        facts.is_some_and(|facts| facts["company.cf_segment"] == "Gold"),
-        "the receipt keeps the linked field's value as evidence",
-    );
+    let client = proof.db.get().await?;
+    for (subject, held) in [(gold, true), (silver, false)] {
+        let row = client
+            .query_one(
+                "SELECT facts,outcomes FROM base_watcher_runs WHERE watcher_id=$1 AND subject=$2",
+                &[&watcher_id, &subject.to_string()],
+            )
+            .await?;
+        let facts: Option<Value> = row.get(0);
+        let outcomes: Option<Value> = row.get(1);
+        check(
+            facts.is_some_and(|facts| {
+                facts["company.cf_segment"] == json!({"omitted": "linked custom field"})
+            }) && outcomes == Some(json!([held])),
+            "the receipt keeps the linked path and condition outcome without its value",
+        );
+    }
+    drop(client);
     segment(5, "Gold").await?;
     let promoted = proof
         .open(&one, 5, "Promoted company's question", "low", "800.00")

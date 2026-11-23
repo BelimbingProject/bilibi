@@ -521,7 +521,32 @@ impl Show {
             ),
             _ => None,
         };
-        let labels = bilibi_grid::Catalog::for_scope(&**client, scope).await.ok();
+        let running = view
+            .versions
+            .iter()
+            .skip(1)
+            .find(|v| Some(v.number) == view.summary.running);
+        let run_version = |run: &RunView| view.versions.iter().find(|v| v.number == run.version);
+        let needs_labels = latest
+            .into_iter()
+            .chain(running)
+            .any(|v| crate::describe::needs_linked_labels(&v.definition, Some(&v.examples)))
+            || view.runs.iter().any(|run| {
+                matches!(
+                    run.state.as_str(),
+                    "no_match" | "done" | "partial" | "matched"
+                ) && run
+                    .outcomes
+                    .as_array()
+                    .is_some_and(|outcomes| !outcomes.is_empty())
+                    && run_version(run)
+                        .is_some_and(|v| crate::describe::needs_linked_labels(&v.definition, None))
+            });
+        let labels = if needs_labels {
+            bilibi_grid::Catalog::for_scope(&**client, scope).await.ok()
+        } else {
+            None
+        };
         let labels = labels.as_ref();
         drop(client);
         let header = render(Header {
@@ -630,18 +655,4 @@ impl Show {
                 can_approve,
             )?);
         }
-        if let Some(version) = view
-            .versions
-            .iter()
-            .skip(1)
-            .find(|version| Some(version.number) == view.summary.running)
-        {
-            versions.push(self.version_card(
-                &view,
-                version,
-                &display,
-                labels,
-                None,
-                true,
-                can_approve,
-            )?);
+        if let Some(version) = running {
