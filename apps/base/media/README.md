@@ -138,6 +138,8 @@ An impersonated session cannot rescan or purge: Queue refuses to enqueue for an 
 
 The Quarantined Files page (`/system/media/quarantine`, Administration › System) lists them by status (Needs attention, Quarantined, Scan failed, Being checked, Not scanned, and Purging or Purged once purged), with Scan again and Purge contents for managers. Purge confirms first, in a dialog that opens with the shared instance banner. A database trigger keeps a purged file's verdict fixed and both purge times final.
 
+Public raster images served inline omit the source filename from the response. Downloads keep their filename.
+
 ## Resumable uploads
 
 A live file input declared with `UploadSpec::resumable` keeps its chunks in a staging file here while they arrive, so a dropped connection, a restarted server or a reloaded page carries on from the bytes already there. Once every byte is there and checked, the file is held in the page's memory until the page takes it, as any upload is. The browser contract is [`docs/live-pages.md`](../../../docs/live-pages.md) (Resumable uploads); the decision is [ADR 14](../../../docs/architecture/decisions/14-resumable-uploads-stage-on-a-media-disk.md).

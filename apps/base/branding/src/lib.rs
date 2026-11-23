@@ -71,7 +71,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, LOGO_KEY, provenance!(), &Se
 })) }
 inventory::submit! { Contribution::new(bilibi_settings_editor::IMAGE_SETTINGS, LOGO_KEY, provenance!(), &bilibi_settings_editor::ImageSetting {
     directory: "branding", max_bytes: LOGO_MAX_BYTES, noun: "Logo",
-    staging_capability: Some(MANAGE), current: "", unset: "", placeholder: false,
+    staging: Some(bilibi_settings_editor::StagedImage { capability: MANAGE, input: "brand_logo" }),
 }) }
 inventory::submit! { Contribution::new(DEFINITIONS, ACCENT_KEY, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::String, scopes: &[ScopeKind::Global],

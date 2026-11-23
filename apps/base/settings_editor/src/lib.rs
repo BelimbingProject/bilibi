@@ -44,24 +44,24 @@ pub const IMAGE_SETTINGS: &str = "base/settings_editor.image-settings";
 pub struct ImageSetting {
     pub directory: &'static str,
     pub max_bytes: u64,
-    /// What the image is, to start a sentence: "Company image", "Logo".
-    pub staging_capability: Option<&'static str>,
+    pub staging: Option<StagedImage>,
     pub noun: &'static str,
-    /// The line beside the preview while an image is set, and while none is.
-    pub current: &'static str,
-    pub unset: &'static str,
-    /// Whether the preview draws the company placeholder while none is set.
-    pub placeholder: bool,
+}
+pub struct StagedImage {
+    pub capability: &'static str,
+    pub input: &'static str,
 }
 fn validate_images(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
+    let mut upload_names = std::collections::BTreeSet::from([web::IMAGE_UPLOAD]);
     for entry in entries {
         let image = entry.get::<ImageSetting>()?;
         if image.directory.is_empty()
             || image.max_bytes == 0
             || image.max_bytes > 10 * 1024 * 1024
             || image.noun.is_empty()
-            || (image.staging_capability.is_none()
-                && (image.current.is_empty() || image.unset.is_empty()))
+            || image.staging.as_ref().is_some_and(|stage| {
+                !bilibi_ui::UploadSpec::valid_name(stage.input) || !upload_names.insert(stage.input)
+            })
         {
             return Err(RegistryError::Contribution(format!(
                 "invalid image setting {} at {}:{}",

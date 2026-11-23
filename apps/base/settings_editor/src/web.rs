@@ -174,7 +174,7 @@ struct Editor {
     uploads: Uploads,
 }
 
-const IMAGE_UPLOAD: &str = "identity_image";
+pub(super) const IMAGE_UPLOAD: &str = "identity_image";
 const IMAGE_TYPES: [&str; 7] = [
     ".png",
     ".jpg",
@@ -195,9 +195,9 @@ impl Editor {
             .unwrap_or(1);
         let uploads = Uploads::new(
             std::iter::once(UploadSpec::new(IMAGE_UPLOAD, upload_limit).accept(IMAGE_TYPES)).chain(
-                core.images.iter().filter_map(|(&key, image)| {
-                    image.staging_capability?;
-                    Some(UploadSpec::new(key, image.max_bytes).accept(IMAGE_TYPES))
+                core.images.values().filter_map(|image| {
+                    let stage = image.staging.as_ref()?;
+                    Some(UploadSpec::new(stage.input, image.max_bytes).accept(IMAGE_TYPES))
                 }),
             ),
         );
@@ -496,12 +496,14 @@ impl Editor {
             return Ok(());
         };
         let mut client = self.core.db.get().await?;
-        let (field, upload) = if let Some(capability) = image.staging_capability {
-            if !matches!(self.picked, Picked::Global) || !plan.capabilities.contains(capability) {
+        let (field, upload) = if let Some(stage) = &image.staging {
+            if !matches!(self.picked, Picked::Global)
+                || !plan.capabilities.contains(stage.capability)
+            {
                 return Ok(());
             }
-            authorize_operator(&**client, scope, capability).await?;
-            (None, key)
+            authorize_operator(&**client, scope, stage.capability).await?;
+            (None, stage.input)
         } else {
             let Some(field) = plan.field(key) else {
                 return Ok(());
@@ -1025,28 +1027,17 @@ impl Editor {
                         .ok(),
                     None => None,
                 };
-                let preview = if url.is_some() || image.is_some_and(|image| image.placeholder) {
-                    render(IdentityImage::company(url.as_deref()).preview())?
-                } else {
-                    Html::EMPTY
-                };
+                let preview = render(IdentityImage::company(url.as_deref()).preview())?;
                 let input = render(
                     self.uploads
                         .input(IMAGE_UPLOAD, format!("input-{}", field.dom()))
                         .label("Replacement image")
                         .hint("PNG, JPEG or WebP, up to 1 MiB."),
                 )?;
-                let state = image.map_or("", |image| {
-                    if field.value.as_i64().is_some() {
-                        image.current
-                    } else {
-                        image.unset
-                    }
-                });
                 render(ImageControl {
                     preview,
                     input,
-                    state,
+                    has_image: field.value.as_i64().is_some(),
                 })?
             } else {
                 control(
@@ -1329,13 +1320,13 @@ impl Editor {
             let mut images: Vec<_> = self.core.images.iter().collect();
             images.sort_unstable_by_key(|(key, _)| **key);
             for (&key, image) in images {
-                if !image
-                    .staging_capability
-                    .is_some_and(|capability| plan.capabilities.contains(capability))
-                {
+                let Some(stage) = &image.staging else {
+                    continue;
+                };
+                if !plan.capabilities.contains(stage.capability) {
                     continue;
                 }
-                let mut body = render(self.uploads.input(key, format!("stage-{key}"))
+                let mut body = render(self.uploads.input(stage.input, format!("stage-{key}"))
                     .label(format!("Upload {}", image.noun.to_lowercase()))
                     .hint("PNG, JPEG or WebP, up to 1 MiB. The upload returns an asset ID for review."))?;
                 body.push(&render(
@@ -1475,13 +1466,13 @@ struct Withheld {
 }
 #[derive(Template)]
 #[template(
-    source = r#"<div class="flex items-center gap-3">{% if !preview.is_empty() %}<span class="shrink-0">{{ preview|safe }}</span>{% endif %}<span class="text-xs text-ink-muted">{{ state }}</span></div><div class="mt-2">{{ input|safe }}</div>"#,
+    source = r#"<div class="flex items-center gap-3"><span class="shrink-0">{{ preview|safe }}</span><span class="text-xs text-ink-muted">{% if has_image %}Current company image{% else %}The default building icon is in use{% endif %}</span></div><div class="mt-2">{{ input|safe }}</div>"#,
     ext = "html"
 )]
 struct ImageControl {
     preview: Html,
     input: Html,
-    state: &'static str,
+    has_image: bool,
 }
 fn render(fragment: impl Template) -> Result<Html> {
     Html::render(&fragment).map_err(|_| Error::Internal)

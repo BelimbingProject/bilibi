@@ -90,6 +90,17 @@ impl Brand {
         !self.name.is_empty() || self.logo.is_some()
     }
 
+    pub fn favicon(&self) -> String {
+        if let Some(logo) = &self.logo {
+            logo.clone()
+        } else if self.custom() {
+            crate::Assets::url(&format!("/assets/brand-icon-{}.svg", self.accent.as_str()))
+                .to_string()
+        } else {
+            crate::Assets::url("/favicon.svg").to_string()
+        }
+    }
+
     /// The `data-accent` value for `<html>`; empty for the default accent,
     /// which needs no attribute.
     pub fn accent_attr(&self) -> &'static str {

@@ -60,10 +60,11 @@ impl Item {
         }
     }
     /// What a restore returns to, as people read it.
-    fn default_text(self) -> &'static str {
+    fn default_text(self, stored: &Stored) -> &'static str {
         match self {
             Self::Name => PRODUCT,
-            Self::Logo => "Built-in logo",
+            Self::Logo if stored.name.is_empty() => "Built-in mark",
+            Self::Logo => "Name only",
             Self::Accent => "Lime",
         }
     }
@@ -75,12 +76,18 @@ impl Item {
         }
     }
     /// The configured value, as people read it.
-    fn shown(self, stored: &Stored) -> String {
+    fn shown(self, stored: &Stored, logo_active: bool) -> String {
         match self {
             Self::Name if stored.name.is_empty() => PRODUCT.into(),
             Self::Name => stored.name.clone(),
-            Self::Logo if stored.logo.is_some() => "Uploaded image".into(),
-            Self::Logo => "Default logo".into(),
+            Self::Logo if logo_active => "Uploaded image".into(),
+            Self::Logo if stored.logo.is_some() => {
+                format!(
+                    "Configured image unavailable ({})",
+                    self.default_text(stored)
+                )
+            }
+            Self::Logo => self.default_text(stored).into(),
             Self::Accent => stored.accent.label().into(),
         }
     }
@@ -121,11 +128,8 @@ fn brand_json(stored: &Stored, logo_active: bool, can_manage: bool) -> Value {
                     Item::Logo => json!(logo_active),
                     Item::Accent => json!(stored.accent.as_str()),
                 },
-                "shown": match item {
-                    Item::Logo if !logo_active && stored.logo.is_some() => "Configured image unavailable".into(),
-                    _ => item.shown(stored),
-                },
-                "default": item.default_text(),
+                "shown": item.shown(stored, logo_active),
+                "default": item.default_text(stored),
                 "customised": item.customised(stored),
             })
         })
@@ -262,18 +266,26 @@ async fn check_logo(
 /// The review of a write: a summary line, then each changed part as
 /// "before → after" under `plan`, the shape the Customisations page's confirm
 /// dialog and the agent review card both read as plain lines.
-fn review(before: &Stored, after: &Stored, summary: &str) -> Value {
+fn review(before: &Stored, after: &Stored, logo_was_active: bool, summary: &str) -> Value {
+    let logo_is_active = if before.logo == after.logo {
+        logo_was_active
+    } else {
+        after.logo.is_some()
+    };
     let mut plan = serde_json::Map::new();
     for item in Item::ALL {
-        let (was, now) = (item.shown(before), item.shown(after));
+        let (was, now) = (
+            item.shown(before, logo_was_active),
+            item.shown(after, logo_is_active),
+        );
         let replaced = item == Item::Logo && before.logo != after.logo;
         if was != now {
             plan.insert(item.as_str().into(), json!(format!("{was} → {now}")));
         } else if item == Item::Name && before.name != after.name {
             let (was, now) = if before.name.is_empty() {
-                ("Built-in wordmark", "Custom display name")
+                ("Default display name", "Custom display name")
             } else {
-                ("Custom display name", "Built-in wordmark")
+                ("Custom display name", "Default display name")
             };
             plan.insert(item.as_str().into(), json!(format!("{was} → {now}")));
         } else if replaced {
@@ -365,12 +377,19 @@ impl WriteHandler for Write {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let sql = client.sql_client().await?;
-            let stored = bound()?.stored(sql).await?;
+            let branding = bound()?;
+            let stored = branding.stored(sql).await?;
+            let logo_was_active = branding.logo_url(sql, stored.logo).await?.is_some();
             let (next, items) = self.next(input, &stored)?;
             if let (true, Some(logo)) = (items.contains(&Item::Logo), next.logo) {
                 check_logo(sql, scope, logo).await?;
             }
-            Ok(Output::from(review(&stored, &next, self.summary())))
+            Ok(Output::from(review(
+                &stored,
+                &next,
+                logo_was_active,
+                self.summary(),
+            )))
         })
     }
     fn commit<'a>(
@@ -383,6 +402,7 @@ impl WriteHandler for Write {
             bilibi_authz::authorize_operator(tx.sql(), scope, MANAGE).await?;
             let branding = bound()?;
             let stored = branding.stored(tx.sql()).await?;
+            let logo_was_active = branding.logo_url(tx.sql(), stored.logo).await?.is_some();
             let (next, items) = self.next(input, &stored)?;
             for item in items {
                 let value = match (self, item) {
@@ -410,7 +430,12 @@ impl WriteHandler for Write {
                     }
                 }
             }
-            Ok(Output::from(review(&stored, &next, self.summary())))
+            Ok(Output::from(review(
+                &stored,
+                &next,
+                logo_was_active,
+                self.summary(),
+            )))
         })
     }
 }
@@ -478,7 +503,7 @@ fn rows(value: &Value) -> Vec<bilibi_labels::CustomisationRow> {
             description: format!(
                 "{}: {} → {}",
                 item.title(),
-                item.default_text(),
+                row["default"].as_str().unwrap_or_default(),
                 row["shown"].as_str().unwrap_or_default()
             ),
             // The brand's settings carry no revision of their own, so the

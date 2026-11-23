@@ -136,6 +136,6 @@ inventory::submit! {
         bilibi_settings_editor::IMAGE_SETTINGS,
         crate::IDENTITY_IMAGE_KEY,
         Provenance { module: "core/company", source: file!(), line: line!() },
-        &bilibi_settings_editor::ImageSetting { directory: "company-identity-images", max_bytes: crate::IDENTITY_IMAGE_MAX_BYTES, noun: "Company image", staging_capability: None, current: "Current company image", unset: "The default building icon is in use", placeholder: true },
+        &bilibi_settings_editor::ImageSetting { directory: "company-identity-images", max_bytes: crate::IDENTITY_IMAGE_MAX_BYTES, noun: "Company image", staging: None },
     )
 }

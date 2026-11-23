@@ -25,7 +25,7 @@ Three installation (global) settings hold the brand. Nothing set means Bilibi's 
 | --- | --- | --- |
 | Staff sign-in, recovery, invitation, 2FA and review cards | Logo, then the name | The Bilibi wordmark |
 | Workspace top bar | Logo and name; opens the dashboard | The Bilibi wordmark |
-| Browser tab | "page · name", the logo as the tab icon | "page · Bilibi", the Bilibi mark |
+| Browser tab | "page · name", the uploaded logo or a plain accent-coloured icon | "page · Bilibi", the Bilibi mark |
 | Error pages | The same logo and name | The Bilibi wordmark |
 | Email | The name as the sender name | `MAIL_FROM_NAME` |
 | Buttons, current menu item, selections | The accent | Lime |
@@ -52,4 +52,4 @@ Three installation (global) settings hold the brand. Nothing set means Bilibi's 
 
 `Branding::current()` returns a `bilibi_ui::Brand` for one render and never fails a page: a failed read is logged and the page carries Bilibi's brand. The Web host passes it to the shell (`ShellContext::brand`), the credential layout (`AuthLayout::brand`), the standalone review, the error document and `Document`. A page never reads the brand or draws a logo itself; it calls `ui::wordmark`.
 
-A logo link is a short-lived signed Media link for the operator workspace's asset (`Media::tenant_stream_url`). A logo that cannot be served is left out.
+A logo link is a short-lived signed Media link for the operator workspace's asset (`Media::tenant_stream_url`). A logo that cannot be served is left out. A custom name without an available logo uses a plain accent-coloured tab icon. Public inline image responses omit the source filename.
