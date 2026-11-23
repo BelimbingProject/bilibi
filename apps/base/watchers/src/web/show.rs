@@ -87,10 +87,7 @@ fn effect_reason(code: &str) -> &'static str {
 }
 /// What the AI answered for a run, in words; nothing when none was asked.
 fn observed(run: &RunView) -> Option<String> {
-    let observation = &run.observation;
-    if observation.is_null() {
-        return None;
-    }
+    let observation = Some(&run.observation).filter(|o| !o.is_null())?;
     if observation.get("restricted").is_some() {
         return Some("The AI observation is hidden: you may not read the fields it sent.".into());
     }
