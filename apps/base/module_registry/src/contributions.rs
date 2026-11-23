@@ -865,7 +865,7 @@ fn validate_page_writes(entries: &[Entry]) -> Result<()> {
                 return Err(invalid(format!("{at} names an event's contract twice")));
             }
         }
-        let mut events: BTreeSet<&str> = pairs.iter().map(|(event, _)| *event).collect();
+        let mut events = BTreeSet::new();
         match writes.pending {
             Pending::None => {}
             Pending::Every { reason } if reason_text(reason) => {}

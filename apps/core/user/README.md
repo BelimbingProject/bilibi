@@ -34,7 +34,7 @@ Base Records kind `user` names and links staff accounts through the same tenant,
 | `link_person(scope, user, person)` / `unlink(scope, user)` | The account binder's commands; `admin.user.update`. See below |
 | `update_account` / `remove_membership` | Tenant membership administration (`src/accounts.rs`): rename with `admin.user.update`, or remove with `admin.user.delete`. Shared credentials are not an administrator operation. See "Account administration" |
 | `invite_member` / `revoke_member_invitation` / `member_invitation` / `accept_member_invitation` / `accept_new_member_invitation` | Prepare or revoke a tenant account, read the safe facts for its emailed page and accept it with an existing or new sign-in. See "Membership invitations" |
-| `update_profile(token, csrf, name, email)` / `landing_pages` / `landing_choice` / `save_landing` / `landing_route` | The signed-in account's own profile and landing page; no capability |
+| `update_profile(token, csrf, name, email)` / `landing_pages` / `landing_choice` / `landing_route` | The signed-in account's own profile and landing page; no capability |
 | `send_email_verification(token, csrf)` / `verify_email(link)` | Signed link to the account's current address; clicking proves mailbox control |
 
 Refusals are `CredentialError` variants a page maps to a field error or flash
@@ -166,7 +166,7 @@ Customer accounts retain their separate portal identity ([ADR 16](../../../docs/
 
 `CompanyAccount` carries id, name, email, verification, Person, the requested organisation and timestamps. It contains no credential or employment affiliation. Staff without a desk are not listed. Business affiliations neither add nor remove workplace access.
 
-## Pages (`core/user.pages`)
+## Pages
 
 `/settings/profile`, `/settings/password` (`src/web.rs`, `templates/password.html`), `/settings/two-factor` (below) and `/settings/appearance` are the signed-in account's own settings inside the shell, on the settings layout of `base/ui/templates/settings.html` with the typed `bilibi_ui::SettingsTab` (adapted to the shared horizontal tabs). Open **My settings** in the account panel at the bottom of the sidebar to start at Profile. AI connections uses the same five-tab layout in `core/agent`. The password page is live: the form submits as the `change-password` event carrying its field values, the state keeps the field errors of the last attempt (`can't be blank`, the password policy, `does not match password`, `is incorrect`), and a success or failure is a flash in the page until dismissed. The route needs a session and no capability; the current password proves the holder inside `change_password`.
 
@@ -178,11 +178,11 @@ unverified, which the saved flash says. A shared-email change requires a portabl
 setting `ui.landing_menu_id` (`accounts::LANDING_KEY`, contributed in
 `contributions.rs`): the select offers exactly the menu pages the account can
 open (`landing_pages`, the menu contributions read through the account's
-effective capabilities), `save_landing` refuses any other value, and the
-Web host's sign-in asks `landing_route` for where to go, falling back to the
-workspace when the choice is unset or no longer reachable.
+effective capabilities). Profile saves the choice through the same reviewed set or restore operation as the connector. The Web host asks `landing_route` where to go after sign-in and opens the workspace when the choice is unset or unreachable.
 
 The same page uploads or removes the account's own `ui.profile_image_asset_id`. Media accepts at most 1 MiB of byte-inspected PNG, JPEG or WebP data and serves it through a signed stream link; the sidebar uses the fixed-size picture and returns to the account's initials when it is absent or unreadable.
+
+Agents use `core.user.landing.read` for the reachable menu pages and current choice, then `core.user.landing.set` or `core.user.landing.restore` with its version. Use `core.user.pins.read` for the account's ordered shortcuts, `core.user.pins.set` to set that list and `core.user.pins.restore` to clear the list or remove one pin by ID. The existing shell and profile actions enforce the same owner rules. The account can remove a pin or restore the landing default on Customisations.
 
 ## Account administration (K16; `src/accounts.rs`, `src/account_ui/`)
 

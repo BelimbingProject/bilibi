@@ -39,7 +39,7 @@ With `base.labels.customisations.view`, search for **Customise my tenant** (`bas
 
 ## Customisations page
 
-Open **Administration › Customisations** (`/admin/customisations`, `base.labels.customisations.view`) to see tenant label overrides and active and archived custom fields. Use **Restore default** on a label override, **Archive** on an active field or **Restore** on an archived field. Each action requires the owning module's write permission. A notice names any sections you lack permission to read.
+Open **Administration › Customisations** (`/admin/customisations`, `base.labels.customisations.view`) to see tenant label overrides, active and archived custom fields, shared workspaces, and your saved pins, landing page and dashboard arrangement. Use **Restore default** on a label override, **Archive** on an active field or **Restore** on an archived field, **Withdraw workspace** on a published layout, **Remove pin** on a shortcut or **Restore default** on a personal landing page or dashboard region. Each action requires the owning module's write permission. A notice names any sections you lack permission to read.
 
 The page shows the recorded change time when [Audit can match the current revision](../audit/README.md#record-revision-attribution). The **Changed by** column requires `admin.audit.log.list` and otherwise displays **Restricted**. Use the owner’s editor or agent operations to create or edit a customisation.
 

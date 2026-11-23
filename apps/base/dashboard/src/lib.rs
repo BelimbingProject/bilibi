@@ -11,7 +11,11 @@
 //! reports) contributes a [`Provider`] with [`provide!`] instead: the page
 //! rechecks placed entries on every update and asks for offers in Customize; each mounts as
 //! its own panel through the provider's embed, like a contributed entry.
+mod arrangement;
 mod web;
+
+pub use arrangement::{Arrangements, ARRANGEMENTS};
+pub use web::{ArrangementWrite, ArrangementWriter, DashboardPage};
 
 use bilibi_database::Error;
 use bilibi_module_registry::{
@@ -119,11 +123,11 @@ pub struct Provided {
 pub type ProvidedFuture<'a> =
     Pin<Box<dyn Future<Output = bilibi_database::Result<Vec<Provided>>> + Send + 'a>>;
 
-/// Entries that exist only at run time. The page calls `entries` with the
-/// reader's sealed scope and the keys of this provider's entries the reader
-/// has placed, on every update; the owner answers only what that reader may
-/// see: each placed key it still may (however many others it has), then, only
-/// when `offers` is true (Customize), up to [`MAX_PROVIDED`] more to offer.
+/// Entries that exist only at run time. Dashboard calls `entries` with its
+/// SQL client, the reader's sealed scope and the placed or proposed keys.
+/// Owners use the supplied client so a review never needs a second connection.
+/// Return only what the reader may see: eligible requested keys and, when
+/// `offers` is true, up to [`MAX_PROVIDED`] more to offer.
 /// Each entry mounts `embed` with its id as the panel's
 /// `entry`, and the embed's `access` still guards every mount and refresh.
 /// Provided entries are offered in Customize, never placed unasked.
@@ -136,7 +140,8 @@ pub struct Provider {
     /// Offers the provider's entries at all.
     pub capability: Option<&'static str>,
     pub refresh_interval: u32,
-    pub entries: for<'a> fn(&'a Scope, &'a [String], bool) -> ProvidedFuture<'a>,
+    pub entries:
+        for<'a> fn(&'a tokio_postgres::Client, &'a Scope, &'a [String], bool) -> ProvidedFuture<'a>,
 }
 
 #[doc(hidden)]
@@ -497,18 +502,9 @@ inventory::submit! {
                 }
                 Ok(Arc::new(dashboard))
             }},
-            bilibi_module_registry::Service { id: "base/dashboard.pages", factory: |services| {
-                Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(web::Pages::new(
-                    services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
-                    services.get("base/dashboard.catalog")?, services.get("base/settings.store")?,
-                    services.get("base/database.mutations")?,
-                )))))
+            bilibi_module_registry::Service { id: ARRANGEMENTS, factory: |services| {
+                Ok(Arc::new(Arrangements::new(services.get("base/dashboard.catalog")?, services.get("base/settings.store")?)))
             }},
         ],
     }
 }
-inventory::submit! { Contribution::new(bilibi_module_registry::contributions::ROUTES, "dashboard.index",
-Provenance { module: "base/dashboard", source: file!(), line: line!() },
-&bilibi_module_registry::contributions::Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Company, method: bilibi_module_registry::contributions::Method::Get, path: "/dashboard", service: "base/dashboard.pages", operation: "index", access: bilibi_module_registry::contributions::Access::SignedIn, framed: true }) }
-// No menu item: the top bar's wordmark (`app-brand`) and
-// sign-in reach the dashboard, and the sidebar holds no `nav-dashboard`.

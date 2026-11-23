@@ -132,7 +132,7 @@ inventory::submit! {
 // The signed-in account's own name, email and landing page; the session alone names the account.
 inventory::submit! {
     Contribution::new(ROUTES, "core/user.settings.profile", Provenance { module: "core/user", source: file!(), line: line!() }, &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
-        method: Method::Get, path: "/settings/profile", service: "core/user.pages", operation: "profile", access: Access::SignedIn, framed: true,
+        method: Method::Get, path: "/settings/profile", service: crate::account_ui::PROFILE_SERVICE, operation: "profile", access: Access::SignedIn, framed: true,
     })
 }
 // `ui.landing_menu_id`: the menu page a sign-in opens, at the
