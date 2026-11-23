@@ -4,7 +4,8 @@
 //! (`bilibi_artifacts::pdf`). Each export is audited with the report, the
 //! reader, the format and the row count, never the data.
 use crate::{
-    cell, contributions, line, web::result, Kind, ReportError, Reports, RunInput, RunResult, EXPORT,
+    cell, contributions, line, web::result, Kind, Report, ReportError, Reports, RunInput,
+    RunResult, EXPORT,
 };
 use bilibi_audit::{record_action, Attribution};
 use bilibi_database::Error;
@@ -82,7 +83,7 @@ impl Reports {
         format: Format,
     ) -> Outcome<File> {
         let cap = self.export_rows(scope).await?;
-        self.export_within(scope, id, input, format, cap, false)
+        self.export_within(scope, self.get(scope, id).await?, input, format, cap, false)
             .await
     }
 
@@ -102,7 +103,9 @@ impl Reports {
             crate::authorize(&**client, scope, EXPORT).await?;
         }
         let cap = self.export_rows(scope).await?;
-        let table = self.tabulate(scope, id, input, cap, false).await?;
+        let table = self
+            .tabulate(scope, self.get(scope, id).await?, input, cap, false)
+            .await?;
         render(&table, format).map(|_| ())
     }
 
@@ -112,7 +115,7 @@ impl Reports {
     pub(crate) async fn export_within(
         &self,
         scope: &Scope,
-        id: i64,
+        report: Report,
         input: &RunInput,
         format: Format,
         cap: usize,
@@ -122,7 +125,8 @@ impl Reports {
             let client = self.db.get().await.map_err(Error::from)?;
             crate::authorize(&**client, scope, EXPORT).await?;
         }
-        let table = self.tabulate(scope, id, input, cap, background).await?;
+        let id = report.id;
+        let table = self.tabulate(scope, report, input, cap, background).await?;
         let bytes = render(&table, format)?;
         let client = self.db.get().await.map_err(Error::from)?;
         record_action(
@@ -151,7 +155,7 @@ impl Reports {
     pub(crate) async fn tabulate(
         &self,
         scope: &Scope,
-        id: i64,
+        report: Report,
         input: &RunInput,
         cap: usize,
         background: bool,
@@ -162,7 +166,9 @@ impl Reports {
             background,
             ..input.clone()
         };
-        let (first, listing) = self.run_for_file(scope, id, &input).await?;
+        let first = self
+            .run_report_for(scope, report.clone(), &input, Some(cap))
+            .await?;
         let oversight = first.report.definition.oversight;
         let status = first.oversight_status();
         let cohort = first.oversight.clone();
@@ -197,21 +203,9 @@ impl Reports {
                 let expected_total = *total;
                 let first_page = (*page_size).max(1);
                 let mut current = Some(first);
-                if let Some(listing) = listing {
-                    // The first run read the totals and the first page; the
-                    // rest is keys and cells, a full Grid page at a time.
+                if !oversight {
                     if let Some(RunResult::Rows { rows, .. }) = current.take().map(|r| r.result) {
                         push_rows(&mut table, rows);
-                    }
-                    let mut offset = first_page;
-                    while (offset as i64) < expected_total {
-                        let page = listing.page(self, scope, offset, FILE_PAGE).await?;
-                        if page.total != expected_total {
-                            return Err(changed(background));
-                        }
-                        table.reference_names.extend(page.reference_names);
-                        push_rows(&mut table, page.rows);
-                        offset += FILE_PAGE;
                     }
                 } else {
                     let pages = (expected_total as usize).div_ceil(first_page);
@@ -220,7 +214,7 @@ impl Reports {
                             Some(run) => run,
                             None => {
                                 input.page = page;
-                                self.run(scope, id, &input).await?
+                                self.run_report(scope, report.clone(), &input).await?
                             }
                         };
                         if oversight
@@ -366,25 +360,11 @@ impl Reports {
     }
 }
 
-/// Rows a file reads at a time after the first page: Grid's page bound.
-const FILE_PAGE: usize = 100;
-
 fn push_rows(table: &mut Tabled, rows: Vec<(Value, Vec<Value>)>) {
     for (_, cells) in rows {
         table.rows.push(cells.iter().map(cell).collect());
         table.records += 1;
     }
-}
-
-/// The question matched a different number of records on a later page:
-/// rows were added or removed while the file was read, so it could repeat
-/// or miss one.
-fn changed(background: bool) -> ReportError {
-    ReportError::Refused(if background {
-        "The records changed while this export was prepared. Prepare it again.".into()
-    } else {
-        "The records changed during the download. Download it again.".into()
-    })
 }
 
 fn too_many(total: i64, cap: usize, background: bool) -> ReportError {

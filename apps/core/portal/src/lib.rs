@@ -154,7 +154,8 @@ inventory::submit! {
                     media: services.get(bilibi_media::SERVICE)?,
                     settings: services.get("base/settings.store")?,
                     events: services.get(bilibi_events::SERVICE)?,
-                    origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
+                    public_origin: std::env::var("PUBLIC_ORIGIN").ok().filter(|origin| !origin.is_empty()).map(|origin| origin.trim_end_matches('/').to_owned()),
+                    public_tenant: std::env::var("PUBLIC_TENANT_ID").ok().and_then(|id| id.parse().ok()),
                 });
                 operations::bind(access.clone())?;
                 Ok(access)

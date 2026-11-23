@@ -279,7 +279,14 @@ async fn main() -> Result<()> {
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
-    let app = bilibi_web::App::new(db.clone(), "http://127.0.0.1")?;
+    let port: u16 = std::env::var("BILIBI_PDF_DEMO_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(48230);
+    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+    // The development origin includes the listener port because the Host guard is exact.
+    let origin = format!("http://127.0.0.1:{port}");
+    let app = bilibi_web::App::new(db.clone(), &origin)?;
     let store_service = app.services.get::<Artifacts>("base/artifacts.store")?;
     let queue = app.services.get::<Queue>("base/queue.store")?;
     let boundary = app
@@ -289,13 +296,7 @@ async fn main() -> Result<()> {
     let authentication = app
         .services
         .get::<Authentication>("base/tenancy.authentication")?;
-
-    let port: u16 = std::env::var("BILIBI_PDF_DEMO_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(48230);
-    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    let router = bilibi_web::router(app.clone());
+    let router = bilibi_web::staff_router(app.clone());
     tokio::spawn(async move { axum::serve(listener, router).await });
 
     let client = db

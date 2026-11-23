@@ -272,7 +272,7 @@ The development seed's one-time `user_bootstrap` receipt names the administrator
 
 `create_first_administrator(grants, operator, input)` is the production
 counterpart of the seed's bootstrap (with the
-operator's own name, email and password), behind `bilibi-web create-owner`
+operator's own name and email, and a random password nobody knows), behind `bilibi-web create-owner`
 (`apps/web/src/create_owner.rs`, documented for operators in
 `docs/server-install.md`). On one `MutationBoundary` transaction as the
 `create-owner` system principal (`Context::system`, since no account exists
@@ -286,7 +286,9 @@ receipt (replacing one whose account was deleted, the only way one can
 remain). The transaction's changes are `user`, `authz.principal_role` and
 `user.bootstrap`; it also records the retained `user.bootstrap.completed`
 action with the account, email and role, as the seed does. The host then
-calls `settle_bootstrap_affiliation` for the Person, business affiliation and first desk. `operator_accounts(tenant)` reads the same account count and first email without writing, so the host decides whether an owner exists before it asks any question; where one does, `create-owner` only settles an unfinished bootstrap and names that owner. Use this service to bootstrap the platform operator's first account.
+calls `settle_bootstrap_affiliation` for the Person, business affiliation and first desk. `operator_accounts(tenant)` reads the same account count and first email without writing, so the host decides whether an owner exists before it asks any question; where one does, `create-owner` only settles an unfinished bootstrap and reports that owner's claim. Use this service to bootstrap the platform operator's first account.
+
+`claim_owner()` is how the owner takes the account. It reads the receipt's account, never a typed address. While the owner has not chosen a password (`password_version` 1) it checks mail readiness and mails a one-time password-reset link, waiting for delivery (`OwnerClaim::Sent`, or `RecentlySent` inside the one-minute reset throttle; a failed delivery withdraws the token and returns `OwnerClaimError::Delivery`). After that it only reports `PasswordChosen` or, once any step-up method is enrolled, `Claimed`. No path creates or claims the owner without the email; root on the server is trusted, so this guards against mistakes and shortcuts, not a malicious administrator.
 
 ### Customer tenant owner
 

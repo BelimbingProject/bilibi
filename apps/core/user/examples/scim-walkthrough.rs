@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .open(path)?;
         file.write_all(
             serde_json::to_string(
-                &json!({"cookie":format!("bilibi_session={}",session.token),"csrf":session.csrf}),
+                &json!({"cookie":format!("__Host-bilibi_session={}",session.token),"csrf":session.csrf}),
             )?
             .as_bytes(),
         )?;

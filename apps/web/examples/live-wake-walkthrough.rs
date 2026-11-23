@@ -264,7 +264,7 @@ async fn open(
     headers.insert("Origin", host.parse().map_err(internal)?);
     headers.insert(
         "Cookie",
-        format!("bilibi_session={token}")
+        format!("__Host-bilibi_session={token}")
             .parse()
             .map_err(internal)?,
     );
@@ -344,7 +344,8 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         let _ = axum::serve(
             listener,
-            bilibi_web::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            bilibi_web::staff_router(app)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .await;
     });

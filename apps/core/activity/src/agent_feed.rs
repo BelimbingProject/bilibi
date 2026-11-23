@@ -79,13 +79,15 @@ impl WriteHandler for CreateFeedKey {
         _: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let (key, token) = owner()?
+            let (key, token, origin) = owner()?
                 .create_feed_key(tx, scope)
                 .await
                 .map_err(|e| invalid(e, ""))?;
+            let path = FEED_PATH.replace("{token}", &token);
             Ok(json!({
                 "key": token,
-                "path": FEED_PATH.replace("{token}", &token),
+                "url": format!("{origin}{path}"),
+                "path": path,
                 "created_at": key.created_at.to_string(),
                 "notice": "This link is shown once. Anyone who has it can read your calendar until you revoke it.",
             })
@@ -150,7 +152,7 @@ fn review_output() -> Value {
 /// `x-one-time-secret` keeps the operation out of `review_entries`, whose
 /// outcome would carry the link into model context and a stored review.
 fn secret_output() -> Value {
-    json!({"type":"object","x-one-time-secret":true,"description":"The commit returns key and path once; they are never shown again and never stored."})
+    json!({"type":"object","x-one-time-secret":true,"description":"The commit returns the key, URL and path once; they are never shown again and never stored."})
 }
 
 static GET: GetFeedKey = GetFeedKey;

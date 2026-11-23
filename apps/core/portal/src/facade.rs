@@ -237,8 +237,9 @@ pub struct PortalService {
     pub(crate) media: Arc<bilibi_media::Media>,
     pub(crate) settings: Arc<Settings>,
     pub(crate) events: Arc<bilibi_events::Events>,
-    /// Public origin that emailed links point at (`APP_ORIGIN`).
-    pub(crate) origin: String,
+    /// Public listener origin and tenant for customer links.
+    pub(crate) public_origin: Option<String>,
+    pub(crate) public_tenant: Option<i64>,
 }
 
 pub(crate) fn digest(token: &str) -> Vec<u8> {
@@ -515,20 +516,28 @@ impl PortalService {
     /// The portal a customer opened, by its address, while it is on and its
     /// tenant is active. Public: anyone holding a link reads the title it
     /// brands. A site that is off is `None`, so its pages answer 404.
-    pub async fn portal_site(&self, address: &str) -> Result<Option<Site>> {
+    pub async fn portal_site(&self, tenant: i64, address: &str) -> Result<Option<Site>> {
         if !address_shaped(address) {
             return Ok(None);
         }
         let client = self.db.get().await?;
         let site = client
             .query_opt(
-                "SELECT s.tenant_id,s.address,s.title,s.enabled,s.registration,s.logo_asset_id,s.version FROM customer_portal_sites s JOIN tenants t ON t.id=s.tenant_id WHERE s.address=$1 AND s.enabled AND t.deleted_at IS NULL AND t.status='active'",
-                &[&address],
+                "SELECT s.tenant_id,s.address,s.title,s.enabled,s.registration,s.logo_asset_id,s.version FROM customer_portal_sites s JOIN tenants t ON t.id=s.tenant_id WHERE s.address=$1 AND s.tenant_id=$2 AND s.enabled AND t.deleted_at IS NULL AND t.status='active'",
+                &[&address, &tenant],
             )
             .await?
             .map(|row| Site::from_row(&row));
         Ok(self.with_logo(site).await)
     }
+    pub async fn public_logo_matches(&self, tenant: i64, asset: i64) -> Result<bool> {
+        let client = self.db.get().await?;
+        Ok(client.query_opt(
+            "SELECT 1 FROM customer_portal_sites s JOIN tenants t ON t.id=s.tenant_id WHERE s.tenant_id=$1 AND s.logo_asset_id=$2 AND s.enabled AND t.deleted_at IS NULL AND t.status='active'",
+            &[&tenant, &asset],
+        ).await?.is_some())
+    }
+
     /// The signed-in customer's own portal site, for its layout and links;
     /// the host refuses the portal's pages while it is off.
     pub async fn site_of(&self, portal: &PortalScope) -> Result<Option<Site>> {
@@ -602,7 +611,14 @@ impl PortalService {
     /// The checks an invitation passes before it is written, on the caller's
     /// connection or transaction: the portal site is set, the Person stands,
     /// the affiliation is the Person's, the address is free.
+    pub(crate) fn public_origin_for(&self, tenant: i64) -> Option<&str> {
+        self.public_origin
+            .as_deref()
+            .filter(|_| self.public_tenant == Some(tenant))
+    }
+
     async fn check_invitation(
+        &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
         input: &InvitationInput,
@@ -618,6 +634,13 @@ impl PortalService {
             .map_err(|error| errors.push(error))
             .ok();
         let tenant = scope.tenant();
+        if self.public_origin_for(tenant).is_none() {
+            errors.push(field(
+                "site",
+                "configure the public listener for this workspace before inviting customers",
+            ));
+            return Ok(Err(errors));
+        }
         let Some(site) = site_of_tenant(client, tenant).await? else {
             errors.push(field(
                 "site",
@@ -674,7 +697,7 @@ impl PortalService {
     ) -> Result<Checked<Value>> {
         authorize_key(client, scope, MANAGE).await?;
         let (name, email, organisation, site) =
-            match Self::check_invitation(client, scope, input).await? {
+            match self.check_invitation(client, scope, input).await? {
                 Ok(checked) => checked,
                 Err(errors) => return Ok(Err(errors)),
             };
@@ -716,7 +739,7 @@ impl PortalService {
             )]));
         }
         let (name, email, organisation, site) =
-            match Self::check_invitation(tx.sql(), scope, input).await? {
+            match self.check_invitation(tx.sql(), scope, input).await? {
                 Ok(checked) => checked,
                 Err(errors) => return Ok(Err(errors)),
             };
@@ -784,7 +807,11 @@ impl PortalService {
             wording["subject"].clone(),
             crate::wording::around_link(
                 &wording,
-                &format!("{}/portal/accept/{}/{token}", self.origin, site.address),
+                &format!(
+                    "{}/portal/accept/{}/{token}",
+                    self.public_origin_for(site.tenant).ok_or(Error::Invalid)?,
+                    site.address
+                ),
             ),
         );
         // A mail adapter's bounce report finds the invitation by this tag.
@@ -952,6 +979,7 @@ impl PortalService {
     /// links are all `None`.
     pub async fn open_invitation(
         &self,
+        listener_tenant: i64,
         address: &str,
         token: &str,
     ) -> Result<Option<OpenInvitation>> {
@@ -961,8 +989,8 @@ impl PortalService {
         let client = self.db.get().await?;
         Ok(client
             .query_opt(
-                "SELECT i.name,i.email FROM customer_invitations i JOIN customer_portal_sites s ON s.tenant_id=i.tenant_id JOIN tenants t ON t.id=i.tenant_id WHERE s.address=$1 AND s.enabled AND i.token_hash=$2 AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at>now() AND t.deleted_at IS NULL AND t.status='active'",
-                &[&address, &digest(token)],
+                "SELECT i.name,i.email FROM customer_invitations i JOIN customer_portal_sites s ON s.tenant_id=i.tenant_id JOIN tenants t ON t.id=i.tenant_id WHERE s.address=$1 AND s.enabled AND i.token_hash=$2 AND s.tenant_id=$3 AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at>now() AND t.deleted_at IS NULL AND t.status='active'",
+                &[&address, &digest(token), &listener_tenant],
             )
             .await?
             .map(|row| OpenInvitation {
@@ -977,6 +1005,7 @@ impl PortalService {
     /// customer then signs in at the portal; no session is made here.
     pub async fn accept(
         &self,
+        listener_tenant: i64,
         address: &str,
         token: &str,
         name: &str,
@@ -998,8 +1027,8 @@ impl PortalService {
         let hash = digest(token);
         let row = client
             .query_opt(
-                "SELECT i.id,i.tenant_id FROM customer_invitations i JOIN customer_portal_sites s ON s.tenant_id=i.tenant_id WHERE s.address=$1 AND s.enabled AND i.token_hash=$2",
-                &[&address, &hash],
+                "SELECT i.id,i.tenant_id FROM customer_invitations i JOIN customer_portal_sites s ON s.tenant_id=i.tenant_id WHERE s.address=$1 AND s.enabled AND i.token_hash=$2 AND s.tenant_id=$3",
+                &[&address, &hash, &listener_tenant],
             )
             .await
             .map_err(Error::from)?

@@ -26,9 +26,9 @@ use std::collections::HashMap;
 /// The portal home, where a customer lands after signing in.
 pub const HOME: &str = "/portal";
 
-/// The customer's session cookie. `Path=/portal`, so the browser never sends
-/// it to a staff path, where a customer is therefore anonymous.
-pub const COOKIE: &str = "bilibi_portal";
+/// The customer's session cookie. The public listener alone reads it; its
+/// `__Host-` prefix binds it to the public hostname.
+pub const COOKIE: &str = "__Host-bilibi_customer";
 
 /// The portal cookie's token. The staff cookie is never read here.
 pub fn token(headers: &HeaderMap) -> Result<String> {
@@ -58,6 +58,14 @@ enum Admission {
     StepUp(PortalScope),
 }
 
+pub(crate) async fn session(app: &App, credential: &str) -> Result<PortalScope> {
+    let portal = app.security.guard_portal(credential).await?;
+    if app.public_tenant != Some(portal.scope().tenant()) {
+        return Err(Error::Unauthorized);
+    }
+    Ok(portal)
+}
+
 /// The portal session, then the route's portal capability, then its
 /// step-up, as `routes::admit` does for staff. A staff session, a missing
 /// one and a customer of a closed account are all `Unauthorized`; a
@@ -73,10 +81,7 @@ async fn admit(
     let Access::Portal(key) = access.base() else {
         return Err(Error::Forbidden);
     };
-    let portal = app
-        .security
-        .guard_portal(credential.ok_or(Error::Unauthorized)?)
-        .await?;
+    let portal = session(app, credential.ok_or(Error::Unauthorized)?).await?;
     // A portal that is off answers 404 to its own customers too (issue 137,
     // behaviour 1), before any capability is decided.
     if !portal_on(app, &portal).await? {
@@ -206,6 +211,7 @@ impl live::Side for Portal {
         })
     }
     async fn activity(app: &App, token: &str) -> Result<PortalScope> {
+        session(app, token).await?;
         let client = app.db.get().await.map_err(Error::from)?;
         PortalScope::seal(
             app.security
@@ -246,7 +252,7 @@ pub async fn upgrade(
 ) -> std::result::Result<Response, HttpError> {
     origin(&app, &headers)?;
     let token = token(&headers)?;
-    let portal = app.security.guard_portal(&token).await?;
+    let portal = session(&app, &token).await?;
     if !portal_on(&app, &portal).await? {
         return Err(Error::NotFound.into());
     }
@@ -486,15 +492,21 @@ pub async fn sign_out(
 ) -> std::result::Result<Response, HttpError> {
     origin(&app, &headers)?;
     if let Ok(credential) = token(&headers) {
-        match app.user.portal_logout(&credential, &form.csrf).await {
-            Ok(()) | Err(Error::Unauthorized) => {}
+        match session(&app, &credential).await {
+            Ok(_) => match app.user.portal_logout(&credential, &form.csrf).await {
+                Ok(()) | Err(Error::Unauthorized) => {}
+                Err(error) => return Err(error.into()),
+            },
+            Err(Error::Unauthorized) => {}
             Err(error) => return Err(error.into()),
         }
     }
     let mut response = sign_in();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("bilibi_portal=; HttpOnly; SameSite=Lax; Path=/portal; Max-Age=0"),
+        HeaderValue::from_static(
+            "__Host-bilibi_customer=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0",
+        ),
     );
     Ok(response)
 }

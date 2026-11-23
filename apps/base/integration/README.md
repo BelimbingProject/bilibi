@@ -60,6 +60,20 @@ The `Location` target, including a signed download query, is not stored.
 
 For URLs supplied by an untrusted caller, use `Outgoing::public_https()`. It accepts HTTPS only, resolves the host once, refuses non-public addresses, pins the accepted addresses for the TLS connection and disables proxies and redirects. Public certificate roots still verify the original host. Set a short timeout and body limit for metadata documents; never fetch an untrusted URL with the ordinary redirecting client.
 
+## Customer-hosted scorers
+
+A reviewed Platform module or reviewed Extension contributes one `Scorer` under `SCORERS`. Customer-code Extensions are refused at boot. The contract fixes one event name, the exact field keys that leave, tenant consent/destination/signing-secret setting keys, a timeout and expiry, one action key, and each typed result's fixed JSON input. The three settings must be editable tenant definitions: boolean consent, a plain string destination and an encrypted string secret. This is the reviewed connector boundary; a reply supplies no action name or input.
+
+The installation owner admits exact destinations through the global `integration.connector_destinations` JSON array in System Settings. Each entry must be distinct public HTTPS with no credentials or fragment. `Integration::score` rechecks that policy, the stored tenant consent override, destination and secret before sending and again before releasing a decision. It always uses `Outgoing::public_https`, disables redirects and proxies, pins public DNS answers, applies the contributed whole-call timeout and limits a reply to 16 KiB. Removing the destination, clearing consent, or clearing/rotating the secret revokes later and in-flight decisions.
+
+The JSON request is `{delivery_id, expires_at, event, fields}`. `event` is the contributed event name; internal event keys and record subjects never leave. `fields` contains every contributed key exactly once and no other key. The opaque delivery id is a truncated HMAC of the tenant, scorer and internal deduplication key. Headers are `Bilibi-Delivery`, Unix-seconds `Bilibi-Expires`, and `Bilibi-Signature: v1=<lowercase hex HMAC-SHA256>` over `expires_at + "." + exact_body_bytes`. The customer service rejects an expired request and deduplicates on `delivery_id`.
+
+The typed reply is a JSON object containing exactly two string fields, `delivery_id` and `result`. The delivery id must match and the result must be one of the contributed values before `score` returns its fixed `ScoreDecision { action, input }`. The connector invokes that action through its ordinary owner contract and uses the decision's delivery id to correlate the action. The delivery receipt prevents a duplicate event from invoking it again. A repeated event never sends or releases the choice again.
+
+`base_integration_scorer_deliveries` is the durable delivery receipt: tenant, scorer, a one-way event-key digest, opaque delivery id, exchange id, state, HTTP status, typed result or bounded refusal code. It stores neither the internal event key, event fields nor the secret. Inserting `sending` before the call gives at-most-once delivery; an interrupted or repeated delivery is uncertain and withheld rather than resent. The ordinary Integration exchange row remains the one HTTP measurement and retains no scorer payload.
+
+The Platform supplies this reusable boundary and an executable walkthrough. The first real customer scorer will supply the production event and action binding.
+
 ## Incoming calls
 
 ```rust
@@ -122,6 +136,8 @@ Recording is a machine measurement on its own pooled connection, outside the cal
 server: retained/redacted preview, HTTP error, body limit, streamed download,
 connect failure, timeout, tenant and system incoming rows, every visibility and
 capability gate, audited deletion and payload pruning.
+
+`examples/scorer-walkthrough.rs` uses a fresh disposable database and a fixture receiver on `127.0.0.1:18464`. Set `BILIBI_SCORER_FIXTURE_URL` to a public HTTPS URL that forwards the request to `/score` on that listener with its headers and body intact. The example also needs `BILIBI_SETTINGS_KEY`, `BILIBI_DISPOSABLE_SCORER_DEMO=yes` and `DATABASE_URL`. It checks the signed envelope at the receiver, invokes the Pick Lists owner's create operation as a granted automation principal, and reads the new value back. It also checks duplicate suppression, extra-field refusal, consent revocation while the receiver holds a valid reply, and payload-free receipts.
 
 ## Inbound webhooks
 

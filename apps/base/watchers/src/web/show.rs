@@ -329,6 +329,35 @@ impl Show {
                     },
                 )?;
             }
+            "run_script" => {
+                let number = get("version")
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .ok_or(Error::Invalid)?;
+                let script = get("script")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .ok_or(Error::Invalid)?;
+                let call = Call {
+                    scope,
+                    credential,
+                    service: crate::PAGES,
+                    event: "run_script",
+                    contract: "base.watchers.script.run",
+                };
+                let outcome = self
+                    .pages
+                    .contracts
+                    .submit(
+                        &call,
+                        json!({
+                            "watcher_id": self.id,
+                            "version": number,
+                            "script": script,
+                            "subject": get("subject").unwrap_or_default(),
+                        }),
+                    )
+                    .await;
+                self.answer(outcome, format!("Script {script} ran as you."))?;
+            }
             _ => return Err(Error::Invalid),
         }
         Ok(())
@@ -372,6 +401,7 @@ impl Show {
         review: Option<&crate::Review>,
         running: bool,
         can_approve: bool,
+        can_run: bool,
     ) -> Result<Html> {
         let watchers = &self.pages.watchers;
         let described = watchers.describe(
@@ -506,6 +536,18 @@ impl Show {
             id: &format!("{dom}-facts"),
             items,
         })?);
+        if can_run && version.approved_at.is_some() {
+            let mut problems = Vec::new();
+            if let Some(definition) =
+                crate::definition::Definition::parse(&version.definition, &mut problems)
+            {
+                body.push(&super::script_run::cards(
+                    &definition,
+                    &dom,
+                    version.number,
+                )?);
+            }
+        }
         if let Some(review) = review.filter(|_| version.approved_at.is_none()) {
             if !review.problems.is_empty() {
                 let mut lines: Vec<String> = review
@@ -551,6 +593,9 @@ impl Show {
             .await?
             .allowed;
         let can_draft = bilibi_authz::decide(&**client, scope, MANAGE)
+            .await?
+            .allowed;
+        let can_run = bilibi_authz::decide(&**client, scope, crate::RUN_SCRIPT)
             .await?
             .allowed;
         let latest = view.versions.first();
@@ -667,6 +712,7 @@ impl Show {
                 review.as_ref(),
                 running,
                 can_approve,
+                can_run,
             )?);
         }
         if let Some(version) = view
@@ -675,7 +721,15 @@ impl Show {
             .skip(1)
             .find(|version| Some(version.number) == view.summary.running)
         {
-            versions.push(self.version_card(&view, version, &display, None, true, can_approve)?);
+            versions.push(self.version_card(
+                &view,
+                version,
+                &display,
+                None,
+                true,
+                can_approve,
+                can_run,
+            )?);
         }
         let mut rows = Vec::new();
         for run in &view.runs {

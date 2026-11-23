@@ -67,7 +67,7 @@ LOCK = DEV / "owner.lock"
 OWNER_PID = DEV / "owner.pid"
 # start-app.sh prepares these after the owner starts. Transfer only these values
 # over the private control socket; never persist credentials or log the payload.
-APP_ENVIRONMENT = {'DATABASE_URL', 'APP_ORIGIN', 'BIND_ADDR'}
+APP_ENVIRONMENT = {'DATABASE_URL', 'APP_ORIGIN', 'BIND_ADDR', 'PUBLIC_ORIGIN', 'PUBLIC_BIND_ADDR', 'PUBLIC_TENANT_ID'}
 
 
 def reply(connection, result):

@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|_| Error::Internal)?;
-    axum::serve(listener, bilibi_web::router(app))
+    axum::serve(listener, bilibi_web::staff_router(app))
         .await
         .map_err(|_| Error::Internal)
 }

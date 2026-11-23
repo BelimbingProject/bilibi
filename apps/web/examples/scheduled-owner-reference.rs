@@ -390,7 +390,7 @@ async fn main() -> Result<()> {
     let ticker = tokio::spawn(scheduler.run(stopped));
     let shutdown = stop.clone();
     println!("Scheduled owner reference at {origin}/system/schedule");
-    let result = axum::serve(listener, bilibi_web::router(app))
+    let result = axum::serve(listener, bilibi_web::staff_router(app))
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             let _ = shutdown.send(true);

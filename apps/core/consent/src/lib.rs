@@ -670,6 +670,7 @@ inventory::submit! { Module {
         ("core-consent-003-log", include_str!("../migrations/003-log.sql")),
         ("core-consent-004-personal-data", include_str!("../migrations/004-personal-data.sql")),
         ("core-consent-005-search-and-retention", include_str!("../migrations/005-search-and-retention.sql")),
+        ("core-consent-006-manual-channels", include_str!("../migrations/006-manual-channels.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         let consent = Arc::new(Consent {

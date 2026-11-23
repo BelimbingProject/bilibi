@@ -8,6 +8,12 @@ use tokio_postgres::Transaction;
 // survivor and its direct predecessors are the complete equivalence class. The reverse index serves this lookup.
 pub(crate) const MEMBERSHIP_SQL: &str = "SELECT $1::bigint AS tenant_id,$2::text AS record_kind,$3::text AS record_id UNION ALL SELECT tenant_id,kind,from_id FROM base_records_redirects WHERE tenant_id=$1 AND kind=$2 AND to_id=$3";
 
+/// Every merged-away record with the survivor it reads as now, for Grid's
+/// subject fields (`bilibi_grid::Survivors`): Grid applies the tenant and kind
+/// predicates, which the unique index on `(tenant_id, kind, from_id)` serves.
+pub(crate) const SURVIVORS_SQL: &str =
+    "SELECT tenant_id, kind, from_id, to_id FROM base_records_redirects";
+
 /// An owner-built membership subquery for existing stored references.
 /// Execute immediately on the transaction and scope passed to
 /// [`Records::matching`]; do not cache it or treat it as write authority.

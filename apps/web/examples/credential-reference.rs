@@ -110,12 +110,12 @@ async fn main() -> Result<std::process::ExitCode, Error> {
     bilibi_walkthrough_fixture::install(&db).await?;
     let origin = std::env::var("APP_ORIGIN").map_err(|_| Error::Invalid)?;
     let bind = std::env::var("BIND_ADDR").map_err(|_| Error::Invalid)?;
-    let app = bilibi_web::App::new(db, &origin)?;
+    let app = bilibi_web::App::new(db, &origin)?.at_public_site(&origin, 1);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|_| Error::Internal)?;
     println!("Credential reference listening at {origin}");
-    axum::serve(listener, bilibi_web::router(app))
+    axum::serve(listener, bilibi_web::public_router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

@@ -17,6 +17,7 @@ pub mod page_views;
 pub mod query;
 pub mod reference;
 mod shared_views;
+mod subject;
 mod summary;
 mod transfer;
 pub mod view;
@@ -29,16 +30,17 @@ pub use page_columns::{Outcome, PageColumns, ViewCaller};
 pub use page_metadata::{PageColumnsFuture, PageDetailsFuture, PageMetadata, PAGE_METADATA};
 pub use page_views::{PageViews, PAGE_VIEWS};
 pub use query::{
-    project, project_lenses, project_within, scalar_access, scalar_expression, scalar_join, stats,
+    project, project_lenses, scalar_access, scalar_expression, scalar_join, stats,
     validate_projection_on, Lenses, Projection, QueryError, Row, ScalarJoin, Stats, BOUNDS,
     MAX_ESTIMATED_COST,
 };
 pub use shared_views::{Audience, SharedView, SHARE as SHARE_VIEWS};
+pub use subject::{bind_survivors, SubjectAccess, Survivors};
 pub use summary::{
-    page_keys, summarize, validate_page_on, validate_summary_on, Bounds, Bucket, Filter, Grouping,
-    KeyPage, Line, Measure, PageSpec, Period, Sort, Summary, SummarySpec, Test, MAX_CHOICES,
-    MAX_COST_BOUND, MAX_FILTERS, MAX_GROUPINGS, MAX_MEASURES, MAX_OFFSET, MAX_RESULT_GROUPS,
-    MAX_SORTS, MAX_STATEMENT_MS, MAX_TEXT,
+    page_keys, report_page, report_summary, summarize, validate_page_on, validate_summary_on,
+    Bounds, Bucket, Filter, Grouping, KeyPage, Line, Measure, PageSpec, Period, Sort, Summary,
+    SummarySpec, Test, MAX_CHOICES, MAX_COST_BOUND, MAX_FILTERS, MAX_GROUPINGS, MAX_MEASURES,
+    MAX_OFFSET, MAX_RESULT_GROUPS, MAX_SORTS, MAX_STATEMENT_MS, MAX_TEXT,
 };
 pub use transfer::{ViewPreview, ViewSetup, ViewTransfer};
 pub use view::View;
@@ -56,7 +58,7 @@ pub use custom::{
 };
 pub use model::{
     id_valid, GridContribution, Installed, Join, Link, LinkDecl, LinkKind, RecordFields, Source,
-    Table, TableDecl, MAX_FIELDS, MAX_LINKS_PER_TABLE, MAX_TABLES,
+    Subject, Table, TableDecl, MAX_FIELDS, MAX_LINKS_PER_TABLE, MAX_TABLES,
 };
 
 #[doc(hidden)]

@@ -23,10 +23,11 @@ Draft checks, write previews and saves use [Grid's audited oversight probe](../g
 - Columns, groupings, measures and sorts the reader cannot see are **left out** and named in `left_out`.
 - A **filter** on a column the reader cannot see **refuses the run** (`HiddenFilter`), so a filter cannot be used to infer a hidden value.
 - A tenant's **custom fields** are columns like built-in fields (`cf_<key>`, from Grid's scoped catalog: [Custom Fields](../custom_fields/README.md#reports-lists-and-search)). An archived field leaves the columns, so a saved report that uses it leaves it out for every reader, as any column they cannot see.
+- A source that declares its **subject** ([Grid: Record subjects](../grid/README.md#record-subjects)), the record each row is about, is counted per record and read per subject: rows about records merged since group, filter and drill under the survivor, and a reader gets only the rows whose subject they may read (the Base Records owner's read rule), in every line, total, list, drill-down, file and panel. A subject they cannot read is no line, not a Restricted one. The owner declares it on the Grid table; a report needs nothing.
 
-Custom record fields are named through Base Records with the reader’s scope on every page and export. Reference grouping keys carry `{stored_id, label}` so drill filters and chart groups retain the stored id as identity while labels follow merges and show Restricted when unavailable; equal labels do not combine distinct records. Reference aggregation limits follow [Grid's measure rules](../grid/README.md#grouped-summaries-and-row-pages-g5).
+Custom record fields and subject fields are named through Base Records with the reader’s scope on every page and export. Reference grouping keys carry `{stored_id, label}` so drill filters and chart groups retain the stored id as identity while labels follow merges and show Restricted when unavailable; equal labels do not combine distinct records. Reference aggregation limits follow [Grid's measure rules](../grid/README.md#grouped-summaries-and-row-pages-g5).
 
-Reports include each custom reference field’s target kind and its table’s readability in their stable access revision. Dashboard revisions and prepared-export downloads use the same fingerprint.
+Reports with declared subjects redraw panels on every refresh and regenerate prepared downloads with the saved answers, the prepared report version and the requester’s current access. Ordinary custom references keep their existing access revision and label checks. Oversight reports exclude subject-declaring sources.
 
 Prepared files retain a deduplicated set of the reference ids and optional labels rendered in every page and group, within the export row cap. Downloads resolve them again as the requester and refuse a changed label or unavailable state. Reference panels rerun on refresh; their HTML is never reused from the panel cache.
 
@@ -79,7 +80,7 @@ Tenant report previews validate drafts on the plan's transaction using [Grid's t
 | `reports.statement_ms`, `reports.max_cost` | 2,000 ms, 100,000 (Grid's own bound) | 500–30,000 ms; 1,000–Grid's `MAX_COST_BOUND` |
 | `reports.queued_statement_ms`, `reports.queued_max_cost` | 60,000 ms, 10,000,000 | 1,000 ms–Grid's `MAX_STATEMENT_MS`; 1,000–`MAX_COST_BOUND` |
 
-A page, a dashboard panel, a download and an agent run read under the interactive pair; a prepared export and a scheduled delivery under the background pair (`RunInput::background`). Every read of a run takes the pair: a list's keys, the cells that fill them (`grid::project_within`) and its totals. A report over its cost or time bound is refused as `TooHeavy`, which says to prepare it as an export instead, and the Result tab offers Prepare CSV/PDF right there instead of the downloads, which read under the same interactive bounds. Too many groups is refused with "add a filter", since the background has the same group limit.
+A page, a dashboard panel, a download and an agent run read under the interactive pair; a prepared export and a scheduled delivery under the background pair (`RunInput::background`). Every read of a run takes the pair: a list’s keys, matching count, cells and totals share a single snapshot (`grid::report_page`). Same-tenant files read every page in that snapshot. A report over its cost or time bound is refused as `TooHeavy`, which says to prepare it as an export instead, and the Result tab offers Prepare CSV/PDF right there instead of the downloads, which read under the same interactive bounds. Too many groups is refused with "add a filter", since the background has the same group limit.
 
 The settings editor groups the two pairs as **Reports · Interactive reads** and **Reports · Background reads**, using its Area filter. A prepared export above its row cap names that cap and asks for a filter, not another prepared export.
 
@@ -127,6 +128,8 @@ A module contributes one in code with `bilibi_reports::builtin!` (key, name, des
 ## Proof
 
 `apps/web/examples/r1-reports.rs` on a disposable database (`BILIBI_GRID_DEMO=disposable`): build, run against plain SQL, share, a field restriction, another tenant, stale version, copy, rows, CSV and PDF and their audit, totals, drill into records, matrix, built-ins, a prepared export's queue job, and a subscription's next run, pause and removal.
+
+`apps/web/examples/report-subjects.rs` on an empty disposable database (`BILIBI_REPORT_SUBJECTS=disposable`): a merged pair counted once under its survivor with the total unchanged, the drill-down behind it, a reader whose reach leaves one subject out of the lines, the total, the list and a filter by its id, a reader with no grant on the subject's table, wider reach, and another tenant's merge.
 
 ## Not yet
 
