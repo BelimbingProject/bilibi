@@ -38,7 +38,7 @@ pg_bin=
 pg_service=
 
 usage() {
-    sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,/^set /p' "${BASH_SOURCE[0]}" | sed -n 's/^# \{0,1\}//p' >&2
     exit 2
 }
 # fail <message> [<what to do next>] [<CODE>]: the code is the stable name
@@ -116,7 +116,7 @@ installer_state() { systemctl is-active "$installer_unit$1" 2>/dev/null || true;
 # address this machine does not hold (normal behind a cloud NAT).
 check_dns() {
     local site=$1 resolved local_addresses address
-    resolved=$(getent ahosts "$site" 2>/dev/null | awk '{print $1}' | sort -u)
+    resolved=$({ getent ahosts "$site" 2>/dev/null || true; } | awk '{print $1}' | sort -u)
     [[ -n $resolved ]] || fail "DNS for $site does not resolve yet" "add an A (and AAAA, if the server has IPv6) record for $site pointing at this server's public address, wait until it resolves, then rerun the same command" DNS_NOT_FOUND
     local_addresses=$(ip -o addr show 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}')
     while IFS= read -r address; do
@@ -153,9 +153,11 @@ apt_install() {
     apt-get install -y -qq --no-install-recommends "${missing[@]}" >>"$log" 2>&1 ||
         fail "could not install ${missing[*]}" "see $log, then rerun the same command" PACKAGE_INSTALL_FAILED
 }
-# apt_repo <name> <key url> <sources line with @KEYRING@>
+# apt_repo <name> <key url> <sources line with @KEYRING@> [asc|gpg]: the key file extension matches its format
 apt_repo() {
-    local ring=/usr/share/keyrings/$1.asc
+    # The key's own format decides the name: apt (sqv on Ubuntu 26.04) reads
+    # an .asc file only when it is ASCII-armored, a binary key only as .gpg.
+    local ring=/usr/share/keyrings/$1.${4:-asc}
     [[ -f /etc/apt/sources.list.d/$1.list ]] && return 0
     apt_install ca-certificates curl gnupg lsb-release
     install -d /usr/share/keyrings
@@ -212,7 +214,7 @@ ensure_github_cli() {
     case $os_family in
         debian)
             apt_repo github-cli https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-                "deb [arch=$(dpkg --print-architecture) signed-by=@KEYRING@] https://cli.github.com/packages stable main"
+                "deb [arch=$(dpkg --print-architecture) signed-by=@KEYRING@] https://cli.github.com/packages stable main" gpg
             apt-get install -y -qq --no-install-recommends gh >>"$log" 2>&1 ||
                 fail 'could not install GitHub CLI' "see $log, then rerun the same command" PACKAGE_INSTALL_FAILED
             ;;
@@ -224,7 +226,7 @@ ensure_github_cli() {
             ;;
     esac
     gh attestation verify --help >/dev/null 2>&1 ||
-        fail 'the installed GitHub CLI cannot verify release provenance' 'update GitHub CLI, then rerun this command'
+        fail 'the installed GitHub CLI cannot verify release provenance' "install a current gh from https://cli.github.com/packages (see $log), then rerun the same command" PACKAGE_INSTALL_FAILED
 }
 hold_caddy_package() {
     if [[ $os_family == debian ]]; then
@@ -260,12 +262,25 @@ ensure_users() {
     install -d -m 0750 -o bilibi-build -g bilibi-build "$root/build"
     install_sudoers
 }
-# install_sudoers: the rule for bilibi-build, replaced only when it differs.
+# install_sudoers: the rule for bilibi-build, naming every instance (and the
+# one `create` is making), replaced only when it differs. The new rule is
+# validated before it is moved in, so a refused rule never reaches
+# /etc/sudoers.d where it would break sudo.
 install_sudoers() {
     [[ -d /etc/sudoers.d ]] || return 0
-    cmp -s "$here/server/sudoers" /etc/sudoers.d/bilibi-build && return 0
-    install -m 0440 "$here/server/sudoers" /etc/sudoers.d/bilibi-build
-    visudo -cf /etc/sudoers.d/bilibi-build >/dev/null || fail 'the sudoers rule for bilibi-build did not validate'
+    local name commands='/usr/bin/systemctl reload caddy' rendered
+    for name in $({ instances; [[ -z ${creating_instance:-} ]] || echo "$creating_instance"; } | sort -u); do
+        commands+=", /usr/bin/systemctl start bilibi@$name, /usr/bin/systemctl stop bilibi@$name, /usr/bin/systemctl restart bilibi@$name"
+    done
+    rendered=$(mktemp /etc/sudoers.d/.bilibi-build.XXXXXX)
+    sed "s|@COMMANDS@|$commands|" "$here/server/sudoers" >"$rendered"
+    chmod 0440 "$rendered"
+    if cmp -s "$rendered" /etc/sudoers.d/bilibi-build; then rm -f -- "$rendered"; return 0; fi
+    if ! visudo -cf "$rendered" >/dev/null 2>>"$log"; then
+        rm -f -- "$rendered"
+        fail 'the sudoers rule for bilibi-build did not validate; nothing was changed' "see $log" SUDOERS_INVALID
+    fi
+    mv -T "$rendered" /etc/sudoers.d/bilibi-build
 }
 # retire_worker: servers that once built software ran bilibi-worker@<instance>.
 # Stop and disable each, then remove the unit template and the old sudoers
@@ -476,6 +491,7 @@ create() {
     [[ -z $tls || $tls == internal || $tls == cloudflare ]] || fail '--tls takes "internal" or "cloudflare"' '' INVALID_INPUT
     [[ -z $cloudflare_token_stdin || $tls == cloudflare ]] || fail '--cloudflare-token-stdin requires --tls cloudflare' '' INVALID_INPUT
     need_root create "$@"
+    creating_instance=$instance
     [[ -f $here/waiting-page.html && -f $here/server/site.caddy ]] || fail "run this from a Bilibi checkout: $here/server is missing"
     [[ -n $tls ]] || check_dns "$site"
 
@@ -995,7 +1011,7 @@ create_owner() {
     instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
     local dir; dir=$(instance_dir "$instance")
     [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>" NO_RELEASE
-    with_env "$instance" bilibi-build "$dir/current/bilibi-web" create-owner "$@"
+    with_env "$instance" bilibi "$dir/current/bilibi-web" create-owner "$@"
 }
 # =========================================================== tenant-provision
 # A customer tenant, primary company and first-owner invitation.
@@ -1034,7 +1050,7 @@ two_factor_reset() {
     instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
     local dir; dir=$(instance_dir "$instance")
     [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>" NO_RELEASE
-    with_env "$instance" bilibi-build "$dir/current/bilibi-web" two-factor-reset "$@"
+    with_env "$instance" bilibi "$dir/current/bilibi-web" two-factor-reset "$@"
 }
 switch() {
     local instance=${1:-} n=${2:-}

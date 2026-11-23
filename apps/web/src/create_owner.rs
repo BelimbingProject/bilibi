@@ -190,7 +190,7 @@ async fn claim(app: &crate::App, origin: &str) -> Result<()> {
     match app.user.claim_owner().await {
         Ok(OwnerClaim::Sent { email }) => {
             println!("A claim link was emailed to {email}. The owner opens it, chooses a password, signs in at {origin}/login and sets up 2FA.");
-            println!("Next: when the owner has done both, rerun the same command to confirm.");
+            println!("Next: when the owner has chosen a password and set up 2FA, rerun the same command to confirm.");
             println!("Owner claim: sent");
             Ok(())
         }

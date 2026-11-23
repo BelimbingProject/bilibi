@@ -13,7 +13,7 @@ You install the official signed Bilibi release on one server for one person: **t
 - **Never skip a signature check.** Install only assets from the official release that pass verification. If a check fails, download again; never patch, rebuild or bypass it.
 - **Never put a secret on a command line.** Relay passwords and tokens go on standard input (`--password-stdin`, `--cloudflare-token-stdin`). Never print them.
 - **Never compile on the server.** The release is finished programs. Do not install Rust, Cargo or build tools there.
-- **On any failure or interruption, rerun the same command.** Every step is safe to repeat and keeps what is already done. Read `code` and `next` in its JSON before you change anything.
+- **On any failure or interruption, rerun the same command.** Every step is safe to repeat and keeps what is already done. When a step failed, first do what its `code` and `next` say (some need a change on the server, such as a DNS record), then rerun it.
 
 Root on the server can still do anything; these rules keep you from holding the owner's sign-in by mistake or shortcut. They are not a defence against a malicious administrator.
 
@@ -33,7 +33,7 @@ The owner needs the mail relay from their email provider or a transactional mail
 
 ## 2. Get a server
 
-**Have one:** it must run Ubuntu 24.04 or newer, Debian 12 or newer, Rocky Linux 10 or RHEL 10, with systemd, at least 2 CPUs, 4 GB memory and 40 GB disk, ports 80 and 443 reachable from the internet and free, and root through `sudo`. Other services may run; the installer adds its own users, database cluster and Caddy sites without removing anything.
+**Have one:** it must run Ubuntu 24.04 or newer, Debian 12 or newer, Rocky Linux 10 or RHEL 10, with systemd, at least 2 CPUs, 4 GB memory and 30 GB disk (the installer does not check these), ports 80 and 443 reachable from the internet and free, and root through `sudo`. Other services may run; the installer adds its own users, database cluster and Caddy sites without removing anything.
 
 **Have nothing:** help the owner rent one in their own account at a cloud provider, with Ubuntu 24.04 LTS and their SSH public key. Examples:
 
@@ -69,22 +69,26 @@ done
 gh attestation trusted-root > trusted-root.jsonl
 ```
 
-Stop if any asset is refused. Copy the folder to the server:
+Stop if any asset is refused. Copy the folder to the server (as root, or to your sudo user's home and then into `/root` with `sudo`):
 
 ```sh
-scp -r ../bilibi-release root@<address>:/root/bilibi-release
+scp -r ../bilibi-release root@<address>:/root/
 ```
 
 ## 5. Run the installer (on the server)
 
+Run these as root. Over ssh as a sudo user, send each batch of commands as a script on standard input, so no quoting is mangled: `ssh <server> 'sudo -i bash -s' <<'EOF'` … `EOF`. Set `tag` again on the server to the tag from step 4.
+
 ```sh
+tag=setup-vX.Y.Z   # the tag you verified in step 4
 cd /root/bilibi-release
+apt-get install -y python3-snappy   # Rocky/RHEL: dnf install -y python3-snappy
 install -D -m 0644 trusted-root.jsonl /etc/bilibi/attestation-trusted-root.jsonl
-mkdir -p tools && tar -xzf bilibi-server-tools.tar.gz -C tools
+rm -rf tools && mkdir tools && tar --no-same-owner -xzf bilibi-server-tools.tar.gz -C tools
 i=tools/scripts/install-server.sh
 ```
 
-Run each step with `--json`. It prints a `started` line, then one result line:
+The packaged installer checks every asset again on the server against that trusted root, so the server needs no GitHub account. `create` installs PostgreSQL, Caddy and the GitHub CLI from their official package repositories, so the server needs outgoing internet access. Run each step with `--json`. It prints a `started` line, then one result line:
 
 ```json
 {"step": "create", "state": "completed", "code": "OK", "next": "...", "detail": "..."}
@@ -98,7 +102,7 @@ Go on only after `"state": "completed"`. On `failed`, do what `code` and `next` 
 | First release | `$i --json release production bilibi-setup-*.tar.gz --repo BelimbingProject/bilibi-try --repo-id 1462459642 --tag "$tag"` | `completed` |
 | Installer service | `$i --json installer bilibi-installer-x86_64-unknown-linux-gnu --repo BelimbingProject/bilibi-try --repo-id 1462459642 --tag "$tag"` | `completed` |
 
-`release` is safe to repeat: the same verified release already in service completes without changes.
+`release` is safe to repeat: the same verified release already in service completes without changes. Its `detail` may warn about integration settings that are unset; those are for later and do not block the install.
 
 ## 6. Outgoing mail
 
@@ -117,7 +121,7 @@ Use `--tls implicit_tls` for port 465. Ask the owner to type the password into y
 $i --json create-owner production --email owner@example.com --name "Owner Name" --company-name "Example Trading"
 ```
 
-The result's `claim` field tells you where the owner is. Tell the owner what to do, wait, and rerun the same command to check:
+Rerun it with the same flags; it never creates a second owner. The result's `claim` field tells you where the owner is. Tell the owner what to do, wait, and rerun the same command to check:
 
 | `claim` | Meaning | Tell the owner |
 | --- | --- | --- |
@@ -125,7 +129,7 @@ The result's `claim` field tells you where the owner is. Tell the owner what to 
 | `recently-sent` | A link went out under a minute ago | Use that email; rerun after a minute to send a new one |
 | `password-chosen` | Password chosen, no 2FA yet | Sign in, open the 2FA link from the email, scan the QR code with an authenticator app |
 | `claimed` | Password and 2FA done | Finished |
-| `mail-not-ready` / `not-delivered` (failed) | Mail is not set up or the relay refused | Fix step 6, rerun |
+| `mail-not-ready` / `not-delivered` (failed) | Mail is not set up or the relay refused; `detail` says why | Fix step 6 (or the cause in `detail`), rerun |
 
 The install is finished only at `claimed`. Then confirm with `$i --json status` and give the owner the address `https://erp.example.com`.
 
@@ -138,12 +142,13 @@ Run `$i --json status`. It lists each instance, its service and installer state 
 | `code` | Meaning | What to do |
 | --- | --- | --- |
 | `OK` | The step finished | Next step |
-| `USAGE`, `INVALID_INPUT`, `INVALID_COMMAND` | A flag or value is wrong | Read `detail`, correct the command |
+| `USAGE`, `INVALID_INPUT`, `INVALID_COMMAND` | A flag or value is wrong, or your shell quoting changed the command | Compare your command with this skill's; send it as a script on standard input |
 | `NOT_ROOT` | Not running as root | Rerun with `sudo` |
 | `OS_UNSUPPORTED` | Not a supported system | Use Ubuntu, Debian, Rocky Linux 10 or RHEL 10 |
 | `PYTHON_MISSING` | No Python 3 | Install `python3`, rerun |
 | `DNS_NOT_FOUND` | The address does not resolve | Step 3, wait, rerun |
 | `PACKAGE_INSTALL_FAILED`, `NETWORK_UNREACHABLE` | A package or key download failed | Check internet access and `/var/log/bilibi-install-server.log`, rerun |
+| `SUDOERS_INVALID` | This system's sudo refused the installer's rule; nothing was changed | Report it with `/var/log/bilibi-install-server.log` |
 | `PORT_IN_USE` | The chosen backend port is taken | Rerun with another `--port` or without it |
 | `NO_INSTANCE` | `create` has not run | Run `create` |
 | `NO_RELEASE` | No release in service | Run `release` |
