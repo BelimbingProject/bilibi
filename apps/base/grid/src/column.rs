@@ -277,7 +277,7 @@ fn build(
             kind: ColumnKind::Field,
             root: root.id(),
             table: table.id(),
-            reference: table.custom_reference(field.id),
+            reference: table.reference(field.id),
             depth: hops.len(),
             hops,
             many: None,
@@ -288,7 +288,7 @@ fn build(
         });
     };
     let agg = agg.ok_or(ColumnError::ManyLinkNeedsAggregate)?;
-    if field.is_some_and(|f| table.custom_reference(f.id).is_some()) {
+    if field.is_some_and(|f| table.reference(f.id).is_some()) {
         return Err(ColumnError::AggregateNeedsOrderedValue);
     }
     match (agg, field) {

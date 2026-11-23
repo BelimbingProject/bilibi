@@ -295,16 +295,39 @@ pub async fn summarize(
     root: &str,
     spec: &SummarySpec,
 ) -> Result<Summary, QueryError> {
+    summarize_with_mode(db, scope, root, spec, false).await
+}
+
+pub async fn report_summary(
+    db: &Db,
+    scope: &Scope,
+    root: &str,
+    spec: &SummarySpec,
+) -> Result<Summary, QueryError> {
+    summarize_with_mode(db, scope, root, spec, true).await
+}
+
+async fn summarize_with_mode(
+    db: &Db,
+    scope: &Scope,
+    root: &str,
+    spec: &SummarySpec,
+    report: bool,
+) -> Result<Summary, QueryError> {
     let mut client = db.get().await.map_err(Error::from)?;
     let tx = client
         .build_transaction()
-        .read_only(true)
+        .read_only(!report)
         .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
         .start()
         .await?;
     spec.bounds.check()?;
     tx.batch_execute(&spec.bounds.sql()).await?;
-    let catalog = Catalog::for_scope(&*tx, scope).await?;
+    let catalog = if report {
+        Catalog::for_report(&*tx, scope).await?
+    } else {
+        Catalog::for_scope(&*tx, scope).await?
+    };
     let result = summarize_catalog(&tx, &catalog, root, spec).await?;
     tx.commit().await?;
     Ok(result)
@@ -329,14 +352,22 @@ pub(crate) async fn summarize_catalog(
     let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
     let mut binds = Binds::new(catalog, &spec.timezone);
     let mut hops = 0;
-    let predicate = filters(catalog, root, &spec.filters, today, &mut binds, &mut hops)?;
+    let predicate = filters(
+        catalog,
+        root,
+        &spec.filters,
+        today,
+        &mut binds,
+        &mut hops,
+        true,
+    )?;
 
     let mut groupings = Vec::with_capacity(spec.groupings.len());
     let mut selected = Vec::new();
     for (i, grouping) in spec.groupings.iter().enumerate() {
         let column = resolve(catalog, root, &grouping.column, &mut hops)?;
         let dated = matches!(column.ty, FieldType::Date | FieldType::DateTime);
-        let value = cell(catalog, root, &column);
+        let value = crate::query::column_value(catalog, root, &column, true);
         let key = match (grouping.bucket, dated) {
             (Some(bucket), true) => format!(
                 "to_jsonb(date_trunc('{}', {})::date)",
@@ -419,8 +450,23 @@ pub(crate) async fn summarize_catalog(
     } else {
         selected.join(", ")
     };
+    let subjects = filtered_proofs(
+        tx,
+        catalog,
+        root,
+        &spec.filters,
+        (today, &spec.timezone),
+        spec.filters
+            .iter()
+            .map(|f| f.column.as_str())
+            .chain(spec.groupings.iter().map(|g| g.column.as_str()))
+            .chain(spec.measures.iter().map(|m| m.column.as_str())),
+        spec.bounds,
+    )
+    .await?;
+    let subjects = binds.push(subjects);
     let sql = format!(
-        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone), base AS (SELECT {inner} FROM {} r CROSS JOIN actor WHERE {predicate}) SELECT {} FROM base GROUP BY GROUPING SETS ({sets}){order} LIMIT {fetch}",
+        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone, {subjects}::jsonb AS subjects), base AS (SELECT {inner} FROM {} r CROSS JOIN actor WHERE {predicate}) SELECT {} FROM base GROUP BY GROUPING SETS ({sets}){order} LIMIT {fetch}",
         source(root),
         columns.join(", ")
     );
@@ -507,6 +553,77 @@ pub async fn page_keys(
     Ok(result)
 }
 
+pub async fn report_page<S: AsRef<str>>(
+    db: &Db,
+    scope: &Scope,
+    root: &str,
+    spec: &PageSpec,
+    columns: &[S],
+    measures: &[Measure],
+    file_cap: Option<usize>,
+) -> Result<(KeyPage, crate::Projection, Vec<Value>), QueryError> {
+    spec.bounds.check()?;
+    let mut client = db.get().await.map_err(Error::from)?;
+    let tx = client
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .start()
+        .await?;
+    tx.batch_execute(&spec.bounds.sql()).await?;
+    let catalog = Catalog::for_report(&*tx, scope).await?;
+    let keys = page_keys_catalog(&tx, &catalog, root, spec).await?;
+    let mut projection = crate::query::project_catalog(
+        &tx,
+        &catalog,
+        root,
+        &keys.keys,
+        columns,
+        &crate::Lenses::default(),
+        spec.bounds,
+    )
+    .await?;
+    let mut totals = Vec::with_capacity(measures.len());
+    for chunk in measures.chunks(MAX_MEASURES) {
+        let summary = summarize_catalog(
+            &tx,
+            &catalog,
+            root,
+            &SummarySpec {
+                bounds: spec.bounds,
+                filters: spec.filters.clone(),
+                groupings: Vec::new(),
+                measures: chunk.to_vec(),
+                timezone: spec.timezone.clone(),
+                max_groups: 1,
+            },
+        )
+        .await?;
+        totals.extend(summary.total.values);
+    }
+    if file_cap.is_some_and(|cap| keys.total as usize <= cap) {
+        let mut next = spec.clone();
+        next.offset += spec.limit;
+        next.limit = MAX_ROWS;
+        while next.offset < keys.total as usize {
+            let batch = page_keys_catalog(&tx, &catalog, root, &next).await?;
+            let page = crate::query::project_catalog(
+                &tx,
+                &catalog,
+                root,
+                &batch.keys,
+                columns,
+                &crate::Lenses::default(),
+                spec.bounds,
+            )
+            .await?;
+            projection.rows.extend(page.rows);
+            next.offset += next.limit;
+        }
+    }
+    tx.commit().await?;
+    Ok((keys, projection, totals))
+}
+
 pub(crate) async fn page_keys_catalog(
     tx: &tokio_postgres::Transaction<'_>,
     catalog: &Catalog,
@@ -528,7 +645,15 @@ pub(crate) async fn page_keys_catalog(
     let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
     let mut binds = Binds::new(catalog, &spec.timezone);
     let mut hops = 0;
-    let predicate = filters(catalog, root, &spec.filters, today, &mut binds, &mut hops)?;
+    let predicate = filters(
+        catalog,
+        root,
+        &spec.filters,
+        today,
+        &mut binds,
+        &mut hops,
+        true,
+    )?;
     let mut order = Vec::new();
     for sort in &spec.sorts {
         let column = resolve(catalog, root, &sort.column, &mut hops)?;
@@ -545,7 +670,23 @@ pub(crate) async fn page_keys_catalog(
     order.push(format!("{key} ASC"));
     // Composed from its parts, never by replacing a marker: the owner's
     // source SQL may itself contain `{}` and is copied in untouched.
-    let head = "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone)";
+    let subjects = filtered_proofs(
+        tx,
+        catalog,
+        root,
+        &spec.filters,
+        (today, &spec.timezone),
+        spec.filters
+            .iter()
+            .map(|f| f.column.as_str())
+            .chain(spec.sorts.iter().map(|s| s.column.as_str())),
+        spec.bounds,
+    )
+    .await?;
+    let subjects = binds.push(subjects);
+    let head = format!(
+        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone, {subjects}::jsonb AS subjects)"
+    );
     let tail = format!("FROM {} r CROSS JOIN actor WHERE {predicate}", source(root));
     let page = format!(
         "{head} SELECT to_jsonb({key}) {tail} ORDER BY {} LIMIT {} OFFSET {}",
@@ -668,7 +809,8 @@ fn local(value: &str, ty: FieldType) -> String {
     }
 }
 
-/// Every filter, joined with AND (`true` when there are none).
+/// Every filter and the root's subject check, joined with AND (`true` when
+/// there are none).
 fn filters(
     catalog: &Catalog,
     root: &Table,
@@ -676,6 +818,7 @@ fn filters(
     today: Date,
     binds: &mut Binds,
     hops: &mut usize,
+    authorize: bool,
 ) -> Result<String, QueryError> {
     if filters.len() > MAX_FILTERS {
         return Err(QueryError::Limit("more than 16 filters"));
@@ -683,14 +826,71 @@ fn filters(
     let mut predicates = Vec::with_capacity(filters.len());
     for filter in filters {
         let column = resolve(catalog, root, &filter.column, hops)?;
-        let value = cell(catalog, root, &column);
-        predicates.push(test(&column, &value, &filter.test, today, binds)?);
+        if !authorize
+            && column
+                .hops
+                .iter()
+                .chain(&column.many)
+                .chain(&column.tail)
+                .any(|link| {
+                    catalog
+                        .table(link.to())
+                        .is_some_and(|table| table.report_subjects && table.subject().is_some())
+                })
+        {
+            continue;
+        }
+        let value = crate::query::column_value(catalog, root, &column, true);
+        let subject = column
+            .field
+            .and_then(|field| catalog.table(column.table)?.report_subject(field.id));
+        predicates.push(test(&column, &value, &filter.test, today, binds, subject)?);
+    }
+    // Whatever the question names, it reads only rows whose subject the
+    // reader may read (#877).
+    if authorize {
+        predicates.extend(crate::subject::readable(root, "r"));
     }
     Ok(if predicates.is_empty() {
         "true".into()
     } else {
         predicates.join(" AND ")
     })
+}
+
+async fn filtered_proofs<'a>(
+    tx: &tokio_postgres::Transaction<'_>,
+    catalog: &Catalog,
+    root: &Table,
+    filter_specs: &[Filter],
+    (today, timezone): (Date, &str),
+    specs: impl IntoIterator<Item = &'a str>,
+    bounds: Bounds,
+) -> Result<Value, QueryError> {
+    if catalog.subject_scope.is_none() {
+        return Ok(Value::Null);
+    }
+    let mut binds = Binds::new(catalog, timezone);
+    let predicate = filters(
+        catalog,
+        root,
+        filter_specs,
+        today,
+        &mut binds,
+        &mut 0,
+        false,
+    )?;
+    let head = "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone)";
+    let rows = format!("FROM {} r CROSS JOIN actor WHERE {predicate}", source(root));
+    crate::subject::proofs(
+        tx,
+        catalog,
+        root,
+        specs,
+        (head, &rows, &binds.refs()),
+        bounds,
+    )
+    .await
 }
 
 /// An equals or one-of value checked against the column's type and written
@@ -793,12 +993,24 @@ fn calendar_instant(text: &str) -> Option<Timestamp> {
         .filter(|at| at.to_zoned(TimeZone::UTC).year() >= 1)
 }
 
+fn subject_operand(subject: crate::Subject, ty: FieldType, raw: &str) -> String {
+    if ty == FieldType::Integer {
+        let id = format!(
+            "CASE WHEN ({raw}) = trunc({raw}) AND ({raw}) BETWEEN '-9223372036854775808'::numeric AND '9223372036854775807'::numeric THEN ({raw})::bigint END"
+        );
+        crate::subject::survivor(subject, ty, &id)
+    } else {
+        crate::subject::survivor(subject, ty, raw)
+    }
+}
+
 fn test(
     column: &Column,
     value: &str,
     test: &Test,
     today: Date,
     binds: &mut Binds,
+    subject: Option<crate::Subject>,
 ) -> Result<String, QueryError> {
     if column.reference.is_some()
         && !matches!(
@@ -816,7 +1028,12 @@ fn test(
             if ty == FieldType::Float {
                 float_test(value, "=", text, binds)
             } else {
-                format!("({value})::{cast} = {}::text::{cast}", binds.push(text))
+                let raw = format!("{}::text::{cast}", binds.push(text));
+                let wanted = match subject {
+                    Some(subject) => subject_operand(subject, ty, &raw),
+                    None => raw,
+                };
+                format!("({value})::{cast} = {wanted}")
             }
         }
         Test::OneOf(choices) => {
@@ -847,6 +1064,12 @@ fn test(
                     ));
                 }
                 format!("({})", parts.join(" OR "))
+            } else if let Some(subject) = subject {
+                let wanted = subject_operand(subject, ty, &format!("choice.id::{cast}"));
+                format!(
+                    "({value})::{cast} IN (SELECT {wanted} FROM unnest({}::text[]) choice(id))",
+                    binds.push(texts)
+                )
             } else {
                 format!(
                     "({value})::{cast} = ANY({}::text[]::{cast}[])",
@@ -967,7 +1190,7 @@ pub async fn validate_summary_on(
     spec: &SummarySpec,
 ) -> Result<(), QueryError> {
     crate::query::bounded(tx, spec.bounds, async {
-        let catalog = Catalog::for_scope(tx, scope).await?;
+        let catalog = Catalog::for_report(tx, scope).await?;
         summarize_catalog(tx, &catalog, root, spec).await.map(drop)
     })
     .await
@@ -980,7 +1203,7 @@ pub async fn validate_page_on(
     spec: &PageSpec,
 ) -> Result<(), QueryError> {
     crate::query::bounded(tx, spec.bounds, async {
-        let catalog = Catalog::for_scope(tx, scope).await?;
+        let catalog = Catalog::for_report(tx, scope).await?;
         page_keys_catalog(tx, &catalog, root, spec).await.map(drop)
     })
     .await

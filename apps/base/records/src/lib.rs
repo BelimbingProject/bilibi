@@ -88,6 +88,17 @@ inventory::submit! { Contribution::new(DEFINITIONS, PICKER_HITS, provenance!(), 
 /// - a holder's Grid table exists with both of its fields.
 pub fn validate_installed(catalog: &Catalog) -> bilibi_module_registry::Result<()> {
     let installed = bilibi_grid::installed()?;
+    for table in installed.tables() {
+        if let Some(subject) = table.subject() {
+            if !declaration::key_shaped(subject.kind) {
+                return Err(RegistryError::Contribution(format!(
+                    "Grid table {} names an invalid subject kind: {}",
+                    table.id(),
+                    subject.kind
+                )));
+            }
+        }
+    }
     let routes: Vec<&Route> = catalog
         .entries::<Route>(ROUTES)?
         .iter()
@@ -224,6 +235,8 @@ inventory::submit! {
         migrations: &[("base-records-001-redirects", include_str!("../migrations/001-redirects.sql"))],
         services: &[Service { id: SERVICE, factory: |services| {
             let records = Arc::new(build(services)?);
+            // Grid reads a table's subject as its survivor (#877).
+            bilibi_grid::bind_survivors(bilibi_grid::Survivors { relation: matching::SURVIVORS_SQL, access: records.clone() })?;
             operations::bind(records.clone())?;
             Ok(records)
         } }],

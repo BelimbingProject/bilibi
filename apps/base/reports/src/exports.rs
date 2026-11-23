@@ -257,7 +257,7 @@ impl Reports {
         let current = scope.current_company().ok_or(ReportError::NotFound)?.get();
         let row = client
             .query_opt(
-                "SELECT artifact_id, filename, format, rows, company_id, report_id, access, reference_names FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND company_id=$4 AND state='ready'",
+                "SELECT artifact_id, filename, format, rows, company_id, report_id, access, reference_names, answers FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND company_id=$4 AND state='ready' AND (expires_at IS NULL OR expires_at > now())",
                 &[&scope.tenant(), &export, &scope.user(), &current],
             )
             .await
@@ -269,16 +269,33 @@ impl Reports {
         let (report, made): (i64, Option<String>) = (row.get(5), row.get(6));
         let reference_names: Vec<crate::ReferenceName> =
             serde_json::from_value(row.get(7)).map_err(|_| Error::Internal)?;
+        let answers: Value = row.get(8);
         drop(client);
-        let now = match self.access(scope, report).await {
+        let current_report = match self.access_report(scope, report).await {
             Err(ReportError::Database(error)) => return Err(error.into()),
             other => other.ok(),
         };
-        if made.is_none()
-            || now != made
-            || !self
-                .reference_names_current(scope, &reference_names)
-                .await?
+        let Some((definition, access)) =
+            current_report.filter(|(_, access)| Some(access) == made.as_ref())
+        else {
+            return Err(ReportError::Refused(
+                "What you may see of this report has changed since the file was made. Prepare it again.".into(),
+            ));
+        };
+        if access.contains(":subject:") {
+            let format = Format::from_key(&format).ok_or(Error::Internal)?;
+            let cap = self.queued_rows(scope).await?;
+            let input = crate::RunInput {
+                answers: serde_json::from_value(answers).map_err(|_| Error::Internal)?,
+                ..crate::RunInput::default()
+            };
+            return self
+                .export_within(scope, definition, &input, format, cap, true)
+                .await;
+        }
+        if !self
+            .reference_names_current(scope, &reference_names)
+            .await?
         {
             return Err(ReportError::Refused(
                 "What you may see of this report has changed since the file was made. Prepare it again.".into(),
@@ -369,13 +386,13 @@ impl Reports {
         // What the requester may see is taken before the run: if it changes
         // during the run, the file is refused at download either way.
         let made = async {
-            let access = self.access(scope, report).await?;
+            let (definition, access) = self.access_report(scope, report).await?;
             let input = crate::RunInput {
                 answers,
                 ..crate::RunInput::default()
             };
             let file = self
-                .export_within(scope, report, &input, format, cap, true)
+                .export_within(scope, definition, &input, format, cap, true)
                 .await?;
             Ok::<_, ReportError>((access, file))
         }

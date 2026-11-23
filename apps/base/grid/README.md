@@ -65,6 +65,19 @@ A table whose capability supports record reach (`CapabilityDefinition::with_reac
 - A child table guarded by the same key (lines of a deal) selects its parent's owner, or every line would show.
 - A parent's oversight read skips a table it reaches only partly.
 
+## Record subjects
+
+A table whose rows are each about one record of another kind (a case about a customer) names the field holding that record's id and its Base Records kind: `TableDecl::new(...).subject("customer_id", "company")`. Reports over the table then count per record, not per stored id, and show a reader only the rows about records they may read (#877).
+
+- **Merges:** the field reads as the record its stored id names now, in report grouping and filtering. Rows stored under a record merged since group and filter under its survivor; no row is rewritten. Base Records owns merges and binds the lookup (`bind_survivors`); Grid never reads its storage by name.
+- **Readable subjects only:** Reports resolve canonical IDs before following redirects. Report summaries, pages and linked reads apply the Base Records owner's read rule to each distinct survivor on the same transaction as the report query. Rows with a null subject remain. Unknown record kinds admit no non-null subjects. Subject field masks and naming still follow the scoped Grid and Base Records restrictions.
+- **Declaration:** one subject per table; an integer or text field other than the key, on a tenant source. The kind is the audit kind its owner registers with [Base Records](../records/README.md); boot refuses a malformed declaration. The field is a record field in reports: it filters by `equals`, `one_of`, `empty` and `not_empty` and accepts count as its only aggregate.
+- **Ordinary Grid reads** use stored values and keep their own access rules. Oversight excludes subject-declaring sources from its catalog and refuses a report built on one.
+- **Bounds:** Grid refuses a report when subject candidates within filters independent of subject authorization or selected page keys, including reachable links, or owner decisions exceed its read bounds or require checking more than 1,000 distinct records.
+
+
+Proof: `BILIBI_REPORT_SUBJECTS=disposable cargo run -p bilibi-web --example report-subjects` on an empty disposable database (`scripts/run-walkthroughs.sh report-subjects`).
+
 ## Tenant custom fields
 
 A tenant's custom fields (`base/custom_fields`, ADR 21) are data, not declarations, so Grid adds them to each fresh scoped catalog through one hook (`bind_custom_columns`, a `CustomColumns` that `base/custom_fields` binds at boot). Grid does not depend on that module.
@@ -219,7 +232,7 @@ reference rows on success. No unit tests or test runner are involved.
 
 ## Reads inside an existing transaction
 
-Use `validate_projection_on`, `validate_page_on` and `validate_summary_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction.
+Use `validate_projection_on`, `validate_page_on` and `validate_summary_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction. Report pages and summaries use repeatable read and allow authorization decision logs.
 
 `OversightQueries::builder_catalog_on` and `probe_on` validate saved oversight questions on the caller's transaction. The probe runs bounded child reads serially and returns whether the question is supported, with no child data in the result. Abort the caller's transaction if savepoint setup or recovery cannot be confirmed.
 
@@ -252,7 +265,7 @@ BILIBI_GRID_DEMO=disposable cargo run -p bilibi-web --example g5-grid-summary
 ```
 
 
-Both specs carry `bounds` (`Bounds { statement_ms, max_cost }`), and `project_within` is `project` under a caller's `Bounds`, so a page of keys is filled under the bounds it was read under: `Default` is the interactive bound every other Grid read uses (2 s, `MAX_ESTIMATED_COST`); a background caller may pass a larger pair, up to `MAX_STATEMENT_MS` and `MAX_COST_BOUND`. Cost and statement-time bound refusals are `QueryError::TooHeavy`, not database faults or structural `Limit`s; callers distinguish them by variant, never by message text.
+Both specs carry `bounds` (`Bounds { statement_ms, max_cost }`), and `report_page` applies the same bounds and scoped snapshot to key selection, counting, cell projection and totals: `Default` is the interactive bound every other Grid read uses (2 s, `MAX_ESTIMATED_COST`); a background caller may pass a larger pair, up to `MAX_STATEMENT_MS` and `MAX_COST_BOUND`. Cost and statement-time bound refusals are `QueryError::TooHeavy`, not database faults or structural `Limit`s; callers distinguish them by variant, never by message text.
 
 Equals and one-of compare typed values: each value is checked against the column's type (a number for a number column, yes/no, text, a `YYYY-MM-DD` date, or a date-time with its offset) and refused as `Unsupported` otherwise, so a wrong type is an answer in words rather than an empty result, and `…+00:00` and `…Z` name the same instant. A float compares in its column's own type (`real` or `double precision`; the value is bound as text with no cast, as a literal would be), never through `numeric` or a wider float, so a stored value matches itself and not a near neighbour. An operand a `real` cannot hold (`1e100`, `1e-100`) compares as `float8`, so it matches no `real` value and orders correctly as a range bound, rather than failing in PostgreSQL. Days and instants before year 1, which PostgreSQL cannot read, are refused the same way. The owner's source SQL is copied into each statement untouched.
 ## Record references
