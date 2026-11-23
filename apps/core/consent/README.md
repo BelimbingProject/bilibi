@@ -1,6 +1,6 @@
 # core/consent
 
-Core Consent keeps one company-scoped answer to whether a person may receive an elective message on a channel for a purpose.
+Core Consent keeps one company-scoped answer to whether a person may be contacted on a channel for an elective purpose.
 
 ## The boundary
 
@@ -116,6 +116,8 @@ The public capability keys are `core.consent.view`, `core.consent.record`, `core
 | Refusal | `no_consent`, `withdrawn`, `suppressed` |
 
 Purposes come from the `core.consent.purposes` pick-list. The starting values are `service` and `marketing`.
+
+For a postal or in-person opt-out, use the corresponding channel when recording the suppression. Suppressions and eligibility checks require a specific channel. The capture channel records how the decision was obtained independently of which channel it governs.
 
 ## Address matching
 
