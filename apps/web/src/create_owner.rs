@@ -215,7 +215,8 @@ async fn claim(app: &crate::App, origin: &str) -> Result<()> {
         }
         Err(OwnerClaimError::MailNotReady(detail)) => {
             eprintln!("The claim link cannot be emailed: {detail}");
-            println!("Next: set the MAIL_* relay settings for this instance, then rerun the same command.");
+            println!("Next: set up outgoing mail with the server installer's mail command, then rerun the same command.");
+            println!("Code: MAIL_NOT_READY");
             println!("Owner claim: mail-not-ready");
             Err(Error::Invalid)
         }
@@ -224,6 +225,7 @@ async fn claim(app: &crate::App, origin: &str) -> Result<()> {
             println!(
                 "Next: check the mail relay settings and the address, then rerun the same command."
             );
+            println!("Code: MAIL_NOT_DELIVERED");
             println!("Owner claim: not-delivered");
             Err(Error::Invalid)
         }

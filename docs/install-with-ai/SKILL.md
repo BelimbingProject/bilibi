@@ -135,7 +135,20 @@ The install is finished only at `claimed`. Then confirm with `$i --json status` 
 
 ## If you were interrupted
 
-Run `$i --json status`. It lists each instance, its service and installer state and current release. Rerun from the first step in the table above that is not done; rerunning a finished step is harmless.
+A dropped connection or a killed command does not stop the installer on the server: the step keeps running there and finishes on its own. Only one step runs at a time, so a rerun waits for the earlier one and never races it.
+
+1. Run `$i --json status`. While its `detail` starts with "A run is in progress", wait a minute and run it again.
+2. Read where each instance is, then rerun from the first step that is not done:
+
+| `status` shows | Rerun |
+| --- | --- |
+| No instance, or "No instances" | Create |
+| `current release` empty | First release |
+| `installer inactive` | Installer service |
+| `mail not set up` | Outgoing mail (step 6) |
+| Everything above done | `create-owner` (step 7) |
+
+Rerunning a finished step is harmless. A `next` line names the plain command; run it with `--json` as in the table in step 5.
 
 ## Error codes
 
@@ -154,6 +167,7 @@ Run `$i --json status`. It lists each instance, its service and installer state 
 | `NO_RELEASE` | No release in service | Run `release` |
 | `SIGNATURE_INVALID`, `SIGNATURE_WRONG_REPOSITORY` | The asset is not the official signed release | Download again from the official release (step 4); never bypass |
 | `ARCHIVE_INVALID` | The archive or its checksum is damaged | Download again, rerun |
+| `MAIL_NOT_READY`, `MAIL_NOT_DELIVERED` | `create-owner` cannot email the claim link: mail is not set up, or the relay refused | Step 6 (or the cause in `detail`), rerun |
 | `MIGRATION_FAILED` | The database update failed; the previous release, if any, is back | Read `detail`; report it to the owner |
 | `UNHEALTHY` | The service did not answer | Read `journalctl -u bilibi@production`, fix, rerun |
 | `<STEP>_FAILED` | Any other failure | Read `detail` and `next`, rerun |

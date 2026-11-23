@@ -193,7 +193,7 @@ sudo scripts/install-server.sh switch production 1
 > [!WARNING]
 > Migrations are forward-only. Switching back to an older release after a newer one changed tables leaves those changes in place; the older program may not expect them. That case is the Software page's Undo, which restores the backup the installer took first and says what would be lost, with a count. Use `switch` only for releases that share the same database shape.
 
-`status` lists every instance, its role, address, service and installer states, and releases.
+`status` lists every instance, its role, address, service, installer and mail states, and releases. It says so first when another run is still working: only one run goes at a time, a rerun waits for the earlier one, and a dropped connection does not stop a run on the server.
 
 ## The installer service
 

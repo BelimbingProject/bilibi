@@ -1070,14 +1070,21 @@ switch() {
 }
 status() {
     local instance list
+    if run_in_progress; then
+        say "A run is in progress: wait until this line is gone, then rerun the step it was doing."
+    fi
     if [[ -n ${1:-} ]]; then list=$1; else list=$(instances); fi
     [[ -n $list ]] || { say "No instances under $root yet."; return; }
     for instance in $list; do
         instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
         local dir; dir=$(instance_dir "$instance")
-        printf '%s: role %s, %s, service %s, installer %s, current release %s\n' "$instance" "$(role_of "$instance")" \
+        local role mail_host mail
+        role=$(role_of "$instance")
+        mail_host=$(env_value "$instance" MAIL_HOST | tr -d "'")
+        if [[ -n $mail_host ]]; then mail="via $mail_host"; elif [[ $role == dev ]]; then mail="to the Dev mailbox"; else mail="not set up"; fi
+        printf '%s: role %s, %s, service %s, installer %s, mail %s, current release %s\n' "$instance" "$role" \
             "$(env_value "$instance" APP_ORIGIN)" "$(service_state "$instance")" \
-            "$(installer_state "$instance")" "$(current_release "$instance")"
+            "$(installer_state "$instance")" "$mail" "$(current_release "$instance")"
         local r
         for r in $(release_numbers "$instance"); do
             printf '  release %s  %s\n' "$r" "$(cut -c1-12 "$dir/releases/$r/SHA256SUMS" 2>/dev/null)"
@@ -1133,7 +1140,24 @@ if [[ ${1:-} == --json ]]; then
     exit $?
 fi
 
+# One run at a time. A dropped or killed client does not stop a run (its
+# children keep going), so a rerun waits for the earlier one instead of
+# racing it on packages, the database or the release links.
+run_lock=/run/bilibi-install-server.lock
+run_in_progress() { [[ $(id -u) -eq 0 && -e $run_lock ]] && ! flock -n "$run_lock" true; }
+hold_run_lock() {
+    [[ $(id -u) -eq 0 ]] || return 0
+    exec {run_lock_fd}>>"$run_lock"
+    if ! flock -n "$run_lock_fd"; then
+        say "Another run is still working; waiting for it to finish."
+        flock "$run_lock_fd"
+    fi
+}
+
 detect_os
+case ${1:-} in
+    create|release|mail|create-owner|tenant-provision|two-factor-reset|installer|switch) hold_run_lock ;;
+esac
 case ${1:-} in
     create) shift; create "$@" ;;
     release) shift; release "$@" ;;
