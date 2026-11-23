@@ -102,20 +102,29 @@ pub(crate) struct Condition {
     pub value: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ActionCall {
     /// An installed action: an owner's write contract key.
     pub operation: String,
     /// Its approved parameters. The action's subject field is never here: the
     /// runner binds it to the trigger's record.
+    #[serde(default)]
     pub input: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum Step {
+    Operation(ActionCall),
+    Script { script: crate::script::Script },
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Definition {
     pub matching: Match,
     pub conditions: Vec<Condition>,
-    pub actions: Vec<ActionCall>,
+    pub steps: Vec<Step>,
 }
 
 #[derive(Clone, Debug)]
@@ -128,9 +137,23 @@ pub(crate) struct Example {
 pub(crate) type Problems = Vec<(String, String)>;
 
 impl Definition {
+    pub(crate) fn actions(&self) -> impl Iterator<Item = &ActionCall> {
+        self.steps.iter().flat_map(|step| match step {
+            Step::Operation(action) => std::slice::from_ref(action),
+            Step::Script { script } => script.calls.as_slice(),
+        })
+    }
+
+    pub(crate) fn scripts(&self) -> impl Iterator<Item = &crate::script::Script> {
+        self.steps.iter().filter_map(|step| match step {
+            Step::Script { script } => Some(script),
+            Step::Operation(_) => None,
+        })
+    }
+
     pub(crate) fn to_json(&self) -> Value {
         let mut value = json!({
-            "do": self.actions.iter().map(|a| json!({"operation": a.operation, "input": a.input})).collect::<Vec<_>>(),
+            "do": self.steps,
         });
         if !self.conditions.is_empty() {
             value["if"] = json!({"match": self.matching.key(), "conditions": self.conditions.iter().map(|c| json!({"field": c.field, "op": c.op.key(), "value": c.value})).collect::<Vec<_>>()});
@@ -209,7 +232,7 @@ impl Definition {
                 value,
             });
         }
-        let mut actions = Vec::new();
+        let mut steps = Vec::new();
         let listed = value
             .get("do")
             .and_then(Value::as_array)
@@ -218,6 +241,15 @@ impl Definition {
             problems.push(("do".into(), format!("give 1 to {MAX_ACTIONS} actions")));
         }
         for (i, item) in listed.iter().take(MAX_ACTIONS).enumerate() {
+            if let Some(value) = item.get("script") {
+                match serde_json::from_value::<crate::script::Script>(value.clone()) {
+                    Ok(script) if item.as_object().is_some_and(|item| item.len() == 1) && script.validate() => {
+                        steps.push(Step::Script { script });
+                    }
+                    _ => problems.push((format!("do.{i}.script"), "Supply a named script with its runner, fields, allowed calls and examples.".into())),
+                }
+                continue;
+            }
             let operation = item
                 .get("operation")
                 .and_then(Value::as_str)
@@ -233,15 +265,15 @@ impl Definition {
             if operation.is_empty() {
                 problems.push((format!("do.{i}.operation"), "is required".into()));
             }
-            actions.push(ActionCall {
+            steps.push(Step::Operation(ActionCall {
                 operation: operation.to_owned(),
                 input,
-            });
+            }));
         }
         Some(Self {
             matching,
             conditions,
-            actions,
+            steps,
         })
     }
 
@@ -323,6 +355,11 @@ impl Definition {
         for condition in &self.conditions {
             if !fields.contains(&condition.field) {
                 fields.push(condition.field.clone());
+            }
+        }
+        for field in self.scripts().flat_map(|script| &script.fields) {
+            if !fields.contains(field) {
+                fields.push(field.clone());
             }
         }
         fields

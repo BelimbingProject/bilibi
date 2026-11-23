@@ -195,8 +195,8 @@ impl Watchers {
         let mut problems = Vec::new();
         for (field, count, key) in [
             ("if.conditions", definition.conditions.len(), CONDITIONS),
-            ("do", definition.actions.len(), WATCHER_ACTIONS),
-            ("do", definition.actions.len(), ACTIONS_PER_RUN),
+            ("do", definition.actions().count(), WATCHER_ACTIONS),
+            ("do", definition.actions().count(), ACTIONS_PER_RUN),
             ("examples", examples, EXAMPLES),
             (
                 "if.conditions",

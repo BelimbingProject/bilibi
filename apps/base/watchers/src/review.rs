@@ -148,7 +148,7 @@ impl Watchers {
             }).collect();
             Some(json!({"path": path, "table": column.table, "type": format!("{:?}", column.ty), "values": field.values, "column": field.source_key(), "hops": hops?}))
         }).collect();
-        let actions: Option<Vec<Value>> = definition.actions.iter().map(|call| {
+        let actions: Option<Vec<Value>> = definition.actions().map(|call| {
             let action = self.action(&call.operation)?;
             Some(json!({"key": action.key, "table": action.definition.table, "subject": action.definition.subject,
                 "version": action.definition.version, "input": action.input, "records": action.definition.records, "capability": action.capability, "approval_capabilities": action.definition.approval_capabilities}))
@@ -282,6 +282,8 @@ impl Watchers {
             &mut review,
             &mut problems,
         )?;
+        self.script_examples(client, scope, definition, &mut problems)
+            .await?;
         problems.extend(
             self.check_limits(
                 client,
@@ -361,6 +363,29 @@ impl Watchers {
             |path| field(path).map(|(ty, values, _)| (ty, values)),
             problems,
         );
+        for script in definition.scripts() {
+            for path in &script.fields {
+                let allowed = table
+                    .and_then(|table| catalog.resolve(table, path).ok())
+                    .is_some_and(|column| {
+                        field(path).is_some()
+                            && column.field.is_some_and(|f| {
+                                catalog.table(column.table).is_some_and(|owner| {
+                                    !owner.is_custom(f.id)
+                                        || (column.hops.is_empty()
+                                            && owner.custom_watcher_condition(f.id))
+                                })
+                            })
+                    });
+                if !allowed {
+                    problems.push(("do".into(), format!("{} cannot read {path}.", script.name)));
+                }
+            }
+            review.actions.push(format!(
+                "Run script {} as {}. JavaScript: {}",
+                script.name, script.runner, script.source
+            ));
+        }
         review.conditions = definition
             .conditions
             .iter()
@@ -371,7 +396,7 @@ impl Watchers {
                 )
             })
             .collect();
-        for (i, call) in definition.actions.iter().enumerate() {
+        for (i, call) in definition.actions().enumerate() {
             let at = |part: &str| format!("do.{i}.{part}");
             let Some(action) = self.action(&call.operation) else {
                 problems.push((
@@ -609,6 +634,8 @@ impl Watchers {
             )
             .await?,
         );
+        self.script_examples(client, scope, &definition, &mut problems)
+            .await?;
         // The approver's own authority: approving never delegates more.
         let grid = bilibi_grid::installed()?;
         let mut needed: std::collections::BTreeSet<&str> = grid
@@ -629,11 +656,13 @@ impl Watchers {
                 }
             }
         }
+        if definition.scripts().next().is_some() {
+            needed.insert(crate::RUN_SCRIPT);
+        }
         let authority = bilibi_authz::effective_grants(client, scope).await?;
         needed.extend(
             definition
-                .actions
-                .iter()
+                .actions()
                 .filter_map(|a| self.action(&a.operation))
                 .flat_map(|a| {
                     std::iter::once(a.capability)
@@ -663,15 +692,12 @@ impl Watchers {
                         grid.table(offered.definition.table).map_or(offered.definition.table, |t| t.label())
                     )),
                     Some(table) => {
-                        for (i, condition) in definition.conditions.iter().enumerate() {
-                            let readable = theirs.resolve(table, &condition.field).ok().filter(|column| {
+                        for path in definition.fields() {
+                            let readable = theirs.resolve(table, &path).ok().filter(|column| {
                                 column.field.is_some_and(|f| !theirs.masked(column.table, f.id))
                             });
                             if readable.is_none() {
-                                problems.push((format!("if.conditions.{i}.field"), format!(
-                                    "{} is hidden from automation, and a watcher never reads a hidden field",
-                                    condition.field
-                                )));
+                                problems.push(("fields".into(), format!("{path} is hidden from automation, and a watcher never reads a hidden field")));
                             }
                         }
                     }
@@ -683,8 +709,7 @@ impl Watchers {
                 .push("Automation is not available here.".into()),
         }
         let records: Vec<&str> = definition
-            .actions
-            .iter()
+            .actions()
             .filter_map(|a| self.action(&a.operation))
             .flat_map(|a| a.definition.records.iter().copied())
             .collect();
@@ -719,8 +744,7 @@ impl Watchers {
                 let edges = graph.entry(row.get(2)).or_default();
                 edges.extend(
                     other
-                        .actions
-                        .iter()
+                        .actions()
                         .filter_map(|call| self.action(&call.operation))
                         .flat_map(|action| {
                             action
@@ -893,6 +917,7 @@ pub(crate) fn bind(
 /// labels, actions with their titles and parameters, examples. Labels come
 /// from the installed catalogs; values from the version itself.
 pub(crate) struct Described {
+    pub scripted: bool,
     pub matching: &'static str,
     pub conditions: Vec<String>,
     pub actions: Vec<String>,
@@ -917,6 +942,7 @@ impl Watchers {
         };
         let Some(parsed) = parsed else {
             return Described {
+                scripted: false,
                 matching: "all",
                 conditions: Vec::new(),
                 actions: Vec::new(),
@@ -929,9 +955,18 @@ impl Watchers {
             .map(|c| definition::sentence(c, &label(&c.field)))
             .collect();
         let actions = parsed
-            .actions
+            .steps
             .iter()
-            .map(|a| {
+            .map(|step| {
+                let a = match step {
+                    crate::definition::Step::Script { script } => {
+                        return format!(
+                            "Run {} as {}. JavaScript: {}",
+                            script.name, script.runner, script.source
+                        )
+                    }
+                    crate::definition::Step::Operation(call) => call,
+                };
                 let title = self
                     .action(&a.operation)
                     .map_or(a.operation.as_str(), |o| o.title);
@@ -970,7 +1005,9 @@ impl Watchers {
                 )
             })
             .collect();
+        let scripted = parsed.scripts().next().is_some();
         Described {
+            scripted,
             matching: parsed.matching.key(),
             conditions,
             actions,

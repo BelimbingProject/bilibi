@@ -130,7 +130,7 @@ impl Watchers {
         if self.trigger(&draft.trigger).is_none() {
             missing.push(format!("Trigger “{}” is unavailable.", draft.trigger));
         }
-        for action in &definition.actions {
+        for action in definition.actions() {
             if self.action(&action.operation).is_none() {
                 missing.push(format!("Action “{}” is unavailable.", action.operation));
             }
@@ -236,7 +236,7 @@ impl Watchers {
                 }
             }
         }
-        for (index, action) in definition.actions.iter().enumerate() {
+        for (index, action) in definition.actions().enumerate() {
             let offered = self.action(&action.operation);
             for (key, value) in &action.input {
                 let schema =

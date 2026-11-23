@@ -38,6 +38,10 @@ A watcher reads “watch an event, if it matches, do something.” An ordinary o
 
 QuickJS fits the JSON inputs that tenants and AI drafts already use. Lua would introduce table and array conversion rules for every reviewer. Both engines need a host deadline and process memory limit to cover native calls. [QuickJS manual](https://bellard.org/quickjs/quickjs.html) · [rquickjs runtime](https://docs.rs/rquickjs/latest/rquickjs/struct.Runtime.html) · [mlua state](https://docs.rs/mlua/latest/mlua/struct.Lua.html)
 
+## Implementation
+
+The first implementation stores a script step in its watcher version. The worker reads the declared event-record fields and returns an ordered selection from approved operation and input pairs. Watcher approval, the run log and Automation access govern that version. Independent script records, general contract lookups and the schedule, person and agent run entry points remain future work. [Watchers contract](../../../apps/base/watchers/README.md#javascript-steps)
+
 ## Consequences
 
 ADR 28 permits tenant JavaScript on shared servers only through this sandbox. Customer Extensions still follow the installation policy. ADR 31 continues to govern watcher delivery, permissions, effects and receipts. Before enabling scripts on shared servers, demonstrate isolation between tenants, termination at the limits, refusal after permission revocation and retry without duplicate effects. [ADR 28](./28-tenant-customisation-is-data-on-shared-servers.md) · [ADR 31](./31-tenant-watchers-run-after-commit-as-one-bounded-principal.md)

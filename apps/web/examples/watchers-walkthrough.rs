@@ -622,8 +622,13 @@ async fn custom_field_proof(
     Ok(())
 }
 
+fn main() -> Result<()> {
+    bilibi_base::watchers::enter_worker();
+    walkthrough()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn walkthrough() -> Result<()> {
     bilibi_base::link();
     bilibi_core::link();
     bilibi_domains::link();
@@ -811,7 +816,11 @@ async fn main() -> Result<()> {
         return finish();
     }
     proof.start()?;
-    let result = mounted_proof(&mut proof).await;
+    let result = if std::env::args().any(|arg| arg == "--scripts") {
+        scripts::walkthrough(&proof).await
+    } else {
+        mounted_proof(&mut proof).await
+    };
     proof.stop().await;
     result?;
     finish()
@@ -2060,3 +2069,6 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         .await?;
     Ok(())
 }
+
+#[path = "watchers/scripts.rs"]
+mod scripts;

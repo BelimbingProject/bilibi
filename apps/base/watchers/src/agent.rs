@@ -389,6 +389,24 @@ fn runs_schema() -> Value {
 fn scalar() -> Value {
     json!({"type":"string","maxLength":500,"description":"Text, a number written as text (\"1000.50\") or true/false written as text"})
 }
+fn script_schema() -> Value {
+    let call = json!({"type":"object","required":["operation"],"properties":{
+        "operation":{"type":"string","maxLength":200},
+        "input":{"type":"object","additionalProperties":true}
+    }});
+    json!({"type":"object","required":["name","source","fields","calls","examples","runner"],"properties":{
+        "name":{"type":"string","maxLength":120},
+        "source":{"type":"string","maxLength":16384,"description":"JavaScript function body. Return an ordered array of declared calls using facts from the approved fields."},
+        "fields":{"type":"array","items":{"type":"string","maxLength":160}},
+        "calls":{"type":"array","items":call},
+        "examples":{"type":"array","items":{"type":"object","required":["facts","expect"],"properties":{
+            "facts":{"type":"object","additionalProperties":true},
+            "expect":{"type":"array","items":call}
+        }}},
+        "runner":{"type":"string","enum":["watchers"]}
+    }})
+}
+
 fn draft_schema() -> Value {
     json!({"type":"object","required":["name","watch","do"],"properties":{
         "watcher_id":{"type":"integer","minimum":1,"description":"The watcher this is the next version of; leave out for a new watcher"},
@@ -401,7 +419,8 @@ fn draft_schema() -> Value {
             "value":{"type":"string","maxLength":500,"nullable":true,"description":"One value for eq, ne, lt, le, gt, ge; leave out for empty and not_empty"},
             "values":{"type":"array","items":scalar(),"description":"The values for in and not_in"}
         }}}}},
-        "do":{"type":"array","items":{"type":"object","required":["operation"],"properties":{
+        "do":{"type":"array","items":{"type":"object","description":"Supply either an operation with its input, or a script.","properties":{
+            "script":script_schema(),
             "operation":{"type":"string","maxLength":200,"description":"An installed action, from base.watchers.vocabulary"},
             "input":{"type":"object","additionalProperties":true,"description":"The action's parameters as a JSON object, without its subject field (the runner binds the trigger's record)"}
         }}},

@@ -198,7 +198,11 @@ impl Watchers {
                             && authority.direct_denied.is_empty()
                             && bilibi_authz::fields::restricted(&tx, scope).await?.is_empty()
                             && bilibi_authz::fields::masked(&tx, scope).await?.is_empty();
-                        for (position, call) in definition.actions.iter().enumerate() {
+                        let calls = match self.plan_steps(&tx, &principal, definition, &facts).await? {
+                            Ok(calls) => calls,
+                            Err(reason) => return Ok(Some(base(reason))),
+                        };
+                        for (position, call) in calls.iter().enumerate() {
                             let action = self.action(&call.operation).ok_or(Error::Invalid)?;
                             let visible = unrestricted && std::iter::once(action.capability)
                                 .chain(action.definition.approval_capabilities.iter().copied())

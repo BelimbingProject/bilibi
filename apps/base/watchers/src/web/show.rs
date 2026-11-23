@@ -55,6 +55,12 @@ fn reason(code: &str) -> &'static str {
         "watcher_limit" => "Not run: the watcher exceeds a configured size or fact limit in System Settings.",
         "attempt_limit" => "Not run: the watchers job reached its configured attempt limit.",
         "action_limit" => "Not run: it has more actions than allowed per run.",
+        "script_run_refused" => "Automation lacks permission to run this script.",
+        "script_timeout" => "The script reached its time limit.",
+        "script_refused" => "The script failed inside its sandbox.",
+        "script_call_refused" => "The script requested a call outside its approved list.",
+        "script_output" | "script_input" => "The script input or result exceeded its contract.",
+        "script_unavailable" => "The script worker could not start.",
         "read_refused" => "Not run: automation may not read these records yet. An administrator allows it in Automation access.",
         "restricted_field" => "Not run: a condition reads a field that is hidden from automation.",
         "subject_unavailable" => "Not run: the record is gone or out of reach.",
@@ -107,11 +113,15 @@ fn why(run: &RunView, described: &crate::review::Described) -> Vec<String> {
         }
     }
     for effect in &run.effects {
-        let action = described
-            .actions
-            .get(effect.position as usize)
-            .cloned()
-            .unwrap_or_else(|| effect.operation.clone());
+        let action = if described.scripted {
+            effect.operation.clone()
+        } else {
+            described
+                .actions
+                .get(effect.position as usize)
+                .cloned()
+                .unwrap_or_else(|| effect.operation.clone())
+        };
         lines.push(match effect.state.as_str() {
             "done" => format!("Did: {action}"),
             _ => {

@@ -525,16 +525,23 @@ impl Worker {
         }
         // Facts and the decision are kept once taken, so a retry after a
         // crash acts on what was decided, never on a second reading.
-        let (facts, outcomes) = if run.state == "matched" {
+        let (facts, outcomes, calls) = if run.state == "matched" {
             let saved = client
                 .query_one(
-                    "SELECT facts,outcomes FROM base_watcher_runs WHERE tenant_id=$1 AND id=$2",
+                    "SELECT facts,outcomes,planned_calls FROM base_watcher_runs WHERE tenant_id=$1 AND id=$2",
                     &[&tenant, &run.id],
                 )
                 .await?;
             (
                 saved.get::<_, Option<Value>>(0).unwrap_or(Value::Null),
                 saved.get::<_, Option<Value>>(1).unwrap_or(Value::Null),
+                match saved.get::<_, Option<Value>>(2) {
+                    Some(plan) => serde_json::from_value(plan).map_err(|_| Error::Invalid)?,
+                    None if definition.scripts().next().is_none() => {
+                        definition.actions().cloned().collect()
+                    }
+                    None => return Err(Error::Invalid),
+                },
             )
         } else {
             let fields = definition.fact_fields(offered.definition.version);
@@ -563,12 +570,41 @@ impl Worker {
                     .finish(execution, &mut client, &run, Stop::NoMatch, Some(decided))
                     .await;
             }
-            self.decide(execution, &mut client, &run, &decided, subject_version)
-                .await?;
-            decided
+            let calls = match watchers
+                .plan_steps(
+                    &**client,
+                    scope,
+                    &definition,
+                    decided.0.as_object().ok_or(Error::Invalid)?,
+                )
+                .await?
+            {
+                Ok(calls) => calls,
+                Err(code) => {
+                    return self
+                        .finish(
+                            execution,
+                            &mut client,
+                            &run,
+                            Stop::Refused(code),
+                            Some(decided),
+                        )
+                        .await
+                }
+            };
+            self.decide(
+                execution,
+                &mut client,
+                &run,
+                &decided,
+                subject_version,
+                &calls,
+            )
+            .await?;
+            (decided.0, decided.1, calls)
         };
         let mut refused = 0;
-        for (position, call) in definition.actions.iter().enumerate() {
+        for (position, call) in calls.iter().enumerate() {
             match self
                 .act(execution, &mut client, &run, position as i32, call)
                 .await?
@@ -590,7 +626,7 @@ impl Worker {
         }
         let state = match refused {
             0 => "done",
-            n if n == definition.actions.len() => "refused",
+            n if n == calls.len() => "refused",
             _ => "partial",
         };
         self.settle(
@@ -612,7 +648,9 @@ impl Worker {
         run: &Run,
         decided: &(Value, Value),
         subject_version: i64,
+        calls: &[crate::definition::ActionCall],
     ) -> Result<()> {
+        let plan = json!(calls);
         let mut tx = execution.begin(client, "watchers.run.matched").await?;
         let (tenant, id, facts, outcomes) = (
             tx.context().tenant,
@@ -622,8 +660,8 @@ impl Worker {
         );
         tx.mutate(move |sql| Box::pin(async move {
             sql.execute(
-                "UPDATE base_watcher_runs SET state='matched',facts=$3,outcomes=$4,subject_version=$5,started_at=COALESCE(started_at,now()) WHERE tenant_id=$1 AND id=$2 AND state='queued'",
-                &[&tenant, &id, &facts, &outcomes, &subject_version],
+                "UPDATE base_watcher_runs SET state='matched',facts=$3,outcomes=$4,subject_version=$5,planned_calls=$6,started_at=COALESCE(started_at,now()) WHERE tenant_id=$1 AND id=$2 AND state='queued'",
+                &[&tenant, &id, &facts, &outcomes, &subject_version, &plan],
             ).await?;
             Ok(((), vec![Change { kind: "base/watchers.run".into(), id, old: json!({"state": "queued"}), new: json!({"state": "matched"}) }]))
         })).await?;
@@ -729,6 +767,14 @@ impl Worker {
         let trigger: String = version.get(0);
         let definition = Definition::parse(&version.get::<_, Value>(1), &mut Vec::new())
             .ok_or(Error::Invalid)?;
+        if definition.scripts().next().is_some()
+            && !bilibi_authz::decide(tx.sql(), &scope, crate::RUN_SCRIPT)
+                .await?
+                .allowed
+        {
+            tx.rollback().await?;
+            return Ok(Acted::Stopped("script_run_refused"));
+        }
         let custom = watchers
             .custom_tables(tx.sql(), &scope, [&definition])
             .await?;
