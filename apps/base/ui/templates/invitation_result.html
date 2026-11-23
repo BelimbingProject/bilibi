@@ -1,5 +1,7 @@
+{#- The terminal invitation card: what happened and the one way on. -#}
 {% import "components.html" as ui %}
-<div class="flex flex-col gap-5">
-<div><h1 class="text-lg font-semibold tracking-tight text-ink-strong">{{ heading }}</h1><p class="mt-1 text-sm text-ink-muted">{{ message }}</p></div>
-{% if resend %}<form method="post" action="{{ href }}">{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="invitation-next", class="w-full", button_type="submit", working="Sending…") %}{{ action }}{% endcall %}</form>{% else %}{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="invitation-next", class="w-full", href=href) %}{{ action }}{% endcall %}{% endif %}
+{% import "credential.html" as credential %}
+<div class="flex flex-col gap-4">
+{% call credential::heading(title=heading, intro=message) %}{% endcall %}
+{% if resend %}<form method="post" action="{{ href }}" class="flex flex-col">{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="invitation-next", class="w-full", button_type="submit", working="Sending…") %}{{ action }}{% endcall %}</form>{% else %}{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="invitation-next", class="w-full", href=href) %}{{ action }}{% endcall %}{% endif %}
 </div>

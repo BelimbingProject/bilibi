@@ -323,11 +323,13 @@ async fn card<T: Template>(
     app: &App,
     title: &str,
     card: T,
+    workspace: Option<LoginWorkspace>,
     flash: FlashMap<'_>,
     status: StatusCode,
 ) -> std::result::Result<Response, HttpError> {
     let body = AuthLayout {
         body: Html::render(&card).map_err(|_| Error::Internal)?,
+        workspace,
         instance: instance_badge(app).await?,
         flash,
     }
@@ -360,6 +362,7 @@ pub(crate) async fn provider_signed_out(
             body,
             ..Default::default()
         },
+        None,
         FlashMap::default(),
         StatusCode::OK,
     )
@@ -483,22 +486,22 @@ pub async fn home(
 }
 async fn login_card(
     app: &App,
-    mut form: LoginForm,
+    form: LoginForm,
     flash: FlashMap<'_>,
     status: StatusCode,
 ) -> std::result::Result<Response, HttpError> {
-    form.workspace = login_workspace(app).await;
     card(
         app,
         "Sign in",
         LoginPage::new(&form).map_err(|_| Error::Internal)?,
+        Some(login_workspace(app).await),
         flash,
         status,
     )
     .await
 }
-/// The sign-in card's workspace strip. A failed lookup degrades the strip and
-/// is logged; it never fails the sign-in card.
+/// The installation company on the sign-in card. A failed lookup degrades
+/// the line and is logged without failing the card.
 async fn login_workspace(app: &App) -> LoginWorkspace {
     let lookup = async {
         let client = app.db.get().await.map_err(Error::from)?;
@@ -533,9 +536,6 @@ pub async fn login(
     origin(&app, &headers)?;
     let mut form = LoginForm {
         email: bounded(&submission.email),
-        // A rejected attempt re-renders the card at the address it was posted
-        // from, password kept.
-        password: submission.password.clone(),
         reauthenticating: tenant_entry(&headers).is_some(),
         ..LoginForm::default()
     };
@@ -745,6 +745,7 @@ async fn challenge_card(
         "Confirm sign-in",
         bilibi_ui::SignInChallengePage::new(&pending.csrf, &methods, method, message, error)
             .map_err(|_| Error::Internal)?,
+        None,
         FlashMap::default(),
         StatusCode::OK,
     )
@@ -839,6 +840,7 @@ async fn forgot_card(
         app,
         "Forgot password",
         ForgotPasswordPage::new(form).map_err(|_| Error::Internal)?,
+        None,
         FlashMap::default(),
         status,
     )
@@ -926,6 +928,7 @@ async fn reset_card(
         app,
         "Reset password",
         ResetPasswordPage::new(form).map_err(|_| Error::Internal)?,
+        None,
         FlashMap::default(),
         status,
     )
@@ -1006,6 +1009,7 @@ async fn invitation_card(
         app,
         "Join workspace",
         InvitationPage::new(form).map_err(|_| Error::Internal)?,
+        None,
         FlashMap::default(),
         status,
     )
@@ -1030,6 +1034,7 @@ async fn invitation_result(
             action,
             resend: false,
         },
+        None,
         FlashMap::default(),
         status,
     )
@@ -1062,6 +1067,7 @@ async fn invitation_unavailable(
             action: "Send me a new link",
             resend: true,
         },
+        None,
         FlashMap::default(),
         StatusCode::OK,
     )
@@ -1351,7 +1357,7 @@ pub async fn sso_callback(
             let secret=bilibi_ui::SecretInput::new("provider-proof","provider-proof","Confirmation code").label("Confirmation code").value(code).hint("Use this once for the access you requested. It expires in two minutes.");
             let link=bilibi_ui::Button{href:&back,body:Html::text("Continue"),..Default::default()};
             let mut body=Html::render(&secret).map_err(|_|Error::Internal)?;body.push(&Html::render(&link).map_err(|_|Error::Internal)?);
-            card(&app,"Confirm access",bilibi_ui::Card{body,..Default::default()},FlashMap::default(),StatusCode::OK).await?
+            card(&app,"Confirm access",bilibi_ui::Card{body,..Default::default()},None,FlashMap::default(),StatusCode::OK).await?
         },
         Ok(bilibi_user::IdentityOutcome::Linked(back)|bilibi_user::IdentityOutcome::StepUp(back))=>Redirect::to(&back).into_response(),
         Err(_)=>login_card(&app,LoginForm{form_error:"Company sign-in was refused or expired. Start again, or ask your company administrator for help.".into(),..LoginForm::default()},FlashMap::default(),StatusCode::UNAUTHORIZED).await?,

@@ -73,9 +73,18 @@ let reading = Html::render(&Markdown::new(&stored_source))?;
 
 The running specimen at `/assets/ui-components.html#specimen-markdown` pairs the reading view with an ordinary textarea and includes literal HTML, unsafe links, images and plain text.
 
+## Wordmark and credential pages
+
+`ui::wordmark` draws Bilibi's name: the mark, then "bilibi" in lowercase in its own face.
+
+- **Sizes:** `WordmarkSize::Bar` for the workspace top bar, with a smaller one-line wordmark below `sm`. Use `WordmarkSize::Credential` above a credential card.
+- **Link:** pass the home or dashboard address as `href`. The `label` names the destination for assistive technology.
+- **Font:** `static/fonts/lexend-wordmark.woff2` holds only the letters b, i and l. See [assets](assets/README.md#pinned-sources-and-licenses).
+- **Credential pages:** `AuthLayout` wraps one card body with the wordmark and instance badge. On sign-in, the installation owner's company (`LoginWorkspace`) appears between them. Card bodies use the macros in `templates/credential.html` (`heading`, `link`, `back`).
+
 ## Signed-in standalone reviews
 
-Return `PageChrome::StandaloneReview` from a page operation that needs the signed-in credential layout instead of the workspace shell. Web keeps the normal route guard, session binding, CSRF and live transport, then `StandaloneReview` draws the Bilibi mark, the installation banner and one review card. OAuth consent is the running use. The page supplies only the card body; it never draws its own logo, instance banner or shell.
+Return `PageChrome::StandaloneReview` from a page operation that needs the signed-in credential layout instead of the workspace shell. Web keeps the normal route guard, session binding, CSRF and live transport, then `StandaloneReview` draws the Bilibi wordmark, the installation banner and one review card. OAuth consent is the running use. The page supplies only the card body; it never draws its own logo, instance banner or shell.
 
 ## Embedded application frames
 

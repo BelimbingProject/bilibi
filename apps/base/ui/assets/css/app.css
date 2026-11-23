@@ -203,6 +203,16 @@
   src: url("/fonts/instrument-sans-variable-italic.woff2") format("woff2");
 }
 
+/* The wordmark's face: the three letters of "bilibi" from Lexend SemiBold
+ * (assets/README.md, Pinned sources). Nothing else uses it. */
+@font-face {
+  font-family: "Bilibi Wordmark";
+  font-style: normal;
+  font-weight: 600;
+  font-display: block;
+  src: url("/fonts/lexend-wordmark.woff2") format("woff2");
+}
+
 /* Semantic color roles — the shared theme rules required by DESIGN.md.
  *
  * Components and templates use these roles (`bg-surface`, `text-ink-muted`,
@@ -491,6 +501,43 @@ body {
   font-size: var(--text-sm);
   line-height: var(--text-sm--line-height);
   min-width: 20rem;
+}
+
+/* The Bilibi wordmark (the `wordmark` macro in templates/components.html):
+ * the mark, then "bilibi" in lowercase, on one line. Everything follows the
+ * one font size its size class sets, so the mark and the gap keep their
+ * proportion to the name wherever it is drawn. */
+.ui-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  color: var(--color-ink-strong);
+  font-family: "Bilibi Wordmark", var(--font-sans);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.015em;
+  white-space: nowrap;
+}
+
+.ui-wordmark > img {
+  width: 1.08em;
+  height: 1.08em;
+  flex: none;
+  object-fit: contain;
+}
+
+.ui-wordmark-bar {
+  font-size: 1.125rem;
+}
+
+@media (width < 40rem) {
+  .ui-wordmark-bar {
+    font-size: 0.8125rem;
+  }
+}
+
+.ui-wordmark-credential {
+  font-size: 2rem;
 }
 
 /* The shared button is one size everywhere: 24 px with 8 px side padding

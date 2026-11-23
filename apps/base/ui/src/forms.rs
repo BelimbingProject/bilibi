@@ -492,7 +492,7 @@ fn push_attr(markup: &mut String, name: &str, value: &str) {
 }
 
 /// Whether a `password` input gets a show/hide control. `Hidden` keeps the
-/// value masked with no control, which is right for sign-in. `Secret` names
+/// value masked with no control. `Secret` names
 /// the value a secret; `Subject` is the noun the control's accessible name
 /// uses instead ("password", "API key"). Any other kind rejects it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

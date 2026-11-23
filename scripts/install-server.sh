@@ -331,7 +331,7 @@ def swap(old, new):
     if page.count(old) != 1:
         sys.exit(f"waiting-page.html no longer has exactly one {old[:40]!r}; update install-server.sh")
     page = page.replace(old, new)
-swap('<title>Bilibi is starting · Business application platform</title>',
+swap('<title>Bilibi is starting</title>',
      '<title>Bilibi is updating</title>')
 swap('<p class="instance" id="waiting-instance" hidden><span class="role" id="waiting-role"></span><span id="waiting-site"></span></p>',
      f'<p class="instance" id="waiting-instance"><span class="role" id="waiting-role">{html.escape(instance)}</span><span id="waiting-site">{html.escape(site)}</span></p>')

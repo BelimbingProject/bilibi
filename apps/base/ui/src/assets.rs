@@ -126,6 +126,16 @@ fn catalogue() -> &'static [StaticAsset] {
                 &include_bytes!("../assets/static/fonts/OFL.txt")[..],
             ),
             (
+                "/fonts/lexend-wordmark.woff2",
+                "font/woff2",
+                &include_bytes!("../assets/static/fonts/lexend-wordmark.woff2")[..],
+            ),
+            (
+                "/fonts/OFL-Lexend.txt",
+                "text/plain; charset=utf-8",
+                &include_bytes!("../assets/static/fonts/OFL-Lexend.txt")[..],
+            ),
+            (
                 "/assets/mail-frame.css",
                 "text/css; charset=utf-8",
                 &include_bytes!("../assets/static/mail-frame.css")[..],

@@ -38,8 +38,8 @@ pub struct PageBody {
 pub trait Page<Context, Error>: Send + Sync {
     fn render<'a>(&'a self, request: PageRequest<'a, Context>) -> PageFuture<'a, Error>;
     /// The document title for a discovered page, when its owner supplies one:
-    /// the page name alone (`"Roles"`); the host adds
-    /// " · Business application platform" and falls back to the product name.
+    /// the page name alone (`"Roles"`); the host adds " · Bilibi" and falls
+    /// back to the product name alone.
     fn title(&self, _operation: &str) -> Option<&'static str> {
         None
     }
