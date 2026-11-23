@@ -1,7 +1,7 @@
-//! The brand's operation contracts, its row on the Customisations page and
-//! its entry in "what can I change here?". The platform operator's agent, the
-//! Customisations page's restore action and System Settings all end in the
-//! same three installation settings.
+//! The brand's operation contracts, its inspection-only rows on the
+//! Customisations page and its entry in "what can I change here?". Only the
+//! reviewed set and restore operations write the three installation settings:
+//! System Settings stages a logo and the Customisations page offers no action.
 use crate::{valid_name, Branding, Stored, ACCENT_KEY, LOGO_KEY, MANAGE, NAME_KEY, NAME_MAX_CHARS};
 use bilibi_agent_api::{
     json::Output, Channels, Definitions, Guide, Handler, Operation, OperationClient,
@@ -264,8 +264,8 @@ async fn check_logo(
 }
 
 /// The review of a write: a summary line, then each changed part as
-/// "before → after" under `plan`, the shape the Customisations page's confirm
-/// dialog and the agent review card both read as plain lines.
+/// "before → after" under `plan`, the shape the agent review card reads as
+/// plain lines.
 fn review(before: &Stored, after: &Stored, logo_was_active: bool, summary: &str) -> Value {
     let logo_is_active = if before.logo == after.logo {
         logo_was_active
@@ -495,7 +495,7 @@ fn customised_items(value: &Value) -> impl Iterator<Item = (Item, &Value)> {
 }
 
 /// The Customisations page's rows: each part this installation changed, for
-/// the people who may restore it.
+/// the people who may change the brand.
 fn rows(value: &Value) -> Vec<bilibi_labels::CustomisationRow> {
     customised_items(value)
         .filter(|(_, row)| row["customised"] == true)

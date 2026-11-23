@@ -43,7 +43,7 @@ Read each attachment through the owning service's authorised `download_attachmen
 
 **Send a workspace's mail with `mailer.deliver_for(tenant, &message)`.** A workspace's **Sender name** (`mail.sender_name`) takes precedence at the installation address. A blank workspace sender and calls to `deliver` use the installation sender.
 
-- The installation sender uses the [adopter display name](../branding/README.md#settings) when available. The configured sender name is the fallback, including when the branding lookup fails.
+- The installation sender uses the [adopter display name](../branding/README.md#settings) when available. The configured sender name (`MAIL_FROM_NAME`) is the fallback, including when the branding lookup fails.
 - The workspace setting takes up to 100 characters and 200 UTF-8 bytes and refuses `@`, quotes and angle brackets, so a name cannot pose as an address.
 - A workspace administrator changes it through the delegated tenant setting operations ([Settings editor](../settings_editor/README.md#tenant-agent-operations)); the operator sets its own on **System Settings → This tenant**.
 - A message that names its own `from` keeps it. A standalone `Mailer` has no settings and uses its sender.

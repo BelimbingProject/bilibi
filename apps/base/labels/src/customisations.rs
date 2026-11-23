@@ -28,8 +28,9 @@ pub struct CustomisationSection {
     pub changes: Option<Changes>,
 }
 
-/// The owner's read and undo contracts for the page, and its projection of
-/// the read result into rows.
+/// The owner's read contract for the page, its projection of the read result
+/// into rows, and the rows' one action. `action: None` makes the rows
+/// inspection-only.
 pub struct Undo {
     pub read: &'static str,
     pub read_input: fn() -> Value,
