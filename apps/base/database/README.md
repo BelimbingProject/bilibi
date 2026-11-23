@@ -74,7 +74,7 @@ Proof, on any reachable PostgreSQL database (it runs only `SELECT 1`):
 cargo run -p bilibi-database --example pool-walkthrough
 ```
 
-It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six callers each holding one connection and asking for a second all answered (the shape that used to lock a process), and the environment limits with their refusals. It also proves that a second checkout is refused with both call sites and that independent checkouts still work.
+It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six tracked callers whose nested checkouts are refused immediately while both pool slots remain occupied, and the environment limits with their refusals. It also proves that a second checkout is refused with both call sites and that independent checkouts still work.
 
 ## One connection per task
 
@@ -89,8 +89,8 @@ Why: once more callers than connections each hold one and ask for a second, ever
 | A connection | `db.get().await?` |
 | To read while you already hold one | Pass the one you hold: `&(impl ProofClient + ?Sized)`, a `&Transaction`, or the `OperationClient` you were given |
 | To call a service that takes its own | Drop your connection first |
-| A real exception: a single, named connection that must be separate, never a whole job | `db.get_detached("why")`, with the reason the pool cannot be starved by it |
-| That exception, but refused at once when the pool has none free instead of waiting behind the connection you hold | `db.try_get_detached("why")` |
+| A single, named connection that must be separate while you hold a pool slot | `db.try_get_detached("why")`, which refuses immediately when the pool is full |
+| A single, named connection that must be separate and can safely wait for admission | `db.get_detached("why")`, with the reason the pool cannot be starved by it |
 | A connection that carries session state (a session lock, a session setting) | `Connection::take(db.get().await?)`: closed when dropped, never returned to the pool, and no longer counted |
 
 - **What counts as a task:** the Tokio task, or the thread for the future a `block_on` drives (a walkthrough's `main`). `tokio::join!` branches are one task. A spawned task starts with none.

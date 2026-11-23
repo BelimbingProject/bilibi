@@ -206,7 +206,7 @@ impl UserService {
         self.sessions
             .require_portable_authority(&**client, scope)
             .await?;
-        self.unlocked(scope).await?;
+        self.unlocked(&**client, scope).await?;
         let row = client
             .query_opt(
                 "SELECT i.password_hash,i.email,i.id FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND u.deleted_at IS NULL",
@@ -283,7 +283,7 @@ impl UserService {
         self.sessions
             .require_portable_authority(&**client, scope)
             .await?;
-        self.unlocked(scope).await?;
+        self.unlocked(&**client, scope).await?;
         let row = client
             .query_opt(
                 "SELECT f.secret,f.confirmed_at IS NOT NULL,f.last_step,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2)",
@@ -408,7 +408,7 @@ impl UserService {
         self.sessions
             .require_portable_authority(&**client, scope)
             .await?;
-        self.unlocked(scope).await?;
+        self.unlocked(&**client, scope).await?;
         let step = totp::verify(&secret, code, now_unix(&**client).await?, None)?;
         let sign_in = client
             .query_opt(
@@ -483,13 +483,13 @@ impl UserService {
     /// it. A miss counts as a failure.
     async fn prove(&self, scope: &Scope, code: &str) -> Outcome<i64> {
         refuse_impersonation(scope)?;
-        self.unlocked(scope).await?;
-        let (tenant, user) = (scope.tenant(), scope.user());
         let client = self
             .db
             .try_get_detached(STEP_UP_CONNECTION)
             .await
             .map_err(Error::from)?;
+        self.unlocked(&**client, scope).await?;
+        let (tenant, user) = (scope.tenant(), scope.user());
         let row = client
             .query_opt(
                 "SELECT f.secret,f.last_step,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND f.confirmed_at IS NOT NULL",
@@ -566,14 +566,9 @@ impl UserService {
     }
 
     /// Refuses while the account's checks are locked, recording the refusal.
-    async fn unlocked(&self, scope: &Scope) -> Outcome<()> {
-        let client = self
-            .db
-            .try_get_detached(STEP_UP_CONNECTION)
-            .await
-            .map_err(Error::from)?;
+    async fn unlocked(&self, client: &impl GenericClient, scope: &Scope) -> Outcome<()> {
         let remaining = credential_attempts::locked(
-            &**client,
+            client,
             scope.tenant(),
             scope.user(),
             credential_attempts::Kind::StepUp,
@@ -583,7 +578,7 @@ impl UserService {
             return Ok(());
         };
         record_action(
-            &**client,
+            client,
             &Attribution::from_scope(scope),
             None,
             "user.two_factor.refused",

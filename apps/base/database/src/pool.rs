@@ -53,7 +53,7 @@ impl Held {
             "this task already holds a pooled connection (taken at {held}) and asked for another at {asked}. \
              Pass the one you hold (`&impl ProofClient`, or the `OperationClient` you were given), or release it first: \
              when more callers than connections do this, each waits out the pool and is refused (#406, #539). \
-             A real exception takes `Db::get_detached(\"why\")`"
+             A real exception while holding a connection takes `Db::try_get_detached(\"why\")`"
         );
         // Deadpool's message-bearing pool error retains the existing public
         // checkout error type while carrying both call sites to the caller.

@@ -114,7 +114,7 @@ impl WorkCalendars {
         let mut failed = 0;
         let mut fenced = self
             .db
-            .get_detached(
+            .try_get_detached(
                 "Queue's fence keeps the job row locked on this connection while each tenant's \
                  transaction commits on the other; one pair per Queue slot running this handler",
             )

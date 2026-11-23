@@ -39,44 +39,8 @@ impl Privacy {
         record: &Value,
         reason: &str,
     ) -> Result<Option<String>> {
-        let reason = reason_text(reason)?;
-        if table.is_empty()
-            || table.len() > 200
-            || field.is_empty()
-            || field.len() > 200
-            || !matches!(record, Value::Number(_) | Value::String(_))
-            || record.to_string().len() > 256
-        {
-            return Err(Error::Invalid);
-        }
-        bilibi_authz::authorize_key(tx, scope, FIELD_REVEAL).await?;
-        let target = format!("{table}.{field}:{}", record_text(record));
-        self.step_up.require(scope, STEP_UP_REVEAL, &target).await?;
-        let grant = self.issuer.reveal(scope, table, field);
-        let value = bilibi_grid::query::reveal_on(tx, scope, &grant, table, field, record)
+        self.reveal(Some(tx), scope, table, field, record, reason)
             .await
-            .map_err(|error| match error {
-                QueryError::Database(error) => error,
-                QueryError::ForbiddenRoot => Error::Forbidden,
-                _ => Error::Invalid,
-            })?
-            .ok_or(Error::NotFound)?;
-        let mut client = self.db.try_get_detached("the reveal audit must survive the surrounding write's rollback; refuse immediately if the pool is full").await?;
-        let audit_tx = client.transaction().await?;
-        bilibi_authz::authorize_key(&*audit_tx, scope, FIELD_REVEAL).await?;
-        record_action(
-            &*audit_tx,
-            scope,
-            "privacy.field.revealed",
-            json!({"table": table, "field": field, "record": record, "reason": reason}),
-        )
-        .await?;
-        audit_tx.commit().await?;
-        Ok(match value {
-            Value::Null => None,
-            Value::String(text) => Some(text),
-            other => Some(other.to_string()),
-        })
     }
     /// The full value of `field` of the `table` record keyed `record`, for a
     /// reader who sees it masked. Needs `privacy.field.reveal`, a reason (a
@@ -85,6 +49,18 @@ impl Privacy {
     /// record the reader may not read is `NotFound`.
     pub async fn reveal_field(
         &self,
+        scope: &Scope,
+        table: &str,
+        field: &str,
+        record: &Value,
+        reason: &str,
+    ) -> Result<Option<String>> {
+        self.reveal(None, scope, table, field, record, reason).await
+    }
+
+    async fn reveal(
+        &self,
+        tx: Option<&tokio_postgres::Transaction<'_>>,
         scope: &Scope,
         table: &str,
         field: &str,
@@ -101,23 +77,34 @@ impl Privacy {
         {
             return Err(Error::Invalid);
         }
-        // Checked first, then the value is read, then the reveal is recorded
-        // and committed before the value is returned: no value without a
-        // record, no record of a reveal that read nothing, and no connection
-        // held while another is taken.
-        bilibi_authz::authorize_key(&**self.db.get().await?, scope, FIELD_REVEAL).await?;
+        match tx {
+            Some(tx) => bilibi_authz::authorize_key(tx, scope, FIELD_REVEAL).await?,
+            None => {
+                bilibi_authz::authorize_key(&**self.db.get().await?, scope, FIELD_REVEAL).await?
+            }
+        }
         let target = format!("{table}.{field}:{}", record_text(record));
         self.step_up.require(scope, STEP_UP_REVEAL, &target).await?;
         let grant = self.issuer.reveal(scope, table, field);
-        let value = bilibi_grid::query::reveal(&self.db, scope, &grant, table, field, record)
-            .await
-            .map_err(|error| match error {
-                QueryError::Database(error) => error,
-                QueryError::ForbiddenRoot => Error::Forbidden,
-                _ => Error::Invalid,
-            })?
-            .ok_or(Error::NotFound)?;
-        let mut client = self.db.get().await?;
+        let value = match tx {
+            Some(tx) => {
+                bilibi_grid::query::reveal_on(tx, scope, &grant, table, field, record).await
+            }
+            None => bilibi_grid::query::reveal(&self.db, scope, &grant, table, field, record).await,
+        }
+        .map_err(|error| match error {
+            QueryError::Database(error) => error,
+            QueryError::ForbiddenRoot => Error::Forbidden,
+            _ => Error::Invalid,
+        })?
+        .ok_or(Error::NotFound)?;
+        let mut client = if tx.is_some() {
+            self.db
+                .try_get_detached("the reveal audit must survive the surrounding write's rollback")
+                .await?
+        } else {
+            self.db.get().await?
+        };
         let tx = client.transaction().await?;
         // Rechecked in the recording transaction: a capability removed since
         // the read returns nothing.

@@ -38,11 +38,11 @@ async fn second_connection(url: &str) -> Result<()> {
         };
         assert!(started.elapsed() < WAIT, "the refusal waited for the pool");
         assert_eq!(error.matches(concat!(file!(), ":")).count(), 2, "{error}");
-        assert!(error.contains("get_detached"));
+        assert!(error.contains("try_get_detached"));
     }
     println!("second=refused");
     // None of these is a second connection of this task.
-    let detached = db.get_detached(BY_HAND).await?;
+    let detached = db.try_get_detached(BY_HAND).await?;
     let other_task = tokio::spawn({
         let db = db.clone();
         async move { db.get().await.is_ok() }
@@ -153,32 +153,38 @@ async fn main() -> Result<()> {
     // The shape that used to lock a process for good: more callers than
     // connections, each holding one and asking for a second.
     let started = Instant::now();
+    let occupied = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let mut callers = tokio::task::JoinSet::new();
     for _ in 0..6 {
         let db = db.clone();
+        let occupied = occupied.clone();
         callers.spawn(async move {
-            let Ok(held) = db.get_detached(BY_HAND).await else {
-                return (false, false);
+            let held = db.get().await?;
+            occupied.wait().await;
+            let started = Instant::now();
+            let nested = db.get().await;
+            let elapsed = started.elapsed();
+            occupied.wait().await;
+            assert!(elapsed < WAIT / 2, "the nested checkout waited");
+            let error = match nested {
+                Ok(_) => return Err(Error::Internal),
+                Err(error) => error.to_string(),
             };
-            let nested = ask(&db).await;
-            held.query_one("SELECT 1", &[]).await.ok();
-            (true, nested.is_ok())
+            assert_eq!(error.matches(concat!(file!(), ":")).count(), 2, "{error}");
+            held.query_one("SELECT 1", &[]).await?;
+            Ok::<_, Error>(())
         });
     }
-    let (mut held, mut nested) = (0, 0);
-    let answered = tokio::time::timeout(WAIT * 10, async {
+    tokio::time::timeout(WAIT * 10, async {
         while let Some(caller) = callers.join_next().await {
-            let (got, second) = caller.map_err(|_| Error::Internal)?;
-            held += usize::from(got);
-            nested += usize::from(second);
+            caller.map_err(|_| Error::Internal)??;
         }
         Ok::<_, Error>(())
     })
-    .await;
-    assert!(matches!(answered, Ok(Ok(()))));
-    assert!(held >= 2);
+    .await
+    .map_err(|_| Error::Internal)??;
     println!(
-        "PASS nested asks: 6 callers on 2 connections all answered in {:.1?} ({held} held one, {nested} got a second)",
+        "PASS nested asks: 6 callers on 2 connections all refused a second checkout in {:.1?}",
         started.elapsed()
     );
     ask(&db).await?;
