@@ -525,35 +525,6 @@ impl UserService {
         Ok(())
     }
 
-    /// Store the account's own choice from the profile form.
-    pub(crate) async fn save_landing(
-        &self,
-        scope: &Scope,
-        value: &str,
-    ) -> std::result::Result<(), AccountError> {
-        let mut client = self.db.get().await.map_err(Error::from)?;
-        let mut tx = self
-            .mutations
-            .begin(
-                &mut client,
-                scope.mutation_context("user.preference.landing"),
-            )
-            .await?;
-        let scope = self.fresh(tx.sql(), scope).await?;
-        Self::lock_landing(&tx, &scope).await?;
-        match self.apply_landing(&mut tx, &scope, value).await {
-            Err(Error::Invalid) => {
-                return Err(AccountError::Validation(vec![field_error(
-                    "landing_menu_id",
-                    "is not a page you can open",
-                )]))
-            }
-            outcome => outcome?,
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
     /// The signed-in account's picture as a short-lived signed Media link.
     /// A missing or unreadable asset quietly uses the initials fallback.
     pub async fn profile_image_url(

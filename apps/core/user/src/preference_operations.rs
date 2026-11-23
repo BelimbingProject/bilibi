@@ -1,6 +1,6 @@
 //! Reviewed self-service operations for navigation preferences.
 use crate::{
-    preferences::{apply_pins, list_pins, lock_pins, Pin, PinDraft, MAX_PINS},
+    preferences::{apply_pins, list_pins, lock_pins, pin_route_is_served, Pin, PinDraft, MAX_PINS},
     UserService,
 };
 use bilibi_agent_api::{
@@ -21,8 +21,9 @@ use tokio_postgres::GenericClient;
 const PINS_READ: &str = "core.user.pins.read";
 const PINS_RESTORE: &str = "core.user.pins.restore";
 const PINS_UNDO: &str = "customisation.pins_restore";
-const LANDING_READ: &str = "core.user.landing.read";
-const LANDING_RESTORE: &str = "core.user.landing.restore";
+pub(crate) const LANDING_READ: &str = "core.user.landing.read";
+pub(crate) const LANDING_SET: &str = "core.user.landing.set";
+pub(crate) const LANDING_RESTORE: &str = "core.user.landing.restore";
 const LANDING_UNDO: &str = "customisation.landing_restore";
 static USERS: OnceLock<Arc<UserService>> = OnceLock::new();
 
@@ -98,7 +99,7 @@ impl ReadHandler for Read {
                     let value = json!(selected);
                     json!({
                         "version": version(scope, &value), "menu_id": selected, "label": label,
-                        "default_url": "/dashboard",
+                        "default_url": "/workspace",
                         "pages": pages.iter().map(|page| json!({"id":page.id,"label":page.label,"url":page.route})).collect::<Vec<_>>(),
                     })
                 }
@@ -128,9 +129,13 @@ impl Write {
     ) -> bilibi_agent_api::Result<Vec<PinDraft>> {
         check(input, scope, &json!(before))?;
         if matches!(self, Self::RestorePins) {
-            let Some(id) = input["pin_id"].as_i64() else {
+            let Some(id) = input.get("pin_id") else {
                 return Ok(Vec::new());
             };
+            let id = id
+                .as_i64()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| invalid("pin_id", "choose a pin ID from read"))?;
             if !before.iter().any(|pin| pin.id == id) {
                 return Err(bilibi_agent_api::Error::NotFound);
             }
@@ -145,6 +150,7 @@ impl Write {
         if pins.len() as i64 > MAX_PINS {
             return Err(invalid("pins", "choose at most 100 pins"));
         }
+        let routes = users()?.pin_routes();
         let mut seen = HashSet::new();
         pins.iter()
             .enumerate()
@@ -162,6 +168,11 @@ impl Write {
                             "use a valid page path, nonempty label and known icon",
                         )
                     })?;
+                if !before.iter().any(|saved| saved.url == pin.url)
+                    && !pin_route_is_served(routes, &pin.url)
+                {
+                    return Err(invalid(&path, "choose a page served by this installation"));
+                }
                 if !seen.insert(pin.url.clone()) {
                     return Err(invalid(&path, "this page is already pinned"));
                 }
@@ -212,7 +223,7 @@ impl WriteHandler for Write {
                 Ok(json!({"before": before, "after": after}).into())
             } else {
                 let (before, after) = self.plan_landing(sql, scope, input).await?;
-                Ok(json!({"before": before, "after": after, "default_url": "/dashboard"}).into())
+                Ok(json!({"before": before, "after": after, "default_url": "/workspace"}).into())
             }
         })
     }
@@ -233,7 +244,7 @@ impl WriteHandler for Write {
                 UserService::lock_landing(tx, scope).await?;
                 let (before, after) = self.plan_landing(tx.sql(), scope, input).await?;
                 users()?.apply_landing(tx, scope, after).await?;
-                Ok(json!({"before": before, "after": after, "version": version(scope, &json!(after)), "default_url": "/dashboard"}).into())
+                Ok(json!({"before": before, "after": after, "version": version(scope, &json!(after)), "default_url": "/workspace"}).into())
             }
         })
     }
@@ -250,7 +261,7 @@ fn restore_schema() -> Value {
 }
 fn pins_restore_schema() -> Value {
     let mut schema = restore_schema();
-    schema["properties"]["pin_id"] = json!({"type":"integer","minimum":1,"description":"Remove only this pin from read. Omit to restore the empty default list."});
+    schema["properties"]["pin_id"] = json!({"type":"integer","minimum":1,"maximum":i64::MAX,"description":"Remove only this pin from read. Omit to restore the empty default list."});
     schema
 }
 fn pins_schema() -> Value {
@@ -283,8 +294,8 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/user.navigation_prefer
         Operation { key:"core.user.pins.set", title:"Set my sidebar pins", summary:"Set your complete ordered list of pins by page path, label and optional icon.", keywords:&["sidebar","pins","workspace"], capability:SIGNED_IN, input:pins_schema, output, handler:Handler::SafeWrite(&Write::SetPins), channels:Channels::Every, step_up:&[] },
         Operation { key:PINS_RESTORE, title:"Restore my sidebar pins", summary:"Remove one pin or clear your list to restore the default.", keywords:&["sidebar","pins","unpin","restore"], capability:SIGNED_IN, input:pins_restore_schema, output, handler:Handler::SafeWrite(&Write::RestorePins), channels:Channels::Every, step_up:&[] },
         Operation { key:LANDING_READ, title:"Read my landing page", summary:"Read your chosen page after sign-in and the menu pages you can choose.", keywords:&["landing","sign-in","start page","workspace"], capability:SIGNED_IN, input:empty_schema, output, handler:Handler::Read(&Read::Landing), channels:Channels::Every, step_up:&[] },
-        Operation { key:"core.user.landing.set", title:"Set my landing page", summary:"Choose which permitted menu page opens after sign-in.", keywords:&["landing","sign-in","start page"], capability:SIGNED_IN, input:landing_schema, output, handler:Handler::SafeWrite(&Write::SetLanding), channels:Channels::Every, step_up:&[] },
-        Operation { key:LANDING_RESTORE, title:"Restore my default landing page", summary:"Clear your landing-page choice so sign-in opens the dashboard again.", keywords:&["landing","sign-in","restore"], capability:SIGNED_IN, input:restore_schema, output, handler:Handler::SafeWrite(&Write::RestoreLanding), channels:Channels::Every, step_up:&[] },
+        Operation { key:LANDING_SET, title:"Set my landing page", summary:"Choose which permitted menu page opens after sign-in.", keywords:&["landing","sign-in","start page"], capability:SIGNED_IN, input:landing_schema, output, handler:Handler::SafeWrite(&Write::SetLanding), channels:Channels::Every, step_up:&[] },
+        Operation { key:LANDING_RESTORE, title:"Restore my default landing page", summary:"Clear your landing-page choice so sign-in opens the workspace again.", keywords:&["landing","sign-in","restore"], capability:SIGNED_IN, input:restore_schema, output, handler:Handler::SafeWrite(&Write::RestoreLanding), channels:Channels::Every, step_up:&[] },
     ],
     guides: &[],
 }) }
@@ -326,7 +337,7 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "core/user.pins_
 }) }
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "core/user.landing_customisations", provenance!(), &bilibi_labels::CustomisationSection {
     title:"My landing page",
-    undo:Some(bilibi_labels::Undo { read:LANDING_READ, read_input:empty, operation:LANDING_RESTORE, event:LANDING_UNDO, action:"Restore default", detail:"The dashboard will open after sign-in.", rows:landing_rows }),
+    undo:Some(bilibi_labels::Undo { read:LANDING_READ, read_input:empty, operation:LANDING_RESTORE, event:LANDING_UNDO, action:"Restore default", detail:"The workspace will open after sign-in.", rows:landing_rows }),
     changes:None,
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "core.user.pins_customisations_restore", provenance!(), &bilibi_agent_api::page::PageBinding {

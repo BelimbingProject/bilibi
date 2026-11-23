@@ -278,6 +278,22 @@ pub async fn list_pins(client: &impl GenericClient, scope: &Scope) -> Result<Vec
         .collect())
 }
 
+/// Whether a normalized pin URL names a page this deployment serves; a route
+/// pattern's `{param}` segments match any one segment. A pin to a page that is
+/// gone stays stored but is not drawn.
+pub fn pin_route_is_served(routes: &[&str], url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or("");
+    let actual: Vec<_> = path.split('/').filter(|s| !s.is_empty()).collect();
+    routes.iter().any(|route| {
+        let pattern: Vec<_> = route.split('/').filter(|s| !s.is_empty()).collect();
+        pattern.len() == actual.len()
+            && pattern
+                .iter()
+                .zip(&actual)
+                .all(|(p, a)| p.starts_with('{') || p == a)
+    })
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PinDraft {
@@ -391,6 +407,10 @@ fn check_pin_session(scope: &Scope, csrf: &str) -> std::result::Result<(), Prefe
 }
 
 impl UserService {
+    pub fn pin_routes(&self) -> &[&'static str] {
+        &self.pin_routes
+    }
+
     /// Toggle the signed-in account's pin and return the resulting list.
     pub async fn toggle_pin(
         &self,
@@ -415,7 +435,8 @@ impl UserService {
             after.remove(index);
             false
         } else {
-            if after.len() as i64 >= MAX_PINS {
+            if after.len() as i64 >= MAX_PINS || !pin_route_is_served(self.pin_routes(), &draft.url)
+            {
                 return Err(PreferenceError::Invalid);
             }
             after.push(draft);

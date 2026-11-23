@@ -16,6 +16,7 @@ pub(crate) const PUBLISH: &str = "base.tiling.publish";
 pub(crate) const WITHDRAW: &str = "base.tiling.withdraw";
 const READ: &str = "base.tiling.read";
 const MANAGE: &str = "base.tiling.manage";
+const GUIDE: &str = "base.tiling";
 const UNDO: &str = "customisation.workspace_withdraw";
 static LAYOUTS: OnceLock<Arc<Layouts>> = OnceLock::new();
 
@@ -271,7 +272,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/tiling.agent", provena
         Operation { key:PUBLISH, title:"Publish a shared workspace", summary:"Publish a tile layout for the current company or selected roles.", keywords:&["tiles","workspace","layout","publish"], capability:layouts::PUBLISH, input:publish_schema, output, handler:Handler::SafeWrite(&Write::Publish), channels:Channels::Every, step_up:&[] },
         Operation { key:WITHDRAW, title:"Withdraw a shared workspace", summary:"Remove one published layout from the current company.", keywords:&["tiles","workspace","layout","withdraw"], capability:layouts::PUBLISH, input:withdraw_schema, output, handler:Handler::SafeWrite(&Write::Withdraw), channels:Channels::Every, step_up:&[] },
     ],
-    guides: &[Guide { key:"base.tiling", title:"Shared tile layouts", summary:"Publish a workspace of existing pages side by side for a company or role.", keywords:&["workspace","tile","side-by-side","role","service desk"], capability:layouts::PUBLISH, body:"Use base.tiling.manage to find the current company, layouts and audience role codes. For side-by-side tiles use h.5(/companies,/users); v.5 places tiles top and bottom. Splits can nest, for example h.5(/companies,v.6(/employees,/users)). Use paths from the site's pages. Percent-encode reserved tree markers ( ) , > and % inside paths. Publish with the company ID, label, tree, audience role codes and version. An empty role list means the whole company. Pass the saved version to replace the same label, or an empty version for a new label. Use base.tiling.read for the viewer's layout links. Each tile checks page access when opened. Withdraw by company ID, slug and version. Review the exact proposal before saving." }],
+    guides: &[Guide { key:GUIDE, title:"Shared tile layouts", summary:"Publish a workspace of existing pages side by side for a company or role.", keywords:&["workspace","tile","side-by-side","role","service desk"], capability:layouts::PUBLISH, body:"Use base.tiling.manage to find the current company, layouts and audience role codes. For side-by-side tiles use h.5(/companies,/users); v.5 places tiles top and bottom. Splits can nest, for example h.5(/companies,v.6(/employees,/users)). Use paths from the site's pages. Percent-encode reserved tree markers ( ) , > and % inside paths. Publish with the company ID, label, tree, audience role codes and version. An empty role list means the whole company. Pass the saved version to replace the same label, or an empty version for a new label. Use base.tiling.read for the viewer's layout links. Each tile checks page access when opened. Withdraw by company ID, slug and version. Review the exact proposal before saving." }],
 }) }
 
 fn rows(value: &Value) -> Vec<bilibi_labels::CustomisationRow> {
@@ -291,10 +292,63 @@ fn rows(value: &Value) -> Vec<bilibi_labels::CustomisationRow> {
     }).collect()
 }
 
+fn choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
+    let managed = &reads[0];
+    let company_id = &managed["company_id"];
+    let mut choices = vec![bilibi_labels::Choice {
+        subject: "new".into(),
+        title: "Publish a new shared workspace".into(),
+        keywords: "workspace tile layout side-by-side service desk role publish",
+        value: Some(Value::Null),
+        version: Some(json!("")),
+        input: json!({"company_id":company_id}),
+        verify_input: empty(),
+        limits: json!({"roles":managed["roles"]}),
+        writes: Some(vec![PUBLISH]),
+        ..Default::default()
+    }];
+    choices.extend(
+        managed["layouts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|layout| {
+                let slug = layout["slug"].as_str()?;
+                let label = layout["label"].as_str()?;
+                Some(bilibi_labels::Choice {
+                    subject: format!("layout:{slug}"),
+                    title: label.into(),
+                    keywords:
+                        "workspace tile layout side-by-side service desk role publish withdraw",
+                    page: layout["url"].as_str().map(str::to_owned),
+                    value: Some(layout.clone()),
+                    default: Some(Value::Null),
+                    customised: true,
+                    version: Some(layout["version"].clone()),
+                    input: json!({"company_id":company_id,"label":label}),
+                    verify_input: empty(),
+                    limits: json!({"roles":managed["roles"]}),
+                    ..Default::default()
+                })
+            }),
+    );
+    choices
+}
+
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/tiling.customisations", provenance!(), &bilibi_labels::CustomisationSection {
     title:"Shared workspaces",
     undo:Some(bilibi_labels::Undo { read:MANAGE, read_input:empty, operation:WITHDRAW, event:UNDO, action:"Withdraw workspace", detail:"This removes the workspace from the people it was shared with.", rows }),
-    changes:None,
+    changes:Some(bilibi_labels::Changes {
+        purpose:"Publish and withdraw shared tile layouts for the current company.",
+        limits:"Use existing page paths and role codes from the current company. Each tile keeps its own access checks.",
+        guide:GUIDE,
+        reads:&[bilibi_labels::Read { operation:MANAGE, input:empty }],
+        choices,
+        change:&[PUBLISH],
+        preview:None,
+        verify:MANAGE,
+        restore:Some(WITHDRAW),
+    }),
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.tiling.customisations_withdraw", provenance!(), &bilibi_agent_api::page::PageBinding {
     service:"base/labels.customisations", event:UNDO, contract:WITHDRAW,

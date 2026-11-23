@@ -74,8 +74,8 @@ pub use memberships::{
 pub use notifications::{unread, Notifications};
 pub use password::PolicyViolation;
 pub use preferences::{
-    list_pins, normalize_label, normalize_url, presentation, Pin, PreferenceError, Presentation,
-    MAX_PINS, THEMES, THEME_KEY,
+    list_pins, normalize_label, normalize_url, pin_route_is_served, presentation, Pin,
+    PreferenceError, Presentation, MAX_PINS, THEMES, THEME_KEY,
 };
 pub use tenant_owner::FirstTenantOwnerError;
 pub use two_factor::{
@@ -285,6 +285,7 @@ pub struct UserService {
     sso_parties: std::sync::Arc<bilibi_tenancy::PartyProofs>,
     pub(crate) step_up: std::sync::Arc<bilibi_step_up::StepUp>,
     staff_assignments: staff_choices::Assignments,
+    pin_routes: Vec<&'static str>,
 }
 inventory::submit! {
     bilibi_module_registry::Module {
@@ -305,8 +306,18 @@ inventory::submit! {
             privacy::bind(services.get("base/session.sessions")?)?;
             services.get::<Sessions>("base/session.sessions")?.bind_end_notice(std::sync::Arc::new(session_notice::SessionNotice(services.get(bilibi_events::SERVICE)?)))?;
             let modules = bilibi_module_registry::discover()?;
-            let staff_assignments = staff_choices::Assignments::from_catalog(&bilibi_module_registry::Catalog::discover(&modules)?, &modules)?;
-            let users = std::sync::Arc::new(UserService {staff_assignments,identities:sso::Registry::default(),sso_grants:services.get("base/authz.grants")?,sso_parties:services.get("base/tenancy.parties")?,sessions:services.get("base/session.sessions")?,mutations:services.get("base/database.mutations")?,authentication:services.get("base/tenancy.authentication")?,persons:services.get(bilibi_person::SERVICE)?,affiliations:services.get(bilibi_affiliation::SERVICE)?,db:services.get::<Db>("base/database.pool")?.as_ref().clone(),notification_boundary:services.get("base/notifications.sink")?,notifications,mailer:services.get("base/mail.mailer")?,templates:services.get(bilibi_templates::SERVICE)?,media:services.get(bilibi_media::SERVICE)?,settings:services.get("base/settings.store")?,display:services.get("base/datetime.display")?,locales:services.get("base/locale.locales")?,signer:Signer::from_hex(std::env::var("BILIBI_USER_SIGNING_KEY").ok().as_deref()),origin:std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),step_up:services.get(bilibi_step_up::SERVICE)?});
+            let catalog = bilibi_module_registry::Catalog::discover(&modules)?;
+            let staff_assignments = staff_choices::Assignments::from_catalog(&catalog, &modules)?;
+            use bilibi_module_registry::contributions::{Method, Route, ROUTES};
+            let pin_routes = catalog.entries::<Route>(ROUTES)?.iter()
+                .map(|entry| entry.get::<Route>())
+                .filter_map(|route| match route {
+                    Ok(route) if route.method == Method::Get && !route.access.portal() => Some(Ok(route.path)),
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<bilibi_module_registry::Result<Vec<_>>>()?;
+            let users = std::sync::Arc::new(UserService {staff_assignments,pin_routes,identities:sso::Registry::default(),sso_grants:services.get("base/authz.grants")?,sso_parties:services.get("base/tenancy.parties")?,sessions:services.get("base/session.sessions")?,mutations:services.get("base/database.mutations")?,authentication:services.get("base/tenancy.authentication")?,persons:services.get(bilibi_person::SERVICE)?,affiliations:services.get(bilibi_affiliation::SERVICE)?,db:services.get::<Db>("base/database.pool")?.as_ref().clone(),notification_boundary:services.get("base/notifications.sink")?,notifications,mailer:services.get("base/mail.mailer")?,templates:services.get(bilibi_templates::SERVICE)?,media:services.get(bilibi_media::SERVICE)?,settings:services.get("base/settings.store")?,display:services.get("base/datetime.display")?,locales:services.get("base/locale.locales")?,signer:Signer::from_hex(std::env::var("BILIBI_USER_SIGNING_KEY").ok().as_deref()),origin:std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),step_up:services.get(bilibi_step_up::SERVICE)?});
             users.register_identity_provider("oidc", std::sync::Arc::new(sso::oidc::Oidc(services.get("base/integration.exchanges")?)))?;
             users.step_up.register(sso::factor::METHOD, std::sync::Arc::new(sso::factor::Factor(users.clone())))?;
             let authenticator = std::sync::Arc::new(two_factor::Authenticator(users.clone()));
@@ -323,6 +334,8 @@ inventory::submit! {
         bilibi_module_registry::Service{id:"core/user.sso-pages",factory:|services|Ok(std::sync::Arc::new(bilibi_ui::page::PageService(std::sync::Arc::new(sso::web::Pages{users:services.get("core/user.accounts")?,contracts:services.get(bilibi_agent_api::page::SERVICE)?}))))},
         bilibi_module_registry::Service {id:"core/user.pages",factory:|services| {
             Ok(std::sync::Arc::new(bilibi_ui::page::PageService(std::sync::Arc::new(web::Pages {users:services.get("core/user.accounts")?,display:services.get("base/datetime.display")?,locales:services.get("base/locale.locales")?,db:services.get::<Db>("base/database.pool")?.as_ref().clone(),grants:services.get("base/authz.grants")?,contracts:services.get(bilibi_agent_api::page::SERVICE)?}))))
+        }}, bilibi_module_registry::Service {id:account_ui::PROFILE_SERVICE,factory:|services| {
+            Ok(services.get::<bilibi_ui::page::PageService<bilibi_security::Scope, Error>>("core/user.pages")?)
         }}, bilibi_module_registry::Service {id:administration::SERVICE,factory:administration::service}],
     }
 }

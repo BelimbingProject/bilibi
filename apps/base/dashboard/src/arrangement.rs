@@ -222,12 +222,15 @@ impl Arrangement {
     }
 
     fn version(&self, scope: &Scope, key: &str) -> String {
+        let ids = |items: &[Item]| items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
         let identity = json!([
             scope.tenant(),
             scope.user(),
             scope.current_company().map(|c| c.get()),
             key,
-            self.stored[key]
+            self.stored[key],
+            ids(self.placed(key)),
+            ids(&self.defaults[key])
         ]);
         Sha256::digest(identity.to_string().as_bytes())
             .iter()
@@ -359,7 +362,6 @@ impl Arrangements {
                 "region": if key == LAYOUT { "grid" } else { "sections" },
                 "before": describe(current.placed(key)),
                 "after": shown,
-                "hidden_entries_restored": if next.is_none() { current.stored[key].as_ref().map_or(0, |ids| ids.len() - current.placed(key).len()) } else { 0 },
                 "uses_default": next.is_none(),
             }),
         ))

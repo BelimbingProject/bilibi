@@ -8,7 +8,7 @@ mod profile;
 
 pub(crate) use detail::Detail;
 pub(crate) use invite::Invite;
-pub(crate) use profile::Profile;
+pub(crate) use profile::{Profile, SERVICE as PROFILE_SERVICE};
 
 use crate::web::Pages;
 use askama::Template;
