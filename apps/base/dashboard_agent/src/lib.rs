@@ -5,14 +5,18 @@ use bilibi_agent_api::{
     invalid, Channels, Definitions, Handler, Operation, OperationClient, OperationFuture,
     ReadHandler, WriteHandler, DEFINITIONS, SIGNED_IN,
 };
-use bilibi_dashboard::{Arrangements, Placement, ARRANGEMENTS};
+use bilibi_dashboard::{
+    ArrangementWrite, ArrangementWriter, Arrangements, DashboardPage, Placement, ARRANGEMENTS,
+};
 use bilibi_database::{Error, MutationTransaction};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance, RegistryError};
 use bilibi_tenancy::Scope;
+use bilibi_ui::page::{LiveRequest, PageService};
 use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 
 const ID: &str = "base/dashboard_agent";
+const PAGE: &str = "base/dashboard_agent.pages";
 const READ: &str = "base.dashboard_agent.read";
 const SET: &str = "base.dashboard_agent.set";
 const RESTORE: &str = "base.dashboard_agent.restore";
@@ -36,14 +40,67 @@ fn owner() -> bilibi_agent_api::Result<&'static Arrangements> {
 }
 inventory::submit! { Module {
     id: ID, layer: Layer::Base,
-    dependencies: &["base/agent_api","base/dashboard","base/database","base/labels","base/module_registry","base/tenancy"],
-    migrations: &[], services: &[],
+    dependencies: &["base/agent_api","base/dashboard","base/database","base/labels","base/module_registry","base/tenancy","base/ui"],
+    migrations: &[], services: &[bilibi_module_registry::Service { id: PAGE, factory: |services| {
+        Ok(Arc::new(PageService::<Scope, Error>(Arc::new(DashboardPage::new(
+            services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
+            services.get(ARRANGEMENTS)?,
+            Arc::new(PageWriter(services.get(bilibi_agent_api::page::SERVICE)?)),
+        )))))
+    }}],
 } }
 inventory::submit! { bilibi_module_registry::Ready {
     module: ID,
     check: |services| ARRANGEMENT.set(services.get(ARRANGEMENTS)?)
         .map_err(|_| RegistryError::Contribution("dashboard operations already bound".into())),
 } }
+inventory::submit! { Contribution::new(bilibi_module_registry::contributions::ROUTES, "dashboard.index", provenance!(),
+    &bilibi_module_registry::contributions::Route {
+        company_scope: bilibi_module_registry::contributions::CompanyScope::Company,
+        method: bilibi_module_registry::contributions::Method::Get, path: "/dashboard",
+        service: PAGE, operation: "index", access: bilibi_module_registry::contributions::Access::SignedIn, framed: true,
+    })
+}
+inventory::submit! { Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, PAGE, provenance!(),
+    &bilibi_module_registry::contributions::PageWrites {
+        service: PAGE,
+        contracts: &[("add_widget", SET), ("remove_widget", SET), ("move_up", SET), ("move_down", SET),
+            ("reorder_widgets", SET), ("add_section", SET), ("remove_section", SET),
+            ("move_section_up", SET), ("move_section_down", SET)],
+        pending: bilibi_module_registry::contributions::Pending::None,
+    })
+}
+
+struct PageWriter(Arc<bilibi_agent_api::page::PageContracts>);
+impl ArrangementWriter for PageWriter {
+    fn set<'a>(
+        &'a self,
+        request: &'a LiveRequest<'_, Scope>,
+        event: &'a str,
+        input: Value,
+    ) -> ArrangementWrite<'a> {
+        Box::pin(async move {
+            let call = bilibi_agent_api::page::Call {
+                scope: request.scope,
+                credential: request.credential,
+                service: PAGE,
+                event,
+                contract: SET,
+            };
+            self.0
+                .submit(&call, input)
+                .await
+                .map(|_| ())
+                .map_err(|error| match error {
+                    bilibi_agent_api::Error::Backend(error) => error,
+                    bilibi_agent_api::Error::Forbidden => Error::Forbidden,
+                    bilibi_agent_api::Error::InvalidInput(_) => Error::Invalid,
+                    _ => Error::Internal,
+                })
+        })
+    }
+}
+
 struct Read;
 impl ReadHandler for Read {
     fn owner(&self) -> &'static str {
@@ -191,14 +248,11 @@ fn rows(reply: &Value) -> Vec<bilibi_labels::CustomisationRow> {
             .iter()
             .filter_map(|item| item["label"].as_str())
             .collect::<Vec<_>>();
-        let mut description = if labels.is_empty() {
+        let description = if labels.is_empty() {
             format!("{label} · None shown")
         } else {
             format!("{label} · {}", labels.join(", "))
         };
-        if let Some(count) = region["hidden_count"].as_u64().filter(|count| *count > 0) {
-            description.push_str(&format!(" · {count} hidden"));
-        }
         Some(bilibi_labels::CustomisationRow {
             description,
             audit_kind: "user_dashboard",

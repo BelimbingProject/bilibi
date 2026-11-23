@@ -15,6 +15,7 @@ mod arrangement;
 mod web;
 
 pub use arrangement::{Arrangements, ARRANGEMENTS};
+pub use web::{ArrangementWrite, ArrangementWriter, DashboardPage};
 
 use bilibi_database::Error;
 use bilibi_module_registry::{
@@ -504,18 +505,6 @@ inventory::submit! {
             bilibi_module_registry::Service { id: ARRANGEMENTS, factory: |services| {
                 Ok(Arc::new(Arrangements::new(services.get("base/dashboard.catalog")?, services.get("base/settings.store")?)))
             }},
-            bilibi_module_registry::Service { id: "base/dashboard.pages", factory: |services| {
-                Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(web::Pages::new(
-                    services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
-                    services.get(ARRANGEMENTS)?,
-                    services.get("base/database.mutations")?,
-                )))))
-            }},
         ],
     }
 }
-inventory::submit! { Contribution::new(bilibi_module_registry::contributions::ROUTES, "dashboard.index",
-Provenance { module: "base/dashboard", source: file!(), line: line!() },
-&bilibi_module_registry::contributions::Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Company, method: bilibi_module_registry::contributions::Method::Get, path: "/dashboard", service: "base/dashboard.pages", operation: "index", access: bilibi_module_registry::contributions::Access::SignedIn, framed: true }) }
-// No menu item: the top bar's wordmark (`app-brand`) and
-// sign-in reach the dashboard, and the sidebar holds no `nav-dashboard`.

@@ -283,14 +283,25 @@ pub async fn list_pins(client: &impl GenericClient, scope: &Scope) -> Result<Vec
 /// gone stays stored but is not drawn.
 pub fn pin_route_is_served(routes: &[&str], url: &str) -> bool {
     let path = url.split('?').next().unwrap_or("");
-    let actual: Vec<_> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let actual: Vec<_> = path.split('/').collect();
+    if path != "/"
+        && actual.iter().skip(1).any(|segment| {
+            segment.is_empty()
+                || matches!(
+                    segment.to_ascii_lowercase().as_str(),
+                    "." | ".." | "%2e" | ".%2e" | "%2e." | "%2e%2e"
+                )
+        })
+    {
+        return false;
+    }
     routes.iter().any(|route| {
-        let pattern: Vec<_> = route.split('/').filter(|s| !s.is_empty()).collect();
+        let pattern: Vec<_> = route.split('/').collect();
         pattern.len() == actual.len()
             && pattern
                 .iter()
                 .zip(&actual)
-                .all(|(p, a)| p.starts_with('{') || p == a)
+                .all(|(p, a)| (p.starts_with('{') && !a.is_empty()) || p == a)
     })
 }
 

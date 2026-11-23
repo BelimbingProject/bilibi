@@ -196,9 +196,16 @@ async fn main() -> Result<()> {
     assert_eq!(managed["layouts"], json!([]));
     let tree = "h.5(/companies,/system/sessions)";
     let publish = json!([{"key":"base.tiling.publish","input":{
-        "company_id":company,"label":"Service desk","tree":tree,"roles":["viewer"],"version":""
+        "company_id":company,"label":"Service desk","slug":"service-desk","tree":tree,"roles":["viewer"],"version":""
     }}]);
     assert_eq!(connector.plan(&publish).await?["valid"], true);
+    let mut wrong_slug = publish.clone();
+    wrong_slug[0]["input"]["slug"] = json!("service-desk-2");
+    assert_eq!(connector.plan(&wrong_slug).await?["valid"], false);
+    let mut unserved_tile = publish.clone();
+    unserved_tile[0]["input"]["tree"] = json!("h.5(/companies,/workspace-route-typo)");
+    assert_eq!(connector.plan(&unserved_tile).await?["valid"], false);
+
     assert_eq!(
         connector.read("base.tiling.manage").await?["layouts"],
         json!([])
@@ -237,7 +244,7 @@ async fn main() -> Result<()> {
     assert!(page.html.contains("open /system/sessions"));
     assert!(!page.html.contains("src=\"/system/sessions\""));
     let unknown = json!([{"key":"base.tiling.publish","input":{
-        "company_id":company,"label":"Unknown audience","tree":tree,"roles":["not_a_role"],"version":""
+        "company_id":company,"label":"Unknown audience","slug":"unknown-audience","tree":tree,"roles":["not_a_role"],"version":""
     }}]);
     assert_eq!(connector.plan(&unknown).await?["valid"], false);
 

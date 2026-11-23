@@ -4,6 +4,7 @@
 //! tile still checks the viewer's own access to its page.
 use crate::layout::Layout;
 use bilibi_database::{Error, Result};
+use bilibi_module_registry::contributions::{Method, Route};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_settings::{
     Definition, ScopeKind, Setting, Settings, Target, Validator, ValueType, DEFINITIONS,
@@ -80,11 +81,49 @@ pub struct RoleOption {
 
 pub struct Layouts {
     pub(crate) settings: Arc<Settings>,
+    pub(crate) routes: Vec<(&'static str, &'static Route)>,
 }
 
 impl Layouts {
-    pub fn new(settings: Arc<Settings>) -> Self {
-        Self { settings }
+    pub fn new(settings: Arc<Settings>, routes: Vec<(&'static str, &'static Route)>) -> Self {
+        Self { settings, routes }
+    }
+
+    /// The discovered GET page serving `path`, literal segments before
+    /// parameters, as Web resolves it.
+    pub(crate) fn route(&self, path: &str) -> Option<&'static Route> {
+        let path = path.split(['?', '#']).next().unwrap_or_default();
+        let segments: Vec<_> = path.split('/').collect();
+        self.routes
+            .iter()
+            .map(|(_, route)| *route)
+            .filter(|route| route.method == Method::Get && !route.access.portal())
+            .filter_map(|route| {
+                let pattern: Vec<_> = route.path.split('/').collect();
+                if pattern.len() != segments.len() {
+                    return None;
+                }
+                let mut literal = 0;
+                for (pattern, value) in pattern.iter().zip(&segments) {
+                    if pattern.starts_with('{') {
+                        if value.is_empty()
+                            || matches!(
+                                value.to_ascii_lowercase().as_str(),
+                                "." | ".." | "%2e" | ".%2e" | "%2e." | "%2e%2e"
+                            )
+                        {
+                            return None;
+                        }
+                    } else if pattern == value {
+                        literal += 1;
+                    } else {
+                        return None;
+                    }
+                }
+                Some((literal, route))
+            })
+            .max_by_key(|(literal, _)| *literal)
+            .map(|(_, route)| route)
     }
 
     // ---- The company's shared layouts ---------------------------------
@@ -177,7 +216,7 @@ fn entries(value: &Value) -> Vec<Entry> {
 }
 
 /// The URL slug for a label: lower-case words joined by hyphens.
-pub fn slug(label: &str) -> String {
+fn slug(label: &str) -> String {
     let mut slug = String::new();
     for character in label.chars().flat_map(char::to_lowercase) {
         if character.is_ascii_alphanumeric() {
@@ -194,9 +233,16 @@ pub fn slug(label: &str) -> String {
     }
 }
 
+pub(crate) fn publish_slug(label: &str, current: Option<&Entry>, entries: &[Entry]) -> String {
+    current.map_or_else(
+        || unique_slug(&slug(label), entries),
+        |entry| entry.slug.clone(),
+    )
+}
+
 /// The first of `base`, `base-2`, `base-3`, ... that no entry and no workspace
 /// route uses.
-pub fn unique_slug(base: &str, entries: &[Entry]) -> String {
+fn unique_slug(base: &str, entries: &[Entry]) -> String {
     let taken = |candidate: &str| {
         RESERVED_SLUGS.contains(&candidate) || entries.iter().any(|entry| entry.slug == candidate)
     };

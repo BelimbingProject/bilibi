@@ -901,6 +901,7 @@ dependencies = [
  "bilibi-labels",
  "bilibi-module-registry",
  "bilibi-tenancy",
+ "bilibi-ui",
  "inventory",
  "serde_json",
 ]

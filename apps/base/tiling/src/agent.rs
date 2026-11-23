@@ -69,7 +69,7 @@ impl ReadHandler for Read {
         &'a self,
         client: &'a dyn OperationClient,
         scope: &'a Scope,
-        _: &'a Value,
+        input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let client = client.sql_client().await?;
@@ -88,6 +88,15 @@ impl ReadHandler for Read {
                     layouts.shared(client, scope).await?
                 }
             };
+            if let (Self::Manage, Some(label)) = (self, input["label"].as_str()) {
+                let label = layouts::clean_label(label)
+                    .ok_or_else(|| invalid("label", "enter a layout name of up to 60 bytes"))?;
+                let current = entries.iter().find(|entry| entry.label == label);
+                reply["proposal"] = json!({
+                    "slug":layouts::publish_slug(&label, current, &entries),
+                    "version":version(current),
+                });
+            }
             reply["layouts"] = json!(entries.iter().map(presented).collect::<Vec<_>>());
             Ok(reply.into())
         })
@@ -127,6 +136,17 @@ impl Write {
                             "provide at least one page in a valid workspace tree",
                         )
                     })?;
+                let layout = crate::layout::Layout::decode(&tree).ok_or(Error::Internal)?;
+                if layout
+                    .leaves()
+                    .iter()
+                    .any(|leaf| !layouts.route(&leaf.path).is_some_and(|route| route.framed))
+                {
+                    return Err(invalid(
+                        "tree",
+                        "each tile must open an installed page that supports tiles",
+                    ));
+                }
                 let mut roles: Vec<String> =
                     serde_json::from_value(input["roles"].clone()).map_err(|_| Error::Invalid)?;
                 let known = layouts::role_options(client, scope).await?;
@@ -142,10 +162,10 @@ impl Write {
                 let slot = entries.iter().position(|entry| entry.label == label);
                 let current = slot.map(|index| &entries[index]);
                 check_version(input, current)?;
-                let slug = current.map_or_else(
-                    || layouts::unique_slug(&layouts::slug(&label), &entries),
-                    |entry| entry.slug.clone(),
-                );
+                let slug = layouts::publish_slug(&label, current, &entries);
+                if input["slug"].as_str() != Some(slug.as_str()) {
+                    return Err(Error::Conflict.into());
+                }
                 let next = Entry {
                     slug,
                     label,
@@ -245,10 +265,16 @@ fn empty() -> Value {
 fn empty_schema() -> Value {
     json!({"type":"object","properties":{}})
 }
+fn manage_schema() -> Value {
+    json!({"type":"object","properties":{
+        "label":{"type":"string","maxLength":60,"description":"Optional label to get its proposed slug and version."}
+    }})
+}
 fn publish_schema() -> Value {
-    json!({"type":"object","required":["company_id","label","tree","roles","version"],"properties":{
+    json!({"type":"object","required":["company_id","label","slug","tree","roles","version"],"properties":{
         "company_id":{"type":"integer","minimum":1,"description":"Current workplace ID from manage."},
         "label":{"type":"string","maxLength":60},
+        "slug":{"type":"string","maxLength":90,"description":"Proposed slug from manage for this label."},
         "tree":{"type":"string","maxLength":2048,"description":"Workspace tree, for example h.5(/companies,/users) for side-by-side tiles."},
         "roles":{"type":"array","items":{"type":"string","maxLength":100},"description":"Audience role codes from manage. Empty means the company."},
         "version":{"type":"string","maxLength":64,"description":"Matching layout version from manage, or an empty string to publish a new label."}
@@ -268,11 +294,11 @@ fn output() -> Value {
 inventory::submit! { Contribution::new(DEFINITIONS, "base/tiling.agent", provenance!(), &Definitions {
     operations: &[
         Operation { key:READ, title:"Read shared workspaces", summary:"Read the workspaces published for your workplace and roles.", keywords:&["tiles","workspace","layout"], capability:SIGNED_IN, input:empty_schema, output, handler:Handler::Read(&Read::Visible), channels:Channels::Every, step_up:&[] },
-        Operation { key:MANAGE, title:"List shared layouts and role audiences", summary:"Publishers can read all shared workspaces and role codes for the current workplace.", keywords:&["tiles","workspace","layout","role"], capability:SIGNED_IN, input:empty_schema, output, handler:Handler::Read(&Read::Manage), channels:Channels::Every, step_up:&[] },
+        Operation { key:MANAGE, title:"List shared layouts and role audiences", summary:"Publishers can read all shared workspaces and role codes for the current workplace.", keywords:&["tiles","workspace","layout","role"], capability:SIGNED_IN, input:manage_schema, output, handler:Handler::Read(&Read::Manage), channels:Channels::Every, step_up:&[] },
         Operation { key:PUBLISH, title:"Publish a shared workspace", summary:"Publish a tile layout for the current company or selected roles.", keywords:&["tiles","workspace","layout","publish"], capability:layouts::PUBLISH, input:publish_schema, output, handler:Handler::SafeWrite(&Write::Publish), channels:Channels::Every, step_up:&[] },
         Operation { key:WITHDRAW, title:"Withdraw a shared workspace", summary:"Remove one published layout from the current company.", keywords:&["tiles","workspace","layout","withdraw"], capability:layouts::PUBLISH, input:withdraw_schema, output, handler:Handler::SafeWrite(&Write::Withdraw), channels:Channels::Every, step_up:&[] },
     ],
-    guides: &[Guide { key:GUIDE, title:"Shared tile layouts", summary:"Publish a workspace of existing pages side by side for a company or role.", keywords:&["workspace","tile","side-by-side","role","service desk"], capability:layouts::PUBLISH, body:"Use base.tiling.manage to find the current company, layouts and audience role codes. For side-by-side tiles use h.5(/companies,/users); v.5 places tiles top and bottom. Splits can nest, for example h.5(/companies,v.6(/employees,/users)). Use paths from the site's pages. Percent-encode reserved tree markers ( ) , > and % inside paths. Publish with the company ID, label, tree, audience role codes and version. An empty role list means the whole company. Pass the saved version to replace the same label, or an empty version for a new label. Use base.tiling.read for the viewer's layout links. Each tile checks page access when opened. Withdraw by company ID, slug and version. Review the exact proposal before saving." }],
+    guides: &[Guide { key:GUIDE, title:"Shared tile layouts", summary:"Publish a workspace of existing pages side by side for a company or role.", keywords:&["workspace","tile","side-by-side","role","service desk"], capability:layouts::PUBLISH, body:"Use base.tiling.manage to find the current company, layouts and audience role codes. For side-by-side tiles use h.5(/companies,/users); v.5 places tiles top and bottom. Splits can nest, for example h.5(/companies,v.6(/employees,/users)). Use paths from the site's pages. Percent-encode reserved tree markers ( ) , > and % inside paths. Pass the label to base.tiling.manage for its proposed slug and version. Publish with the company ID, label, proposed slug, tree, audience role codes and version. An empty role list means the whole company. Pass the saved version to replace the same label, or an empty version for a new label. Use base.tiling.read for the viewer's layout links. Each tile checks page access when opened. Withdraw by company ID, slug and version. Review the exact proposal before saving." }],
 }) }
 
 fn rows(value: &Value) -> Vec<bilibi_labels::CustomisationRow> {
@@ -325,7 +351,7 @@ fn choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
                     default: Some(Value::Null),
                     customised: true,
                     version: Some(layout["version"].clone()),
-                    input: json!({"company_id":company_id,"label":label}),
+                    input: json!({"company_id":company_id,"label":label,"slug":slug}),
                     verify_input: empty(),
                     limits: json!({"roles":managed["roles"]}),
                     ..Default::default()

@@ -11,7 +11,7 @@
 use crate::arrangement::{Arrangement, Arrangements, MAX_PANELS};
 use crate::{Item, PanelArgs, LAYOUT, SECTIONS};
 use askama::Template;
-use bilibi_database::{Db, Error, MutationBoundary, Result};
+use bilibi_database::{Db, Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
     page::{
@@ -21,20 +21,37 @@ use bilibi_ui::{
     Button, ButtonVariant, FlashMap, Html, StatusKind, NO_FLASH,
 };
 use serde::Deserialize;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 struct Core {
     db: Db,
     arrangements: Arc<Arrangements>,
-    boundary: Arc<MutationBoundary>,
+    writer: Arc<dyn ArrangementWriter>,
 }
-pub struct Pages(Arc<Core>);
-impl Pages {
-    pub fn new(db: Db, arrangements: Arc<Arrangements>, boundary: Arc<MutationBoundary>) -> Self {
+pub type ArrangementWrite<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
+
+pub trait ArrangementWriter: Send + Sync {
+    fn set<'a>(
+        &'a self,
+        request: &'a LiveRequest<'_, Scope>,
+        event: &'a str,
+        input: Value,
+    ) -> ArrangementWrite<'a>;
+}
+
+pub struct DashboardPage(Arc<Core>);
+impl DashboardPage {
+    pub fn new(
+        db: Db,
+        arrangements: Arc<Arrangements>,
+        writer: Arc<dyn ArrangementWriter>,
+    ) -> Self {
         Self(Arc::new(Core {
             db,
             arrangements,
-            boundary,
+            writer,
         }))
     }
 }
@@ -49,31 +66,26 @@ impl Core {
 
     async fn persist(
         &self,
-        scope: &Scope,
-        key: &str,
-        before: &[Item],
+        request: &LiveRequest<'_, Scope>,
+        region: (&str, &str),
         entries: &[Item],
     ) -> Result<()> {
-        let mut client = self.db.get().await?;
-        let mut tx = self
-            .boundary
-            .begin_view_state(&mut client, scope.mutation_context("dashboard.arrangement"))
-            .await?;
-        let before = before
-            .iter()
-            .map(|item| item.id.clone())
-            .collect::<Vec<_>>();
-        let next = entries
-            .iter()
-            .map(|item| item.id.clone())
-            .collect::<Vec<_>>();
-        self.arrangements
-            .apply_page(&mut tx, scope, key, &before, &next)
-            .await?;
-        tx.commit().await
+        let LiveInput::Event(value) = request.input else {
+            return Err(Error::Internal);
+        };
+        let event = value["type"].as_str().ok_or(Error::Invalid)?;
+        let (region, version) = region;
+        let region = if region == LAYOUT { "grid" } else { "sections" };
+        let ids: Vec<_> = entries.iter().map(|item| &item.id).collect();
+        self.writer
+            .set(
+                request,
+                event,
+                json!({"region":region,"version":version,"entry_ids":ids}),
+            )
+            .await
     }
 }
-
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Event {
@@ -131,10 +143,14 @@ impl Dash {
     }
     async fn event(
         &mut self,
-        scope: &Scope,
+        request: &LiveRequest<'_, Scope>,
         arrangement: &mut Arrangement,
         event: Event,
     ) -> Result<()> {
+        let grid_version = arrangement.version(request.scope, LAYOUT);
+        let section_version = arrangement.version(request.scope, SECTIONS);
+        let grid = (LAYOUT, grid_version.as_str());
+        let sections = (SECTIONS, section_version.as_str());
         match event {
             Event::ToggleLayoutEdit => self.editing = !self.editing,
             Event::ClearFlash { key } => {
@@ -154,8 +170,8 @@ impl Dash {
             }
             Event::AddWidget { id } => {
                 self.add(
-                    scope,
-                    LAYOUT,
+                    request,
+                    grid,
                     &mut arrangement.grid,
                     &arrangement.spare_grid,
                     &id,
@@ -164,8 +180,8 @@ impl Dash {
             }
             Event::AddSection { id } => {
                 self.add(
-                    scope,
-                    SECTIONS,
+                    request,
+                    sections,
                     &mut arrangement.sections,
                     &arrangement.spare_sections,
                     &id,
@@ -174,8 +190,8 @@ impl Dash {
             }
             Event::RemoveWidget { id } => {
                 self.remove(
-                    scope,
-                    LAYOUT,
+                    request,
+                    grid,
                     &mut arrangement.grid,
                     &id,
                     Some("Widget removed."),
@@ -183,23 +199,23 @@ impl Dash {
                 .await?
             }
             Event::RemoveSection { id } => {
-                self.remove(scope, SECTIONS, &mut arrangement.sections, &id, None)
+                self.remove(request, sections, &mut arrangement.sections, &id, None)
                     .await?
             }
             Event::MoveUp { id } => {
-                self.step(scope, LAYOUT, &mut arrangement.grid, &id, -1)
+                self.step(request, grid, &mut arrangement.grid, &id, -1)
                     .await?
             }
             Event::MoveDown { id } => {
-                self.step(scope, LAYOUT, &mut arrangement.grid, &id, 1)
+                self.step(request, grid, &mut arrangement.grid, &id, 1)
                     .await?
             }
             Event::MoveSectionUp { id } => {
-                self.step(scope, SECTIONS, &mut arrangement.sections, &id, -1)
+                self.step(request, sections, &mut arrangement.sections, &id, -1)
                     .await?
             }
             Event::MoveSectionDown { id } => {
-                self.step(scope, SECTIONS, &mut arrangement.sections, &id, 1)
+                self.step(request, sections, &mut arrangement.sections, &id, 1)
                     .await?
             }
             Event::ReorderWidgets { ids } => {
@@ -220,9 +236,7 @@ impl Dash {
                         .map(|w| &w.id)
                         .ne(current.iter().map(|w| &w.id))
                     {
-                        self.core
-                            .persist(scope, LAYOUT, current, &reordered)
-                            .await?;
+                        self.core.persist(request, grid, &reordered).await?;
                         arrangement.grid = reordered;
                     }
                 }
@@ -232,8 +246,8 @@ impl Dash {
     }
     async fn add(
         &mut self,
-        scope: &Scope,
-        key: &str,
+        request: &LiveRequest<'_, Scope>,
+        region: (&str, &str),
         placed: &mut Vec<Item>,
         spare: &[Item],
         id: &str,
@@ -244,7 +258,7 @@ impl Dash {
         };
         let mut next = placed.clone();
         next.push(widget.clone());
-        self.core.persist(scope, key, placed, &next).await?;
+        self.core.persist(request, region, &next).await?;
         *placed = next;
         self.flash = Some((
             StatusKind::Success,
@@ -254,8 +268,8 @@ impl Dash {
     }
     async fn remove(
         &mut self,
-        scope: &Scope,
-        key: &str,
+        request: &LiveRequest<'_, Scope>,
+        region: (&str, &str),
         placed: &mut Vec<Item>,
         id: &str,
         message: Option<&str>,
@@ -265,7 +279,7 @@ impl Dash {
         };
         let mut next = placed.clone();
         let widget = next.remove(at);
-        self.core.persist(scope, key, placed, &next).await?;
+        self.core.persist(request, region, &next).await?;
         *placed = next;
         self.flash = Some((
             StatusKind::Success,
@@ -278,8 +292,8 @@ impl Dash {
     }
     async fn step(
         &mut self,
-        scope: &Scope,
-        key: &str,
+        request: &LiveRequest<'_, Scope>,
+        region: (&str, &str),
         placed: &mut Vec<Item>,
         id: &str,
         direction: isize,
@@ -295,7 +309,7 @@ impl Dash {
         };
         let mut next = placed.clone();
         next.swap(at, to);
-        self.core.persist(scope, key, placed, &next).await?;
+        self.core.persist(request, region, &next).await?;
         *placed = next;
         Ok(())
     }
@@ -414,7 +428,7 @@ fn render(
     .map_err(render_error)
 }
 
-impl Page<Scope, Error> for Pages {
+impl Page<Scope, Error> for DashboardPage {
     fn title(&self, operation: &str) -> Option<&'static str> {
         (operation == "index").then_some("Dashboard")
     }
@@ -456,7 +470,7 @@ impl LiveState<Scope, Error> for Dash {
                 LiveInput::Event(value) => {
                     let event: Event =
                         serde_json::from_value(value.clone()).map_err(|_| Error::Invalid)?;
-                    match self.event(scope, &mut arrangement, event).await {
+                    match self.event(&request, &mut arrangement, event).await {
                         Ok(()) => {}
                         Err(Error::Conflict) => {
                             self.flash = Some((StatusKind::Error, "The dashboard changed. Review the current arrangement and try again.".into()));

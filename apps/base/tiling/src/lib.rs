@@ -30,10 +30,10 @@ inventory::submit! {
                     .map(|entry| Ok((entry.provenance.module, entry.get::<Route>()?)))
                     .collect::<bilibi_module_registry::Result<Vec<_>>>()?;
                 let db = services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone();
-                let layouts = Arc::new(layouts::Layouts::new(services.get("base/settings.store")?));
+                let layouts = Arc::new(layouts::Layouts::new(services.get("base/settings.store")?, routes));
                 agent::bind(layouts.clone())?;
                 Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(web::Pages::new(
-                    db, Arc::new(menu), routes, layouts, services.get(bilibi_agent_api::page::SERVICE)?,
+                    db, Arc::new(menu), layouts, services.get(bilibi_agent_api::page::SERVICE)?,
                 )))))
             }},
         ],

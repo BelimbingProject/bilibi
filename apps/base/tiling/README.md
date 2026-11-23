@@ -51,7 +51,7 @@ The shared-workspaces control lists layouts published for the current workplace.
 
 ### Agent operations
 
-`base.tiling.read` lists the layouts visible to the caller in their current company. With `ui.workspace.publish`, `base.tiling.manage` lists all the layouts and the available role codes. Use `base.tiling.publish` with the company ID, label, audience role codes and a tree such as `h.5(/companies,/users)`. An empty role list means the whole company. Use an empty version for a new label or the current version to replace it. `base.tiling.withdraw` takes the company ID, slug and version. The Shared workspaces page and the **Withdraw workspace** action on Customisations use the same contracts.
+`base.tiling.read` lists the layouts visible to the caller in their current company. With `ui.workspace.publish`, `base.tiling.manage` lists all the layouts and the available role codes. Use `base.tiling.publish` with the company ID, label, audience role codes and a tree such as `h.5(/companies,/users)`. An empty role list means the whole company. Pass the label to `base.tiling.manage` and include its proposed slug and version in the publish input. A new label has an empty version. `base.tiling.withdraw` takes the company ID, slug and version. The Shared workspaces page and the **Withdraw workspace** action on Customisations use the same contracts.
 
 ## Keys
 

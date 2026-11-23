@@ -114,11 +114,15 @@ impl SharedPage {
                 self.roles = roles.clone();
                 let tree = if tree.is_empty() { &self.tree } else { &tree };
                 let name = layouts::clean_label(&label);
-                let version = agent::version(
-                    self.entries
-                        .iter()
-                        .find(|entry| Some(&entry.label) == name.as_ref()),
-                );
+                let current = self
+                    .entries
+                    .iter()
+                    .find(|entry| Some(&entry.label) == name.as_ref());
+                let version = agent::version(current);
+                let slug = name
+                    .as_deref()
+                    .map(|name| layouts::publish_slug(name, current, &self.entries))
+                    .unwrap_or_default();
                 let company = scope.current_company().ok_or(Error::Forbidden)?;
                 let call = Call {
                     scope,
@@ -127,7 +131,7 @@ impl SharedPage {
                     event: "publish_layout",
                     contract: agent::PUBLISH,
                 };
-                match core.contracts.submit(&call, json!({"company_id":company.get(),"label":label,"tree":tree,"roles":roles,"version":version})).await {
+                match core.contracts.submit(&call, json!({"company_id":company.get(),"label":label,"slug":slug,"tree":tree,"roles":roles,"version":version})).await {
                     Ok(_) => {
                         self.reload(core, scope).await?;
                         self.flash(StatusKind::Success, "Shared the workspace.");

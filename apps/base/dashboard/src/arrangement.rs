@@ -221,7 +221,7 @@ impl Arrangement {
         }
     }
 
-    fn version(&self, scope: &Scope, key: &str) -> String {
+    pub(crate) fn version(&self, scope: &Scope, key: &str) -> String {
         let ids = |items: &[Item]| items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
         let identity = json!([
             scope.tenant(),
@@ -245,14 +245,12 @@ impl Arrangement {
                 .map(|item| json!({"id":item.id,"label":item.label}))
                 .collect::<Vec<_>>()
         };
-        let held = self.placed(key);
         json!({
             "version":self.version(scope, key),
-            "placed":describe(held),
+            "placed":describe(self.placed(key)),
             "available":describe(self.spare(key)),
             "default":describe(&self.defaults[key]),
-            "customised":self.stored[key].is_some(),
-            "hidden_count":self.stored[key].as_ref().map_or(0, |ids| ids.len() - held.len()),
+            "customised":self.stored[key].is_some()
         })
     }
 
@@ -382,25 +380,6 @@ impl Arrangements {
             .await?;
         self.save(tx, scope, key, planned).await?;
         Ok(review)
-    }
-
-    pub(crate) async fn apply_page(
-        &self,
-        tx: &mut MutationTransaction<'_>,
-        scope: &Scope,
-        key: &str,
-        before: &[String],
-        next: &[String],
-    ) -> Result<()> {
-        Self::lock(tx, scope).await?;
-        let current = self
-            .arrangement(tx.sql().client(), scope, false, next)
-            .await?;
-        if current.placed(key).iter().map(|item| &item.id).ne(before) {
-            return Err(Error::Conflict);
-        }
-        let planned = current.plan(key, Some(next))?;
-        self.save(tx, scope, key, planned).await
     }
 
     async fn lock(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<()> {
