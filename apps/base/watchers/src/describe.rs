@@ -3,7 +3,7 @@ use crate::definition::{self, Definition};
 use crate::review::is_linked_custom;
 use crate::store::Watchers;
 use bilibi_grid::Catalog;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// A stored version in words, for reading: conditions with their fields'
 /// labels, actions with their titles and parameters, examples. Direct linked
