@@ -332,12 +332,12 @@ fn landing_rows(reply: &Value) -> Vec<bilibi_labels::CustomisationRow> {
 
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "core/user.pins_customisations", provenance!(), &bilibi_labels::CustomisationSection {
     title:"My pins",
-    undo:Some(bilibi_labels::Undo { read:PINS_READ, read_input:empty, operation:PINS_RESTORE, event:PINS_UNDO, action:"Remove pin", detail:"This removes the shortcut from your sidebar.", rows:pin_rows }),
+    undo: Some(bilibi_labels::Undo { read: PINS_READ, read_input: empty, action: Some(bilibi_labels::UndoAction { operation: PINS_RESTORE, event: PINS_UNDO, label: "Remove pin", detail: "This removes the shortcut from your sidebar." }), rows: pin_rows }),
     changes:None,
 }) }
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "core/user.landing_customisations", provenance!(), &bilibi_labels::CustomisationSection {
     title:"My landing page",
-    undo:Some(bilibi_labels::Undo { read:LANDING_READ, read_input:empty, operation:LANDING_RESTORE, event:LANDING_UNDO, action:"Restore default", detail:"The workspace will open after sign-in.", rows:landing_rows }),
+    undo: Some(bilibi_labels::Undo { read: LANDING_READ, read_input: empty, action: Some(bilibi_labels::UndoAction { operation: LANDING_RESTORE, event: LANDING_UNDO, label: "Restore default", detail: "The workspace will open after sign-in." }), rows: landing_rows }),
     changes:None,
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "core.user.pins_customisations_restore", provenance!(), &bilibi_agent_api::page::PageBinding {

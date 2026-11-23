@@ -363,7 +363,7 @@ fn choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
 
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/tiling.customisations", provenance!(), &bilibi_labels::CustomisationSection {
     title:"Shared workspaces",
-    undo:Some(bilibi_labels::Undo { read:MANAGE, read_input:empty, operation:WITHDRAW, event:UNDO, action:"Withdraw workspace", detail:"This removes the workspace from the people it was shared with.", rows }),
+    undo: Some(bilibi_labels::Undo { read: MANAGE, read_input: empty, action: Some(bilibi_labels::UndoAction { operation: WITHDRAW, event: UNDO, label: "Withdraw workspace", detail: "This removes the workspace from the people it was shared with." }), rows }),
     changes:Some(bilibi_labels::Changes {
         purpose:"Publish and withdraw shared tile layouts for the current company.",
         limits:"Use existing page paths and role codes from the current company. Each tile keeps its own access checks.",
