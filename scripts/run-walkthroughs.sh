@@ -118,7 +118,7 @@ WALKTHROUGHS=(
   'base|settings|apps/base/settings|settings-walkthrough|operator|BILIBI_DISPOSABLE_SETTINGS_DEMO=yes|-;inspect'
   'base|workflow-owner|apps/base/workflow|owner|migrate|BILIBI_DISPOSABLE_WORKFLOW_DEMO=yes|init;available 4 1;approve 4 1;history 4 1;proof-delivery 4 2;proof-maintenance 4;approval-init 4;proof-bell 4'
 
-  'privacy|privacy-requests|apps/base/privacy|requests-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
+  'privacy|privacy-requests|apps/base/privacy|requests-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium PUBLIC_ORIGIN=https://privacy-public.localhost PUBLIC_TENANT_ID=1|seed;-'
   'privacy|privacy-job-read|apps/base/privacy|requests-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy|seed;job-read'
   'privacy|privacy-failures|apps/base/privacy|failures-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-job-ends|apps/base/privacy|job-ends-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
@@ -240,6 +240,7 @@ WALKTHROUGHS=(
   'web|two-doors|apps/cli|two-doors-walkthrough|migrate|BILIBI_TWO_DOORS_DEMO=disposable|-'
   'web|tenant-settings|apps/web|tenant-settings-walkthrough|migrate|BILIBI_TENANT_SETTINGS_DEMO=disposable|-'
   'web|sign-in-throttle|apps/web|sign-in-throttle-walkthrough|migrate|BILIBI_DISPOSABLE_THROTTLE_DEMO=yes|-'
+  'web|site-boundary|apps/web|site-boundary-walkthrough|migrate||-'
   'web|session-place|apps/web|session-place-walkthrough|none|BILIBI_SESSION_PLACE_WALKTHROUGH=disposable BILIBI_SESSION_PLACE_ROOT=@/place|-'
 
   # Each mounts a container from fixtures/containers, rebuilds, runs and unmounts.

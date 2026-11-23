@@ -205,7 +205,7 @@ async fn main() -> Outcome {
     let admin = app.security.guard(&admin_login.token).await?;
     let viewer = app.security.guard(&viewer_login.token).await?;
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    let router = bilibi_web::router(app.clone());
+    let router = bilibi_web::staff_router(app.clone());
     tokio::spawn(async move {
         let _ = axum::serve(
             listener,

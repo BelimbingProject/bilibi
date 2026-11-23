@@ -6,7 +6,7 @@
 //! revokes any. Every write calls the operation contract agents use
 //! (`core.activity.create_feed_key`, `.revoke_feed_key`).
 use super::{event, refusal, render, sentences, BrowserZone, Clock, Pages, Refusal};
-use crate::{FeedKeyPage, FeedKeyQuery, FeedKeySort, FEED_PATH};
+use crate::{FeedKeyPage, FeedKeyQuery, FeedKeySort};
 use askama::Template;
 use bilibi_agent_api::Error as ContractError;
 use bilibi_database::{Error, Result};
@@ -113,14 +113,6 @@ impl Feed {
         })
     }
 
-    fn url(key: &str) -> String {
-        let origin = std::env::var("APP_ORIGIN")
-            .unwrap_or_else(|_| "http://localhost:3000".into())
-            .trim_end_matches('/')
-            .to_owned();
-        format!("{origin}{}", FEED_PATH.replace("{token}", key))
-    }
-
     async fn write(
         &mut self,
         scope: &Scope,
@@ -182,8 +174,8 @@ impl Feed {
                     Ok(result) => {
                         self.confirm = None;
                         self.code_error = None;
-                        if let Some(key) = result["result"]["key"].as_str() {
-                            self.link = Some(Self::url(key));
+                        if let Some(url) = result["result"]["url"].as_str() {
+                            self.link = Some(url.to_owned());
                         }
                         self.flash = Some((
                             StatusKind::Success,

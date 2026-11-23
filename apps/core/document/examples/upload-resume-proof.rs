@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
     std::fs::write(&hold, b"")?;
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     println!("Bilibi at {origin}");
-    let served = axum::serve(listener, bilibi_web::router(app)).await;
+    let served = axum::serve(listener, bilibi_web::staff_router(app)).await;
     let _ = stop.send(true);
     let _ = worker.await;
     Ok(served?)

@@ -137,7 +137,7 @@ async fn main() -> DbResult<()> {
             .map_err(internal)?;
         println!("Bilibi (with the fixture ticket owner) at {origin}");
         let app = bilibi_web::App::new(db.clone(), &origin)?;
-        return axum::serve(listener, bilibi_web::router(app))
+        return axum::serve(listener, bilibi_web::staff_router(app))
             .await
             .map_err(internal);
     }

@@ -305,7 +305,7 @@ async fn serve(db: Db) -> Result<()> {
     );
     let served = axum::serve(
         listener,
-        bilibi_web::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        bilibi_web::staff_router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;

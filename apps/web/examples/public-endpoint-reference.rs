@@ -418,7 +418,7 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
         parsed.host_str().ok_or(Error::Invalid)?,
         parsed.port_or_known_default().ok_or(Error::Invalid)?
     );
-    let app = bilibi_web::App::new(db, &origin)?;
+    let app = bilibi_web::App::new(db, &origin)?.at_public_site(&origin, 1);
     let listener = tokio::net::TcpListener::bind(&address)
         .await
         .map_err(|_| Error::Internal)?;
@@ -426,7 +426,8 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
-            bilibi_web::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            bilibi_web::public_router(app)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .with_graceful_shutdown(async {
             let _ = stopped.await;
@@ -534,14 +535,15 @@ async fn main() -> Result<std::process::ExitCode> {
     let db = bilibi_database::pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     let origin = std::env::var("APP_ORIGIN").map_err(|_| Error::Invalid)?;
     let bind = std::env::var("BIND_ADDR").map_err(|_| Error::Invalid)?;
-    let app = bilibi_web::App::new(db, &origin)?;
+    let app = bilibi_web::App::new(db, &origin)?.at_public_site(&origin, 1);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|_| Error::Internal)?;
     println!("Public endpoint reference listening at {origin}");
     axum::serve(
         listener,
-        bilibi_web::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        bilibi_web::public_router(app)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;

@@ -539,6 +539,23 @@ impl UserService {
         email: &str,
     ) -> Result<(), CredentialError> {
         let email = normalize_email(email)?;
+        let public = if let Some(site) = site {
+            let Some(origin) = std::env::var("PUBLIC_ORIGIN")
+                .ok()
+                .filter(|origin| !origin.is_empty())
+                .filter(|_| {
+                    std::env::var("PUBLIC_TENANT_ID")
+                        .ok()
+                        .and_then(|id| id.parse().ok())
+                        == audience.tenant()
+                })
+            else {
+                return finish_reset_request().await;
+            };
+            Some((origin, site))
+        } else {
+            None
+        };
         let client = self.db.get().await.map_err(Error::from)?;
         // The account sign-in would choose (`identity::password_identity`):
         // last used, then the lowest live membership. Ambiguity (two
@@ -575,8 +592,12 @@ impl UserService {
         let Some(token) = mail.issue_token(tenant, user, &address, false).await? else {
             return finish_reset_request().await;
         };
-        let link = match site {
-            Some(site) => self.portal_reset_link(site, &address, &token),
+        let link = match public {
+            Some((origin, site)) => format!(
+                "{}/portal/reset/{site}/{token}?email={}",
+                origin.trim_end_matches('/'),
+                encode_component(&address)
+            ),
             None => self.reset_link(&address, &token),
         };
         let message = Message::text(
@@ -603,16 +624,6 @@ impl UserService {
     /// Where the emailed link points; the reset page reads both values.
     pub fn reset_link(&self, email: &str, token: &str) -> String {
         reset_link(&self.origin, email, token)
-    }
-
-    /// Where a portal's emailed link points: the host's reset page of the
-    /// portal at `site` (ADR 16).
-    pub(crate) fn portal_reset_link(&self, site: &str, email: &str, token: &str) -> String {
-        format!(
-            "{}/portal/reset/{site}/{token}?email={}",
-            self.origin,
-            encode_component(email)
-        )
     }
 
     /// Check a staff reset link before asking for a new password. Redemption

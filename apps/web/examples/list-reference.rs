@@ -400,7 +400,7 @@ async fn main() -> Result<()> {
     println!("List reference listening at {origin}");
     axum::serve(
         listener,
-        bilibi_web::router(bilibi_web::App::new(db, &origin)?),
+        bilibi_web::staff_router(bilibi_web::App::new(db, &origin)?),
     )
     .with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;

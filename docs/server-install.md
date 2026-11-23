@@ -7,7 +7,7 @@
 Publish your application's protected setup tag, then download its setup archive, installer and server-tools assets. Verify `bilibi-server-tools.tar.gz` with `gh attestation verify` before you extract or run its root-owned script. The runtime needs neither Cargo nor a Rust compiler; Production receives the tested programs and never builds them. On a fresh Ubuntu, Debian, Rocky Linux 10 or RHEL 10 server, run:
 
 ```sh
-sudo scripts/install-server.sh create production --role production --site erp.example.com
+sudo scripts/install-server.sh create production --role production --site app.example.com --public-site shop.example.com
 sudo scripts/install-server.sh release production /path/to/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
 ```
 
@@ -18,7 +18,7 @@ sudo scripts/install-server.sh create-owner production --email owner@example.com
 sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
 ```
 
-The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and the proxy site, and prints what to do next. The second copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The third sets the mail relay. The fourth creates the first account, the server owner, and emails the owner a claim link: the owner chooses a password there and sets up 2FA. The fifth starts the installer, the service that puts later releases into service when the owner asks on the Software page. Open `https://erp.example.com`, sign in with that email, and Caddy serves the app, with a certificate it fetched itself.
+The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and two proxy site blocks, and prints what to do next. The second copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The third sets the mail relay. The fourth creates the first account, the server owner, and emails the owner a claim link: the owner chooses a password there and sets up 2FA. The fifth starts the installer, the service that puts later releases into service when the owner asks on the Software page. Open `https://app.example.com`, sign in with that email, and Caddy serves the staff site, with a certificate it fetched itself. `https://shop.example.com` is the public site.
 
 Letting an AI assistant do the install? Give it [the Install Bilibi skill](install-with-ai/SKILL.md). Every command takes `--json` for one machine-readable line per step, with a stable error code and what to do next.
 
@@ -96,7 +96,23 @@ Each instance has its own PostgreSQL role and database (`bilibi_production`, `bi
 
 The offline waiting page identifies the instance folder and address; it does not cache a server role.
 
-Caddy has one site per instance in `/etc/caddy/sites/bilibi-<instance>.caddy`, imported by `/etc/caddy/Caddyfile`. The site proxies to the instance's local port and serves the waiting page while the backend is down.
+Caddy has one generated file per instance in `/etc/caddy/sites/bilibi-<instance>.caddy`, imported by `/etc/caddy/Caddyfile`. An instance with `--public-site` has two site blocks and two loopback upstreams in that file. Both serve the waiting page while their listener is down.
+
+## Keep the staff site private
+
+**The public hostname goes to the internet; the staff hostname goes to a private address or an identity-aware proxy.** Bilibi still checks the exact `Host` on both listeners, but a host check is not a network boundary.
+
+On a server with a VPN or private interface, give Caddy separate IP addresses for staff and public traffic. Replace the example addresses with IPs assigned to the server.
+
+```sh
+printf '%s\n' "$CLOUDFLARE_API_TOKEN" | sudo scripts/install-server.sh create production \
+  --role production --site app.example.com --public-site shop.example.com \
+  --staff-bind 10.20.0.5 --public-bind 203.0.113.10 --tls cloudflare --cloudflare-token-stdin
+```
+
+`--staff-bind` takes the server's private or VPN IP and binds Caddy’s staff block to that address. `--public-bind` binds the public block to a different interface. Point each hostname at its corresponding address. `--tls cloudflare` obtains certificates by DNS without making the staff address public; `--tls internal` is the alternative when every staff device trusts Caddy's local authority. If the machine has only one reachable address, an address allow-list on the staff block is a weaker last resort.
+
+For a tunnel running on the same server, use `--staff-bind 127.0.0.1 --public-bind 203.0.113.10` with the installation command above. Point the identity-aware tunnel at `https://127.0.0.1:443` and configure the staff hostname as both the HTTP Host and the TLS server name. Require the proxy’s identity check before staff sign-in. For a proxy running elsewhere, use a private staff IP and restrict ingress on that interface to the proxy. Send the public hostname directly to the public Caddy address. Staff invitation and password-reset links intentionally require that same private path. If a cloud identity provider or AI application must reach the staff machine edge, publish only the [machine paths](#a-firewall-identity-proxy-or-cdn-in-front-of-bilibi), with the provider or application authentication that fits that path; do not publish all staff pages.
 
 ## Which certificate should I use?
 
@@ -405,7 +421,7 @@ Script commands:
 
 | Command | What it does |
 | --- | --- |
-| `create <instance> --role dev\|staging\|production --site <host> [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy site. Rerun to change the site; the saved role is preserved and the port stays fixed. Change the role in Instance settings with 2FA |
+| `create <instance> --role dev\|staging\|production --site <staff-host> [--public-site <public-host> or --no-public-site] [--public-tenant <id>] [--staff-bind <address> or --no-staff-bind] [--public-bind <address>] [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy blocks. `--public-site` enables the public listener; `--staff-bind` keeps the staff Caddy block on one private interface. Rerun to change the sites. Omitted public-site and bind settings keep their saved values. Use `--no-public-site` to disable the public listener or `--no-staff-bind` to remove the explicit Caddy binds. Changes to listener configuration restart a running instance and check both active listeners. The saved role and staff port stay fixed |
 | `release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance and checksums, copy into `releases/<n>`, migrate, switch, check |
 | `mail <instance> --host <relay> --port <n> --username <user> --tls starttls\|implicit_tls --from-address <address> [--from-name <name>] --password-stdin` | [Outgoing mail](#outgoing-mail) relay in `env`; restarts a running service |
 | `create-owner <instance> --email <address> [--name <name>] [--company-name <name> [--company-code <code>] [--tenant-name <name>]]` | [Server owner setup](#the-first-account): creates the owner and emails the claim link; rerun to resend or check the claim |
@@ -426,8 +442,11 @@ Keys in `env` (the service's environment; `README.md` explains each):
 | Key | Set to |
 | --- | --- |
 | `BILIBI_ENV` | Initial role for the install seed: `development`, `staging` or `production`; later changes use Instance settings |
-| `APP_ORIGIN` | `https://<site>`, the exact address people browse |
-| `BIND_ADDR` | `127.0.0.1:<port>`, where Caddy forwards to; the first free port from 4300 unless you pass `--port` |
+| `APP_ORIGIN` | `https://<staff-site>`, the exact staff address |
+| `BIND_ADDR` | `127.0.0.1:<port>`, the staff listener where Caddy forwards |
+| `PUBLIC_ORIGIN` | `https://<public-site>`, present only when `--public-site` enables public routes |
+| `PUBLIC_BIND_ADDR` | The public listener’s separate loopback address |
+| `PUBLIC_TENANT_ID` | The one tenant served by the public listener. Set with `--public-tenant <id>`, defaulting to tenant 1 when enabling the public site |
 | `DATABASE_URL` | the instance's own database and role on the local cluster |
 | `BILIBI_SETTINGS_KEY`, `BILIBI_USER_SIGNING_KEY`, `BILIBI_MEDIA_SIGNING_KEY` | generated 64-hex-character keys; keep them, losing `BILIBI_SETTINGS_KEY` loses every secret setting and authenticator key |
 | `BILIBI_MAIL_DIR` | `data/mailbox`, used only by a Dev instance. A Staging or Production instance sends no mail until you add the `MAIL_*` relay variables ([Mail](../apps/base/mail/README.md#choosing-the-transport)); until then every send fails and System Info's Mail line says why |
@@ -455,7 +474,7 @@ The address must be the exact public origin people browse, without a path, query
 
 AI apps register themselves without an operator-maintained client list. Their return addresses must use HTTPS, except HTTP callbacks to the person's own loopback address. Each app supplies its own callback paths; loopback ports may vary. See [Agent](../apps/core/agent/README.md#client-registration) for matching and retention rules.
 
-## A firewall or CDN in front of Bilibi
+## A firewall, identity proxy or CDN in front of Bilibi
 
 AI apps are programs, not browsers. A browser check in front of Bilibi lets a person through and blocks the app, usually after its sign-in already worked.
 
@@ -466,13 +485,16 @@ AI apps are programs, not browsers. A browser check in front of Bilibi lets a pe
 | **Cause** | A rule that expects a browser: Cloudflare's Browser Integrity Check, Bot Fight Mode, or a managed or JavaScript challenge. |
 | **Fix** | Skip that check for the paths programs call, and only for them. |
 
-The paths programs call:
+The staff-site machine paths are:
 
 - `/mcp`
 - `/api/v1/` and everything under it
 - `/oauth/token`, `/oauth/device_authorization` and `/oauth/register`
 - `/.well-known/` and everything under it
-- `/scim/` and `/webhooks/`, when you use them
+- `/scim/v2/` and everything under it
+- `/login/sso/backchannel/` and everything under it
+
+The public-site machine paths are `/webhooks/` and `/visitor/v1/`, with everything under each. They do not belong in a staff-site bypass rule.
 
 The pages people open (`/oauth/device`, `/oauth/authorize`, sign-in) keep the browser check.
 

@@ -508,7 +508,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .await?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     println!("Page columns at {origin}/g4-page-columns");
-    axum::serve(listener, bilibi_web::router(app))
+    axum::serve(listener, bilibi_web::staff_router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
