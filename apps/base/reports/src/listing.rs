@@ -23,6 +23,7 @@ pub(crate) struct Listing {
 pub(crate) struct ListPage {
     pub reference_names: Vec<crate::ReferenceName>,
     pub total: i64,
+    pub totals: Vec<Value>,
     pub columns: Vec<Column>,
     pub rows: Vec<(Value, Vec<Value>)>,
 }
@@ -36,8 +37,9 @@ impl Listing {
         scope: &Scope,
         offset: usize,
         limit: usize,
+        measures: &[bilibi_grid::Measure],
     ) -> Outcome<ListPage> {
-        let (keys, projection) = bilibi_grid::report_page(
+        let (keys, projection, totals) = bilibi_grid::report_page(
             &reports.db,
             scope,
             &self.record_type,
@@ -50,6 +52,7 @@ impl Listing {
                 limit,
             },
             &self.specs,
+            measures,
         )
         .await
         .map_err(grid)?;
@@ -76,6 +79,7 @@ impl Listing {
         Ok(ListPage {
             reference_names,
             total: keys.total,
+            totals,
             columns: projection.columns,
             rows,
         })

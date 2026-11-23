@@ -352,7 +352,15 @@ pub(crate) async fn summarize_catalog(
     let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
     let mut binds = Binds::new(catalog, &spec.timezone);
     let mut hops = 0;
-    let predicate = filters(catalog, root, &spec.filters, today, &mut binds, &mut hops)?;
+    let predicate = filters(
+        catalog,
+        root,
+        &spec.filters,
+        today,
+        &mut binds,
+        &mut hops,
+        true,
+    )?;
 
     let mut groupings = Vec::with_capacity(spec.groupings.len());
     let mut selected = Vec::new();
@@ -442,10 +450,12 @@ pub(crate) async fn summarize_catalog(
     } else {
         selected.join(", ")
     };
-    let subjects = crate::subject::proofs(
+    let subjects = filtered_proofs(
         tx,
         catalog,
         root,
+        &spec.filters,
+        (today, &spec.timezone),
         spec.filters
             .iter()
             .map(|f| f.column.as_str())
@@ -549,7 +559,8 @@ pub async fn report_page<S: AsRef<str>>(
     root: &str,
     spec: &PageSpec,
     columns: &[S],
-) -> Result<(KeyPage, crate::Projection), QueryError> {
+    measures: &[Measure],
+) -> Result<(KeyPage, crate::Projection, Vec<Value>), QueryError> {
     spec.bounds.check()?;
     let mut client = db.get().await.map_err(Error::from)?;
     let tx = client
@@ -570,8 +581,26 @@ pub async fn report_page<S: AsRef<str>>(
         spec.bounds,
     )
     .await?;
+    let mut totals = Vec::with_capacity(measures.len());
+    for chunk in measures.chunks(MAX_MEASURES) {
+        let summary = summarize_catalog(
+            &tx,
+            &catalog,
+            root,
+            &SummarySpec {
+                bounds: spec.bounds,
+                filters: spec.filters.clone(),
+                groupings: Vec::new(),
+                measures: chunk.to_vec(),
+                timezone: spec.timezone.clone(),
+                max_groups: 1,
+            },
+        )
+        .await?;
+        totals.extend(summary.total.values);
+    }
     tx.commit().await?;
-    Ok((keys, projection))
+    Ok((keys, projection, totals))
 }
 
 pub(crate) async fn page_keys_catalog(
@@ -595,7 +624,15 @@ pub(crate) async fn page_keys_catalog(
     let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
     let mut binds = Binds::new(catalog, &spec.timezone);
     let mut hops = 0;
-    let predicate = filters(catalog, root, &spec.filters, today, &mut binds, &mut hops)?;
+    let predicate = filters(
+        catalog,
+        root,
+        &spec.filters,
+        today,
+        &mut binds,
+        &mut hops,
+        true,
+    )?;
     let mut order = Vec::new();
     for sort in &spec.sorts {
         let column = resolve(catalog, root, &sort.column, &mut hops)?;
@@ -612,10 +649,12 @@ pub(crate) async fn page_keys_catalog(
     order.push(format!("{key} ASC"));
     // Composed from its parts, never by replacing a marker: the owner's
     // source SQL may itself contain `{}` and is copied in untouched.
-    let subjects = crate::subject::proofs(
+    let subjects = filtered_proofs(
         tx,
         catalog,
         root,
+        &spec.filters,
+        (today, &spec.timezone),
         spec.filters
             .iter()
             .map(|f| f.column.as_str())
@@ -758,6 +797,7 @@ fn filters(
     today: Date,
     binds: &mut Binds,
     hops: &mut usize,
+    authorize: bool,
 ) -> Result<String, QueryError> {
     if filters.len() > MAX_FILTERS {
         return Err(QueryError::Limit("more than 16 filters"));
@@ -765,6 +805,9 @@ fn filters(
     let mut predicates = Vec::with_capacity(filters.len());
     for filter in filters {
         let column = resolve(catalog, root, &filter.column, hops)?;
+        if !authorize && column.depth != 0 {
+            continue;
+        }
         let value = cell(catalog, root, &column);
         let subject = column
             .field
@@ -773,12 +816,49 @@ fn filters(
     }
     // Whatever the question names, it reads only rows whose subject the
     // reader may read (#877).
-    predicates.extend(crate::subject::readable(root, "r"));
+    if authorize {
+        predicates.extend(crate::subject::readable(root, "r"));
+    }
     Ok(if predicates.is_empty() {
         "true".into()
     } else {
         predicates.join(" AND ")
     })
+}
+
+async fn filtered_proofs<'a>(
+    tx: &tokio_postgres::Transaction<'_>,
+    catalog: &Catalog,
+    root: &Table,
+    filter_specs: &[Filter],
+    (today, timezone): (Date, &str),
+    specs: impl IntoIterator<Item = &'a str>,
+    bounds: Bounds,
+) -> Result<Value, QueryError> {
+    if catalog.subject_scope.is_none() {
+        return Ok(Value::Null);
+    }
+    let mut binds = Binds::new(catalog, timezone);
+    let predicate = filters(
+        catalog,
+        root,
+        filter_specs,
+        today,
+        &mut binds,
+        &mut 0,
+        false,
+    )?;
+    let head = "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone)";
+    let rows = format!("FROM {} r CROSS JOIN actor WHERE {predicate}", source(root));
+    crate::subject::proofs(
+        tx,
+        catalog,
+        root,
+        specs,
+        (head, &rows, &binds.refs()),
+        bounds,
+    )
+    .await
 }
 
 /// An equals or one-of value checked against the column's type and written

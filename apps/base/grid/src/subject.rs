@@ -7,9 +7,10 @@ use std::{
     sync::{Arc, OnceLock},
     time::Duration,
 };
-use tokio_postgres::Transaction;
+use tokio_postgres::{Transaction, types::ToSql};
 
 pub trait SubjectAccess: Send + Sync {
+    fn integer_key(&self, kind: &str) -> bool;
     fn readable<'a>(
         &'a self,
         client: &'a dyn ProofClient,
@@ -41,8 +42,16 @@ pub(crate) fn survivor(subject: crate::Subject, ty: FieldType, raw: &str) -> Str
     let Some(survivors) = SURVIVORS.get() else {
         return raw.into();
     };
+    let integer = survivors.access.integer_key(subject.kind);
+    let raw = if integer && ty != FieldType::Integer {
+        format!(
+            "CASE WHEN ({raw}) ~ '^[+-]?[0-9]+$' AND octet_length({raw}) <= 64 AND pg_input_is_valid({raw}, 'bigint') THEN (({raw})::bigint)::text END"
+        )
+    } else {
+        format!("({raw})::text")
+    };
     let id = format!(
-        "COALESCE((SELECT grid_merged.to_id FROM ({}) grid_merged WHERE grid_merged.tenant_id = $1 AND grid_merged.kind = '{}' AND grid_merged.from_id = ({raw})::text), ({raw})::text)",
+        "COALESCE((SELECT grid_merged.to_id FROM ({}) grid_merged WHERE grid_merged.tenant_id = $1 AND grid_merged.kind = '{}' AND grid_merged.from_id = ({raw})), ({raw}))",
         survivors.relation, subject.kind
     );
     if ty == FieldType::Integer {
@@ -81,54 +90,89 @@ pub(crate) async fn proofs<'a>(
     catalog: &Catalog,
     root: &Table,
     specs: impl IntoIterator<Item = &'a str>,
+    (head, rows, params): (&str, &str, &[&(dyn ToSql + Sync)]),
     bounds: Bounds,
 ) -> Result<Value, QueryError> {
     let (Some(scope), Some(records)) = (&catalog.subject_scope, SURVIVORS.get()) else {
         return Ok(Value::Null);
     };
-    let mut tables = BTreeSet::from([root.id()]);
+    let mut candidates = BTreeSet::new();
+    if let Some((subject, ty, raw)) = field(root, "r") {
+        let id = survivor(subject, ty, &raw);
+        candidates.insert(format!(
+            "SELECT '{}' AS kind, ({id})::text AS id {rows}",
+            subject.kind
+        ));
+    }
     for spec in specs {
-        if let Ok(column) = catalog.resolve(root, spec) {
-            tables.extend(
-                column
-                    .hops
-                    .iter()
-                    .chain(&column.many)
-                    .chain(&column.tail)
-                    .map(|link| link.to()),
-            );
+        let Ok(column) = catalog.resolve(root, spec) else {
+            continue;
+        };
+        let links: Vec<_> = column
+            .hops
+            .iter()
+            .chain(&column.many)
+            .chain(&column.tail)
+            .collect();
+        for (i, link) in links.iter().enumerate() {
+            let target = catalog.table(link.to()).expect("resolved target");
+            if target.subject().is_none() {
+                continue;
+            }
+            let walked = crate::query::walk_links(catalog, root, &links[..=i], false);
+            if let Some((subject, ty, raw)) = field(walked.table, &walked.alias) {
+                let id = survivor(subject, ty, &raw);
+                candidates.insert(format!(
+                    "SELECT '{}' AS kind, candidate.id FROM (SELECT r.* {rows}) r CROSS JOIN LATERAL (SELECT ({id})::text AS id {}) candidate",
+                    subject.kind, walked.suffix,
+                ));
+            }
         }
     }
-    tokio::time::timeout(Duration::from_millis(u64::from(bounds.statement_ms)), async {
-        const MAX_SUBJECTS: usize = 1000;
-        let mut checked = BTreeSet::new();
-        let mut readable: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
-        for table in tables.into_iter().filter_map(|id| catalog.table(id)) {
-            let Some((subject, ty, raw)) = field(table, "holder") else {
-                continue;
-            };
-            let survivor = survivor(subject, ty, &raw);
-            let sql = format!("WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr) SELECT DISTINCT id FROM (SELECT ({survivor})::text AS id FROM {} holder CROSS JOIN actor WHERE {raw} IS NOT NULL) candidates WHERE id IS NOT NULL LIMIT {}", table.scoped_source(), MAX_SUBJECTS + 1);
-            let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[&scope.tenant(), &scope.user()];
-            let explain: Value = tx.query_one(&format!("EXPLAIN (FORMAT JSON) {sql}"), params).await?.try_get(0)?;
-            if !explain[0]["Plan"]["Total Cost"].as_f64().is_some_and(|cost| cost <= bounds.max_cost) {
-                return Err(QueryError::TooHeavy("the estimated cost of subject checks exceeds its bound"));
+    if candidates.is_empty() {
+        return Ok(Value::Null);
+    }
+    const MAX_SUBJECTS: usize = 1000;
+    let candidates = candidates
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    let sql = format!(
+        "{head} SELECT DISTINCT kind, id FROM ({candidates}) candidates WHERE id IS NOT NULL LIMIT {}",
+        MAX_SUBJECTS + 1
+    );
+    tokio::time::timeout(
+        Duration::from_millis(u64::from(bounds.statement_ms)),
+        async {
+            let explain: Value = tx
+                .query_one(&format!("EXPLAIN (FORMAT JSON) {sql}"), params)
+                .await?
+                .try_get(0)?;
+            if !explain[0]["Plan"]["Total Cost"]
+                .as_f64()
+                .is_some_and(|cost| cost <= bounds.max_cost)
+            {
+                return Err(QueryError::TooHeavy(
+                    "the estimated cost of subject checks exceeds its bound",
+                ));
             }
-            for row in tx.query(&sql, params).await? {
-                let id: String = row.try_get(0)?;
-                if !checked.insert((subject.kind, id.clone())) {
-                    continue;
-                }
-                if checked.len() > MAX_SUBJECTS {
-                    return Err(QueryError::TooHeavy("the number of subjects exceeds the read bound"));
-                }
-                if records.access.readable(tx, scope, subject.kind, &id).await? {
-                    readable.entry(subject.kind).or_default().insert(id);
+            let candidates = tx.query(&sql, params).await?;
+            if candidates.len() > MAX_SUBJECTS {
+                return Err(QueryError::TooHeavy(
+                    "the number of subjects exceeds the read bound",
+                ));
+            }
+            let mut readable: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            for row in candidates {
+                let kind: String = row.try_get(0)?;
+                let id: String = row.try_get(1)?;
+                if records.access.readable(tx, scope, &kind, &id).await? {
+                    readable.entry(kind).or_default().insert(id);
                 }
             }
-        }
-        Ok(serde_json::json!(readable))
-    })
+            Ok(serde_json::json!(readable))
+        },
+    )
     .await
     .map_err(|_| QueryError::TooHeavy("subject checks exceeded the time bound"))?
 }

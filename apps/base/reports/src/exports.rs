@@ -271,14 +271,18 @@ impl Reports {
             serde_json::from_value(row.get(7)).map_err(|_| Error::Internal)?;
         let answers: Value = row.get(8);
         drop(client);
-        let now = match self.access(scope, report).await {
+        let current_report = match self.access_report(scope, report).await {
             Err(ReportError::Database(error)) => return Err(error.into()),
             other => other.ok(),
         };
-        if now
-            .as_deref()
-            .is_some_and(|access| access.contains(":subject:"))
-        {
+        let Some((definition, access)) =
+            current_report.filter(|(_, access)| Some(access) == made.as_ref())
+        else {
+            return Err(ReportError::Refused(
+                "What you may see of this report has changed since the file was made. Prepare it again.".into(),
+            ));
+        };
+        if access.contains(":subject:") {
             let format = Format::from_key(&format).ok_or(Error::Internal)?;
             let cap = self.queued_rows(scope).await?;
             let input = crate::RunInput {
@@ -286,14 +290,12 @@ impl Reports {
                 ..crate::RunInput::default()
             };
             return self
-                .export_within(scope, report, &input, format, cap, true)
+                .export_within(scope, definition, &input, format, cap, true)
                 .await;
         }
-        if made.is_none()
-            || now != made
-            || !self
-                .reference_names_current(scope, &reference_names)
-                .await?
+        if !self
+            .reference_names_current(scope, &reference_names)
+            .await?
         {
             return Err(ReportError::Refused(
                 "What you may see of this report has changed since the file was made. Prepare it again.".into(),
@@ -384,13 +386,13 @@ impl Reports {
         // What the requester may see is taken before the run: if it changes
         // during the run, the file is refused at download either way.
         let made = async {
-            let access = self.access(scope, report).await?;
+            let (definition, access) = self.access_report(scope, report).await?;
             let input = crate::RunInput {
                 answers,
                 ..crate::RunInput::default()
             };
             let file = self
-                .export_within(scope, report, &input, format, cap, true)
+                .export_within(scope, definition, &input, format, cap, true)
                 .await?;
             Ok::<_, ReportError>((access, file))
         }

@@ -98,7 +98,7 @@ let page = format!("SELECT id FROM notes WHERE {predicate} ORDER BY id LIMIT $4 
 
 ## Report on a subject
 
-When each row of your table is about one record (a case about a customer) and people will count rows per record, declare that field as the table's subject instead of reading redirects yourself: [Grid: Record subjects](../grid/README.md#record-subjects). Reports group merged records under their survivor and use the owner’s `authorize` decision on the report transaction to determine which rows each reader may see.
+When each row of your table is about one record (a case about a customer) and people will count rows per record, declare that field as the table's subject instead of reading redirects yourself: [Grid: Record subjects](../grid/README.md#record-subjects). Reports canonicalize subject IDs by the target kind’s key type and group merged records under their survivor and use the owner’s `authorize` decision on the report transaction to determine which rows each reader may see.
 
 ## Behaviour
 

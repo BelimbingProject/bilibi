@@ -924,26 +924,29 @@ impl Reports {
     /// restriction or a lost share shows at the next refresh, not the next
     /// run. Cheaper than a run: no Grid read. Needs `reports.view`.
     pub async fn access(&self, scope: &Scope, id: i64) -> Outcome<String> {
+        self.access_report(scope, id)
+            .await
+            .map(|(_, access)| access)
+    }
+
+    async fn access_report(&self, scope: &Scope, id: i64) -> Outcome<(Report, String)> {
         let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, VIEW).await?;
         let report = match store::read(&**client, scope.tenant(), scope.user(), id, false).await {
             Err(Error::NotFound) => return Err(ReportError::NotFound),
             other => other?,
         };
-        if report.definition.oversight {
+        let access = if report.definition.oversight {
             drop(client);
             self.oversight.prove(scope).await.map_err(grid)?;
-            // Drawing caches cannot skip child audit or live consent checks.
-            return Ok(format!(
-                "{}:oversight:{}",
-                report.version,
-                jiff::Timestamp::now()
-            ));
-        }
-        let catalog = Catalog::for_report(&**client, scope)
-            .await
-            .map_err(|e| ReportError::Database(e.into()))?;
-        Ok(access_key(&catalog, &report, &self.records))
+            format!("{}:oversight:{}", report.version, jiff::Timestamp::now())
+        } else {
+            let catalog = Catalog::for_report(&**client, scope)
+                .await
+                .map_err(|e| ReportError::Database(e.into()))?;
+            access_key(&catalog, &report, &self.records)
+        };
+        Ok((report, access))
     }
 
     /// One dashboard update shares a fresh catalog across all placed reports.
@@ -1081,18 +1084,6 @@ impl Reports {
     pub async fn run(&self, scope: &Scope, id: i64, input: &RunInput) -> Outcome<Run> {
         let report = self.get(scope, id).await?;
         self.run_report(scope, report, input).await
-    }
-
-    /// A run for a file: no record links, and a list's question kept so its
-    /// other pages are read with only their keys and cells.
-    pub(crate) async fn run_for_file(
-        &self,
-        scope: &Scope,
-        id: i64,
-        input: &RunInput,
-    ) -> Outcome<(Run, Option<listing::Listing>)> {
-        let report = self.get(scope, id).await?;
-        self.run_report_for(scope, report, input, true).await
     }
 
     /// Runs a built-in report as the reader, like a stored one.
@@ -1249,7 +1240,7 @@ impl Reports {
                     } else {
                         Vec::new()
                     };
-                let totals_filters = filters.clone();
+                let measures: Vec<_> = totals_of.iter().flatten().cloned().collect();
                 // A value saved before the setting's bound was 100 still runs.
                 let page_size = self
                     .setting(&**client, scope, contributions::PAGE_SIZE_KEY)
@@ -1265,7 +1256,13 @@ impl Reports {
                     timezone: timezone.clone(),
                 };
                 let page = listing
-                    .page(self, scope, input.page.saturating_mul(page_size), page_size)
+                    .page(
+                        self,
+                        scope,
+                        input.page.saturating_mul(page_size),
+                        page_size,
+                        &measures,
+                    )
                     .await?;
                 reference_names = page.reference_names;
                 let rows = page.rows;
@@ -1275,30 +1272,8 @@ impl Reports {
                 } else {
                     self.record_pages(scope, root, &rows).await?
                 };
-                let totals = if totals_of.iter().any(Option::is_some) {
-                    // Grid totals up to 8 measures a read; a wider list
-                    // (up to 32 columns) takes one read per eight.
-                    let measures: Vec<_> = totals_of.iter().flatten().cloned().collect();
-                    let mut values = Vec::with_capacity(measures.len());
-                    for chunk in measures.chunks(bilibi_grid::MAX_MEASURES) {
-                        let summary = bilibi_grid::report_summary(
-                            &self.db,
-                            scope,
-                            &report.record_type,
-                            &SummarySpec {
-                                bounds,
-                                filters: totals_filters.clone(),
-                                groupings: Vec::new(),
-                                measures: chunk.to_vec(),
-                                timezone: timezone.clone(),
-                                max_groups: 1,
-                            },
-                        )
-                        .await
-                        .map_err(grid)?;
-                        values.extend(summary.total.values);
-                    }
-                    let mut sums = values.into_iter();
+                let totals = if !measures.is_empty() {
+                    let mut sums = page.totals.into_iter();
                     Some(
                         totals_of
                             .iter()

@@ -18,7 +18,9 @@ use bilibi_base::reports::{
     RunInput, RunResult,
 };
 use bilibi_database::{Db, MutationBoundary, pool};
-use bilibi_grid::{Bounds, Field, FieldType, GridContribution, PageSpec, Source, TableDecl};
+use bilibi_grid::{
+    Bounds, Field, FieldType, GridContribution, LinkDecl, LinkKind, PageSpec, Source, TableDecl,
+};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance};
 use bilibi_records::{Access, RecordKind, RecordOwner, Records};
 use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
@@ -93,8 +95,27 @@ static GRID: GridContribution = GridContribution {
         .time_field("opened_on")
         // Each case is about one account.
         .subject("account_id", ACCOUNT),
+        TableDecl::new(
+            "report_subject_text_cases",
+            "Cases with text account IDs",
+            CASES,
+            Source::tenant("SELECT id, title, CASE WHEN account_id = 2 THEN '0002' ELSE account_id::text END AS account_id, minutes, opened_on FROM report_subject_cases WHERE tenant_id = $1"),
+            "id",
+            &[
+                Field::new("id", "ID", FieldType::Integer),
+                Field::new("title", "Title", FieldType::String),
+                Field::new("account_id", "Account", FieldType::String),
+                Field::new("minutes", "Minutes", FieldType::Integer),
+                Field::new("opened_on", "Opened", FieldType::Date),
+            ],
+        )
+        .label_field("title")
+        .subject("account_id", ACCOUNT),
     ],
-    links: &[],
+    links: &[LinkDecl::on(
+        "text_case", "Text case", LinkKind::One,
+        "report_subject_cases", "id", "report_subject_text_cases", "id",
+    )],
 };
 bilibi_grid::contribute!("extensions/report_subjects", "report_subjects.grid", &GRID);
 
@@ -281,7 +302,12 @@ async fn main() -> Result<(), Failure> {
         "Cases",
         Kind::Rows,
         Definition {
-            columns: vec!["title".into(), "account_id".into(), "minutes".into()],
+            columns: vec![
+                "title".into(),
+                "account_id".into(),
+                "minutes".into(),
+                "text_case.account_id".into(),
+            ],
             totals: true,
             ..Definition::default()
         },
@@ -485,7 +511,7 @@ async fn main() -> Result<(), Failure> {
     checks.check(
         "a list of cases leaves out the cases about that account and names a merged account as its survivor",
         *total == 5
-            && totals.as_deref() == Some(&[Value::Null, Value::Null, json!(190)])
+            && totals.as_deref() == Some(&[Value::Null, Value::Null, json!(190), Value::Null])
             && named
                 == [
                     "Late delivery=Northwind",
@@ -608,6 +634,38 @@ async fn main() -> Result<(), Failure> {
         format!("{} rows before, {} rows after", before.rows, after.rows),
     );
 
+    let current = reports.get(&manager, title_only).await?;
+    let mut client = db.get().await?;
+    let mut tx = boundary
+        .begin(&mut client, manager.mutation_context("reports.update"))
+        .await?;
+    reports
+        .update(
+            &mut tx,
+            &manager,
+            title_only,
+            current.version,
+            &draft(
+                "Edited case titles",
+                Kind::Rows,
+                Definition {
+                    columns: vec!["title".into(), "minutes".into()],
+                    ..Definition::default()
+                },
+            ),
+        )
+        .await?;
+    tx.commit().await?;
+    drop(client);
+    checks.check(
+        "an old prepared link refuses the edited report",
+        matches!(
+            reports.exported(&viewer, export).await,
+            Err(ReportError::Refused(_))
+        ),
+        "definition changed after preparation",
+    );
+
     std::fs::remove_dir_all(&artifact_root)?;
 
     println!("== Wider reach and other tenants");
@@ -633,6 +691,48 @@ async fn main() -> Result<(), Failure> {
         "another tenant's merge of the same id is not followed",
         still == merged,
         format!("{still:?}"),
+    );
+
+    db.get().await?.execute(
+        "INSERT INTO report_subject_cases(id,tenant_id,title,account_id,minutes,opened_on) SELECT id,1,'Historical case',id,1,CURRENT_DATE - 120 FROM generate_series(100,1100) id",
+        &[],
+    ).await?;
+    let mut recent = draft(
+        "Recent cases by text account",
+        Kind::Summary,
+        Definition {
+            groupings: vec![GroupingDef {
+                column: "account_id".into(),
+                bucket: None,
+            }],
+            measures: vec![MeasureDef {
+                column: "minutes".into(),
+                agg: "sum".into(),
+            }],
+            filters: vec![FilterDef {
+                column: "opened_on".into(),
+                test: "within".into(),
+                value: json!("last_30_days"),
+                ask: false,
+            }],
+            ..Definition::default()
+        },
+    );
+    recent.record_type = "report_subject_text_cases".into();
+    let recent = write(&recent).await?;
+    let result = reports.run(&viewer, recent, &RunInput::default()).await?;
+    checks.check(
+        "recent groups ignore 1,001 historical subject IDs and merge padded text IDs",
+        summary(&result.result) == merged,
+        format!("{:?}", summary(&result.result)),
+    );
+    let mut old_spelling = drill.clone();
+    old_spelling.drill[0].value = json!("0002");
+    let recent_drill = reports.run(&viewer, recent, &old_spelling).await?;
+    checks.check(
+        "a padded text operand drills into all three survivor cases",
+        matches!(recent_drill.result, RunResult::Rows { total: 3, .. }),
+        "stored alias 0002",
     );
 
     if checks.failed > 0 {

@@ -27,7 +27,7 @@ Draft checks, write previews and saves use [Grid's audited oversight probe](../g
 
 Custom record fields and subject fields are named through Base Records with the reader’s scope on every page and export. Reference grouping keys carry `{stored_id, label}` so drill filters and chart groups retain the stored id as identity while labels follow merges and show Restricted when unavailable; equal labels do not combine distinct records. Reference aggregation limits follow [Grid's measure rules](../grid/README.md#grouped-summaries-and-row-pages-g5).
 
-Reports with declared subjects redraw panels on every refresh and regenerate prepared downloads with the saved answers and the requester’s current access. Ordinary custom references keep their existing access revision and label checks.
+Reports with declared subjects redraw panels on every refresh and regenerate prepared downloads with the saved answers, the prepared report version and the requester’s current access. Ordinary custom references keep their existing access revision and label checks.
 
 Prepared files retain a deduplicated set of the reference ids and optional labels rendered in every page and group, within the export row cap. Downloads resolve them again as the requester and refuse a changed label or unavailable state. Reference panels rerun on refresh; their HTML is never reused from the panel cache.
 
@@ -80,7 +80,7 @@ Tenant report previews validate drafts on the plan's transaction using [Grid's t
 | `reports.statement_ms`, `reports.max_cost` | 2,000 ms, 100,000 (Grid's own bound) | 500–30,000 ms; 1,000–Grid's `MAX_COST_BOUND` |
 | `reports.queued_statement_ms`, `reports.queued_max_cost` | 60,000 ms, 10,000,000 | 1,000 ms–Grid's `MAX_STATEMENT_MS`; 1,000–`MAX_COST_BOUND` |
 
-A page, a dashboard panel, a download and an agent run read under the interactive pair; a prepared export and a scheduled delivery under the background pair (`RunInput::background`). Every read of a run takes the pair: a list's keys, matching count and cells (`grid::report_page`), and any aggregate totals. A report over its cost or time bound is refused as `TooHeavy`, which says to prepare it as an export instead, and the Result tab offers Prepare CSV/PDF right there instead of the downloads, which read under the same interactive bounds. Too many groups is refused with "add a filter", since the background has the same group limit.
+A page, a dashboard panel, a download and an agent run read under the interactive pair; a prepared export and a scheduled delivery under the background pair (`RunInput::background`). Every read of a run takes the pair: a list's keys, matching count, cells and totals share a single snapshot (`grid::report_page`). A report over its cost or time bound is refused as `TooHeavy`, which says to prepare it as an export instead, and the Result tab offers Prepare CSV/PDF right there instead of the downloads, which read under the same interactive bounds. Too many groups is refused with "add a filter", since the background has the same group limit.
 
 The settings editor groups the two pairs as **Reports · Interactive reads** and **Reports · Background reads**, using its Area filter. A prepared export above its row cap names that cap and asks for a filter, not another prepared export.
 

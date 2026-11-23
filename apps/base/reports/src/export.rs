@@ -4,12 +4,13 @@
 //! (`bilibi_artifacts::pdf`). Each export is audited with the report, the
 //! reader, the format and the row count, never the data.
 use crate::{
-    cell, contributions, line, web::result, Kind, ReportError, Reports, RunInput, RunResult, EXPORT,
+    EXPORT, Kind, Report, ReportError, Reports, RunInput, RunResult, cell, contributions, line,
+    web::result,
 };
-use bilibi_audit::{record_action, Attribution};
+use bilibi_audit::{Attribution, record_action};
 use bilibi_database::Error;
 use bilibi_tenancy::Scope;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 type Outcome<T> = Result<T, ReportError>;
 
@@ -82,7 +83,7 @@ impl Reports {
         format: Format,
     ) -> Outcome<File> {
         let cap = self.export_rows(scope).await?;
-        self.export_within(scope, id, input, format, cap, false)
+        self.export_within(scope, self.get(scope, id).await?, input, format, cap, false)
             .await
     }
 
@@ -102,7 +103,9 @@ impl Reports {
             crate::authorize(&**client, scope, EXPORT).await?;
         }
         let cap = self.export_rows(scope).await?;
-        let table = self.tabulate(scope, id, input, cap, false).await?;
+        let table = self
+            .tabulate(scope, self.get(scope, id).await?, input, cap, false)
+            .await?;
         render(&table, format).map(|_| ())
     }
 
@@ -112,7 +115,7 @@ impl Reports {
     pub(crate) async fn export_within(
         &self,
         scope: &Scope,
-        id: i64,
+        report: Report,
         input: &RunInput,
         format: Format,
         cap: usize,
@@ -122,7 +125,8 @@ impl Reports {
             let client = self.db.get().await.map_err(Error::from)?;
             crate::authorize(&**client, scope, EXPORT).await?;
         }
-        let table = self.tabulate(scope, id, input, cap, background).await?;
+        let id = report.id;
+        let table = self.tabulate(scope, report, input, cap, background).await?;
         let bytes = render(&table, format)?;
         let client = self.db.get().await.map_err(Error::from)?;
         record_action(
@@ -151,7 +155,7 @@ impl Reports {
     pub(crate) async fn tabulate(
         &self,
         scope: &Scope,
-        id: i64,
+        report: Report,
         input: &RunInput,
         cap: usize,
         background: bool,
@@ -162,7 +166,9 @@ impl Reports {
             background,
             ..input.clone()
         };
-        let (first, listing) = self.run_for_file(scope, id, &input).await?;
+        let (first, listing) = self
+            .run_report_for(scope, report.clone(), &input, true)
+            .await?;
         let oversight = first.report.definition.oversight;
         let status = first.oversight_status();
         let cohort = first.oversight.clone();
@@ -205,7 +211,7 @@ impl Reports {
                     }
                     let mut offset = first_page;
                     while (offset as i64) < expected_total {
-                        let page = listing.page(self, scope, offset, FILE_PAGE).await?;
+                        let page = listing.page(self, scope, offset, FILE_PAGE, &[]).await?;
                         if page.total != expected_total {
                             return Err(changed(background));
                         }
@@ -220,7 +226,7 @@ impl Reports {
                             Some(run) => run,
                             None => {
                                 input.page = page;
-                                self.run(scope, id, &input).await?
+                                self.run_report(scope, report.clone(), &input).await?
                             }
                         };
                         if oversight

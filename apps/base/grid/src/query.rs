@@ -331,8 +331,21 @@ pub(crate) async fn project_catalog<S: AsRef<str>>(
     let trend_from = iso(months[0]);
     let trend_to = iso(today.first_of_month().saturating_add(1.month()));
     let since = iso(lenses.since.unwrap_or_else(|| default_since(today)));
-    let subjects =
-        crate::subject::proofs(tx, catalog, root, specs.iter().map(AsRef::as_ref), bounds).await?;
+    let proof_head = "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr)";
+    let proof_rows = format!(
+        "FROM {} r CROSS JOIN actor WHERE {} IN (SELECT (id #>> '{{}}')::{cast} FROM jsonb_array_elements($3::jsonb) AS x(id))",
+        source(root),
+        field("r", root, root.key())
+    );
+    let subjects = crate::subject::proofs(
+        tx,
+        catalog,
+        root,
+        specs.iter().map(AsRef::as_ref),
+        (proof_head, &proof_rows, &[&tenant, &user, &ids]),
+        bounds,
+    )
+    .await?;
     let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[
         &tenant,
         &user,
@@ -835,10 +848,10 @@ pub(crate) fn cell(catalog: &Catalog, root: &Table, column: &Column) -> String {
 
 /// The links a column walks, as the `FROM .. WHERE` of a correlated subquery
 /// on the root row `r`, with the alias and table of the last one.
-struct Walked<'c> {
-    suffix: String,
-    alias: String,
-    table: &'c Table,
+pub(crate) struct Walked<'c> {
+    pub(crate) suffix: String,
+    pub(crate) alias: String,
+    pub(crate) table: &'c Table,
 }
 
 /// `count` of the many-link's rows or the column's aggregate of its field.
@@ -888,9 +901,15 @@ fn walk<'c>(catalog: &'c Catalog, root: &'c Table, column: &Column) -> Option<Wa
         .chain(column.many.iter())
         .chain(column.tail.iter())
         .collect();
-    if links.is_empty() {
-        return None;
-    }
+    (!links.is_empty()).then(|| walk_links(catalog, root, &links, true))
+}
+
+pub(crate) fn walk_links<'c>(
+    catalog: &'c Catalog,
+    root: &'c Table,
+    links: &[&Link],
+    authorize: bool,
+) -> Walked<'c> {
     let mut from = String::new();
     let mut parent = root;
     let mut p = "r".to_string();
@@ -898,14 +917,17 @@ fn walk<'c>(catalog: &'c Catalog, root: &'c Table, column: &Column) -> Option<Wa
     for (i, link) in links.iter().enumerate() {
         let target = catalog.table(link.to()).expect("resolved target");
         let t = format!("t{i}");
-        let target_source = match crate::subject::readable(target, "linked") {
+        let target_source = match authorize
+            .then(|| crate::subject::readable(target, "linked"))
+            .flatten()
+        {
             Some(predicate) => format!(
                 "(SELECT linked.* FROM {} linked WHERE {predicate})",
                 source(target)
             ),
             None => source(target),
         };
-        let predicate = if link.kind() == LinkKind::One {
+        let predicate = if authorize && link.kind() == LinkKind::One {
             // For an edge, EXISTS/set membership alone could hide two distinct
             // targets; this scalar SELECT enforces the declared cardinality.
             format!(
@@ -927,11 +949,11 @@ fn walk<'c>(catalog: &'c Catalog, root: &'c Table, column: &Column) -> Option<Wa
         p = t;
         parent = target;
     }
-    Some(Walked {
+    Walked {
         suffix: format!("FROM {from} WHERE {first_condition}"),
         alias: p,
         table: parent,
-    })
+    }
 }
 fn statement(
     catalog: &Catalog,
