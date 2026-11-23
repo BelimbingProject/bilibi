@@ -505,23 +505,23 @@ impl Watchers {
                     Ok(column)
                         if column.agg.is_none()
                             && column.many.is_none()
-                            && column
-                                .field
-                                .is_some_and(|field| !catalog.masked(column.table, field.id)) =>
+                            && column.field.is_some_and(|field| {
+                                !catalog.masked(column.table, field.id)
+                                    && (crate::review::custom_path(path).is_some()
+                                        || catalog
+                                            .table(column.table)
+                                            .is_some_and(|owner| !owner.is_custom(field.id)))
+                            }) =>
                     {
                         column
                     }
                     _ => {
-                        // A linked table the reader may not read at all is a
-                        // refused read, as the trigger's own table is.
-                        let closed = bilibi_grid::installed()
-                            .ok()
-                            .and_then(|grid| Some((grid, grid.table(table)?)))
-                            .is_some_and(|(grid, root)| {
-                                crate::review::hops(grid, root, path)
-                                    .iter()
-                                    .any(|hop| catalog.table(hop.to()).is_none())
-                            });
+                        let closed = crate::review::custom_path(path)
+                            .and_then(|(link, _)| {
+                                let grid = bilibi_grid::installed().ok()?;
+                                crate::review::custom_owner(grid, grid.table(table)?, Some(link?))
+                            })
+                            .is_some_and(|(_, owner)| catalog.table(owner.id()).is_none());
                         return Ok(Err(if closed {
                             "read_refused"
                         } else {
@@ -663,7 +663,7 @@ impl Watchers {
                                 target
                                     .visible_fields()
                                     .filter(|f| target.custom_watcher_condition(f.id))
-                                    .map(move |f| json!({"field": format!("{}.{}", link.id(), f.id), "label": format!("{} \u{203a} {}", link.label(), target.field_label(f)), "type": format!("{:?}", f.ty).to_lowercase(), "values": f.values, "masked": catalog.masked(target.id(), f.id), "custom": true, "link": link.id()}))
+                                    .map(move |f| json!({"field": format!("{}.{}", link.id(), f.id), "label": format!("{} \u{203a} {}", link.label(), target.field_label(f)), "type": format!("{:?}", f.ty).to_lowercase(), "values": f.values, "masked": catalog.masked(target.id(), f.id), "custom": true}))
                             });
                         own.chain(linked).collect()
                     })

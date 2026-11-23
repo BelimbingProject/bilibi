@@ -5,10 +5,8 @@ use bilibi_grid::Catalog;
 use serde_json::{Value, json};
 
 /// A stored version in words, for reading: conditions with their fields'
-/// labels, actions with their titles and parameters, examples. Labels come
-/// from the reader's catalog when one is given (a tenant custom field's label,
-/// a linked record's field as `Company › Segment`), else from the installed
-/// catalogs; values from the version itself.
+/// labels, actions with their titles and parameters, examples. Direct linked
+/// custom fields use the reader's labels, such as `Company › Segment`.
 pub(crate) struct Described {
     pub scripted: bool,
     pub matching: &'static str,
@@ -30,7 +28,9 @@ impl Watchers {
             .trigger(trigger)
             .and_then(|t| bilibi_grid::installed().ok()?.table(t.definition.table));
         let label = |path: &str| {
-            reader
+            crate::review::custom_path(path)
+                .and_then(|(link, _)| link)
+                .and(reader)
                 .and_then(|catalog| {
                     let root = catalog.table(table?.id())?;
                     catalog.resolve(root, path).ok().map(|column| column.label)

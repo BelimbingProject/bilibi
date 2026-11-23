@@ -521,8 +521,6 @@ impl Show {
             ),
             _ => None,
         };
-        // Conditions read in the reader's own words: a tenant custom field by
-        // its label, a linked record's field by its link.
         let labels = bilibi_grid::Catalog::for_scope(&**client, scope).await.ok();
         let labels = labels.as_ref();
         drop(client);

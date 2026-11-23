@@ -738,20 +738,22 @@ async fn linked_custom_field_proof(proof: &Proof) -> Result<()> {
         .review_approval(&**client, &one, watcher_id, number as i32)
         .await?;
     drop(client);
-    println!("     approval review: {:?}", review.warnings);
+    println!("     approval review: {:?}", review.problems);
     check(
         review
-            .warnings
+            .problems
             .iter()
-            .any(|warning| warning.contains("Automation may not read Companies yet")),
-        "the approval review warns that automation may not read companies yet",
+            .any(|(path, reason)| {
+                path == "if.conditions.0.field" && reason.contains("hidden from automation")
+            }),
+        "the approval review refuses the linked field while automation cannot read companies",
     );
     proof
         .grant(&one, "watchers", "admin.company.list", Some(true))
         .await?;
 
     println!("\n== A trial reads the linked field the same way");
-    proof
+    let silver_subject = proof
         .open(
             &one,
             5,
@@ -780,6 +782,7 @@ async fn linked_custom_field_proof(proof: &Proof) -> Result<()> {
         .as_array()
         .cloned()
         .unwrap_or_default();
+    let silver_subject = silver_subject.to_string();
     let fact = |row: &Value| row["current_record"]["facts"]["company.cf_segment"].clone();
     println!(
         "     trial: {} past events, {} would match",
@@ -794,11 +797,14 @@ async fn linked_custom_field_proof(proof: &Proof) -> Result<()> {
     check(
         rows.iter()
             .filter(|r| r["state"] == "match")
-            .all(|r| fact(r) == "Gold")
-            && rows
-                .iter()
-                .any(|r| r["state"] == "near_miss" && fact(r) != "Gold"),
-        "and reports the other companies' cases as near misses",
+            .all(|r| fact(r) == "Gold"),
+        "every matching case has a Gold company",
+    );
+    check(
+        rows.iter().any(|r| {
+            r["subject"] == silver_subject && r["state"] == "near_miss" && fact(r) == "Silver"
+        }),
+        "the Silver company's case is a near miss with its current Segment",
     );
 
     println!("\n== The approved watcher routes by the company's value");

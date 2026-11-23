@@ -79,47 +79,37 @@ impl Draft {
     }
 }
 
-/// A condition path that ends in a tenant custom field: the one-links walked
-/// before it (empty on the trigger's own record) and the field's key. So
-/// `cf_segment` is `("", "segment")` and `company.cf_segment` is
-/// `("company", "segment")`.
-pub(crate) fn custom_path(path: &str) -> Option<(&str, &str)> {
-    let (links, field) = path.rsplit_once('.').unwrap_or(("", path));
-    bilibi_grid::custom_key(field).map(|key| (links, key))
+pub(crate) fn custom_path(path: &str) -> Option<(Option<&str>, &str)> {
+    let (link, field) = match path.split_once('.') {
+        Some((link, field)) if !link.is_empty() => (Some(link), field),
+        Some(_) => return None,
+        None => (None, path),
+    };
+    bilibi_grid::custom_key(field).map(|key| (link, key))
 }
 
-/// The one-links `links` walks from `root` in the installed catalog, and the
-/// table they reach: where a linked record's custom field lives. The installed
-/// catalog holds no tenant field, so its own resolver stops at `cf_<key>`.
-pub(crate) fn linked<'g>(
+pub(crate) fn custom_owner<'g>(
     grid: &'g Installed,
     root: &'g Table,
-    links: &str,
-) -> Option<(Vec<Link>, &'g Table)> {
-    let mut table = root;
-    let mut hops = Vec::new();
-    if links.is_empty() {
-        return Some((hops, table));
-    }
-    for segment in links.split('.') {
-        let link = table
-            .link(segment)
-            .filter(|link| link.kind() == LinkKind::One)?;
-        table = grid.table(link.to())?;
-        hops.push(*link);
-    }
-    Some((hops, table))
+    link: Option<&str>,
+) -> Option<(Option<Link>, &'g Table)> {
+    let Some(link) = link else {
+        return Some((None, root));
+    };
+    let link = root.link(link).filter(|link| link.kind() == LinkKind::One)?;
+    Some((Some(*link), grid.table(link.to())?))
 }
 
 /// The one-links a condition path walks from `root`: a declared field's, or
 /// a linked record's custom field's, which the installed resolver cannot name.
-pub(crate) fn hops(grid: &Installed, root: &Table, path: &str) -> Vec<Link> {
+fn hops(grid: &Installed, root: &Table, path: &str) -> Vec<Link> {
     match bilibi_grid::column::resolve(path, root, &|id| grid.table(id)) {
         Ok(column) => column.hops,
         Err(_) => custom_path(path)
-            .and_then(|(links, _)| linked(grid, root, links))
-            .map(|(hops, _)| hops)
-            .unwrap_or_default(),
+            .and_then(|(link, _)| custom_owner(grid, root, link))
+            .and_then(|(link, _)| link)
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -193,14 +183,20 @@ impl Watchers {
         };
         let fields: Option<Vec<Value>> = paths.iter().map(|path| {
             let Ok(column) = bilibi_grid::column::resolve(path, root, &|id| grid.table(id)) else {
-                let (links, key) = custom_path(path)?;
-                let (hops, owner) = linked(grid, root, links)?;
+                let (link, key) = custom_path(path)?;
+                let (link, owner) = custom_owner(grid, root, link)?;
                 let (table, column) = custom.iter().filter(|table| table.table == owner.id()).find_map(|table| {
                     table.columns.iter().find(|column| column.key == key).map(|column| (table, column))
                 })?;
-                let hops: Option<Vec<Value>> = hops.iter().map(hop).collect();
-                return column.watcher_condition.then_some(hops?).map(|hops| json!({"path": path, "table": table.table, "type": format!("{:?}", column.ty),
-                    "custom": {"column": table.column, "value": column.value}, "hops": hops}));
+                if !column.watcher_condition {
+                    return None;
+                }
+                let mut binding = json!({"path": path, "table": table.table, "type": format!("{:?}", column.ty),
+                    "custom": {"column": table.column, "value": column.value}});
+                if let Some(link) = link {
+                    binding["hops"] = json!([hop(&link)?]);
+                }
+                return Some(binding);
             };
             let field = column.field?;
             let hops: Option<Vec<Value>> = column.hops.iter().map(hop).collect();
@@ -265,9 +261,9 @@ impl Watchers {
                 Definition::parse(&row.get(2), &mut Vec::new()).ok_or(Error::Invalid)?;
             // The field's own table is the trigger's, or one its links reach.
             if definition.fields().iter().any(|path| {
-                custom_path(path).is_some_and(|(links, used)| {
+                custom_path(path).is_some_and(|(link, used)| {
                     used == key
-                        && linked(grid, root, links).is_some_and(|(_, owner)| owner.id() == table)
+                        && custom_owner(grid, root, link).is_some_and(|(_, owner)| owner.id() == table)
                 })
             }) {
                 affected.push(if may_name {
@@ -401,7 +397,7 @@ impl Watchers {
         }
         // A tenant custom field is a condition only when the tenant offered
         // it to watchers (#730), on the trigger's own record or on a record
-        // one-links reach (#862).
+        // one link away (#862).
         for (i, condition) in definition.conditions.iter().enumerate() {
             let Some(column) =
                 table.and_then(|table| catalog.resolve(table, &condition.field).ok())
@@ -414,7 +410,12 @@ impl Watchers {
             let Some(field) = column.field.filter(|field| owner.is_custom(field.id)) else {
                 continue;
             };
-            if !owner.custom_watcher_condition(field.id) {
+            if custom_path(&condition.field).is_none() || column.many.is_some() {
+                problems.push((
+                    format!("if.conditions.{i}.field"),
+                    "a custom field must be on the trigger record or one direct link away".into(),
+                ));
+            } else if !owner.custom_watcher_condition(field.id) {
                 problems.push((format!("if.conditions.{i}.field"), format!("{} is a custom field not offered to watchers; an administrator turns on Watcher condition for it on Custom fields", condition.field)));
             }
         }
