@@ -16,7 +16,7 @@
 - Every pending and admitted staff sign-in records immutable authentication authority: `portable`, or `tenant_sso` with its tenant, provider and company. Rotation and second-factor completion preserve it; ordinary application code cannot promote it.
 - Portable authority may enter another membership, subject to that target's existing factor and company-SSO policy. Tenant SSO authority may operate only in its issuing tenant.
 - Selecting another tenant from a tenant-SSO session starts target-bound reauthentication. The target accepts portable proof or its own enabled SSO, then replaces the old session. An impersonated session cannot enter another tenant.
-- Removing any membership removes only that membership. Shared identity deletion, recovery and final retention belong to the authenticated holder and installation operator.
+- Removing any membership removes only that membership. The last removal starts the installation operator's configurable unused-identity retention clock; a later invitation cancels it. Exceptional mailbox recovery, immediate orphan deletion and the final retention sweep are server-owner commands, never tenant operations.
 - Customer portal accounts remain tenant-bound identities and never become portable staff memberships.
 
 The dedicated first-owner invitation remains defence in depth. An identity first created through SSO can establish portable proof through verified-mail recovery before entering a tenant with no suitable SSO.
@@ -42,4 +42,4 @@ Giving one membership's customer administrator control of the shared credential 
 - Password, SSO and pending-factor admission must pass and preserve an explicit `AuthenticationAuthority`; custom sign-in adapters never insert or rewrite session rows directly.
 - Identity-provider extensions return authenticated external identities as before, but Core User always marks their browser proof tenant-bound. An extension cannot claim portable authority or switch tenants.
 - SCIM `userName` and contact facts are tenant provisioning data, not authority to change the installation-wide sign-in address.
-- Fresh databases apply `base-session-011-authentication-authority` and `core-user-033-portable-identity-authority`. Development databases created with the former home-authority schema are disposable and must be recreated; there is no conversion or compatibility path.
+- Fresh databases apply `base-session-011-authentication-authority`, `core-user-033-portable-identity-authority` and `core-user-034-identity-lifecycle`. Development databases created with the former home-authority schema are disposable and must be recreated; there is no conversion or compatibility path.

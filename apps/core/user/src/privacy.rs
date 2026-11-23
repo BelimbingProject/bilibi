@@ -465,6 +465,11 @@ impl Handler for Accounts {
                                     old: before,
                                     new: json!({"name": ERASED, "status": "deleted", "links_removed": links.len()}),
                                 });
+                                if let Some(change) =
+                                    crate::identity_lifecycle::mark_orphaned(sql, identity).await?
+                                {
+                                    changes.push(change);
+                                }
                                 changes.extend(links);
                                 let (invitation_changes, records) =
                                     anonymise_accepted_invitations(sql, tenant, user).await?;
