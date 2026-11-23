@@ -9,20 +9,20 @@
 //!
 //! BILIBI_REPORT_SUBJECTS=disposable cargo run -p bilibi-web --example report-subjects
 use bilibi_authz::{
+    CapabilityDefinition, Reach, RoleDefinition, VOCABULARY, VocabularyContribution,
     grants::{CreatedRole, Grants},
     roles::NewRole,
-    CapabilityDefinition, Reach, RoleDefinition, VocabularyContribution, VOCABULARY,
 };
 use bilibi_base::reports::{
     Definition, Draft, FilterDef, GroupingDef, Kind, MeasureDef, ReportError, Reports, RunInput,
     RunResult,
 };
-use bilibi_database::{pool, Db, MutationBoundary};
+use bilibi_database::{Db, MutationBoundary, pool};
 use bilibi_grid::{Bounds, Field, FieldType, GridContribution, PageSpec, Source, TableDecl};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance};
 use bilibi_records::{Access, RecordKind, RecordOwner, Records};
 use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
@@ -31,7 +31,8 @@ bilibi_walkthrough_fixture::walkthrough_module_roles!();
 const MODULE: &str = "extensions/report_subjects";
 const ACCOUNTS: &str = "reference.accounts.view";
 const CASES: &str = "reference.cases.view";
-const ACCOUNT: &str = "report_subjects.account";
+const ACCOUNT: &str = "report-subjects.account";
+const SURVIVOR: &str = "9223372036854775807";
 
 inventory::submit! {
     Module {
@@ -237,9 +238,9 @@ async fn main() -> Result<(), Failure> {
     // case names no account, and tenant 2 has an account and a case of its own.
     db.get().await?.batch_execute(
         "INSERT INTO report_subject_accounts(id,tenant_id,name,owner_user_id) VALUES \
-         (1,1,'Northwind',2),(2,1,'Northwind Ltd',1),(3,1,'Contoso',1),(4,1,'Fabrikam',2),(5,2,'Other tenant account',5); \
+         (9223372036854775807,1,'Northwind',2),(2,1,'Northwind Ltd',1),(3,1,'Contoso',1),(4,1,'Fabrikam',2),(5,2,'Other tenant account',5); \
          INSERT INTO report_subject_cases(id,tenant_id,title,account_id,minutes,opened_on) VALUES \
-         (1,1,'Late delivery',1,10,CURRENT_DATE),(2,1,'Wrong invoice',2,20,CURRENT_DATE),(3,1,'Missing part',2,30,CURRENT_DATE), \
+         (1,1,'Late delivery',9223372036854775807,10,CURRENT_DATE),(2,1,'Wrong invoice',2,20,CURRENT_DATE),(3,1,'Missing part',2,30,CURRENT_DATE), \
          (4,1,'Broken seal',3,40,CURRENT_DATE),(5,1,'No reply',3,50,CURRENT_DATE),(6,1,'Slow refund',4,60,CURRENT_DATE), \
          (7,1,'General question',NULL,70,CURRENT_DATE),(8,2,'Other tenant case',5,80,CURRENT_DATE)",
     ).await?;
@@ -273,7 +274,8 @@ async fn main() -> Result<(), Failure> {
         "Cases",
         Kind::Rows,
         Definition {
-            columns: vec!["title".into(), "account_id".into()],
+            columns: vec!["title".into(), "account_id".into(), "minutes".into()],
+            totals: true,
             ..Definition::default()
         },
     ))
@@ -293,7 +295,7 @@ async fn main() -> Result<(), Failure> {
         before
             == (
                 expected(&[
-                    ("Northwind", "1", 1, 10),
+                    ("Northwind", SURVIVOR, 1, 10),
                     ("Northwind Ltd", "2", 2, 50),
                     ("Contoso", "3", 2, 90),
                     ("Fabrikam", "4", 1, 60),
@@ -309,7 +311,9 @@ async fn main() -> Result<(), Failure> {
     let mut tx = boundary
         .begin(&mut client, admin.mutation_context("report_subjects.merge"))
         .await?;
-    records.redirect(&mut tx, &admin, ACCOUNT, "2", "1").await?;
+    records
+        .redirect(&mut tx, &admin, ACCOUNT, "2", SURVIVOR)
+        .await?;
     tx.sql()
         .execute(
             "UPDATE report_subject_accounts SET removed=true WHERE tenant_id=1 AND id=2",
@@ -334,7 +338,7 @@ async fn main() -> Result<(), Failure> {
             && merged
                 == (
                     expected(&[
-                        ("Northwind", "1", 3, 60),
+                        ("Northwind", SURVIVOR, 3, 60),
                         ("Contoso", "3", 2, 90),
                         ("Fabrikam", "4", 1, 60),
                         ("-", "-", 1, 70),
@@ -348,7 +352,7 @@ async fn main() -> Result<(), Failure> {
         drill: vec![FilterDef {
             column: "account_id".into(),
             test: "equals".into(),
-            value: json!("1"),
+            value: json!(SURVIVOR),
             ask: false,
         }],
         ..RunInput::default()
@@ -364,6 +368,32 @@ async fn main() -> Result<(), Failure> {
         "drilling into the survivor lists the cases stored under either id",
         *total == 3 && rows.len() == 3,
         format!("{total} cases"),
+    );
+
+    for (test, value) in [("equals", json!("2")), ("one_of", json!(["2", "4"]))] {
+        let mut older = drill.clone();
+        older.drill[0].test = test.into();
+        older.drill[0].value = value;
+        let result = reports.run(&manager, report, &older).await?;
+        let expected_total = if test == "equals" { 3 } else { 4 };
+        checks.check(
+            "a drill filter saved before the merge still matches the survivor",
+            matches!(result.result, RunResult::Rows { total, .. } if total == expected_total),
+            format!("{test}: expected {expected_total}"),
+        );
+    }
+    let owner_projection = bilibi_grid::project(
+        &db,
+        &manager,
+        "report_subject_cases",
+        &[json!(2)],
+        &["account_id"],
+    )
+    .await?;
+    checks.check(
+        "an ordinary Grid projection retains the stored subject id",
+        owner_projection.rows[0].cells.values().next() == Some(&json!(2)),
+        format!("{:?}", owner_projection.rows),
     );
 
     println!("== A reader gets only the rows whose subject they may read");
@@ -397,7 +427,7 @@ async fn main() -> Result<(), Failure> {
         "reach mine: the survivor's line holds every merged case, the account they do not reach is no line, and no line is Restricted",
         own == (
             expected(&[
-                ("Northwind", "1", 3, 60),
+                ("Northwind", SURVIVOR, 3, 60),
                 ("Fabrikam", "4", 1, 60),
                 ("-", "-", 1, 70),
             ]),
@@ -421,7 +451,13 @@ async fn main() -> Result<(), Failure> {
         .run(&viewer, listed, &RunInput::default())
         .await
         .map_err(|e| format!("rows: {e:?}"))?;
-    let RunResult::Rows { total, rows, .. } = &rows.result else {
+    let RunResult::Rows {
+        total,
+        rows,
+        totals,
+        ..
+    } = &rows.result
+    else {
         return Err("a rows report lists rows".into());
     };
     let named: Vec<String> = rows
@@ -437,6 +473,7 @@ async fn main() -> Result<(), Failure> {
     checks.check(
         "a list of cases leaves out the cases about that account and names a merged account as its survivor",
         *total == 5
+            && totals.as_deref() == Some(&[Value::Null, Value::Null, json!(190)])
             && named
                 == [
                     "Late delivery=Northwind",
@@ -486,10 +523,25 @@ async fn main() -> Result<(), Failure> {
         format!("{:?}", keys.keys),
     );
 
+    let title_only = write(&draft(
+        "Case titles",
+        Kind::Rows,
+        Definition {
+            columns: vec!["title".into()],
+            ..Definition::default()
+        },
+    ))
+    .await?;
+    let own_access = reports.access(&viewer, title_only).await?;
     println!("== Wider reach and other tenants");
     grants
         .set_role_capability(&admin, readers, ACCOUNTS, Some(Reach::All))
         .await?;
+    checks.check(
+        "the title-only report access revision changes with subject reach",
+        own_access != reports.access(&viewer, title_only).await?,
+        "Own to All",
+    );
     let all = run(&viewer).await?;
     checks.check(
         "reach all: the reader sees what the manager sees, never another tenant's case",

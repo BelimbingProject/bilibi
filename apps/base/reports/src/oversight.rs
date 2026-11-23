@@ -55,7 +55,7 @@ impl Reports {
                 .map_err(grid)
         } else {
             let client = self.db.get().await.map_err(Error::from)?;
-            Catalog::for_scope(&**client, scope)
+            Catalog::for_report(&**client, scope)
                 .await
                 .map_err(|e| ReportError::Database(e.into()))
         }
@@ -244,7 +244,7 @@ impl Reports {
             let totals = if definition.totals && !input.as_rows {
                 let numeric: Vec<_> = columns
                     .iter()
-                    .filter(|c| c.ty.number() && c.spec != root.key())
+                    .filter(|c| c.reference.is_none() && c.ty.number() && c.spec != root.key())
                     .collect();
                 let mut sums = BTreeMap::new();
                 for chunk in numeric.chunks(bilibi_grid::MAX_MEASURES) {

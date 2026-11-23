@@ -2,7 +2,7 @@
 //! record its stored id names now. Base Records owns merges, so it binds the
 //! one [`Survivors`] relation here and Grid never reads its storage by name;
 //! who may read a subject is the reader's scoped catalog, as for any row.
-use crate::{catalog::Catalog, model::Table, query::ident, FieldType};
+use crate::{FieldType, catalog::Catalog, model::Table, query::ident};
 use bilibi_module_registry::RegistryError;
 use std::sync::OnceLock;
 
@@ -24,27 +24,21 @@ pub fn bind_survivors(survivors: Survivors) -> bilibi_module_registry::Result<()
         .map_err(|_| RegistryError::Service("duplicate Grid survivor binding".into()))
 }
 
-/// The subject field of the row `alias` as its survivor, in the field's own
-/// type. Without a bound relation no record was merged: the stored id.
-pub(crate) fn survivor(table: &Table, alias: &str) -> Option<String> {
-    let subject = table.subject()?;
-    let field = table.decl.fields.iter().find(|f| f.id == subject.field)?;
-    let raw = format!("{alias}.{}", ident(field.source_key()));
+pub(crate) fn survivor(subject: crate::Subject, ty: FieldType, raw: &str) -> String {
     let Some(survivors) = SURVIVORS.get() else {
-        return Some(raw);
+        return raw.into();
     };
-    // A survivor that is no number cannot be a row of an integer field's
-    // kind; it reads as the stored id instead of failing the statement.
-    let to_id = match field.ty {
-        FieldType::Integer => {
-            "CASE WHEN grid_merged.to_id ~ '^-?[0-9]{1,18}$' THEN grid_merged.to_id::bigint END"
-        }
-        _ => "grid_merged.to_id",
-    };
-    Some(format!(
-        "COALESCE((SELECT {to_id} FROM ({}) grid_merged WHERE grid_merged.tenant_id = $1 AND grid_merged.kind = '{}' AND grid_merged.from_id = ({raw})::text), {raw})",
+    let id = format!(
+        "COALESCE((SELECT grid_merged.to_id FROM ({}) grid_merged WHERE grid_merged.tenant_id = $1 AND grid_merged.kind = '{}' AND grid_merged.from_id = ({raw})::text), ({raw})::text)",
         survivors.relation, subject.kind
-    ))
+    );
+    if ty == FieldType::Integer {
+        format!(
+            "(SELECT CASE WHEN pg_input_is_valid(grid_id.id, 'bigint') THEN grid_id.id::bigint END FROM (SELECT {id} AS id) grid_id)"
+        )
+    } else {
+        id
+    }
 }
 
 /// Keeps the rows of `table`, aliased `alias`, whose subject the reader may
@@ -53,16 +47,13 @@ pub(crate) fn survivor(table: &Table, alias: &str) -> Option<String> {
 /// mounted) admits only rows without a subject. `None` when the table
 /// declares no subject.
 pub(crate) fn readable(catalog: &Catalog, table: &Table, alias: &str) -> Option<String> {
-    let subject = table.subject()?;
+    let subject = table.subject().filter(|_| table.report_subjects)?;
     let field = table.decl.fields.iter().find(|f| f.id == subject.field)?;
     let raw = format!("{alias}.{}", ident(field.source_key()));
-    let Some(target) = catalog
-        .tables()
-        .find(|target| target.decl.record_types.contains(&subject.kind))
-    else {
+    let Some(target) = catalog.record_table(subject.kind) else {
         return Some(format!("{raw} IS NULL"));
     };
-    let survivor = survivor(table, alias)?;
+    let survivor = survivor(subject, field.ty, &raw);
     let key = format!("grid_subject.{}", ident(target.key_field().source_key()));
     let native = field.ty == FieldType::Integer && target.key_field().ty == FieldType::Integer;
     let (survivor, key) = if native {

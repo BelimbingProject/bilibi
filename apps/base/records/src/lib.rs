@@ -11,14 +11,14 @@ mod operations;
 mod records;
 
 pub use declaration::{
-    Access, Holder, PortalProtection, PortalStepUp, RecordKind, RecordOwner, HOLDERS, KINDS,
-    PORTAL_STEP_UP,
+    Access, HOLDERS, Holder, KINDS, PORTAL_STEP_UP, PortalProtection, PortalStepUp, RecordKind,
+    RecordOwner,
 };
-pub use drops::{AddTo, DropRefusal, DropTarget, DROP_EVENT, DROP_PARAM, DROP_TARGETS, MAX_DROP};
+pub use drops::{AddTo, DROP_EVENT, DROP_PARAM, DROP_TARGETS, DropRefusal, DropTarget, MAX_DROP};
 pub use matching::ReferenceMatch;
 pub use records::{
-    Hit, Records, Reference, Referrers, Refusal, Resolved, MAX_PER_KIND, MAX_SEARCH_KINDS,
-    PICKER_HITS,
+    Hit, MAX_PER_KIND, MAX_SEARCH_KINDS, PICKER_HITS, Records, Reference, Referrers, Refusal,
+    Resolved,
 };
 #[doc(hidden)]
 pub use {
@@ -26,12 +26,12 @@ pub use {
     inventory,
 };
 
-use bilibi_authz::{CapabilityDefinition, RoleDefinition, VocabularyContribution, VOCABULARY};
+use bilibi_authz::{CapabilityDefinition, RoleDefinition, VOCABULARY, VocabularyContribution};
 use bilibi_module_registry::{
-    contributions::{Method, Route, ROUTES},
     Catalog, Module, RegistryError, Service,
+    contributions::{Method, ROUTES, Route},
 };
-use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
+use bilibi_settings::{DEFINITIONS, Definition, Editor, ScopeKind, Setting, ValueType};
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -88,6 +88,17 @@ inventory::submit! { Contribution::new(DEFINITIONS, PICKER_HITS, provenance!(), 
 /// - a holder's Grid table exists with both of its fields.
 pub fn validate_installed(catalog: &Catalog) -> bilibi_module_registry::Result<()> {
     let installed = bilibi_grid::installed()?;
+    for table in installed.tables() {
+        if let Some(subject) = table.subject() {
+            if !declaration::key_shaped(subject.kind) {
+                return Err(RegistryError::Contribution(format!(
+                    "Grid table {} names an invalid subject kind: {}",
+                    table.id(),
+                    subject.kind
+                )));
+            }
+        }
+    }
     let routes: Vec<&Route> = catalog
         .entries::<Route>(ROUTES)?
         .iter()

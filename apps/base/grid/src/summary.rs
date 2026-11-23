@@ -12,12 +12,12 @@
 //! are column specs resolved against that catalog, so a column the reader
 //! cannot see is refused like an unknown one and cannot be used to infer a
 //! hidden value. Only catalog identifiers enter SQL; every value is bound.
-use crate::query::{cell, field, source, QueryError, MAX_ESTIMATED_COST, MAX_HOPS, MAX_ROWS};
+use crate::query::{MAX_ESTIMATED_COST, MAX_HOPS, MAX_ROWS, QueryError, cell, field, source};
 use crate::{Agg, Catalog, Column, FieldType, Table};
 use bilibi_database::{Db, Error};
 use bilibi_tenancy::Scope;
 use bytes::BytesMut;
-use jiff::{civil::Date, tz::TimeZone, Timestamp, ToSpan};
+use jiff::{Timestamp, ToSpan, civil::Date, tz::TimeZone};
 use serde_json::Value;
 use tokio_postgres::types::{Format, IsNull, ToSql, Type};
 
@@ -304,7 +304,7 @@ pub async fn summarize(
         .await?;
     spec.bounds.check()?;
     tx.batch_execute(&spec.bounds.sql()).await?;
-    let catalog = Catalog::for_scope(&*tx, scope).await?;
+    let catalog = Catalog::for_report(&*tx, scope).await?;
     let result = summarize_catalog(&tx, &catalog, root, spec).await?;
     tx.commit().await?;
     Ok(result)
@@ -501,10 +501,42 @@ pub async fn page_keys(
         .await?;
     spec.bounds.check()?;
     tx.batch_execute(&spec.bounds.sql()).await?;
-    let catalog = Catalog::for_scope(&*tx, scope).await?;
+    let catalog = Catalog::for_report(&*tx, scope).await?;
     let result = page_keys_catalog(&tx, &catalog, root, spec).await?;
     tx.commit().await?;
     Ok(result)
+}
+
+pub async fn report_page<S: AsRef<str>>(
+    db: &Db,
+    scope: &Scope,
+    root: &str,
+    spec: &PageSpec,
+    columns: &[S],
+) -> Result<(KeyPage, crate::Projection), QueryError> {
+    spec.bounds.check()?;
+    let mut client = db.get().await.map_err(Error::from)?;
+    let tx = client
+        .build_transaction()
+        .read_only(true)
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .start()
+        .await?;
+    tx.batch_execute(&spec.bounds.sql()).await?;
+    let catalog = Catalog::for_report(&*tx, scope).await?;
+    let keys = page_keys_catalog(&tx, &catalog, root, spec).await?;
+    let projection = crate::query::project_catalog(
+        &tx,
+        &catalog,
+        root,
+        &keys.keys,
+        columns,
+        &crate::Lenses::default(),
+        spec.bounds,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((keys, projection))
 }
 
 pub(crate) async fn page_keys_catalog(
@@ -685,7 +717,10 @@ fn filters(
     for filter in filters {
         let column = resolve(catalog, root, &filter.column, hops)?;
         let value = cell(catalog, root, &column);
-        predicates.push(test(&column, &value, &filter.test, today, binds)?);
+        let subject = column
+            .field
+            .and_then(|field| catalog.table(column.table)?.report_subject(field.id));
+        predicates.push(test(&column, &value, &filter.test, today, binds, subject)?);
     }
     // Whatever the question names, it reads only rows whose subject the
     // reader may read (#877).
@@ -803,6 +838,7 @@ fn test(
     test: &Test,
     today: Date,
     binds: &mut Binds,
+    subject: Option<crate::Subject>,
 ) -> Result<String, QueryError> {
     if column.reference.is_some()
         && !matches!(
@@ -820,7 +856,12 @@ fn test(
             if ty == FieldType::Float {
                 float_test(value, "=", text, binds)
             } else {
-                format!("({value})::{cast} = {}::text::{cast}", binds.push(text))
+                let raw = format!("{}::text::{cast}", binds.push(text));
+                let wanted = match subject {
+                    Some(subject) => crate::subject::survivor(subject, ty, &raw),
+                    None => raw,
+                };
+                format!("({value})::{cast} = {wanted}")
             }
         }
         Test::OneOf(choices) => {
@@ -851,6 +892,12 @@ fn test(
                     ));
                 }
                 format!("({})", parts.join(" OR "))
+            } else if let Some(subject) = subject {
+                let wanted = crate::subject::survivor(subject, ty, &format!("choice.id::{cast}"));
+                format!(
+                    "({value})::{cast} IN (SELECT {wanted} FROM unnest({}::text[]) choice(id))",
+                    binds.push(texts)
+                )
             } else {
                 format!(
                     "({value})::{cast} = ANY({}::text[]::{cast}[])",
@@ -971,7 +1018,7 @@ pub async fn validate_summary_on(
     spec: &SummarySpec,
 ) -> Result<(), QueryError> {
     crate::query::bounded(tx, spec.bounds, async {
-        let catalog = Catalog::for_scope(tx, scope).await?;
+        let catalog = Catalog::for_report(tx, scope).await?;
         summarize_catalog(tx, &catalog, root, spec).await.map(drop)
     })
     .await
@@ -984,7 +1031,7 @@ pub async fn validate_page_on(
     spec: &PageSpec,
 ) -> Result<(), QueryError> {
     crate::query::bounded(tx, spec.bounds, async {
-        let catalog = Catalog::for_scope(tx, scope).await?;
+        let catalog = Catalog::for_report(tx, scope).await?;
         page_keys_catalog(tx, &catalog, root, spec).await.map(drop)
     })
     .await

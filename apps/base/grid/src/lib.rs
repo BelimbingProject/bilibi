@@ -24,23 +24,22 @@ pub mod view;
 mod view_operations;
 pub use lens::{Lens, Range};
 pub use oversight::{
-    ChildResult, OversightData, OversightQueries, OversightResult, OversightSpec, OVERSIGHT_QUERIES,
+    ChildResult, OVERSIGHT_QUERIES, OversightData, OversightQueries, OversightResult, OversightSpec,
 };
 pub use page_columns::{Outcome, PageColumns, ViewCaller};
-pub use page_metadata::{PageColumnsFuture, PageDetailsFuture, PageMetadata, PAGE_METADATA};
-pub use page_views::{PageViews, PAGE_VIEWS};
+pub use page_metadata::{PAGE_METADATA, PageColumnsFuture, PageDetailsFuture, PageMetadata};
+pub use page_views::{PAGE_VIEWS, PageViews};
 pub use query::{
-    project, project_lenses, project_within, scalar_access, scalar_expression, scalar_join, stats,
-    validate_projection_on, Lenses, Projection, QueryError, Row, ScalarJoin, Stats, BOUNDS,
-    MAX_ESTIMATED_COST,
+    BOUNDS, Lenses, MAX_ESTIMATED_COST, Projection, QueryError, Row, ScalarJoin, Stats, project,
+    project_lenses, scalar_access, scalar_expression, scalar_join, stats, validate_projection_on,
 };
-pub use shared_views::{Audience, SharedView, SHARE as SHARE_VIEWS};
-pub use subject::{bind_survivors, Survivors};
+pub use shared_views::{Audience, SHARE as SHARE_VIEWS, SharedView};
+pub use subject::{Survivors, bind_survivors};
 pub use summary::{
-    page_keys, summarize, validate_page_on, validate_summary_on, Bounds, Bucket, Filter, Grouping,
-    KeyPage, Line, Measure, PageSpec, Period, Sort, Summary, SummarySpec, Test, MAX_CHOICES,
-    MAX_COST_BOUND, MAX_FILTERS, MAX_GROUPINGS, MAX_MEASURES, MAX_OFFSET, MAX_RESULT_GROUPS,
-    MAX_SORTS, MAX_STATEMENT_MS, MAX_TEXT,
+    Bounds, Bucket, Filter, Grouping, KeyPage, Line, MAX_CHOICES, MAX_COST_BOUND, MAX_FILTERS,
+    MAX_GROUPINGS, MAX_MEASURES, MAX_OFFSET, MAX_RESULT_GROUPS, MAX_SORTS, MAX_STATEMENT_MS,
+    MAX_TEXT, Measure, PageSpec, Period, Sort, Summary, SummarySpec, Test, page_keys, report_page,
+    summarize, validate_page_on, validate_summary_on,
 };
 pub use transfer::{ViewPreview, ViewSetup, ViewTransfer};
 pub use view::View;
@@ -49,16 +48,16 @@ use bilibi_module_registry::{Consumer, Layer, Module, RegistryError, Result, Ser
 use std::sync::OnceLock;
 
 pub use catalog::{
-    restrictable, restriction_catalog, Catalog, CatalogError, Restrictable, MAX_COLUMNS,
+    Catalog, CatalogError, MAX_COLUMNS, Restrictable, restrictable, restriction_catalog,
 };
 pub use column::{Agg, Column, ColumnError, ColumnKind};
 pub use custom::{
-    bind_custom_columns, custom_field_id, custom_key, custom_tables, key_shaped, CustomColumn,
-    CustomColumns, CustomFuture, CustomTable,
+    CustomColumn, CustomColumns, CustomFuture, CustomTable, bind_custom_columns, custom_field_id,
+    custom_key, custom_tables, key_shaped,
 };
 pub use model::{
-    id_valid, GridContribution, Installed, Join, Link, LinkDecl, LinkKind, RecordFields, Source,
-    Subject, Table, TableDecl, MAX_FIELDS, MAX_LINKS_PER_TABLE, MAX_TABLES,
+    GridContribution, Installed, Join, Link, LinkDecl, LinkKind, MAX_FIELDS, MAX_LINKS_PER_TABLE,
+    MAX_TABLES, RecordFields, Source, Subject, Table, TableDecl, id_valid,
 };
 
 #[doc(hidden)]
@@ -149,8 +148,8 @@ pub fn validate_capabilities(
 
 /// Grid supplies Authz's protected-field catalog (`bilibi_authz::field_catalog`)
 /// as data: the restrictable fields of every installed table.
-fn restriction_snapshot(
-) -> std::result::Result<Vec<bilibi_authz::field_catalog::CatalogTable>, String> {
+fn restriction_snapshot()
+-> std::result::Result<Vec<bilibi_authz::field_catalog::CatalogTable>, String> {
     use bilibi_authz::field_catalog::{CatalogField, CatalogTable};
     Ok(
         restriction_catalog(installed().map_err(|error| error.to_string())?)
@@ -188,7 +187,7 @@ impl Table {
 /// Grid supplies Labels' renamable record types and fields as data: every
 /// installed table, and each table's non-hidden fields by `table.field`.
 fn label_subjects() -> std::result::Result<Vec<bilibi_labels::Subject>, String> {
-    use bilibi_labels::{subject_id, Kind, Subject};
+    use bilibi_labels::{Kind, Subject, subject_id};
     let installed = installed().map_err(|error| error.to_string())?;
     let mut subjects = Vec::new();
     for table in installed.tables() {

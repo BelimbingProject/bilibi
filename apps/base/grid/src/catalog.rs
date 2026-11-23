@@ -14,7 +14,7 @@ use std::{
     fmt,
     sync::{Arc, Mutex, OnceLock},
 };
-use tokio_postgres::{types::Type, GenericClient};
+use tokio_postgres::{GenericClient, types::Type};
 
 pub const MAX_COLUMNS: usize = 32;
 pub const MAX_SUGGESTIONS: usize = 50;
@@ -127,9 +127,25 @@ pub struct Catalog {
     names: Arc<bilibi_labels::FieldLabels>,
 }
 impl Catalog {
-    pub(crate) fn without_record_fields(mut self) -> Self {
+    pub async fn for_report(
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<Self, CatalogError> {
+        let mut catalog = Self::for_scope(client, scope).await?;
+        for table in catalog.tables.values_mut() {
+            table.report_subjects = true;
+        }
+        Ok(catalog)
+    }
+
+    pub fn record_table(&self, kind: &str) -> Option<&Table> {
+        self.tables()
+            .find(|table| table.decl.record_types.contains(&kind))
+    }
+
+    pub(crate) fn without_custom_references(mut self) -> Self {
         for table in self.tables.values_mut() {
-            table.remove_record_fields();
+            table.remove_custom_references();
         }
         self
     }
@@ -303,7 +319,7 @@ impl Catalog {
         rows: bool,
     ) -> Result<Self, CatalogError> {
         let parent = oversight.verify(client, grant).await?;
-        let mut catalog = Self::for_scope(client, &parent).await?;
+        let mut catalog = Self::for_report(client, &parent).await?;
         let mut tables = BTreeMap::new();
         for table in catalog.tables.values() {
             // A child's rows have no owner in the parent's teams: a parent
@@ -389,7 +405,7 @@ impl Catalog {
         oversight: &bilibi_tenancy::OversightScope,
         rows: bool,
     ) -> Result<Self, CatalogError> {
-        let mut catalog = Self::for_scope(client, oversight.parent()).await?;
+        let mut catalog = Self::for_report(client, oversight.parent()).await?;
         let mut children = Vec::new();
         for grant in oversight.children() {
             children.push(Self::for_oversight(client, oversight, grant, rows).await?);
@@ -658,7 +674,7 @@ fn truncated(spec: &str) -> String {
 fn field_specs(table: &Table, prefix: &str) -> Vec<String> {
     table
         .visible_fields()
-        .filter(|field| table.reference(field.id).is_none())
+        .filter(|field| table.custom_reference(field.id).is_none())
         .map(|field| format!("{prefix}{}", field.id))
         .collect()
 }
@@ -666,7 +682,7 @@ fn rollup_specs(target: &Table, path: &str, out: &mut Vec<String>) {
     out.push(format!("{path}:count"));
     for field in target
         .visible_fields()
-        .filter(|field| target.reference(field.id).is_none())
+        .filter(|field| target.custom_reference(field.id).is_none())
     {
         let id = field.id;
         match field.ty {

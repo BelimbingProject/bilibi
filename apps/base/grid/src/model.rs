@@ -276,6 +276,7 @@ pub struct Table {
     /// In a scoped catalog: the reader's reach on an owner-declaring table
     /// when it is narrower than all (#683).
     reach: Option<bilibi_authz::Reach>,
+    pub(crate) report_subjects: bool,
     /// In a scoped catalog: the tenant's custom fields among `fields`, by id,
     /// with their current label and value SQL over the row alias `{alias}`.
     custom: BTreeMap<&'static str, CustomField>,
@@ -362,16 +363,14 @@ impl Table {
     /// The Base Records kind a field's value names: a tenant's custom record
     /// field, or the table's subject field.
     pub fn reference(&self, id: &str) -> Option<&'static str> {
-        self.custom_reference(id).or_else(|| {
-            self.decl
-                .subject
-                .filter(|subject| subject.field == id)
-                .map(|subject| subject.kind)
-        })
+        self.custom_reference(id)
+            .or_else(|| self.report_subject(id).map(|subject| subject.kind))
     }
-    /// Leaves record fields out of what a list may pick: custom record
-    /// fields are removed, and the subject field stays only for joins.
-    pub(crate) fn remove_record_fields(&mut self) {
+    pub(crate) fn report_subject(&self, id: &str) -> Option<Subject> {
+        self.subject()
+            .filter(|subject| self.report_subjects && subject.field == id)
+    }
+    pub(crate) fn remove_custom_references(&mut self) {
         self.fields.retain(|field| {
             !self
                 .custom
@@ -379,13 +378,6 @@ impl Table {
                 .is_some_and(|custom| custom.reference.is_some())
         });
         self.custom.retain(|_, custom| custom.reference.is_none());
-        if let Some(subject) = self.decl.subject {
-            for field in &mut self.fields {
-                if field.id == subject.field {
-                    field.hidden = true;
-                }
-            }
-        }
     }
     pub(crate) fn custom_sql(&self, id: &str, alias: &str) -> Option<String> {
         self.custom
@@ -755,22 +747,15 @@ impl Table {
             return Err(bad("a team field needs an owner field".into()));
         }
         if let Some(subject) = decl.subject {
-            // The kind is written into statements as a literal, and the
-            // survivor lookup binds the tenant as `$1`.
-            let kind_valid = !subject.kind.is_empty()
-                && subject.kind.len() <= 200
-                && subject.kind.bytes().all(|c| {
-                    c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'.'
-                });
             let field_valid = subject.field != decl.key
                 && decl
                     .fields
                     .iter()
                     .find(|f| f.id == subject.field)
                     .is_some_and(|f| matches!(f.ty, FieldType::Integer | FieldType::String));
-            if !kind_valid || !field_valid || !decl.source.tenant_scoped {
+            if !field_valid || !decl.source.tenant_scoped {
                 return Err(bad(
-                    "a subject names a declared integer or text field other than the key, a record kind key, and needs a tenant source"
+                    "a subject names a declared integer or text field other than the key and needs a tenant source"
                         .into(),
                 ));
             }
@@ -802,6 +787,7 @@ impl Table {
             links: Vec::new(),
             protected,
             reach: None,
+            report_subjects: false,
             custom: BTreeMap::new(),
         })
     }

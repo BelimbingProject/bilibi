@@ -17,10 +17,10 @@ mod wording;
 
 #[doc(hidden)]
 pub use bilibi_module_registry::{Contribution, Provenance};
-pub use builtin::{Builtin, BUILTINS};
+pub use builtin::{BUILTINS, Builtin};
 pub use contributions::{AUTHOR, EXPORT, MANAGE, SCHEDULE, SHARE, VIEW};
 pub use definition::{
-    Definition, FilterDef, GroupingDef, Kind, MeasureDef, SortDef, CHARTS, MAX_COLUMNS,
+    CHARTS, Definition, FilterDef, GroupingDef, Kind, MAX_COLUMNS, MeasureDef, SortDef,
 };
 pub use export::{File, Format};
 pub use exports::Prepared;
@@ -37,7 +37,7 @@ use bilibi_grid::{Catalog, Column, FieldType, Filter, PageSpec, QueryError, Summ
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::Scope;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const SERVICE: &str = "base/reports.reports";
@@ -392,6 +392,14 @@ fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Reco
     };
     let d = &report.definition;
     let mut references = std::collections::BTreeSet::new();
+    let reach = |kind: &str| {
+        catalog.record_table(kind).map_or("none", |table| {
+            table.reach().map_or("all", |reach| reach.code())
+        })
+    };
+    if let Some(subject) = root.subject() {
+        references.insert(format!("subject:{}:{}", subject.kind, reach(subject.kind)));
+    }
     let seen: String = d
         .columns
         .iter()
@@ -402,28 +410,37 @@ fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Reco
         // A masked column still resolves; its values are read partial, so
         // masking it changes what the reader sees (ADR 05).
         .map(|spec| match catalog.resolve(root, spec) {
-            Ok(column) => match column.reference {
-                Some(kind) => {
-                    let readable = records
-                        .kind(kind)
-                        .is_some_and(|kind| catalog.table(kind.table).is_some());
-                    references.insert(format!("ref:{}:{kind}:{}", column.spec, u8::from(readable)));
-                    'r'
+            Ok(column) => {
+                for link in column
+                    .hops
+                    .iter()
+                    .chain(column.many.iter())
+                    .chain(&column.tail)
+                {
+                    if let Some(subject) = catalog
+                        .table(link.to())
+                        .and_then(bilibi_grid::Table::subject)
+                    {
+                        references.insert(format!(
+                            "subject:{}:{}",
+                            subject.kind,
+                            reach(subject.kind)
+                        ));
+                    }
                 }
-                None if catalog.mask(&column).is_some() => 'm',
-                None => '1',
-            },
+                if catalog.mask(&column).is_some() {
+                    'm'
+                } else if let Some(kind) = column.reference {
+                    let reach = records.kind(kind).map_or("none", |_| reach(kind));
+                    references.insert(format!("ref:{}:{kind}:{reach}", column.spec));
+                    'r'
+                } else {
+                    '1'
+                }
+            }
             Err(_) => '0',
         })
         .collect();
-    // A source's subject decides which rows the reader gets, whatever the
-    // report names: gaining or losing its table changes the result.
-    if let Some(subject) = root.subject() {
-        let readable = catalog
-            .tables()
-            .any(|table| table.decl.record_types.contains(&subject.kind));
-        references.insert(format!("subject:{}:{}", subject.kind, u8::from(readable)));
-    }
     format!(
         "{}:{seen}:{}",
         report.version,
@@ -604,7 +621,7 @@ impl Reports {
                 .map_err(grid)?
         } else {
             let tx = tx.ok_or(Error::Internal)?;
-            Catalog::for_scope(tx, scope)
+            Catalog::for_report(tx, scope)
                 .await
                 .map_err(|e| ReportError::Database(e.into()))?
         };
@@ -932,7 +949,7 @@ impl Reports {
                 jiff::Timestamp::now()
             ));
         }
-        let catalog = Catalog::for_scope(&**client, scope)
+        let catalog = Catalog::for_report(&**client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         Ok(access_key(&catalog, &report, &self.records))
@@ -950,7 +967,7 @@ impl Reports {
         authorize(&**client, scope, VIEW).await?;
         let reports =
             store::dashboard(&**client, scope.tenant(), scope.user(), placed, offers).await?;
-        let catalog = Catalog::for_scope(&**client, scope)
+        let catalog = Catalog::for_report(&**client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         Ok(reports
@@ -1105,7 +1122,7 @@ impl Reports {
         scope: &Scope,
     ) -> Outcome<Vec<Report>> {
         authorize(client, scope, VIEW).await?;
-        let catalog = Catalog::for_scope(client, scope)
+        let catalog = Catalog::for_report(client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         Ok(self
@@ -1167,7 +1184,7 @@ impl Reports {
             .display(&**client, scope, None, "en")
             .await?
             .timezone;
-        let catalog = Catalog::for_scope(&**client, scope)
+        let catalog = Catalog::for_report(&**client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         let root = catalog
@@ -1226,21 +1243,21 @@ impl Reports {
                 } else {
                     Vec::new()
                 };
-                let totals_of: Vec<Option<bilibi_grid::Measure>> = if report.kind == Kind::Rows
-                    && definition.totals
-                {
-                    columns
-                        .iter()
-                        .map(|c| {
-                            (c.ty.number() && c.spec != root.key()).then(|| bilibi_grid::Measure {
-                                column: c.spec.clone(),
-                                agg: bilibi_grid::Agg::Sum,
+                let totals_of: Vec<Option<bilibi_grid::Measure>> =
+                    if report.kind == Kind::Rows && definition.totals {
+                        columns
+                            .iter()
+                            .map(|c| {
+                                (c.reference.is_none() && c.ty.number() && c.spec != root.key())
+                                    .then(|| bilibi_grid::Measure {
+                                        column: c.spec.clone(),
+                                        agg: bilibi_grid::Agg::Sum,
+                                    })
                             })
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                 let totals_filters = filters.clone();
                 // A value saved before the setting's bound was 100 still runs.
                 let page_size = self

@@ -210,7 +210,7 @@ impl Watchers {
             if column.as_ref().is_some_and(|column| {
                 catalog.table(column.table).is_some_and(|table| {
                     column.field.is_some_and(|field| {
-                        table.reference(field.id).is_some()
+                        table.custom_reference(field.id).is_some()
                             || field.id == table.key()
                             || record_id(field.id)
                             || field.personal.is_some()

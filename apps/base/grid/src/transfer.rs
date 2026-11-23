@@ -49,7 +49,7 @@ async fn missing_column(
     let catalog = crate::Catalog::for_setup_preview(tx, scope, fields)
         .await
         .map_err(Error::from)?
-        .without_record_fields();
+        .without_custom_references();
     let allowed = columns.preview_columns(&catalog, arrangement.clone());
     Ok(arrangement
         .columns
