@@ -27,9 +27,7 @@ pub(crate) async fn held_accepted_invitations(
         .map(|row| (row.get(0), row.get(1)))
         .collect();
     let ids: Vec<i64> = rows.iter().map(|(id, _)| *id).collect();
-    let held = holds
-        .records(sql, grant, INVITATION_KIND, &ids)
-        .await?;
+    let held = holds.records(sql, grant, INVITATION_KIND, &ids).await?;
     Ok(rows
         .into_iter()
         .filter_map(|(id, user)| held.get(&id).map(|hold| (id, user, *hold)))
