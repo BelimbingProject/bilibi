@@ -38,4 +38,17 @@ impl StepUpGate {
             body,
         }
     }
+
+    /// Covers a page body already rendered by a trusted server-owned page.
+    ///
+    /// Request data and stored user content must be rendered through their
+    /// typed components before the host passes the resulting page body here.
+    pub fn rendered_page(
+        prompt: impl Into<String>,
+        return_to: impl Into<String>,
+        title: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self::new(prompt, return_to, title, Html::raw(body.into()))
+    }
 }

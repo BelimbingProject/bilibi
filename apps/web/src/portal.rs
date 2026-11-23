@@ -149,11 +149,11 @@ async fn step_up_page(
         .0
         .step_up_title(requested.route.operation, requested_path)
         .unwrap_or_else(|| "Protected page".to_owned());
-    let gate = Html::render(&bilibi_ui::StepUpGate::new(
+    let gate = Html::render(&bilibi_ui::StepUpGate::rendered_page(
         destination,
         return_to,
         title.clone(),
-        Html::raw(page.html),
+        page.html,
     ))
     .map_err(|_| Error::Internal)?;
     let (site, logo) = site_brand(app, portal).await?;

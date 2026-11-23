@@ -685,11 +685,11 @@ async fn step_up_page(
         .0
         .step_up_title(requested.route.operation, requested_path)
         .unwrap_or_else(|| "Protected page".to_owned());
-    let gate = bilibi_ui::Html::render(&bilibi_ui::StepUpGate::new(
+    let gate = bilibi_ui::Html::render(&bilibi_ui::StepUpGate::rendered_page(
         destination,
         return_to,
         title.clone(),
-        bilibi_ui::Html::raw(page.html),
+        page.html,
     ))
     .map_err(|_| Error::Internal)?;
     let shell = crate::shell::render(

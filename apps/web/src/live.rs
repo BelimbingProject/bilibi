@@ -1069,11 +1069,11 @@ impl<S: Side> Session<S> {
     ) -> Result<Value> {
         let (path, page_html) = match &self.step_up {
             Some(gate) => {
-                let html = bilibi_ui::Html::render(&bilibi_ui::StepUpGate::new(
+                let html = bilibi_ui::Html::render(&bilibi_ui::StepUpGate::rendered_page(
                     gate.prompt.clone(),
                     gate.return_to.clone(),
                     gate.title.clone(),
-                    bilibi_ui::Html::raw(body.html.clone()),
+                    body.html.clone(),
                 ))
                 .map_err(|_| Error::Internal)?;
                 (gate.path.as_str(), html.as_str().to_owned())

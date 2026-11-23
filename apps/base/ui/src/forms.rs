@@ -1111,8 +1111,6 @@ impl CodeInput {
         self
     }
 
-    /// Move keyboard focus here when this field is the page's immediate task.
-
     pub fn errors(mut self, errors: Vec<String>) -> Self {
         self.errors = errors;
         self
