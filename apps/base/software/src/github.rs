@@ -289,18 +289,19 @@ impl Software {
     }
 
     /// The read token for one use of `repository`: a fresh one from this
-    /// server's GitHub App when it has one, else the saved read token, else
-    /// none (a public repository). Never stored; drop it after the use.
+    /// server's GitHub App when it has one and is installed on `repository`,
+    /// else the saved read token, else none (a public repository). Never stored; drop it after the use.
     pub(crate) async fn github_token(
         &self,
         scope: &Scope,
         repository: &str,
     ) -> std::result::Result<Option<String>, String> {
         if let Some(app) = app::load(self.paths.as_ref())? {
-            return app::mint(&self.integration, scope, &app, repository)
-                .await
-                .map(Some)
-                .map_err(app::Refusal::sentence);
+            match app::mint(&self.integration, scope, &app, repository).await {
+                Ok(token) => return Ok(Some(token)),
+                Err(app::Refusal::NotInstalled(_)) => {}
+                Err(refusal) => return Err(refusal.sentence()),
+            }
         }
         let read = async {
             let client = self.db.get().await?;

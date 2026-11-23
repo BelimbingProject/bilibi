@@ -217,8 +217,8 @@ The application maker's [guide to connecting servers](https://github.com/Belimbi
 From then on:
 
 - `release`, `installer` and `verify` ask GitHub for a token that can only read the `--repo` you name, give it to that one `gh attestation verify` as `GH_TOKEN`, and drop it. It is never printed, logged or written to disk.
-- **Software › Releases** does the same for each list, review, download and upload check. While the server has an App, the page's saved read token is not used.
-- A repository the App is not installed on, such as the official `BelimbingProject/bilibi` for the installer, is read without a login, as before.
+- **Software › Releases** does the same for each list, review, download and upload check. The page's saved read token is used only for a repository the App is not installed on.
+- A repository the App is not installed on, such as the official `BelimbingProject/bilibi` for the installer, is read with the saved read token, or without a login, as before.
 - A `GH_TOKEN` you set yourself for one command still wins.
 
 The App lives in `/opt/bilibi/github-app.json`, one per server, because every instance on the machine serves the same application. Root and the Bilibi services can read it, like each instance's `env`, which already holds the key that unlocks saved secrets.
