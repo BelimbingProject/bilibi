@@ -23,8 +23,8 @@ use bilibi_database::{Change, Error, MutationTransaction};
 use bilibi_events::{EventType, Events, NewEvent, On, EVENTS};
 use bilibi_grid::{Field, FieldType, GridContribution, LinkDecl, LinkKind, Source, TableDecl};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance, Service};
-use bilibi_watchers::{Action, Trigger, ACTIONS, TRIGGERS};
 use bilibi_tenancy::Scope;
+use bilibi_watchers::{Action, Trigger, ACTIONS, LOCAL_SCRIPT_ACTIONS, TRIGGERS};
 use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 
@@ -124,6 +124,7 @@ inventory::submit! { Contribution::new(TRIGGERS, ROUTED, provenance!(), &Trigger
 inventory::submit! { Contribution::new(TRIGGERS, FLAGGED, provenance!(), &Trigger {
     on: On { event: FLAGGED, versions: &[1] }, title: "A case is flagged", table: TABLE, subject: "/case", logical_event: None, version: "version",
 }) }
+inventory::submit! { Contribution::new(LOCAL_SCRIPT_ACTIONS, "watcher_cases.cases.route", provenance!(), &()) }
 inventory::submit! { Contribution::new(ACTIONS, "watcher_cases.cases.route", provenance!(), &Action {
     title: "Send the case to a queue", table: TABLE, subject: "case_id", version: "expected_version", records: &[ROUTED], approval_capabilities: &[],
 }) }
@@ -202,15 +203,28 @@ impl WriteHandler for Open {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|pair| (bilibi_agent_api::text_field(pair, "key"), pair["value"].clone()))
+                .map(|pair| {
+                    (
+                        bilibi_agent_api::text_field(pair, "key"),
+                        pair["value"].clone(),
+                    )
+                })
                 .collect();
             let custom = match custom_fields()?
-                .validate_locked(tx.sql(), scope, RECORD_TYPE, &patch, &serde_json::Map::new())
+                .validate_locked(
+                    tx.sql(),
+                    scope,
+                    RECORD_TYPE,
+                    &patch,
+                    &serde_json::Map::new(),
+                )
                 .await?
             {
                 Ok(values) => Value::Object(values),
                 Err(errors) => {
-                    let first = errors.first().map_or("is not valid", |error| error.message.as_str());
+                    let first = errors
+                        .first()
+                        .map_or("is not valid", |error| error.message.as_str());
                     return Err(invalid("custom", first));
                 }
             };

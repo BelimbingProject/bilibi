@@ -57,6 +57,17 @@ impl WatcherSetup {
         input["examples"] = examples.clone();
         let mut problems = Vec::new();
         let mut draft = Draft::parse(&input, &mut problems);
+        if draft
+            .definition
+            .as_ref()
+            .is_some_and(|definition| definition.scripts().next().is_some())
+        {
+            problems.push((
+                "do".into(),
+                "Setup packs cannot transfer script steps.".into(),
+            ));
+            draft.definition = None;
+        }
         draft.watcher_id = None;
         draft.explanation = None;
         if draft.name != self.name
@@ -95,6 +106,9 @@ impl Watchers {
         }
         let mut setup = setup(&row);
         let (draft, problems) = setup.parse(&row.get(4));
+        if !problems.is_empty() {
+            return Err(Error::Refused(problems[0].1.clone()));
+        }
         let catalog = Catalog::for_scope(tx, scope).await.map_err(Error::from)?;
         let mut problems = problems;
         let warnings = self.check_literals(&catalog, &draft, &mut problems);

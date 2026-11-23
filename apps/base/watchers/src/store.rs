@@ -200,7 +200,7 @@ impl Watchers {
             ("examples", examples, EXAMPLES),
             (
                 "if.conditions",
-                definition.fact_fields(version_field).len(),
+                definition.fact_fields(version_field, true).len(),
                 FACTS_READ,
             ),
         ] {
@@ -363,7 +363,7 @@ impl Watchers {
         bilibi_authz::authorize_key(client, scope, VIEW).await?;
         let tenant = scope.tenant();
         let rows = client.query(
-            "SELECT u.id,u.watcher_id,v.number,u.event_id,u.event_name,u.subject,u.depth,u.state,u.reason,u.facts,u.outcomes,u.created_at,u.finished_at,v.definition,v.catalog_digest FROM base_watcher_runs u JOIN base_watcher_versions v ON v.tenant_id=u.tenant_id AND v.id=u.version_id WHERE u.tenant_id=$1 AND ($2::bigint IS NULL OR u.watcher_id=$2) ORDER BY u.id DESC LIMIT $3",
+            "SELECT u.id,u.watcher_id,v.number,u.event_id,u.event_name,u.subject,u.depth,u.state,u.reason,u.facts,u.outcomes,u.created_at,u.finished_at,v.definition,v.catalog_digest,u.planned_calls IS NOT NULL FROM base_watcher_runs u JOIN base_watcher_versions v ON v.tenant_id=u.tenant_id AND v.id=u.version_id WHERE u.tenant_id=$1 AND ($2::bigint IS NULL OR u.watcher_id=$2) ORDER BY u.id DESC LIMIT $3",
             &[&tenant, &watcher, &limit.clamp(1, 200)],
         ).await?;
         let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
@@ -392,22 +392,34 @@ impl Watchers {
                 saved.is_some() && saved == self.catalog_digest(event, definition, &custom)
             });
             let allowed = match self.trigger(event).filter(|_| compatible) {
-                Some(trigger) => self
-                    .read_facts(client, scope, trigger.definition.table, row.get(5), &fields)
-                    .await?
-                    .is_ok(),
+                Some(trigger) => {
+                    let fields = match definition {
+                        Some(definition)
+                            if definition.scripts().next().is_some() && row.get::<_, bool>(15) =>
+                        {
+                            definition.fact_fields(trigger.definition.version, true)
+                        }
+                        _ => fields,
+                    };
+                    self.read_facts(client, scope, trigger.definition.table, row.get(5), &fields)
+                        .await?
+                        .is_ok()
+                }
                 None => false,
             };
-            readable.insert(row.get::<_, i64>(0), allowed);
+            let scripted = definition
+                .as_ref()
+                .is_some_and(|definition| definition.scripts().next().is_some());
+            readable.insert(row.get::<_, i64>(0), (allowed, scripted));
         }
         let hidden = json!({"restricted": true});
         Ok(rows
             .iter()
             .map(|row| {
-                let shown = readable
+                let (shown, scripted) = readable
                     .get(&row.get::<_, i64>(0))
                     .copied()
-                    .unwrap_or(false);
+                    .unwrap_or_default();
                 let id: i64 = row.get(0);
                 RunView {
                     id,
@@ -433,7 +445,7 @@ impl Watchers {
                     finished_at: time_opt(row, 12),
                     effects: effects
                         .iter()
-                        .filter(|e| e.get::<_, i64>(0) == id)
+                        .filter(|e| (shown || !scripted) && e.get::<_, i64>(0) == id)
                         .map(|e| EffectView {
                             position: e.get(1),
                             operation: e.get(2),
@@ -632,7 +644,7 @@ impl Watchers {
                     required.retain(|r| r.as_str() != Some(a.definition.subject) && r.as_str() != Some(a.definition.version));
                 }
                 json!({"operation": a.key, "title": a.title, "summary": a.summary, "table": a.definition.table,
-                    "subject": a.definition.subject, "records": a.definition.records, "input": input})
+                    "subject": a.definition.subject, "records": a.definition.records, "local_script": a.local_script, "input": input})
             })
             .collect();
         Ok(json!({

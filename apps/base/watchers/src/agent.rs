@@ -394,7 +394,7 @@ fn script_schema() -> Value {
         "operation":{"type":"string","maxLength":200},
         "input":{"type":"object","additionalProperties":true}
     }});
-    json!({"type":"object","required":["name","source","fields","calls","examples","runner"],"properties":{
+    json!({"type":"object","required":["name","source","fields","calls","examples"],"properties":{
         "name":{"type":"string","maxLength":120},
         "source":{"type":"string","maxLength":16384,"description":"JavaScript function body. Return an ordered array of declared calls using facts from the approved fields."},
         "fields":{"type":"array","items":{"type":"string","maxLength":160}},
@@ -403,7 +403,8 @@ fn script_schema() -> Value {
             "facts":{"type":"object","additionalProperties":true},
             "expect":{"type":"array","items":call}
         }}},
-        "runner":{"type":"string","enum":["watchers"]}
+        "language":{"type":"string","enum":["javascript"]},
+        "source_digest":{"type":"string","description":"SHA-256 of the exact source. Filled in by Bilibi when omitted."}
     }})
 }
 

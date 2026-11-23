@@ -151,6 +151,20 @@ impl Definition {
         })
     }
 
+    pub(crate) fn script_calls(&self) -> impl Iterator<Item = &ActionCall> {
+        self.scripts().flat_map(|script| &script.calls)
+    }
+
+    pub(crate) fn script_fact_fields(&self, version: &str) -> Vec<String> {
+        let mut fields = vec![version.to_owned()];
+        for field in self.scripts().flat_map(|script| &script.fields) {
+            if !fields.contains(field) {
+                fields.push(field.clone());
+            }
+        }
+        fields
+    }
+
     pub(crate) fn to_json(&self) -> Value {
         let mut value = json!({
             "do": self.steps,
@@ -243,10 +257,11 @@ impl Definition {
         for (i, item) in listed.iter().take(MAX_ACTIONS).enumerate() {
             if let Some(value) = item.get("script") {
                 match serde_json::from_value::<crate::script::Script>(value.clone()) {
-                    Ok(script) if item.as_object().is_some_and(|item| item.len() == 1) && script.validate() => {
+                    Ok(mut script) if item.as_object().is_some_and(|item| item.len() == 1) && script.validate() => {
+                        script.pin_source();
                         steps.push(Step::Script { script });
                     }
-                    _ => problems.push((format!("do.{i}.script"), "Supply a named script with its runner, fields, allowed calls and examples.".into())),
+                    _ => problems.push((format!("do.{i}.script"), "Supply a named script with its source, fields, allowed calls and examples.".into())),
                 }
                 continue;
             }
@@ -341,22 +356,30 @@ impl Definition {
         (matched, outcomes)
     }
 
-    pub(crate) fn fact_fields(&self, version: &str) -> Vec<String> {
-        let mut fields = self.fields();
+    pub(crate) fn fact_fields(&self, version: &str, include_script: bool) -> Vec<String> {
+        let mut fields = if include_script {
+            self.fields()
+        } else {
+            self.condition_fields()
+        };
         if !fields.iter().any(|field| field == version) {
             fields.push(version.to_owned());
         }
         fields
     }
 
-    /// The fields the conditions read, each once, in order.
-    pub(crate) fn fields(&self) -> Vec<String> {
+    pub(crate) fn condition_fields(&self) -> Vec<String> {
         let mut fields: Vec<String> = Vec::new();
         for condition in &self.conditions {
             if !fields.contains(&condition.field) {
                 fields.push(condition.field.clone());
             }
         }
+        fields
+    }
+
+    pub(crate) fn fields(&self) -> Vec<String> {
+        let mut fields = self.condition_fields();
         for field in self.scripts().flat_map(|script| &script.fields) {
             if !fields.contains(field) {
                 fields.push(field.clone());
@@ -423,7 +446,7 @@ fn scalar(value: &Value) -> bool {
 }
 
 /// Whether `value` is a value of a field of type `ty`.
-fn typed(ty: FieldType, choices: &[&str], value: &Value) -> Result<(), String> {
+pub(crate) fn typed(ty: FieldType, choices: &[&str], value: &Value) -> Result<(), String> {
     match ty {
         FieldType::Integer | FieldType::Float | FieldType::Decimal => decimal(value)
             .map(|_| ())
@@ -450,7 +473,7 @@ fn typed(ty: FieldType, choices: &[&str], value: &Value) -> Result<(), String> {
 }
 
 /// `true`/`false`, as JSON or as the text the agent schema carries.
-fn boolean(value: &Value) -> Option<bool> {
+pub(crate) fn boolean(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(b) => Some(*b),
         Value::String(text) => match text.as_str() {

@@ -23,6 +23,7 @@ pub struct Review {
     pub actions: Vec<String>,
     /// Each example: what it expects and what the conditions answer.
     pub examples: Vec<(bool, bool)>,
+    pub script_examples: Vec<String>,
     pub warnings: Vec<String>,
     pub trigger_title: String,
 }
@@ -40,6 +41,7 @@ impl Review {
                 "result": if *got {"match"} else {"no_match"},
                 "passes": expect == got,
             })).collect::<Vec<_>>(),
+            "script_examples": self.script_examples,
             "warnings": self.warnings,
             "problems": self.problems.iter().map(|(field, why)| json!({"field": field, "problem": why})).collect::<Vec<_>>(),
         })
@@ -150,8 +152,12 @@ impl Watchers {
         }).collect();
         let actions: Option<Vec<Value>> = definition.actions().map(|call| {
             let action = self.action(&call.operation)?;
-            Some(json!({"key": action.key, "table": action.definition.table, "subject": action.definition.subject,
-                "version": action.definition.version, "input": action.input, "records": action.definition.records, "capability": action.capability, "approval_capabilities": action.definition.approval_capabilities}))
+            let mut binding = json!({"key": action.key, "table": action.definition.table, "subject": action.definition.subject,
+                "version": action.definition.version, "input": action.input, "records": action.definition.records, "capability": action.capability, "approval_capabilities": action.definition.approval_capabilities});
+            if definition.scripts().next().is_some() {
+                binding["script_local"] = json!(action.local_script);
+            }
+            Some(binding)
         }).collect();
         Some(digest(
             &json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
@@ -282,8 +288,14 @@ impl Watchers {
             &mut review,
             &mut problems,
         )?;
-        self.script_examples(client, scope, definition, &mut problems)
-            .await?;
+        self.review_script_examples(
+            client,
+            scope,
+            (catalog, trigger, definition),
+            &mut review,
+            &mut problems,
+        )
+        .await?;
         problems.extend(
             self.check_limits(
                 client,
@@ -381,10 +393,7 @@ impl Watchers {
                     problems.push(("do".into(), format!("{} cannot read {path}.", script.name)));
                 }
             }
-            review.actions.push(format!(
-                "Run script {} as {}. JavaScript: {}",
-                script.name, script.runner, script.source
-            ));
+            review.actions.push(script.describe());
         }
         review.conditions = definition
             .conditions
@@ -405,6 +414,16 @@ impl Watchers {
                 ));
                 continue;
             };
+            if !action.local_script
+                && definition
+                    .script_calls()
+                    .any(|declared| declared.operation == action.key)
+            {
+                problems.push((
+                    at("operation"),
+                    format!("{} is unavailable in scripted watchers", action.key),
+                ));
+            }
             if action.definition.table != trigger.definition.table {
                 problems.push((
                     at("operation"),
@@ -450,7 +469,7 @@ impl Watchers {
             });
         }
         let types = |path: &str| field(path).map_or(FieldType::String, |(ty, _, _)| ty);
-        let fields = definition.fields();
+        let fields = definition.condition_fields();
         for (i, example) in examples.iter().enumerate() {
             if let Some(unknown) = example.facts.keys().find(|key| !fields.contains(key)) {
                 problems.push((
@@ -474,6 +493,94 @@ impl Watchers {
                 ));
             }
             review.examples.push((example.expect, matched));
+        }
+        Ok(())
+    }
+
+    async fn review_script_examples(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        context: (&Catalog, &OfferedTrigger, &Definition),
+        review: &mut Review,
+        problems: &mut Problems,
+    ) -> Result<()> {
+        let (catalog, trigger, definition) = context;
+        if definition.scripts().next().is_none() || !problems.is_empty() {
+            return Ok(());
+        }
+        let table = catalog
+            .table(trigger.definition.table)
+            .ok_or(Error::Invalid)?;
+        let time = self.limit(client, scope, crate::SCRIPT_TIME).await? as u64;
+        let (heap, limit) = self.script_limits(client, scope).await?;
+        for script in definition.scripts() {
+            for (index, example) in script.examples.iter().enumerate() {
+                let mut facts = serde_json::Map::new();
+                let mut valid = true;
+                for (path, value) in &example.facts {
+                    let column = catalog.resolve(table, path).map_err(|_| Error::Invalid)?;
+                    let field = column.field.ok_or(Error::Invalid)?;
+                    if !value.is_null() {
+                        if let Err(why) = definition::typed(column.ty, field.values, value) {
+                            problems.push((
+                                "do".into(),
+                                format!(
+                                    "{} example {} field {path} {why}.",
+                                    script.name,
+                                    index + 1
+                                ),
+                            ));
+                            valid = false;
+                            continue;
+                        }
+                    }
+                    let value = match column.ty {
+                        _ if value.is_null() => Value::Null,
+                        ty if ty.number() && value.is_number() => json!(value.to_string()),
+                        FieldType::Boolean => json!(definition::boolean(value)),
+                        _ => value.clone(),
+                    };
+                    facts.insert(path.clone(), value);
+                }
+                if !valid {
+                    continue;
+                }
+                if !bilibi_authz::decide(client, scope, crate::RUN_SCRIPT)
+                    .await?
+                    .allowed
+                {
+                    problems.push((
+                        "do".into(),
+                        "You need the script execution grant to run examples.".into(),
+                    ));
+                    return Ok(());
+                }
+                let actual = crate::script::before_deadline(
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_millis(time)),
+                    script.capture(&facts, time, heap),
+                )
+                .await
+                .unwrap_or(Err("script_timeout"));
+                let passes = actual.as_ref().is_ok_and(|calls| {
+                    *calls == example.expect && script.permits(calls) && calls.len() <= limit
+                });
+                let actual = match actual {
+                    Ok(calls) => json!(calls).to_string(),
+                    Err(reason) => reason.to_owned(),
+                };
+                let line = format!(
+                    "{} example {} expected {} and returned {}.",
+                    script.name,
+                    index + 1,
+                    json!(example.expect),
+                    actual
+                );
+                if !passes {
+                    problems.push(("do".into(), line.clone()));
+                }
+                review.script_examples.push(line);
+            }
         }
         Ok(())
     }
@@ -634,8 +741,14 @@ impl Watchers {
             )
             .await?,
         );
-        self.script_examples(client, scope, &definition, &mut problems)
-            .await?;
+        self.review_script_examples(
+            client,
+            scope,
+            (&catalog, offered, &definition),
+            &mut review,
+            &mut problems,
+        )
+        .await?;
         // The approver's own authority: approving never delegates more.
         let grid = bilibi_grid::installed()?;
         let mut needed: std::collections::BTreeSet<&str> = grid
@@ -960,10 +1073,7 @@ impl Watchers {
             .map(|step| {
                 let a = match step {
                     crate::definition::Step::Script { script } => {
-                        return format!(
-                            "Run {} as {}. JavaScript: {}",
-                            script.name, script.runner, script.source
-                        )
+                        return script.describe();
                     }
                     crate::definition::Step::Operation(call) => call,
                 };
@@ -982,7 +1092,7 @@ impl Watchers {
                 }
             })
             .collect();
-        let examples = definition::parse_examples(examples, &mut problems)
+        let mut examples: Vec<String> = definition::parse_examples(examples, &mut problems)
             .iter()
             .map(|e| {
                 let facts: Vec<String> = e
@@ -1005,6 +1115,17 @@ impl Watchers {
                 )
             })
             .collect();
+        for script in parsed.scripts() {
+            for (index, example) in script.examples.iter().enumerate() {
+                examples.push(format!(
+                    "{} example {} with {} expects {}.",
+                    script.name,
+                    index + 1,
+                    json!(example.facts),
+                    json!(example.expect)
+                ));
+            }
+        }
         let scripted = parsed.scripts().next().is_some();
         Described {
             scripted,

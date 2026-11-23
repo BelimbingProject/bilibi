@@ -460,184 +460,205 @@ impl Worker {
         let mut problems = Vec::new();
         let definition =
             Definition::parse(&row.get::<_, Value>(3), &mut problems).ok_or(Error::Invalid)?;
-        let approved_digest: Option<String> = row.get(4);
-        let custom = watchers
-            .custom_tables(&**client, scope, [&definition])
+        let deadline = watchers
+            .script_deadline(&**client, scope, &definition)
             .await?;
-        if row.get::<_, bool>(5)
-            || approved_digest.is_none()
-            || approved_digest != watchers.catalog_digest(&trigger, &definition, &custom)
-        {
-            let mut tx = execution
-                .begin(&mut client, "watchers.review_required")
+        let result = crate::script::before_deadline(deadline, async {
+            let approved_digest: Option<String> = row.get(4);
+            let custom = watchers
+                .custom_tables(&**client, scope, [&definition])
                 .await?;
-            let watcher = run.watcher;
-            let version = run.version;
-            tx.mutate(move |sql| Box::pin(async move {
-                let changed = sql.execute("UPDATE base_watchers SET needs_review=true,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2 AND active_version_id=$3 AND NOT needs_review", &[&tenant, &watcher, &version]).await?;
-                let changes = if changed == 0 { Vec::new() } else { vec![Change { kind: "base/watchers.watcher".into(), id: watcher, old: json!({"needs_review": false}), new: json!({"needs_review": true}) }] };
-                Ok(((), changes))
-            })).await?;
-            tx.commit().await?;
-            return self
-                .finish(
-                    execution,
-                    &mut client,
-                    &run,
-                    Stop::Refused("catalog_changed"),
-                    None,
-                )
-                .await;
-        }
-        let stop = if i64::from(run.depth) > depth {
-            Some(Stop::Refused("chain_budget"))
-        } else if off {
-            Some(Stop::Refused("watcher_off"))
-        } else if active != Some(run.version) {
-            Some(Stop::Refused("stale_version"))
-        } else if !row.get::<_, bool>(7) {
-            Some(Stop::Refused("stale_activation"))
-        } else {
-            None
-        };
-        if let Some(stop) = stop {
-            return self.finish(execution, &mut client, &run, stop, None).await;
-        }
-        let offered = watchers.trigger(&trigger).ok_or(Error::Invalid)?;
-        let limits = watchers
-            .check_limits(
-                &**client,
-                scope,
-                &definition,
-                row.get::<_, Value>(6).as_array().map_or(0, Vec::len),
-                offered.definition.version,
-            )
-            .await?;
-        if !limits.is_empty() {
-            let code = if limits.iter().any(|(field, _)| field == "do") {
-                "action_limit"
-            } else {
-                "watcher_limit"
-            };
-            return self
-                .finish(execution, &mut client, &run, Stop::Refused(code), None)
-                .await;
-        }
-        // Facts and the decision are kept once taken, so a retry after a
-        // crash acts on what was decided, never on a second reading.
-        let (facts, outcomes, calls) = if run.state == "matched" {
-            let saved = client
-                .query_one(
-                    "SELECT facts,outcomes,planned_calls FROM base_watcher_runs WHERE tenant_id=$1 AND id=$2",
-                    &[&tenant, &run.id],
-                )
-                .await?;
-            (
-                saved.get::<_, Option<Value>>(0).unwrap_or(Value::Null),
-                saved.get::<_, Option<Value>>(1).unwrap_or(Value::Null),
-                match saved.get::<_, Option<Value>>(2) {
-                    Some(plan) => serde_json::from_value(plan).map_err(|_| Error::Invalid)?,
-                    None if definition.scripts().next().is_none() => {
-                        definition.actions().cloned().collect()
-                    }
-                    None => return Err(Error::Invalid),
-                },
-            )
-        } else {
-            let fields = definition.fact_fields(offered.definition.version);
-            let read = watchers
-                .read_facts(
-                    &**client,
-                    scope,
-                    offered.definition.table,
-                    &run.subject,
-                    &fields,
-                )
-                .await?;
-            let (facts, types) = match read {
-                Ok(read) => read,
-                Err(code) => {
-                    return self
-                        .finish(execution, &mut client, &run, Stop::Refused(code), None)
-                        .await;
-                }
-            };
-            let subject_version = record_revision(facts.get(offered.definition.version))?;
-            let (matched, outcomes) = evaluate(&definition, &facts, &types);
-            let decided = (Value::Object(facts), json!(outcomes));
-            if !matched {
+            if row.get::<_, bool>(5)
+                || approved_digest.is_none()
+                || approved_digest != watchers.catalog_digest(&trigger, &definition, &custom)
+            {
+                let mut tx = execution
+                    .begin(&mut client, "watchers.review_required")
+                    .await?;
+                let watcher = run.watcher;
+                let version = run.version;
+                tx.mutate(move |sql| Box::pin(async move {
+                    let changed = sql.execute("UPDATE base_watchers SET needs_review=true,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2 AND active_version_id=$3 AND NOT needs_review", &[&tenant, &watcher, &version]).await?;
+                    let changes = if changed == 0 { Vec::new() } else { vec![Change { kind: "base/watchers.watcher".into(), id: watcher, old: json!({"needs_review": false}), new: json!({"needs_review": true}) }] };
+                    Ok(((), changes))
+                })).await?;
+                tx.commit().await?;
                 return self
-                    .finish(execution, &mut client, &run, Stop::NoMatch, Some(decided))
+                    .finish(
+                        execution,
+                        &mut client,
+                        &run,
+                        Stop::Refused("catalog_changed"),
+                        None,
+                    )
                     .await;
             }
-            let calls = match watchers
-                .plan_steps(
+            let stop = if i64::from(run.depth) > depth {
+                Some(Stop::Refused("chain_budget"))
+            } else if off {
+                Some(Stop::Refused("watcher_off"))
+            } else if active != Some(run.version) {
+                Some(Stop::Refused("stale_version"))
+            } else if !row.get::<_, bool>(7) {
+                Some(Stop::Refused("stale_activation"))
+            } else {
+                None
+            };
+            if let Some(stop) = stop {
+                return self.finish(execution, &mut client, &run, stop, None).await;
+            }
+            let offered = watchers.trigger(&trigger).ok_or(Error::Invalid)?;
+            let limits = watchers
+                .check_limits(
                     &**client,
                     scope,
                     &definition,
-                    decided.0.as_object().ok_or(Error::Invalid)?,
+                    row.get::<_, Value>(6).as_array().map_or(0, Vec::len),
+                    offered.definition.version,
                 )
-                .await?
-            {
-                Ok(calls) => calls,
-                Err(code) => {
+                .await?;
+            if !limits.is_empty() {
+                let code = if limits.iter().any(|(field, _)| field == "do") {
+                    "action_limit"
+                } else {
+                    "watcher_limit"
+                };
+                return self
+                    .finish(execution, &mut client, &run, Stop::Refused(code), None)
+                    .await;
+            }
+            // Facts and the decision are kept once taken, so a retry after a
+            // crash acts on what was decided, never on a second reading.
+            let (facts, outcomes, calls) = if run.state == "matched" {
+                let saved = client
+                    .query_one(
+                        "SELECT facts,outcomes,planned_calls FROM base_watcher_runs WHERE tenant_id=$1 AND id=$2",
+                        &[&tenant, &run.id],
+                    )
+                    .await?;
+                (
+                    saved.get::<_, Option<Value>>(0).unwrap_or(Value::Null),
+                    saved.get::<_, Option<Value>>(1).unwrap_or(Value::Null),
+                    match saved.get::<_, Option<Value>>(2) {
+                        Some(plan) => serde_json::from_value(plan).map_err(|_| Error::Invalid)?,
+                        None if definition.scripts().next().is_none() => {
+                            definition.actions().cloned().collect()
+                        }
+                        None => return Err(Error::Invalid),
+                    },
+                )
+            } else {
+                let fields = definition.fact_fields(offered.definition.version, false);
+                let read = watchers
+                    .read_facts(
+                        &**client,
+                        scope,
+                        offered.definition.table,
+                        &run.subject,
+                        &fields,
+                    )
+                    .await?;
+                let (facts, types) = match read {
+                    Ok(read) => read,
+                    Err(code) => {
+                        return self
+                            .finish(execution, &mut client, &run, Stop::Refused(code), None)
+                            .await;
+                    }
+                };
+                let subject_version = record_revision(facts.get(offered.definition.version))?;
+                let (matched, outcomes) = evaluate(&definition, &facts, &types);
+                let decided = (Value::Object(facts), json!(outcomes));
+                if !matched {
                     return self
-                        .finish(
-                            execution,
-                            &mut client,
-                            &run,
-                            Stop::Refused(code),
-                            Some(decided),
-                        )
-                        .await
+                        .finish(execution, &mut client, &run, Stop::NoMatch, Some(decided))
+                        .await;
                 }
+                let calls = match watchers
+                    .plan_steps(
+                        &**client,
+                        scope,
+                        &definition,
+                        (offered, &run.subject, subject_version),
+                        deadline,
+                    )
+                    .await?
+                {
+                    Ok(calls) => calls,
+                    Err(code) => {
+                        return self
+                            .finish(
+                                execution,
+                                &mut client,
+                                &run,
+                                Stop::Refused(code),
+                                Some(decided),
+                            )
+                            .await
+                    }
+                };
+                self.decide(
+                    execution,
+                    &mut client,
+                    &run,
+                    &decided,
+                    subject_version,
+                    &calls,
+                )
+                .await?;
+                (decided.0, decided.1, calls)
             };
-            self.decide(
+            let mut refused = 0;
+            for (position, call) in calls.iter().enumerate() {
+                match self
+                    .act(execution, &mut client, &run, position as i32, call)
+                    .await?
+                {
+                    Acted::Done => {}
+                    Acted::Refused => refused += 1,
+                    Acted::Stopped(code) => {
+                        return self
+                            .finish(
+                                execution,
+                                &mut client,
+                                &run,
+                                Stop::Refused(code),
+                                Some((facts, outcomes)),
+                            )
+                            .await;
+                    }
+                }
+            }
+            let state = match refused {
+                0 => "done",
+                n if n == calls.len() => "refused",
+                _ => "partial",
+            };
+            self.settle(
                 execution,
                 &mut client,
                 &run,
-                &decided,
-                subject_version,
-                &calls,
+                state,
+                (refused > 0).then_some("action_refused"),
+                Some((facts, outcomes)),
             )
-            .await?;
-            (decided.0, decided.1, calls)
-        };
-        let mut refused = 0;
-        for (position, call) in calls.iter().enumerate() {
-            match self
-                .act(execution, &mut client, &run, position as i32, call)
-                .await?
-            {
-                Acted::Done => {}
-                Acted::Refused => refused += 1,
-                Acted::Stopped(code) => {
-                    return self
-                        .finish(
-                            execution,
-                            &mut client,
-                            &run,
-                            Stop::Refused(code),
-                            Some((facts, outcomes)),
-                        )
-                        .await;
-                }
+            .await
+        })
+        .await;
+        match result {
+            Ok(result) => result,
+            Err(_) => {
+                crate::script::cancel_sql(&client).await;
+                self.finish(
+                    execution,
+                    &mut client,
+                    &run,
+                    Stop::Refused("script_timeout"),
+                    None,
+                )
+                .await
             }
         }
-        let state = match refused {
-            0 => "done",
-            n if n == calls.len() => "refused",
-            _ => "partial",
-        };
-        self.settle(
-            execution,
-            &mut client,
-            &run,
-            state,
-            (refused > 0).then_some("action_refused"),
-            Some((facts, outcomes)),
-        )
-        .await
     }
 
     /// Records that the run matched, with the facts and outcomes.
@@ -695,13 +716,25 @@ impl Worker {
     ) -> Result<()> {
         let mut tx = execution.begin(client, "watchers.run.finished").await?;
         let (tenant, id) = (tx.context().tenant, run.id);
+        if reason == Some("script_timeout") {
+            let settled = tx.sql().query_one(
+                "SELECT state NOT IN ('queued','matched') FROM base_watcher_runs WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                &[&tenant, &id],
+            ).await?.get::<_, bool>(0);
+            if settled {
+                return tx.rollback().await;
+            }
+        }
         let (facts, outcomes) = decided.unzip();
         tx.mutate(move |sql| Box::pin(async move {
-            sql.execute(
-                "UPDATE base_watcher_runs SET state=$3,reason=$4,facts=COALESCE($5,facts),outcomes=COALESCE($6,outcomes),started_at=COALESCE(started_at,now()),finished_at=now() WHERE tenant_id=$1 AND id=$2 AND state IN ('queued','matched')",
+            let row = sql.query_one(
+                "UPDATE base_watcher_runs SET state=CASE WHEN $4='script_timeout' AND EXISTS (
+                    SELECT 1 FROM base_watcher_effects e WHERE e.tenant_id=$1 AND e.version_id=base_watcher_runs.version_id
+                        AND e.event_id=base_watcher_runs.event_id AND e.state='done'
+                ) THEN 'partial' ELSE $3 END,reason=$4,facts=COALESCE($5,facts),outcomes=COALESCE($6,outcomes),started_at=COALESCE(started_at,now()),finished_at=now() WHERE tenant_id=$1 AND id=$2 AND state IN ('queued','matched') RETURNING state",
                 &[&tenant, &id, &state, &reason, &facts, &outcomes],
             ).await?;
-            Ok(((), vec![Change { kind: "base/watchers.run".into(), id, old: Value::Null, new: json!({"state": state, "reason": reason}) }]))
+            Ok(((), vec![Change { kind: "base/watchers.run".into(), id, old: Value::Null, new: json!({"state": row.get::<_, String>(0), "reason": reason}) }]))
         })).await?;
         tx.commit().await
     }
@@ -775,6 +808,10 @@ impl Worker {
             tx.rollback().await?;
             return Ok(Acted::Stopped("script_run_refused"));
         }
+        if !watchers.local_script_plan(&definition) {
+            tx.rollback().await?;
+            return Ok(Acted::Stopped("script_call_refused"));
+        }
         let custom = watchers
             .custom_tables(tx.sql(), &scope, [&definition])
             .await?;
@@ -803,7 +840,7 @@ impl Worker {
             tx.rollback().await?;
             return Ok(Acted::Stopped(code));
         }
-        let fields = definition.fact_fields(trigger.definition.version);
+        let fields = definition.fact_fields(trigger.definition.version, true);
         if let Err(code) = watchers
             .read_facts(
                 tx.sql(),

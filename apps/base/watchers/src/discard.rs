@@ -112,7 +112,7 @@ pub(crate) fn draft_summary(definition: &Value, examples: &Value) -> Value {
         .into_iter()
         .flatten()
         .map(|action| match action.get("script") {
-            Some(script) => json!({"script":script["name"],"runner":script["runner"],"fields":script["fields"],"operations":script["calls"].as_array().into_iter().flatten().map(|call| &call["operation"]).collect::<Vec<_>>()}),
+            Some(script) => json!({"script":script["name"],"language":script["language"],"source_digest":script["source_digest"],"fields":script["fields"],"operations":script["calls"].as_array().into_iter().flatten().map(|call| &call["operation"]).collect::<Vec<_>>()}),
             None => action["operation"].clone(),
         })
         .collect();

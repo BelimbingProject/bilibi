@@ -1100,7 +1100,7 @@ impl Editor {
                     html.push(&render(Bullets { lines: &conditions })?);
                     html
                 };
-                let examples: Vec<String> = facts["examples"]
+                let mut examples: Vec<String> = facts["examples"]
                     .as_array()
                     .into_iter()
                     .flatten()
@@ -1127,6 +1127,7 @@ impl Editor {
                         )
                     })
                     .collect();
+                examples.extend(list("script_examples"));
                 let mut body = render(SectionHeading {
                     title: "Review",
                     id: "watcher-draft-review-heading",

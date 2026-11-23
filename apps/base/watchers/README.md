@@ -26,14 +26,13 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 
 ## JavaScript steps
 
-A `do` step can carry a named JavaScript function body under `script`. The connector drafts it as part of the watcher version. Its approval pins the source, fields, examples, permitted calls and inputs together. Each invocation receives only its declared fields from the scoped trigger record. A script can branch, calculate and return an ordered array of calls. An empty array skips the actions. [ADR 34](../../../docs/architecture/decisions/34-tenant-scripts-run-through-operation-contracts.md)
+A `do` step can carry a named JavaScript function body under `script`. The connector drafts it as part of the watcher version. Its approval pins the source, language, SHA-256 source digest, fields, examples, permitted calls and inputs together. Each invocation receives only its declared fields from the scoped trigger record. A script can branch, calculate and return an ordered array of calls. An empty array skips the actions. [ADR 34](../../../docs/architecture/decisions/34-tenant-scripts-run-through-operation-contracts.md)
 
 ```json
 {
   "script": {
     "name": "Route urgent cases",
     "source": "return facts.priority === 'urgent' ? [{operation:'watcher_cases.cases.route',input:{queue:'priority'}}] : [];",
-    "runner": "watchers",
     "fields": ["priority"],
     "calls": [{"operation":"watcher_cases.cases.route","input":{"queue":"priority"}}],
     "examples": [
@@ -44,10 +43,10 @@ A `do` step can carry a named JavaScript function body under `script`. The conne
 }
 ```
 
-- The tenant grants `watchers.script.execute` separately in Automation access. Each script names its permitted runner. Queued runs and each effect check the live grant. The record owner binds the subject and checks each write through its normal operation.
-- The host accepts only complete operation and input pairs in the declaration. This includes every destination and payload supplied to outbound operations. The worker receives no connector credentials and has no filesystem, network or database interface.
-- The optional watcher filter runs first. QuickJS executes in a fresh process under a Linux syscall allowlist. The tenant can lower `watchers.script_heap_mib` and `watchers.script_milliseconds`. The host also limits the whole run's time and action count, and saves the selected calls before the first effect so retries retain the same plan.
-- Draft and approval run each example with its supplied facts and compare the ordered calls. Trial evaluates the script and previews the selected effects. Use `base.watchers.get` to inspect the exact version and `base.watchers.switch` to stop it.
+- The tenant grants `watchers.script.execute` separately in Automation access. The named watcher principal checks its live grant before planning and before each effect. The draft and approval reviewer needs the same capability to run examples. The record owner binds the subject and checks each write through its normal operation.
+- The host accepts only complete operation and input pairs in the declaration. For a script to request an operation, its owner must contribute the operation key to `LOCAL_SCRIPT_ACTIONS`. Owners offer only actions whose execution and downstream effects stay within the installation. The worker receives no connector credentials and has no filesystem, network or database interface.
+- The optional watcher filter runs first. QuickJS executes in a fresh process under a Linux syscall allowlist. The tenant can lower `watchers.script_heap_mib` and `watchers.script_milliseconds`. The host also limits the whole run's time and action count, and validates the full plan before saving it and starting any effect. Retries use the saved calls and existing effect receipts.
+- Draft and approval present expected and captured calls for each example. Use the record representation for facts, including text for numbers. Omitted fields are null. Trial evaluates the script and previews the selected effects. Use `base.watchers.get` to inspect the exact version and `base.watchers.switch` to stop it.
 - With the reference owner mounted, run `cargo run -p bilibi-web --example watchers-walkthrough -- --scripts` on a fresh walkthrough database. The proof checks a successful route, refused file and network access, an attempted write to another company's record, and the worker's heap and time limits.
 
 ## Versions and approval
@@ -166,7 +165,7 @@ For a match, the watcher principal calls the action owner's preview at the curre
 
 ## Setup packs
 
-Export a latest unapproved version and preview it as a new destination draft through [Setup packs](../setup_packs/README.md). Reverse an initial unapproved draft through Customisations. The draft discard operation refuses a watcher after it has been revised or approved.
+Export a latest unapproved version and preview it as a new destination draft through [Setup packs](../setup_packs/README.md). Setup packs refuse scripts. Reverse an initial unapproved draft through Customisations. The draft discard operation refuses a watcher after it has been revised or approved.
 
 ## Tables
 

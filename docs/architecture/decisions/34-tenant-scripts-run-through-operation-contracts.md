@@ -22,7 +22,7 @@ A watcher reads “watch an event, if it matches, do something.” An ordinary o
 
 **Review anything sent outside.** Mark outbound operations in the owner's contract metadata. Approval names the operation, the permitted destination and the data it may send. Recheck those terms against the actual arguments. A new recipient or broader payload needs fresh approval. Scripts never receive connector secrets.
 
-**Bound the whole run.** Set ceilings for elapsed time, memory, calls, rows and output bytes. Count host calls and waiting time against the budget and terminate the worker when it expires. Keep the existing tenant and chain limits. The run log identifies the version, caller, cause, operations completed and reason for a skip, refusal or timeout. On a retry, use recorded effect identities to prevent duplicate writes or sends. A later refusal leaves earlier committed effects visible.
+**Bound the whole run.** Set ceilings for elapsed time, memory, calls, rows and output bytes. Count host calls and waiting time against the budget and terminate the worker when it expires. Keep the existing tenant and chain limits. The run log identifies the version, caller, cause, operations completed and reason for a skip, refusal or timeout. On a retry, use recorded effect identities to prevent duplicate writes or sends. The complete script plan is validated before any effect starts. Once execution begins, committed effects retain their receipts.
 
 **Make examples executable.** Each version supplies example facts, lookup replies and expected ordered operation calls with their inputs. Run the same script in preview with captured calls and no writes or deliveries. For example, an urgent case requests routing that case to the priority desk exactly once. A normal case requests no operation. Show expected and actual results at review and require all examples to pass before approval.
 
@@ -40,7 +40,9 @@ QuickJS fits the JSON inputs that tenants and AI drafts already use. Lua would i
 
 ## Implementation
 
-The first implementation stores a script step in its watcher version. The worker reads the declared event-record fields and returns an ordered selection from approved operation and input pairs. Watcher approval, the run log and Automation access govern that version. Independent script records, general contract lookups and the schedule, person and agent run entry points remain future work. [Watchers contract](../../../apps/base/watchers/README.md#javascript-steps)
+The first implementation stores the JavaScript source and its SHA-256 digest in the watcher version. The optional filter runs before script facts are read. The worker receives declared event-record fields and returns an ordered selection from approved operation and input pairs. Only operations their owners explicitly designate as local can be selected by a script. Outbound operations remain unavailable to scripts in this slice. Setup packs refuse scripted watchers.
+
+The tenant-wide `watchers.script.execute` grant applies to the named watcher principal for queued runs and to the person running examples at draft or approval. Use the watcher's version and Customisations entry to inspect, switch off or undo the watcher. Independent script records, per-script grants, contract lookups, outbound terms and schedule, page, CLI and delegated-agent entry points remain future work. [Watchers contract](../../../apps/base/watchers/README.md#javascript-steps)
 
 ## Consequences
 

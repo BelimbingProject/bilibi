@@ -74,11 +74,11 @@ fn isolate() -> Option<()> {
 /// Called before starting Tokio or opening credentials in a fresh executable.
 pub fn enter_worker() {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(WORKER_ARG)) {
-        std::process::exit(if worker().is_some() { 0 } else { 1 });
+        std::process::exit(worker().unwrap_or(1));
     }
 }
 
-fn worker() -> Option<()> {
+fn worker() -> Option<i32> {
     isolate()?;
     let mut frame = Vec::new();
     std::io::stdin()
@@ -101,24 +101,57 @@ fn worker() -> Option<()> {
     let runtime = Runtime::new().ok()?;
     runtime.set_memory_limit((request.heap_mib.clamp(1, 32) as usize) << 20);
     runtime.set_max_stack_size(256 * 1024);
-    runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timed_out = interrupted.clone();
+    use std::sync::atomic::Ordering::Relaxed;
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        let expired = Instant::now() >= deadline;
+        timed_out.store(expired, Relaxed);
+        expired
+    })));
     let context = Context::custom::<(intrinsic::Eval, intrinsic::Json)>(&runtime).ok()?;
+    let facts = serde_json::to_vec(&request.facts).ok()?;
     let output = context.with(|ctx| {
-        let facts = ctx
-            .json_parse(serde_json::to_vec(&request.facts).ok()?)
-            .ok()?;
-        ctx.globals().set("facts", facts).ok()?;
-        let source = format!(
-            "(function(facts){{'use strict';\n{}\n}})(facts)",
-            request.source
-        );
-        let result = ctx.eval::<rquickjs::Value, _>(source).ok()?;
-        ctx.json_stringify(result).ok()??.to_string().ok()
-    })?;
+        let run = || -> rquickjs::Result<Option<String>> {
+            let facts = ctx.json_parse(facts)?;
+            ctx.globals().set("facts", facts)?;
+            let source = format!(
+                "(function(facts){{'use strict';\n{}\n}})(facts)",
+                request.source
+            );
+            let result = ctx.eval::<rquickjs::Value, _>(source)?;
+            ctx.json_stringify(result)?
+                .map(|text| text.to_string())
+                .transpose()
+        };
+        match run() {
+            Ok(output) => Ok(output),
+            Err(_) if interrupted.load(Relaxed) => Err(2),
+            Err(rquickjs::Error::Allocation) => Err(3),
+            Err(rquickjs::Error::Exception) => {
+                let exception = ctx.catch();
+                let message = exception
+                    .as_exception()
+                    .and_then(|exception| exception.message());
+                Err(if message.as_deref() == Some("out of memory") {
+                    3
+                } else {
+                    1
+                })
+            }
+            Err(_) => Err(1),
+        }
+    });
+    let output = match output {
+        Ok(Some(output)) => output,
+        Ok(None) => return None,
+        Err(code) => return Some(code),
+    };
     if output.len() > OUTPUT_BYTES {
         return None;
     }
-    std::io::stdout().write_all(output.as_bytes()).ok()
+    std::io::stdout().write_all(output.as_bytes()).ok()?;
+    Some(0)
 }
 
 pub(crate) async fn evaluate(
@@ -163,12 +196,15 @@ pub(crate) async fn evaluate(
                 .read_to_end(&mut output)
                 .await
                 .map_err(|_| "script_refused")?;
-            if output.len() > OUTPUT_BYTES
-                || !child.wait().await.map_err(|_| "script_refused")?.success()
-            {
-                return Err("script_refused");
+            if output.len() > OUTPUT_BYTES {
+                return Err("script_output");
             }
-            serde_json::from_slice(&output).map_err(|_| "script_refused")
+            match child.wait().await.map_err(|_| "script_refused")?.code() {
+                Some(0) => serde_json::from_slice(&output).map_err(|_| "script_output"),
+                Some(2) => Err("script_timeout"),
+                Some(3) => Err("script_memory"),
+                _ => Err("script_refused"),
+            }
         })
         .await;
     outcome.unwrap_or(Err("script_timeout"))
