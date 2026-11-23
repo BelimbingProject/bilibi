@@ -5,7 +5,7 @@
 # rerun: it keeps what exists.
 # The layout, and why it is this way, is in docs/server-install.md.
 #
-#   install-server.sh create <instance> --role dev|staging|production --site <staff-host> [--public-site <public-host>] [--staff-bind <address>] [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
+#   install-server.sh create <instance> --role dev|staging|production --site <staff-host> [--public-site <public-host> | --no-public-site] [--public-tenant <id>] [--staff-bind <address> | --no-staff-bind] [--public-bind <address>] [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
 #   install-server.sh release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
 #   install-server.sh create-owner <instance> [bilibi-web create-owner flags]
 #   install-server.sh tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>
@@ -354,7 +354,7 @@ open(out, "w", encoding="utf-8").write(page)
 PY
 }
 cloudflare_env_key() { printf 'BILIBI_CLOUDFLARE_API_TOKEN_%s' "$(tr '[:lower:]-' '[:upper:]_' <<<"$1")"; }
-write_caddy_site() { # <instance> <site> <port> <tls> <caddy env> [public site] [public port] [staff bind]
+write_caddy_site() { # <instance> <site> <port> <tls> <caddy env> [public site] [public port] [staff bind] [public bind]
     local tls='' token_key
     case $4 in
         internal) tls='tls internal' ;;
@@ -364,15 +364,16 @@ write_caddy_site() { # <instance> <site> <port> <tls> <caddy env> [public site] 
             ;;
     esac
     install -d /etc/caddy/sites
-    python3 - "$here/server/site.caddy" "/etc/caddy/sites/bilibi-$1.caddy" "$1" "$2" "$3" "$tls" "${6:-}" "${7:-}" "${8:-}" <<'PY'
+    python3 - "$here/server/site.caddy" "/etc/caddy/sites/bilibi-$1.caddy" "$1" "$2" "$3" "$tls" "${6:-}" "${7:-}" "${8:-}" "${9:-}" <<'PY'
 import sys
-source, out, instance, site, port, tls, public_site, public_port, staff_bind = sys.argv[1:]
+source, out, instance, site, port, tls, public_site, public_port, staff_bind, public_bind = sys.argv[1:]
 text = open(source, encoding="utf-8").read()
 public = ""
 if public_site:
     tls_line = f"\t{tls}\n" if tls else ""
+    bind_line = f"\tbind {public_bind}\n" if public_bind else ""
     public = f'''\n{public_site} {{
-{tls_line}\tencode zstd gzip
+{tls_line}{bind_line}\tencode zstd gzip
 \treverse_proxy 127.0.0.1:{public_port}
 \timport bilibi_waiting_{instance}
 }}\n'''
@@ -451,15 +452,20 @@ start_installer() {
 }
 # ================================================================ create
 create() {
-    local instance=${1:-} role='' site='' public_site='' staff_bind='' port='' public_port='' tls='' cloudflare_token_stdin='' cloudflare_token=''
+    local instance=${1:-} role='' site='' public_site='' staff_bind='' public_bind='' public_tenant='' remove_site='' remove_staff_bind='' port='' public_port='' tls='' cloudflare_token_stdin='' cloudflare_token=''
     [[ -n $instance ]] || usage
+    need_root create "$@"
     shift
     while (($#)); do
         case $1 in
             --role) role=${2:-}; shift 2 ;;
             --site) site=${2:-}; shift 2 ;;
-            --public-site) public_site=${2:-}; shift 2 ;;
-            --staff-bind) staff_bind=${2:-}; shift 2 ;;
+            --public-site) [[ -n ${2:-} ]] || usage; public_site=$2; shift 2 ;;
+            --no-public-site) remove_site=1; shift ;;
+            --public-tenant) [[ -n ${2:-} ]] || usage; public_tenant=$2; shift 2 ;;
+            --no-staff-bind) remove_staff_bind=1; shift ;;
+            --public-bind) [[ -n ${2:-} ]] || usage; public_bind=$2; shift 2 ;;
+            --staff-bind) [[ -n ${2:-} ]] || usage; staff_bind=$2; shift 2 ;;
             --port) port=${2:-}; shift 2 ;;
             --tls) tls=${2:-}; shift 2 ;;
             --cloudflare-token-stdin) cloudflare_token_stdin=1; shift ;;
@@ -469,18 +475,60 @@ create() {
     valid_name "$instance" || fail "instance name must be 1 to 32 lower-case letters, digits or hyphens: $instance"
     [[ $role =~ ^(dev|staging|production)$ ]] || fail '--role must be dev, staging or production'
     [[ $site =~ ^[a-z0-9.-]+$ ]] || fail '--site must be a host name, like erp.example.com'
+    [[ -z $remove_staff_bind || ( -z $staff_bind && -z $public_bind ) ]] || usage
+    [[ -z $remove_site || ( -z $public_site && -z $public_tenant && -z $public_bind ) ]] || usage
+    local old_origin='' old_public_origin='' old_public_bind='' old_public_tenant=''
+    if [[ -f $(instance_dir "$instance")/env ]]; then
+        old_origin=$(env_value "$instance" APP_ORIGIN)
+        old_public_origin=$(env_value "$instance" PUBLIC_ORIGIN)
+        old_public_bind=$(env_value "$instance" PUBLIC_BIND_ADDR)
+        old_public_tenant=$(env_value "$instance" PUBLIC_TENANT_ID)
+        staff_bind=${staff_bind:-$(env_value "$instance" CADDY_STAFF_BIND)}
+        public_bind=${public_bind:-$(env_value "$instance" CADDY_PUBLIC_BIND)}
+        tls=${tls:-$(env_value "$instance" CADDY_TLS)}
+    fi
+    if [[ -n $remove_site ]]; then
+        public_bind=''
+    else
+        public_site=${public_site:-${old_public_origin#https://}}
+        if [[ -n $public_site ]]; then
+            public_tenant=${public_tenant:-${old_public_tenant:-1}}
+        else
+            [[ -z $public_tenant && -z $public_bind ]] || usage
+        fi
+    fi
+    if [[ -n $remove_staff_bind ]]; then
+        staff_bind=''
+        public_bind=''
+    fi
     [[ -z $public_site || $public_site =~ ^[a-z0-9.-]+$ ]] || fail '--public-site must be a host name, like shop.example.com'
     [[ -z $public_site || $public_site != "$site" ]] || fail '--public-site must differ from --site'
-    [[ -z $staff_bind || $staff_bind =~ ^[0-9a-fA-F:.]+$ ]] || fail '--staff-bind must be an IP address'
+    [[ -z $public_tenant || $public_tenant =~ ^[1-9][0-9]*$ ]] || fail '--public-tenant must be a positive tenant ID'
     [[ -z $port || $port =~ ^[0-9]+$ ]] || fail '--port must be a number'
     [[ -z $port || ( $port -ge 1 && $port -le 65535 ) ]] || fail '--port must be between 1 and 65535'
-    [[ -z $public_site || -z $port || $port -lt 65535 ]] || fail '--port must leave another port for --public-site'
     [[ -z $tls || $tls == internal || $tls == cloudflare ]] || fail '--tls takes "internal" or "cloudflare"'
     [[ -z $cloudflare_token_stdin || $tls == cloudflare ]] || fail '--cloudflare-token-stdin requires --tls cloudflare'
-    need_root create "$@"
     [[ -f $here/waiting-page.html && -f $here/server/site.caddy ]] || fail "run this from a Bilibi checkout: $here/server is missing"
 
     install_packages
+    python3 - "$staff_bind" "$public_bind" "$public_site" "$public_tenant" <<'PYTHON'
+import ipaddress
+import sys
+
+staff, public, site, tenant = sys.argv[1:]
+try:
+    staff = ipaddress.ip_address(staff) if staff else None
+    public = ipaddress.ip_address(public) if public else None
+except ValueError as error:
+    sys.exit(f"Invalid Caddy bind address: {error}")
+
+if any(ip.is_unspecified or getattr(ip, "ipv4_mapped", None) or getattr(ip, "scope_id", None) for ip in (staff, public) if ip):
+    sys.exit("Caddy bind addresses must identify specific interfaces")
+if site and ((staff is None) != (public is None) or (staff is not None and staff == public)):
+    sys.exit("Use distinct --staff-bind and --public-bind addresses with private staff ingress")
+if tenant and int(tenant) > 2**63 - 1:
+    sys.exit("--public-tenant is outside the supported tenant ID range")
+PYTHON
     ensure_github_cli
     [[ $tls == cloudflare ]] && ensure_cloudflare_module
     ensure_users
@@ -513,17 +561,30 @@ create() {
     if [[ $tls == cloudflare && -z $cloudflare_token && ! -f $caddy_env ]]; then
         fail '--tls cloudflare needs a zone-scoped API token on standard input' 'pipe the token to this command and add --cloudflare-token-stdin'
     fi
-    if [[ ! -f $env ]]; then
-        created=1
+    if [[ -f $env ]]; then
+        local saved_bind
+        saved_bind=$(env_value "$instance" BIND_ADDR)
+        [[ -z $port || $saved_bind == "127.0.0.1:$port" ]] || fail "$instance already listens on $saved_bind; the port is fixed at creation"
+        port=${saved_bind##*:}
+    else
         [[ -n $port ]] || port=$(free_port)
         port_in_use "$port" && fail "port $port is in use" 'pick another with --port'
-        if [[ -n $public_site ]]; then
+    fi
+    local public_origin='' public_backend=''
+    if [[ -n $public_site ]]; then
+        public_port=${old_public_bind##*:}
+        if [[ -z $public_port ]]; then
             public_port=$((port + 1))
-            while port_in_use "$public_port" || [[ $public_port == "$port" ]]; do
+            while ((public_port <= 65535)) && port_in_use "$public_port"; do
                 ((public_port += 1))
-                ((public_port <= 65535)) || fail 'no free local port for --public-site'
             done
+            ((public_port <= 65535)) || fail 'no free local port for --public-site'
         fi
+        public_origin=https://$public_site
+        public_backend=127.0.0.1:$public_port
+    fi
+    if [[ ! -f $env ]]; then
+        created=1
         local bilibi_env
         case $role in dev) bilibi_env=development ;; *) bilibi_env=$role ;; esac
         umask 027
@@ -542,32 +603,20 @@ BILIBI_MAIL_DIR=$dir/data/mailbox
 # Where the program receives releases and the installer keeps them.
 BILIBI_INSTANCE_DIR=$dir
 EOF
-        if [[ -n $public_site ]]; then
-            printf 'PUBLIC_ORIGIN=https://%s\nPUBLIC_BIND_ADDR=127.0.0.1:%s\n' "$public_site" "$public_port" >>"$env"
-        fi
         umask 022
     else
         local kept_role; kept_role=$(role_of "$instance")
         [[ $kept_role == "$role" ]] || say "$instance keeps its saved role ($kept_role). Change the role in Instance settings with 2FA."
         role=$kept_role
-        [[ -z $port || $(env_value "$instance" BIND_ADDR) == "127.0.0.1:$port" ]] || fail "$instance already listens on $(env_value "$instance" BIND_ADDR); the port is fixed at creation"
-        port=${port:-$(env_value "$instance" BIND_ADDR | sed 's/.*://')}
         sed -i "s|^APP_ORIGIN=.*|APP_ORIGIN=https://$site|" "$env"
-        public_port=$(env_value "$instance" PUBLIC_BIND_ADDR | sed 's/.*://')
-        sed -i '/^PUBLIC_ORIGIN=/d; /^PUBLIC_BIND_ADDR=/d' "$env"
-        if [[ -n $public_site ]]; then
-            if [[ -z $public_port ]]; then
-                public_port=$((port + 1))
-                while port_in_use "$public_port" || [[ $public_port == "$port" ]]; do
-                    ((public_port += 1))
-                    ((public_port <= 65535)) || fail 'no free local port for --public-site'
-                done
-            fi
-            printf 'PUBLIC_ORIGIN=https://%s\nPUBLIC_BIND_ADDR=127.0.0.1:%s\n' "$public_site" "$public_port" >>"$env"
-        fi
         # Older layouts gain the instance path used by release transport.
         grep -q '^BILIBI_INSTANCE_DIR=' "$env" || printf 'BILIBI_INSTANCE_DIR=%s\n' "$dir" >>"$env"
     fi
+    sed -i '/^PUBLIC_ORIGIN=/d; /^PUBLIC_BIND_ADDR=/d; /^PUBLIC_TENANT_ID=/d; /^CADDY_STAFF_BIND=/d; /^CADDY_PUBLIC_BIND=/d; /^CADDY_TLS=/d' "$env"
+    if [[ -n $public_site ]]; then
+        printf 'PUBLIC_ORIGIN=%s\nPUBLIC_BIND_ADDR=%s\nPUBLIC_TENANT_ID=%s\n' "$public_origin" "$public_backend" "$public_tenant" >>"$env"
+    fi
+    printf 'CADDY_STAFF_BIND=%s\nCADDY_PUBLIC_BIND=%s\nCADDY_TLS=%s\n' "$staff_bind" "$public_bind" "$tls" >>"$env"
     if [[ -n $cloudflare_token ]]; then
         [[ $(cat "$caddy_env" 2>/dev/null) == "$token_key=$cloudflare_token" ]] || caddy_restart=1
         umask 027
@@ -588,7 +637,13 @@ EOF
     chmod 0644 "$dir/site/waiting.html"
     configure_selinux "$instance"
     configure_caddy_environment
-    write_caddy_site "$instance" "$site" "$port" "$tls" "$caddy_env" "$public_site" "$public_port" "$staff_bind"
+    write_caddy_site "$instance" "$site" "$port" "$tls" "$caddy_env" "$public_site" "$public_port" "$staff_bind" "$public_bind"
+    if [[ $old_origin != "https://$site" || $old_public_origin != "$public_origin" || $old_public_bind != "$public_backend" || $old_public_tenant != "$public_tenant" ]]; then
+        if systemctl is-active --quiet "$unit_name$instance"; then
+            systemctl restart "$unit_name$instance"
+            wait_healthy "$instance" || fail "$instance did not become ready with the new listener configuration"
+        fi
+    fi
     configure_firewall
     systemctl enable "$unit_name$instance" >/dev/null 2>&1
     start_installer "$instance"
@@ -881,12 +936,22 @@ for line in extensions.splitlines():
         sys.exit(f"Extension {name} requires an isolated installation; use an isolated installation, or prepare a code-free release")
 ' "$installation_mode"
 }
+listener_ready() {
+    local authority=${2#*://}
+    authority=${authority%%/*}
+    [[ -n $1 && -n $authority ]] &&
+        [[ $(curl -s -o /dev/null -w '%{http_code}' --max-time 2 -H "Host: $authority" "http://$1$3" 2>/dev/null) == 200 ]]
+}
 # wait_healthy <instance>: the backend answers on its own port within 60 s.
 wait_healthy() {
-    local port; port=$(env_value "$1" BIND_ADDR | sed 's/.*://')
-    local _try
+    local staff_bind staff_origin public_bind public_origin _try
+    staff_bind=$(env_value "$1" BIND_ADDR)
+    staff_origin=$(env_value "$1" APP_ORIGIN)
+    public_bind=$(env_value "$1" PUBLIC_BIND_ADDR)
+    public_origin=$(env_value "$1" PUBLIC_ORIGIN)
     for _try in $(seq 1 60); do
-        if [[ $(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$port/" 2>/dev/null) =~ ^[1-4][0-9][0-9]$ ]]; then
+        if listener_ready "$staff_bind" "$staff_origin" /login &&
+            { [[ -z $public_bind && -z $public_origin ]] || listener_ready "$public_bind" "$public_origin" /portal/sign-in; }; then
             return 0
         fi
         [[ $(service_state "$1") == failed ]] && return 1

@@ -418,7 +418,7 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
         parsed.host_str().ok_or(Error::Invalid)?,
         parsed.port_or_known_default().ok_or(Error::Invalid)?
     );
-    let app = bilibi_web::App::new(db, &origin)?.at_site(bilibi_web::Site::Public, &origin);
+    let app = bilibi_web::App::new(db, &origin)?.at_public_site(&origin, 1);
     let listener = tokio::net::TcpListener::bind(&address)
         .await
         .map_err(|_| Error::Internal)?;
@@ -535,7 +535,7 @@ async fn main() -> Result<std::process::ExitCode> {
     let db = bilibi_database::pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     let origin = std::env::var("APP_ORIGIN").map_err(|_| Error::Invalid)?;
     let bind = std::env::var("BIND_ADDR").map_err(|_| Error::Invalid)?;
-    let app = bilibi_web::App::new(db, &origin)?.at_site(bilibi_web::Site::Public, &origin);
+    let app = bilibi_web::App::new(db, &origin)?.at_public_site(&origin, 1);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|_| Error::Internal)?;

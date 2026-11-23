@@ -67,6 +67,7 @@ pub struct App {
     pub db: Db,
     pub origin: Arc<str>,
     pub site: Site,
+    public_tenant: Option<i64>,
     settings: Arc<bilibi_base::settings::Settings>,
     pub step_up: Arc<bilibi_base::step_up::StepUp>,
     /// The host the server listens on, shown in the status bar;
@@ -171,6 +172,7 @@ impl App {
             db,
             origin: origin.into(),
             site: Site::Staff,
+            public_tenant: None,
             settings,
             step_up,
             listen_address: None,
@@ -192,8 +194,9 @@ impl App {
         })
     }
 
-    pub fn at_site(mut self, site: Site, origin: &str) -> Self {
-        self.site = site;
+    pub fn at_public_site(mut self, origin: &str, tenant: i64) -> Self {
+        self.site = Site::Public;
+        self.public_tenant = Some(tenant);
         self.origin = origin.into();
         self
     }
@@ -422,6 +425,7 @@ pub fn public_router(app: App) -> Router {
             "/portal/verify/{site}/{token}",
             get(portal_auth::verify_page).post(portal_auth::verify),
         )
+        .route(media::STREAM, get(media::stream))
         .route("/portal/sign-out", post(portal::sign_out))
         .route("/portal/live", get(portal::upgrade))
         .route("/fonts/{name}", get(embedded_asset))

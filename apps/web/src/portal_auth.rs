@@ -64,7 +64,9 @@ fn access(app: &App) -> Result<Arc<PortalService>, HttpError> {
         .map_err(Error::from)?)
 }
 async fn site(app: &App, address: &str) -> Result<Option<Site>, HttpError> {
-    Ok(access(app)?.portal_site(address).await?)
+    Ok(access(app)?
+        .portal_site(app.public_tenant.ok_or(Error::NotFound)?, address)
+        .await?)
 }
 
 /// A credential card in the portal's document, branded with `brand`.
@@ -138,7 +140,7 @@ fn remembered(headers: &HeaderMap) -> Option<String> {
 /// The tenant of the portal session this browser holds, if one is live.
 async fn signed_in_tenant(app: &App, headers: &HeaderMap) -> Option<i64> {
     let token = portal::token(headers).ok()?;
-    let portal = app.security.guard_portal(&token).await.ok()?;
+    let portal = portal::session(app, &token).await.ok()?;
     Some(portal.scope().tenant())
 }
 fn email_field(form: &str, value: &str, errors: Vec<String>, autofocus: bool) -> Field {
@@ -613,26 +615,25 @@ async fn admitted(
     site: &Site,
     session: &bilibi_user::Login,
 ) -> Result<Response, HttpError> {
-    let mut client = app.db.get().await.map_err(Error::from)?;
-    // One browser holds one portal session: the one the cookie held before,
-    // this tenant's or another's, ends now.
-    if let Ok(previous) = portal::token(headers) {
-        if let Ok(scope) = app
-            .security
-            .sessions
-            .check_portal(&**client, &previous)
+    let previous = match portal::token(headers) {
+        Ok(token) => portal::session(app, &token)
             .await
-        {
-            let mut tx = app
-                .mutations
-                .begin(&mut client, scope.mutation_context("session.sign_out"))
-                .await?;
-            app.security
-                .sessions
-                .delete(&mut tx, &scope, &previous)
-                .await?;
-            tx.commit().await?;
-        }
+            .ok()
+            .map(|portal| (token, portal)),
+        Err(_) => None,
+    };
+    let mut client = app.db.get().await.map_err(Error::from)?;
+    if let Some((previous, portal)) = previous {
+        let scope = portal.scope();
+        let mut tx = app
+            .mutations
+            .begin(&mut client, scope.mutation_context("session.sign_out"))
+            .await?;
+        app.security
+            .sessions
+            .delete(&mut tx, scope, &previous)
+            .await?;
+        tx.commit().await?;
     }
     // The portal has no Your sessions page, so a customer gets no
     // new-device email; the sign-in is still recorded.
@@ -1011,7 +1012,10 @@ pub async fn accept_page(
     let Some(site) = site(&app, &address).await? else {
         return unknown_site();
     };
-    let Some(invitation) = access(&app)?.open_invitation(&address, &token).await? else {
+    let Some(invitation) = access(&app)?
+        .open_invitation(site.tenant, &address, &token)
+        .await?
+    else {
         return invitation_invalid(&site, false);
     };
     accept_card(
@@ -1050,7 +1054,10 @@ pub async fn accept(
         return unknown_site();
     };
     let access = access(&app)?;
-    let Some(invitation) = access.open_invitation(&address, &token).await? else {
+    let Some(invitation) = access
+        .open_invitation(site.tenant, &address, &token)
+        .await?
+    else {
         return invitation_invalid(&site, false);
     };
     let name = submission.name.trim().chars().take(255).collect::<String>();
@@ -1072,7 +1079,7 @@ pub async fn accept(
         return accept_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY);
     }
     match access
-        .accept(&address, &token, &name, &submission.password)
+        .accept(site.tenant, &address, &token, &name, &submission.password)
         .await
     {
         Ok(()) => {
@@ -1204,7 +1211,10 @@ pub async fn register_page(
     State(app): State<App>,
     Path(address): Path<String>,
 ) -> Result<Response, HttpError> {
-    let Some(site) = access(&app)?.registration_site(&address).await? else {
+    let Some(site) = access(&app)?
+        .registration_site(app.public_tenant.ok_or(Error::NotFound)?, &address)
+        .await?
+    else {
         return unknown_site();
     };
     register_card(
@@ -1243,7 +1253,10 @@ pub async fn register(
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
     let access = access(&app)?;
-    let Some(site) = access.registration_site(&address).await? else {
+    let Some(site) = access
+        .registration_site(app.public_tenant.ok_or(Error::NotFound)?, &address)
+        .await?
+    else {
         return unknown_site();
     };
     let (name, email, company) = (
@@ -1269,7 +1282,7 @@ pub async fn register(
         &headers,
     ));
     match access
-        .register(&address, &name, &email, &company, &sender)
+        .register(site.tenant, &address, &name, &email, &company, &sender)
         .await
     {
         Ok(()) => {
@@ -1346,10 +1359,15 @@ pub async fn verify_page(
     Path((address, token)): Path<(String, String)>,
 ) -> Result<Response, HttpError> {
     let access = access(&app)?;
-    let Some(site) = access.registration_site(&address).await? else {
+    let Some(site) = access
+        .registration_site(app.public_tenant.ok_or(Error::NotFound)?, &address)
+        .await?
+    else {
         return unknown_site();
     };
-    let open = access.verification_open(&address, &token).await?;
+    let open = access
+        .verification_open(site.tenant, &address, &token)
+        .await?;
     verify_card(&site, open, false)
 }
 /// `POST /portal/verify/{site}/{token}`: confirms the request's address; it
@@ -1361,9 +1379,12 @@ pub async fn verify(
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
     let access = access(&app)?;
-    let Some(site) = access.registration_site(&address).await? else {
+    let Some(site) = access
+        .registration_site(app.public_tenant.ok_or(Error::NotFound)?, &address)
+        .await?
+    else {
         return unknown_site();
     };
-    let verified = access.verify(&address, &token).await?;
+    let verified = access.verify(site.tenant, &address, &token).await?;
     verify_card(&site, verified, verified)
 }

@@ -109,7 +109,11 @@ impl From<Error> for RegisterError {
 
 /// The site at `address` while it is on and takes requests, and its tenant
 /// is active.
-async fn open_site(client: &(impl GenericClient + Sync), address: &str) -> Result<Option<Site>> {
+async fn open_site(
+    client: &(impl GenericClient + Sync),
+    tenant: i64,
+    address: &str,
+) -> Result<Option<Site>> {
     if !crate::address_shaped(address) {
         return Ok(None);
     }
@@ -120,8 +124,8 @@ async fn open_site(client: &(impl GenericClient + Sync), address: &str) -> Resul
         .join(",");
     Ok(client
         .query_opt(
-            &format!("SELECT {columns} FROM customer_portal_sites s JOIN tenants t ON t.id=s.tenant_id WHERE s.address=$1 AND s.enabled AND s.registration AND t.deleted_at IS NULL AND t.status='active'"),
-            &[&address],
+            &format!("SELECT {columns} FROM customer_portal_sites s JOIN tenants t ON t.id=s.tenant_id WHERE s.address=$1 AND s.tenant_id=$2 AND s.enabled AND s.registration AND t.deleted_at IS NULL AND t.status='active'"),
+            &[&address, &tenant],
         )
         .await?
         .map(|row| Site::from_row(&row)))
@@ -130,9 +134,9 @@ async fn open_site(client: &(impl GenericClient + Sync), address: &str) -> Resul
 impl PortalService {
     /// Whether the portal at `address` takes requests for an account; its
     /// register page answers 404 otherwise.
-    pub async fn registration_site(&self, address: &str) -> Result<Option<Site>> {
+    pub async fn registration_site(&self, tenant: i64, address: &str) -> Result<Option<Site>> {
         let client = self.db.get().await?;
-        let site = open_site(&**client, address).await?;
+        let site = open_site(&**client, tenant, address).await?;
         Ok(self.with_logo(site).await)
     }
 
@@ -143,14 +147,18 @@ impl PortalService {
     /// replaced. The caller answers the same in every case.
     pub async fn register(
         &self,
+        tenant: i64,
         address: &str,
         name: &str,
         email: &str,
         company: &str,
         sender: &str,
     ) -> std::result::Result<(), RegisterError> {
+        let Some(origin) = self.public_origin_for(tenant) else {
+            return Err(RegisterError::Closed);
+        };
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let Some(site) = open_site(&**client, address).await? else {
+        let Some(site) = open_site(&**client, tenant, address).await? else {
             return Err(RegisterError::Closed);
         };
         let mut errors = Vec::new();
@@ -230,7 +238,7 @@ impl PortalService {
             wording["subject"].clone(),
             crate::wording::around_link(
                 &wording,
-                &format!("{}/portal/verify/{}/{token}", self.origin, site.address),
+                &format!("{origin}/portal/verify/{}/{token}", site.address),
             ),
         );
         let mailer = self.mailer.clone();
@@ -319,12 +327,12 @@ impl PortalService {
 
     /// Whether a verification link on the portal at `address` is open, for
     /// its page; unknown, used and expired links are all `false`.
-    pub async fn verification_open(&self, address: &str, token: &str) -> Result<bool> {
+    pub async fn verification_open(&self, tenant: i64, address: &str, token: &str) -> Result<bool> {
         if !token_shaped(token) {
             return Ok(false);
         }
         let client = self.db.get().await?;
-        let Some(site) = open_site(&**client, address).await? else {
+        let Some(site) = open_site(&**client, tenant, address).await? else {
             return Ok(false);
         };
         Ok(client
@@ -338,12 +346,12 @@ impl PortalService {
 
     /// Confirms the address of the request a link names: it then waits for
     /// staff and no longer expires. A link works once.
-    pub async fn verify(&self, address: &str, token: &str) -> Result<bool> {
+    pub async fn verify(&self, tenant: i64, address: &str, token: &str) -> Result<bool> {
         if !token_shaped(token) {
             return Ok(false);
         }
         let mut client = self.db.get().await?;
-        let Some(site) = open_site(&**client, address).await? else {
+        let Some(site) = open_site(&**client, tenant, address).await? else {
             return Ok(false);
         };
         let tenant = site.tenant;

@@ -159,8 +159,9 @@ The launcher's Rust build ends with its elapsed time, the number of crates Cargo
 | `DATABASE_URL` | PostgreSQL 18. Unset: this checkout's private instance under `.local/postgres18`, on a port chosen once (5438 when free) and remembered in `.local/postgres18/port` |
 | `APP_ORIGIN` | The exact staff origin, no trailing slash. Staging and Production refuse to start unless it is HTTPS; see [HTTPS for OAuth](docs/server-install.md#https-for-oauth) |
 | `BIND_ADDR` | Staff listen address, default `127.0.0.1:3000` |
-| `PUBLIC_ORIGIN` | The exact public origin. Omit it together with `PUBLIC_BIND_ADDR` to serve no public routes |
+| `PUBLIC_ORIGIN` | The exact public origin. Omit it together with `PUBLIC_BIND_ADDR` and `PUBLIC_TENANT_ID` to serve no public routes |
 | `PUBLIC_BIND_ADDR` | Public listen address. Required with `PUBLIC_ORIGIN` and different from `BIND_ADDR` |
+| `PUBLIC_TENANT_ID` | Positive ID of the tenant served by the public listener. The development launcher defaults to tenant 1 |
 | `DATABASE_POOL_SIZE` | Database connections one app process may hold, 1 to 1000, default 16. System Info shows it as Pool Size. Keep the total of every process under PostgreSQL's `max_connections` |
 | `DATABASE_POOL_WAIT_SECONDS` | How long a request or job waits for a free connection before it is refused (a page answers 503, a job retries), 1 to 300, default 5 |
 | `MAIL_HOST` | SMTP relay. Unset: write mail to `.local/mailbox/` |

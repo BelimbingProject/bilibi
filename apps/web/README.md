@@ -1,6 +1,6 @@
 # Two sites
 
-Bilibi serves one staff router and, when `PUBLIC_ORIGIN` and `PUBLIC_BIND_ADDR` are set, one public router from separate listeners ([ADR 34](../../docs/architecture/decisions/34-two-sites-listener-boundary.md)). The listener selects the site; each router also requires the exact `Host` from its own origin and answers another host with 404. Staff credentials, pages, downloads, `/live`, `/api/v1`, `/mcp`, OAuth, `/.well-known` and SCIM exist only on the staff listener. Public pages and token endpoints, the customer portal, `/visitor/v1` and `/webhooks` exist only on the public listener. Without both public variables, no public route is served.
+Bilibi serves one staff router and, when `PUBLIC_ORIGIN`, `PUBLIC_BIND_ADDR` and `PUBLIC_TENANT_ID` are set, one public router from separate listeners ([ADR 34](../../docs/architecture/decisions/34-two-sites-listener-boundary.md)). The listener selects the site; each router also requires the exact `Host` from its own origin and answers another host with 404. Staff credentials, pages, downloads, `/live`, `/api/v1`, `/mcp`, OAuth, `/.well-known` and SCIM exist only on the staff listener. Public pages and token endpoints, the customer portal, `/visitor/v1` and `/webhooks` exist only on the public listener. The public listener admits customer and visitor sessions for the configured tenant. Omit all three public settings to serve only the staff site.
 
 # Sign-in
 
@@ -63,7 +63,7 @@ without a valid session redirect to login. Authenticated refusals return 403.
 | `/portal/verify/{site}/{token}` | A button that confirms the request's address (the GET alone confirms nothing) |
 
 - Sign-in (the form, or accepting an invitation) alone sets `__Host-bilibi_customer`: `HttpOnly`, `SameSite=Lax`, `Secure`, `Path=/`, no `Domain`, `Max-Age` one day, holding the fresh token each sign-in issues.
-- One public hostname holds one customer session. During the one-tenant transition, signing in again on that hostname ends the session it held before.
+- One public hostname holds one customer session. Signing in again on that hostname ends the previous session if it belongs to that listener’s tenant.
 - `__Host-bilibi_portal_site` (same host flags, one year) remembers the portal address for `/portal/sign-in` until hostname lookup replaces the path address.
 - A tenant that requires a second step for `core.user.portal_sign_in` sends the customer to the challenge page above after the password; the shared challenge card (`SignInChallengePage::at`) posts there.
 - Recovery is throttled per sender before any password work: forgotten-password and reset requests, staff and portal together, and portal requests for an account, are limited by `user.recovery.per_sender_per_minute` (default 5); over it, the form answers 429 with a message that names no account.

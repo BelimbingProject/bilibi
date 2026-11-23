@@ -27,6 +27,7 @@ The [capability rename migration](migrations/009-capability-rename.sql) updates 
 
 ## Invitations
 
+- Configure the public listener for the workspace before inviting customers. Invitation, registration verification and customer password reset links use its public origin.
 - Staff invite a **Person**, optionally through one of its **affiliations** (a business customer, signing in for that company); without one the customer is a private individual.
 - The invite dialog finds the Person by name on the server (`base/records` search, with the actor's permission to see people), so any number of people can be invited. An agent Person is refused: agents act through Agent Access, never the portal.
 - The address must not already belong to a customer of the tenant. Inviting it again revokes the open invitation first.

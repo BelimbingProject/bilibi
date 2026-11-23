@@ -746,10 +746,17 @@ impl PortalPage {
             })?);
             return Ok(html);
         };
-        let address = format!(
-            "{}/portal/sign-in/{}",
-            self.pages.access.origin, site.address
-        );
+        let address = self
+            .pages
+            .access
+            .public_origin_for(site.tenant)
+            .map_or_else(
+                || {
+                    "Configure the public listener for this workspace to get a sign-in address."
+                        .to_owned()
+                },
+                |origin| format!("{origin}/portal/sign-in/{}", site.address),
+            );
         let mut html = render(Facts {
             id: "customer-site-facts",
             items: vec![

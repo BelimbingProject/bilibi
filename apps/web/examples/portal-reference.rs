@@ -414,7 +414,7 @@ async fn main() -> std::result::Result<std::process::ExitCode, Error> {
     bilibi_walkthrough_fixture::install(&db).await?;
     let origin = std::env::var("APP_ORIGIN").map_err(|_| Error::Invalid)?;
     let bind = std::env::var("BIND_ADDR").map_err(|_| Error::Invalid)?;
-    let app = bilibi_web::App::new(db, &origin)?.at_site(bilibi_web::Site::Public, &origin);
+    let app = bilibi_web::App::new(db, &origin)?.at_public_site(&origin, 1);
     app.services
         .get::<bilibi_authz::grants::Grants>("base/authz.grants")?
         .reconcile()

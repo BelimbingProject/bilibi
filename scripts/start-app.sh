@@ -167,13 +167,14 @@ public_plan=$(python3 "$root/scripts/local-https-api.py" --plan "$public_host" "
 readarray -t public_origin_plan <<< "$public_plan"
 [[ ${public_origin_plan[0]} == https ]] || { echo 'Local HTTPS is required for the public hostname.' >&2; exit 1; }
 public_instance=("${public_origin_plan[1]}" "${public_origin_plan[2]}" "${public_origin_plan[3]}")
-"$root/scripts/local-https.sh" "$public_host" "${public_instance[1]}" "$root/.local/https/public-instance"
+env -u BILIBI_DEV_STATUS_PORT "$root/scripts/local-https.sh" "$public_host" "${public_instance[1]}" "$root/.local/https/public-instance"
 readarray -t public_instance < "$root/.local/https/public-instance"
 export APP_ORIGIN="https://${instance[0]}"
 [[ ${instance[2]} == 443 ]] || APP_ORIGIN+=":${instance[2]}"
 export PUBLIC_ORIGIN="https://${public_instance[0]}"
 [[ ${public_instance[2]} == 443 ]] || PUBLIC_ORIGIN+=":${public_instance[2]}"
 export BIND_ADDR="127.0.0.1:${instance[1]}"
+export PUBLIC_TENANT_ID="${PUBLIC_TENANT_ID:-1}"
 export PUBLIC_BIND_ADDR="127.0.0.1:${public_instance[1]}"
 if [[ -n $(ss -H -ltn "sport = :${instance[1]}") || -n $(ss -H -ltn "sport = :${public_instance[1]}") ]]; then
     echo "This checkout already has a listener at $APP_ORIGIN. Stop its dev command before starting another." >&2

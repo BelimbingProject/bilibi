@@ -8,7 +8,8 @@
 //! gets the one refusal. Only the SHA-256 of the key is stored; the key is
 //! shown once, when it is made. README, Calendar feed.
 use crate::{
-    ics, Activities, Filter, Mine, Sort, State, WriteError, WriteResult, MANAGE_FEEDS, VIEW,
+    ics, Activities, FieldError, Filter, Mine, Sort, State, WriteError, WriteResult, MANAGE_FEEDS,
+    VIEW,
 };
 use bilibi_authz::authorize_proof;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
@@ -122,6 +123,20 @@ async fn own(client: &dyn ReadClient, scope: &Scope, capability: &str) -> WriteR
         return Err(WriteError::Forbidden);
     }
     Ok(())
+}
+
+fn public_feed_origin(tenant: i64) -> WriteResult<String> {
+    let configured = std::env::var("PUBLIC_TENANT_ID")
+        .ok()
+        .and_then(|id| id.parse().ok());
+    std::env::var("PUBLIC_ORIGIN")
+        .ok()
+        .filter(|origin| configured == Some(tenant) && !origin.is_empty())
+        .map(|origin| origin.trim_end_matches('/').to_owned())
+        .ok_or_else(|| WriteError::Invalid(vec![FieldError::new(
+            "site",
+            "Configure the public listener for this workspace before creating a calendar feed link.",
+        )]))
 }
 
 impl Activities {
@@ -238,7 +253,9 @@ impl Activities {
         client: &dyn ReadClient,
         scope: &Scope,
     ) -> WriteResult<()> {
-        own(client, scope, VIEW).await
+        own(client, scope, VIEW).await?;
+        public_feed_origin(scope.tenant())?;
+        Ok(())
     }
 
     /// Makes the reader's feed key, replacing the one they had (its link
@@ -248,9 +265,10 @@ impl Activities {
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
-    ) -> WriteResult<(FeedKey, String)> {
+    ) -> WriteResult<(FeedKey, String, String)> {
         let scope = self.fresh(tx.sql(), scope).await?;
         own(tx.sql(), &scope, VIEW).await?;
+        let origin = public_feed_origin(scope.tenant())?;
         // A link anyone holding it can read: ask for the second factor first.
         self.step_up
             .require(
@@ -302,6 +320,7 @@ impl Activities {
                 last_used_at: None,
             },
             token,
+            origin,
         ))
     }
 
@@ -385,6 +404,9 @@ impl Activities {
             return Ok(None);
         };
         let (tenant, user): (i64, i64) = (row.get(0), row.get(1));
+        if public_feed_origin(tenant).is_err() {
+            return Ok(None);
+        }
         let scope = match self
             .authentication
             .authenticate_job(&**client, tenant, user, None)

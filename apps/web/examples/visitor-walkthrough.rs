@@ -429,7 +429,7 @@ async fn serve(db: Db) -> Result<()> {
         .collect();
     let page = std::env::var("PAGE_ADDR").unwrap_or_else(|_| "127.0.0.1:3992".into());
     open_sites(&pages, &pages);
-    let app = bilibi_web::App::new(db.clone(), &origin)?.at_site(bilibi_web::Site::Public, &origin);
+    let app = bilibi_web::App::new(db.clone(), &origin)?.at_public_site(&origin, 1);
     let setup = prepare_host(&db, app.services.clone()).await?;
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let running = tokio::spawn(executor(&setup.services)?.run(stopped));
@@ -822,8 +822,38 @@ async fn prepare(db: Db) -> Result<()> {
     let addr = listener.local_addr().map_err(internal)?.to_string();
     let host = format!("http://{addr}");
     open_sites(&[PAGE.into()], &[PAGE.into()]);
-    let app = bilibi_web::App::new(db.clone(), &host)?.at_site(bilibi_web::Site::Public, &host);
+    let staff_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(internal)?;
+    let staff_addr = staff_listener.local_addr().map_err(internal)?.to_string();
+    let staff_host = format!("http://{staff_addr}");
+    let other_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(internal)?;
+    let other_addr = other_listener.local_addr().map_err(internal)?.to_string();
+    let staff_app = bilibi_web::App::new(db.clone(), &staff_host)?;
+    let app = staff_app.clone().at_public_site(&host, 1);
+    let other_app = staff_app
+        .clone()
+        .at_public_site(&format!("http://{other_addr}"), 2);
     let setup = prepare_host(&db, app.services.clone()).await?;
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            staff_listener,
+            bilibi_web::staff_router(staff_app)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            other_listener,
+            bilibi_web::public_router(other_app)
+                .layer(axum::middleware::from_fn(played_peer))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let running = tokio::spawn(executor(&setup.services)?.run(stopped));
     tokio::spawn(async move {
@@ -1500,9 +1530,15 @@ async fn prepare(db: Db) -> Result<()> {
     );
 
     println!("== another tenant's visitor");
-    let other = open(&addr, "other-desk", Some(PAGE)).await.json();
+    let refused = open(&addr, "other-desk", Some(PAGE)).await;
+    run.expect(
+        "tenant 1's public listener refuses tenant 2's site",
+        refused.status == 403,
+        refused.body,
+    );
+    let other = open(&other_addr, "other-desk", Some(PAGE)).await.json();
     let other_token = other["token"].as_str().unwrap_or_default().to_owned();
-    let mut ows = socket(&addr, Some(PAGE)).await.expect("upgrade");
+    let mut ows = socket(&other_addr, Some(PAGE)).await.expect("upgrade");
     hello(&mut ows, &other_token, None).await;
     let _ = until(&mut ows, "ready", 5).await;
     let items = until(&mut ows, "items", 5).await;
@@ -1902,17 +1938,21 @@ async fn prepare(db: Db) -> Result<()> {
         ),
     ];
     for (label, path, headers) in cases {
-        let reply = http(&addr, "GET", path, &headers, "").await;
+        let target = if path == "/portal" {
+            &addr
+        } else {
+            &staff_addr
+        };
+        let reply = http(target, "GET", path, &headers, "").await;
         let location = reply.header("location").unwrap_or("").to_owned();
         run.expect(
             label,
-            matches!(reply.status, 301..=303 | 401 | 403 | 404 | 405)
-                && !reply.body.contains("Companies"),
+            matches!(reply.status, 301..=303 | 401 | 403) && !reply.body.contains("Companies"),
             format!("GET {path} -> {} {location}", reply.status),
         );
     }
     let mcp = http(
-        &addr,
+        &staff_addr,
         "POST",
         "/mcp",
         &[
@@ -1929,12 +1969,12 @@ async fn prepare(db: Db) -> Result<()> {
         format!("POST /mcp -> {}", mcp.status),
     );
     let sign_out = http(
-        &addr,
+        &staff_addr,
         "POST",
         "/logout",
         &[
             ("Cookie", cookie_staff.as_str()),
-            ("Origin", host.as_str()),
+            ("Origin", staff_host.as_str()),
             ("Content-Type", "application/x-www-form-urlencoded"),
         ],
         "csrf=x",
@@ -1946,12 +1986,17 @@ async fn prepare(db: Db) -> Result<()> {
         format!("POST /logout -> {}", sign_out.status),
     );
     for path in ["/live", "/portal/live"] {
-        let mut request = format!("ws://{addr}{path}")
+        let (target, origin) = if path == "/live" {
+            (&staff_addr, &staff_host)
+        } else {
+            (&addr, &host)
+        };
+        let mut request = format!("ws://{target}{path}")
             .into_client_request()
             .expect("request");
         request
             .headers_mut()
-            .insert("Origin", host.parse().expect("origin"));
+            .insert("Origin", origin.parse().expect("origin"));
         request.headers_mut().insert(
             "Cookie",
             format!("__Host-bilibi_session={t}; __Host-bilibi_customer={t}")

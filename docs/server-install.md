@@ -98,17 +98,17 @@ Caddy has one generated file per instance in `/etc/caddy/sites/bilibi-<instance>
 
 **The public hostname goes to the internet; the staff hostname goes to a private address or an identity-aware proxy.** Bilibi still checks the exact `Host` on both listeners, but a host check is not a network boundary.
 
-On one server with a VPN or private interface, bind Caddy's staff block to that interface and leave the public block on the public addresses:
+On a server with a VPN or private interface, give Caddy separate IP addresses for staff and public traffic. Replace the example addresses with IPs assigned to the server.
 
 ```sh
 printf '%s\n' "$CLOUDFLARE_API_TOKEN" | sudo scripts/install-server.sh create production \
   --role production --site app.example.com --public-site shop.example.com \
-  --staff-bind 10.20.0.5 --tls cloudflare --cloudflare-token-stdin
+  --staff-bind 10.20.0.5 --public-bind 203.0.113.10 --tls cloudflare --cloudflare-token-stdin
 ```
 
-`--staff-bind` takes the server's private or VPN IP and writes Caddy's `bind` directive only in the staff block. DNS for the staff name must lead staff to that address. `--tls cloudflare` obtains certificates by DNS without making the staff address public; `--tls internal` is the alternative when every staff device trusts Caddy's local authority. If the machine has only one reachable address, an address allow-list on the staff block is a weaker last resort.
+`--staff-bind` takes the server's private or VPN IP and binds Caddy’s staff block to that address. `--public-bind` binds the public block to a different interface. Point each hostname at its corresponding address. `--tls cloudflare` obtains certificates by DNS without making the staff address public; `--tls internal` is the alternative when every staff device trusts Caddy's local authority. If the machine has only one reachable address, an address allow-list on the staff block is a weaker last resort.
 
-Without a VPN, put the staff hostname behind an identity-aware proxy such as Cloudflare Access and send the public hostname straight to Caddy. Require the proxy's identity check before Bilibi's staff sign-in page. Staff invitation and password-reset links intentionally require that same private path. If a cloud identity provider or AI application must reach the staff machine edge, publish only the [machine paths](#a-firewall-identity-proxy-or-cdn-in-front-of-bilibi), with the provider or application authentication that fits that path; do not publish all staff pages.
+For a tunnel running on the same server, use `--staff-bind 127.0.0.1 --public-bind 203.0.113.10` with the installation command above. Point the identity-aware tunnel at `https://127.0.0.1:443` and configure the staff hostname as both the HTTP Host and the TLS server name. Require the proxy’s identity check before staff sign-in. For a proxy running elsewhere, use a private staff IP and restrict ingress on that interface to the proxy. Send the public hostname directly to the public Caddy address. Staff invitation and password-reset links intentionally require that same private path. If a cloud identity provider or AI application must reach the staff machine edge, publish only the [machine paths](#a-firewall-identity-proxy-or-cdn-in-front-of-bilibi), with the provider or application authentication that fits that path; do not publish all staff pages.
 
 ## Which certificate should I use?
 
@@ -417,7 +417,7 @@ Script commands:
 
 | Command | What it does |
 | --- | --- |
-| `create <instance> --role dev\|staging\|production --site <staff-host> [--public-site <public-host>] [--staff-bind <address>] [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy blocks. `--public-site` enables the public listener; `--staff-bind` keeps the staff Caddy block on one private interface. Rerun to change the sites; the saved role and staff port stay fixed |
+| `create <instance> --role dev\|staging\|production --site <staff-host> [--public-site <public-host> or --no-public-site] [--public-tenant <id>] [--staff-bind <address> or --no-staff-bind] [--public-bind <address>] [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy blocks. `--public-site` enables the public listener; `--staff-bind` keeps the staff Caddy block on one private interface. Rerun to change the sites. Omitted public-site and bind settings keep their saved values. Use `--no-public-site` to disable the public listener or `--no-staff-bind` to remove the explicit Caddy binds. Changes to listener configuration restart a running instance and check both active listeners. The saved role and staff port stay fixed |
 | `release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance and checksums, copy into `releases/<n>`, migrate, switch, check |
 | `create-owner <instance> [--email <address>] [--name <name>] [--password-stdin] [--company-name <name> --company-code <code>]` | [Server owner setup](#the-first-account) |
 | `tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>` | [Customer tenant and first-owner setup](#the-first-owner-of-a-customer-tenant) |
@@ -439,7 +439,8 @@ Keys in `env` (the service's environment; `README.md` explains each):
 | `APP_ORIGIN` | `https://<staff-site>`, the exact staff address |
 | `BIND_ADDR` | `127.0.0.1:<port>`, the staff listener where Caddy forwards |
 | `PUBLIC_ORIGIN` | `https://<public-site>`, present only when `--public-site` enables public routes |
-| `PUBLIC_BIND_ADDR` | The public listener's separate loopback address |
+| `PUBLIC_BIND_ADDR` | The public listener’s separate loopback address |
+| `PUBLIC_TENANT_ID` | The one tenant served by the public listener. Set with `--public-tenant <id>`, defaulting to tenant 1 when enabling the public site |
 | `DATABASE_URL` | the instance's own database and role on the local cluster |
 | `BILIBI_SETTINGS_KEY`, `BILIBI_USER_SIGNING_KEY`, `BILIBI_MEDIA_SIGNING_KEY` | generated 64-hex-character keys; keep them, losing `BILIBI_SETTINGS_KEY` loses every secret setting and authenticator key |
 | `BILIBI_MAIL_DIR` | `data/mailbox`, used only by a Dev instance. A Staging or Production instance sends no mail until you add the `MAIL_*` relay variables ([Mail](../apps/base/mail/README.md#choosing-the-transport)); until then every send fails and System Info's Mail line says why |

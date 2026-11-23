@@ -163,17 +163,31 @@ async fn serve() -> Result<()> {
             let public_site = match (
                 std::env::var("PUBLIC_ORIGIN").ok(),
                 std::env::var("PUBLIC_BIND_ADDR").ok(),
+                std::env::var("PUBLIC_TENANT_ID").ok(),
             ) {
-                (Some(origin), Some(bind)) => Some((origin, bind)),
-                (None, None) => None,
+                (Some(origin), Some(bind), Some(tenant)) => {
+                    let tenant =
+                        tenant
+                            .parse::<i64>()
+                            .ok()
+                            .filter(|id| *id > 0)
+                            .ok_or_else(|| {
+                                eprintln!("PUBLIC_TENANT_ID must be a positive tenant ID");
+                                Error::Invalid
+                            })?;
+                    Some((origin, bind, tenant))
+                }
+                (None, None, None) => None,
                 _ => {
-                    eprintln!("PUBLIC_ORIGIN and PUBLIC_BIND_ADDR must be set together");
+                    eprintln!(
+                        "PUBLIC_ORIGIN, PUBLIC_BIND_ADDR and PUBLIC_TENANT_ID must be set together"
+                    );
                     return Err(Error::Invalid);
                 }
             };
             if public_site
                 .as_ref()
-                .is_some_and(|(public_origin, public_bind)| {
+                .is_some_and(|(public_origin, public_bind, _)| {
                     public_bind == &bind
                         || origin_host(public_origin)
                             .zip(origin_host(&origin))
@@ -211,8 +225,8 @@ async fn serve() -> Result<()> {
             let listener = tokio::net::TcpListener::bind(&bind)
                 .await
                 .map_err(|_| Error::Internal)?;
-            let public = if let Some((public_origin, public_bind)) = &public_site {
-                let public = app.clone().at_site(bilibi_web::Site::Public, public_origin);
+            let public = if let Some((public_origin, public_bind, tenant)) = &public_site {
+                let public = app.clone().at_public_site(public_origin, *tenant);
                 match public.secure_origin().await {
                     Ok(true) => {}
                     Ok(false) => {
