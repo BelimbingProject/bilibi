@@ -99,7 +99,7 @@ Every attempt also checks that its captured principal is still the definition's 
 
 Run the executable with `catalog` for the public boot-contract proof without a database. It checks missing and foreign definitions, undeclared and foreign principals, installation reach, missing schedule keys and standing grants. A reordered bound retains the review fingerprint; a widened one changes it.
 
-After the explicit owner grants, `notifications 1` proves the Notifications boundary's principal self-record is a no-op, an account's self-record persists exactly once, rollback leaves no row, invalid titles and explicit recipients remain refused, and a principal can still notify a real account explicitly. The same boundary is called by Company's ordinary facade during the scheduled effect.
+After the explicit owner grants, `notifications 1` proves the Notifications boundary's principal self-record is a no-op, an account's self-record persists exactly once, rollback leaves no row, invalid titles and explicit recipients remain refused, and a principal can still notify a real account explicitly.
 
 Create and archive a non-primary fixture company through the normal Company page, then run `locked-owner TENANT_ID COMPANY_ID` after granting that principal the business keys. It proves the granted principal's normal Company write is still refused for the archived record, with its value and version unchanged.
 
