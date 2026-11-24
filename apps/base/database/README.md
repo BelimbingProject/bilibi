@@ -162,7 +162,7 @@ stores SQL text, so put secrets behind service parameters rather than SQL litera
 F2 was demonstrated with external runtime fixture executables and a disposable
 PostgreSQL database, without unit tests. Evidence lives in Firstmate's task data
 folder `data/bilibi-f2/`: legacy upgrade without replay, repeat development seed preserving
-an edit, shared Company/notification trace and bell fan-out, explicit rollback,
+an edit, explicit rollback,
 drop, swallowed capture failure, action-capture failure, cancelled owner/capture,
 deferred commit failure, system/impersonator attribution, failed seed rollback and
 retry, repeat seed skipping, definition drift refusal, SQL/service dependency

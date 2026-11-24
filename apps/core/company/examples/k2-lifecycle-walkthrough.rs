@@ -71,6 +71,40 @@ async fn main() -> Result<(), Error> {
         .get_detached("the walkthrough's own checking connection")
         .await?;
     let client: &tokio_postgres::Client = &client;
+    let before: i64 = client
+        .query_one(
+            "SELECT count(*) FROM notifications WHERE tenant_id=1 AND user_id=$1",
+            &[&manager.user()],
+        )
+        .await?
+        .get(0);
+    let version: i64 = client
+        .query_one(
+            "SELECT version FROM companies WHERE tenant_id=1 AND id=1",
+            &[],
+        )
+        .await?
+        .get(0);
+    companies
+        .save(
+            &manager_login.token,
+            &Edit {
+                id: 1,
+                field: "website".into(),
+                value: "https://example.test".into(),
+                version,
+            },
+        )
+        .await?;
+    let after: i64 = client
+        .query_one(
+            "SELECT count(*) FROM notifications WHERE tenant_id=1 AND user_id=$1",
+            &[&manager.user()],
+        )
+        .await?
+        .get(0);
+    assert_eq!(before, after, "a company edit must not notify its editor");
+    println!("company edit does not notify its editor");
     let id = create(&companies, &manager, "K2 lifecycle specimen", "pending").await?;
     let org = OrganisationId::new(id)?;
     for status in ["pending", "active", "suspended", "archived"] {

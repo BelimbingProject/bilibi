@@ -88,7 +88,6 @@ pub const IDENTITY_IMAGE_KEY: &str = "company.identity_image_asset_id";
 pub const IDENTITY_IMAGE_MAX_BYTES: u64 = 1024 * 1024;
 
 use bilibi_database::{Change, Db, Error, MutationBoundary, Result};
-use bilibi_notifications::NotificationBoundary;
 use bilibi_security::{guard, restrictions, Scope, Sessions};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -373,7 +372,6 @@ pub async fn save(
     db: &Db,
     token: &str,
     edit: &Edit,
-    notifications: &NotificationBoundary,
     mutations: &MutationBoundary,
     sessions: &Sessions,
 ) -> Result<()> {
@@ -384,14 +382,13 @@ pub async fn save(
         .begin(&mut client, scope.mutation_context("company.update"))
         .await?;
     let scope = guard(tx.sql(), token, sessions).await?;
-    save_in(tx, &scope, edit, notifications).await
+    save_in(tx, &scope, edit).await
 }
 
 pub async fn save_as(
     db: &Db,
     scope: &Scope,
     edit: &Edit,
-    notifications: &NotificationBoundary,
     mutations: &MutationBoundary,
 ) -> Result<()> {
     edit.validate()?;
@@ -399,14 +396,13 @@ pub async fn save_as(
     let tx = mutations
         .begin(&mut client, scope.mutation_context("company.update"))
         .await?;
-    save_in(tx, scope, edit, notifications).await
+    save_in(tx, scope, edit).await
 }
 
 async fn save_in(
     mut tx: bilibi_database::MutationTransaction<'_>,
     scope: &Scope,
     edit: &Edit,
-    notifications: &NotificationBoundary,
 ) -> Result<()> {
     let scope = scope.clone();
     organisation::authorize_target(tx.sql(), &scope, edit.id, UPDATE).await?;
@@ -477,9 +473,6 @@ async fn save_in(
         };
         Ok(((), vec![Change { kind: "company".into(), id, old: json!({&field:old}), new: json!({&field:new}) }]))
     })).await?;
-    notifications
-        .record(&mut tx, &scope, "Company updated")
-        .await?;
     tx.commit().await
 }
 
@@ -489,7 +482,6 @@ async fn save_in(
 pub struct CompanyService {
     sessions: Arc<Sessions>,
     db: Db,
-    notifications: Arc<NotificationBoundary>,
     mutations: Arc<MutationBoundary>,
     proofs: Arc<bilibi_tenancy::PartyProofs>,
     directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
@@ -526,18 +518,10 @@ impl CompanyService {
         result
     }
     pub async fn save_as(&self, scope: &Scope, edit: &Edit) -> Result<()> {
-        save_as(&self.db, scope, edit, &self.notifications, &self.mutations).await
+        save_as(&self.db, scope, edit, &self.mutations).await
     }
     pub async fn save(&self, token: &str, edit: &Edit) -> Result<()> {
-        save(
-            &self.db,
-            token,
-            edit,
-            &self.notifications,
-            &self.mutations,
-            &self.sessions,
-        )
-        .await
+        save(&self.db, token, edit, &self.mutations, &self.sessions).await
     }
     /// `create_company/3`: a refused create rolls back and reports its fields.
     pub async fn create_company(&self, scope: &Scope, new: &NewCompany) -> Result<CreateOutcome> {
@@ -826,7 +810,7 @@ async fn finish(tx: bilibi_database::MutationTransaction<'_>, saved: bool) -> Re
 inventory::submit! {
     bilibi_module_registry::Module {
         id:"core/company",layer:bilibi_module_registry::Layer::Core,
-        dependencies:&["base/database","base/security","base/ui","base/notifications","base/party_ids","base/session","base/menu","base/grid","base/search","base/dashboard","base/reports","base/authz","base/tenancy","base/audit","base/agent_api","base/datetime","base/locale","base/principal_directory","base/media","base/artifacts","base/picklists","base/custom_fields","base/settings","base/settings_editor","base/records","base/ports","base/personal_data","base/watchers","core/party","core/geonames","core/person"],
+        dependencies:&["base/database","base/security","base/ui","base/party_ids","base/session","base/menu","base/grid","base/search","base/dashboard","base/reports","base/authz","base/tenancy","base/audit","base/agent_api","base/datetime","base/locale","base/principal_directory","base/media","base/artifacts","base/picklists","base/custom_fields","base/settings","base/settings_editor","base/records","base/ports","base/personal_data","base/watchers","core/party","core/geonames","core/person"],
         migrations:&[MIGRATION, MIGRATION_ORGANISATION, MIGRATION_RELATIONSHIPS, MIGRATION_ROLE_OWNER, MIGRATION_SEARCH, ("core-company-008-match-keys", include_str!("../migrations/008-match-keys.sql")), MIGRATION_SESSION_COMPANY, ("core-company-010-assignment-scope",include_str!("../migrations/010-assignment-scope.sql")), ("core-company-011-custom-fields",include_str!("../migrations/011-custom-fields.sql")), ("core-company-012-personal-data",include_str!("../migrations/012-personal-data.sql")), ("core-company-013-search-trigram",include_str!("../migrations/013-search-trigram.sql")), ("core-company-014-custom-search",include_str!("../migrations/014-custom-search.sql"))],
         services: &[
             bilibi_module_registry::Service { id: SERVICE, factory: |services| {
@@ -846,7 +830,7 @@ inventory::submit! {
                 relationship_operations::bind(db.clone(), proofs.clone(), directory.clone())?;
                 Ok(Arc::new(CompanyService {
                     sessions: services.get("base/session.sessions")?, mutations: services.get("base/database.mutations")?,
-                    db, notifications: services.get("base/notifications.sink")?, proofs, directory,
+                    db, proofs, directory,
                     settings, media: services.get(bilibi_media::SERVICE)?,
                 }))
             } },
