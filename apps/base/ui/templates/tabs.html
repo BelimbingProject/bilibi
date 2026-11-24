@@ -13,7 +13,7 @@
 <div id="{{ id }}-scroller" data-tab-scroller class="flex w-full min-w-0 max-w-full flex-nowrap gap-1 overflow-x-auto overflow-y-hidden overscroll-x-contain scroll-px-8 border-b border-line [scrollbar-width:thin]">
 {%- for tab in items -%}
 {%- if !tab.href.is_empty() -%}
-<a href="{{ tab.href }}"{% if !tab.id.is_empty() %} id="{{ tab.id }}"{% endif %}{% if tab.patch %} data-patch{% endif %} data-tab class="{{ tab.class() }}"{% if tab.current %} aria-current="page"{% endif %}>{{ tab.label|safe }}{% if !tab.count.is_empty() %} <span class="inline-flex min-w-4 h-4 items-center justify-center rounded-full bg-surface-sunken px-1 text-xs tabular-nums">{{ tab.count }}</span>{% endif %}</a>
+<a href="{{ tab.href }}"{% if !tab.id.is_empty() %} id="{{ tab.id }}"{% endif %}{% if tab.patch %} data-patch{% endif %} data-tab class="{{ tab.class() }}"{% if tab.current %} aria-current="page"{% endif %}>{{ tab.label|safe }}</a>
 {%- else -%}
 <button type="button"{% if !tab.id.is_empty() %} id="{{ tab.id }}"{% endif %} data-tab class="{{ tab.class() }}"{% if tab.current %} aria-current="page"{% endif %}{% if !tab.event.is_empty() %} data-event="{{ tab.event }}"{% endif %}{% if !tab.value.is_empty() %} data-value-tab="{{ tab.value }}"{% endif %}>{{ tab.label|safe }}{% if !tab.count.is_empty() %} <span class="inline-flex min-w-4 h-4 items-center justify-center rounded-full bg-surface-sunken px-1 text-xs tabular-nums">{{ tab.count }}</span>{% endif %}</button>
 {%- endif -%}

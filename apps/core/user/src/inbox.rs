@@ -66,7 +66,6 @@ struct BellView {
     items: Vec<Item>,
     todos: Vec<bilibi_notifications::TodoList>,
     todo_count: usize,
-    todo_more: bool,
     todo_tab: bool,
     tabs: Tabs<'static>,
 }
@@ -84,18 +83,18 @@ async fn bell_html(users: &UserService, scope: &Scope, todo_tab: bool) -> Result
     let todos = users.notification_boundary.todos(scope).await?;
     let todo_count: usize = todos.iter().map(|list| list.count).sum();
     let todo_more = todos.iter().any(|list| list.more);
-    let todo_badge = if todo_count >= 99 {
+    let todo_badge = if todo_count > 99 {
         "99+".to_owned()
     } else {
         format!("{todo_count}{}", if todo_more { "+" } else { "" })
     };
-    let unread_badge = if unread >= 99 {
+    let unread_badge = if unread > 99 {
         "99+".to_owned()
     } else {
         unread.to_string()
     };
     let total = todo_count.saturating_add(unread.max(0) as usize);
-    let badge = if total >= 99 {
+    let badge = if total > 99 {
         "99+".to_owned()
     } else {
         format!("{total}{}", if todo_more { "+" } else { "" })
@@ -126,7 +125,6 @@ async fn bell_html(users: &UserService, scope: &Scope, todo_tab: bool) -> Result
     BellView {
         todos,
         todo_count,
-        todo_more,
         todo_tab,
         tabs,
         unread,
