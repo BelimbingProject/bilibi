@@ -67,7 +67,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
             ),
             (
                 "mine".into(),
-                ListFilter::one_of(&["any", "assignee", "guest"], "any"),
+                ListFilter::one_of(&["any", "assignee", "guest", "todo"], "any"),
             ),
         ]),
         omit_blank: vec!["search".into()],
@@ -223,6 +223,7 @@ impl Index {
             mine: match self.list.filters["mine"].as_str() {
                 "assignee" => Mine::Assignee,
                 "guest" => Mine::Guest,
+                "todo" => Mine::Todo,
                 _ => Mine::Any,
             },
             related: self.related.clone(),
@@ -955,6 +956,7 @@ impl Index {
                     ("Everyone's I may see", "any"),
                     ("Assigned to me", "assignee"),
                     ("I am a guest", "guest"),
+                    ("My to-do activities", "todo"),
                 ]),
             ),
         ];

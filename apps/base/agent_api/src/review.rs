@@ -318,12 +318,12 @@ impl bilibi_notifications::TodoSource for Reviews {
             let client = self.db.get().await?;
             let rows = client
                 .query(
-                    "SELECT id,COALESCE(card#>>'{operation,title}','AI changes') FROM base_agent_api_reviews WHERE tenant_id=$1 AND user_id=$2 AND status IN ('open','refused') ORDER BY created_at DESC LIMIT 101",
+                    "SELECT id,COALESCE(card#>>'{operation,title}','AI changes') FROM base_agent_api_reviews WHERE tenant_id=$1 AND user_id=$2 AND status IN ('open','refused') ORDER BY created_at DESC LIMIT 100",
                     &[&scope.tenant(), &scope.user()],
                 )
                 .await?;
-            let more = rows.len() > 100;
-            let count = rows.len().min(100);
+            let more = rows.len() > 99;
+            let count = rows.len().min(99);
             let items = rows
                 .iter()
                 .take(5)
@@ -333,6 +333,7 @@ impl bilibi_notifications::TodoSource for Reviews {
                 })
                 .collect();
             Ok(bilibi_notifications::TodoList {
+                label: "AI reviews".into(),
                 items,
                 count,
                 more,

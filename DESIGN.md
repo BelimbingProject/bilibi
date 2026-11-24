@@ -341,6 +341,8 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 ## Page review checklist
 
+Summary badges equal the sum of the counts on what they open; never render a link to an empty list or an unlabeled “See all”.
+
 Run this on every page you changed, in the browser at `APP_ORIGIN`, once with a mouse and once in touch mode (DevTools device emulation, coarse pointer). Every answer must be yes.
 
 1. Does every subtitle, hint and empty state say something the title and labels do not?

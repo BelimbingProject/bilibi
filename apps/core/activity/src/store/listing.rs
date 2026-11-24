@@ -63,6 +63,7 @@ impl Listing {
                 Mine::Assignee => "assignee",
                 Mine::Guest => "guest",
                 Mine::TakingPart => "part",
+                Mine::Todo => "todo",
             },
             related_kind: filter.related.as_ref().map(|r| r.kind.clone()),
             related_id: filter.related.as_ref().map(|r| r.id.clone()),
@@ -90,6 +91,7 @@ impl Listing {
          AND ($9 = 'any'
               OR ($9 = 'assignee' AND a.assignee_user_id = $2)
               OR ($9 = 'guest' AND EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id=$2 AND g.role IN ('related','invited')))
+              OR ($9 = 'todo' AND a.closed_at IS NULL AND a.reminded_at IS NOT NULL AND (a.assignee_user_id=$2 OR (a.kind IN ('call','meeting') AND EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id=$2 AND g.response<>'declined'))))
               OR ($9 = 'part' AND (a.created_by=$2 OR a.assignee_user_id=$2 OR EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id=$2 AND g.response<>'declined'))))
          AND ($10::text IS NULL
               OR (a.related_kind = $10 AND a.related_id = $11)

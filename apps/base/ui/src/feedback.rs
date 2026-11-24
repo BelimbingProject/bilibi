@@ -393,6 +393,7 @@ pub struct Tab<'a> {
     pub event: &'a str,
     pub value: &'a str,
     pub label: Html,
+    pub count: String,
 }
 
 impl<'a> Tab<'a> {

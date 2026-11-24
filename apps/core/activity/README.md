@@ -7,7 +7,7 @@
 - Activities and their guests (`core_activities`, `core_activity_guests`).
 - Repeating series: the rule (`core_activity_series`) and one activity per occurrence.
 - One Activities list (`/activities`), shown as a table, a calendar or as the tasks in tiles by status, one record page (`/activities/{id}`) and the Activities panel on record pages.
-- Reminders: a per-tenant scheduled sweep, each activity's own reminder offsets (else the creator's default, else the tenant's), the bell's To do rows and the optional reminder email to the assignee and to guests without an account.
+- Reminders: a per-tenant scheduled sweep, each activity's own reminder offsets (else the creator's default, else the tenant's), the bell's To do rows and the optional reminder email to the assignee and to guests without an account. The Activities list's “My to-do activities” filter shows the same open, reminded work as the bell.
 - Invitations: Send invites, the bell notice to colleagues, the invitation email worker, and the `core/activity.invitation_gates` registry a Domain contributes its contact rules to.
 - The calendar feed: one read-only iCalendar link per person, and its key ([Calendar feed](#calendar-feed)).
 - The `core/activity.happened` event, record kind `core.activity.activity` and the agent operations.

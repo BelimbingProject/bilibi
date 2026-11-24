@@ -15,7 +15,7 @@
 {%- if !tab.href.is_empty() -%}
 <a href="{{ tab.href }}"{% if !tab.id.is_empty() %} id="{{ tab.id }}"{% endif %}{% if tab.patch %} data-patch{% endif %} data-tab class="{{ tab.class() }}"{% if tab.current %} aria-current="page"{% endif %}>{{ tab.label|safe }}</a>
 {%- else -%}
-<button type="button"{% if !tab.id.is_empty() %} id="{{ tab.id }}"{% endif %} data-tab class="{{ tab.class() }}"{% if tab.current %} aria-current="page"{% endif %}{% if !tab.event.is_empty() %} data-event="{{ tab.event }}"{% endif %}{% if !tab.value.is_empty() %} data-value-tab="{{ tab.value }}"{% endif %}>{{ tab.label|safe }}</button>
+<button type="button"{% if !tab.id.is_empty() %} id="{{ tab.id }}"{% endif %} data-tab class="{{ tab.class() }}"{% if tab.current %} aria-current="page"{% endif %}{% if !tab.event.is_empty() %} data-event="{{ tab.event }}"{% endif %}{% if !tab.value.is_empty() %} data-value-tab="{{ tab.value }}"{% endif %}>{{ tab.label|safe }}{% if !tab.count.is_empty() %} <span class="inline-flex min-w-4 h-4 items-center justify-center rounded-full bg-surface-sunken px-1 text-xs tabular-nums">{{ tab.count }}</span>{% endif %}</button>
 {%- endif -%}
 {%- endfor -%}
 </div>
