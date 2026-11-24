@@ -1137,6 +1137,8 @@ async fn walkthrough() -> Result<()> {
     proof.start()?;
     let result = if std::env::args().any(|arg| arg == "--scripts") {
         scripts::walkthrough(&proof).await
+    } else if std::env::args().any(|arg| arg == "--observations") {
+        observations::walkthrough(&mut proof).await
     } else {
         mounted_proof(&mut proof).await
     };
@@ -2414,5 +2416,7 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
     Ok(())
 }
 
+#[path = "watchers/observations.rs"]
+mod observations;
 #[path = "watchers/scripts.rs"]
 mod scripts;

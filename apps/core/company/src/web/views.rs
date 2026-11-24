@@ -1876,7 +1876,7 @@ pub(super) async fn create(
                 .options(opts.countries.clone()),
             "status" => field.options(choices(&[("Active", "active"), ("Pending", "pending")])),
             "code" => field
-                .hint("Clear the code to let Bilibi choose one.")
+                .hint("Clear the code to generate one automatically.")
                 .attr("maxlength", "255")
                 .attr("data-edited-marker", "code_edited"),
             _ => field.attr("maxlength", if name == "name" { "160" } else { "255" }),

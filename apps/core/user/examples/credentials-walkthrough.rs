@@ -472,13 +472,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
     let checks = [
         ("sender name", from.contains("Example Trading")),
-        (
-            "subject",
-            message.contains("Subject: Reset your Bilibi password"),
-        ),
+        ("subject", message.contains("Subject: Reset your password")),
         (
             "platform wording",
-            message.contains("Reset your Bilibi password by opening this link:")
+            message.contains("Reset your password by opening this link:")
                 && message.contains("If you did not request this, you can ignore this email."),
         ),
         (

@@ -128,15 +128,16 @@ impl UploadSpec {
         )
     }
 
+    pub fn valid_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 64
+            && name.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte)
+            })
+    }
+
     fn declare(name: String, max_file_size: u64, resumable: bool) -> Self {
-        assert!(
-            !name.is_empty()
-                && name.len() <= 64
-                && name.bytes().all(|byte| byte.is_ascii_lowercase()
-                    || byte.is_ascii_digit()
-                    || b"_-".contains(&byte)),
-            "invalid upload name {name:?}"
-        );
+        assert!(Self::valid_name(&name), "invalid upload name {name:?}");
         Self {
             name,
             accept: Vec::new(),

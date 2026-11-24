@@ -265,7 +265,7 @@ fn rows(reply: &Value) -> Vec<bilibi_labels::CustomisationRow> {
 }
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/dashboard_agent.customisations", provenance!(), &bilibi_labels::CustomisationSection {
     title:"My dashboard",
-    undo:Some(bilibi_labels::Undo { read:READ, read_input:empty, operation:RESTORE, event:UNDO, action:"Restore default", detail:"The chosen dashboard region will return to its original entries.", rows }),
+    undo: Some(bilibi_labels::Undo { read: READ, read_input: empty, action: Some(bilibi_labels::UndoAction { operation: RESTORE, event: UNDO, label: "Restore default", detail: "The chosen dashboard region will return to its original entries." }), rows }),
     changes:None,
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.dashboard_agent.customisations_restore", provenance!(), &bilibi_agent_api::page::PageBinding {

@@ -173,6 +173,26 @@ impl Vocab {
     fn action(&self, operation: &str) -> Option<&ActionV> {
         self.actions.iter().find(|a| a.operation == operation)
     }
+    /// With an AI observation, its answer is two more condition fields.
+    fn observing(mut self, trigger: &str, observe: Option<&Value>) -> Self {
+        let Some(observe) = observe else {
+            return self;
+        };
+        if let Some(trigger) = self.triggers.iter_mut().find(|t| t.event == trigger) {
+            trigger.fields.push(FieldV {
+                id: crate::observe::LABEL.into(),
+                label: "AI label".into(),
+                ty: "enum".into(),
+                values: observe["labels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(text)
+                    .collect(),
+            });
+        }
+        self
+    }
 }
 
 #[derive(Clone, Default)]
@@ -215,6 +235,9 @@ pub(super) struct Editor {
     conditions: Vec<Cond>,
     actions: Vec<Act>,
     examples: Vec<Example>,
+    /// The latest version's AI observation, kept as drafted: the page shows
+    /// it and its answer's condition fields; an agent drafts a change to it.
+    observe: Option<Value>,
     reviewed: Option<Reviewed>,
     flash: Option<(StatusKind, String)>,
 }
@@ -291,6 +314,7 @@ impl Editor {
             conditions: Vec::new(),
             actions: Vec::new(),
             examples: Vec::new(),
+            observe: None,
             reviewed: None,
             flash: None,
         }
@@ -308,6 +332,7 @@ impl Editor {
         };
         editor.explanation = version.explanation.clone().unwrap_or_default();
         let definition = &version.definition;
+        editor.observe = definition.get("observe").filter(|o| o.is_object()).cloned();
         editor.matching = definition["if"]["match"]
             .as_str()
             .unwrap_or("all")
@@ -468,6 +493,9 @@ impl Editor {
         if let Some(id) = self.watcher_id {
             input["watcher_id"] = json!(id);
         }
+        if let Some(observe) = &self.observe {
+            input["observe"] = observe.clone();
+        }
         if !self.explanation.trim().is_empty() {
             input["explanation"] = json!(self.explanation.trim());
         }
@@ -488,7 +516,7 @@ impl Editor {
         };
         current.flash = None;
         let vocab = match Vocab::load(pages, call.scope).await {
-            Ok(vocab) => vocab,
+            Ok(vocab) => vocab.observing(&current.trigger, current.observe.as_ref()),
             Err(ContractError::Backend(error)) => return Err(error),
             Err(_) => {
                 current.flash = Some((StatusKind::Error, DENIED_DRAFT.into()));
@@ -1139,32 +1167,40 @@ impl Editor {
                         "What this version does. Nothing runs until an administrator approves it.",
                     ..SectionHeading::default()
                 })?;
+                let mut items = vec![Fact {
+                    title: "Watch",
+                    id: "",
+                    value: Html::text(&text(&facts["trigger"])),
+                }];
+                if let Some(observation) = facts["observation"].as_str() {
+                    items.push(Fact {
+                        title: "AI observation",
+                        id: "",
+                        value: Html::text(observation),
+                    });
+                }
+                items.extend([
+                    Fact {
+                        title: "If",
+                        id: "",
+                        value: condition,
+                    },
+                    Fact {
+                        title: "Do",
+                        id: "",
+                        value: render(Bullets {
+                            lines: &list("actions"),
+                        })?,
+                    },
+                    Fact {
+                        title: "Examples",
+                        id: "",
+                        value: render(Lines { lines: &examples })?,
+                    },
+                ]);
                 body.push(&render(Facts {
                     id: "watcher-draft-review",
-                    items: vec![
-                        Fact {
-                            title: "Watch",
-                            id: "",
-                            value: Html::text(&text(&facts["trigger"])),
-                        },
-                        Fact {
-                            title: "If",
-                            id: "",
-                            value: condition,
-                        },
-                        Fact {
-                            title: "Do",
-                            id: "",
-                            value: render(Bullets {
-                                lines: &list("actions"),
-                            })?,
-                        },
-                        Fact {
-                            title: "Examples",
-                            id: "",
-                            value: render(Lines { lines: &examples })?,
-                        },
-                    ],
+                    items,
                 })?);
                 let warnings = list("warnings");
                 if !warnings.is_empty() {
@@ -1182,12 +1218,49 @@ impl Editor {
 
     pub(super) async fn dialog(&self, pages: &Pages, scope: &Scope) -> Result<Html> {
         let vocab = match Vocab::load(pages, scope).await {
-            Ok(vocab) => vocab,
+            Ok(vocab) => vocab.observing(&self.trigger, self.observe.as_ref()),
             Err(ContractError::Backend(error)) => return Err(error),
             Err(_) => return Ok(Html::EMPTY),
         };
         let trigger_chosen = vocab.trigger(&self.trigger).is_some();
         let mut parts = vec![self.head(&vocab)?];
+        if let Some(observe) = &self.observe {
+            let words = |key: &str| {
+                observe[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|item| {
+                        let id = text(item);
+                        vocab
+                            .field(&self.trigger, &id)
+                            .map_or(id, |f| f.label.clone())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let shown = |id: &str, label: &str, value: String, hint: &str| {
+                render(
+                    Field::named("observe")
+                        .id(format!("watcher-draft-observe-{id}"))
+                        .label(label)
+                        .value(&value)
+                        .hint(hint)
+                        .readonly(),
+                )
+            };
+            parts.push(Self::section(
+                "AI observation",
+                "watcher-draft-observe",
+                "Asked once per event before the conditions; conditions can use the AI label. Your AI agent drafts a change to it.",
+                vec![
+                    shown("question", "Question", text(&observe["question"]), "")?,
+                    shown("labels", "Answers", words("labels"), "The only answers kept.")?,
+                    shown("fields", "Sends", words("fields"), "Nothing else of the record is sent.")?,
+                ],
+                Html::EMPTY,
+            )?);
+        }
         parts.push(Self::section(
             "If",
             "watcher-draft-if",

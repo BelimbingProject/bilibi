@@ -39,6 +39,7 @@ use std::{
 mod editor;
 mod script_run;
 mod show;
+mod words;
 
 pub const INDEX: &str = "/watchers";
 pub const SHOW: &str = "/watchers/{id}";
@@ -250,7 +251,7 @@ impl Index {
         }
         let header = render(Header {
             title: Html::text("Watchers"),
-            subtitle: "A watcher waits for something to happen in Bilibi and then acts on it.",
+            subtitle: "A watcher runs an action when its event occurs.",
             actions: if can_draft {
                 render(CreateButton {
                     noun: "Watcher",

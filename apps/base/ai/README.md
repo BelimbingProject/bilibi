@@ -1,6 +1,6 @@
 # One-shot model calls
 
-**Use it for:** sending instructions plus text to a configured AI provider and getting text back (a summary, a draft), with installation and company switches, a deadline and a metadata log.
+**Use it for:** sending instructions plus text to a configured AI provider and getting text back (a summary, a draft), with installation, company and tenant-automation switches, a deadline and a metadata log.
 
 **Not for:** calling a model's HTTP API from your own module, agent loops, tool calling, embeddings, streaming, vendor-specific providers (an Extension), or applying generated text without a person's reviewed write.
 
@@ -28,13 +28,13 @@ let answer = ai.generate(&scope, Request {
 
 - **Never call `generate` while holding a pooled connection or a transaction.** It reads settings on a short connection, releases it before the HTTP call, and writes its row on another.
 - **Invalid (`Err(Invalid)`):** an unregistered module, empty instructions, instructions over 20,000 or text over 200,000 characters, a malformed provider name, a zero deadline. No row.
-- **Output is untrusted.** Render it escaped; never act on it without a person's reviewed write through your operation contract.
+- **Output is untrusted.** Render it escaped; never act on it without a person's reviewed write through your operation contract. The one exception is an approved watcher's AI observation, whose answer can only pick a label that decides whether actions a person approved run ([Watchers](../watchers/README.md#ai-observations)).
 
 ## Reasons for "unavailable"
 
 | Reason | When | Model called |
 |---|---|---|
-| `disabled` | `ai.enabled` off, the scope's company has `ai.company_enabled` off, or the scope has no company | no |
+| `disabled` | `ai.enabled` off; for a person, their company has `ai.company_enabled` off or the scope has no company; for Watchers, the tenant has `ai.automation_enabled` off. System calls require the `watchers` principal and `base/watchers` module | no |
 | `not_configured` | no provider listed, or none by the requested name | no |
 | `timeout` | no reply within the deadline: the smaller of the request's and `ai.timeout_seconds`; the call is cut off 2 s after it in any case | yes |
 | `provider_error` | HTTP error, a redirect, an unreachable server, a reply that is not chat-completions JSON, or an empty or over-long (200,000 characters) answer | yes |
@@ -55,12 +55,13 @@ All on System Settings, group **AI**.
 |---|---|---|---|
 | `ai.enabled` | installation | `false` | The installation switch |
 | `ai.company_enabled` | company | `false` | The company switch, edited under a picked company (`admin.company.update`) |
+| `ai.automation_enabled` | tenant | `false` | Enables Watchers observations when `ai.enabled` is also on |
 | `ai.providers` | installation | `[]` | Up to 20 `{"name", "base_url", "model"}` with an optional `"local": true`; the first is the default. Names are lower-case letters, digits, `-`, `_`, `.`; the URL has no credentials, query or fragment, and is https unless the provider is local |
 | `ai.provider_keys` | installation | none | Encrypted `{"<provider name>": "<key>"}`; a save replaces every key. Never shown back: the editor is `NEVER_REVEALED`, so System Settings offers no "Show stored value", even to a holder of `base.settings.secret.view` |
 | `ai.timeout_seconds` | installation | `20` | 5 to 60; the longest any call waits |
 | `ai.interaction_retention_days` | installation | `180` | 1 to 3650 |
 
-- The company is the scope's own (`Scope::current_company`). A system principal has none, so it gets `disabled`.
+- The company is the scope's own (`Scope::current_company`). The `watchers` principal uses the tenant's `ai.automation_enabled` switch for calls from `base/watchers`.
 - Settings refuse a malformed provider list or key map on every write.
 
 ## Interaction log

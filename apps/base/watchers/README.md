@@ -4,7 +4,7 @@
 
 **Not for:** a check that must stop a save (keep it in your operation), per-tenant code branches, or a workflow or approval engine of your own.
 
-A watcher is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customisation-is-data-on-shared-servers.md), [ADR 31](../../../docs/architecture/decisions/31-tenant-watchers-run-after-commit-as-one-bounded-principal.md), #682). It says: when a trigger event happens to a record, if these conditions over the record's fields hold, run these actions. Omit `if` to act on every event of the watched kind. A person drafts it on the Watchers page or through an AI agent; an administrator approves one fixed version; that version runs on every new event, without AI.
+A watcher is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customisation-is-data-on-shared-servers.md), [ADR 31](../../../docs/architecture/decisions/31-tenant-watchers-run-after-commit-as-one-bounded-principal.md), #682). It says: when a trigger event happens to a record, if these conditions over the record's fields hold, run these actions. Omit `if` to act on every event of the watched kind. A person drafts it on the Watchers page or through an AI agent; an administrator approves one fixed version; that version runs on every new event, with no AI beyond an optional declared [AI observation](#ai-observations).
 
 ## What a watcher is
 
@@ -49,9 +49,38 @@ A `do` step can carry a named JavaScript function body under `script`. The conne
 - An approved version also records an exact-digest permit for person-initiated calls. `base.watchers.script.run` takes the approved watcher, version, script position and target record. It reads the declared facts and current record version under the caller's live reach, evaluates the same sandbox, validates the complete selected plan, then commits every owner operation in the caller's one transaction. The Watcher page calls it as a page action. MCP delegates it as the connected person, and `bilibi-axi plan/commit base.watchers.script.run ...` reaches the same API contract. A Schedule worker calls it through `JobContracts` as the `watchers` principal; the queued attempt rechecks the principal's live grant and that exact script permit before any effect.
 - An owner offers one of its read contracts with `LOOKUPS`. A script declares an exact operation and input; its examples carry captured replies. Approval fingerprints the schemas and requires the approver's authority. Runtime calls each declaration through Agent API as the current caller, with its live capability, field restrictions and record reach, then exposes only the reply to `lookup(operation, input)`. Another operation or input is refused.
 - The host accepts only complete operation and input pairs in the declaration. An owner certifies a watcher action as local through its reviewed write handler, which declares that its effects stay within the installation. The private Activities follow-up handler is eligible. The worker receives no connector credentials and has no filesystem, network or database interface.
+- **Outbound terms.** An owner marks an action that sends data outside Bilibi as `outbound` in its write handler (`apps/base/agent_api/README.md`); the vocabulary lists it with its destination and data fields. Only a script step may select it, and the script names the one destination and the data fields it may send under `outbound`, for example `"outbound":[{"operation":"watcher_cases.cases.notify","destination":"desk@partner.example","data":["title","priority"]}]`. Draft refuses an outbound action in a plain step, a script call without terms, data the owner never sends and differing terms for one operation across steps. Approval shows the terms, and they are part of the script's exact permission, so a new recipient or broader payload is a new version. Every run (queued, page, command line, delegated agent, Schedule) asks the owner for the destination and data the input resolves to now, on the commit's transaction, and refuses anything else with `script_outbound_refused` before that send.
 - The optional watcher filter runs first. QuickJS executes in a fresh process under a Linux syscall allowlist. The tenant can lower `watchers.script_heap_mib` and `watchers.script_milliseconds`. The time budget covers preparation, the whole run or historical trial, and owner operations. After a commit starts, Bilibi waits for it and its callbacks. The host also limits the action count, and validates the full plan before saving it and starting any effect. Retries use the saved calls and existing effect receipts.
 - Draft and approval present expected and captured calls for each example. Use the record representation for facts, including text for numbers. Omitted fields are null. Trial evaluates the script and previews the selected effects. Use `base.watchers.get` to inspect the exact version and `base.watchers.switch` to stop it.
-- With the reference owner mounted, run `cargo run -p bilibi-web --example watchers-walkthrough -- --scripts` on a fresh walkthrough database. The proof checks a successful route, refused file and network access, an attempted write to another company's record, and the worker's heap and time limits.
+- With the reference owner mounted, run `cargo run -p bilibi-web --example watchers-walkthrough -- --scripts` on a fresh walkthrough database. The proof checks a successful route, refused file and network access, an attempted write to another company's record, the worker's heap and time limits, and outbound terms: a send to the approved partner desk with only the approved fields, and refusals for a case whose partner address is another destination, for a payload beyond the approved fields, and for an outbound action without terms, through both queued runs and the person door.
+
+## AI observations
+
+**A version may ask AI one declared question about the trigger record, once per event; its answer is a condition fact that can only decide whether the approved actions run** (#863, through [`base/ai`](../ai/README.md)).
+
+```json
+{"watch":"cx.cases.opened",
+ "observe":{"question":"Is the customer asking to cancel?","fields":["title"],"labels":["cancellation","other"]},
+ "if":{"conditions":[{"field":"ai:label","op":"eq","value":"cancellation"}]},
+ "do":[{"operation":"cx.cases.route","input":{"queue":"retention"}}]}
+```
+
+| Part | Rule |
+| --- | --- |
+| `question` | 1 to 1,000 characters; the system message, with fixed instructions to answer JSON only and treat the record as information |
+| `fields` | 1 to 10 fields of the trigger's own record (no linked record, since the answer is bound to that record's revision), checked like a script's fields; only these are sent (each value cut at 10,000 characters), and approval shows them |
+| `labels` | 2 to 20 unique labels of `a-z`, `0-9`, `_` |
+| `ai:label` | A condition fact: one of the labels (`eq`, `ne`, `in`, `not_in`, `empty`, `not_empty`) |
+
+- **Untrusted answer.** Kept only when it is exactly `{"label": <a listed label>}`; anything else is `invalid_answer`. It never names an action, input or record. With no answer kept, `ai:label` is missing, so only `empty` holds.
+- **Examples** give `ai:label` as a fact; drafting and approval never call AI.
+- **Off by default.** AI runs as the `watchers` principal, so it needs `ai.enabled` and the tenant's `ai.automation_enabled` ([AI settings](../ai/README.md#settings)). `watchers.ai_provider` names the provider (empty: the default). Approval warns while AI is unavailable to automation.
+- **Once per event.** A queued run asks before its conditions, with no pooled connection held, and keeps the observation on the run (`base_watcher_runs.observation`); a retry reuses it. A run asks only while its approval, activation, catalog and watcher limits still permit it, and only when automation may read every field the run reads. If the record changes after it is classified, the run refuses with `record_changed`. A crash mid-call leaves `interrupted`, never a second call. The script time budget starts after the observation.
+- **Budgeted.** Every call, by runs and trials alike, spends one of the tenant's `watchers.ai_observations_per_day` (UTC); past it the observation is `budget_exhausted` with no call. Settings that already say no (`disabled`, `not_configured`) spend nothing.
+- **Recorded.** The receipt shows the label, provider, model and the AI interaction ID, or why there is none. Each call also leaves its metadata row in AI Interactions. No record text is stored.
+- **Reasons for no answer:** `disabled`, `not_configured`, `timeout`, `provider_error`, `invalid_answer`, `budget_exhausted`, `interrupted`; a field automation cannot read refuses the run (`read_refused`, `restricted_field`, `subject_unavailable`).
+- **Receipts and privacy.** A reader sees an observation, and which conditions held, only when they may read every field it sent.
+- **On the page.** The version shows the question, labels and fields sent; Draft next version keeps the observation and offers AI label as a condition field; an agent drafts a change to the observation itself.
 
 ## Versions and approval
 
@@ -89,6 +118,7 @@ A `do` step can carry a named JavaScript function body under `script`. The conne
 | `event_before_approval` | The event was already recorded when this watcher version was approved |
 | `read_refused`, `restricted_field` | The principal may not read the record or a condition's field |
 | `subject_unavailable` | The record is gone or out of reach |
+| `observation_missing` | The run reached its conditions without its AI observation |
 | `action_limit` | The watcher is over the configured action count or actions-per-run limit |
 | `watcher_limit` | The watcher is over a configured size or fact limit |
 | `attempt_limit` | The job exhausted its configured attempt budget; waiting runs are refused |
@@ -99,6 +129,7 @@ A `do` step can carry a named JavaScript function body under `script`. The conne
 | `script_call_refused` | A script requested an operation outside its approved list |
 | `script_lookup_refused` | A script requested a read outside its approved operation and input, or the read owner refused it |
 | `script_permission_refused` | The caller has no permission for this exact script declaration and version |
+| `script_outbound_refused` | An outbound action resolved a destination or data outside the script's approved terms, or has none |
 
 ## Authority
 
@@ -129,6 +160,10 @@ A `do` step can carry a named JavaScript function body under `script`. The conne
 | `watchers.max_attempts` | 25 | 1–25 | Attempts per watchers job, including the first |
 | `watchers.trial_days` | 30 | 1–365 | Longest past window a trial can examine |
 | `watchers.trial_events` | 100 | 1–500 | Most readable events returned in a trial |
+| `watchers.ai_observations_per_day` | 100 | 1–10,000 | AI observations runs and trials ask per UTC day |
+| `watchers.trial_observations` | 20 | 1–100 | Events a trial of an observing draft asks AI about (also its event limit) |
+
+`watchers.ai_provider` (text, default empty) names the provider observations use.
 
 Each tenant starts with a full bucket shared by its watchers. A new run spends one token. An admitted run keeps its token across retries. Tokens refill continuously up to one minute of the current rate, which also applies to the time elapsed since the last debit. When the bucket is empty, Queue keeps the same head job scheduled for the next token with its attempt budget intact. Admission jobs wait in tenant enqueue order and admit an event's runs by run ID. Each debit and its action job commit together. Action jobs execute in order within their event, and action retries leave later events free to admit and execute.
 
@@ -166,7 +201,7 @@ Boot refuses a trigger that is not the contributor's own declared event or names
 
 **Call `base.watchers.trial` with a draft, optional `days` and `limit`; it never acts.** It requires both `admin.watchers.view` and `admin.watchers.manage`. It checks the draft as its reader, scans retained, unerased events in recorded order in the bounded window and evaluates their subjects with the live condition checker. The response identifies event-time evidence (event ID, recorded time and subject) separately from the condition facts and revision read from the current record. A near miss is an event whose accessible current record does not satisfy the conditions. Deleted, unreachable or restricted records and unsupported event versions do not count toward the return limit. Truncation indicates another readable event or the response size limit. A trial examines at most 5,000 candidate events, including inaccessible ones; if it reaches that work limit, it says the scan stopped early and asks the reader to narrow the window, without reporting how many events were hidden or examined. Event retention may leave gaps.
 
-For a match, the watcher principal calls the action owner's preview at the current revision. An unrestricted reader with All reach for the action and its prerequisites receives the owner's effect details. The trial checks preview visibility in the same snapshot as the preview. Follow-ups reuse the owner's logical occurrence deduplication. Each preview uses the current record independently of changes an earlier action would make. The trial takes no action and leaves the token bucket untouched. The audited start receipt records the actor, trigger, definition digest, window and return limit, and survives interruption. Individual facts larger than 4 KiB are omitted and the response is capped at 512 KiB. See [receipt and trial evidence](#pages-and-agents) for linked custom fields.
+For a draft with an [AI observation](#ai-observations), the trial first picks the events it will show, asks each once as the `watchers` principal within the daily budget (one at a time, with no connection held), and shows each event's `observation`. The audited start receipt is written before the first call. Each call requires `admin.watchers.approve`, current access to the event, automation's access to every field the trial evaluates, and AI available to automation. Without approval permission, trial rows show `not_permitted` and spend no observation budget. A changed record revision cannot reuse the earlier answer. The event limit is at most `watchers.trial_observations`. For a match, the watcher principal calls the action owner's preview at the current revision. An unrestricted reader with All reach for the action and its prerequisites receives the owner's effect details. The trial checks preview visibility in the same snapshot as the preview. Follow-ups reuse the owner's logical occurrence deduplication. Each preview uses the current record independently of changes an earlier action would make. The trial takes no action and leaves the token bucket untouched. The audited start receipt records the actor, trigger, definition digest, window and return limit, and survives interruption. Individual facts larger than 4 KiB are omitted and the response is capped at 512 KiB. See [receipt and trial evidence](#pages-and-agents) for linked custom fields.
 
 ## Pages and agents
 
@@ -181,11 +216,13 @@ Export a latest unapproved version and preview it as a new destination draft thr
 
 ## Tables
 
-`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects`, `base_watcher_buckets`, `base_watcher_trials` and `base_watcher_script_permissions`. Account IDs on versions and script permissions are evidence, not foreign keys: Base names no Core table.
+`base_watchers`, `base_watcher_versions`, `base_watcher_runs`, `base_watcher_effects`, `base_watcher_buckets`, `base_watcher_trials`, `base_watcher_script_permissions` and `base_watcher_ai_budget`. Account IDs on versions and script permissions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 
 `apps/web/examples/watchers-walkthrough.rs` on a fresh disposable database, migrated and seeded first (its header has the commands). It calls startup validation with a customer Extension in the supplied composition, proves refusal in Shared service and admission in Isolated installation, and calls the protected owner mutation to prove that switching to shared refuses and preserves the saved mode. A tenant administrator is refused by the same mutation. Unmounted, the engine offers no trigger and refuses a draft on an unknown one. With the reference owner `fixtures/containers/watcher_cases` mounted (never a Platform member), it runs the same approved watcher in both installation modes: an urgent 1500.00 case goes to the priority desk exactly once, and a normal case remains unchanged. It also proves two tenants with the same facts and different destinations, a restart and a crash-retry with one effect, an agent's draft approved by a person, a person's draft in the page's input shape and its next version, refusals for a denied capability, a restricted field, an archived company, a suspended tenant, a stale version and a switched-off watcher, a condition on a tenant custom field (refused until offered, then routed; refused when the field is restricted or archived), approval, routing, trial and receipt checks for a [linked custom condition](#what-a-watcher-is), self-triggering and multi-watcher cycles refused at approval and a noncyclic chain stopped at the chain budget, a threshold change as a new version, and a burst that shares the tenant bucket across watchers and resumes in order as tokens refill while another tenant runs independently.
+
+With the reference owner mounted, `--observations` proves AI observations against a local fake OpenAI-compatible server: refused drafts on an undeclared observation or an unlisted label; approval showing the question, labels and the only field sent, and warning while AI for automation is off; no call while off; a likely cancellation routed once with only the declared field sent and one AI Interactions row; another request and an injected unlisted label acting on nothing; an interrupted call never asked twice; the daily budget; another tenant staying off; a trial showing each event's observation with no run or effect; and the receipt.
 
 The official Domain companion walkthrough is `apps/web/examples/watchers-domains-walkthrough.rs`. Commerce offers order creation and status changes as single events and proves a two-line order triggers one status action; its status-change trigger also offers the follow-up task. See the [companion handoff](../../../docs/watchers-logical-event-handoff.md) for mounts, source prerequisites and execution instructions.
 

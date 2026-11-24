@@ -645,6 +645,7 @@ dependencies = [
  "bilibi-audit-views",
  "bilibi-authz",
  "bilibi-authz-agent",
+ "bilibi-branding",
  "bilibi-bulk-data",
  "bilibi-custom-fields",
  "bilibi-dashboard",
@@ -692,6 +693,25 @@ dependencies = [
  "bilibi-visitor",
  "bilibi-watchers",
  "bilibi-workflow",
+]
+
+[[package]]
+name = "bilibi-branding"
+version = "0.2.1"
+dependencies = [
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-labels",
+ "bilibi-media",
+ "bilibi-module-registry",
+ "bilibi-settings",
+ "bilibi-settings-editor",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "inventory",
+ "serde_json",
+ "tokio-postgres",
 ]
 
 [[package]]
@@ -2201,6 +2221,7 @@ version = "0.2.1"
 dependencies = [
  "askama",
  "bilibi-agent-api",
+ "bilibi-ai",
  "bilibi-authz",
  "bilibi-custom-fields",
  "bilibi-database",

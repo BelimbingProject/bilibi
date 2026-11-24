@@ -226,9 +226,10 @@ impl Watchers {
                     "A condition on a record identifier or personal field cannot travel.".into(),
                 ));
             }
-            if column
-                .as_ref()
-                .is_none_or(|column| column.ty == FieldType::String)
+            if !crate::observe::observed(&condition.field)
+                && column
+                    .as_ref()
+                    .is_none_or(|column| column.ty == FieldType::String)
             {
                 let values = condition
                     .value

@@ -17,7 +17,8 @@ mod store;
 mod web;
 
 pub use contributions::{
-    COMPANY_ENABLED, ENABLED, LIST, PROVIDERS, PROVIDER_KEYS, RETENTION_DAYS, TIMEOUT_SECONDS,
+    AUTOMATION_ENABLED, COMPANY_ENABLED, ENABLED, LIST, PROVIDERS, PROVIDER_KEYS, RETENTION_DAYS,
+    TIMEOUT_SECONDS,
 };
 pub use gateway::{
     ANSWER_CHARACTERS_MAX, CUT_OFF_GRACE, INSTRUCTIONS_CHARACTERS_MAX, TEXT_CHARACTERS_MAX,
@@ -59,8 +60,9 @@ pub struct Request<'a> {
 /// any call; `Timeout` and `ProviderError` only after one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Reason {
-    /// AI is off for the installation or the scope's company, or the scope
-    /// has no company.
+    /// AI is off for the installation or the scope's company, the scope has
+    /// no company, or (for a system principal) automation AI is off for the
+    /// tenant.
     Disabled,
     /// No provider is configured, or none by the requested name.
     NotConfigured,

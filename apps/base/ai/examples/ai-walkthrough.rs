@@ -513,7 +513,7 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .collect();
     checks.check(
         "every setting has a System Settings editor",
-        editors.len() == 6,
+        editors.len() == 7,
         editors.join(","),
     );
 

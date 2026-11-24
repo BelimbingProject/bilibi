@@ -59,6 +59,7 @@ pub use record_reference::{NamedKind, PickerHit, RecordPicker, RecordState, Rela
 mod portal;
 mod search_multi;
 pub use search_multi::{SearchMultiOption, SearchMultiSelect};
+mod brand;
 mod section;
 mod settings;
 mod shell;
@@ -67,6 +68,7 @@ mod specimen;
 mod statusbar;
 mod step_up_gate;
 mod wordmark;
+pub use brand::{Accent, Brand, PRODUCT};
 pub use softphone::{CallAction, CallPhase, PhoneHealth, Softphone, SoftphoneAction};
 pub mod upload;
 pub mod workspace;
@@ -141,10 +143,13 @@ pub use upload::{
 };
 pub use wordmark::WordmarkSize;
 
-/// The HTML document around a page. `title` is the page's own name, or the product name when a page has none.
+/// The HTML document around a page. `title` is the page's own name, or the brand's name when a page has none.
 #[derive(Template)]
 #[template(path = "document.html")]
 pub struct Document<'a> {
+    /// Whose name ends the tab title, whose logo is the tab icon and whose
+    /// accent the page is drawn in.
+    pub brand: &'a Brand,
     pub title: &'a str,
     pub body: &'a str,
     /// The account's explicit `light`/`dark` choice, stamped on `<html>` so the

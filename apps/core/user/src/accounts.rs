@@ -294,7 +294,7 @@ impl UserService {
             .mail_with_reset_link(
                 scope.tenant(),
                 user,
-                "Recover your Bilibi sign-in",
+                "Recover your sign-in",
                 "Your workspace administrator requested a recovery email for you.",
                 true,
             )

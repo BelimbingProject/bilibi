@@ -327,15 +327,17 @@ async fn card<T: Template>(
     flash: FlashMap<'_>,
     status: StatusCode,
 ) -> std::result::Result<Response, HttpError> {
+    let brand = app.branding.current().await;
     let body = AuthLayout {
         body: Html::render(&card).map_err(|_| Error::Internal)?,
+        brand: &brand,
         workspace,
         instance: instance_badge(app).await?,
         flash,
     }
     .render()
     .map_err(|_| Error::Internal)?;
-    let mut response = document_titled(title, &body)?.into_response();
+    let mut response = document_titled(title, &body, &brand)?.into_response();
     *response.status_mut() = status;
     Ok(response)
 }
@@ -352,8 +354,7 @@ pub(crate) async fn provider_signed_out(
         body: Html::text("Continue signing out"),
         ..Default::default()
     };
-    let mut body =
-        Html::text("You are signed out of Bilibi. Continuing to your company's sign-out page.");
+    let mut body = Html::text("You are signed out. Continuing to your company's sign-out page.");
     body.push(&Html::render(&link).map_err(|_| Error::Internal)?);
     let mut response = card(
         app,

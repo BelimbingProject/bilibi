@@ -171,7 +171,7 @@ The launcher's Rust build ends with its elapsed time, the number of crates Cargo
 | `BILIBI_SSO_ALLOW_PRIVATE_ENDPOINTS` | `1` lets company sign-in reach identity providers on private networks and literal-loopback HTTP. Unset: public HTTPS only. See [company sign-in](apps/core/user/sso.md) |
 | `BILIBI_ENV` | `development`, `staging` or `production`. Initial role for the install seed. Unset means `production`; `./bilibi start` defaults to `development`. Later role changes use Instance settings. Other values refuse installation |
 
-Every page, consent page and agent answer says which Bilibi it is, so nobody mistakes a test copy for the live system. The status bar always shows the stored server role; Staging also shows a top-bar badge. Dev and Staging show a sign-in badge; reviews and agent plans name every instance, production included. The name and colour are the Instance settings (`instance.label`, `instance.colour`), read through `bilibi_base::system::Instance::resolve` ([Base System](apps/base/system/README.md)).
+Use [Instance settings](apps/base/system/README.md) to distinguish a test copy from the live system. To customise the staff interface for your installation, see [Change the installation brand](apps/base/branding/README.md#change-it).
 
 The stored server role also decides whether ordinary Base Step-up checks apply. Click the status-bar role to open Instance settings. A Core Administrator can change it with a fresh 2FA code; changing to or from Production carries a warning and every change is audited.
 

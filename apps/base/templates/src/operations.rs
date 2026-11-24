@@ -357,8 +357,8 @@ fn choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
 
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/templates.customisations", crate::provenance!(), &bilibi_labels::CustomisationSection {
     title: "Templates",
-    undo: Some(bilibi_labels::Undo { read:OVERRIDES, read_input:empty_input, operation:RESTORE, event:UNDO_EVENT,
-        action:"Restore inherited wording", detail:"Future messages will use the inherited wording.", rows }),
+    undo: Some(bilibi_labels::Undo { read:OVERRIDES, read_input:empty_input, action: Some(bilibi_labels::UndoAction { operation:RESTORE, event:UNDO_EVENT,
+        label:"Restore inherited wording", detail:"Future messages will use the inherited wording." }), rows }),
     changes: Some(bilibi_labels::Changes {
         purpose:"Change the wording people receive from a workspace or company.",
         limits:"Plain text with the variables each template offers. The sending feature chooses the recipient and attachments.",

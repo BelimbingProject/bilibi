@@ -15,6 +15,8 @@ pub const LIST: &str = "admin.system.ai-interaction.list";
 pub const ENABLED: &str = "ai.enabled";
 /// The company switch, off by default: a company uses AI only when both are on.
 pub const COMPANY_ENABLED: &str = "ai.company_enabled";
+/// The tenant switch for Watchers AI observations, off by default.
+pub const AUTOMATION_ENABLED: &str = "ai.automation_enabled";
 /// The configured providers, a list of `{name, base_url, model}` with an
 /// optional `local: true`; the first is the default.
 pub const PROVIDERS: &str = "ai.providers";
@@ -75,6 +77,13 @@ inventory::submit! { Contribution::new(DEFINITIONS, COMPANY_ENABLED, provenance!
     editor: Some(Editor { group: "AI", label: "AI for this company",
         help: "Lets modules send this company's text to the configured AI providers. It works only while AI is on for the installation.",
         capability: Some(COMPANY_UPDATE), reveal_duration_ms: 5_000 }),
+})) }
+inventory::submit! { Contribution::new(DEFINITIONS, AUTOMATION_ENABLED, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Boolean, scopes: &[ScopeKind::Tenant], default: || json!(false), nullable: false, encrypted: false,
+    minimum: None, maximum: None, validator: None,
+    editor: Some(Editor { group: "AI", label: "AI for automation",
+        help: "Lets Watchers send the record fields declared in approved observations and trials run by an approver to the configured AI providers. It works only while AI is on for the installation.",
+        capability: None, reveal_duration_ms: 5_000 }),
 })) }
 inventory::submit! { Contribution::new(DEFINITIONS, PROVIDERS, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::Array, scopes: GLOBAL, default: || json!([]), nullable: false, encrypted: false,

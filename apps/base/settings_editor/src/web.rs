@@ -20,7 +20,7 @@
 use crate::{
     form::{self, Field, Plan, Step},
     reveal::{self, Refusal, Reveal},
-    ImageSetting, COMPANY_MANAGE, GLOBAL_MANAGE,
+    ImageSetting, StagedImage, COMPANY_MANAGE, GLOBAL_MANAGE,
 };
 use askama::Template;
 use bilibi_authz::authorize_operator;
@@ -150,6 +150,7 @@ pub struct Core {
     pub step_up: Arc<StepUp>,
     pub media: Arc<bilibi_media::Media>,
     pub images: HashMap<&'static str, &'static ImageSetting>,
+    pub staged_images: HashMap<&'static str, &'static StagedImage>,
 }
 pub struct Pages(Arc<Core>);
 impl Pages {
@@ -174,7 +175,7 @@ struct Editor {
     uploads: Uploads,
 }
 
-const IMAGE_UPLOAD: &str = "identity_image";
+pub(super) const IMAGE_UPLOAD: &str = "identity_image";
 const IMAGE_TYPES: [&str; 7] = [
     ".png",
     ".jpg",
@@ -193,6 +194,13 @@ impl Editor {
             .map(|image| image.max_bytes)
             .max()
             .unwrap_or(1);
+        let uploads = Uploads::new(
+            std::iter::once(UploadSpec::new(IMAGE_UPLOAD, upload_limit).accept(IMAGE_TYPES)).chain(
+                core.staged_images.values().map(|stage| {
+                    UploadSpec::new(stage.input, stage.image.max_bytes).accept(IMAGE_TYPES)
+                }),
+            ),
+        );
         Ok(Self {
             core,
             flash: None,
@@ -212,9 +220,7 @@ impl Editor {
             row_status: CommitStatus::None,
             pending_proof: None,
             draft: None,
-            uploads: Uploads::new(
-                [UploadSpec::new(IMAGE_UPLOAD, upload_limit).accept(IMAGE_TYPES)],
-            ),
+            uploads,
         })
     }
     fn flash(&mut self, kind: StatusKind, message: impl Into<String>) {
@@ -486,18 +492,27 @@ impl Editor {
             return Ok(());
         }
         let plan = self.plan(scope).await?;
-        let Some(field) = plan.field(key) else {
-            return Ok(());
+        let mut client = self.core.db.get().await?;
+        let staged = self.core.staged_images.get(key).copied();
+        let (field, upload, image) = if let Some(stage) = staged {
+            if !matches!(self.picked, Picked::Global)
+                || !plan.capabilities.contains(stage.capability)
+            {
+                return Ok(());
+            }
+            authorize_operator(&**client, scope, stage.capability).await?;
+            (Err(stage.noun), stage.input, &stage.image)
+        } else {
+            let (Some(field), Some(&image)) = (plan.field(key), self.core.images.get(key)) else {
+                return Ok(());
+            };
+            (Ok(field), IMAGE_UPLOAD, image)
         };
-        let Some(image) = self.core.images.get(field.key) else {
-            return Ok(());
-        };
-        let Some(file) = self.uploads.consume(IMAGE_UPLOAD).into_iter().next() else {
+        let Some(file) = self.uploads.consume(upload).into_iter().next() else {
             self.flash(StatusKind::Error, "Choose a PNG, JPEG or WebP image first.");
             self.row_status = CommitStatus::Error("Choose a PNG, JPEG or WebP image first.".into());
             return Ok(());
         };
-        let mut client = self.core.db.get().await?;
         let stored = self
             .core
             .media
@@ -531,6 +546,19 @@ impl Editor {
             Err(_) => {
                 self.flash(StatusKind::Error, "The image could not be stored.");
                 self.row_status = CommitStatus::Error("The image could not be stored.".into());
+                return Ok(());
+            }
+        };
+        let field = match field {
+            Ok(field) => field,
+            Err(noun) => {
+                self.flash(
+                    StatusKind::Success,
+                    format!(
+                        "{noun} stored. Use asset ID {} in the reviewed operation.",
+                        asset.id
+                    ),
+                );
                 return Ok(());
             }
         };
@@ -1283,7 +1311,37 @@ impl Editor {
             Some((k, text)) if *k == kind => text.as_str(),
             _ => "",
         };
+        let mut staged_uploads = Html::EMPTY;
+        if matches!(self.picked, Picked::Global) {
+            let mut images: Vec<_> = self.core.staged_images.iter().collect();
+            images.sort_unstable_by_key(|(key, _)| **key);
+            for (&key, stage) in images {
+                if !plan.capabilities.contains(stage.capability) {
+                    continue;
+                }
+                let mut body = render(self.uploads.input(stage.input, format!("stage-{key}"))
+                    .label(format!("Upload {}", stage.noun.to_lowercase()))
+                    .hint("PNG, JPEG or WebP, up to 1 MiB. The upload returns an asset ID for review."))?;
+                body.push(&render(
+                    Control::named("key").kind(InputKind::Hidden).value(key),
+                )?);
+                staged_uploads.push(&render(Form {
+                    id: &format!("stage-form-{key}"),
+                    event: "save_image_setting",
+                    class: "ui-compact-controls",
+                    body,
+                    actions: render(Button {
+                        variant: ButtonVariant::Primary,
+                        button_type: "submit",
+                        body: Html::text("Upload"),
+                        ..Button::default()
+                    })?,
+                    ..Form::default()
+                })?);
+            }
+        }
         let view = SettingsView {
+            staged_uploads,
             flash: FlashMap {
                 error: message(StatusKind::Error),
                 warning: message(StatusKind::Warning),
@@ -1384,6 +1442,7 @@ struct SettingsView<'a> {
     flash: FlashMap<'a>,
     header: Html,
     scopes: Html,
+    staged_uploads: Html,
     table: Html,
     toolbar: Html,
     pagination: Html,

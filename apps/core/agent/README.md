@@ -57,12 +57,12 @@ compare a credential yourself.
 
 `core/agent.pages` serves the three signed-in routes through the discovered page contract; `src/web.rs` serves the device, authorize and connections pages, and the templates compose the shared Base UI macros in place (`askama.toml` adds `base/ui/templates` to the template path).
 
-Both consent pages use the host's standalone review layout: the Bilibi mark, the instance banner and the review card, without the workspace menu, top bar or status bar. The authorization review also shows the configured public origin (`APP_ORIGIN`) as the Bilibi address, separately from the client's return address. Its shared form groups the connection facts, access explanation and primary approval action; Your connections stays available in the page header.
+Both consent pages use the host's standalone review layout: the wordmark, the instance banner and the review card, without the workspace menu, top bar or status bar. The authorization review also shows the configured public origin (`APP_ORIGIN`) as the address, separately from the client's return address. Its shared form groups the connection facts, access explanation and primary approval action; Your connections stays available in the page header.
 
 `/oauth/device` ("Connect an app with a code", found by the shell's search under that name) is three steps on one address:
 
 1. **The code.** One field. An incomplete code in the address only fills it.
-2. **Approve this app?** A complete code (typed, or the app's `verification_uri_complete` link) opens the review: the app's self-declared name, the code to compare with the app, the Bilibi address and what the app can do. Opening it approves nothing; **Approve connection**, **Refuse** and **Use another code** decide.
+2. **Approve this app?** A complete code (typed, or the app's `verification_uri_complete` link) opens the review: the app's self-declared name, the code to compare with the app, the address and what the app can do. Opening it approves nothing; **Approve connection**, **Refuse** and **Use another code** decide.
 3. **The outcome,** with the app's name and a prominent link to **Your connections**.
 
 A signed-out person is sent to sign in and returns to the same address with the code. When the tenant's Step-up policy asks for 2FA, the confirm step sits between 2 and 3 and returns to step 2. The AI connections page (**Enter a code**) and the status bar's AI panel link to it.

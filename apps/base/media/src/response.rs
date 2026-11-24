@@ -71,16 +71,21 @@ impl AsyncRead for Reader {
 fn delivery(filename: &str, mime_type: Option<&str>, private: bool) -> Delivery {
     let mime = mime_type.unwrap_or("").trim().to_ascii_lowercase();
     let inline = !private && INLINE.contains(&mime.as_str());
-    let filename: String = filename
-        .bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect();
+    let disposition = if inline {
+        "inline".into()
+    } else {
+        let filename: String = filename
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                    (b as char).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect();
+        format!("attachment; filename*=UTF-8''{filename}")
+    };
     Delivery {
         content_type: if inline {
             mime
@@ -88,13 +93,7 @@ fn delivery(filename: &str, mime_type: Option<&str>, private: bool) -> Delivery 
             "application/octet-stream".into()
         },
         headers: vec![
-            (
-                "content-disposition",
-                format!(
-                    "{}; filename*=UTF-8''{filename}",
-                    if inline { "inline" } else { "attachment" }
-                ),
-            ),
+            ("content-disposition", disposition),
             ("x-content-type-options", "nosniff".into()),
             (
                 "content-security-policy",

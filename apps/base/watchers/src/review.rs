@@ -24,6 +24,11 @@ pub struct Review {
     /// Each example: what it expects and what the conditions answer.
     pub examples: Vec<(bool, bool)>,
     pub script_examples: Vec<String>,
+    /// The AI observation in words: the question, its labels and the
+    /// fields sent, which nothing else of the record joins.
+    pub observation: Option<String>,
+    /// The fields the observation sends, as field and label.
+    pub observation_fields: Vec<(String, String)>,
     pub warnings: Vec<String>,
     pub trigger_title: String,
 }
@@ -42,6 +47,8 @@ impl Review {
                 "passes": expect == got,
             })).collect::<Vec<_>>(),
             "script_examples": self.script_examples,
+            "observation": self.observation,
+            "observation_fields": self.observation_fields.iter().map(|(field, label)| json!({"field": field, "label": label})).collect::<Vec<_>>(),
             "warnings": self.warnings,
             "problems": self.problems.iter().map(|(field, why)| json!({"field": field, "problem": why})).collect::<Vec<_>>(),
         })
@@ -214,6 +221,9 @@ impl Watchers {
                 "version": action.definition.version, "input": action.input, "records": action.definition.records, "capability": action.capability, "approval_capabilities": action.definition.approval_capabilities});
             if definition.scripts().next().is_some() {
                 binding["script_local"] = json!(action.local_script);
+            }
+            if let Some(outbound) = action.outbound {
+                binding["outbound"] = json!({"destination": outbound.destination, "data": outbound.data});
             }
             Some(binding)
         }).collect();
@@ -451,21 +461,25 @@ impl Watchers {
             |path| field(path).map(|(ty, values, _)| (ty, values)),
             problems,
         );
+        // A script or an observation reads a field as a condition would:
+        // readable, unmasked, and a custom field only when offered.
+        let allowed = |path: &str| {
+            table
+                .and_then(|table| catalog.resolve(table, path).ok())
+                .is_some_and(|column| {
+                    field(path).is_some()
+                        && column.field.is_some_and(|f| {
+                            catalog.table(column.table).is_some_and(|owner| {
+                                !owner.is_custom(f.id)
+                                    || (column.hops.is_empty()
+                                        && owner.custom_watcher_condition(f.id))
+                            })
+                        })
+                })
+        };
         for script in definition.scripts() {
             for path in &script.fields {
-                let allowed = table
-                    .and_then(|table| catalog.resolve(table, path).ok())
-                    .is_some_and(|column| {
-                        field(path).is_some()
-                            && column.field.is_some_and(|f| {
-                                catalog.table(column.table).is_some_and(|owner| {
-                                    !owner.is_custom(f.id)
-                                        || (column.hops.is_empty()
-                                            && owner.custom_watcher_condition(f.id))
-                                })
-                            })
-                    });
-                if !allowed {
+                if !allowed(path) {
                     problems.push(("do".into(), format!("{} cannot read {path}.", script.name)));
                 }
             }
@@ -487,7 +501,86 @@ impl Watchers {
                     }
                 }
             }
+            for (index, terms) in script.outbound.iter().enumerate() {
+                let at = format!("do.script.outbound.{index}");
+                let Some(declared) = self
+                    .action(&terms.operation)
+                    .and_then(|action| action.outbound)
+                else {
+                    problems.push((
+                        at,
+                        format!(
+                            "{} does not send outside Bilibi; leave it out of outbound",
+                            terms.operation
+                        ),
+                    ));
+                    continue;
+                };
+                if let Some(field) = terms
+                    .data
+                    .iter()
+                    .find(|field| !declared.data.contains(&field.as_str()))
+                {
+                    problems.push((
+                        at.clone(),
+                        format!(
+                            "{} never sends {field}; it can send {}",
+                            terms.operation,
+                            declared.data.join(", ")
+                        ),
+                    ));
+                }
+                if definition
+                    .scripts()
+                    .filter_map(|other| other.terms(&terms.operation))
+                    .any(|other| other != terms.terms())
+                {
+                    problems.push((
+                        at,
+                        format!(
+                            "every script step of a watcher names the same terms for {}",
+                            terms.operation
+                        ),
+                    ));
+                }
+            }
             review.actions.push(script.describe());
+        }
+        if let Some(observe) = &definition.observe {
+            // Only the trigger record's own fields: the run binds its answer
+            // to that record's revision, which a linked record does not move.
+            for (i, path) in observe.fields.iter().enumerate() {
+                let own = table
+                    .and_then(|table| catalog.resolve(table, path).ok())
+                    .is_some_and(|column| column.hops.is_empty());
+                if !allowed(path) || !own {
+                    problems.push((
+                        format!("observe.fields.{i}"),
+                        format!("{path} is not a field of this trigger's own record you may read"),
+                    ));
+                }
+            }
+            let label =
+                |path: &str| field(path).map_or_else(|| path.to_owned(), |(_, _, label)| label);
+            review.observation_fields = observe
+                .fields
+                .iter()
+                .map(|path| (path.clone(), label(path)))
+                .collect();
+            review.observation = Some(observe.describe(label));
+        }
+        for (index, step) in definition.steps.iter().enumerate() {
+            if let crate::definition::Step::Operation(call) = step {
+                if self
+                    .action(&call.operation)
+                    .is_some_and(|action| action.outbound.is_some())
+                {
+                    problems.push((format!("do.{index}.operation"), format!(
+                        "{} sends outside Bilibi: select it from a script step whose approval names its destination and data",
+                        call.operation
+                    )));
+                }
+            }
         }
         review.conditions = definition
             .conditions
@@ -495,7 +588,9 @@ impl Watchers {
             .map(|c| {
                 definition::sentence(
                     c,
-                    &field(&c.field).map_or_else(|| c.field.clone(), |(_, _, label)| label),
+                    &crate::describe::condition_label(&c.field, &|path: &str| {
+                        field(path).map_or_else(|| path.to_owned(), |(_, _, label)| label)
+                    }),
                 )
             })
             .collect();
@@ -508,14 +603,20 @@ impl Watchers {
                 ));
                 continue;
             };
-            if !action.local_script
-                && definition
-                    .script_calls()
+            if let Some(script) = definition.scripts().find(|script| {
+                script
+                    .calls
+                    .iter()
                     .any(|declared| declared.operation == action.key)
-            {
+                    && !action.script_callable(script)
+            }) {
                 problems.push((
                     at("operation"),
-                    format!("{} is unavailable in scripted watchers", action.key),
+                    if action.outbound.is_some() {
+                        format!("{} sends outside Bilibi: {} must name its destination and data under outbound", action.key, script.name)
+                    } else {
+                        format!("{} is unavailable in scripted watchers", action.key)
+                    },
                 ));
             }
             if action.definition.table != trigger.definition.table {
@@ -563,13 +664,32 @@ impl Watchers {
             });
         }
         let types = |path: &str| field(path).map_or(FieldType::String, |(ty, _, _)| ty);
-        let fields = definition.condition_fields();
+        let fields = definition.example_fields();
         for (i, example) in examples.iter().enumerate() {
             if let Some(unknown) = example.facts.keys().find(|key| !fields.contains(key)) {
                 problems.push((
                     format!("examples.{i}.facts"),
                     format!("{unknown} is not a field the conditions read"),
                 ));
+            }
+            if let (Some(observe), Some(label)) = (
+                definition.observe.as_ref(),
+                example.facts.get(crate::observe::LABEL),
+            ) {
+                if !label.is_null()
+                    && !label
+                        .as_str()
+                        .is_some_and(|label| observe.accepts_label(label))
+                {
+                    problems.push((
+                        format!("examples.{i}.facts"),
+                        format!(
+                            "ai:label must be null or one of {}",
+                            observe.labels.join(", ")
+                        ),
+                    ));
+                    continue;
+                }
             }
             let (matched, _) = definition.evaluate(&example.facts, &types);
             if matched != example.expect {
@@ -923,6 +1043,13 @@ impl Watchers {
                 let theirs = Catalog::for_scope(client, &principal)
                     .await
                     .map_err(Error::from)?;
+                if definition.observe.is_some() {
+                    if let Some(reason) = self.observation_available(client, &principal).await? {
+                        review.warnings.push(format!(
+                            "AI is unavailable for automation here ({reason}): until an administrator turns on AI for the installation and AI for automation, and lists the provider, every observation is unavailable and conditions on it see no answer."
+                        ));
+                    }
+                }
                 for key in definition
                     .scripts()
                     .flat_map(|script| &script.lookups)

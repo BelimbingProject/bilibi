@@ -3,7 +3,7 @@
 //! and, for debug builds only, the developer page that explains an internal
 //! error (Phoenix's debug error page). Both are whole documents that link only
 //! the stylesheet, so a broken script or live session cannot break them.
-use crate::{AuthLayout, Html, NO_FLASH};
+use crate::{AuthLayout, Brand, Html, NO_FLASH};
 use askama::Template;
 
 /// What a visitor is told about one status: the heading, the sentence and the
@@ -18,7 +18,8 @@ pub struct ErrorCopy {
     pub href: &'static str,
 }
 
-const HOME: &str = "Return to Bilibi";
+/// Names no product: an installation may carry its own brand.
+const HOME: &str = "Return to the workspace";
 
 /// The words for `status`. Internals never appear here: a production error
 /// says that the page could not be shown and nothing more.
@@ -72,7 +73,7 @@ pub fn copy_for(status: u16) -> ErrorCopy {
         503 => (
             "temporarily-unavailable",
             "Temporarily unavailable",
-            "Bilibi cannot complete this request right now. Try again in a moment.",
+            "This request cannot be completed right now. Try again in a moment.",
         ),
         status if (400..500).contains(&status) => (
             "request-failed",
@@ -124,23 +125,26 @@ struct ErrorCard {
 #[template(path = "error_document.html")]
 struct ErrorDocument<'a> {
     title: &'a str,
-    staff: bool,
+    /// The staff brand; `None` on a portal page, which shows no icon.
+    brand: Option<&'a Brand>,
     body: Html,
 }
 
-/// The whole production document for `status`.
-pub fn error_document(status: u16) -> askama::Result<String> {
+/// The whole production document for `status`, under the installation's
+/// brand.
+pub fn error_document(status: u16, brand: &Brand) -> askama::Result<String> {
     let copy = copy_for(status);
     let card = Html::render(&ErrorCard { copy })?;
     let body = Html::render(&AuthLayout {
         body: card,
+        brand,
         workspace: None,
         instance: Html::default(),
         flash: NO_FLASH,
     })?;
     ErrorDocument {
-        title: &format!("{} · Bilibi", copy.heading),
-        staff: true,
+        title: &format!("{} · {}", copy.heading, brand.product()),
+        brand: Some(brand),
         body,
     }
     .render()
@@ -160,7 +164,7 @@ pub fn portal_error_document(status: u16) -> askama::Result<String> {
     })?;
     ErrorDocument {
         title: copy.heading,
-        staff: false,
+        brand: None,
         body,
     }
     .render()

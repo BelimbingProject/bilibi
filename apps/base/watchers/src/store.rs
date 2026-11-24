@@ -29,6 +29,7 @@ pub struct Watchers {
     pub(crate) settings: Arc<Settings>,
     pub(crate) authentication: Arc<Authentication>,
     pub(crate) directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
+    pub(crate) ai: Arc<bilibi_ai::Ai>,
     pub(crate) offers: Offers,
 }
 
@@ -120,6 +121,8 @@ pub struct RunView {
     pub reason: Option<String>,
     pub facts: Value,
     pub outcomes: Value,
+    /// The AI observation the conditions read, or null when none was asked.
+    pub observation: Value,
     pub created_at: Timestamp,
     pub finished_at: Option<Timestamp>,
     pub effects: Vec<EffectView>,
@@ -367,7 +370,7 @@ impl Watchers {
         bilibi_authz::authorize_key(client, scope, VIEW).await?;
         let tenant = scope.tenant();
         let rows = client.query(
-            "SELECT u.id,u.watcher_id,v.number,u.event_id,u.event_name,u.subject,u.depth,u.state,u.reason,u.facts,u.outcomes,u.created_at,u.finished_at,v.definition,v.catalog_digest FROM base_watcher_runs u JOIN base_watcher_versions v ON v.tenant_id=u.tenant_id AND v.id=u.version_id WHERE u.tenant_id=$1 AND ($2::bigint IS NULL OR u.watcher_id=$2) ORDER BY u.id DESC LIMIT $3",
+            "SELECT u.id,u.watcher_id,v.number,u.event_id,u.event_name,u.subject,u.depth,u.state,u.reason,u.facts,u.outcomes,u.created_at,u.finished_at,v.definition,v.catalog_digest,u.observation FROM base_watcher_runs u JOIN base_watcher_versions v ON v.tenant_id=u.tenant_id AND v.id=u.version_id WHERE u.tenant_id=$1 AND ($2::bigint IS NULL OR u.watcher_id=$2) ORDER BY u.id DESC LIMIT $3",
             &[&tenant, &watcher, &limit.clamp(1, 200)],
         ).await?;
         let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
@@ -397,8 +400,13 @@ impl Watchers {
             });
             let allowed = match self.trigger(event).filter(|_| compatible) {
                 Some(trigger) => {
+                    // A script's or an observation's outcome tells about the
+                    // fields it read, so the reader must read them all.
                     let fields = match definition {
-                        Some(definition) if definition.scripts().next().is_some() => {
+                        Some(definition)
+                            if definition.scripts().next().is_some()
+                                || definition.observe.is_some() =>
+                        {
                             definition.fact_fields(trigger.definition.version, true)
                         }
                         _ => fields,
@@ -409,9 +417,9 @@ impl Watchers {
                 }
                 None => false,
             };
-            let scripted = definition
-                .as_ref()
-                .is_none_or(|definition| definition.scripts().next().is_some());
+            let scripted = definition.as_ref().is_none_or(|definition| {
+                definition.scripts().next().is_some() || definition.observe.is_some()
+            });
             readable.insert(row.get::<_, i64>(0), (allowed, scripted));
         }
         let hidden = json!({"restricted": true});
@@ -447,6 +455,11 @@ impl Watchers {
                         row.get::<_, Option<Value>>(10).unwrap_or(Value::Null)
                     } else {
                         hidden.clone()
+                    },
+                    observation: match row.get::<_, Option<Value>>(15) {
+                        Some(observation) if shown => observation,
+                        Some(_) => hidden.clone(),
+                        None => Value::Null,
                     },
                     created_at: time(row, 11),
                     finished_at: if hidden_outcome {
@@ -686,7 +699,8 @@ impl Watchers {
                     required.retain(|r| r.as_str() != Some(a.definition.subject) && r.as_str() != Some(a.definition.version));
                 }
                 json!({"operation": a.key, "title": a.title, "summary": a.summary, "table": a.definition.table,
-                    "subject": a.definition.subject, "records": a.definition.records, "local_script": a.local_script, "input": input})
+                    "subject": a.definition.subject, "records": a.definition.records, "local_script": a.local_script, "input": input,
+                    "outbound": a.outbound.map(|o| json!({"destination": o.destination, "data": o.data}))})
             })
             .collect();
         let mut lookups = Vec::new();
@@ -704,6 +718,16 @@ impl Watchers {
             "actions": actions,
             "lookups": lookups,
             "operators": definition::Op::ALL,
+            "observation": {
+                "facts": [
+                    {"field": crate::observe::LABEL, "type": "enum", "values": "the draft's observe.labels"},
+                ],
+                "available_to_automation": match self.principal(client, scope.tenant()).await {
+                    Ok(principal) => self.observation_available(client, &principal).await?.map_or_else(|| json!(true), |reason| json!(reason)),
+                    Err(Error::Unauthorized) => return Err(Error::Unauthorized),
+                    Err(_) => json!("automation_unavailable"),
+                },
+            },
             "limits": {
                 "actions_per_run": self.limit(client, scope, ACTIONS_PER_RUN).await?,
                 "chain_depth": self.limit(client, scope, CHAIN_DEPTH).await?,
@@ -716,6 +740,8 @@ impl Watchers {
                 "max_attempts": self.limit(client, scope, MAX_ATTEMPTS).await?,
                 "trial_days": self.limit(client, scope, crate::TRIAL_DAYS).await?,
                 "trial_events": self.limit(client, scope, crate::TRIAL_EVENTS).await?,
+                "ai_observations_per_day": self.limit(client, scope, crate::AI_OBSERVATIONS_PER_DAY).await?,
+                "trial_observations": self.limit(client, scope, crate::TRIAL_OBSERVATIONS).await?,
             },
         }))
     }

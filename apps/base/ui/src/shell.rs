@@ -227,6 +227,8 @@ struct RenderedCompanyChoice<'a> {
 /// Display-only scope. The host must obtain operator standing from an explicit
 /// proof; a tenant ID or administrator role never implies it.
 pub struct ShellContext<'a> {
+    /// Whose name the top bar carries: the installation's own, or Bilibi's.
+    pub brand: &'a crate::Brand,
     pub user: &'a str,
     pub email: &'a str,
     pub tenant: &'a str,
@@ -345,12 +347,13 @@ pub struct Framed<'a> {
 }
 
 /// A signed-in review without workspace navigation. It keeps the guarded live
-/// root and the account's display preferences, but draws only the Bilibi mark,
+/// root and the account's display preferences, but draws only the wordmark,
 /// the installation banner and the review card.
 #[derive(Template)]
 #[template(path = "standalone_review.html")]
 pub struct StandaloneReview<'a> {
     pub body: &'a str,
+    pub brand: &'a crate::Brand,
     pub instance: &'a Html,
     pub live: bool,
     pub tenant_id: i64,

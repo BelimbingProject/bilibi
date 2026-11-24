@@ -18,7 +18,7 @@
 </div>
 <div class="max-h-[70vh] space-y-4 overflow-y-auto p-3">
 {% if show_connect && local_only %}
-{% call fb::alert(kind=bilibi_ui::StatusKind::Info, id="app-ai-local-only") %}This Bilibi cannot be reached from the internet, so AI websites and bots cannot connect to it. Use an AI program on this computer, such as Claude Code, Codex or Pi.{% endcall %}
+{% call fb::alert(kind=bilibi_ui::StatusKind::Info, id="app-ai-local-only") %}This installation cannot be reached from the internet, so AI websites and bots cannot connect to it. Use an AI program on this computer, such as Claude Code, Codex or Pi.{% endcall %}
 {% endif %}
 <p class="text-ink-muted">Your AI apps stay connected while you're signed in to the browser where you switched them on.</p>
 {% if !own_account %}
