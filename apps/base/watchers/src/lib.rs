@@ -15,6 +15,7 @@ mod agent;
 mod catalog;
 mod definition;
 mod discard;
+mod observe;
 mod review;
 mod run;
 mod sandbox;
@@ -68,6 +69,12 @@ pub const RUN: &str = "watchers.run.execute";
 pub(crate) const RUN_SCRIPT: &str = "watchers.script.execute";
 pub(crate) const SCRIPT_TIME: &str = "watchers.script_milliseconds";
 pub(crate) const SCRIPT_HEAP: &str = "watchers.script_heap_mib";
+/// The AI provider observations use: empty for `base/ai`'s default.
+pub(crate) const AI_PROVIDER: &str = "watchers.ai_provider";
+/// Most AI observations a tenant's watchers and trials ask per UTC day.
+pub(crate) const AI_OBSERVATIONS_PER_DAY: &str = "watchers.ai_observations_per_day";
+/// Most events a trial of an observing draft asks AI about.
+pub(crate) const TRIAL_OBSERVATIONS: &str = "watchers.trial_observations";
 /// The principal records why a run ended unfinished (a standing grant).
 pub const SETTLE: &str = "watchers.run.settle";
 
@@ -180,6 +187,28 @@ inventory::submit! { Contribution::new(DEFINITIONS, TRIAL_DAYS, provenance!(), &
 inventory::submit! { Contribution::new(DEFINITIONS, TRIAL_EVENTS, provenance!(), &limit(
 "Events per trial", "The most readable past events a watcher trial may return.", || json!(100), 500.0)) }
 
+inventory::submit! { Contribution::new(DEFINITIONS, AI_OBSERVATIONS_PER_DAY, provenance!(), &limit(
+"AI observations per day", "The most AI observations this tenant's watchers and trials may ask each day (UTC). When they are used up, an observation is unavailable and conditions on it see no answer.", || json!(100), 10_000.0)) }
+inventory::submit! { Contribution::new(DEFINITIONS, TRIAL_OBSERVATIONS, provenance!(), &limit(
+"AI observations per trial", "The most past events a trial of a watcher with an AI observation asks AI about.", || json!(20), 100.0)) }
+inventory::submit! { Contribution::new(DEFINITIONS, AI_PROVIDER, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::String,
+    scopes: &[ScopeKind::Global, ScopeKind::Tenant],
+    default: || json!(""),
+    nullable: false,
+    encrypted: false,
+    minimum: None,
+    maximum: None,
+    validator: Some(bilibi_settings::Validator { accepts: observe::provider_setting, message: "must be empty for the default AI provider, or a provider name from AI providers" }),
+    editor: Some(Editor {
+        group: "Watchers",
+        label: "AI provider for observations",
+        help: "The AI provider a watcher's AI observation asks, by name from AI providers. Leave empty for the first listed. AI for automation must be on.",
+        capability: Some(APPROVE),
+        reveal_duration_ms: 5_000,
+    }),
+})) }
+
 inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker { max_attempts: ATTEMPT_CEILING, validate: run::arguments }) }
 inventory::submit! { Contribution::new(WORKERS, ADMISSION_WORKER, provenance!(), &Worker { max_attempts: ATTEMPT_CEILING, validate: run::admission_arguments }) }
 inventory::submit! { Contribution::new(TENANT_FIFO, ADMISSION_WORKER, provenance!(), &TenantFifo(|_| Ok(0))) }
@@ -216,6 +245,7 @@ fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry:
         settings: services.get("base/settings.store")?,
         authentication: services.get("base/tenancy.authentication")?,
         directory: services.get("base/principal_directory.directory")?,
+        ai: services.get(bilibi_ai::SERVICE)?,
         offers,
     })
 }
@@ -223,8 +253,8 @@ fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry:
 inventory::submit! {
     Module {
         id: "base/watchers", layer: Layer::Base,
-        dependencies: &["base/custom_fields", "base/labels", "base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/events", "base/grid", "base/settings", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql")), ("base-watchers-005-token-bucket", include_str!("../migrations/005-token-bucket.sql")), ("base-watchers-006-activation", include_str!("../migrations/006-activation.sql")), ("base-watchers-007-trials", include_str!("../migrations/007-trials.sql")), ("base-watchers-008-name-lookup", include_str!("../migrations/008-name-lookup.sql")), ("base-watchers-009-script-plan", include_str!("../migrations/009-script-plan.sql")), ("base-watchers-010-script-permissions", include_str!("../migrations/010-script-permissions.sql"))],
+        dependencies: &["base/ai", "base/custom_fields", "base/labels", "base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/events", "base/grid", "base/settings", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale"],
+        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql")), ("base-watchers-005-token-bucket", include_str!("../migrations/005-token-bucket.sql")), ("base-watchers-006-activation", include_str!("../migrations/006-activation.sql")), ("base-watchers-007-trials", include_str!("../migrations/007-trials.sql")), ("base-watchers-008-name-lookup", include_str!("../migrations/008-name-lookup.sql")), ("base-watchers-009-script-plan", include_str!("../migrations/009-script-plan.sql")), ("base-watchers-010-script-permissions", include_str!("../migrations/010-script-permissions.sql")), ("base-watchers-011-observations", include_str!("../migrations/011-observations.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let watchers = Arc::new(build(services)?);

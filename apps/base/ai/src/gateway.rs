@@ -5,8 +5,8 @@
 //! exchange on its own, and the row is written on another afterwards.
 use crate::{
     contributions::{
-        COMPANY_ENABLED, ENABLED, PROVIDERS, PROVIDER_KEYS, TIMEOUT_MAX, TIMEOUT_MIN,
-        TIMEOUT_SECONDS,
+        AUTOMATION_ENABLED, COMPANY_ENABLED, ENABLED, PROVIDERS, PROVIDER_KEYS, TIMEOUT_MAX,
+        TIMEOUT_MIN, TIMEOUT_SECONDS,
     },
     providers::{self, Provider},
     store, Ai, Answer, Availability, Generated, Reason, Request,
@@ -81,30 +81,30 @@ fn answer_text(reply: &Value) -> Option<String> {
 }
 
 impl Ai {
-    /// The switches, the provider and the time limit, read on `client` for
-    /// the scope's company (`Scope::current_company`); a scope without a
-    /// company has the company switch's default, off.
     async fn configured(
         &self,
         client: &dyn ReadClient,
         scope: &Scope,
         requested: Option<&str>,
     ) -> Result<Configured> {
-        let target = scope
-            .current_company()
-            .map_or(Target::Tenant, Target::Company);
+        let (target, switch) = match (scope.principal(), scope.current_company()) {
+            (Some("watchers"), _) => (Target::Tenant, AUTOMATION_ENABLED),
+            (Some(_), _) => return Ok(Configured::Unavailable(Reason::Disabled)),
+            (None, Some(company)) => (Target::Company(company), COMPANY_ENABLED),
+            (None, None) => (Target::Tenant, COMPANY_ENABLED),
+        };
         let values = self
             .settings
             .resolve_many(
                 client,
                 scope,
                 target,
-                &[ENABLED, COMPANY_ENABLED, PROVIDERS, TIMEOUT_SECONDS],
+                &[ENABLED, switch, PROVIDERS, TIMEOUT_SECONDS],
             )
             .await?;
         let read = |key: &str| values.get(key).map(|resolved| &resolved.value);
         let on = |key: &str| read(key).and_then(Value::as_bool) == Some(true);
-        if !on(ENABLED) || !on(COMPANY_ENABLED) {
+        if !on(ENABLED) || !on(switch) {
             return Ok(Configured::Unavailable(Reason::Disabled));
         }
         let listed = read(PROVIDERS)
@@ -166,7 +166,11 @@ impl Ai {
         let started = Instant::now();
         let (configured, key) = {
             let client = self.db.get().await?;
-            let configured = self.configured(&**client, scope, request.provider).await?;
+            let configured = if scope.principal().is_some() && request.module != "base/watchers" {
+                Configured::Unavailable(Reason::Disabled)
+            } else {
+                self.configured(&**client, scope, request.provider).await?
+            };
             let key = match &configured {
                 Configured::Ready { provider, .. } => {
                     let stored = self

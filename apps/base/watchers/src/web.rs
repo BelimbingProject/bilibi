@@ -39,6 +39,7 @@ use std::{
 mod editor;
 mod script_run;
 mod show;
+mod words;
 
 pub const INDEX: &str = "/watchers";
 pub const SHOW: &str = "/watchers/{id}";

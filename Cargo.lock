@@ -2220,6 +2220,7 @@ version = "0.2.1"
 dependencies = [
  "askama",
  "bilibi-agent-api",
+ "bilibi-ai",
  "bilibi-authz",
  "bilibi-custom-fields",
  "bilibi-database",

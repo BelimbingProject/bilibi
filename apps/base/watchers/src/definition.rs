@@ -125,6 +125,8 @@ pub(crate) struct Definition {
     pub matching: Match,
     pub conditions: Vec<Condition>,
     pub steps: Vec<Step>,
+    /// One AI observation asked before the conditions (`observe.rs`).
+    pub observe: Option<crate::observe::Observe>,
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +167,9 @@ impl Definition {
         let mut value = json!({
             "do": self.steps,
         });
+        if let Some(observe) = &self.observe {
+            value["observe"] = json!(observe);
+        }
         if !self.conditions.is_empty() {
             value["if"] = json!({"match": self.matching.key(), "conditions": self.conditions.iter().map(|c| json!({"field": c.field, "op": c.op.key(), "value": c.value})).collect::<Vec<_>>()});
         }
@@ -217,7 +222,7 @@ impl Definition {
                 .get("field")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if bilibi_grid::column::parse(field).is_err() {
+            if !crate::observe::observed(field) && bilibi_grid::column::parse(field).is_err() {
                 problems.push((at("field"), "is not a field path".into()));
             }
             let Some(op) = item.get("op").and_then(Value::as_str).and_then(Op::parse) else {
@@ -250,6 +255,10 @@ impl Definition {
                 value,
             });
         }
+        let observe = match value.get("observe") {
+            None | Some(Value::Null) => None,
+            Some(observe) => crate::observe::Observe::parse(observe, problems),
+        };
         let mut steps = Vec::new();
         let listed = value
             .get("do")
@@ -297,6 +306,7 @@ impl Definition {
             matching,
             conditions,
             steps,
+            observe,
         })
     }
 
@@ -308,6 +318,10 @@ impl Definition {
     ) {
         for (i, condition) in self.conditions.iter().enumerate() {
             let at = |part: &str| format!("if.conditions.{i}.{part}");
+            if crate::observe::observed(&condition.field) {
+                self.check_observed(condition, &at, problems);
+                continue;
+            }
             let Some((ty, choices)) = field(&condition.field) else {
                 problems.push((
                     at("field"),
@@ -339,6 +353,43 @@ impl Definition {
         }
     }
 
+    fn check_observed(
+        &self,
+        condition: &Condition,
+        at: &dyn Fn(&str) -> String,
+        problems: &mut Problems,
+    ) {
+        let Some(observe) = &self.observe else {
+            problems.push((
+                at("field"),
+                format!("{} needs an AI observation (observe)", condition.field),
+            ));
+            return;
+        };
+        let values = match &condition.value {
+            Value::Array(items) => items.as_slice(),
+            Value::Null => &[][..],
+            value => std::slice::from_ref(value),
+        };
+        if condition.op.ordered() {
+            problems.push((
+                at("op"),
+                "a label takes is, is not, is one of, is none of, empty or not empty".into(),
+            ));
+        }
+        for value in values {
+            if !value
+                .as_str()
+                .is_some_and(|label| observe.accepts_label(label))
+            {
+                problems.push((
+                    at("value"),
+                    format!("must be one of {}", observe.labels.join(", ")),
+                ));
+            }
+        }
+    }
+
     /// Each condition's outcome on `facts` (field path → value), and whether
     /// the definition matches.
     pub(crate) fn evaluate(
@@ -353,7 +404,7 @@ impl Definition {
                 holds(
                     c,
                     facts.get(&c.field).unwrap_or(&Value::Null),
-                    types(&c.field),
+                    crate::observe::fact_type(&c.field).unwrap_or_else(|| types(&c.field)),
                 )
             })
             .collect();
@@ -376,7 +427,17 @@ impl Definition {
         fields
     }
 
+    /// The record fields the conditions read (never `ai:` facts).
     pub(crate) fn condition_fields(&self) -> Vec<String> {
+        self.example_fields()
+            .into_iter()
+            .filter(|path| !crate::observe::observed(path))
+            .collect()
+    }
+
+    /// The facts examples are written in: every condition's field,
+    /// including the observation's `ai:label`.
+    pub(crate) fn example_fields(&self) -> Vec<String> {
         let mut fields: Vec<String> = Vec::new();
         for condition in &self.conditions {
             if !fields.contains(&condition.field) {
@@ -386,9 +447,16 @@ impl Definition {
         fields
     }
 
+    /// Every record field the version reads: conditions, scripts and the
+    /// fields its observation sends.
     pub(crate) fn fields(&self) -> Vec<String> {
         let mut fields = self.condition_fields();
-        for field in self.scripts().flat_map(|script| &script.fields) {
+        let observed = self.observe.iter().flat_map(|observe| &observe.fields);
+        for field in self
+            .scripts()
+            .flat_map(|script| &script.fields)
+            .chain(observed)
+        {
             if !fields.contains(field) {
                 fields.push(field.clone());
             }

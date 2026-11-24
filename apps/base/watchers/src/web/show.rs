@@ -1,6 +1,7 @@
 //! `/watchers/{id}`: one watcher, the version that awaits approval or runs (with
 //! the approval review and Approve through a confirmation), the on/off
 //! switch and the latest receipts in words.
+use super::words::{effect_reason, observed, reason};
 use super::*;
 
 #[derive(Template)]
@@ -41,52 +42,8 @@ fn sentence(text: &str) -> String {
     out
 }
 
-/// Why a run ended as it did, in words.
-fn reason(code: &str) -> &'static str {
-    match code {
-        "catalog_changed" => "Not run: the installed fields or actions changed. Draft a new version for review.",
-        "record_changed" => "Skipped: the record changed after the watcher matched.",
-        "event_before_enabled" => "Skipped: this event was recorded before the watcher was switched on.",
-        "stale_activation" => "Skipped: the watcher was switched off and on after this run was queued.",
-        "event_before_approval" => "Skipped: this event was recorded before the watcher version was approved.",
-        "chain_budget" => "Stopped: another watcher started it, and the chain reached the limit of watchers in a row.",
-        "watcher_off" => "Not run: the watcher was switched off.",
-        "stale_version" => "Not run: a newer version was approved after this event, so this one no longer runs.",
-        "watcher_limit" => "Not run: the watcher exceeds a configured size or fact limit in System Settings.",
-        "attempt_limit" => "Not run: the watchers job reached its configured attempt limit.",
-        "action_limit" => "Not run: it has more actions than allowed per run.",
-        "script_run_refused" => "Automation lacks permission to run this script.",
-        "script_memory" => "The script reached its memory limit.",
-        "script_timeout" => "The script reached its time limit.",
-        "script_refused" => "The script failed inside its sandbox.",
-        "script_call_refused" => "The script requested a call outside its approved list.",
-        "script_lookup_refused" => "The script requested a read outside its approved lookups, or the read owner refused it.",
-        "script_outbound_refused" => "Not sent: the destination or data did not match the approved outbound terms.",
-        "script_permission_refused" => "This watcher is not permitted to run that particular script version.",
-        "script_output" | "script_input" => "The script input or result exceeded its contract.",
-        "script_unavailable" => "The script worker could not start.",
-        "read_refused" => "Not run: automation may not read these records yet. An administrator allows it in Automation access.",
-        "restricted_field" => "Not run: a condition reads a field that is hidden from automation.",
-        "subject_unavailable" => "Not run: the record is gone or out of reach.",
-        "action_refused" => "An action was refused; see its outcome.",
-        "actor_refused" => "Not run: automation was stopped here (the workspace is suspended or Automation access was withdrawn).",
-        _ => "Not run.",
-    }
-}
-fn effect_reason(code: &str) -> &'static str {
-    match code {
-        "forbidden" => "refused: automation is not allowed to do this",
-        "invalid" => "refused by the record's owner",
-        "refused" => "refused by the record's owner",
-        "not_found" => "refused: the record is gone",
-        "record_changed" => "skipped: the record changed after the watcher matched",
-        "conflict" => "refused: the record changed",
-        "actor_refused" => "refused: automation was stopped",
-        _ => "refused",
-    }
-}
 fn why(run: &RunView, described: &crate::review::Described) -> Vec<String> {
-    let mut lines = Vec::new();
+    let mut lines: Vec<String> = observed(run).into_iter().collect();
     match run.state.as_str() {
         _ if run.outcomes.get("restricted").is_some() => {
             lines.push("Which conditions held is hidden: you may not read these records.".into());
@@ -437,12 +394,19 @@ impl Show {
                 .render(version.drafted_at, Format::DateTime, Precision::Minute)
                 .text
         );
-        let mut items = vec![
-            Fact {
-                title: "Watch",
+        let mut items = vec![Fact {
+            title: "Watch",
+            id: "",
+            value: Html::text(&view.summary.trigger_title),
+        }];
+        if let Some(observation) = &described.observation {
+            items.push(Fact {
+                title: "AI observation",
                 id: "",
-                value: Html::text(&view.summary.trigger_title),
-            },
+                value: Html::text(observation),
+            });
+        }
+        items.extend([
             Fact {
                 title: "If",
                 id: "",
@@ -462,7 +426,7 @@ impl Show {
                     lines: &described.examples,
                 })?,
             },
-        ];
+        ]);
         if let Some(review) = review.filter(|review| !review.script_examples.is_empty()) {
             items.push(Fact {
                 title: "Script example results",
@@ -745,10 +709,30 @@ impl Show {
                     "Approve version {} of \u{201c}{}\u{201d}?",
                     request.number, view.summary.name
                 );
-                let detail = format!(
-                    "From now on it runs each time \u{201c}{}\u{201d}, without AI. A run still waiting for an earlier version will not act.",
-                    view.summary.trigger_title
-                );
+                let observation = view
+                    .versions
+                    .iter()
+                    .find(|version| version.number == request.number)
+                    .and_then(|version| {
+                        self.pages
+                            .watchers
+                            .describe(
+                                &view.summary.trigger,
+                                &version.definition,
+                                &version.examples,
+                            )
+                            .observation
+                    });
+                let detail = match observation {
+                    None => format!(
+                        "From now on it runs each time \u{201c}{}\u{201d}, without AI. A run still waiting for an earlier version will not act.",
+                        view.summary.trigger_title
+                    ),
+                    Some(observation) => format!(
+                        "From now on it runs each time \u{201c}{}\u{201d}. {observation} The answer only decides whether the approved actions run. A run still waiting for an earlier version will not act.",
+                        view.summary.trigger_title
+                    ),
+                };
                 render(ConfirmDialog {
                     id: "watcher-approve-confirm",
                     consequence: &consequence,
