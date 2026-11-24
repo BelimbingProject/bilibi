@@ -188,6 +188,8 @@ pub enum Mine {
     /// The reader takes part: creator, assignee or account guest. Never the
     /// oversight set of `core.activity.all.view` (the calendar feed).
     TakingPart,
+    /// Open, reminded activities assigned to or accepted by the reader.
+    Todo,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

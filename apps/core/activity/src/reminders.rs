@@ -33,7 +33,7 @@ const BATCH: i64 = 200;
 const BATCHES: usize = 10;
 /// Rows the bell shows, and the most it counts before saying `N+`.
 const TODO_ROWS: i64 = 5;
-const TODO_COUNT: i64 = 100;
+const TODO_COUNT: i64 = 99;
 
 macro_rules! provenance {
     () => {
@@ -466,10 +466,11 @@ impl TodoSource for Todos {
                 });
             }
             Ok(TodoList {
+                label: "Activities".into(),
                 items,
                 count: count.min(TODO_COUNT) as usize,
-                more: count > TODO_COUNT,
-                see_all: Some("/activities".into()),
+                more: count >= TODO_COUNT,
+                see_all: Some("/activities?mine=todo".into()),
             })
         })
     }

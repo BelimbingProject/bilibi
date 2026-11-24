@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 /// Approvals one bell render reads. The bell lists five and counts up to
 /// this many, then shows `N+`.
-const BELL_APPROVALS: i64 = 10;
+const BELL_APPROVALS: i64 = 99;
 pub(crate) struct ApprovalTodos(pub Arc<Engine>);
 impl bilibi_notifications::TodoSource for ApprovalTodos {
     fn read<'a>(&'a self, scope: &'a Scope) -> bilibi_notifications::TodoFuture<'a> {
@@ -43,6 +43,7 @@ impl bilibi_notifications::TodoSource for ApprovalTodos {
             let (entries, after) = (page.entries, page.next_cursor);
             let count = entries.len();
             Ok(bilibi_notifications::TodoList {
+                label: "Approvals".into(),
                 count,
                 more: after.is_some(),
                 items: entries

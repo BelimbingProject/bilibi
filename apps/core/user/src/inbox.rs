@@ -65,8 +65,8 @@ struct BellView {
     aria_label: String,
     items: Vec<Item>,
     todos: Vec<bilibi_notifications::TodoList>,
-    todo_badge: String,
     todo_count: usize,
+    todo_more: bool,
     todo_tab: bool,
     tabs: Tabs<'static>,
 }
@@ -83,37 +83,50 @@ async fn bell_html(users: &UserService, scope: &Scope, todo_tab: bool) -> Result
     // while invoking them: concurrent bells could otherwise exhaust the pool.
     let todos = users.notification_boundary.todos(scope).await?;
     let todo_count: usize = todos.iter().map(|list| list.count).sum();
-    let todo_badge = format!(
-        "{todo_count}{}",
-        if todos.iter().any(|list| list.more) {
-            "+"
-        } else {
-            ""
-        }
-    );
-    let tabs = Tabs {
-        id: "bell-tabs",
-        tabs: vec![
-            Tab::button("todo_tab", "", "To do", todo_tab),
-            Tab::button("notifications_tab", "", "Notifications", !todo_tab),
-        ],
-        ..Tabs::default()
+    let todo_more = todos.iter().any(|list| list.more);
+    let todo_badge = if todo_count >= 99 {
+        "99+".to_owned()
+    } else {
+        format!("{todo_count}{}", if todo_more { "+" } else { "" })
     };
-    let badge = if unread > 99 {
+    let unread_badge = if unread >= 99 {
         "99+".to_owned()
     } else {
         unread.to_string()
     };
-    let aria_label = match unread {
-        0 => "Notifications".to_owned(),
-        1 => "1 unread notification".to_owned(),
-        _ => format!("{badge} unread notifications"),
+    let total = todo_count.saturating_add(unread.max(0) as usize);
+    let badge = if total >= 99 {
+        "99+".to_owned()
+    } else {
+        format!("{total}{}", if todo_more { "+" } else { "" })
     };
-    let aria_label = format!("{todo_badge} to do, {aria_label}");
+    let tabs = Tabs {
+        id: "bell-tabs",
+        tabs: vec![
+            Tab {
+                count: if todo_count > 0 {
+                    todo_badge.clone()
+                } else {
+                    String::new()
+                },
+                ..Tab::button("todo_tab", "", "To do", todo_tab)
+            },
+            Tab {
+                count: if unread > 0 {
+                    unread_badge.clone()
+                } else {
+                    String::new()
+                },
+                ..Tab::button("notifications_tab", "", "Notifications", !todo_tab)
+            },
+        ],
+        ..Tabs::default()
+    };
+    let aria_label = format!("{todo_badge} to do, {unread_badge} unread notifications");
     BellView {
         todos,
-        todo_badge,
         todo_count,
+        todo_more,
         todo_tab,
         tabs,
         unread,
