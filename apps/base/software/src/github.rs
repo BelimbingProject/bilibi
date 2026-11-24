@@ -749,6 +749,8 @@ fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: 
         };
     }
     json!({
+        "latest": cache["latest"],
+        "complete": cache["complete"],
         "available": cache["available"].as_bool().unwrap_or(false),
         "repository": repository,
         "repository_id": live_id,
@@ -758,7 +760,7 @@ fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: 
         "target": target,
         "prerelease": prerelease,
         "fetched_at": cache["fetched_at"],
-        "stale": stale || cache["stale"].as_bool().unwrap_or(false),
+        "stale": stale || cache["attempt_at"].is_string() || cache["stale"].as_bool().unwrap_or(false),
         "token_set": saved.token_set,
         "app": saved.app,
         "refresh_minutes": saved.refresh_minutes,
@@ -831,6 +833,7 @@ async fn fetch_listing(
     let previous = read_cache(cache_path, repository);
     let etag = previous
         .as_ref()
+        .filter(|cache| cache["complete"] == true && cache["repository_id"] == id)
         .and_then(|cache| cache["etag"].as_str())
         .map(str::to_owned);
     let url = format!("{API}/repos/{repository}/releases?per_page=30");
@@ -865,28 +868,48 @@ async fn fetch_listing(
         ));
     }
     let mut body = json_body(&first.body)?;
-    let mut rated = &first;
-    let mut page_keep = None;
-    if let Some(next) = next_link(&header_text(&first, "link").unwrap_or_default()) {
-        if next.starts_with(API) && rate_headers_remaining(&first) > 10 {
-            if let Ok(page) = get_raw(integration, scope, &next, token, None, "releases.list").await
-            {
-                if (200..300).contains(&page.status) {
-                    if let Ok(mut more) = json_body(&page.body) {
-                        if let (Some(left), Some(right)) =
-                            (body.as_array_mut(), more.as_array_mut())
-                        {
-                            left.append(right);
-                        }
-                    }
-                    page_keep = Some(page);
-                }
-            }
+    let releases = body
+        .as_array_mut()
+        .ok_or_else(|| "GitHub returned an unreadable release list.".to_owned())?;
+    let mut next = next_link(&header_text(&first, "link").unwrap_or_default());
+    let single_page = next.is_none();
+    let mut last = None;
+    let mut pages = 1;
+    // Keep the same rate-limit reserve. A partial listing is useful in Details,
+    // but cannot establish which version to announce.
+    while let Some(url) = next.as_deref() {
+        if !url.starts_with(&format!("{API}/repos/{repository}/releases?"))
+            && !url.starts_with(&format!("{API}/repositories/{id}/releases?"))
+        {
+            break;
         }
+        if pages >= 10 || rate_headers_remaining(last.as_ref().unwrap_or(&first)) <= 10 {
+            break;
+        }
+        let page = get_raw(integration, scope, url, token, None, "releases.list").await?;
+        if page.status != 200 {
+            return Err(github_status(
+                repository,
+                page.status,
+                token.is_some(),
+                &page,
+            ));
+        }
+        let mut more = json_body(&page.body)?;
+        releases.append(
+            more.as_array_mut()
+                .ok_or_else(|| "GitHub returned an unreadable release list.".to_owned())?,
+        );
+        let following = next_link(&header_text(&page, "link").unwrap_or_default());
+        if following == next {
+            break;
+        }
+        next = following;
+        pages += 1;
+        last = Some(page);
     }
-    if let Some(page) = page_keep.as_ref() {
-        rated = page;
-    }
+    let rated = last.as_ref().unwrap_or(&first);
+    let latest = super::update::latest(releases);
     let releases = body
         .as_array()
         .into_iter()
@@ -900,7 +923,9 @@ async fn fetch_listing(
         "repository": repository,
         "repository_id": id,
         "private": private,
-        "etag": header_text(&first, "etag"),
+        "etag": if single_page {header_text(&first, "etag")} else {None},
+        "complete":next.is_none(),
+        "latest":latest,
         "fetched_at": jiff::Timestamp::now().to_string(),
         "releases": releases,
     });

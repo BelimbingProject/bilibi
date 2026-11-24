@@ -96,8 +96,9 @@ impl Software {
                     json!(crate::github::same_asset(release, &installed["github"]));
             }
         }
+        let update = crate::update::discover(self.paths.as_ref(), &github);
         Ok(
-            json!({"instance": review::instance_json(&instance), "installed_asset": installed, "uploads": uploads, "github": github}),
+            json!({"instance": review::instance_json(&instance), "installed_asset": installed, "uploads": uploads, "github": github, "update":update}),
         )
     }
 

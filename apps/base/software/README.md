@@ -131,6 +131,21 @@ The upload is resumable: while Media has a staging disk (`media.upload.staging_d
 
 A gzip-compressed tar carries `bilibi-web`, `SHA256SUMS` and optionally `manifest.txt`, `Cargo.lock`, `release.json`, `bundle.json` and `plugins/`. The application repository created by `./bilibi new <name>` builds and packages the complete composition on GitHub; see [application workspaces](../../../docs/application-workspaces.md). Only that published, attested archive is installable. Archive parsing, safe paths and compatibility checks live in private `src/transport.rs`.
 
+### Update notices
+
+The installation schedule **Check for software updates** sends the active installation owner one bell notice per newly discovered stable setup tag in the accepted repository. The notice opens Software › Releases. Publisher-written change notes appear as plain text. When the release body contains only App Maker’s standard packaging instructions, the notice reads “No change notes were supplied.”
+
+Enable the reviewed installation schedule during setup. Schedule checks every 15 minutes and respects the listing cache and GitHub rate limits. The notice receipt and the bell notification commit together, so retries cannot announce the same release twice.
+
+The `update` field of `base.software.releases` reports the running setup version and one of the following states.
+
+| State | Meaning |
+| --- | --- |
+| `ready` | A complete, fresh listing has a newer stable setup with one matching file. The result includes the publisher’s notes and the exact asset for review. Admission and proof verification occur during installation. |
+| `current` | The running setup version is at least as new as the newest stable setup found. |
+| `unavailable` | Source acceptance, the running setup, the listing or a unique compatible file could not be established. The reason identifies the missing check. |
+| `source_checkout` | This program has no installed release folder. |
+
 ### Install from GitHub
 
 Name one repository on **Software › Releases**, as owner/name, for example your-company/my-bilibi. A public repository needs no token, but GitHub then allows only 60 calls an hour from a server's address, and each install review uses about three. A token raises that to 5,000 an hour.
