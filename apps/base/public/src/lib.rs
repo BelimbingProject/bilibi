@@ -19,6 +19,7 @@ mod budget;
 mod contributions;
 pub mod link;
 mod operations;
+mod resolve;
 mod sites;
 mod web;
 
@@ -28,7 +29,7 @@ pub use contributions::{
     SENDER_PER_HOUR, SENDER_PER_MINUTE,
 };
 pub use link::{Cache, Link, LinkFuture, LinkRequest, LinkService, Local, Reply, Target, PIXEL};
-pub use sites::Reached;
+pub use resolve::Reached;
 pub use sites::{
     address_shaped, hostname_shaped, Checked, FieldError, Hostname, LogoChange, Site, SiteInput,
     MANAGE, TITLE_MAX, VIEW,
