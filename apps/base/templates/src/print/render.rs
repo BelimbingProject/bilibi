@@ -6,6 +6,7 @@ use super::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use bilibi_artifacts::{InlineDocument, PdfPaper};
 use bilibi_ui::{Accent, Assets};
+use qrcode::{render::svg, QrCode};
 use std::{
     fmt::{self, Write},
     sync::OnceLock,
@@ -72,7 +73,7 @@ impl Html {
         )?;
         self.write_str(concat!(
             "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; ",
-            "style-src 'unsafe-inline'; font-src data:; ",
+            "style-src 'unsafe-inline'; font-src data:; img-src data:; ",
             "base-uri 'none'; form-action 'none'\">"
         ))?;
         self.element("title", title)?;
@@ -138,8 +139,25 @@ impl Html {
                 }
                 Ok(())
             }
+            PrintValue::Raster { mime, bytes } => self.image("print-raster", mime, bytes),
+            PrintValue::QrCode(url) => {
+                let code = QrCode::new(url).map_err(|_| fmt::Error)?;
+                let svg = code
+                    .render::<svg::Color<'_>>()
+                    .min_dimensions(182, 182)
+                    .build();
+                self.image("print-qr", "image/svg+xml", svg.as_bytes())
+            }
             PrintValue::Rows(_) => unreachable!("the compiler requires scalar facts here"),
         }
+    }
+
+    fn image(&mut self, class: &str, mime: &str, bytes: &[u8]) -> fmt::Result {
+        write!(
+            self,
+            "<img class=\"{class}\" alt=\"\" src=\"data:{mime};base64,{}\">",
+            STANDARD.encode(bytes),
+        )
     }
 
     fn blocks(&mut self, blocks: &[Block], facts: &CheckedFacts<'_>) -> fmt::Result {

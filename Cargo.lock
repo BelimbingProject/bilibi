@@ -2061,10 +2061,12 @@ dependencies = [
  "icu_locale",
  "inventory",
  "jiff",
+ "qrcode",
  "rust_decimal",
  "serde",
  "serde_json",
  "tokio-postgres",
+ "url",
 ]
 
 [[package]]

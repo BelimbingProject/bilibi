@@ -21,6 +21,7 @@ const EN: &str = r#"{"blocks":[
     {"type":"field","field":"issuer"},
     {"type":"field","field":"reference"},
     {"type":"field","field":"address","label":"Workplace"},
+    {"type":"field","field":"validation"},
     {"type":"table","rows":"operations","columns":[{"field":"instructions"},{"field":"sequence"}]}
 ]}"#;
 const MS: &str = r#"{"paper":"letter","blocks":[
@@ -28,6 +29,7 @@ const MS: &str = r#"{"paper":"letter","blocks":[
     {"type":"field","field":"issuer"},
     {"type":"field","field":"reference"},
     {"type":"field","field":"address","label":"Tempat kerja"},
+    {"type":"field","field":"validation"},
     {"type":"table","rows":"operations","columns":[{"field":"instructions"},{"field":"sequence"}]}
 ]}"#;
 
@@ -58,6 +60,7 @@ const ADDRESS: &[&str] = &[
     "Example Town, Selangor",
     "Malaysia",
 ];
+const VALIDATION: &str = "https://example.test/document/WS-2026-0240/validate";
 static CONTRACT: PrintContract = PrintContract {
     key: "base.artifacts.work_sheet",
     label: "Production work sheet",
@@ -87,6 +90,14 @@ static CONTRACT: PrintContract = PrintContract {
             required_output: false,
             labels: &[],
             sample: PrintValue::Address(ADDRESS),
+        },
+        PrintField {
+            id: "validation",
+            kind: PrintKind::QrCode,
+            optional: true,
+            required_output: true,
+            labels: &[("en", "Validation"), ("ms", "Pengesahan")],
+            sample: PrintValue::QrCode(VALIDATION),
         },
         PrintField {
             id: "operations",
@@ -205,6 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("reference", PrintValue::Text(REFERENCE)),
         ("address", PrintValue::Address(ADDRESS)),
         ("operations", PrintValue::Rows(&rows)),
+        ("validation", PrintValue::QrCode(VALIDATION)),
     ];
     let branding = app.services.get::<Branding>(bilibi_branding::SERVICE)?;
     let accent = branding.accent(&**client).await?;
@@ -238,6 +250,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let html = document.html();
         assert_eq!(document.paper(), paper);
         assert!(html.contains("data:font/woff2;base64,"));
+        assert!(html.contains("data:image/svg+xml;base64,"));
+        assert!(!compiled
+            .render("issued", &facts[..facts.len() - 1])?
+            .contains("class=\"print-qr\""));
         assert!(!html.contains("<footer>"));
         assert!(html.contains("<title>Production work sheet</title>"));
         assert!(html.contains("&lt;guard&gt; &amp; gauges"));
@@ -257,6 +273,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(out.join(name), read.bytes)?;
     }
     assert!(CONTRACT.compile("ms", &MS.replace("letter", "a3")).is_err());
+    assert!(CONTRACT
+        .compile(
+            "en",
+            &EN.replace(r#"{"type":"field","field":"validation"},"#, "")
+        )
+        .is_err());
     assert!(CONTRACT
         .compile(
             "en",
