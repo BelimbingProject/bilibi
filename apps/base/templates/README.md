@@ -44,7 +44,18 @@ mailer.deliver_linked_for(tenant, &message, Some(&link)).await?;
 
 ## Word a portal notice
 
-Contribute `Output::PortalNotice`, then render with `Templates::wording` after authorizing the customer page. Use the company from the portal proof and put the prose through `Html::text`. The portal home uses `core.portal.welcome_notice`; its surrounding actions and links belong to the page. Named PDF prose slots are the next slice of issue #833.
+Contribute `Output::PortalNotice`, then render with `Templates::wording` after authorizing the customer page. Use the company from the portal proof and put the prose through `Html::text`. The portal home uses `core.portal.welcome_notice`; its surrounding actions and links belong to the page.
+
+## Declare a print contract
+
+Contribute one `PrintContract` per document type through `bilibi_templates::PRINT_CATALOGUE`, using the same owner-prefixed key convention as wording. Give the contract a version, audience, printable lifecycle states, typed fields with synthetic samples, and a versioned packaged layout per supported language. The registry compiles each default and renders its samples at boot. A key can identify either wording or print.
+
+- Resolve the packaged layout by exact locale, base language, optional business fallback, then the contract's packaged base. The result includes the language and packaged version. Company and workspace print overrides will use the same per-language order as wording when print revisions are enabled.
+- The owning module authorizes the source, chooses the versioned business snapshot and passes the state and typed facts to the compiled layout. Text, calendar dates, integers, exact decimals, currency amounts, booleans and multiline addresses are supported. A repeat field has a named row schema. Required facts and row fields are checked even if a layout omits them.
+- Layouts are JSON with a `blocks` array, compiled into HTML by Templates. Blocks are `heading` and `paragraph` with `text`, `field` with `field` and `label`, `section` with `heading` and `blocks`, `if_present` with an optional `field` and `blocks`, and `table` with `rows` and `columns` (each with a row `field` and `heading`). Layout wording and record text are escaped. Templates supplies the markup.
+- A layout is bounded to 48 KiB, 160 blocks, eight levels and 16 columns per table. A table holds up to 2,000 rows. A fact string holds up to 16 KiB, and there is a 4 MiB budget each for facts and rendered HTML.
+
+Run `cargo run --locked -p bilibi-templates --example print-contract-walkthrough` to exercise registry validation, packaged English and Malay selection, optional fields, escaping and repeated rows.
 
 The first tenant owner's invitation (`bilibi tenant-owner`) keeps fixed text: it is sent before the workspace exists.
 
