@@ -290,6 +290,12 @@ calls `settle_bootstrap_affiliation` for the Person, business affiliation and fi
 
 `claim_owner()` is how the owner takes the account. It reads the receipt's account, never a typed address. While the owner has not chosen a password (`password_version` 1) it checks mail readiness and mails a one-time password-reset link, waiting for delivery (`OwnerClaim::Sent`, or `RecentlySent` inside the one-minute reset throttle; a failed delivery withdraws the token and returns `OwnerClaimError::Delivery`). After that it only reports `PasswordChosen` or, once any step-up method is enrolled, `Claimed`. No path creates or claims the owner without the email; root on the server is trusted, so this guards against mistakes and shortcuts, not a malicious administrator.
 
+### Ownership transfer (`src/ownership.rs`)
+
+`/settings/ownership` is the one reviewed path for changing the installation owner while the current owner is available. The current owner selects another active, Person-backed staff account in the platform operator tenant and confirms the offer with an every-time Base Step-up code. The named recipient has 15 minutes to accept with their own every-time code or may decline without changing ownership. Agent, principal and impersonated sessions cannot start or answer an offer.
+
+Acceptance locks the pending offer and the live `user_bootstrap` receipt, rechecks that the offer's sender is still the owner and changes only the receipt's account and email in one `MutationBoundary`. The transfer and receipt changes share that audit boundary; neither account's roles or ordinary membership data changes. Owner proof, Software owner actions and release trust read the receipt, so they follow the new owner immediately. `bilibi-web create-owner` remains the server recovery path when the owner is unavailable; it is not part of this two-person review.
+
 ### Customer tenant owner
 
 `provision_tenant_owner` backs [server first-owner setup and reissue](../../../docs/server-install.md#the-first-owner-of-a-customer-tenant). It validates the Person name and origin, checks mail readiness before writing and renders the invitation before committing. Reissue takes the recorded tenant ID and uses the current tenant name in the invitation. The initial tenant, primary company, pending account, invitation, Authz role assignment and bootstrap receipt commit together before delivery. The invitation uses the default of `user.invitation_days` and stores no inviter account.
