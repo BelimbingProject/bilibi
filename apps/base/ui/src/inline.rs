@@ -3,7 +3,7 @@
 //! See `docs/inline-editing.md` and the `u5-inline` running-app specimen.
 use crate::Html;
 use askama::Template;
-use std::collections::BTreeMap;
+use std::{cell::RefCell, collections::BTreeMap, future::Future};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum CommitStatus {
@@ -11,6 +11,7 @@ pub enum CommitStatus {
     None,
     Saved,
     Error(String),
+    Conflict(String),
 }
 impl CommitStatus {
     pub fn kind(&self) -> &'static str {
@@ -18,11 +19,12 @@ impl CommitStatus {
             Self::None => "none",
             Self::Saved => "saved",
             Self::Error(_) => "error",
+            Self::Conflict(_) => "conflict",
         }
     }
     pub fn message(&self) -> &str {
         match self {
-            Self::Error(message) => message,
+            Self::Error(message) | Self::Conflict(message) => message,
             _ => "",
         }
     }
@@ -85,9 +87,33 @@ pub struct CommitOutcome {
     pub status: CommitStatus,
 }
 
-/// Common owner-supplied context. `version` is the stored version when editing
-/// begins, carried back unchanged through background patches. The owner must
-/// check it atomically when saving; it is never an authorization proof.
+tokio::task_local! {
+    static INLINE_READ: RefCell<InlineRead>;
+}
+
+#[derive(Default)]
+pub struct InlineRead {
+    pub fact: String,
+    pub id: String,
+    pub field: String,
+    pub event: String,
+    pub original: String,
+    pub version: Option<String>,
+    pub conflict: bool,
+}
+
+impl InlineRead {
+    pub async fn during<T>(self, render: impl Future<Output = T>) -> (T, Self) {
+        INLINE_READ
+            .scope(RefCell::new(self), async {
+                let output = render.await;
+                let read = INLINE_READ.with(RefCell::take);
+                (output, read)
+            })
+            .await
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct InlineField {
     pub id: String,
@@ -175,13 +201,34 @@ impl InlineField {
         self.hint = hint.into();
         self
     }
+    pub fn rendered_status(&self) -> CommitStatus {
+        INLINE_READ.try_with(|read| {
+            let mut read = read.borrow_mut();
+            if self.id != read.fact || self.id_value != read.id
+                || self.name != read.field || self.save_event != read.event
+            {
+                return self.status.clone();
+            }
+            read.version = Some(self.version.clone());
+            if !self.editable || self.value == read.original {
+                return self.status.clone();
+            }
+            read.conflict = true;
+            let label = self.label.strip_prefix("Edit ").unwrap_or(&self.label);
+            let value = self.display();
+            CommitStatus::Conflict(format!(
+                "Someone else just changed {label} while you were editing, so your change was not saved. It now shows {value}. Edit it again if you still want to change it."
+            ))
+        }).unwrap_or_else(|_| self.status.clone())
+    }
+
     /// The trigger's `aria-describedby`: the hint, then the outcome.
-    pub fn described_by(&self) -> String {
+    pub fn described_by(&self, status: &CommitStatus) -> String {
         let mut ids = Vec::new();
         if !self.hint.is_empty() {
             ids.push(format!("{}-hint", self.id));
         }
-        if self.status.present() {
+        if status.present() {
             ids.push(format!("{}-status", self.id));
         }
         ids.join(" ")

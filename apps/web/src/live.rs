@@ -12,6 +12,7 @@ use bilibi_base::perf::{Finish, Kind, Outcome};
 use bilibi_database::{page_write, Error, Result};
 use bilibi_module_registry::contributions::{Access, Embed, Route, EMBEDS};
 use bilibi_security::Scope;
+use bilibi_ui::inline::InlineRead;
 use bilibi_ui::page::{
     Change, LiveBody, LiveInput, LiveRequest, LiveState, PageChrome, PageRequest, PanelSpec,
 };
@@ -513,6 +514,71 @@ async fn permitted<T>(
     }
 }
 
+async fn update_state<S: Side>(
+    app: &App,
+    state: &mut Mounted<S::Context>,
+    scope: &S::Context,
+    token: &str,
+    input: LiveInput<'_>,
+) -> Result<LiveBody> {
+    let mut inline_payload;
+    let input = match input {
+        LiveInput::Event(payload) if payload.get("fact").is_some() => {
+            let get = |key| {
+                payload
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or(Error::Invalid)
+            };
+            let read = InlineRead {
+                fact: get("fact")?,
+                id: get("id")?,
+                field: get("field")?,
+                event: get("type")?,
+                original: get("original")?,
+                ..InlineRead::default()
+            };
+            let (body, read) = read
+                .during(crate::render_fields(
+                    app,
+                    Some(S::scope(scope)),
+                    state.state.update(LiveRequest {
+                        scope,
+                        credential: token,
+                        input: LiveInput::Refresh,
+                    }),
+                ))
+                .await;
+            let body = body?;
+            if read.conflict || body.redirect.is_some() {
+                return Ok(body);
+            }
+            let version = read.version.ok_or_else(|| {
+                Error::refused("This field is no longer available. The change was not saved.")
+            })?;
+            inline_payload = payload.clone();
+            inline_payload["version"] = Value::String(version);
+            LiveInput::Event(&inline_payload)
+        }
+        input => input,
+    };
+    let event = page_event(app, state.service, &input)?;
+    permitted(
+        event,
+        crate::render_fields(
+            app,
+            Some(S::scope(scope)),
+            state.state.update(LiveRequest {
+                scope,
+                credential: token,
+                input,
+            }),
+        ),
+    )
+    .await
+}
+
 struct Mounted<C: 'static> {
     state: State<C>,
     access: Access,
@@ -955,20 +1021,7 @@ impl<S: Side> Session<S> {
         let scope = self.scope(app, token).await?;
         if target == "page" {
             let page = self.page.as_mut().ok_or(Error::Invalid)?;
-            let event = page_event(app, page.service, &input)?;
-            let mut body = permitted(
-                event,
-                crate::render_fields(
-                    app,
-                    Some(S::scope(&scope)),
-                    page.state.update(LiveRequest {
-                        scope: &scope,
-                        credential: token,
-                        input,
-                    }),
-                ),
-            )
-            .await?;
+            let mut body = update_state::<S>(app, page, &scope, token, input).await?;
             hold_flash(app, token, &mut body);
             let moved = body.path.as_deref().is_some_and(|path| path != self.path);
             // A page may move only among its own routes; any other path is a
@@ -1011,20 +1064,7 @@ impl<S: Side> Session<S> {
             Some(panel) => panel,
             None => self.panels.get_mut(target).ok_or(Error::Invalid)?,
         };
-        let event = page_event(app, panel.mounted.service, &input)?;
-        let mut body = permitted(
-            event,
-            crate::render_fields(
-                app,
-                Some(S::scope(&scope)),
-                panel.mounted.state.update(LiveRequest {
-                    scope: &scope,
-                    credential: token,
-                    input,
-                }),
-            ),
-        )
-        .await?;
+        let mut body = update_state::<S>(app, &mut panel.mounted, &scope, token, input).await?;
         hold_flash(app, token, &mut body);
         let owns_query = self.merge_panel_query(target, &body.query)?;
         let mut message = fragment(target, body);
