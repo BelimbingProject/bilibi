@@ -56,14 +56,24 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
         "source_not_accepted"
     } else if listing["complete"] != true {
         "incomplete_list"
-    } else if current.is_none() || setup["repository"] != listing["repository"] {
-        "unknown_installed_release"
     } else {
         let latest = &listing["latest"];
-        let Some(tag) = latest["tag"].as_str() else {
+        let Some((tag, published)) = latest["tag"]
+            .as_str()
+            .and_then(|tag| Some((tag, version(tag)?)))
+        else {
             result["reason"] = json!("no_stable_release");
             return result;
         };
+        result["release"] = latest.clone();
+        let Some(current) = current.filter(|_| setup["repository"] == listing["repository"]) else {
+            result["reason"] = json!("unknown_installed_release");
+            return result;
+        };
+        if published <= current {
+            result["state"] = json!("current");
+            return result;
+        }
         let mut rows = listing["releases"]
             .as_array()
             .into_iter()
@@ -73,13 +83,8 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
             (None, _) => "no_matching_file",
             (_, Some(_)) => "ambiguous_files",
             (Some(row), None) => {
-                if version(tag) > current {
-                    result["state"] = json!("ready");
-                    result["release"] = latest.clone();
-                    result["asset"] = json!({"repository_id":listing["repository_id"],"release_id":row["release_id"],"asset":row["asset_id"],"tag":tag,"target":row["target"],"digest":row["digest"]});
-                } else {
-                    result["state"] = json!("current");
-                }
+                result["state"] = json!("ready");
+                result["asset"] = json!({"repository_id":listing["repository_id"],"release_id":row["release_id"],"asset":row["asset_id"],"tag":tag,"target":row["target"],"digest":row["digest"]});
                 return result;
             }
         }

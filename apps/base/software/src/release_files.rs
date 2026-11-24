@@ -10,10 +10,17 @@ use bilibi_tenancy::Scope;
 use bilibi_ui::{
     forms::{Field, InputKind},
     page::{LiveInput, LiveRequest, Uploads},
-    BuiltinColumn, Button, ButtonVariant, Card, ColumnsOutcome, Fact, Facts, FlexRow, FlexTable,
-    Fold, Form, Html, ListColumns, SectionHeading, StatusKind, TableEmpty, UploadSpec,
+    ActionLink, BuiltinColumn, Button, ButtonVariant, Card, ColumnsOutcome, Fact, Facts, FlexRow,
+    FlexTable, Fold, Form, Html, ListColumns, SectionHeading, StatusKind, TableEmpty, UploadSpec,
 };
 use serde_json::{json, Value};
+
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}<div data-hook="ClipboardCopy">{% call ui::copy_box(id="software-update-prompt", label="AI prompt", text="Check this Bilibi server for a stable update and show me the install review.", copy_label="Copy AI prompt") %}{% endcall %}</div>"#,
+    ext = "html"
+)]
+struct UpdatePrompt;
 
 pub const PATH: &str = "/system/software/releases";
 /// The file input's name: the key the owner consumes by.
@@ -282,27 +289,55 @@ impl ReleaseFiles {
             .releases_with(scope, refresh_github, self.github_prerelease)
             .await?;
         let enrolled = self.pages.software.step_up.enrolled(scope).await?;
-        let mut body = Html::EMPTY;
-        body.push(&self.trust_section(&facts)?);
-        body.push(&self.github_section(&facts, manages, enrolled)?);
-        let mut upload = Html::EMPTY;
+        let update = &facts["update"];
+        let release = &update["release"];
+        let latest = match (
+            facts["github"]["repository"].as_str(),
+            release["tag"].as_str(),
+            release["version"].as_str(),
+        ) {
+            (Some(repository), Some(tag), Some(version)) => render(ActionLink {
+                id: "software-latest-notes",
+                href: &format!("https://github.com/{repository}/releases/tag/{tag}"),
+                title: "Release notes",
+                body: Html::text(version),
+                ..ActionLink::default()
+            })?,
+            _ => Html::text("Unavailable"),
+        };
+        let mut body = render(Facts {
+            id: "software-update-versions",
+            items: vec![
+                Fact {
+                    id: "software-update-installed",
+                    title: "Installed version",
+                    value: Html::text(update["current"].as_str().unwrap_or("Unknown")),
+                },
+                Fact {
+                    id: "software-update-latest",
+                    title: "Latest version",
+                    value: latest,
+                },
+            ],
+        })?;
+        body.push(&render(UpdatePrompt)?);
+        let mut details = self.trust_section(&facts)?;
+        details.push(&self.github_section(&facts, manages, enrolled)?);
         if manages {
-            upload.push(&self.upload_section(&instance)?);
+            details.push(&self.upload_section(&instance)?);
         }
         if facts["uploads"]
             .as_array()
             .is_some_and(|uploads| !uploads.is_empty())
         {
-            upload.push(&self.waiting_section(&facts, manages)?);
+            details.push(&self.waiting_section(&facts, manages)?);
         }
-        upload.push(&install);
+        details.push(&install);
         body.push(&render(Fold {
-            id: "software-offline-upload",
-            title: "Upload a release file",
-            open: facts["uploads"]
-                .as_array()
-                .is_some_and(|uploads| !uploads.is_empty()),
-            body: upload,
+            id: "software-release-details",
+            title: "Details",
+            open: self.github_error.is_some(),
+            body: details,
             ..Fold::default()
         })?);
         Ok(body)

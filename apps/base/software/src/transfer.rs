@@ -112,6 +112,9 @@ impl Software {
             }
         }
         let update = crate::update::discover(self.paths.as_ref(), &github);
+        if let Some(fields) = github.as_object_mut() {
+            fields.remove("latest");
+        }
         Ok(
             json!({"instance": review::instance_json(&instance), "release_trust": trust, "installed_asset": installed, "uploads": uploads, "github": github, "update":update}),
         )

@@ -1,89 +1,53 @@
-//! The installation schedule checks for a release; it has no install authority.
 use crate::Software;
-use bilibi_database::{Change, Error, Result};
-use bilibi_module_registry::{Contribution, Provenance};
+use bilibi_database::{Change, Context, Error, Result};
 use bilibi_notifications::Notice;
-use bilibi_queue::{Execution, Handler, HandlerBinding, HandlerFuture, Outcome, Worker};
-use bilibi_schedule::{Definition, Misfire, Overlap, Reach, Schedule};
 use serde_json::{json, Value};
-use std::sync::Arc;
 
-const WORKER: &str = "base/software-check-update";
-pub(super) const SERVICE: &str = "base/software.update-notice";
-macro_rules! source {
-    () => {
-        Provenance {
-            module: "base/software",
-            source: file!(),
-            line: line!(),
-        }
-    };
-}
-inventory::submit! { Contribution::new(bilibi_queue::WORKERS, WORKER, source!(), &Worker {
-    max_attempts: 3, validate: |args| bilibi_schedule::worker::validate(args, |v|
-        if v == json!({}) {Ok(v)} else {Err(Error::Invalid)})
-}) }
-inventory::submit! { Contribution::new(bilibi_queue::HANDLERS, WORKER, source!(), &HandlerBinding {service:SERVICE, capability:bilibi_schedule::EXECUTE}) }
-inventory::submit! { Contribution::new(bilibi_schedule::DEFINITIONS, "base/software.updates", source!(), &Definition {
-    name:"Check for software updates", expression:"*/15 * * * *", timezone:"Etc/UTC",
-    task_name:"Check for software updates", worker:WORKER, args:|| json!({}), overlap:Overlap::Forbid,
-    misfire:Misfire::Coalesce, reach:Reach::Installation, owner_route:Some("/system/software?tab=releases"),
-}) }
-pub(super) struct Check {
-    pub software: Arc<Software>,
-    pub schedule: Arc<Schedule>,
-}
-impl Handler for Check {
-    fn perform<'a>(&'a self, execution: &'a Execution, args: Value) -> HandlerFuture<'a> {
-        Box::pin(self.schedule.run(execution, args, |_| async {
-            match self.check(execution).await {
-                Ok(()) => Outcome::Completed,
-                Err(error) => {
-                    eprintln!("software update check: {error}");
-                    Outcome::Retry("software_update_check_failed")
-                }
-            }
-        }))
-    }
-}
-impl Check {
-    async fn check(&self, execution: &Execution) -> Result<()> {
-        let Some(paths) = self.software.paths.as_ref() else {
+impl Software {
+    pub(super) async fn check_for_update(&self) -> Result<()> {
+        let Some(paths) = self.paths.as_ref() else {
             return Ok(());
         };
-        let scope = execution.scope().ok_or(Error::Internal)?;
-        let listing = self.software.github_listing(scope, false, false).await?;
+        let listing = self.release_listing(None, false, false).await?;
+        if listing.is_null() {
+            return Ok(());
+        }
         let update = super::update::discover(Some(paths), &listing);
+        if matches!(
+            update["reason"].as_str(),
+            Some("check_failed" | "incomplete_list")
+        ) {
+            return Err(Error::Internal);
+        }
         if update["state"] != "ready" {
             return Ok(());
         }
         let tag = update["release"]["tag"].as_str().ok_or(Error::Internal)?;
         let repo = listing["repository_id"].as_i64().ok_or(Error::Internal)?;
-        let mut client = self.software.db.get().await?;
-        let mut tx = execution
-            .begin(&mut client, "software.update.available")
-            .await?;
-        let Some(owner) = self.software.notifications.installation_owner(&tx).await? else {
+        let mut client = self.db.get().await?;
+        let Some(tenant) = bilibi_schedule::scheduler::operator_tenant(&**client).await? else {
             return Ok(());
         };
-        // Re-prove the recipient's access to the release notes. The check
-        // still runs and commits under the Queue identity.
-        let recipient = self
-            .software
-            .authentication
-            .authenticate(
-                tx.sql(),
-                scope.tenant(),
-                owner,
-                format!("update-notice-{owner}"),
+        let mut tx = self
+            .mutations
+            .begin(
+                &mut client,
+                Context::system(tenant, "software", "software.update.available"),
             )
+            .await?;
+        let Some(owner) = self.notifications.installation_owner(&tx).await? else {
+            return Ok(());
+        };
+        let recipient = self
+            .authentication
+            .authenticate(tx.sql(), tenant, owner, format!("update-notice-{owner}"))
             .await?;
         if !bilibi_authz::holds_proof(tx.sql(), &recipient, crate::VIEW).await? {
             return Ok(());
         }
         let receipt = tx.sql().query_opt(
             "INSERT INTO base_software_update_notices(tenant_id,recipient,repository_id,tag) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING id",
-            &[&scope.tenant(),&owner,&repo,&tag]).await?;
+            &[&recipient.tenant(),&owner,&repo,&tag]).await?;
         if let Some(row) = receipt {
             tx.record(Change {
                 kind: "base/software.update-notice".into(),
@@ -107,9 +71,8 @@ impl Check {
                         .unwrap_or("No change notes were supplied."),
                 )
                 .url("/system/software?tab=releases");
-            self.software
-                .notifications
-                .notify(&mut tx, scope, &[owner], &notice)
+            self.notifications
+                .notify(&mut tx, &recipient, &[owner], &notice)
                 .await?;
         }
         tx.commit().await
