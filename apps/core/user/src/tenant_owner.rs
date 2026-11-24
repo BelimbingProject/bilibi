@@ -53,6 +53,10 @@ impl From<tokio_postgres::Error> for FirstTenantOwnerError {
     }
 }
 
+fn tenant_owner_lock(tenant: i64) -> String {
+    format!("tenant-owner-id:{tenant}")
+}
+
 impl UserService {
     pub async fn provision_tenant_owner(
         &self,
@@ -124,6 +128,8 @@ impl UserService {
         // cannot rotate a link that an earlier run is still sending.
         let invitation = {
             let sql = tokio_postgres::Client::transaction(&mut client).await?;
+            let company_name = company.name.trim();
+            let company_code = company.code.as_deref().map(str::trim);
             let matches = sql
                 .query(
                     "SELECT t.id,p.company_id,b.invitation_id
@@ -135,12 +141,8 @@ impl UserService {
                          AND t.status='active' AND o.tenant_id IS NULL
                      WHERE t.name=$1 AND t.deleted_at IS NULL
                        AND c.deleted_at IS NULL AND c.name=$2 AND c.code=$3
-                     ORDER BY t.id LIMIT 2 FOR SHARE OF t,p,c",
-                    &[
-                        &tenant_name,
-                        &company.name.trim(),
-                        &company.code.as_deref().map(str::trim),
-                    ],
+                     ORDER BY t.id LIMIT 2",
+                    &[&tenant_name, &company_name, &company_code],
                 )
                 .await?;
             let (tenant, company, retry_invitation) = match matches.as_slice() {
@@ -175,6 +177,11 @@ impl UserService {
                 }
                 _ => return Err(FirstTenantOwnerError::AmbiguousTenant),
             };
+            sql.execute(
+                "SELECT pg_advisory_lock(hashtextextended($1,0))",
+                &[&tenant_owner_lock(tenant)],
+            )
+            .await?;
             let mut tx = self.mutations.adopt_deployment(
                 sql,
                 Context::system(tenant, TENANT_OWNER_PRINCIPAL, TENANT_OWNER_ACTION),
@@ -186,11 +193,17 @@ impl UserService {
                         "SELECT i.user_id,i.email,u.name FROM user_tenant_owner_bootstraps b
                          JOIN user_invitations i ON i.tenant_id=b.tenant_id AND i.user_id=b.user_id AND i.id=b.invitation_id
                          JOIN users u ON u.tenant_id=b.tenant_id AND u.id=b.user_id
+                         JOIN tenants t ON t.id=b.tenant_id
+                         JOIN tenant_primary_companies p ON p.tenant_id=b.tenant_id AND p.company_id=b.company_id
+                         JOIN companies c ON c.tenant_id=p.tenant_id AND c.id=p.company_id
                          WHERE b.tenant_id=$1 AND i.id=$2
+                           AND t.name=$3 AND t.deleted_at IS NULL AND t.status='active'
+                           AND c.name=$4 AND c.code=$5 AND c.deleted_at IS NULL
+                           AND NOT EXISTS (SELECT 1 FROM platform_operator o WHERE o.tenant_id=t.id)
                            AND i.accepted_at IS NULL AND i.revoked_at IS NULL
                            AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL
-                         FOR UPDATE OF i,u",
-                        &[&tenant, &id],
+                         FOR UPDATE OF i,u FOR SHARE OF t,p,c",
+                        &[&tenant, &id, &tenant_name, &company_name, &company_code],
                     )
                     .await?
                     .ok_or(FirstTenantOwnerError::OwnerNotPending)?;
@@ -350,20 +363,17 @@ impl UserService {
         user: i64,
     ) -> Result<()> {
         let sql = tx.sql();
-        if let Some(row) = sql
+        if sql
             .query_opt(
-                "SELECT t.name
-                 FROM user_tenant_owner_bootstraps b
-                 JOIN tenants t ON t.id=b.tenant_id
-                 WHERE b.tenant_id=$1 AND b.user_id=$2",
+                "SELECT 1 FROM user_tenant_owner_bootstraps WHERE tenant_id=$1 AND user_id=$2",
                 &[&tenant, &user],
             )
             .await?
+            .is_some()
         {
-            let name: &str = row.get(0);
             sql.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
-                &[&tenant_name_lock(name)],
+                &[&tenant_owner_lock(tenant)],
             )
             .await?;
         }

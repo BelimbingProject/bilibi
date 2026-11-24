@@ -42,6 +42,10 @@ impl WriteHandler for Create {
         Box::pin(async move { Ok(facade()?.create_in(tx, scope, input).await?.into()) })
     }
 }
+fn rename_identity(tenant: &bilibi_tenancy::TenantIdentity) -> Value {
+    json!({"id":tenant.id,"name":tenant.name,"name_version":tenant.name_version})
+}
+
 struct Rename;
 impl WriteHandler for Rename {
     fn owner(&self) -> &'static str {
@@ -69,7 +73,7 @@ impl WriteHandler for Rename {
             if tenant.name_version != version {
                 return Err(Error::Conflict.into());
             }
-            Ok(json!({"summary":format!("Rename tenant “{}” to “{}”", tenant.name, name), "tenant":tenant_json(&tenant), "name":name}).into())
+            Ok(json!({"summary":format!("Rename tenant “{}” to “{}”", tenant.name, name), "tenant":rename_identity(&tenant), "name":name}).into())
         })
     }
     fn commit<'a>(
@@ -92,7 +96,7 @@ impl WriteHandler for Rename {
                 )
                 .await?
                 .map_err(crate::tenant_errors)?;
-            Ok(tenant_json(&tenant).into())
+            Ok(rename_identity(&tenant).into())
         })
     }
 }
@@ -110,7 +114,7 @@ impl ReadHandler for Detail {
         Box::pin(async move {
             let id = input["tenant_id"].as_i64().unwrap_or(scope.tenant());
             let tenant = facade()?.tenants.read_for_rename(client, scope, id).await?;
-            Ok(tenant_json(&tenant).into())
+            Ok(rename_identity(&tenant).into())
         })
     }
 }
@@ -152,22 +156,23 @@ impl ReadHandler for Read {
     }
     fn call<'a>(
         &'a self,
-        client: &'a dyn OperationClient,
+        _client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let facade = facade()?;
-            bilibi_authz::authorize_proof(client, scope, bilibi_tenancy::LIST).await?;
-            let proof = bilibi_tenancy::prove_operator(client, scope).await?;
+            let proof = {
+                let client = facade.db.get().await.map_err(Error::from)?;
+                bilibi_authz::authorize_operator(&**client, scope, bilibi_tenancy::LIST).await?
+            };
             match self {
                 Self::List => {
                     let page = input["page"].as_i64().unwrap_or(1);
                     let size = input["page_size"].as_i64().unwrap_or(25);
                     let (entries, total) = facade
                         .tenants
-                        .search_on(
-                            client,
+                        .search(
                             &proof,
                             input["search"].as_str().unwrap_or_default(),
                             page,
@@ -187,11 +192,7 @@ impl ReadHandler for Read {
                 Self::Get => {
                     let tenant = facade
                         .tenants
-                        .fetch_on(
-                            client,
-                            &proof,
-                            input["tenant_id"].as_i64().ok_or(Error::Invalid)?,
-                        )
+                        .fetch(&proof, input["tenant_id"].as_i64().ok_or(Error::Invalid)?)
                         .await?
                         .ok_or(bilibi_agent_api::Error::NotFound)?;
                     Ok(tenant_json(&tenant).into())
@@ -226,6 +227,9 @@ fn move_output() -> Value {
 fn tenant_output() -> Value {
     json!({"type":"object","description":"Tenant identity: id, parent_id, name, name_version, status (active or suspended), is_platform_operator and, while suspended, suspension {at, reason}. A tenant id does not change the caller's scope."})
 }
+fn rename_output() -> Value {
+    json!({"type":"object","description":"Tenant identity: id, name and name_version. The rename review also includes the proposed name and summary."})
+}
 fn list_output() -> Value {
     json!({"type":"array","items":tenant_output()})
 }
@@ -234,8 +238,8 @@ fn create_output() -> Value {
 }
 inventory::submit! { Contribution::new(DEFINITIONS,"core/tenant",Provenance { module:"core/tenant",source:file!(),line:line!() },&Definitions {
     operations:&[
-        Operation { key:DETAIL,title:"Read a tenant for rename",summary:"Read your tenant, or any tenant as an installation operator, for a rename.",keywords:&["tenant","workspace","read"],capability:bilibi_tenancy::VIEW,input:detail_schema,output:tenant_output,handler:Handler::Read(&Detail),channels:Channels::Every,step_up:&[] },
-        Operation { key:RENAME,title:"Rename a tenant",summary:"Rename your tenant, or any tenant as an installation operator. The version prevents stale changes.",keywords:&["tenant","workspace","rename"],capability:bilibi_tenancy::RENAME,input:rename_schema,output:tenant_output,handler:Handler::SafeWrite(&Rename),channels:Channels::Every,step_up:&[] },
+        Operation { key:DETAIL,title:"Read a tenant for rename",summary:"Read your tenant, or any tenant as an installation operator, for a rename.",keywords:&["tenant","workspace","read"],capability:bilibi_tenancy::VIEW,input:detail_schema,output:rename_output,handler:Handler::Read(&Detail),channels:Channels::Every,step_up:&[] },
+        Operation { key:RENAME,title:"Rename a tenant",summary:"Rename your tenant, or any tenant as an installation operator. The version prevents stale changes.",keywords:&["tenant","workspace","rename"],capability:bilibi_tenancy::RENAME,input:rename_schema,output:rename_output,handler:Handler::SafeWrite(&Rename),channels:Channels::Every,step_up:&[] },
         Operation { key:LIST,title:"Search tenants",summary:"Find tenants in the platform directory by name. Requires operator standing and the tenant-list capability.",keywords:&["tenant","customer","workspace","search","find"],capability:bilibi_tenancy::LIST,input:list_schema,output:list_output,handler:Handler::Read(&Read::List),channels:Channels::Every,step_up:&[] },
         Operation { key:GET,title:"Read a tenant",summary:"Read one tenant's name, parent, status and operator marker. This grants no access to its business data.",keywords:&["tenant","customer","workspace","read"],capability:bilibi_tenancy::LIST,input:get_schema,output:tenant_output,handler:Handler::Read(&Read::Get),channels:Channels::Every,step_up:&[] },
         Operation { key:SUSPEND,title:"Suspend a tenant",summary:"Suspend a tenant with a reason: its people are signed out and nobody can sign in, connect an agent or run its jobs until it is reactivated. Its data is kept. Requires operator standing, tenant-suspend capability and the 2FA policy.",keywords:&["tenant","customer","workspace","suspend","lock","disable","block"],capability:bilibi_tenancy::SUSPEND,input:move_schema,output:move_output,handler:Handler::SafeWrite(&MoveWrite(SUSPEND)),channels:Channels::Every,step_up:&[SUSPEND] },

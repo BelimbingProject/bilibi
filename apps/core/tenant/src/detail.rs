@@ -9,7 +9,7 @@ use bilibi_ui::{
     BackLink, Card, CommitStates, CommitStatus, Fact, Facts, Header, Html, InlineEdit, InlineField,
     Page as UiPage, PageVariant,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 
 fn render(template: impl Template) -> Result<Html> {
     Html::render(&template).map_err(|_| Error::Internal)
@@ -28,7 +28,6 @@ struct View {
 pub(super) struct Detail {
     pages: Pages,
     id: i64,
-    cached: Option<Value>,
     statuses: CommitStates,
     notice: String,
 }
@@ -37,44 +36,33 @@ impl Detail {
         Self {
             pages,
             id,
-            cached: None,
             statuses: CommitStates::default(),
             notice: String::new(),
         }
     }
     async fn body(&mut self, scope: &Scope) -> Result<String> {
-        let (tenant, editable) = match self
+        let result = self
             .pages
             .contracts
             .read(scope, DETAIL, &json!({"tenant_id":self.id}))
             .await
+            .map_err(crate::web::contract_error)?;
+        let tenant = &result["result"];
+        let client = self.pages.db.get().await?;
+        let editable = match self
+            .pages
+            .authorization
+            .authorize_scope(&**client, scope, bilibi_tenancy::RENAME)
+            .await
         {
-            Ok(value) => {
-                let tenant = value["result"].clone();
-                self.cached = Some(tenant.clone());
-                let client = self.pages.db.get().await?;
-                let allowed = self
-                    .pages
-                    .authorization
-                    .authorize_scope(&**client, scope, bilibi_tenancy::RENAME)
-                    .await;
-                let editable = match allowed {
-                    Ok(()) if self.id == scope.tenant() => true,
-                    Ok(()) => match bilibi_tenancy::prove_operator(&**client, scope).await {
-                        Ok(_) => true,
-                        Err(Error::Forbidden) => false,
-                        Err(error) => return Err(error),
-                    },
-                    Err(Error::Forbidden) => false,
-                    Err(error) => return Err(error),
-                };
-                (tenant, editable)
-            }
-            Err(ContractError::Forbidden | ContractError::Backend(Error::Forbidden)) => {
-                (self.cached.clone().ok_or(Error::Forbidden)?, false)
-            }
-            Err(ContractError::Backend(error)) => return Err(error),
-            Err(_) => return Err(Error::Internal),
+            Ok(()) if self.id == scope.tenant() => true,
+            Ok(()) => match bilibi_tenancy::prove_operator(&**client, scope).await {
+                Ok(_) => true,
+                Err(Error::Forbidden) => false,
+                Err(error) => return Err(error),
+            },
+            Err(Error::Forbidden) => false,
+            Err(error) => return Err(error),
         };
         let name = tenant["name"].as_str().ok_or(Error::Internal)?;
         let version = tenant["name_version"].as_i64().ok_or(Error::Internal)?;

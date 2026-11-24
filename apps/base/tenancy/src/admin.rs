@@ -427,23 +427,6 @@ impl Tenants {
             .as_ref()
             .map(TenantIdentity::from_row))
     }
-    /// Fetch on the connection already held by an operation.
-    pub async fn fetch_on(
-        &self,
-        client: &dyn crate::ProofClient,
-        proof: &OperatorProof,
-        id: i64,
-    ) -> Result<Option<TenantIdentity>> {
-        prove_operator(client, proof.scope()).await?;
-        if id <= 0 {
-            return Ok(None);
-        }
-        Ok(client
-            .query_opt(&format!("{SELECT} AND t.id = $1"), &[&id])
-            .await?
-            .as_ref()
-            .map(TenantIdentity::from_row))
-    }
     /// Validates the draft and parent without a business write.
     pub async fn preview(
         &self,
@@ -676,23 +659,11 @@ impl Tenants {
         page_size: i64,
     ) -> Result<(Vec<TenantIdentity>, i64)> {
         let client = self.db.get().await?;
-        self.search_on(&**client, proof, search, page, page_size)
-            .await
-    }
-    /// Bounded directory search on the connection already held by an operation.
-    pub async fn search_on(
-        &self,
-        client: &dyn crate::ReadClient,
-        proof: &OperatorProof,
-        search: &str,
-        page: i64,
-        page_size: i64,
-    ) -> Result<(Vec<TenantIdentity>, i64)> {
-        prove_operator(client, proof.scope()).await?;
+        prove_operator(&**client, proof.scope()).await?;
         let page_size = page_size.clamp(1, 100);
         let offset = (page.clamp(1, 1_000_000) - 1) * page_size;
         let rows = client.query(&format!("{SELECT} AND ($1='' OR strpos(lower(t.name),lower($1))>0) ORDER BY t.name,t.id LIMIT $2 OFFSET $3"), &[&search,&page_size,&offset]).await?;
-        let total = client.query_opt("SELECT count(*) FROM tenants WHERE deleted_at IS NULL AND ($1='' OR strpos(lower(name),lower($1))>0)", &[&search]).await?.ok_or(bilibi_database::Error::Internal)?.get(0);
+        let total = client.query_one("SELECT count(*) FROM tenants WHERE deleted_at IS NULL AND ($1='' OR strpos(lower(name),lower($1))>0)", &[&search]).await?.get(0);
         Ok((rows.iter().map(TenantIdentity::from_row).collect(), total))
     }
 }
