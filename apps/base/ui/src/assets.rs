@@ -146,6 +146,36 @@ fn catalogue() -> &'static [StaticAsset] {
                 &include_bytes!("../assets/static/logo.svg")[..],
             ),
             (
+                "/assets/brand-icon-lime.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-lime.svg")[..],
+            ),
+            (
+                "/assets/brand-icon-teal.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-teal.svg")[..],
+            ),
+            (
+                "/assets/brand-icon-cyan.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-cyan.svg")[..],
+            ),
+            (
+                "/assets/brand-icon-indigo.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-indigo.svg")[..],
+            ),
+            (
+                "/assets/brand-icon-violet.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-violet.svg")[..],
+            ),
+            (
+                "/assets/brand-icon-fuchsia.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-fuchsia.svg")[..],
+            ),
+            (
                 "/favicon.svg",
                 "image/svg+xml",
                 &include_bytes!("../assets/static/favicon.svg")[..],

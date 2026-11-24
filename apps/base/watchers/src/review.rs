@@ -164,6 +164,9 @@ impl Watchers {
             if definition.scripts().next().is_some() {
                 binding["script_local"] = json!(action.local_script);
             }
+            if let Some(outbound) = action.outbound {
+                binding["outbound"] = json!({"destination": outbound.destination, "data": outbound.data});
+            }
             Some(binding)
         }).collect();
         let lookups: Option<Vec<Value>> = definition
@@ -435,6 +438,49 @@ impl Watchers {
                     }
                 }
             }
+            for (index, terms) in script.outbound.iter().enumerate() {
+                let at = format!("do.script.outbound.{index}");
+                let Some(declared) = self
+                    .action(&terms.operation)
+                    .and_then(|action| action.outbound)
+                else {
+                    problems.push((
+                        at,
+                        format!(
+                            "{} does not send outside Bilibi; leave it out of outbound",
+                            terms.operation
+                        ),
+                    ));
+                    continue;
+                };
+                if let Some(field) = terms
+                    .data
+                    .iter()
+                    .find(|field| !declared.data.contains(&field.as_str()))
+                {
+                    problems.push((
+                        at.clone(),
+                        format!(
+                            "{} never sends {field}; it can send {}",
+                            terms.operation,
+                            declared.data.join(", ")
+                        ),
+                    ));
+                }
+                if definition
+                    .scripts()
+                    .filter_map(|other| other.terms(&terms.operation))
+                    .any(|other| other != terms.terms())
+                {
+                    problems.push((
+                        at,
+                        format!(
+                            "every script step of a watcher names the same terms for {}",
+                            terms.operation
+                        ),
+                    ));
+                }
+            }
             review.actions.push(script.describe());
         }
         if let Some(observe) = &definition.observe {
@@ -460,6 +506,19 @@ impl Watchers {
                 .collect();
             review.observation = Some(observe.describe(label));
         }
+        for (index, step) in definition.steps.iter().enumerate() {
+            if let crate::definition::Step::Operation(call) = step {
+                if self
+                    .action(&call.operation)
+                    .is_some_and(|action| action.outbound.is_some())
+                {
+                    problems.push((format!("do.{index}.operation"), format!(
+                        "{} sends outside Bilibi: select it from a script step whose approval names its destination and data",
+                        call.operation
+                    )));
+                }
+            }
+        }
         review.conditions = definition
             .conditions
             .iter()
@@ -481,14 +540,20 @@ impl Watchers {
                 ));
                 continue;
             };
-            if !action.local_script
-                && definition
-                    .script_calls()
+            if let Some(script) = definition.scripts().find(|script| {
+                script
+                    .calls
+                    .iter()
                     .any(|declared| declared.operation == action.key)
-            {
+                    && !action.script_callable(script)
+            }) {
                 problems.push((
                     at("operation"),
-                    format!("{} is unavailable in scripted watchers", action.key),
+                    if action.outbound.is_some() {
+                        format!("{} sends outside Bilibi: {} must name its destination and data under outbound", action.key, script.name)
+                    } else {
+                        format!("{} is unavailable in scripted watchers", action.key)
+                    },
                 ));
             }
             if action.definition.table != trigger.definition.table {

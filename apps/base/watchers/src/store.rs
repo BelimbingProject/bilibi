@@ -668,7 +668,8 @@ impl Watchers {
                     required.retain(|r| r.as_str() != Some(a.definition.subject) && r.as_str() != Some(a.definition.version));
                 }
                 json!({"operation": a.key, "title": a.title, "summary": a.summary, "table": a.definition.table,
-                    "subject": a.definition.subject, "records": a.definition.records, "local_script": a.local_script, "input": input})
+                    "subject": a.definition.subject, "records": a.definition.records, "local_script": a.local_script, "input": input,
+                    "outbound": a.outbound.map(|o| json!({"destination": o.destination, "data": o.data}))})
             })
             .collect();
         let mut lookups = Vec::new();

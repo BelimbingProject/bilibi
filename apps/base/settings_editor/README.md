@@ -38,6 +38,8 @@ Values are read with `Settings::resolve_masked`, so an encrypted value is never 
 
 A module can contribute `ImageSetting` under `base/settings_editor.image-settings` with the same ID as a company-scoped setting. Its Value editor becomes a PNG/JPEG/WebP file input backed by Media, with Upload and Remove actions; real bytes are inspected and the stored setting is the Media asset ID.
 
+A `StagedImage` contribution under `base/settings_editor.staged-images` shows a standalone upload in Global scope for callers with the declared capability. Use a unique upload input name accepted by `UploadSpec`. It returns a checked Media asset ID for the owner's reviewed operation and leaves the setting untouched.
+
 Saved overrides and runtime state live in `base_settings`; inherited module defaults have no stored row.
 
 ## Writes

@@ -432,7 +432,7 @@ impl Draft {
                 }
                 "code" => {
                     field = field
-                        .hint("Clear the code to let Bilibi choose one.")
+                        .hint("Clear the code to generate one automatically.")
                         .attr("maxlength", "255")
                         .attr("data-edited-marker", "code_edited")
                 }

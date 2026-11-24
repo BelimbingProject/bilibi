@@ -14,11 +14,13 @@
 <svg class="ui-icon {{ class }}" xmlns="http://www.w3.org/2000/svg" viewBox="{{ glyph.view_box }}" width="{{ glyph.size }}" height="{{ glyph.size }}" fill="{{ glyph.fill }}"{% if !glyph.stroke_width.is_empty() %} stroke="currentColor" stroke-width="{{ glyph.stroke_width }}"{% endif %} aria-hidden="true" focusable="false">{{ glyph.body()|safe }}</svg>
 {% endmacro %}
 
-{#- The Bilibi wordmark (DESIGN.md, Character): the mark, then "bilibi" in
-    lowercase in its own face, on one line. `href` is the way home and
-    `label` names where it goes. The look is `.ui-wordmark` in assets/css/app.css. -#}
-{% macro wordmark(href, size=bilibi_ui::WordmarkSize::Bar, id="", label="Bilibi home") %}
-<a href="{{ href }}"{% if !id.is_empty() %} id="{{ id }}"{% endif %} aria-label="{{ label }}" class="ui-wordmark {{ size.class() }} rounded-sm transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong"><img src="{{ bilibi_ui::Assets::url("/favicon.svg") }}" alt="" width="{{ size.mark_pixels() }}" height="{{ size.mark_pixels() }}" decoding="async" loading="eager" aria-hidden="true"><span aria-hidden="true">bilibi</span></a>
+{#- The wordmark (DESIGN.md, Character): the installation's own logo and name
+    when `brand` has them, in the interface face; otherwise the Bilibi mark,
+    then "bilibi" in lowercase in its own face, on one line. `href` is the way
+    home and `label` says where it goes, after the name ("Bilibi home"). The
+    look is `.ui-wordmark` in assets/css/app.css. -#}
+{% macro wordmark(href, brand, size=bilibi_ui::WordmarkSize::Bar, id="", label="home") %}
+<a href="{{ href }}"{% if !id.is_empty() %} id="{{ id }}"{% endif %} aria-label="{{ brand.product() }} {{ label }}"{% if brand.custom() %} data-brand="own"{% if !brand.name.is_empty() %} title="{{ brand.name }}"{% endif %}{% endif %} class="ui-wordmark {{ size.class() }}{% if brand.custom() %} ui-wordmark-own{% endif %} rounded-sm transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong">{% if brand.custom() %}{% if let Some(logo) = brand.logo %}<img src="{{ logo }}" alt="" height="{{ size.mark_pixels() }}" decoding="async" loading="eager" aria-hidden="true">{% endif %}{% if !brand.name.is_empty() %}<span aria-hidden="true">{{ brand.name }}</span>{% endif %}{% else %}<img src="{{ bilibi_ui::Assets::url("/favicon.svg") }}" alt="" width="{{ size.mark_pixels() }}" height="{{ size.mark_pixels() }}" decoding="async" loading="eager" aria-hidden="true"><span aria-hidden="true">bilibi</span>{% endif %}</a>
 {% endmacro %}
 
 {#- One fixed-size company mark or account picture. Uploaded raster images and

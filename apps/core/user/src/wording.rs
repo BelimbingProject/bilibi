@@ -78,10 +78,10 @@ template!(
         base_language: "en",
         defaults: &[DefaultText {
             language: "en",
-            version: "1",
+            version: "2",
             slots: &[
-                ("subject", "Reset your Bilibi password"),
-                ("intro", "Reset your Bilibi password by opening this link:"),
+                ("subject", "Reset your password"),
+                ("intro", "Reset your password by opening this link:"),
                 (
                     "closing",
                     "If you did not request this, you can ignore this email."
@@ -115,10 +115,10 @@ template!(
         base_language: "en",
         defaults: &[DefaultText {
             language: "en",
-            version: "1",
+            version: "2",
             slots: &[
-                ("subject", "Your Bilibi sign-in is locked"),
-                ("intro", "Several wrong passwords were entered for your Bilibi account, so its sign-in is locked for about {{duration}}.\n\nIf this was you, wait and try again, or reset your password now to unlock it. If it was not you, your password is still safe; resetting it is a good idea."),
+                ("subject", "Your sign-in is locked"),
+                ("intro", "Several wrong passwords were entered for your account, so its sign-in is locked for about {{duration}}.\n\nIf this was you, wait and try again, or reset your password now to unlock it. If it was not you, your password is still safe; resetting it is a good idea."),
                 ("reset_with_link", "Reset your password with this link:"),
                 ("reset_without_link", "Reset your password with \"Forgot your password?\" on the sign-in page."),
             ],
@@ -169,9 +169,9 @@ template!(
         base_language: "en",
         defaults: &[DefaultText {
             language: "en",
-            version: "1",
+            version: "2",
             slots: &[
-                ("subject", "Verify your Bilibi email address"),
+                ("subject", "Verify your email address"),
                 ("intro", "Verify your email address by opening this link:"),
                 ("closing", "The link expires in one hour. If you did not request this, you can ignore this email."),
             ],
@@ -202,10 +202,10 @@ template!(
         base_language: "en",
         defaults: &[DefaultText {
             language: "en",
-            version: "1",
+            version: "2",
             slots: &[
-                ("subject", "New sign-in to your Bilibi account"),
-                ("intro", "Your Bilibi account was signed in from a device it has not used before."),
+                ("subject", "New sign-in to your account"),
+                ("intro", "Your account was signed in from a device it has not used before."),
                 ("details", "Time: {{time}}\nDevice: {{device}}\nIP address: {{ip_address}}\nPlace: {{place}}"),
                 ("closing", "If this was you, you can ignore this email.\n\nIf this wasn't you, change your password now. Then sign that session out in Your sessions:"),
             ],

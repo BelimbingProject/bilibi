@@ -31,7 +31,7 @@ mailer.deliver_for(tenant, &message).await?;
 - A published override that cannot hold the real facts gives way to the packaged wording, with a log line, so the message is still sent.
 - **Links stay in code.** A slot is prose before or after a link; the sending module builds the link and fixes the order of the parts. Security messages use packaged wording. Publish and restore refuse those keys.
 - A line some messages lack (a place, an end date) is its own slot with an optional variable; Pass omitted slots to `Templates::wording` when the message leaves out those lines.
-- `Mailer::deliver_for` sends under the workspace's sender name ([Mail](../mail/README.md#sender-name)).
+- Use `Mailer::deliver_for` to apply the [sender name rules](../mail/README.md#sender-name) for the workspace.
 
 | Module | Templates |
 | --- | --- |

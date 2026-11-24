@@ -534,9 +534,9 @@ inventory::submit! {
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/grid.customisations", Provenance { module: "base/grid", source: file!(), line: line!() }, &bilibi_labels::CustomisationSection {
     title: "Shared list views",
     undo: Some(bilibi_labels::Undo {
-        read: "base.grid.view.pages", read_input: pages_input, operation: "base.grid.view.delete",
-        event: "customisation.shared_view", action: "Remove view",
-        detail: "The people it was shared with lose the saved view.", rows: customisation_rows,
+        read: "base.grid.view.pages", read_input: pages_input, action: Some(bilibi_labels::UndoAction { operation: "base.grid.view.delete",
+        event: "customisation.shared_view", label: "Remove view",
+        detail: "The people it was shared with lose the saved view." }), rows: customisation_rows,
     }),
     changes: Some(bilibi_labels::Changes {
         purpose: "Save a list's columns, filters and sort as a named view for everyone in this tenant or for chosen roles.",

@@ -304,6 +304,13 @@ impl Show {
                     format!("Nothing changed: {}.", problems.join("; ")),
                 ))
             }
+            // A script refusal names its reason, as the run receipts do.
+            Err(ContractError::Backend(Error::Refused(code))) if code.starts_with("script_") => {
+                self.flash = Some((
+                    StatusKind::Error,
+                    format!("Nothing changed. {}", reason(&code)),
+                ))
+            }
             Err(_) => {
                 self.flash = Some((
                     StatusKind::Error,

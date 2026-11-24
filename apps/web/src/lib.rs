@@ -76,6 +76,8 @@ pub struct App {
     pub services: Arc<bilibi_module_registry::Services>,
     pub company: Arc<bilibi_company::CompanyService>,
     pub user: Arc<bilibi_user::UserService>,
+    /// The installation's own name, logo and accent, or Bilibi's.
+    pub branding: Arc<bilibi_base::branding::Branding>,
     pub security: Arc<bilibi_security::Security>,
     pub renderer: Arc<bilibi_ui::Renderer>,
     pub menu: Arc<bilibi_base::menu::Menu>,
@@ -132,6 +134,7 @@ impl App {
         let company = services.get("core/company.companies")?;
         let user = services.get("core/user.accounts")?;
         let security = services.get("base/security.guard")?;
+        let branding = services.get(bilibi_base::branding::SERVICE)?;
         let step_up: Arc<bilibi_base::step_up::StepUp> =
             services.get(bilibi_base::step_up::SERVICE)?;
         let settings: Arc<bilibi_base::settings::Settings> = services.get("base/settings.store")?;
@@ -178,6 +181,7 @@ impl App {
             listen_address: None,
             company,
             user,
+            branding,
             security,
             renderer,
             menu: Arc::new(menu),
@@ -709,11 +713,21 @@ impl IntoResponse for HttpError {
 fn render<T: Template>(template: T) -> Result<String> {
     template.render().map_err(|_| Error::Internal)
 }
-fn document_titled(title: &str, body: &str) -> Result<Html<String>> {
-    document_themed(title, body, "system")
+fn document_titled(title: &str, body: &str, brand: &bilibi_ui::Brand) -> Result<Html<String>> {
+    document_themed(title, body, "system", brand)
 }
-fn document_themed(title: &str, body: &str, theme: &str) -> Result<Html<String>> {
-    Ok(Html(render(Document { title, body, theme })?))
+fn document_themed(
+    title: &str,
+    body: &str,
+    theme: &str,
+    brand: &bilibi_ui::Brand,
+) -> Result<Html<String>> {
+    Ok(Html(render(Document {
+        brand,
+        title,
+        body,
+        theme,
+    })?))
 }
 fn token(headers: &HeaderMap) -> Result<String> {
     headers

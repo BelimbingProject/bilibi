@@ -45,9 +45,7 @@ fn lock_notices(mailbox: &bilibi_mail::Mailbox, address: &str) -> usize {
         .unwrap_or_default()
         .iter()
         .filter_map(|entry| mailbox.read(&entry.id).ok())
-        .filter(|message| {
-            message.contains("Your Bilibi sign-in is locked") && message.contains(address)
-        })
+        .filter(|message| message.contains("Your sign-in is locked") && message.contains(address))
         .count()
 }
 #[tokio::main]
