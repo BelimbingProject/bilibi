@@ -68,7 +68,7 @@ never treated as stored.
    Give the editor no width of its own: inside a fact it fills the fact's
    floating-field box (`[data-fact]` in `assets/css/app.css`). The owner may change the available choices on every render; no client-side vocabulary or separate refresh event is needed.
 
-The choice shell retains its editor while active, while a reply is outstanding, or while a refused/unconfirmed draft is kept. An idle shell adopts the latest owner-rendered editor, including background changes; a kept draft is released only by its confirmed save or cancellation. This refreshes both native select options and Combobox choices without replacing the trigger or moving focus. A background patch never acknowledges a pending write or replaces a draft's original version.
+The choice shell retains its editor while active, while a reply is outstanding, or while a refused/unconfirmed draft is kept. An idle shell adopts the latest owner-rendered editor, including background changes; a kept draft is released only by its confirmed save or cancellation. This refreshes both native select options and Combobox choices without replacing the trigger or moving focus. A background patch never acknowledges a pending write or replaces a draft's original version. Saves on one record are queued; after a confirmed local save, open or queued fresh drafts advance only when the returned rendering still shows their original value. If a save is refused after the version moved, the hook compares the freshly rendered fact with its original value and retries once with the new version if unchanged. A changed fact shows the current value and explains the conflict.
 
 ## Draft recovery
 
