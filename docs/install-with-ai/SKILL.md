@@ -26,7 +26,7 @@ Ask once, at the start, and write the answers down:
 | Do you have a server? Its address and SSH access | `root@203.0.113.10` | step 2 |
 | The web address for Bilibi, on a domain you control | `erp.example.com` | steps 3, 5 |
 | Your organisation's name | `Example Trading` | step 7 |
-| The email address that will own the server | `owner@example.com` | step 7 |
+| Your name, and the email address that will own the server | `Owner Name`, `owner@example.com` | step 7 |
 | Outgoing mail (SMTP) relay: host, port, username, password, sender address | `smtp.example.net`, `587`, … | step 6 |
 
 The owner needs the mail relay from their email provider or a transactional mail service. Production sends no mail without it, and the claim link is an email.
@@ -69,10 +69,17 @@ done
 gh attestation trusted-root > trusted-root.jsonl
 ```
 
-Stop if any asset is refused. Copy the folder to the server (as root, or to your sudo user's home and then into `/root` with `sudo`):
+Stop if any asset is refused. Copy the folder to the server so it ends up as `/root/bilibi-release`. As root:
 
 ```sh
 scp -r ../bilibi-release root@<address>:/root/
+```
+
+As a sudo user, copy it to that user's home, then move it into `/root`:
+
+```sh
+scp -r ../bilibi-release <user>@<address>:
+ssh <user>@<address> 'sudo rm -rf /root/bilibi-release && sudo mv bilibi-release /root/'
 ```
 
 ## 5. Run the installer (on the server)
@@ -82,13 +89,13 @@ Run these as root. Over ssh as a sudo user, send each batch of commands as a scr
 ```sh
 tag=setup-vX.Y.Z   # the tag you verified in step 4
 cd /root/bilibi-release
-apt-get install -y python3-snappy   # Rocky/RHEL: dnf install -y python3-snappy
+apt-get update && apt-get install -y python3-snappy   # Rocky/RHEL: dnf install -y python3-snappy
 install -D -m 0644 trusted-root.jsonl /etc/bilibi/attestation-trusted-root.jsonl
 rm -rf tools && mkdir tools && tar --no-same-owner -xzf bilibi-server-tools.tar.gz -C tools
 i=tools/scripts/install-server.sh
 ```
 
-The packaged installer checks every asset again on the server against that trusted root, so the server needs no GitHub account. `create` installs PostgreSQL, Caddy and the GitHub CLI from their official package repositories, so the server needs outgoing internet access. Run each step with `--json`. It prints a `started` line, then one result line:
+`release` and `installer` check their asset again on the server against that trusted root, so the server needs no GitHub account. The tools archive is checked only on your computer in step 4: it holds the checking program itself. `create` installs PostgreSQL, Caddy and the GitHub CLI from their official package repositories, so the server needs outgoing internet access. Run each step with `--json`. It prints a `started` line, then one result line:
 
 ```json
 {"step": "create", "state": "completed", "code": "OK", "next": "...", "detail": "..."}

@@ -852,7 +852,9 @@ installer() {
     done
     [[ -n $repository && -n $tag ]] || usage
     need_root installer "$@"
-    [[ -f $source && -x $source ]] || fail "$source is not an executable bilibi-installer" "build it in your development checkout with: cargo build --release --locked -p bilibi-installer, then install target/release/bilibi-installer here"
+    # A downloaded release asset has no execute bit; the verified copy is
+    # installed with its own mode below.
+    [[ -f $source ]] || fail "$source is not a file" "download bilibi-installer-x86_64-unknown-linux-gnu from the release and give its path" INVALID_INPUT
     stage_source "$source"
     verify_provenance "$staged" "$repository" "$repository_id" "$tag"
     [[ -d $root/build ]] || fail "no instance exists yet" "create one first: $0 create <instance> --role ... --site ..."
@@ -1275,7 +1277,7 @@ status() {
         [[ -z $(env_value "$instance" PUBLIC_ORIGIN) ]] || printf '  public site  %s\n' "$(env_value "$instance" PUBLIC_ORIGIN)"
         local r
         for r in $(release_numbers "$instance"); do
-            printf '  release %s  %s\n' "$r" "$(cut -c1-12 "$dir/releases/$r/SHA256SUMS" 2>/dev/null)"
+            printf '  release %s  program %s\n' "$r" "$(awk '$2 == "bilibi-web" { print substr($1, 1, 12) }' "$dir/releases/$r/SHA256SUMS" 2>/dev/null)"
         done
     done
 }
