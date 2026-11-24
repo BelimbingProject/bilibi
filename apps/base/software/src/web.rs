@@ -32,8 +32,8 @@ use bilibi_ui::{
     },
     params, Alert, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, Choice,
     ColumnType, ColumnsOutcome, ConfirmDialog, Fact, Facts, Field, FlashMap, FlexRow, FlexTable,
-    Fold, Header, Html, InputKind, Instant, ListColumns, ListSpec, ListState, SectionHeading,
-    StatusKind, Tab, TableEmpty, Tabs, NO_FLASH,
+    Fold, Header, Html, InputKind, Instant, ListColumns, ListSpec, ListState, StatusKind, Tab,
+    TableEmpty, Tabs, NO_FLASH,
 };
 use jiff::Timestamp;
 use serde_json::{json, Value};
@@ -688,48 +688,23 @@ impl View {
         } else {
             self.catalogue(scope).await?
         };
-        let transfer = if releases {
+        let content = if releases {
             let active = status["job"]["state"] == "queued" || status["job"]["state"] == "running";
-            let install = if can_manage {
+            let mut details = if can_manage {
                 self.install_card(&instance, &status, active)?
             } else {
                 Html::EMPTY
             };
-            self.releases.body(scope, install).await?
-        } else {
-            Html::EMPTY
-        };
-        let mut content = Html::EMPTY;
-        if releases {
-            content.push(&self.instance_card(&instance, &status)?);
-            if status["job"].is_null() {
-                content.push(&render(Card {
-                    id: "software-job",
-                    title: "Last install",
-                    body: Html::text("No install or undo has been requested on this server yet."),
-                    ..Card::default()
-                })?);
-            } else {
-                content.push(&self.job_card(&display, &instance, can_manage, &status)?);
+            details.push(&self.instance_card(&instance, &status)?);
+            if !status["job"].is_null() {
+                details.push(&self.job_card(&display, &instance, can_manage, &status)?);
             }
-            content.push(&self.backups_card(&display, &status)?);
-            content.push(&render(SectionHeading {
-                title: "Get an update",
-                description:
-                    "Install a verified setup file from GitHub or upload a saved copy of one.",
-                ..SectionHeading::default()
-            })?);
-            content.push(&transfer);
-            let history = self.history_card(&display, &status)?;
-            content.push(&render(Fold {
-                id: "software-history-details",
-                title: "Install history",
-                body: history,
-                ..Fold::default()
-            })?);
+            details.push(&self.backups_card(&display, &status)?);
+            details.push(&self.history_card(&display, &status)?);
+            self.releases.body(scope, details).await?
         } else {
-            content.push(&self.modules.body(&status, &catalogue, &self.propose)?);
-        }
+            self.modules.body(&status, &catalogue, &self.propose)?
+        };
         self.page(&instance, content)
     }
 
