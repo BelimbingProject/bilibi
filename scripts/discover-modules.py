@@ -463,7 +463,27 @@ def pin(root, modules, files):
                 + f'cargo_lock_sha256 = "{sha256(lock)}"\n'
                 + '\n[containers]\n')
     for name, head in heads.items():
-        manifest += f'\n[containers."{name}"]\nhead = "{head}"\n'
+        folder = mounted[name]
+        date = git(folder, "show", "-s", "--format=%cs", head).strip()
+        branch = subprocess.run(["git", "-C", str(folder), "symbolic-ref", "--quiet", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+        if not branch and subprocess.run(["git", "-C", str(folder), "rev-parse", "--verify", "refs/remotes/origin/main"], capture_output=True, text=True).stdout.strip() == head:
+            branch = "main"
+        package_versions = set()
+        for module, _ in modules[name.split("/", 1)[0]]:
+            if module.split("/")[0] != name.split("/", 1)[1]:
+                continue
+            package = tomllib.loads((root / "apps" / name.split("/", 1)[0] / module / "Cargo.toml").read_text())["package"]
+            value = package.get("version")
+            if isinstance(value, dict) and value.get("workspace"):
+                value = platform_version
+            if isinstance(value, str):
+                package_versions.add(value)
+        package_version = package_versions.pop() if len(package_versions) == 1 else None
+        manifest += f'\n[containers."{name}"]\nhead = "{head}"\ndate = "{date}"\n'
+        if package_version:
+            manifest += f'package_version = "{package_version}"\n'
+        if branch and re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
+            manifest += f'branch = "{branch}"\n'
         if versions[name]:
             manifest += f'version = "{versions[name]}"\n'
         layer, container = name.split('/', 1)

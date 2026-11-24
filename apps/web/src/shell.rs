@@ -436,7 +436,6 @@ async fn context<'a>(
             composition.version,
             &display,
         ),
-        components: composition.containers,
         topbar_actions,
         page_search: bilibi_ui::page_search(&pages, records).map_err(|_| Error::Internal)?,
     })

@@ -18,7 +18,7 @@ use bilibi_ui::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
         PageFuture, PageRequest, PanelSpec,
     },
-    Button, ButtonVariant, FlashMap, Html, StatusKind, NO_FLASH,
+    Button, ButtonVariant, FlashMap, Html, IconButton, StatusKind, NO_FLASH,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -406,7 +406,11 @@ fn render(
     View {
         subtitle: format!("{} · {}", scope.tenant_name, scope.user_name),
         customize: if editing {
-            button("close-customize", "Close")
+            Html::render(&IconButton {
+                id: "close-customize",
+                event: "toggle_layout_edit",
+                ..IconButton::new("close", "Close")
+            })
         } else {
             button("customize-layout", "Customize")
         }

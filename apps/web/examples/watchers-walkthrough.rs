@@ -964,6 +964,9 @@ async fn walkthrough() -> Result<()> {
         tag: None,
         pin: PinState::Unpinned,
         containers: vec![Container {
+            date: None,
+            branch: None,
+            package_version: None,
             layer: Layer::Extensions,
             id: "customer_example",
             modules: vec!["customer_example/change"],

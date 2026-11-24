@@ -9,8 +9,8 @@ use crate::{Document, Filter};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    download::FileBody, Alert, Button, ButtonVariant, ConfirmDialog, Fact, Facts, FilePreview,
-    Html, Modal, ModalWidth, StatusKind,
+    download::FileBody, Alert, Button, ConfirmDialog, Fact, Facts, FilePreview, Html, Modal,
+    ModalWidth, StatusKind,
 };
 use serde_json::{json, Value};
 
@@ -279,15 +279,6 @@ impl Index {
             body: Html::text("Download"),
             ..Button::default()
         })?);
-        body.push(&render(Button {
-            id: "documents-preview-close",
-            button_type: "button",
-            event: "close_preview",
-            variant: ButtonVariant::Primary,
-            class: "mt-3 ml-2",
-            body: Html::text("Close"),
-            ..Button::default()
-        })?);
         render(Modal {
             id: "documents-preview-modal",
             title: &preview.name,
@@ -343,15 +334,6 @@ impl Index {
                     .collect(),
             })?);
         }
-        let actions = render(Button {
-            id: "documents-result-close",
-            button_type: "button",
-            event: "close_result",
-            variant: ButtonVariant::Primary,
-            body: Html::text("Close"),
-            ..Button::default()
-        })?;
-        body.push(&actions);
         render(Modal {
             id: "documents-result-modal",
             title: "Delete result",

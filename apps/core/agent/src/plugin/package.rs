@@ -121,11 +121,7 @@ impl Package {
             connection,
             display_name: format!("{DISPLAY_NAME} {}", instance.label),
             version: env!("CARGO_PKG_VERSION"),
-            description: format!(
-                "{DESCRIPTION} This plugin reaches {}: {}",
-                instance.label,
-                instance.role.consequence()
-            ),
+            description: format!("{DESCRIPTION} This plugin reaches {}.", instance.label),
             short_description: format!("{SHORT_DESCRIPTION} on {}", instance.label),
             default_prompt: DEFAULT_PROMPT.replace("{}", &instance.label),
             skills,
@@ -200,10 +196,9 @@ fn app_skills(package: &str, registry: &Registry, instance: &Instance) -> Vec<Sk
         .map(|app| {
             let name = skill_name(package, &app.tool.replace("open_", ""));
             let body = format!(
-                "{skill}\n## This connection\n\nThis `{package}` connection reaches **{label}**. {consequence} The card says the same at the top of every screen; if the person meant another instance, use that instance's own connection.\n\nOpen the card with the `{tool}` tool of this connection. Read the `{package}` skill for the tools, the self-report and the review rules.\n",
+                "{skill}\n## This connection\n\nThis `{package}` connection reaches **{label}**. The card says the same at the top of every screen; if the person meant another instance, use that instance's own connection.\n\nOpen the card with the `{tool}` tool of this connection. Read the `{package}` skill for the tools, the self-report and the review rules.\n",
                 skill = app.skill,
                 label = instance.label,
-                consequence = instance.role.consequence(),
                 tool = app.tool,
             );
             Skill {
@@ -229,10 +224,9 @@ fn workflow(
     guides: &[(&'static str, Skill)],
 ) -> Skill {
     let mut body = format!(
-        "{BUSINESS_CONTEXT}\n\n{identity} {INSTANCE_INSTRUCTIONS}\n\n{REVIEW_INSTRUCTIONS}\n\n## Connection\n\nUse the connected Bilibi MCP server of this plugin. It reaches **{label}**: {consequence} Say \"{label}\" whenever you tell the person where a change lands; a person may hold a Dev, a Staging and a Production connection, and only the plugin's name and this skill tell them apart. It needs no shell, local executable or tokens in chat. Use the host's OAuth connection UI when linking is required; never ask for a token or password. Each connection selects the person, company and tenant during consent. Do not switch accounts or transports to bypass a refusal.\n\n## Tools\n\n",
+        "{BUSINESS_CONTEXT}\n\n{identity} {INSTANCE_INSTRUCTIONS}\n\n{REVIEW_INSTRUCTIONS}\n\n## Connection\n\nUse the connected Bilibi MCP server of this plugin. It reaches **{label}**. Say \"{label}\" whenever you tell the person where a change lands; a person may hold a Dev, a Staging and a Production connection, and only the plugin's name and this skill tell them apart. It needs no shell, local executable or tokens in chat. Use the host's OAuth connection UI when linking is required; never ask for a token or password. Each connection selects the person, company and tenant during consent. Do not switch accounts or transports to bypass a refusal.\n\n## Tools\n\n",
         identity = instance.agent_notice(),
         label = instance.label,
-        consequence = instance.role.consequence(),
     );
     for tool in mcp::tools().into_iter().chain(mcp::app_tools(registry)) {
         let name = tool.get("name").and_then(Value::as_str).unwrap_or_default();
@@ -301,15 +295,14 @@ fn setup(package: &str, connection: &Connection, instance: &Instance) -> Skill {
         description: format!("Set up or diagnose the Bilibi {} connection: check the MCP tools, complete OAuth linking through the host, and report what is available.", instance.label),
         body: format!(
             "Read the `{package}` skill's workflow first, including how to report yourself.\n\n\
-This plugin connects to **{label}** ({consequence}).\n\n\
+This plugin connects to **{label}**.\n\n\
 - MCP server: `{server}`, saved as `{package}`.\n\
 - Sign-in: OAuth with PKCE (S256) and automatic client registration, with no client secret and the scope `{scope}`. The person approves it in their browser through the host's connection UI; no Bilibi password or token goes through chat.\n\
 - AI switch: each connection is switched on or off at {settings}. The error `ai_switched_off` means it is off; OAuth approval and the switch are separate choices.\n\
 - Check: call `hello`. A working call proves the connection and the sign-in, so a later refusal of an operation is a permission answer and an empty result is an empty result.\n\n\
 Report what `hello` returned, or the exact error and whether the host needs a new chat or a reload to list the tools.\n",
             label = instance.label,
-            consequence = instance.role.consequence(),
-            scope = connection.scope(),
+                scope = connection.scope(),
         ),
     }
 }

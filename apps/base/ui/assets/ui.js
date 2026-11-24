@@ -186,8 +186,7 @@
       this.el.showModal();
       // A confirmation starts on Cancel even when its body contains a reason field.
       if (this.el.getAttribute('role') === 'alertdialog') {
-        const cancel = Array.from(this.el.querySelectorAll('button[data-event]'))
-          .find(button => button.dataset.event === this.el.dataset.cancel);
+        const cancel = this.el.querySelector(`#${CSS.escape(this.el.id)}-cancel`);
         if (cancel) cancel.focus();
       }
 

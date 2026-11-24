@@ -61,7 +61,6 @@ main { padding: 10px 12px; }
 .banner { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border-left: 5px solid; }
 .banner .role { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 2px 6px; border-radius: 4px; border: 1px solid; }
 .banner .label { font-size: 15px; font-weight: 700; }
-.banner .message { font-size: 12px; }
 [data-tone="info"] { background: var(--info-surface); border-color: var(--info); color: var(--info-ink); }
 [data-tone="success"] { background: var(--success-surface); border-color: var(--success); color: var(--success-ink); }
 [data-tone="warning"] { background: var(--warning-surface); border-color: var(--warning); color: var(--warning-ink); }
@@ -229,22 +228,16 @@ function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many || one + 
 // The instance banner: on every screen, in the instance's own colour.
 // ---------------------------------------------------------------------------
 const ROLE_WORD = { development: 'Dev', staging: 'Staging', production: 'Production' };
-const ROLE_MESSAGE = {
-  development: 'Development server. Test updates on your computer before installing them here.',
-  staging: 'Test copy. Changes here do not affect production.',
-  production: 'Live system. Changes here change real data.',
-};
 function banner(instance) {
   const tone = instance.colour || 'info';
   document.getElementById('banner').replaceChildren(el('div', { class: 'banner', data: { tone }, id: 'instance-banner' }, [
     el('span', { class: 'role', text: ROLE_WORD[instance.role] || instance.role }),
     el('span', { class: 'label', text: instance.label }),
-    el('span', { class: 'message', text: ROLE_MESSAGE[instance.role] || '' }),
   ]));
 }
 function instanceLine(instance) {
   return el('p', { class: 'small', id: 'review-instance', 'data-tone': instance.colour }, [
-    'On ', el('strong', { text: instance.label }), (ROLE_WORD[instance.role] || instance.role) === instance.label ? '. ' : ' (' + (ROLE_WORD[instance.role] || instance.role) + '). ', ROLE_MESSAGE[instance.role] || '',
+    'On ', el('strong', { text: instance.label }), (ROLE_WORD[instance.role] || instance.role) === instance.label ? '. ' : ' (' + (ROLE_WORD[instance.role] || instance.role) + '). ',
   ]);
 }
 

@@ -735,7 +735,7 @@ impl View {
 
     fn page(&mut self, instance: &Instance, content: Html) -> Result<String> {
         let label = instance.label.clone();
-        let subtitle = "Browse domains and extensions, or get an update for this server.";
+        let subtitle = "See what this server runs and install updates from the Releases tab.";
         let header = render(Header {
             title: Html::text("Software"),
             subtitle,

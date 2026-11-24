@@ -64,10 +64,17 @@ pub fn catalogue(catalogue: &Catalogue, made: &Composition) -> Value {
                 Some((_, needs)) if !needs.is_empty() => format!("Needs Bilibi {needs}"),
                 _ => format!("No published version supports Bilibi {}", made.version),
             };
-            item["compatibility"] = json!(match &chosen {
-                Some((true, ..)) => format!("Tested with Bilibi {}", made.version),
-                Some((false, ..)) => format!("Works with Bilibi {}", made.version),
-                None => unfit.clone(),
+            let running = installed[kind]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|d| d["id"] == id.as_str());
+            item["compatibility"] = json!(match (running, &chosen) {
+                (Some(d), _) if d["version"].is_null() && d["branch"] == "main" =>
+                    "Built from main for this release".to_owned(),
+                (_, Some((true, ..))) => format!("Tested with Bilibi {}", made.version),
+                (_, Some((false, ..))) => format!("Works with Bilibi {}", made.version),
+                _ => unfit.clone(),
             });
             // Official modules are kept in step with every Platform release,
             // so they also get one plain status.

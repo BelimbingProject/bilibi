@@ -479,10 +479,9 @@ fn listed(registry: &Registry, instance: &Instance) -> Vec<Value> {
     for tool in &mut tools {
         if matches!(tool["name"].as_str(), Some("plan" | "commit")) {
             let description = format!(
-                "{} This Bilibi is {}. {}",
+                "{} This Bilibi is {}.",
                 tool["description"].as_str().unwrap_or_default(),
-                instance.label,
-                instance.role.consequence()
+                instance.label
             );
             tool["description"] = json!(description);
         }

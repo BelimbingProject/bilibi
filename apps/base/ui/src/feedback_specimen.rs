@@ -46,7 +46,13 @@ impl FeedbackSpecimen {
     pub fn new() -> Self {
         let link = |label| Tab::link("#component-tabs", label, label == "Overview");
         Self {
-            confirmation_reason: crate::Html::render(&crate::Field::named("reason").id("design-library-confirm-reason").label("Reason (optional)").kind(crate::InputKind::Textarea)).expect("confirmation reason specimen"),
+            confirmation_reason: crate::Html::render(
+                &crate::Field::named("reason")
+                    .id("design-library-confirm-reason")
+                    .label("Reason (optional)")
+                    .kind(crate::InputKind::Textarea),
+            )
+            .expect("confirmation reason specimen"),
             tabs_links: [
                 "Overview",
                 "History",
@@ -78,28 +84,64 @@ impl FeedbackSpecimen {
                 ..FlashMap::default()
             },
             statusbar_tags: vec![
-                StatusbarTag { id: "design-library-ai-quiet", label: "AI", title: "AI is off", controls: "design-library-ai-panel", state: "off", quiet: true },
-                StatusbarTag { id: "design-library-ai-connected", label: "AI", title: "AI is on", controls: "design-library-ai-panel", state: "on", quiet: false },
+                StatusbarTag {
+                    id: "design-library-ai-quiet",
+                    label: "AI",
+                    title: "AI is off",
+                    controls: "design-library-ai-panel",
+                    state: "off",
+                    quiet: true,
+                },
+                StatusbarTag {
+                    id: "design-library-ai-connected",
+                    label: "AI",
+                    title: "AI is on",
+                    controls: "design-library-ai-panel",
+                    state: "on",
+                    quiet: false,
+                },
             ],
             instance_statuses: vec![
-                InstanceStatus { id: "", tone: StatusKind::Info, role: "development", role_label: "Dev", label: "Dev", title: "You are on Dev.", editable: true },
-                InstanceStatus { id: "", tone: StatusKind::Warning, role: "staging", role_label: "Staging", label: "Training", title: "You are on Training (Staging).", editable: false },
-                InstanceStatus { id: "", tone: StatusKind::Error, role: "production", role_label: "Production", label: "Production", title: "You are on Production.", editable: false },
+                InstanceStatus {
+                    id: "",
+                    tone: StatusKind::Info,
+                    role: "development",
+                    role_label: "Dev",
+                    label: "Dev",
+                    title: "You are on Dev.",
+                    editable: true,
+                },
+                InstanceStatus {
+                    id: "",
+                    tone: StatusKind::Warning,
+                    role: "staging",
+                    role_label: "Staging",
+                    label: "Training",
+                    title: "You are on Training (Staging).",
+                    editable: false,
+                },
+                InstanceStatus {
+                    id: "",
+                    tone: StatusKind::Error,
+                    role: "production",
+                    role_label: "Production",
+                    label: "Production",
+                    title: "You are on Production.",
+                    editable: false,
+                },
             ],
             instance_badges: vec![
                 InstanceBadge {
                     tone: StatusKind::Info,
                     role: "development",
                     label: "Dev",
-                    title: "You are on Dev. This is a development copy. Changes here do not affect production.",
-                    message: "This is a development copy. Changes here do not affect production.",
+                    title: "You are on Dev.",
                 },
                 InstanceBadge {
                     tone: StatusKind::Warning,
                     role: "staging",
                     label: "SBG Staging",
-                    title: "You are on SBG Staging. This is a test copy. Changes here do not affect production.",
-                    message: "This is a test copy. Changes here do not affect production.",
+                    title: "You are on SBG Staging.",
                 },
             ],
             instance_banners: vec![
@@ -108,7 +150,6 @@ impl FeedbackSpecimen {
                     tone: StatusKind::Info,
                     role: "development",
                     label: "Dev",
-                    message: "This is a development copy. Changes here do not affect production.",
                     class: "",
                 },
                 InstanceBanner {
@@ -116,7 +157,6 @@ impl FeedbackSpecimen {
                     tone: StatusKind::Warning,
                     role: "staging",
                     label: "SBG Staging",
-                    message: "This is a test copy. Changes here do not affect production.",
                     class: "",
                 },
                 InstanceBanner {
@@ -124,7 +164,6 @@ impl FeedbackSpecimen {
                     tone: StatusKind::Error,
                     role: "production",
                     label: "SBG Production",
-                    message: "This is the live system. Changes here change real data.",
                     class: "",
                 },
             ],

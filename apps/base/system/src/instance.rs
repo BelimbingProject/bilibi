@@ -112,21 +112,6 @@ impl Role {
             Self::Production => "the live system",
         }
     }
-    /// What a change here does, as one sentence.
-    pub fn effect(self) -> &'static str {
-        match self {
-            Self::Dev | Self::Staging => "Changes here do not affect production.",
-            Self::Production => "Changes here change real data.",
-        }
-    }
-    /// What a change here does, in one or two short sentences.
-    pub fn consequence(self) -> &'static str {
-        match self {
-            Self::Dev => "This is a development copy. Changes here do not affect production.",
-            Self::Staging => "This is a test copy. Changes here do not affect production.",
-            Self::Production => "This is the live system. Changes here change real data.",
-        }
-    }
     /// The default colour, one of `DESIGN.md`'s status roles.
     pub fn colour(self) -> Colour {
         match self {
@@ -375,20 +360,17 @@ impl Instance {
             && host.contains('.')
             && !LOCAL_ONLY.iter().any(|suffix| host.ends_with(suffix))
     }
-    /// The sentence an agent or a hover shows: "You are on Staging. This is a
-    /// test copy. Changes here do not affect production."
+    /// The sentence a hover shows.
     pub fn notice(&self) -> String {
-        format!("You are on {}. {}", self.label, self.role.consequence())
+        format!("You are on {}.", self.label)
     }
-    /// Agent connection identity includes the role even when the operator's
-    /// label is ambiguous, and the canonical address rather than request data.
+    /// Agent connection identity includes the role and canonical address.
     pub fn agent_notice(&self) -> String {
         format!(
-            "You are on {} ({}), at {}. {}",
+            "You are on {} ({}), at {}.",
             self.label,
             self.role.label(),
-            self.origin,
-            self.role.consequence()
+            self.origin
         )
     }
     /// What the Agent API and MCP send, so an agent can tell its person
@@ -412,7 +394,6 @@ impl Instance {
             role: self.role.env_value(),
             label: &self.label,
             title: &title,
-            message: self.role.consequence(),
         })
     }
     /// The status bar always names the role, including Production.
@@ -435,7 +416,6 @@ impl Instance {
             tone: self.colour.status(),
             role: self.role.env_value(),
             label: &self.label,
-            message: self.role.consequence(),
             class,
         })
     }
