@@ -1,7 +1,7 @@
 use super::{render, Checked, PrintContract, PrintField, PrintKind, Problem, MAX_LAYOUT_BYTES};
 use crate::print::facts::PrintFacts;
 use bilibi_artifacts::{InlineDocument, PdfPaper};
-use bilibi_branding::PrintBrand;
+use bilibi_ui::Accent;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
@@ -127,36 +127,15 @@ impl CompiledPrint<'_> {
         &self,
         state: &str,
         facts: PrintFacts<'_>,
-        brand: &PrintBrand,
+        accent: Accent,
     ) -> Checked<InlineDocument> {
         render::document(
             self.render(state, facts)?,
             &self.language,
-            self.title(),
+            self.contract.label,
             self.paper,
-            brand,
+            accent,
         )
-    }
-
-    /// Render the same document from synthetic declaration facts.
-    pub fn preview_document(&self, brand: &PrintBrand) -> Checked<InlineDocument> {
-        render::document(
-            self.preview()?,
-            &self.language,
-            self.title(),
-            self.paper,
-            brand,
-        )
-    }
-
-    fn title(&self) -> &str {
-        self.blocks
-            .iter()
-            .find_map(|block| match block {
-                Block::Heading { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .unwrap_or(self.contract.label)
     }
 
     fn render_facts(&self, facts: PrintFacts<'_>) -> Checked<String> {

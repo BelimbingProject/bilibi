@@ -48,21 +48,3 @@ th {
   border-bottom: 1pt solid #57534e;
   font-weight: 650;
 }
-footer {
-  display: flex;
-  align-items: center;
-  gap: 4pt;
-  margin-top: 12pt;
-  padding-top: 4pt;
-  border-top: 0.5pt solid #a8a29e;
-  color: #44403c;
-  font-size: 8pt;
-  break-inside: avoid;
-}
-footer img {
-  width: auto;
-  height: auto;
-  max-width: 52pt;
-  max-height: 10pt;
-  object-fit: contain;
-}

@@ -3,9 +3,6 @@
 //! contract.
 mod email;
 mod operations;
-mod print;
-
-pub use print::{PrintBrand, PrintLogo};
 
 use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_database::Db;
@@ -110,12 +107,19 @@ impl Branding {
     ) -> bilibi_database::Result<Stored> {
         let name = self.settings.get_global(client, NAME_KEY).await?;
         let logo = self.settings.get_global(client, LOGO_KEY).await?;
-        let accent = self.settings.get_global(client, ACCENT_KEY).await?;
         Ok(Stored {
             name: name.as_str().unwrap_or_default().to_owned(),
             logo: logo.as_i64(),
-            accent: accent.as_str().and_then(Accent::parse).unwrap_or_default(),
+            accent: self.accent(client).await?,
         })
+    }
+
+    pub async fn accent(
+        &self,
+        client: &(impl GenericClient + Sync),
+    ) -> bilibi_database::Result<Accent> {
+        let accent = self.settings.get_global(client, ACCENT_KEY).await?;
+        Ok(accent.as_str().and_then(Accent::parse).unwrap_or_default())
     }
 
     /// The brand to draw on `client`'s connection. A logo that cannot be

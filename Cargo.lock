@@ -717,7 +717,6 @@ dependencies = [
  "bilibi-ui",
  "inventory",
  "serde_json",
- "tokio",
  "tokio-postgres",
 ]
 
@@ -2050,7 +2049,6 @@ dependencies = [
  "bilibi-agent-api",
  "bilibi-artifacts",
  "bilibi-authz",
- "bilibi-branding",
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-labels",
