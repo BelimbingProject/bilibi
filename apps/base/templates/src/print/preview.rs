@@ -1,6 +1,6 @@
 use super::PrintContract;
 use crate::{Templates, VIEW};
-use bilibi_artifacts::{Artifacts, Operation, Owner, PdfOptions, Reference};
+use bilibi_artifacts::{Artifacts, InlineDocument, Operation, Owner, PdfOptions, Reference};
 use bilibi_branding::Branding;
 use bilibi_database::{Db, Error, Result};
 use bilibi_module_registry::{
@@ -49,12 +49,23 @@ impl Owner for PreviewOwner {
         reference: Option<&'a Reference>,
     ) -> ProofFuture<'a, ()> {
         Box::pin(async move {
+            let reference = reference.ok_or(Error::Forbidden)?;
             if !matches!(operation, Operation::Create | Operation::Read)
-                || !reference.is_some_and(|reference| reference.subject == scope.user().to_string())
+                || reference.subject != scope.user().to_string()
             {
                 return Err(Error::Forbidden);
             }
-            bilibi_authz::authorize_proof(client, scope, VIEW).await
+            let target = match reference.kind.as_str() {
+                "workspace" => None,
+                id => Some(
+                    OrganisationId::try_from(id.parse::<i64>().map_err(|_| Error::Forbidden)?)
+                        .map_err(|_| Error::Forbidden)?,
+                ),
+            };
+            service()?
+                .templates
+                .authorize(client, scope, target, false)
+                .await
         })
     }
 }
@@ -84,21 +95,14 @@ impl Previews {
         layout: &str,
     ) -> Result<StagedPreview> {
         let mut client = self.db.try_get_detached("an agent preview may hold a read connection; the temporary artifact needs an independent write").await?;
-        self.templates
-            .authorize(&**client, scope, target, false)
-            .await?;
-        let company = target
-            .or_else(|| scope.current_company())
+        let company = scope
+            .current_company()
             .ok_or_else(|| Error::refused("Select a company before opening a print preview."))?;
         let reference = Reference {
             subject: scope.user().to_string(),
-            kind: contract.key.into(),
+            kind: target.map_or_else(|| "workspace".into(), |id| id.get().to_string()),
         };
-        let accent = self.branding.accent(&**client).await?;
-        let document = contract
-            .compile(language, layout)
-            .and_then(|compiled| compiled.preview_document(accent))
-            .map_err(|problem| Error::refused(problem.to_string()))?;
+        let document = self.document(&client, contract, language, layout).await?;
         let options = PdfOptions::default()
             .expires_in_days(1)
             .template_version(contract.version);
@@ -107,32 +111,47 @@ impl Previews {
             .for_owner(scope, company, &OWNER)
             .render_inline_document(&mut client, reference, document, &options)
             .await
-            .map_err(|error| match error {
-                bilibi_artifacts::Error::Database(error) => error,
-                _ => Error::refused("The PDF preview could not be rendered."),
-            })?;
+            .map_err(render_error)?;
         Ok(StagedPreview {
             company,
             id: stored.document.id,
         })
     }
 
+    async fn document(
+        &self,
+        client: &tokio_postgres::Client,
+        contract: &PrintContract,
+        language: &str,
+        layout: &str,
+    ) -> Result<InlineDocument> {
+        let accent = self.branding.accent(client).await?;
+        contract
+            .compile(language, layout)
+            .and_then(|compiled| compiled.preview_document(accent))
+            .map_err(|problem| Error::refused(problem.to_string()))
+    }
+
     async fn read(&self, scope: &Scope, company: OrganisationId, id: &str) -> Result<FileBody> {
         let mut client = self.db.get().await?;
-        self.templates
-            .authorize(&**client, scope, Some(company), false)
-            .await?;
         let document = self
             .artifacts
             .for_owner(scope, company, &OWNER)
             .read(&mut client, id)
             .await
             .map_err(|_| Error::NotFound)?;
-        Ok(FileBody::inline(
-            document.bytes,
-            "application/pdf",
-            "print-preview.pdf",
-        ))
+        Ok(pdf(document.bytes))
+    }
+}
+
+fn pdf(bytes: Vec<u8>) -> FileBody {
+    FileBody::inline(bytes, "application/pdf", "print-preview.pdf")
+}
+
+fn render_error(error: bilibi_artifacts::Error) -> Error {
+    match error {
+        bilibi_artifacts::Error::Database(error) => error,
+        _ => Error::refused("The PDF preview could not be rendered."),
     }
 }
 
@@ -156,16 +175,18 @@ impl Download<Scope, Error> for Previews {
                         .get("revision")
                         .and_then(|id| id.parse::<i64>().ok())
                         .ok_or(Error::NotFound)?;
-                    let (contract, company, language, layout) = {
-                        let client = self.db.get().await?;
-                        self.templates
-                            .print_revision(&**client, request.scope, revision)
-                            .await?
-                    };
-                    let preview = self
-                        .stage(request.scope, company, contract, &language, &layout)
+                    let client = self.db.get().await?;
+                    let (contract, language, layout) = self
+                        .templates
+                        .print_revision(&**client, request.scope, revision)
                         .await?;
-                    self.read(request.scope, preview.company, &preview.id).await
+                    let document = self.document(&client, contract, &language, &layout).await?;
+                    let bytes = self
+                        .artifacts
+                        .print_document(&client, document)
+                        .await
+                        .map_err(render_error)?;
+                    Ok(pdf(bytes))
                 }
                 _ => Err(Error::NotFound),
             }

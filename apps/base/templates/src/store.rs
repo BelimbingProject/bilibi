@@ -6,7 +6,7 @@ use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::Catalog;
 use bilibi_party_ids::OrganisationId;
 use bilibi_settings::{Settings, Target};
-use bilibi_tenancy::{NamedOrganisation, PartyProofs, ReadClient, Scope};
+use bilibi_tenancy::{NamedOrganisation, PartyProofs, ProofClient, ReadClient, Scope};
 use serde::Serialize;
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
@@ -261,7 +261,7 @@ impl Templates {
 
     pub(crate) async fn authorize(
         &self,
-        client: &dyn ReadClient,
+        client: &dyn ProofClient,
         scope: &Scope,
         company: Option<OrganisationId>,
         write: bool,

@@ -11,7 +11,7 @@ use bilibi_base::templates::{Origin, Templates};
 use bilibi_database::{pool, Error, MutationBoundary};
 use bilibi_tenancy::{Authentication, ProofFuture, Scope};
 use bilibi_ui::download::{DownloadRequest, DownloadService};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{collections::HashMap, os::unix::fs::PermissionsExt};
 use tokio_postgres::Transaction;
 
@@ -32,13 +32,22 @@ impl PlanAuthority for Held<'_> {
     }
 }
 
-fn publish(company: Option<i64>, revision: i64, title: &str) -> PlannedOperation {
+async fn reviewed(contracts: &PageContracts, scope: &Scope, company: Option<i64>) -> Result<Value> {
+    let mut input = json!({"key":contract::KEY,"language":"en","company_id":company});
+    let reply = contracts
+        .read(scope, "base.templates.print.get", &input)
+        .await?;
+    input["review"] = json!(reply["result"]["print"]["review"]
+        .as_str()
+        .ok_or("no review token")?);
+    Ok(input)
+}
+
+fn publish(mut input: Value, title: &str) -> PlannedOperation {
+    input["layout"] = json!(contract::EN.replace("Production sheet", title));
     PlannedOperation {
         key: "base.templates.print.publish".into(),
-        input: json!({
-            "key":contract::KEY,"language":"en","company_id":company,"revision":revision,
-            "layout":contract::EN.replace("Production sheet", title),
-        }),
+        input,
     }
 }
 
@@ -124,19 +133,41 @@ async fn main() -> Result<()> {
         .services
         .get::<Templates>(bilibi_base::templates::SERVICE)?;
     let company = |id| OrganisationId::new(id).map(Some);
+    let stale = publish(
+        reviewed(&contracts, &manager, Some(1)).await?,
+        "Stale inherited layout",
+    );
+    assert_eq!(
+        plans
+            .preview(&Held(&manager), std::slice::from_ref(&stale))
+            .await?["valid"],
+        true
+    );
     let workspace = apply(
         &plans,
         &manager,
-        &publish(None, 0, "Workspace production sheet"),
+        &publish(
+            reviewed(&contracts, &manager, None).await?,
+            "Workspace production sheet",
+        ),
     )
     .await?;
+    assert!(plans
+        .commit(&manager, &Held(&manager), &[stale])
+        .await
+        .is_err());
+
     let first = apply(
         &plans,
         &manager,
-        &publish(Some(1), 0, "Company production sheet"),
+        &publish(
+            reviewed(&contracts, &manager, Some(1)).await?,
+            "Company production sheet",
+        ),
     )
     .await?;
-    let stale = publish(Some(1), first, "Stale proposed title");
+    let company_review = reviewed(&contracts, &manager, Some(1)).await?;
+    let stale = publish(company_review.clone(), "Stale proposed title");
     assert_eq!(
         plans
             .preview(&Held(&manager), std::slice::from_ref(&stale))
@@ -146,7 +177,7 @@ async fn main() -> Result<()> {
     let latest = apply(
         &plans,
         &manager,
-        &publish(Some(1), first, "New company title"),
+        &publish(company_review, "New company title"),
     )
     .await?;
     assert!(plans
@@ -218,6 +249,28 @@ async fn main() -> Result<()> {
         );
     }
 
+    let files = app
+        .services
+        .get::<DownloadService<Scope, Error>>("base/templates.downloads")?;
+    let query = HashMap::new();
+    for (revision, current) in [(first, false), (latest, true)] {
+        let params = HashMap::from([("revision".into(), revision.to_string())]);
+        let result = files
+            .0
+            .serve(DownloadRequest {
+                operation: "published",
+                scope: &manager,
+                path: &params,
+                query: &query,
+            })
+            .await;
+        if current {
+            assert!(result?.bytes.starts_with(b"%PDF-"));
+        } else {
+            assert!(matches!(result, Err(Error::NotFound)));
+        }
+    }
+
     let draft = contracts
         .read(
             &manager,
@@ -233,10 +286,6 @@ async fn main() -> Result<()> {
         .ok_or("no preview path")?;
     let id = path.rsplit('/').next().ok_or("no preview ID")?;
     let params = HashMap::from([("company".into(), "1".into()), ("id".into(), id.into())]);
-    let query = HashMap::new();
-    let files = app
-        .services
-        .get::<DownloadService<Scope, Error>>("base/templates.downloads")?;
     let request = |scope| DownloadRequest {
         operation: "preview",
         scope,
@@ -252,11 +301,45 @@ async fn main() -> Result<()> {
         .read(&manager, "base.templates.print.get", &get(1))
         .await?;
     assert_eq!(before["result"]["print"]["revision"], latest);
-    let restore = PlannedOperation {
+    let mut restore = PlannedOperation {
         key: "base.templates.print.restore".into(),
-        input: json!({"key":contract::KEY,"language":"en","company_id":1,"revision":latest}),
+        input: reviewed(&contracts, &manager, Some(1)).await?,
     };
+    assert_eq!(
+        plans
+            .preview(&Held(&manager), std::slice::from_ref(&restore))
+            .await?["valid"],
+        true
+    );
+    let workspace = apply(
+        &plans,
+        &manager,
+        &publish(
+            reviewed(&contracts, &manager, None).await?,
+            "Updated workspace title",
+        ),
+    )
+    .await?;
+    assert!(plans
+        .commit(&manager, &Held(&manager), std::slice::from_ref(&restore))
+        .await
+        .is_err());
+    restore.input = reviewed(&contracts, &manager, Some(1)).await?;
+    let stale = publish(restore.input.clone(), "Earlier editor");
     let marker = apply(&plans, &manager, &restore).await?;
+    let params = HashMap::from([("revision".into(), latest.to_string())]);
+    assert!(matches!(
+        files
+            .0
+            .serve(DownloadRequest {
+                operation: "published",
+                scope: &manager,
+                path: &params,
+                query: &query,
+            })
+            .await,
+        Err(Error::NotFound)
+    ));
     let after = contracts
         .read(&manager, "base.templates.print.get", &get(1))
         .await?;
@@ -267,11 +350,7 @@ async fn main() -> Result<()> {
         workspace
     );
     assert!(plans
-        .commit(
-            &manager,
-            &Held(&manager),
-            &[publish(Some(1), latest, "Earlier editor")]
-        )
+        .commit(&manager, &Held(&manager), &[stale])
         .await
         .is_err());
 

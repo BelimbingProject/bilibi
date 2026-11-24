@@ -73,7 +73,7 @@ The first tenant owner's invitation (`bilibi tenant-owner`) keeps fixed text: it
 
 Read `base.templates.print.list` and `base.templates.print.get` for the contract, sample facts, current and inherited layout, and the exact revision. Use `base.templates.print.preview` to open a private sample PDF for either the effective layout or a proposed draft. It expires within a day. The owner can resolve a published layout for an authorised record with `Templates::resolve_print`.
 
-Use the reviewed `base.templates.print.publish` and `base.templates.print.restore` operations. Each change appends an audited revision, and a stale approval is refused. **Administration › Customisations** shows current overrides, their inheritance source, a **Preview PDF** action and **Restore inherited layout**.
+Use the reviewed `base.templates.print.publish` and `base.templates.print.restore` operations. Pass the `review` token from the print read when publishing or restoring. Each change appends an audited revision, and approval is refused if the current or inherited layout has changed. **Administration › Customisations** shows current overrides, their inheritance source, a **Preview PDF** action and **Restore inherited layout**.
 
 ## Which wording is used?
 

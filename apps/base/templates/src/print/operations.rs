@@ -2,7 +2,7 @@ use super::{preview, revisions::AUDIT_KIND, PrintField, PrintKind, PrintValue};
 use crate::{
     operations::{owner, selection},
     store::Selection,
-    Templates, MANAGE, MODULE, VIEW,
+    MANAGE, MODULE, VIEW,
 };
 use bilibi_agent_api::page::{PageBinding, PAGE_BINDINGS};
 use bilibi_agent_api::{
@@ -87,30 +87,16 @@ enum Write {
 
 struct Revision<'a> {
     selection: Selection<'a>,
-    expected: i64,
+    expected: &'a str,
     layout: Option<&'a str>,
 }
 
 impl Write {
-    fn revision<'a>(
-        &self,
-        templates: &Templates,
-        input: &'a Value,
-    ) -> bilibi_agent_api::Result<Revision<'a>> {
+    fn revision<'a>(&self, input: &'a Value) -> bilibi_agent_api::Result<Revision<'a>> {
         let selection = selection(input)?;
-        let contract = templates.print_contract(selection.key)?;
-        let expected = input["revision"].as_i64().ok_or(Error::Invalid)?;
+        let expected = input["review"].as_str().ok_or(Error::Invalid)?;
         let layout = match self {
-            Self::Publish => {
-                let layout = input["layout"].as_str().ok_or(Error::Invalid)?;
-                contract
-                    .compile(selection.language, layout)
-                    .and_then(|compiled| compiled.preview())
-                    .map_err(|problem| {
-                        bilibi_agent_api::invalid(&problem.field, &problem.message)
-                    })?;
-                Some(layout)
-            }
+            Self::Publish => Some(input["layout"].as_str().ok_or(Error::Invalid)?),
             Self::Restore => None,
         };
         Ok(Revision {
@@ -134,7 +120,7 @@ impl WriteHandler for Write {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let templates = owner()?;
-            let revision = self.revision(templates, input)?;
+            let revision = self.revision(input)?;
             let target = &revision.selection;
             let before = templates.edit_print(client, scope, target, true).await?;
             before.check(revision.expected, revision.layout.is_none())?;
@@ -154,9 +140,12 @@ impl WriteHandler for Write {
                     json!({ "summary": format!("New documents will use {inherited}.") }).into(),
                 );
             };
+            templates
+                .validate_print(target, layout)
+                .map_err(|problem| bilibi_agent_api::invalid(&problem.field, &problem.message))?;
             Ok(json!({
                 "key":target.key, "company_id":target.company, "language":target.language,
-                "revision":revision.expected, "before":before.effective.origin, "layout":layout,
+                "revision":before.revision, "before":before.effective.origin, "layout":layout,
                 "preview_operation":PREVIEW,
             })
             .into())
@@ -171,7 +160,7 @@ impl WriteHandler for Write {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let templates = owner()?;
-            let revision = self.revision(templates, input)?;
+            let revision = self.revision(input)?;
             let id = templates
                 .change_print(
                     tx,
@@ -250,13 +239,13 @@ fn preview_schema() -> Value {
 }
 fn restore() -> Value {
     let mut schema = get();
-    schema["required"] = json!(["key", "language", "revision"]);
-    schema["properties"]["revision"] = json!({"type":"integer","minimum":0});
+    schema["required"] = json!(["key", "language", "review"]);
+    schema["properties"]["review"] = json!({"type":"string","minLength":64,"maxLength":64});
     schema
 }
 fn publish() -> Value {
     let mut schema = restore();
-    schema["required"] = json!(["key", "language", "revision", "layout"]);
+    schema["required"] = json!(["key", "language", "review", "layout"]);
     schema["properties"]["layout"] = json!({"type":"string","maxLength":49152});
     schema
 }
@@ -270,7 +259,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/templates.print.agent"
         Operation { key: PUBLISH, title: "Publish a print layout", summary: "Publish a reviewed layout for one language and company or the workspace.", keywords: &["print","publish"], capability: MANAGE, input: publish, output: result, handler: Handler::SafeWrite(&Write::Publish), channels: Channels::Every, step_up: &[] },
         Operation { key: RESTORE, title: "Restore inherited print layout", summary: "Restore the layout inherited from the workspace or the packaged default.", keywords: &["print","restore"], capability: MANAGE, input: restore, output: result, handler: Handler::SafeWrite(&Write::Restore), channels: Channels::Every, step_up: &[] },
     ],
-    guides: &[Guide { key: "base.templates.print", title: "Customise a business print layout", summary: "Read, preview and publish a print layout for a workspace or company.", keywords: &["print","pdf","template"], capability: VIEW, body: "List document types, then read the target key, language and optional company. Use the current layout as an example. The layout is a JSON string containing paper and blocks. Arrange the owner fields and tables, preserving required blocks and leaving their labels to the contract. Preview the draft PDF with synthetic facts. Review and approve publication against the current revision. You can view and restore the result in Administration > Customisations." }],
+    guides: &[Guide { key: "base.templates.print", title: "Customise a business print layout", summary: "Read, preview and publish a print layout for a workspace or company.", keywords: &["print","pdf","template"], capability: VIEW, body: "List document types, then read the target key, language and optional company. Use the current layout as an example. The layout is a JSON string containing paper and blocks. Arrange the owner fields and tables, preserving required blocks and leaving their labels to the contract. Preview the draft PDF with synthetic facts. Review and approve publication using the review token returned by the read operation. You can view and restore the result in Administration > Customisations." }],
 }) }
 
 fn rows(input: &Value) -> Vec<bilibi_labels::CustomisationRow> {
@@ -281,7 +270,7 @@ fn rows(input: &Value) -> Vec<bilibi_labels::CustomisationRow> {
             audit_kind: AUDIT_KIND,
             audit_id: revision,
             revision,
-            input: json!({"key":row["key"],"language":row["language"],"company_id":row["company_id"],"revision":revision}),
+            input: json!({"key":row["key"],"language":row["language"],"company_id":row["company_id"],"review":row["review"]}),
         })
     }).collect()
 }
