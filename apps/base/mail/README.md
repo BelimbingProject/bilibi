@@ -49,6 +49,14 @@ Read each attachment through the owning service's authorised `download_attachmen
 - A message that names its own `from` keeps it. A standalone `Mailer` has no settings and uses its sender.
 - The message text comes from [Templates](../templates/README.md#word-a-modules-own-mail), never from a string in code.
 
+## Branded workspace mail
+
+- The registered mailer adds the shared HTML layout when the caller supplies a plain body. This also applies when a job calls `mailer.render` before recording and delivering its attempt.
+- The plain body travels alongside the HTML layout in `multipart/alternative`. Both use the same rendered wording. Askama escapes every subject, passage and variable in the HTML layout.
+- `deliver_linked_for(tenant, &message, Some(&url))` adds an HTML action for the owner-built HTTP(S) URL when it appears on its own line in the plain body. Only supply URLs built by the component that owns the action. Template text has no markup or link syntax.
+- The layout uses the installation name, its accent and a Bilibi footer. A readable adopter logo travels with the HTML as an inline raster part, so opening mail fetches nothing and the logo stays visible after a web logo link would expire. Mail can fall back to the name and accent if the logo cannot be read or would exceed the message limit. If the generated layout still exceeds the limit, the mailer uses the original plain body and attachments subject to the same validation and size limit.
+- The fixed layout applies to platform-delivered security messages too. Their wording and action placement still belong to the issuing module. Caller-provided HTML keeps its layout. The standalone `render` function builds only the parts supplied by the caller.
+
 ## Delivery reports
 
 A relay that takes a message says nothing later, and Base reads no mailbox, so a bounce reaches Bilibi when an Extension adapting a mail provider (a webhook, a feed) reports it, or when a module that fetches mail finds a `Parsed.report` (see Receiving a message). `base/mail.reports` (`DeliveryReports`) is that one door:
@@ -162,7 +170,7 @@ SMTP also requires `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_TLS_MODE
 
 `mailer.dev_mailbox()` returns `Some(&Mailbox)` only for the active development transport, and `None` for SMTP. **A development-only tool must also require `Instance::resolve(...).role` to be development** (`base/system`): a production installation without `MAIL_HOST` still has a mailbox transport, though it sends nothing to it.
 
-Open the newest `.eml` file in a mail client to see its plain and HTML parts and attachments. Simple plain-text messages retain their decoded (`8bit`) readable copy so reset links can be copied directly. Multipart messages keep their MIME encoding intact. Returned `Sent.bytes` always remain the wire form.
+Open the newest `.eml` file in a mail client to see its plain and HTML parts and attachments. Multipart messages keep their MIME encoding intact. Read their plain alternative with `bilibi_mail::parse` when extracting a link in a walkthrough. Returned `Sent.bytes` always remain the wire form.
 
 Mail creates the directory as `0700` and does not change an existing one; files are `0600`, and only the newest 100 messages are kept. `Mailbox::entries` lists messages newest first; `Mailbox::read` reads one accepted filename. The `inbound/` subfolder is excluded from listing and pruning. A module that offers inbound development tools owns reading that folder.
 

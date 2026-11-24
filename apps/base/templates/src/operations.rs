@@ -233,12 +233,12 @@ fn publish() -> Value {
 inventory::submit! { Contribution::new(DEFINITIONS, "base/templates.agent", crate::provenance!(), &Definitions {
     operations: &[
         Operation { key: OVERRIDES, title: "List published wording", summary: "Find current template overrides for the workspace and companies you can work in.", keywords: &["wording","templates"], capability: VIEW, input: empty, output: list_output, handler: Handler::Read(&Read::Overrides), channels: Channels::Every, step_up: &[] },
-        Operation { key: LIST, title: "List templates", summary: "Find templates, their editability, fields and variables.", keywords: &["wording","email","copy"], capability: VIEW, input: empty, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
-        Operation { key: INSPECT, title: "Read template wording", summary: "See the current and inherited wording and the revision for one language and company.", keywords: &["wording","email"], capability: VIEW, input: inspect, output, handler: Handler::Read(&Read::Inspect), channels: Channels::Every, step_up: &[] },
-        Operation { key: PUBLISH, title: "Publish template wording", summary: "Publish plain-text wording for one language and company or the workspace.", keywords: &["wording","email"], capability: MANAGE, input: publish, output, handler: Handler::SafeWrite(&Write::Publish), channels: Channels::Every, step_up: &[] },
-        Operation { key: RESTORE, title: "Restore inherited wording", summary: "Remove the custom wording for one language and company or the workspace.", keywords: &["wording","email"], capability: MANAGE, input: restore, output, handler: Handler::SafeWrite(&Write::Restore), channels: Channels::Every, step_up: &[] },
+        Operation { key: LIST, title: "List templates", summary: "Find templates, their editability, fields and variables.", keywords: &["wording","email","portal notice","copy"], capability: VIEW, input: empty, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
+        Operation { key: INSPECT, title: "Read template wording", summary: "See the current and inherited wording and the revision for one language and company.", keywords: &["wording","email","portal notice"], capability: VIEW, input: inspect, output, handler: Handler::Read(&Read::Inspect), channels: Channels::Every, step_up: &[] },
+        Operation { key: PUBLISH, title: "Publish template wording", summary: "Publish plain-text wording for one language and company or the workspace.", keywords: &["wording","email","portal notice"], capability: MANAGE, input: publish, output, handler: Handler::SafeWrite(&Write::Publish), channels: Channels::Every, step_up: &[] },
+        Operation { key: RESTORE, title: "Restore inherited wording", summary: "Remove the custom wording for one language and company or the workspace.", keywords: &["wording","email","portal notice"], capability: MANAGE, input: restore, output, handler: Handler::SafeWrite(&Write::Restore), channels: Channels::Every, step_up: &[] },
     ],
-    guides: &[Guide { key: "base.templates", title: "Edit message templates", summary: "Find and preview wording you can publish for a workspace or company.", keywords: &["templates","email","wording"], capability: VIEW, body: "List the templates, then read the chosen key, language and optional company. The read gives you all editable fields, sample variables, the current and inherited text and the revision. Place variables in double braces. Publish all editable fields together or restore inherited wording. Review the sample and approve the operation before committing." }],
+    guides: &[Guide { key: "base.templates", title: "Edit wording templates", summary: "Find and preview wording you can publish for a workspace or company.", keywords: &["templates","email","portal notice","wording"], capability: VIEW, body: "List the templates, then read the chosen key, language and optional company. The read gives you all editable fields, sample variables, the current and inherited text and the revision. Place variables in double braces. Publish all editable fields together or restore inherited wording. Review the sample and approve the operation before committing." }],
 }) }
 
 const UNDO_EVENT: &str = "customisation.templates";
@@ -358,7 +358,7 @@ fn choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/templates.customisations", crate::provenance!(), &bilibi_labels::CustomisationSection {
     title: "Templates",
     undo: Some(bilibi_labels::Undo { read:OVERRIDES, read_input:empty_input, action: Some(bilibi_labels::UndoAction { operation:RESTORE, event:UNDO_EVENT,
-        label:"Restore inherited wording", detail:"Future messages will use the inherited wording." }), rows }),
+        label:"Restore inherited wording", detail:"This template will use inherited wording again." }), rows }),
     changes: Some(bilibi_labels::Changes {
         purpose:"Change the wording people receive from a workspace or company.",
         limits:"Plain text with the variables each template offers. The sending feature chooses the recipient and attachments.",

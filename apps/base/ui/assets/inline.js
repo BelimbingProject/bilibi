@@ -2,72 +2,11 @@
 // own reply ends Saving. Background patches never acknowledge a write.
 (() => {
   'use strict';
-  // One queue per record prevents this page's own writes racing one another.
-  const records = new Map();
-  function recordFor(el) {
-    const key = JSON.stringify([el.closest('[data-target]')?.dataset.target || '', el.dataset.saveEvent, el.dataset.id]);
-    if (!records.has(key)) records.set(key, {hooks: new Set(), queue: [], sending: false});
-    return records.get(key);
-  }
-  function sendNext(record) {
-    if (record.sending || !record.queue.length) return;
-    const {owner, draft} = record.queue.shift();
-    if (!owner.el.isConnected) return sendNext(record);
-    record.sending = true;
-    function send() {
-      owner.emit(owner.el.dataset.saveEvent, {
-        id: owner.el.dataset.id, field: owner.el.dataset.field,
-        value: draft.value, version: draft.version,
-        onReply: (reply) => {
-          if (!owner.el.isConnected) { record.sending = false; return sendNext(record); }
-          const currentVersion = owner.el.dataset.version;
-          const currentValue = owner.el.dataset.value;
-          const saved = reply.type !== 'error' && owner.el.dataset.status === 'saved';
-          // A refusal whose version moved has a freshly rendered value. Retry
-          // once only when this particular fact is still what the editor saw.
-          if (!saved && reply.type !== 'error' && owner.el.dataset.status === 'error'
-            && currentVersion && currentVersion !== draft.version) {
-            if (currentValue === draft.original && !draft.retried) {
-              draft.version = currentVersion;
-              draft.retried = true;
-              return send();
-            }
-            if (currentValue !== draft.original) {
-              const label = (owner.trigger()?.getAttribute('aria-label') || owner.el.dataset.field).replace(/^Edit\s+/i, '');
-              const shown = owner.choice ? owner.trigger()?.textContent.trim() : (owner.el.dataset.displayValue ?? currentValue);
-              owner.message(`Someone else just changed ${label} while you were editing, so your change was not saved. It now shows ${shown || '—'}. Edit it again if you still want to change it.`);
-              owner.el.querySelector('[data-role="outcome"]')?.classList.add('hidden');
-              if (owner.draft === draft) owner.draft = null;
-            }
-          }
-          owner.pending.delete(draft);
-          if (saved) {
-            for (const other of record.hooks) {
-              if (other.active && (!other.draft || other.draft === draft) && other.version === draft.version && other.el.dataset.version === currentVersion && other.el.dataset.value === other.original) other.version = currentVersion;
-            }
-            for (const item of record.queue) {
-              if (item.draft.advanceable && item.draft.version === draft.version && item.owner.el.dataset.version === currentVersion && item.owner.el.dataset.value === item.draft.original) item.draft.version = currentVersion;
-            }
-            if (owner.draft === draft) owner.draft = null;
-          } else if (reply.type === 'error') {
-            owner.message(reply.message || 'The change was not confirmed. Open the field to retry, or press Escape to discard the draft.');
-          }
-          owner.updated();
-          record.sending = false;
-          sendNext(record);
-        },
-      });
-    }
-    send();
-  }
   const hook = {
     mounted() {
-      this.record = recordFor(this.el);
-      this.record.hooks.add(this);
       this.active = false;
       this.draft = null;
       this.pending = new Set();
-      this.sequence = 0;
       this.long = this.el.dataset.hook === 'InlineLongText';
       this.choice = this.el.dataset.hook === 'InlineChoice';
       this.editorSource = this.editor()?.dataset.editor;
@@ -124,7 +63,7 @@
       this.updated();
       if (this.el.dataset.initialEdit === 'true') this.start(undefined, false, this.el.dataset.autofocus !== 'false');
     },
-    destroyed() { this.abort.abort(); this.record.hooks.delete(this); },
+    destroyed() { this.abort.abort(); },
     editor() { return this.el.querySelector('[data-role="editor"]'); },
     // A several-choices editor is a MultiSelect named `<field>[]`: its value
     // is the ticked codes joined by commas (a code never holds one).
@@ -182,8 +121,7 @@
       // The owner's hint, then the outcome, as the template renders them.
       const describedBy = [
         this.el.querySelector('[data-role="hint"]') && `${this.el.id}-hint`,
-        this.el.dataset.status !== 'none' && !this.el.querySelector('[data-role="outcome"]')?.classList.contains('hidden') && `${this.el.id}-status`,
-        !this.el.querySelector('[data-role="connection"]')?.classList.contains('hidden') && `${this.el.id}-connection`,
+        this.el.dataset.status !== 'none' && `${this.el.id}-status`,
       ].filter(Boolean).join(' ');
       const trigger = this.trigger();
       if (trigger) {
@@ -195,7 +133,7 @@
       this.editor()?.classList.toggle('hidden', !this.active);
       const input = this.control();
       if (input) {
-        input.setAttribute('aria-invalid', String(this.el.dataset.status === 'error'));
+        input.setAttribute('aria-invalid', String(['error', 'conflict'].includes(this.el.dataset.status)));
         if (describedBy) input.setAttribute('aria-describedby', describedBy);
         else input.removeAttribute('aria-describedby');
       }
@@ -220,12 +158,10 @@
     start(value, atEnd = false, autofocus = true) {
       if (this.el.dataset.editable !== 'true' || this.active) return;
       this.active = true;
-      // An unsuccessful draft keeps its original version until explicit Escape.
-      const draft = this.draft || {value: this.el.dataset.value, version: this.el.dataset.version};
-      this.original = draft.original ?? this.el.dataset.value;
-      this.version = draft.version;
-      this.advanceable = !this.draft || this.pending.has(this.draft);
-      this.message('');
+      const current = this.el.dataset.value;
+      const draft = this.draft || {value: current, original: current};
+      this.original = draft.original;
+      this.openedPendingValue = this.pending.has(draft) ? draft.value : undefined;
       const input = this.control();
       if (!input) { this.active = false; return; }
       input.value = value === undefined ? draft.value : value;
@@ -255,20 +191,42 @@
       if (!this.active) return;
       const input = this.control();
       const value = this.long || this.choice ? input.value : input.value.trim();
-      const unchanged = value === this.original;
+      const unchanged = value === this.openedPendingValue
+        || (value === this.original && !this.pending.size);
       if (unchanged || (!value.trim() && !this.el.hasAttribute('data-allow-empty'))) {
         this.cancel(returnFocus);
         return;
       }
-      const draft = {value, original: this.original, version: this.version, advanceable: this.advanceable, sequence: ++this.sequence};
+      const draft = {value, original: this.original};
       this.draft = draft;
       this.active = false;
       this.pending.add(draft);
       this.message('');
       this.updated();
       if (returnFocus) this.trigger()?.focus();
-      this.record.queue.push({owner: this, draft});
-      sendNext(this.record);
+      this.emit(this.el.dataset.saveEvent, {
+        id: this.el.dataset.id, field: this.el.dataset.field, value,
+        fact: this.el.id, original: draft.original,
+        prepareOriginal: () => draft.original,
+        onReply: (reply) => {
+          this.pending.delete(draft);
+          if (!this.el.isConnected) return;
+          if (reply.type === 'error') {
+            if (this.draft === draft) this.message(reply.message || 'The change was not confirmed. Open the field to retry, or press Escape to discard the draft.');
+          } else if (this.el.dataset.status === 'saved') {
+            if (this.el.dataset.value === draft.value) {
+              if (this.active && this.original === draft.original) this.original = draft.value;
+              for (const pending of this.pending) {
+                if (pending.original === draft.original) pending.original = draft.value;
+              }
+            }
+            if (this.draft === draft) this.draft = null;
+          } else if (this.draft === draft && this.el.dataset.status === 'conflict') {
+            this.draft = null;
+          }
+          this.updated();
+        },
+      });
     },
     message(value) {
       const message = this.el.querySelector('[data-role="connection"]');

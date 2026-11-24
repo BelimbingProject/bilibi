@@ -11,7 +11,7 @@ Ask an AI assistant to draft and preview wording through the template operations
 Contribute a static `Template` through Module Registry. Use `bilibi_templates::CATALOGUE` for editable wording and `bilibi_templates::PLATFORM_CATALOGUE` for packaged-only wording. Use `<domain>.<module>.<purpose>` for the key. Base and Core use their layer name in place of the domain. Give each packaged language an explicit version and declare a base language. The registry checks duplicate keys, slot and variable IDs, and whether the defaults render.
 
 - Declare which slots a variable can appear in and give it a sample of the same type as the runtime fact. The first slice supports text and calendar dates.
-- Pass the sealed scope and the authorised business record's company to `Templates::resolve`. Pass the resolved slots and typed facts to `Template::render`. Rendering performs no lookups.
+- Pass the sealed scope and the authorised business record's company to `Templates::wording` to select and render business wording using language preferences. For explicit language selection, use `Templates::resolve` and pass the resolved slots and typed facts to `Template::render`.
 - Use `{{variable_id}}` for substitution. The renderer treats every supplied value as text, and makes control characters in subject values spaces. A missing required fact stops rendering of a slot that uses it. The error identifies the field.
 - The sending module owns recipients, attachments, access, and delivery. Its approved wording can be snapshotted before the job queues.
 - `Slot::subject()`, `Slot::text(id, label)`, `Variable::text(..)` and `Variable::optional_text(..)` build the common shapes. `bounded(text, max_bytes)` shortens a fact (a title, a name) that must fit a subject.
@@ -22,16 +22,17 @@ Contribute a static `Template` through Module Registry. Use `bilibi_templates::C
 
 ```rust,ignore
 let text = templates.platform_wording("core.user.password_reset", &[])?;
+let link = build_trusted_link();
 let message = Message::text(to, text["subject"].clone(), format!("{}\n\n{link}\n\n{}\n", text["intro"], text["closing"]));
-mailer.deliver_for(tenant, &message).await?;
+mailer.deliver_linked_for(tenant, &message, Some(&link)).await?;
 ```
 
-- `Templates::wording` renders scoped mail using the authorised record’s company and the message’s resolved locale. `Templates::tenant_wording` uses the template’s base language and a tenant the caller proved from its own record. `Templates::platform_wording` renders packaged security mail without a database connection.
+- `Templates::wording` renders scoped mail with the authorised record's company. Pass the message's existing locale as the context fallback. `Templates::tenant_wording` reads the preferred language of a tenant the caller proved from its own record. `Templates::platform_wording` renders packaged security mail in its base language without a database connection.
 - Supply full facts for mail. If the rendered subject exceeds its byte limit, delivery shortens the text facts in that slot and preserves body text.
 - A published override that cannot hold the real facts gives way to the packaged wording, with a log line, so the message is still sent.
 - **Links stay in code.** A slot is prose before or after a link; the sending module builds the link and fixes the order of the parts. Security messages use packaged wording. Publish and restore refuse those keys.
 - A line some messages lack (a place, an end date) is its own slot with an optional variable; Pass omitted slots to `Templates::wording` when the message leaves out those lines.
-- Use `Mailer::deliver_for` to apply the [sender name rules](../mail/README.md#sender-name) for the workspace.
+- Use the registered [workspace mailer](../mail/README.md#branded-workspace-mail) for the sender name and branded HTML layout.
 
 | Module | Templates |
 | --- | --- |
@@ -41,13 +42,20 @@ mailer.deliver_for(tenant, &message).await?;
 | `core/document` | `core.document.share` |
 | `base/reports` | `base.reports.scheduled_report` |
 
-Portal notices and PDF prose slots are later slices of issue #833.
+## Word a portal notice
+
+Contribute `Output::PortalNotice`, then render with `Templates::wording` after authorizing the customer page. Use the company from the portal proof and put the prose through `Html::text`. The portal home uses `core.portal.welcome_notice`; its surrounding actions and links belong to the page. Named PDF prose slots are the next slice of issue #833.
 
 The first tenant owner's invitation (`bilibi tenant-owner`) keeps fixed text: it is sent before the workspace exists.
 
 ## Which wording is used?
 
-For each language in order, the company override wins, then the workspace override, then the packaged text. Resolution tries the exact requested tag, its base language, the caller's business fallback if it has one, and the template's packaged base language. The first match supplies every slot and reports its language and version or revision.
+Set **Wording language** (`templates.language`) through the delegated [tenant settings operations](../settings_editor/README.md#tenant-agent-operations) or choose the company under **System Settings → Settings scope**. Restore the setting to inherit. It accepts a language tag such as `ms-MY` and applies to business email and portal notices. It leaves the interface locale and the language of platform security mail as they are.
+
+1. Try the record company's preference, the workspace preference, the consumer's requested locale, and finally the template's packaged base language. Try the exact tag and then its base language at each preference.
+2. At each language, try the company override, the workspace override and the packaged text. The first match supplies every slot and reports the language and version or revision.
+
+Template inspection and publication still address the scope and language given explicitly in the operation.
 
 ## Publish through the operation
 
@@ -58,3 +66,5 @@ Company changes require access to that company. The shared Customisations page l
 ## Check the statement cover
 
 With Finance mounted, the `receivables-companies` walkthrough checks the Finance draft operation, two companies in the same workspace, the audit and stale revision checks, and restoration. Set `BILIBI_PDF_CHROMIUM` to a Chromium binary and `BILIBI_MAIL_DIR` to a private empty directory to run its delivery assertion against Base Mail's development mailbox as well.
+
+Run `scripts/run-walkthroughs.sh templated-wording` for the language chain and the resulting mail. To inspect the light and dark layout, run the `wording-walkthrough` example on a migrated disposable database with `BILIBI_WORDING_DEMO=disposable`, `BILIBI_WORDING_PREVIEW` set to an existing private directory, and a separate development mailbox. Open `mail-preview.html` from that directory. The preview comes from the delivered MIME and substitutes its inline image for the browser.

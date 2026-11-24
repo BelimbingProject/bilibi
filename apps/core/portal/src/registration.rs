@@ -233,18 +233,19 @@ impl PortalService {
                 ("days", bilibi_templates::Value::Text(&days_text)),
             ],
         )?;
+        let link = format!("{origin}/portal/verify/{}/{token}", site.address);
         let message = Message::text(
             Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
             wording["subject"].clone(),
-            crate::wording::around_link(
-                &wording,
-                &format!("{origin}/portal/verify/{}/{token}", site.address),
-            ),
+            crate::wording::around_link(&wording, &link),
         );
         let mailer = self.mailer.clone();
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver_for(tenant, &message).await {
+                if let Err(error) = mailer
+                    .deliver_linked_for(tenant, &message, Some(&link))
+                    .await
+                {
                     eprintln!("mail: a registration verification was not delivered: {error}");
                 }
             });

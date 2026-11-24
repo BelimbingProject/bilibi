@@ -60,7 +60,7 @@ pub(crate) async fn guest_mail(
         body.push_str(&format!("{}\n", text["where_line"]));
     }
     if let Some(url) = &activity.join_url {
-        body.push_str(&format!("{} {url}\n", text["join_label"]));
+        body.push_str(&format!("{}\n{url}\n", text["join_label"]));
     }
     if let Some(description) = activity.description.as_ref().filter(|_| described) {
         body.push_str(&format!("\n{description}\n"));

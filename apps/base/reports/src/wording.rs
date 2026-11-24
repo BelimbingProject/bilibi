@@ -16,8 +16,14 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_templates:
         bilibi_templates::Variable::text("report_name", "Report name", "Monthly sales", &["subject", "intro"]),
     ],
     base_language: "en",
-    defaults: &[bilibi_templates::DefaultText { language: "en", version: "1", slots: &[
-        ("subject", "Scheduled report: {{report_name}}"),
-        ("intro", "Your scheduled report {{report_name}} is ready.\n\nDownload it, signed in, before it expires:"),
-    ] }],
+    defaults: &[
+        bilibi_templates::DefaultText { language: "en", version: "1", slots: &[
+            ("subject", "Scheduled report: {{report_name}}"),
+            ("intro", "Your scheduled report {{report_name}} is ready.\n\nDownload it, signed in, before it expires:"),
+        ] },
+        bilibi_templates::DefaultText { language: "ms", version: "1", slots: &[
+            ("subject", "Laporan berjadual: {{report_name}}"),
+            ("intro", "Laporan berjadual anda, {{report_name}}, sudah sedia.\n\nLog masuk untuk memuat turunnya sebelum pautan tamat tempoh:"),
+        ] },
+    ],
 }) }

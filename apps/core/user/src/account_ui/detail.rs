@@ -1194,25 +1194,29 @@ impl Detail {
                 self.fact_outcome(&field, "Name", &submitted, result)
             }
             "person" => {
-                let result = if submitted.trim().is_empty() {
-                    users
-                        .unlink(scope, self.id)
-                        .await
-                        .map(|_| ())
-                        .map_err(AccountError::from)
-                } else {
-                    match submitted
-                        .parse::<i64>()
-                        .ok()
-                        .and_then(|id| PersonId::new(id).ok())
-                    {
-                        Some(person) => users
-                            .link_person(scope, self.id, person)
-                            .await
-                            .map(|_| ())
-                            .map_err(AccountError::from),
-                        None => Err(AccountError::NotFound),
+                let person_id = |value: &str| {
+                    if value.is_empty() {
+                        Ok(None)
+                    } else {
+                        value
+                            .parse::<i64>()
+                            .ok()
+                            .and_then(|id| PersonId::new(id).ok())
+                            .map(Some)
+                            .ok_or(AccountError::NotFound)
                     }
+                };
+                let original = value["original"].as_str().ok_or(Error::Invalid)?;
+                let expected = person_id(original).map_err(|_| Error::Invalid)?;
+                let result = match person_id(submitted.trim()) {
+                    Ok(person) => match users
+                        .set_person_link(scope, self.id, person, Some(expected))
+                        .await
+                    {
+                        Err(LinkError::Access(Error::Conflict)) => return Err(Error::Conflict),
+                        result => result.map(|_| ()).map_err(AccountError::from),
+                    },
+                    Err(error) => Err(error),
                 };
                 let label = self.choice_label(scope, "person", &submitted).await;
                 self.fact_outcome("person", "Person", &label, result)

@@ -144,6 +144,16 @@ pub struct Sent {
 /// No IO. Resolve installation limits through `Mailer::limits` first when
 /// rendering for a Domain port. The chosen sender overrides the default.
 pub fn render(message: &Message, default_from: &Address, limits: Limits) -> Result<Rendered> {
+    render_parts(message, default_from, limits, message.html.as_deref(), None)
+}
+
+pub(crate) fn render_parts(
+    message: &Message,
+    default_from: &Address,
+    limits: Limits,
+    html: Option<&str>,
+    logo: Option<(&str, &Attachment)>,
+) -> Result<Rendered> {
     let count = 1usize
         .saturating_add(message.cc.len())
         .saturating_add(message.bcc.len());
@@ -151,7 +161,8 @@ pub fn render(message: &Message, default_from: &Address, limits: Limits) -> Resu
         message
             .text
             .len()
-            .saturating_add(message.html.as_ref().map_or(0, String::len)),
+            .saturating_add(html.map_or(0, str::len))
+            .saturating_add(logo.map_or(0, |(_, image)| image.bytes.len())),
         |sum, attachment| sum.saturating_add(attachment.bytes.len()),
     );
     if !header_value(&message.subject, 200)
@@ -223,11 +234,22 @@ pub fn render(message: &Message, default_from: &Address, limits: Limits) -> Resu
         builder = builder.raw_header(header(name, value)?);
     }
     let text = SinglePart::plain(message.text.clone());
-    let alternative = message.html.as_ref().map(|html| {
-        MultiPart::alternative()
-            .singlepart(text.clone())
-            .singlepart(SinglePart::html(html.clone()))
-    });
+    let alternative = if let Some(html) = html {
+        let html = SinglePart::html(html.to_owned());
+        let parts = MultiPart::alternative().singlepart(text.clone());
+        Some(match logo {
+            Some((content_id, image)) => {
+                let content_type =
+                    ContentType::parse(&image.content_type).map_err(|_| Error::Invalid)?;
+                let inline = LettreAttachment::new_inline(content_id.to_owned())
+                    .body(image.bytes.clone(), content_type);
+                parts.multipart(MultiPart::related().singlepart(html).singlepart(inline))
+            }
+            None => parts.singlepart(html),
+        })
+    } else {
+        None
+    };
     let built = if message.attachments.is_empty() {
         match alternative {
             Some(parts) => builder.multipart(parts),

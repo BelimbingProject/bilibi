@@ -25,6 +25,10 @@ The [capability rename migration](migrations/009-capability-rename.sql) updates 
 - Changing the address breaks links already emailed.
 - **Off until staff turn it on** (`enabled`, issue 137 behaviour 1). While off, its anonymous pages answer 404 (`portal_site` returns `None`), its signed-in customers' pages, downloads and live socket answer 404 (the host checks `site_of`), and no invitation is sent or redeemed.
 
+## Welcome notice
+
+The signed-in home page renders `core.portal.welcome_notice` through [Base Templates](../../base/templates/README.md#word-a-portal-notice). The customer's own company or tenant can choose the language and publish wording through the template operations. The text can name the portal and the customer's sign-in address. Administrators inspect, preview and restore published wording on **Administration → Customisations**.
+
 ## Invitations
 
 - Configure the public listener for the workspace before inviting customers. Invitation, registration verification and customer password reset links use its public origin.

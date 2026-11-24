@@ -204,13 +204,14 @@ impl UserService {
             }
             Err(error) => return Err(error),
         };
-        let message = self.invitation_mail((&name, &email), &tenant_name, None, &new_token)?;
+        let (message, link) =
+            self.invitation_mail((&name, &email), &tenant_name, None, &new_token)?;
         let mailer = self.mailer.clone();
         let db = self.db.clone();
         let mutations = self.mutations.clone();
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver_for(tenant, &message).await {
+                if let Err(error) = mailer.deliver_linked_for(tenant, &message, Some(&link)).await {
                     eprintln!("mail: user invitation {id} was not delivered: {error}");
                     let restore = async {
                         let mut client = db.get().await?;
@@ -385,12 +386,15 @@ impl UserService {
                 .await?;
         }
         let tenant = scope.tenant();
-        let message =
+        let (message, link) =
             self.invitation_mail((&name, &email), &tenant_name, Some(days), &raw_token)?;
         let (mailer, id) = (self.mailer.clone(), invitation.id);
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver_for(tenant, &message).await {
+                if let Err(error) = mailer
+                    .deliver_linked_for(tenant, &message, Some(&link))
+                    .await
+                {
                     eprintln!("mail: user invitation {id} was not delivered: {error}");
                 }
             });
