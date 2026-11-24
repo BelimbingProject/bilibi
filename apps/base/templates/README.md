@@ -11,7 +11,7 @@ Ask an AI assistant to draft and preview wording through the template operations
 Contribute a static `Template` through Module Registry. Use `bilibi_templates::CATALOGUE` for editable wording and `bilibi_templates::PLATFORM_CATALOGUE` for packaged-only wording. Use `<domain>.<module>.<purpose>` for the key. Base and Core use their layer name in place of the domain. Give each packaged language an explicit version and declare a base language. The registry checks duplicate keys, slot and variable IDs, and whether the defaults render.
 
 - Declare which slots a variable can appear in and give it a sample of the same type as the runtime fact. The first slice supports text and calendar dates.
-- Pass the sealed scope and the authorised business record's company to `Templates::resolve_preferred` for a business language preference or `Templates::resolve` for an explicit language selection. Pass the resolved slots and typed facts to `Template::render`. Rendering performs no lookups.
+- Pass the sealed scope and the authorised business record's company to `Templates::wording` to select and render business wording using language preferences. For explicit language selection, use `Templates::resolve` and pass the resolved slots and typed facts to `Template::render`.
 - Use `{{variable_id}}` for substitution. The renderer treats every supplied value as text, and makes control characters in subject values spaces. A missing required fact stops rendering of a slot that uses it. The error identifies the field.
 - The sending module owns recipients, attachments, access, and delivery. Its approved wording can be snapshotted before the job queues.
 - `Slot::subject()`, `Slot::text(id, label)`, `Variable::text(..)` and `Variable::optional_text(..)` build the common shapes. `bounded(text, max_bytes)` shortens a fact (a title, a name) that must fit a subject.
@@ -52,7 +52,7 @@ The first tenant owner's invitation (`bilibi tenant-owner`) keeps fixed text: it
 
 Set **Wording language** (`templates.language`) through the delegated [tenant settings operations](../settings_editor/README.md#tenant-agent-operations) or choose the company under **System Settings → Settings scope**. Restore the setting to inherit. It accepts a language tag such as `ms-MY` and applies to business email and portal notices. It leaves the interface locale and the language of platform security mail as they are.
 
-1. Try the record company's preference, the workspace preference, the consumer's requested locale and optional fallback, and finally the template's packaged base language. Try the exact tag and then its base language at each preference.
+1. Try the record company's preference, the workspace preference, the consumer's requested locale, and finally the template's packaged base language. Try the exact tag and then its base language at each preference.
 2. At each language, try the company override, the workspace override and the packaged text. The first match supplies every slot and reports the language and version or revision.
 
 Template inspection and publication still address the scope and language given explicitly in the operation.

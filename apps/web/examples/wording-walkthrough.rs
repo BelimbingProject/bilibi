@@ -5,10 +5,10 @@ use bilibi_base::{
     media::{Media, Upload},
     party_ids::OrganisationId,
     settings::{Settings, Target},
-    templates::{Origin, Templates, Value, LANGUAGE},
+    templates::{Templates, Value, LANGUAGE},
 };
 use bilibi_database::pool;
-use bilibi_mail::{Address, InlineImage, Mailer, Message};
+use bilibi_mail::{Address, Attachment, InlineImage, Mailer, Message, MAX_MESSAGE_BYTES};
 use bilibi_tenancy::{ProofFuture, Scope};
 use bilibi_web::App;
 use serde_json::json;
@@ -82,15 +82,24 @@ impl Walkthrough {
         Ok(())
     }
 
-    async fn notice(
-        &self,
-        company: Option<OrganisationId>,
-    ) -> Result<bilibi_base::templates::Resolved> {
+    async fn notice(&self, company: Option<OrganisationId>) -> Result<String> {
         let templates: Arc<Templates> = self.app.services.get(bilibi_base::templates::SERVICE)?;
         let client = self.app.db.get().await?;
-        Ok(templates
-            .resolve_preferred(&**client, &self.scope, NOTICE, company, "en-MY", None)
-            .await?)
+        let values = [
+            ("site_title", Value::Text("Example Portal")),
+            ("email", Value::Text("customer@example.test")),
+        ];
+        let wording = templates
+            .wording(
+                &**client,
+                &self.scope,
+                NOTICE,
+                company,
+                "en-MY",
+                (&values, &[]),
+            )
+            .await?;
+        Ok(wording["body"].clone())
     }
 
     async fn set_brand(&self, output: &Path) -> Result<()> {
@@ -111,6 +120,15 @@ impl Walkthrough {
                 Target::Global,
                 "media.disks",
                 json!({"local": output}),
+            )
+            .await?;
+        settings
+            .put(
+                &mut tx,
+                &self.scope,
+                Target::Global,
+                MAX_MESSAGE_BYTES,
+                json!(8192),
             )
             .await?;
         tx.commit().await?;
@@ -162,13 +180,17 @@ async fn main() -> Result<()> {
     };
     let company = OrganisationId::new(1)?;
     let other = OrganisationId::new(2)?;
-    assert_eq!(walk.notice(Some(company)).await?.language, "en");
+    let english = "You are signed in to Example Portal as customer@example.test. Use the menu above to open what Example Portal shares with you.";
+    assert_eq!(walk.notice(Some(company)).await?, english);
     walk.write(
         "base.settings_editor.tenant.set",
         json!({"key":LANGUAGE, "value":"ms-MY"}),
     )
     .await?;
-    assert_eq!(walk.notice(None).await?.language, "ms");
+    assert!(walk
+        .notice(None)
+        .await?
+        .starts_with("Anda telah log masuk ke Example Portal sebagai customer@example.test."));
 
     let publish = |company, body| {
         json!({
@@ -186,20 +208,21 @@ async fn main() -> Result<()> {
         publish(Some(company.get()), "Portal syarikat {{site_title}}."),
     )
     .await?;
-    assert!(matches!(
-        walk.notice(Some(company)).await?.origin,
-        Origin::Company { .. }
-    ));
-    assert!(matches!(
-        walk.notice(Some(other)).await?.origin,
-        Origin::Tenant { .. }
-    ));
+    assert_eq!(
+        walk.notice(Some(company)).await?,
+        "Portal syarikat Example Portal."
+    );
+    assert_eq!(
+        walk.notice(Some(other)).await?,
+        "Selamat datang ke Example Portal."
+    );
     walk.language(company, "en-GB").await?;
-    let notice = walk.notice(Some(company)).await?;
-    assert_eq!(notice.language, "en");
-    assert!(matches!(notice.origin, Origin::Packaged { .. }));
+    assert_eq!(walk.notice(Some(company)).await?, english);
     walk.language(company, "fr-CA").await?;
-    assert_eq!(walk.notice(Some(company)).await?.language, "ms-MY");
+    assert_eq!(
+        walk.notice(Some(company)).await?,
+        "Portal syarikat Example Portal."
+    );
     let templates: Arc<Templates> = walk.app.services.get(bilibi_base::templates::SERVICE)?;
     let client = walk.app.db.get().await?;
     let explicit = templates
@@ -264,5 +287,26 @@ async fn main() -> Result<()> {
     assert!(preview.contains("src=\"data:image/png;"));
     fs::write(output.join("mail-preview.html"), preview)?;
     println!("PASS localized mail with escaped fact, trusted link, plain alternative, accent and embedded logo");
+    let mut large = Message::text(
+        message.to.clone(),
+        "Meeting invitation",
+        "Meeting description. ".repeat(250),
+    );
+    let calendar = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
+    large.attachments.push(Attachment {
+        filename: "meeting.ics".into(),
+        content_type: "text/calendar".into(),
+        bytes: calendar.to_vec(),
+    });
+    let sent = mailer.deliver_for(walk.scope.tenant(), &large).await?;
+    let parsed = bilibi_mail::parse(&sent.bytes, &mailer.parse_limits().await?)?;
+    assert!(parsed.html.is_none());
+    assert_eq!(
+        parsed.text.as_deref().map(str::trim_end),
+        Some(large.text.trim_end())
+    );
+    assert_eq!(parsed.attachments.len(), 1);
+    assert_eq!(parsed.attachments[0].bytes, calendar);
+    println!("PASS plain mail with its attachment when branded HTML exceeds the wire limit");
     Ok(())
 }

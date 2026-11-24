@@ -106,11 +106,15 @@ pub(crate) fn render(
         let html = layout.html(html_budget)?;
         render_parts(message, from, limits, Some(&html), logo)
     };
-    match render(&layout, logo_id.as_deref().zip(brand.logo.as_ref())) {
+    let branded = match render(&layout, logo_id.as_deref().zip(brand.logo.as_ref())) {
         Err(crate::Error::Invalid) if brand.logo.is_some() => {
             layout.logo_id = None;
             render(&layout, None)
         }
+        result => result,
+    };
+    match branded {
+        Err(crate::Error::Invalid) => render_parts(message, from, limits, None, None),
         result => result,
     }
 }

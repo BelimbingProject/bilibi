@@ -106,25 +106,6 @@ impl Templates {
             .await
     }
 
-    /// Resolve the company's and tenant's language preferences for an
-    /// authorized business record before the consumer's contextual locale.
-    pub async fn resolve_preferred(
-        &self,
-        client: &dyn ReadClient,
-        scope: &Scope,
-        key: &str,
-        company: Option<OrganisationId>,
-        requested: &str,
-        fallback: Option<&str>,
-    ) -> Result<Resolved> {
-        let entry = self.get(key)?;
-        let languages = self
-            .preferred_languages(client, scope, entry, company, (requested, fallback))
-            .await?;
-        self.select_for(client, scope.tenant(), entry, company, &languages)
-            .await
-    }
-
     async fn select_for(
         &self,
         client: &dyn ReadClient,
@@ -209,7 +190,7 @@ impl Templates {
     ) -> Result<Text> {
         let entry = self.get(key)?;
         let languages = self
-            .preferred_languages(client, scope, entry, company, (language, None))
+            .preferred_languages(client, scope, entry, company, language)
             .await?;
         let resolved = self
             .select_for(client, scope.tenant(), entry, company, &languages)
@@ -223,9 +204,9 @@ impl Templates {
         scope: &Scope,
         entry: &Template,
         company: Option<OrganisationId>,
-        (requested, fallback): (&str, Option<&str>),
+        requested: &str,
     ) -> Result<Vec<String>> {
-        let fallback_chain = catalogue::languages(requested, fallback, entry.base_language)
+        let fallback_chain = catalogue::languages(requested, None, entry.base_language)
             .map_err(|problem| Error::refused(problem.to_string()))?;
         if !self.editable(entry.key) {
             return Ok(fallback_chain);
@@ -249,8 +230,7 @@ impl Templates {
                 .as_str()
                 .into_iter()
                 .chain(tenant_language.value.as_str())
-                .chain(std::iter::once(requested))
-                .chain(fallback),
+                .chain(std::iter::once(requested)),
             entry.base_language,
         ))
     }
