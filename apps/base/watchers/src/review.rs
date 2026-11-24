@@ -8,7 +8,7 @@ use crate::definition::{self, Definition, Example, Problems};
 use crate::store::Watchers;
 use crate::{ACTIVE_PER_TRIGGER, APPROVE, MANAGE};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
-use bilibi_grid::{Catalog, CustomTable, FieldType};
+use bilibi_grid::{Catalog, CustomTable, FieldType, Installed, Link, LinkKind, Table};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -86,6 +86,46 @@ impl Draft {
     }
 }
 
+pub(crate) fn custom_path(path: &str) -> Option<(Option<&str>, &str)> {
+    let (link, field) = match path.split_once('.') {
+        Some((link, field)) if !link.is_empty() => (Some(link), field),
+        Some(_) => return None,
+        None => (None, path),
+    };
+    bilibi_grid::custom_key(field).map(|key| (link, key))
+}
+
+pub(crate) fn is_linked_custom(path: &str) -> bool {
+    custom_path(path).is_some_and(|(link, _)| link.is_some())
+}
+
+pub(crate) fn custom_owner<'g>(
+    grid: &'g Installed,
+    root: &'g Table,
+    link: Option<&str>,
+) -> Option<(Option<Link>, &'g Table)> {
+    let Some(link) = link else {
+        return Some((None, root));
+    };
+    let link = root
+        .link(link)
+        .filter(|link| link.kind() == LinkKind::One)?;
+    Some((Some(*link), grid.table(link.to())?))
+}
+
+/// The one-links a condition path walks from `root`: a declared field's, or
+/// a linked record's custom field's, which the installed resolver cannot name.
+fn hops(grid: &Installed, root: &Table, path: &str) -> Vec<Link> {
+    match bilibi_grid::column::resolve(path, root, &|id| grid.table(id)) {
+        Ok(column) => column.hops,
+        Err(_) => custom_path(path)
+            .and_then(|(link, _)| custom_owner(grid, root, link))
+            .and_then(|(link, _)| link)
+            .into_iter()
+            .collect(),
+    }
+}
+
 fn digest(definition: &Value, examples: &Value) -> String {
     let bytes = serde_json::to_vec(&json!({"definition": definition, "examples": examples}))
         .unwrap_or_default();
@@ -109,7 +149,7 @@ impl Watchers {
             definition
                 .fields()
                 .iter()
-                .any(|path| bilibi_grid::custom_key(path).is_some())
+                .any(|path| custom_path(path).is_some())
         });
         if !custom {
             return Ok(Vec::new());
@@ -118,9 +158,10 @@ impl Watchers {
     }
 
     /// The installed bindings a version runs on. A condition on a tenant
-    /// custom field of the trigger's table pins the field's type and value SQL
-    /// from `custom` (`custom_tables`); a field that is archived, gone or no
-    /// longer offered to watchers has no fingerprint, so the version is refused.
+    /// custom field, of the trigger's table or of a record one-links reach,
+    /// pins the field's type and value SQL from `custom` (`custom_tables`) and
+    /// the links walked to it; a field that is archived, gone or no longer
+    /// offered to watchers has no fingerprint, so the version is refused.
     pub(crate) fn catalog_digest(
         &self,
         event: &str,
@@ -132,29 +173,46 @@ impl Watchers {
         let root = grid.table(trigger.table)?;
         let mut paths = definition.fields();
         paths.push(trigger.version.to_owned());
+        let hop = |link: &Link| -> Option<Value> {
+            let from = grid.table(link.decl.from)?;
+            let to = grid.table(link.to())?;
+            let join = match link.decl.join {
+                bilibi_grid::Join::On {
+                    from_field,
+                    to_field,
+                } => json!({
+                    "from": from.field(from_field)?.source_key(),
+                    "to": to.field(to_field)?.source_key(),
+                }),
+                bilibi_grid::Join::Edge(source) => {
+                    json!({"edge": source.sql, "tenant_scoped": source.tenant_scoped})
+                }
+            };
+            Some(
+                json!({"id": link.id(), "from": from.id(), "to": to.id(), "kind": format!("{:?}", link.kind()),
+                "join": join, "source": to.source().sql, "tenant_scoped": to.source().tenant_scoped,
+                "key": to.key(), "key_column": to.key_field().source_key(), "capability": to.capability()}),
+            )
+        };
         let fields: Option<Vec<Value>> = paths.iter().map(|path| {
             let Ok(column) = bilibi_grid::column::resolve(path, root, &|id| grid.table(id)) else {
-                let (table, column) = custom.iter().filter(|table| table.table == trigger.table).find_map(|table| {
-                    table.columns.iter().find(|column| bilibi_grid::custom_key(path) == Some(column.key.as_str())).map(|column| (table, column))
+                let (link, key) = custom_path(path)?;
+                let (link, owner) = custom_owner(grid, root, link)?;
+                let (table, column) = custom.iter().filter(|table| table.table == owner.id()).find_map(|table| {
+                    table.columns.iter().find(|column| column.key == key).map(|column| (table, column))
                 })?;
-                return column.watcher_condition.then(|| json!({"path": path, "table": table.table, "type": format!("{:?}", column.ty),
-                    "custom": {"column": table.column, "value": column.value}}));
+                if !column.watcher_condition {
+                    return None;
+                }
+                let mut binding = json!({"path": path, "table": table.table, "type": format!("{:?}", column.ty),
+                    "custom": {"column": table.column, "value": column.value}});
+                if let Some(link) = link {
+                    binding["hops"] = json!([hop(&link)?]);
+                }
+                return Some(binding);
             };
             let field = column.field?;
-            let hops: Option<Vec<Value>> = column.hops.iter().map(|link| {
-                let from = grid.table(link.decl.from)?;
-                let to = grid.table(link.to())?;
-                let join = match link.decl.join {
-                    bilibi_grid::Join::On { from_field, to_field } => json!({
-                        "from": from.field(from_field)?.source_key(),
-                        "to": to.field(to_field)?.source_key(),
-                    }),
-                    bilibi_grid::Join::Edge(source) => json!({"edge": source.sql, "tenant_scoped": source.tenant_scoped}),
-                };
-                Some(json!({"id": link.id(), "from": from.id(), "to": to.id(), "kind": format!("{:?}", link.kind()),
-                    "join": join, "source": to.source().sql, "tenant_scoped": to.source().tenant_scoped,
-                    "key": to.key(), "key_column": to.key_field().source_key(), "capability": to.capability()}))
-            }).collect();
+            let hops: Option<Vec<Value>> = column.hops.iter().map(hop).collect();
             Some(json!({"path": path, "table": column.table, "type": format!("{:?}", column.ty), "values": field.values, "column": field.source_key(), "hops": hops?}))
         }).collect();
         let actions: Option<Vec<Value>> = definition.actions().map(|call| {
@@ -206,21 +264,25 @@ impl Watchers {
             )
             .await?;
         let may_name = bilibi_authz::holds_proof(client, scope, crate::VIEW).await?;
+        let grid = bilibi_grid::installed()?;
         let mut affected = Vec::new();
         for row in rows {
-            if !self
+            let Some(root) = self
                 .trigger(row.get(1))
-                .is_some_and(|trigger| trigger.definition.table == table)
-            {
+                .and_then(|trigger| grid.table(trigger.definition.table))
+            else {
                 continue;
-            }
+            };
             let definition =
                 Definition::parse(&row.get(2), &mut Vec::new()).ok_or(Error::Invalid)?;
-            if definition
-                .fields()
-                .iter()
-                .any(|path| bilibi_grid::custom_key(path) == Some(key))
-            {
+            // The field's own table is the trigger's, or one its links reach.
+            if definition.fields().iter().any(|path| {
+                custom_path(path).is_some_and(|(link, used)| {
+                    used == key
+                        && custom_owner(grid, root, link)
+                            .is_some_and(|(_, owner)| owner.id() == table)
+                })
+            }) {
                 affected.push(if may_name {
                     row.get(0)
                 } else {
@@ -351,7 +413,8 @@ impl Watchers {
             ));
         }
         // A tenant custom field is a condition only when the tenant offered
-        // it to watchers, and only on the trigger's own record (#730).
+        // it to watchers (#730), on the trigger's own record or on a record
+        // one link away (#862).
         for (i, condition) in definition.conditions.iter().enumerate() {
             let Some(column) =
                 table.and_then(|table| catalog.resolve(table, &condition.field).ok())
@@ -364,14 +427,14 @@ impl Watchers {
             let Some(field) = column.field.filter(|field| owner.is_custom(field.id)) else {
                 continue;
             };
-            let why = if !column.hops.is_empty() {
-                format!("{} is a custom field of a linked record; a watcher reads custom fields of the trigger's own record only", condition.field)
+            if custom_path(&condition.field).is_none() || column.many.is_some() {
+                problems.push((
+                    format!("if.conditions.{i}.field"),
+                    "a custom field must be on the trigger record or one direct link away".into(),
+                ));
             } else if !owner.custom_watcher_condition(field.id) {
-                format!("{} is a custom field not offered to watchers; an administrator turns on Watcher condition for it on Custom fields", condition.field)
-            } else {
-                continue;
-            };
-            problems.push((format!("if.conditions.{i}.field"), why));
+                problems.push((format!("if.conditions.{i}.field"), format!("{} is a custom field not offered to watchers; an administrator turns on Watcher condition for it on Custom fields", condition.field)));
+            }
         }
         let field = |path: &str| -> Option<(FieldType, &'static [&'static str], String)> {
             let table = table?;
@@ -525,7 +588,7 @@ impl Watchers {
             .map(|c| {
                 definition::sentence(
                     c,
-                    &condition_label(&c.field, &|path: &str| {
+                    &crate::describe::condition_label(&c.field, &|path: &str| {
                         field(path).map_or_else(|| path.to_owned(), |(_, _, label)| label)
                     }),
                 )
@@ -935,16 +998,12 @@ impl Watchers {
             .unwrap_or_default();
         if let Some(root) = grid.table(offered.definition.table) {
             for path in definition.fields() {
-                if let Ok(column) = bilibi_grid::column::resolve(&path, root, &|id| grid.table(id))
-                {
-                    needed.extend(
-                        column
-                            .hops
-                            .iter()
-                            .filter_map(|hop| grid.table(hop.to()))
-                            .map(|table| table.capability()),
-                    );
-                }
+                let hops = hops(grid, root, &path);
+                needed.extend(
+                    hops.iter()
+                        .filter_map(|hop| grid.table(hop.to()))
+                        .map(|table| table.capability()),
+                );
             }
         }
         if definition.scripts().next().is_some() {
@@ -979,27 +1038,11 @@ impl Watchers {
         }
         // The principal reads every field the conditions name; a restricted or
         // masked one is refused at the source, never read and hidden later.
-        match self.principal(client, tenant).await {
+        let theirs = match self.principal(client, tenant).await {
             Ok(principal) => {
                 let theirs = Catalog::for_scope(client, &principal)
                     .await
                     .map_err(Error::from)?;
-                match theirs.table(offered.definition.table) {
-                    None => review.warnings.push(format!(
-                        "Automation may not read {} yet: the watcher will not act until an administrator allows it in Automation access.",
-                        grid.table(offered.definition.table).map_or(offered.definition.table, |t| t.label())
-                    )),
-                    Some(table) => {
-                        for path in definition.fields() {
-                            let readable = theirs.resolve(table, &path).ok().filter(|column| {
-                                column.field.is_some_and(|f| !theirs.masked(column.table, f.id))
-                            });
-                            if readable.is_none() {
-                                problems.push(("fields".into(), format!("{path} is hidden from automation, and a watcher never reads a hidden field")));
-                            }
-                        }
-                    }
-                }
                 if definition.observe.is_some() {
                     if let Some(reason) = self.observation_available(client, &principal).await? {
                         review.warnings.push(format!(
@@ -1023,11 +1066,57 @@ impl Watchers {
                         ));
                     }
                 }
+                Some(theirs)
             }
             Err(Error::Unauthorized) => return Err(Error::Unauthorized),
-            Err(_) => review
-                .warnings
-                .push("Automation is not available here.".into()),
+            Err(_) => {
+                review
+                    .warnings
+                    .push("Automation is not available here.".into());
+                None
+            }
+        };
+        let automation_root = theirs
+            .as_ref()
+            .and_then(|catalog| catalog.table(offered.definition.table));
+        if theirs.is_some() && automation_root.is_none() {
+            review.warnings.push(format!(
+                "Automation may not read {} yet: the watcher will not act until an administrator allows it in Automation access.",
+                grid.table(offered.definition.table).map_or(offered.definition.table, |t| t.label())
+            ));
+        }
+        for path in definition.fields() {
+            let linked = is_linked_custom(&path);
+            if automation_root.is_none() && !linked {
+                continue;
+            }
+            let readable = theirs
+                .as_ref()
+                .zip(automation_root)
+                .is_some_and(|(catalog, table)| {
+                    catalog.resolve(table, &path).is_ok_and(|column| {
+                        column
+                            .field
+                            .is_some_and(|f| !catalog.masked(column.table, f.id))
+                    })
+                });
+            if !readable {
+                let field = if linked {
+                    definition
+                        .conditions
+                        .iter()
+                        .position(|condition| condition.field == path)
+                        .map(|i| format!("if.conditions.{i}.field"))
+                } else {
+                    None
+                };
+                problems.push((
+                    field.unwrap_or_else(|| "fields".into()),
+                    format!(
+                        "{path} is hidden from automation, and a watcher never reads a hidden field"
+                    ),
+                ));
+            }
         }
         let records: Vec<&str> = definition
             .actions()
@@ -1289,137 +1378,4 @@ pub(crate) fn bind(
     let mut input = input.clone();
     input.insert(field.into(), value);
     Some(Value::Object(input))
-}
-
-/// A stored version in words, for reading: conditions with their fields'
-/// labels, actions with their titles and parameters, examples. Labels come
-/// from the installed catalogs; values from the version itself.
-/// A condition's subject in words: a record field's label, or the AI's answer.
-fn condition_label(path: &str, label: &dyn Fn(&str) -> String) -> String {
-    match path {
-        crate::observe::LABEL => "AI label".to_owned(),
-        _ => label(path),
-    }
-}
-
-pub(crate) struct Described {
-    pub scripted: bool,
-    /// The AI observation in words, with the fields it sends.
-    pub observation: Option<String>,
-    pub matching: &'static str,
-    pub conditions: Vec<String>,
-    pub actions: Vec<String>,
-    pub examples: Vec<String>,
-}
-impl Watchers {
-    pub(crate) fn describe(
-        &self,
-        trigger: &str,
-        definition: &Value,
-        examples: &Value,
-    ) -> Described {
-        let mut problems = Vec::new();
-        let parsed = Definition::parse(definition, &mut problems);
-        let table = self
-            .trigger(trigger)
-            .and_then(|t| bilibi_grid::installed().ok()?.table(t.definition.table));
-        let label = |path: &str| {
-            table
-                .and_then(|t| t.field(path))
-                .map_or_else(|| path.to_owned(), |f| f.label.to_owned())
-        };
-        let Some(parsed) = parsed else {
-            return Described {
-                scripted: false,
-                observation: None,
-                matching: "all",
-                conditions: Vec::new(),
-                actions: Vec::new(),
-                examples: Vec::new(),
-            };
-        };
-        let conditions = parsed
-            .conditions
-            .iter()
-            .map(|c| definition::sentence(c, &condition_label(&c.field, &label)))
-            .collect();
-        let observation = parsed
-            .observe
-            .as_ref()
-            .map(|observe| observe.describe(label));
-        let actions = parsed
-            .steps
-            .iter()
-            .map(|step| {
-                let a = match step {
-                    crate::definition::Step::Script { script } => {
-                        return script.describe();
-                    }
-                    crate::definition::Step::Operation(call) => call,
-                };
-                let title = self
-                    .action(&a.operation)
-                    .map_or(a.operation.as_str(), |o| o.title);
-                let parameters: Vec<String> = a
-                    .input
-                    .iter()
-                    .map(|(key, value)| format!("{key}: {}", definition::shown(value)))
-                    .collect();
-                if parameters.is_empty() {
-                    title.to_owned()
-                } else {
-                    format!("{title} ({})", parameters.join(", "))
-                }
-            })
-            .collect();
-        let mut examples: Vec<String> = definition::parse_examples(examples, &mut problems)
-            .iter()
-            .map(|e| {
-                let facts: Vec<String> = e
-                    .facts
-                    .iter()
-                    .map(|(field, value)| {
-                        format!(
-                            "{} {}",
-                            condition_label(field, &label),
-                            definition::shown(value)
-                        )
-                    })
-                    .collect();
-                format!(
-                    "{}: {}",
-                    if e.expect {
-                        "Matches"
-                    } else {
-                        "Does not match"
-                    },
-                    if facts.is_empty() {
-                        "any record".to_owned()
-                    } else {
-                        facts.join(", ")
-                    }
-                )
-            })
-            .collect();
-        for script in parsed.scripts() {
-            for (index, example) in script.examples.iter().enumerate() {
-                examples.push(format!(
-                    "{} example {} with {} expects {}.",
-                    script.name,
-                    index + 1,
-                    json!(example.facts),
-                    json!(example.expect)
-                ));
-            }
-        }
-        let scripted = parsed.scripts().next().is_some();
-        Described {
-            scripted,
-            observation,
-            matching: parsed.matching.key(),
-            conditions,
-            actions,
-            examples,
-        }
-    }
 }

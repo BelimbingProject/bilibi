@@ -792,6 +792,7 @@ dependencies = [
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-walkthrough-fixture",
+ "bilibi-watchers",
  "bilibi-web",
  "bilibi-workflow",
  "hmac 0.13.0",

@@ -42,7 +42,7 @@ fn sentence(text: &str) -> String {
     out
 }
 
-fn why(run: &RunView, described: &crate::review::Described) -> Vec<String> {
+fn why(run: &RunView, described: &crate::describe::Described) -> Vec<String> {
     let mut lines: Vec<String> = observed(run).into_iter().collect();
     match run.state.as_str() {
         _ if run.outcomes.get("restricted").is_some() => {
@@ -325,14 +325,16 @@ impl Show {
         &self,
         view: &WatcherView,
         version: &VersionView,
-        display: &DisplayContext,
+        context: (&DisplayContext, Option<&bilibi_grid::Catalog>),
         review: Option<&crate::Review>,
         running: bool,
         can_approve: bool,
         can_run: bool,
     ) -> Result<Html> {
+        let (display, labels) = context;
         let watchers = &self.pages.watchers;
         let described = watchers.describe(
+            labels,
             &view.summary.trigger,
             &version.definition,
             &version.examples,
@@ -536,6 +538,33 @@ impl Show {
             ),
             _ => None,
         };
+        let running = view
+            .versions
+            .iter()
+            .skip(1)
+            .find(|v| Some(v.number) == view.summary.running);
+        let run_version = |run: &RunView| view.versions.iter().find(|v| v.number == run.version);
+        let needs_labels = latest
+            .into_iter()
+            .chain(running)
+            .any(|v| crate::describe::needs_linked_labels(&v.definition, Some(&v.examples)))
+            || view.runs.iter().any(|run| {
+                matches!(
+                    run.state.as_str(),
+                    "no_match" | "done" | "partial" | "matched"
+                ) && run
+                    .outcomes
+                    .as_array()
+                    .is_some_and(|outcomes| !outcomes.is_empty())
+                    && run_version(run)
+                        .is_some_and(|v| crate::describe::needs_linked_labels(&v.definition, None))
+            });
+        let labels = if needs_labels {
+            bilibi_grid::Catalog::for_scope(&**client, scope).await.ok()
+        } else {
+            None
+        };
+        let labels = labels.as_ref();
         drop(client);
         let header = render(Header {
             title: Html::text(&view.summary.name),
@@ -636,23 +665,18 @@ impl Show {
             versions.push(self.version_card(
                 &view,
                 version,
-                &display,
+                (&display, labels),
                 review.as_ref(),
                 running,
                 can_approve,
                 can_run,
             )?);
         }
-        if let Some(version) = view
-            .versions
-            .iter()
-            .skip(1)
-            .find(|version| Some(version.number) == view.summary.running)
-        {
+        if let Some(running) = running {
             versions.push(self.version_card(
                 &view,
-                version,
-                &display,
+                running,
+                (&display, labels),
                 None,
                 true,
                 can_approve,
@@ -661,14 +685,11 @@ impl Show {
         }
         let mut rows = Vec::new();
         for run in &view.runs {
-            let described = latest
-                .filter(|v| v.number == run.version)
-                .or_else(|| view.versions.iter().find(|v| v.number == run.version))
-                .map(|v| {
-                    pages
-                        .watchers
-                        .describe(&view.summary.trigger, &v.definition, &v.examples)
-                });
+            let described = run_version(run).map(|v| {
+                pages
+                    .watchers
+                    .describe(labels, &view.summary.trigger, &v.definition, &v.examples)
+            });
             let lines = described.as_ref().map(|d| why(run, d)).unwrap_or_default();
             let id = run.id.to_string();
             let mut row = FlexRow::new(id.clone())
@@ -717,6 +738,7 @@ impl Show {
                         self.pages
                             .watchers
                             .describe(
+                                labels,
                                 &view.summary.trigger,
                                 &version.definition,
                                 &version.examples,

@@ -1070,7 +1070,7 @@ impl Editor {
                 let field = vocab.field(&self.trigger, path);
                 let label = field.map_or(path.as_str(), |f| f.label.as_str());
                 body.push(&Self::typed(
-                    format!("{dom}-f-{path}"),
+                    format!("{dom}-f-{}", path.replace('.', "-")),
                     format!("e[f_{path}]"),
                     label,
                     field,
@@ -1265,7 +1265,7 @@ impl Editor {
             "If",
             "watcher-draft-if",
             if trigger_chosen {
-                "Conditions on the record the event is about. Leave none for every event."
+                "Conditions on the record the event is about, or on a record it links to. Leave none for every event."
             } else {
                 "Choose what happens first; the fields of its record appear here."
             },

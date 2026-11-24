@@ -518,13 +518,29 @@ impl Watchers {
                     Ok(column)
                         if column.agg.is_none()
                             && column.many.is_none()
-                            && column
-                                .field
-                                .is_some_and(|field| !catalog.masked(column.table, field.id)) =>
+                            && column.field.is_some_and(|field| {
+                                !catalog.masked(column.table, field.id)
+                                    && (crate::review::custom_path(path).is_some()
+                                        || catalog
+                                            .table(column.table)
+                                            .is_some_and(|owner| !owner.is_custom(field.id)))
+                            }) =>
                     {
                         column
                     }
-                    _ => return Ok(Err("restricted_field")),
+                    _ => {
+                        let closed = crate::review::custom_path(path)
+                            .and_then(|(link, _)| {
+                                let grid = bilibi_grid::installed().ok()?;
+                                crate::review::custom_owner(grid, grid.table(table)?, Some(link?))
+                            })
+                            .is_some_and(|(_, owner)| catalog.table(owner.id()).is_none());
+                        return Ok(Err(if closed {
+                            "read_refused"
+                        } else {
+                            "restricted_field"
+                        }));
+                    }
                 };
                 reached.push(
                     bilibi_grid::scalar_access(&catalog, table, path)
@@ -633,6 +649,7 @@ impl Watchers {
         let catalog = Catalog::for_scope(client, scope)
             .await
             .map_err(Error::from)?;
+        let catalog = &catalog;
         let triggers: Vec<Value> = self
             .offers
             .triggers
@@ -643,11 +660,25 @@ impl Watchers {
                     .map(|table| {
                         // A tenant custom field is offered only when the tenant
                         // opted it into watcher conditions.
-                        table
+                        let own = table
                             .visible_fields()
                             .filter(|f| !table.is_custom(f.id) || table.custom_watcher_condition(f.id))
-                            .map(|f| json!({"field": f.id, "label": table.field_label(f), "type": format!("{:?}", f.ty).to_lowercase(), "values": f.values, "masked": catalog.masked(table.id(), f.id), "custom": table.is_custom(f.id)}))
-                            .collect()
+                            .map(|f| json!({"field": f.id, "label": table.field_label(f), "type": format!("{:?}", f.ty).to_lowercase(), "values": f.values, "masked": catalog.masked(table.id(), f.id), "custom": table.is_custom(f.id)}));
+                        // So are the offered custom fields of a record one
+                        // link away (`company.cf_segment`, #862), when the
+                        // reader may read that record's table.
+                        let linked = table
+                            .links()
+                            .iter()
+                            .filter(|link| link.kind() == bilibi_grid::LinkKind::One)
+                            .filter_map(|link| Some((link, catalog.table(link.to())?)))
+                            .flat_map(|(link, target)| {
+                                target
+                                    .visible_fields()
+                                    .filter(|f| target.custom_watcher_condition(f.id))
+                                    .map(move |f| json!({"field": format!("{}.{}", link.id(), f.id), "label": format!("{} \u{203a} {}", link.label(), target.field_label(f)), "type": format!("{:?}", f.ty).to_lowercase(), "values": f.values, "masked": catalog.masked(target.id(), f.id), "custom": true}))
+                            });
+                        own.chain(linked).collect()
                     })
                     .unwrap_or_default();
                 json!({"trigger": t.event, "title": t.definition.title, "table": t.definition.table, "fields": fields,

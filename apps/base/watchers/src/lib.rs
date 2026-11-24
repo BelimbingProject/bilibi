@@ -14,6 +14,7 @@
 mod agent;
 mod catalog;
 mod definition;
+mod describe;
 mod discard;
 mod observe;
 mod review;
