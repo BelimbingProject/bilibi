@@ -11,6 +11,7 @@
 #   install-server.sh mail <instance> --host <relay> --port <n> --username <user> --tls starttls|implicit_tls --from-address <address> [--from-name <name>] --password-stdin
 #   install-server.sh create-owner <instance> --email <owner address> [--name <name>] [--company-name <name>]
 #   install-server.sh tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>
+#   install-server.sh tenant-provision <instance> --tenant-id <id> --owner-email <address>
 #   install-server.sh two-factor-reset <instance> --email <address>
 #   install-server.sh identity-recover <instance> --email <old> --new-email <new>
 #   install-server.sh identity-delete <instance> --email <address> --confirm <address>
@@ -1346,7 +1347,7 @@ tenant_provision() {
     while (( $# )); do
         (( $# >= 2 )) || usage
         case $1 in
-            --tenant-name|--company-name|--company-code|--owner-email) ;;
+            --tenant-name|--tenant-id|--company-name|--company-code|--owner-email) ;;
             *) usage ;;
         esac
         [[ ! ${options[$1]+present} ]] || fail "Repeated option: $1"

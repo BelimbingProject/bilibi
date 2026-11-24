@@ -66,7 +66,7 @@ fn draft(input: &Value) -> Result<(NewTenant, Vec<String>)> {
     ))
 }
 fn tenant_json(tenant: &bilibi_tenancy::TenantIdentity) -> Value {
-    json!({"id":tenant.id,"parent_id":tenant.parent_id,"name":tenant.name,"name_version":tenant.name_version,"status":tenant.status.as_str(),"is_platform_operator":tenant.is_platform_operator,
+    json!({"id":tenant.id,"parent_id":tenant.parent_id,"name":tenant.name,"status":tenant.status.as_str(),"is_platform_operator":tenant.is_platform_operator,
         "suspension":tenant.suspension.as_ref().map(|suspension| json!({"at":suspension.at,"reason":suspension.reason}))})
 }
 /// The move named by a suspend or reactivate operation key.

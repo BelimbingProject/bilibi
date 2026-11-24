@@ -12,7 +12,7 @@ Every contract serves every channel through the operation registry.
 | --- | --- | --- |
 | `core.tenant.tenant.list` | Optional `search`, `page`, `page_size` (at most 100) | Operator standing and `admin.tenancy.tenant.list` |
 | `core.tenant.tenant.get` | `tenant_id` | Same list permission |
-| `core.tenant.tenant.detail` | Optional `tenant_id` (defaults to your tenant) | `tenancy.tenant.view`, own tenant or operator standing |
+| `core.tenant.tenant.detail` | `tenant_id` | `tenancy.tenant.view`, own tenant or operator standing |
 | `core.tenant.tenant.rename` | `tenant_id`, `name`, `version` | `tenancy.tenant.rename`, own tenant or operator standing |
 | `core.tenant.tenant.create` | `name`, `primary_company`; optional `additional_companies`, `parent_id` | Operator standing and `admin.tenancy.tenant.create`, plus Base Step-up policy |
 | `core.tenant.tenant.suspend` | `tenant_id`, `reason` (required, at most 500 characters) | Operator standing and `admin.tenancy.tenant.suspend`, plus Base Step-up policy |
@@ -24,7 +24,7 @@ An agent runs the dry-run check, shows the review to its person, waits for expli
 
 ### Rename
 
-Read `core.tenant.tenant.detail` for the current `name_version`, then review and commit `core.tenant.tenant.rename` with that version. The name is trimmed and must be nonempty and at most 255 characters, as at creation. The transaction checks the version, current permission and target again and records the old and new names in the audit trail. Tenant owners and administrators with `tenancy.tenant.rename` can rename their own tenant; an operator with that capability can rename any tenant.
+Read `core.tenant.tenant.detail` with the target `tenant_id` for the current `name_version`, then review and commit `core.tenant.tenant.rename` with that version. The name is trimmed and must be nonempty and at most 255 characters, as at creation. The transaction checks the version, current permission and target again and records the old and new names in the audit trail. Tenant owners and administrators with `tenancy.tenant.rename` can rename their own tenant; an operator with that capability can rename any tenant.
 
 ### Suspend and reactivate
 

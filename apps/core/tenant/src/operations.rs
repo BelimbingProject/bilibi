@@ -112,7 +112,10 @@ impl ReadHandler for Detail {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let id = input["tenant_id"].as_i64().unwrap_or(scope.tenant());
+            let id = input["tenant_id"]
+                .as_i64()
+                .filter(|id| *id > 0)
+                .ok_or(Error::Invalid)?;
             let tenant = facade()?.tenants.read_for_rename(client, scope, id).await?;
             Ok(rename_identity(&tenant).into())
         })
@@ -213,7 +216,7 @@ fn get_schema() -> Value {
     json!({"type":"object","required":["tenant_id"],"properties":{"tenant_id":{"type":"integer","minimum":1}}})
 }
 fn detail_schema() -> Value {
-    json!({"type":"object","properties":{"tenant_id":{"type":"integer","minimum":1,"description":"Defaults to your own tenant"}}})
+    json!({"type":"object","required":["tenant_id"],"properties":{"tenant_id":{"type":"integer","minimum":1,"maximum":i64::MAX}}})
 }
 fn rename_schema() -> Value {
     json!({"type":"object","required":["tenant_id","name","version"],"properties":{"tenant_id":{"type":"integer","minimum":1},"name":{"type":"string","maxLength":255},"version":{"type":"integer","minimum":1}}})
@@ -225,7 +228,7 @@ fn move_output() -> Value {
     json!({"type":"object","description":"Review: the tenant, the status it moves to, the reason and what the move does. Commit: the tenant as it now stands and, for a suspension, how many sessions ended."})
 }
 fn tenant_output() -> Value {
-    json!({"type":"object","description":"Tenant identity: id, parent_id, name, name_version, status (active or suspended), is_platform_operator and, while suspended, suspension {at, reason}. A tenant id does not change the caller's scope."})
+    json!({"type":"object","description":"Tenant identity: id, parent_id, name, status (active or suspended), is_platform_operator and, while suspended, suspension {at, reason}. A tenant id does not change the caller's scope."})
 }
 fn rename_output() -> Value {
     json!({"type":"object","description":"Tenant identity: id, name and name_version. The rename review also includes the proposed name and summary."})
@@ -247,6 +250,6 @@ inventory::submit! { Contribution::new(DEFINITIONS,"core/tenant",Provenance { mo
         Operation { key:CREATE,title:"Create a tenant and its companies",summary:"Provision a new tenant with its primary company and optional additional companies, atomically. Requires operator standing, tenant-create capability and the tenant's 2FA policy.",keywords:&["tenant","customer","workspace","create","provision","company","companies"],capability:bilibi_tenancy::CREATE,input:create_schema,output:create_output,handler:Handler::SafeWrite(&Create),channels:Channels::Every,step_up:&[CREATE] },
     ],
     guides:&[Guide { key:"core.tenant.rename",title:"Rename a tenant",summary:"Review and rename your tenant or, as an operator, another tenant.",keywords:&["tenant","workspace","rename"],capability:bilibi_tenancy::RENAME,
-        body:"Read core.tenant.tenant.detail with no tenant_id for your own tenant, or with a tenant_id when acting as the installation operator. Plan core.tenant.tenant.rename with that id, its current name_version as version, and the new name. Show the review and commit only after approval. The name is trimmed, required and at most 255 characters; a stale version is refused. Tenant owners can rename only their own tenant; operators can rename other tenants if they hold the capability." }, Guide { key:"core.tenant",title:"Tenants and their companies",summary:"Provision a customer's separate workspace with its companies, using the platform operator's standing.",keywords:&["tenant","workspace","customer","companies","provision"],capability:bilibi_tenancy::LIST,
+        body:"Read core.tenant.tenant.detail with your tenant_id, or another tenant_id when acting as the installation operator. Plan core.tenant.tenant.rename with that id, its current name_version as version, and the new name. Show the review and commit only after approval. The name is trimmed, required and at most 255 characters; a stale version is refused. Tenant owners can rename only their own tenant; operators can rename other tenants if they hold the capability." }, Guide { key:"core.tenant",title:"Tenants and their companies",summary:"Provision a customer's separate workspace with its companies, using the platform operator's standing.",keywords:&["tenant","workspace","customer","companies","provision"],capability:bilibi_tenancy::LIST,
         body:"A tenant is a customer's separate data boundary; a company is an organisation inside it. Search core.tenant.tenant.list before creating. Read one with core.tenant.tenant.get. To create Acme with three companies, plan core.tenant.tenant.create with name Acme, primary_company Acme Trading and additional_companies [Acme Industrial, Acme Auto]. Show the review including generated company codes, then commit after the person approves. The entire tenant, companies and primary assignment commit together, attributed to your person. A step_up_required refusal asks for your person's current authenticator code; retry the same plan with step_up_code. To stop a tenant's access, plan core.tenant.tenant.suspend with tenant_id and a reason; commit it only after your person approves, because everyone signed in to that tenant is signed out at once. core.tenant.tenant.reactivate lifts it. The platform operator's own tenant cannot be suspended. Create needs the platform operator's tenant-create capability; suspend needs tenant-suspend and reactivate needs tenant-reactivate. Never substitute core.company.create: that creates only in your current tenant. Creating a tenant does not switch your connection into it, create accounts or grant access to its business data. Impersonation is unavailable to agents." }],
 }) }

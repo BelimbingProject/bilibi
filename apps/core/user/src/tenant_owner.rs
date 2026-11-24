@@ -21,12 +21,20 @@ const TENANT_OWNER_REISSUED: &str = "user.tenant_owner.reissued";
 pub(crate) const DEDICATED_OWNER_SIGN_IN: &str =
     "A tenant owner needs a new sign-in. Use a separate email address.";
 
+pub enum TenantOwnerTarget<'a> {
+    Create {
+        name: &'a str,
+        company: &'a NewCompany,
+    },
+    Reissue {
+        tenant: i64,
+    },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FirstTenantOwnerError {
-    #[error("a matching tenant already exists without a matching owner bootstrap receipt")]
+    #[error("a tenant with that name already exists")]
     TenantExists,
-    #[error("more than one tenant matches the supplied tenant and primary company")]
-    AmbiguousTenant,
     #[error("the bootstrap owner has no pending invitation")]
     OwnerNotPending,
     #[error("{DEDICATED_OWNER_SIGN_IN}")]
@@ -40,9 +48,9 @@ pub enum FirstTenantOwnerError {
     #[error("Cannot prepare the owner invitation: {0}")]
     Mail(#[from] bilibi_mail::Error),
     #[error(
-        "Owner invitation delivery failed after commit. Rerun the same command to reissue it."
+        "Owner invitation delivery failed after commit for tenant {tenant}. Reissue with --tenant-id {tenant} and --owner-email."
     )]
-    Delivery,
+    Delivery { tenant: i64 },
     #[error(transparent)]
     Access(#[from] Error),
 }
@@ -60,11 +68,9 @@ fn tenant_owner_lock(tenant: i64) -> String {
 impl UserService {
     pub async fn provision_tenant_owner(
         &self,
-        tenant_name: &str,
-        company: &NewCompany,
+        target: TenantOwnerTarget<'_>,
         owner_email: &str,
-    ) -> std::result::Result<Invitation, FirstTenantOwnerError> {
-        let tenant_name = tenant_name.trim();
+    ) -> std::result::Result<(i64, Invitation), FirstTenantOwnerError> {
         let email = validate_email(owner_email)
             .map_err(|error| FirstTenantOwnerError::Validation(vec![error]))?;
         let name = email
@@ -108,55 +114,21 @@ impl UserService {
         let raw_token = token()?;
         let token_hash = digest(&raw_token);
         self.mailer.ready().await?;
-        let message = Message::text(
-            Address::new(Some(&name), &email)?,
-            "You're invited to become a tenant owner",
-            format!(
-                "You are invited to become the owner of {tenant_name}.\n\nOpen this link to set up your sign-in:\n\n{origin}/accept/{raw_token}\n\nThe link works once and expires in {days} days. If you did not expect this, you can ignore this email.\n"
-            ),
-        );
-        let rendered = self.mailer.render(&message).await?;
         let mut client = Connection::take(self.db.get().await.map_err(Error::from)?);
-        client
-            .execute(
-                "SELECT pg_advisory_lock(hashtextextended($1,0))",
-                &[&tenant_name_lock(tenant_name)],
-            )
-            .await?;
-        // This installation command is the one authority for this tenant
-        // name. Keep its session lock through delivery so overlapping runs
-        // cannot rotate a link that an earlier run is still sending.
-        let invitation = {
+        let (tenant, invitation, rendered) = {
             let sql = tokio_postgres::Client::transaction(&mut client).await?;
-            let company_name = company.name.trim();
-            let company_code = company.code.as_deref().map(str::trim);
-            let matches = sql
-                .query(
-                    "SELECT t.id,p.company_id,b.invitation_id
-                     FROM tenants t
-                     JOIN tenant_primary_companies p ON p.tenant_id=t.id
-                     JOIN companies c ON c.tenant_id=p.tenant_id AND c.id=p.company_id
-                     LEFT JOIN platform_operator o ON o.tenant_id=t.id
-                     LEFT JOIN user_tenant_owner_bootstraps b ON b.tenant_id=t.id AND b.company_id=c.id
-                         AND t.status='active' AND o.tenant_id IS NULL
-                     WHERE t.name=$1 AND t.deleted_at IS NULL
-                       AND c.deleted_at IS NULL AND c.name=$2 AND c.code=$3
-                     ORDER BY t.id LIMIT 2",
-                    &[&tenant_name, &company_name, &company_code],
-                )
-                .await?;
-            let (tenant, company, retry_invitation) = match matches.as_slice() {
-                [row] => {
-                    let invitation = row
-                        .get::<_, Option<i64>>(2)
-                        .ok_or(FirstTenantOwnerError::TenantExists)?;
-                    (row.get(0), row.get(1), Some(invitation))
-                }
-                [] => {
+            let (tenant, created) = match target {
+                TenantOwnerTarget::Create { name, company } => {
+                    let name = name.trim();
+                    sql.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                        &[&tenant_name_lock(name)],
+                    )
+                    .await?;
                     let exists: bool = sql
                         .query_one(
                             "SELECT EXISTS(SELECT 1 FROM tenants WHERE name=$1 AND deleted_at IS NULL)",
-                            &[&tenant_name],
+                            &[&name],
                         )
                         .await?
                         .get(0);
@@ -166,49 +138,69 @@ impl UserService {
                     if email_taken(&sql, &email, None).await? {
                         return Err(FirstTenantOwnerError::DedicatedSignIn);
                     }
-                    match bilibi_company::provision_tenant_in(&sql, tenant_name, company).await? {
+                    match bilibi_company::provision_tenant_in(&sql, name, company).await? {
                         ProvisionOutcome::Provisioned(ready) => {
-                            (ready.tenant.id, ready.company.id, None)
+                            (ready.tenant.id, Some((ready.tenant.name, ready.company.id)))
                         }
                         ProvisionOutcome::Refused(errors) => {
                             return Err(FirstTenantOwnerError::CompanyValidation(errors));
                         }
                     }
                 }
-                _ => return Err(FirstTenantOwnerError::AmbiguousTenant),
+                TenantOwnerTarget::Reissue { tenant } if tenant > 0 => (tenant, None),
+                TenantOwnerTarget::Reissue { .. } => return Err(Error::Invalid.into()),
             };
             sql.execute(
                 "SELECT pg_advisory_lock(hashtextextended($1,0))",
                 &[&tenant_owner_lock(tenant)],
             )
             .await?;
-            let mut tx = self.mutations.adopt_deployment(
-                sql,
-                Context::system(tenant, TENANT_OWNER_PRINCIPAL, TENANT_OWNER_ACTION),
-            )?;
-            let (invitation, event) = if let Some(id) = retry_invitation {
-                let pending = tx
-                    .sql()
+            let pending = if created.is_none() {
+                Some(sql
                     .query_opt(
-                        "SELECT i.user_id,i.email,u.name FROM user_tenant_owner_bootstraps b
+                        "SELECT i.id,i.user_id,i.email,u.name,t.name FROM user_tenant_owner_bootstraps b
                          JOIN user_invitations i ON i.tenant_id=b.tenant_id AND i.user_id=b.user_id AND i.id=b.invitation_id
                          JOIN users u ON u.tenant_id=b.tenant_id AND u.id=b.user_id
                          JOIN tenants t ON t.id=b.tenant_id
                          JOIN tenant_primary_companies p ON p.tenant_id=b.tenant_id AND p.company_id=b.company_id
                          JOIN companies c ON c.tenant_id=p.tenant_id AND c.id=p.company_id
-                         WHERE b.tenant_id=$1 AND i.id=$2
-                           AND t.name=$3 AND t.deleted_at IS NULL AND t.status='active'
-                           AND c.name=$4 AND c.code=$5 AND c.deleted_at IS NULL
+                         WHERE b.tenant_id=$1
+                           AND t.deleted_at IS NULL AND t.status='active' AND c.deleted_at IS NULL
                            AND NOT EXISTS (SELECT 1 FROM platform_operator o WHERE o.tenant_id=t.id)
                            AND i.accepted_at IS NULL AND i.revoked_at IS NULL
                            AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL
                          FOR UPDATE OF i,u FOR SHARE OF t,p,c",
-                        &[&tenant, &id, &tenant_name, &company_name, &company_code],
+                        &[&tenant],
                     )
                     .await?
-                    .ok_or(FirstTenantOwnerError::OwnerNotPending)?;
-                let (user, old_email, old_name): (i64, String, String) =
-                    (pending.get(0), pending.get(1), pending.get(2));
+                    .ok_or(FirstTenantOwnerError::OwnerNotPending)?)
+            } else {
+                None
+            };
+            let tenant_name: &str = if let Some((name, _)) = &created {
+                name
+            } else {
+                pending.as_ref().ok_or(Error::Internal)?.get(4)
+            };
+            let message = Message::text(
+                Address::new(Some(&name), &email)?,
+                "You're invited to become a tenant owner",
+                format!(
+                    "You are invited to become the owner of {tenant_name}.\n\nOpen this link to set up your sign-in:\n\n{origin}/accept/{raw_token}\n\nThe link works once and expires in {days} days. If you did not expect this, you can ignore this email.\n"
+                ),
+            );
+            let rendered = self.mailer.render(&message).await?;
+            let mut tx = self.mutations.adopt_deployment(
+                sql,
+                Context::system(tenant, TENANT_OWNER_PRINCIPAL, TENANT_OWNER_ACTION),
+            )?;
+            let (invitation, event) = if let Some(pending) = pending {
+                let (id, user, old_email, old_name): (i64, i64, String, String) = (
+                    pending.get(0),
+                    pending.get(1),
+                    pending.get(2),
+                    pending.get(3),
+                );
                 if email_taken(tx.sql(), &email, None).await? {
                     return Err(FirstTenantOwnerError::DedicatedSignIn);
                 }
@@ -245,8 +237,15 @@ impl UserService {
                 (invitation, TENANT_OWNER_REISSUED)
             } else {
                 (
-                    self.invite_tenant_owner_in(&mut tx, company, name, email, token_hash, days)
-                        .await?,
+                    self.invite_tenant_owner_in(
+                        &mut tx,
+                        created.ok_or(Error::Internal)?.1,
+                        name,
+                        email,
+                        token_hash,
+                        days,
+                    )
+                    .await?,
                     TENANT_OWNER_INVITED,
                 )
             };
@@ -266,13 +265,13 @@ impl UserService {
             )
             .await?;
             tx.commit().await?;
-            invitation
+            (tenant, invitation, rendered)
         };
         self.mailer
             .deliver_rendered(rendered)
             .await
-            .map_err(|_| FirstTenantOwnerError::Delivery)?;
-        Ok(invitation)
+            .map_err(|_| FirstTenantOwnerError::Delivery { tenant })?;
+        Ok((tenant, invitation))
     }
 
     async fn invite_tenant_owner_in(

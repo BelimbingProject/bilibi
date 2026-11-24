@@ -17,8 +17,7 @@ use bilibi_agent_api::{
 use bilibi_database::{Db, Error, Result};
 use bilibi_datetime::{DisplayContext, DisplayPolicy, Format, Precision};
 use bilibi_tenancy::{
-    Authorization, Move, OperatorProof, Scope, Suspension, TenantErrors, TenantIdentity,
-    TenantStatus,
+    Authorization, Move, OperatorProof, Scope, Suspension, TenantErrors, TenantStatus,
 };
 use bilibi_ui::page::{
     LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
@@ -101,6 +100,15 @@ pub struct Pages {
     pub authorization: Arc<Authorization>,
 }
 
+struct DirectoryTenant {
+    id: i64,
+    parent_id: Option<i64>,
+    name: String,
+    status: TenantStatus,
+    is_platform_operator: bool,
+    suspension: Option<Suspension>,
+}
+
 /// One tenant as the table shows it.
 struct TenantRow {
     id: i64,
@@ -113,7 +121,7 @@ struct TenantRow {
 }
 
 fn present(
-    identities: &[TenantIdentity],
+    identities: &[DirectoryTenant],
     sort_by: Option<&str>,
     descending: bool,
 ) -> Vec<TenantRow> {
@@ -429,7 +437,11 @@ impl TenantsPage {
         let result = self
             .pages
             .contracts
-            .read(scope, crate::DETAIL, &serde_json::json!({}))
+            .read(
+                scope,
+                crate::DETAIL,
+                &serde_json::json!({"tenant_id":scope.tenant()}),
+            )
             .await
             .map_err(contract_error)?;
         let tenant = &result["result"];
@@ -551,9 +563,9 @@ impl TenantsPage {
         render(table)
     }
 
-    fn form(&self, identities: &[TenantIdentity]) -> Option<CreateForm> {
+    fn form(&self, identities: &[DirectoryTenant]) -> Option<CreateForm> {
         let draft = self.create.as_ref()?;
-        let mut parents: Vec<&TenantIdentity> = identities.iter().collect();
+        let mut parents: Vec<&DirectoryTenant> = identities.iter().collect();
         parents.sort_by_key(|identity| identity.id);
         let mut summary = bilibi_ui::ErrorSummary::new("tenant-create-errors");
         for (id, label, errors) in [
@@ -661,11 +673,10 @@ impl TenantsPage {
                 .map_err(contract_error)?;
             let rows = result["result"].as_array().ok_or(Error::Internal)?;
             for row in rows {
-                identities.push(TenantIdentity {
+                identities.push(DirectoryTenant {
                     id: row["id"].as_i64().ok_or(Error::Internal)?,
                     parent_id: row["parent_id"].as_i64(),
                     name: row["name"].as_str().ok_or(Error::Internal)?.into(),
-                    name_version: row["name_version"].as_i64().ok_or(Error::Internal)?,
                     status: row["status"]
                         .as_str()
                         .and_then(TenantStatus::parse)
