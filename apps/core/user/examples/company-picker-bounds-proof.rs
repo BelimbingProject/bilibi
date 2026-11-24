@@ -2,9 +2,9 @@
 //! 3,000 more companies in the tenant, the company pickers a tenant-wide
 //! administrator uses no longer draw every company. Each picker names at most
 //! one page of companies, and typing finds the last company: role create
-//! saves a role owned by it, account create takes it as the first desk, the
-//! role grant and the privacy request offer it, and the settings scope finds
-//! it. Exits non-zero when a check fails. Never point it at a shared database.
+//! saves a role owned by it, the role grant and the privacy request offer it,
+//! and the settings scope finds it. Exits non-zero when a check fails. Never
+//! point it at a shared database.
 //!
 //! ```sh
 //! BILIBI_USER_DEMO=disposable cargo run -p bilibi-user --example company-picker-bounds-proof --locked
@@ -175,49 +175,8 @@ async fn main() -> Result<(), Error> {
         owner,
     );
 
-    println!("-- account create");
-    let users = app.services.get::<Pages>("core/user.pages")?;
-    let mut state = mount(&users, &admin, "create", HashMap::new(), HashMap::new()).await?;
-    let html = send(&mut state, &admin, token, None).await?;
-    checks.check(
-        "account create names at most one page of companies",
-        listed(&html) <= BOUND,
-        listed(&html),
-    );
-    let _ = send(
-        &mut state,
-        &admin,
-        token,
-        Some(json!({"type": "change_desk"})),
-    )
-    .await;
-    let html = send(
-        &mut state,
-        &admin,
-        token,
-        Some(json!({"type": "validate", "user[company_id_search]": last, "user[name]": "Bound Person"})),
-    )
-    .await?;
-    checks.check(
-        "typing finds the last company as a first desk",
-        named(&html, last),
-        listed(&html),
-    );
-    let html = send(
-        &mut state,
-        &admin,
-        token,
-        Some(json!({"type": "pick_desk", "record": record})),
-    )
-    .await;
-    checks.check(
-        "choosing it makes it the first desk",
-        html.as_deref()
-            .is_ok_and(|html| named(html, last) && html.contains(&format!("value=\"{last_id}\""))),
-        html.as_ref().map(|html| listed(html)),
-    );
-
     println!("-- role grant on an account");
+    let users = app.services.get::<Pages>("core/user.pages")?;
     let mut path = HashMap::new();
     path.insert("id".to_owned(), "3".to_owned());
     let mut state = mount(&users, &admin, "detail", path, HashMap::new()).await?;

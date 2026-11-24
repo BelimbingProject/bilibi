@@ -111,7 +111,7 @@ async fn main() -> Outcome {
         "Sign in at {origin} as admin@example.test and open {origin}/companies/1, then History."
     );
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    axum::serve(listener, bilibi_web::router(app))
+    axum::serve(listener, bilibi_web::staff_router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

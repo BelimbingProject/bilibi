@@ -3,7 +3,7 @@
 **Document Type:** Architecture overview
 **Status:** Active
 **Scope:** Layers, modules, composition, data, audit and security of Bilibi. The UI rules are in [`DESIGN.md`](../../DESIGN.md).
-**Last Updated:** 2026-11-05
+**Last Updated:** 2026-11-23
 
 Bilibi is a business application platform written in Rust: a set of small modules that plug into one web host, each owning its own data, pages and rules.
 
@@ -142,13 +142,13 @@ Each Domain and each Extension lives in its own repository, with one or more mod
 
 ## The web host
 
-**The host is generic; modules plug into it.** It knows how to serve pages, not what any page is about.
+**The host is generic; modules plug into it.** It knows how to serve pages, not what any page is about. [ADR 34](decisions/34-two-sites-listener-boundary.md) divides them between staff and public routers on separate listeners; the socket is the boundary and each router checks its own configured host.
 
 - **Stack:** Axum on Tokio, Askama templates and a native WebSocket adapter. There is no single-page-app framework and no client-side model.
 - **Pages are contributions.** A module registers a `Route` that names a `PageService`. The host checks access, then the owner renders. *built*
-- **Access kinds:** Public, SignedIn, Capability, AnyOf (one of several capabilities), Operator, OperatorCapability, Owner, StepUp.
+- **Access kinds:** SignedIn, Capability, AnyOf (one of several capabilities), Operator, OperatorCapability, Owner and StepUp pages are installed only on the staff listener. Portal pages join the public listener under their customer scope. Nothing on the staff site is anonymous.
 - **Downloads** are `DOWNLOADS` contributions: GET only, never public.
-- **Public endpoints** are `PUBLIC_ENDPOINTS` contributions: a GET or POST token link (tracking pixel, click redirect, one-click unsubscribe) with no session, answered with bytes, a validated redirect or a 204.
+- **The public site** belongs to `base/public` (`apps/base/public/README.md`): anonymous `PUBLIC_PAGES` and token `PUBLIC_LINKS` (tracking pixel, click redirect, one-click unsubscribe, calendar feed), each with a required sender budget under the listener's own, and the sealed `PublicScope` their owners receive.
 - **Live pages:** the server renders HTML and the browser patches it by element id. Every intent is queued and acknowledged by request ID. Contract: `docs/live-pages.md`.
 - **Agent edge:** `/api/v1`, `/mcp` and device-code OAuth. Both resolve to the `base/agent_api` registry.
 

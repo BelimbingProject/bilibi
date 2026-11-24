@@ -46,11 +46,24 @@ pub struct Editor {
     pub label: &'static str,
     pub help: &'static str,
     pub capability: Option<&'static str>,
+    /// How long a revealed stored secret stays shown, 1,000 to 60,000 ms; or
+    /// [`NEVER_REVEALED`] for an encrypted value no one may see again.
     pub reveal_duration_ms: u32,
 }
 /// Marker payload for [`TENANT_ADMIN`]. The definition remains the source of
 /// the label, type, validation, capability and secret policy.
 pub struct TenantAdmin;
+/// `reveal_duration_ms` for an encrypted setting that is never shown back,
+/// not even through the stored-secret reveal: a credential whose holder
+/// should re-enter it rather than read it (such as an API key sent to an
+/// operator-chosen server).
+pub const NEVER_REVEALED: u32 = 0;
+impl Editor {
+    /// Whether a stored value may be revealed at all.
+    pub fn revealable(&self) -> bool {
+        self.reveal_duration_ms != NEVER_REVEALED
+    }
+}
 pub struct Definition {
     pub value_type: ValueType,
     pub scopes: &'static [ScopeKind],
@@ -234,7 +247,8 @@ impl Definitions {
                     if editor.group.is_empty()
                         || editor.label.is_empty()
                         || editor.help.is_empty()
-                        || !(1_000..=60_000).contains(&editor.reveal_duration_ms)
+                        || !((1_000..=60_000).contains(&editor.reveal_duration_ms)
+                            || d.encrypted && editor.reveal_duration_ms == NEVER_REVEALED)
                         || editor.capability.is_some_and(str::is_empty)
                     {
                         return Err(fail("invalid editor metadata"));

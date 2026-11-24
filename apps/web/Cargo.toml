@@ -28,7 +28,6 @@ uuid.workspace = true
 url.workspace = true
 askama.workspace = true
 tokio-postgres.workspace = true
-libc.workspace = true
 jiff.workspace = true
 icu_properties.workspace = true
 

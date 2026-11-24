@@ -108,14 +108,7 @@ impl Media {
         tenant: i64,
         id: i64,
     ) -> Result<String> {
-        let row = self.fetch(client, tenant, id).await?;
-        if self.private_tree(client, id).await? {
-            return Err(Error::PrivateAsset);
-        }
-        if row.disk == EXTERNAL {
-            return Err(Error::SourceNotStored);
-        }
-        self.readable(client, &row).await?;
+        let row = self.public_stored(client, tenant, id).await?;
         let ttl = self
             .setting(client, "media.stream_ttl_seconds")
             .await?
@@ -134,7 +127,29 @@ impl Media {
         token: &str,
     ) -> Result<Stored> {
         let claims = self.signer.verify(id, token, now())?;
-        let row = self.fetch(client, claims.tenant, id).await?;
+        self.public_stored(client, claims.tenant, id).await
+    }
+
+    /// Read a public asset held by an owner that can prove the tenant and
+    /// asset from its own configuration, for example an installed brand.
+    /// The stream owns the same bounds and checks as a signed download.
+    pub async fn open_tenant_public_asset(
+        &self,
+        client: &(impl GenericClient + Sync),
+        tenant: i64,
+        id: i64,
+    ) -> Result<FileStream> {
+        let row = self.public_stored(client, tenant, id).await?;
+        self.stream(client, &row).await
+    }
+
+    async fn public_stored(
+        &self,
+        client: &(impl GenericClient + Sync),
+        tenant: i64,
+        id: i64,
+    ) -> Result<Stored> {
+        let row = self.fetch(client, tenant, id).await?;
         if self.private_tree(client, id).await? {
             return Err(Error::PrivateAsset);
         }

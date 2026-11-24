@@ -182,8 +182,8 @@ async fn bootstrap(db: &Db, app: &crate::App) -> Result<Bootstrap> {
                 .get(0);
             let identity: i64 = tx
                 .query_one(
-                    "INSERT INTO user_identities(kind,email,password_hash,home_tenant_id,home_user_id,last_tenant_id) VALUES('staff',$1,$2,$3,$4,$3) RETURNING id",
-                    &[&ADMIN_EMAIL, &hash, &tenant, &user],
+                    "INSERT INTO user_identities(kind,email,password_hash,last_tenant_id) VALUES('staff',$1,$2,$3) RETURNING id",
+                    &[&ADMIN_EMAIL, &hash, &tenant],
                 )
                 .await?
                 .get(0);

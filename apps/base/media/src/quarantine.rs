@@ -326,9 +326,11 @@ impl Media {
     /// the row's lock. A failed removal or record retries, and bytes already
     /// gone count as removed, so a retry after a lost record finishes it.
     async fn remove_purged(&self, execution: &Execution, id: i64) -> Result<Outcome> {
-        let holds = RecordHolds::acquire(execution.tenant()).await?;
-        let removed = self.remove_unheld(execution, id, &holds).await;
-        holds.release().await?;
+        let mut client = self.db.get().await.map_err(bilibi_database::Error::from)?;
+        let (holds, mut hold_guard) = RecordHolds::acquire(&mut client, execution.tenant()).await?;
+        let client = hold_guard.client();
+        let removed = self.remove_unheld(client, execution, id, &holds).await;
+        hold_guard.release().await?;
         removed
     }
     /// A legal hold on the file, or on the attachment it is bound to, keeps
@@ -336,12 +338,12 @@ impl Media {
     /// unreadable; a purge repeated once the hold is released removes them.
     async fn remove_unheld(
         &self,
+        client: &mut tokio_postgres::Client,
         execution: &Execution,
         id: i64,
         holds: &RecordHolds,
     ) -> Result<Outcome> {
         let tenant = execution.tenant();
-        let mut client = self.db.get().await.map_err(bilibi_database::Error::from)?;
         let bindings: Vec<i64> = client
             .query(
                 "SELECT id FROM base_media_attachments WHERE tenant_id=$1 AND media_asset_id=$2",
@@ -351,14 +353,17 @@ impl Media {
             .iter()
             .map(|row| row.get(0))
             .collect();
-        if !holds.records(ASSET_KIND, &[id]).await?.is_empty()
-            || !holds.records(ATTACHMENT_KIND, &bindings).await?.is_empty()
+        if !holds.records(&*client, ASSET_KIND, &[id]).await?.is_empty()
+            || !holds
+                .records(&*client, ATTACHMENT_KIND, &bindings)
+                .await?
+                .is_empty()
         {
             return Ok(Outcome::Cancel("legal_hold"));
         }
-        let roots = self.disks(&**client).await?;
+        let roots = self.disks(&*client).await?;
         // `begin` fences the lease and re-proves the principal's grant.
-        let mut tx = execution.begin(&mut client, "media.purge.removal").await?;
+        let mut tx = execution.begin(client, "media.purge.removal").await?;
         let row = self.lock_stored(&mut tx, tenant, id).await?;
         if row.purged || !row.purge_requested {
             tx.rollback().await?;

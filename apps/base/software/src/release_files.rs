@@ -37,6 +37,7 @@ pub(super) struct ReleaseFiles {
     /// The next render asks GitHub now, unless GitHub is limiting this server.
     github_refresh: bool,
     github_error: Option<String>,
+    pending_github: Option<(&'static str, Value)>,
     pub(super) flash: Option<(StatusKind, String)>,
 }
 fn github_columns() -> Vec<BuiltinColumn> {
@@ -77,23 +78,95 @@ impl ReleaseFiles {
             github_prerelease: false,
             github_refresh: false,
             github_error: None,
+            pending_github: None,
             flash: None,
         })
     }
     fn say(&mut self, kind: StatusKind, message: impl Into<String>) {
         self.flash = Some((kind, message.into()));
     }
-    /// Saves the GitHub repository, token or refresh interval. A step-up the
-    /// owner asks for ends the event: the host takes the person to confirm
-    /// and back, and nothing was changed.
+    fn stage_github(&mut self, event: &'static str, input: Value) {
+        self.github_error = None;
+        self.pending_github = Some((event, input));
+    }
+
+    pub(super) fn cancel_github(&mut self) {
+        self.pending_github = None;
+        self.github_error = None;
+    }
+
+    pub(super) async fn github_gate(&self, scope: &Scope) -> Result<Option<Html>> {
+        let Some((event, _)) = &self.pending_github else {
+            return Ok(None);
+        };
+        let methods = self
+            .pages
+            .software
+            .step_up
+            .enrolled_methods(scope)
+            .await?
+            .into_iter()
+            .map(|method| {
+                bilibi_ui::ProofMethod::new(
+                    method.id,
+                    method.label,
+                    method.code_length,
+                    method.numeric,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut step = bilibi_ui::StepUp::new(!methods.is_empty(), "/system/software?tab=releases");
+        step.code = render(bilibi_ui::ProofInput::new(
+            "github-action-code",
+            "code",
+            methods,
+        ))?;
+        step.actions = render(Button {
+            button_type: "submit",
+            variant: ButtonVariant::Primary,
+            body: Html::text("Confirm"),
+            ..Button::default()
+        })?;
+        step.secondary_actions = render(Button {
+            button_type: "button",
+            event: "cancel_github",
+            body: Html::text("Cancel"),
+            ..Button::default()
+        })?;
+        let mut body = Html::EMPTY;
+        if let Some(message) = &self.github_error {
+            body.push(&render(bilibi_ui::Alert {
+                kind: StatusKind::Error,
+                body: Html::text(message),
+                ..Default::default()
+            })?);
+        }
+        body.push(&render(step)?);
+        let form = render(Form {
+            id: "github-action-proof",
+            event,
+            body,
+            ..Default::default()
+        })?;
+        let heading = match *event {
+            "github_accept" => "Accept GitHub repository",
+            "clear_github_token" => "Clear GitHub read token",
+            _ => "Save GitHub settings",
+        };
+        let gate = bilibi_ui::StepUpGate::action("Software", heading, form)
+            .map_err(|_| Error::Internal)?;
+        Ok(Some(render(gate)?))
+    }
+
     async fn github_save(
         &mut self,
         request: &LiveRequest<'_, Scope>,
-        event: &str,
+        event: &'static str,
         input: Value,
+        scope: &Scope,
     ) -> Result<()> {
         let call = bilibi_agent_api::page::Call {
-            scope: request.scope,
+            scope,
             credential: request.credential,
             service: PAGES,
             event,
@@ -124,7 +197,21 @@ impl ReleaseFiles {
                 self.github_error = Some(message.clone());
                 self.say(StatusKind::Error, message);
             }
-            Err(AgentError::Backend(error @ Error::StepUpRequired { .. })) => return Err(error),
+            Err(AgentError::Backend(Error::StepUpRequired { reason, .. })) => {
+                self.pending_github = Some((event, input));
+                self.github_error = Some(
+                    match reason {
+                        "locked" => "Too many wrong codes. Wait a while, then try again.",
+                        "impersonating" => {
+                            "GitHub settings cannot be changed while viewing as someone else."
+                        }
+                        "not_enrolled" => "Set up 2FA before changing GitHub settings.",
+                        _ => "The 2FA code was refused.",
+                    }
+                    .into(),
+                );
+            }
+            Err(AgentError::Backend(Error::Unauthorized)) => return Err(Error::Unauthorized),
             Err(AgentError::Forbidden) => {
                 let message = "You do not have permission to change the GitHub repository.";
                 self.github_error = Some(message.into());
@@ -336,6 +423,7 @@ impl ReleaseFiles {
         let accepted = github["accepted"].as_bool() == Some(true);
         let identity_changed = github["identity_changed"].as_bool() == Some(true);
         let token_set = github["token_set"].as_bool() == Some(true);
+        let app = github["app"].as_str();
         let minutes = github["refresh_minutes"].as_i64().unwrap_or(15);
         let mut body = render(Facts {
             id: "release-files-github-facts",
@@ -355,9 +443,13 @@ impl ReleaseFiles {
                     value: Html::text(if accepted { "Yes" } else { "No" }),
                 },
                 Fact {
-                    title: "Read token",
+                    title: "Read access",
                     id: "release-files-github-token-fact",
-                    value: Html::text(if token_set { "Saved" } else { "Not set" }),
+                    value: Html::text(&match app {
+                        Some(client_id) => format!("This server's GitHub App {client_id}: a new read-only token for each check"),
+                        None if token_set => "Saved read token".into(),
+                        None => "None (a public repository)".into(),
+                    }),
                 },
                 Fact {
                     title: "Check every",
@@ -449,10 +541,12 @@ impl ReleaseFiles {
             if let Some(error) = &self.github_error {
                 repository_field = repository_field.error(error.clone());
             }
+            // With the server's GitHub App a saved token is never used, so its
+            // field is not offered (Read access names the App).
             let mut secret = SecretInput::in_form("github", "token", "GitHub read token")
                 .id("release-files-github-token")
                 .label("GitHub read token")
-                .hint("Leave empty for a public repository. For a private one, use a fine-grained token that can read this repository only.");
+                .hint("Leave empty for a public repository. For a private one, give the server a GitHub App with scripts/install-server.sh github-app: it never expires. A fine-grained token that can read this repository only also works, until it expires.");
             if token_set {
                 secret = secret.stored();
             }
@@ -466,7 +560,9 @@ impl ReleaseFiles {
                 .attr("min", "1")
                 .attr("max", "1440");
             let mut fields = render(repository_field)?;
-            fields.push(&render(secret)?);
+            if app.is_none() {
+                fields.push(&render(secret)?);
+            }
             fields.push(&render(minutes_field)?);
             let mut actions = render(Button {
                 id: "release-files-github-save",
@@ -730,6 +826,33 @@ impl ReleaseFiles {
             authorize_operator(&**client, request.scope, VIEW).await?;
         }
         if let LiveInput::Event(value) = request.input {
+            let event = value["type"].as_str().unwrap_or("");
+            if let Some((expected, _)) = &self.pending_github {
+                if event == "cancel_github" {
+                    self.cancel_github();
+                    return Ok(true);
+                }
+                if event != *expected {
+                    return Err(Error::Invalid);
+                }
+                let code = value["code"].as_str().ok_or(Error::Invalid)?;
+                let scope = request.scope.clone().presenting_step_up(code);
+                if scope.step_up_code().is_none() {
+                    self.github_error = Some("Enter a current 2FA code.".into());
+                    return Ok(true);
+                }
+                let (event, input) = self.pending_github.take().ok_or(Error::Internal)?;
+                self.github_save(request, event, input, &scope).await?;
+                return Ok(true);
+            }
+            if value.get("code").is_some()
+                && matches!(
+                    event,
+                    "github_source" | "github_accept" | "clear_github_token"
+                )
+            {
+                return Err(Error::Invalid);
+            }
             let values =
                 bilibi_ui::params::string_values_checked(value, bilibi_ui::params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
@@ -755,7 +878,7 @@ impl ReleaseFiles {
                     if !token.is_empty() {
                         input["token"] = json!(token);
                     }
-                    self.github_save(request, "github_source", input).await?;
+                    self.stage_github("github_source", input);
                 }
                 "github_accept" => {
                     let mut input = json!({
@@ -765,11 +888,10 @@ impl ReleaseFiles {
                     if let Ok(id) = get("repository_id").trim().parse::<i64>() {
                         input["repository_id"] = json!(id);
                     }
-                    self.github_save(request, "github_accept", input).await?;
+                    self.stage_github("github_accept", input);
                 }
                 "clear_github_token" => {
-                    self.github_save(request, "clear_github_token", json!({"clear_token": true}))
-                        .await?;
+                    self.stage_github("clear_github_token", json!({"clear_token": true}));
                 }
                 "refresh_github" => self.github_refresh = true,
                 "github_prerelease" => self.github_prerelease = !self.github_prerelease,

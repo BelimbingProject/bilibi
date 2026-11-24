@@ -436,6 +436,7 @@ async fn open_session(
         .0
         .site(&request.site)
         .await?
+        .filter(|site| app.public_tenant == Some(site.tenant()))
         .ok_or(Error::Forbidden)?;
     // The origin first: only a page the site lists may spend the site's own
     // budget; any other caller is bounded by its address alone.
@@ -480,7 +481,7 @@ async fn authenticate(
         .site(scope.site())
         .await?
         .ok_or(Error::Unauthorized)?;
-    if site.tenant() != scope.tenant() {
+    if app.public_tenant != Some(scope.tenant()) || site.tenant() != scope.tenant() {
         return Err(Error::Unauthorized);
     }
     site.admit(origin)?;

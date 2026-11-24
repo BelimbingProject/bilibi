@@ -17,16 +17,18 @@ mod redaction;
 mod redirect;
 pub mod reference_webhook;
 mod retention;
+mod scorer;
 mod transport;
 mod web;
 pub mod webhooks;
 pub use contributions::{
-    WebhookLimits, CONNECTOR_ALLOWED_DESTINATIONS, CONNECTOR_PRIVATE_NETWORKS, DELETE,
-    EXCHANGE_RETENTION_DAYS, LIST, PAYLOAD, PUBLIC_ENDPOINT_SENDER_LIMIT, RETENTION_DAYS,
-    WEBHOOK_SETTINGS,
+    WebhookLimits, DELETE, EXCHANGE_RETENTION_DAYS, LIST, PAYLOAD, RETENTION_DAYS, WEBHOOK_SETTINGS,
 };
 pub use destination::{ConnectorPolicy, Destination, Unusable, DESTINATION_REFUSED};
 pub use redirect::RedirectPolicy;
+pub use scorer::{
+    ScoreDecision, ScoreEvent, ScoreFailure, Scorer, ScorerResult, CONNECTOR_DESTINATIONS, SCORERS,
+};
 pub use transport::{Failure, Outgoing, Reply, Streamed};
 
 use bilibi_authz::{authorize_key, SystemScope};
@@ -375,6 +377,8 @@ pub(crate) fn valid_call(call: &Call) -> bool {
 pub struct Integration {
     db: Db,
     boundary: Arc<MutationBoundary>,
+    settings: Arc<bilibi_settings::Settings>,
+    scorers: scorer::Scorers,
     clients: transport::Clients,
     /// Wakes the live panels that show a person their own agent activity (the
     /// status bar's AI tag) once an agent request for their account is
@@ -382,11 +386,18 @@ pub struct Integration {
     agent_activity: broadcast::Sender<bilibi_ui::page::Change>,
 }
 impl Integration {
-    pub fn new(db: Db, boundary: Arc<MutationBoundary>) -> Result<Self> {
+    pub(crate) fn new(
+        db: Db,
+        boundary: Arc<MutationBoundary>,
+        settings: Arc<bilibi_settings::Settings>,
+        scorers: scorer::Scorers,
+    ) -> Result<Self> {
         let (agent_activity, _) = broadcast::channel(128);
         Ok(Self {
             db,
             boundary,
+            settings,
+            scorers,
             clients: transport::Clients::new()?,
             agent_activity,
         })
@@ -792,8 +803,10 @@ impl Integration {
                 by_tenant.entry(row.get(1)).or_default().push(row.get(0));
             }
             for (tenant, ids) in by_tenant {
-                let holds = bilibi_personal_data::RecordHolds::acquire(tenant).await?;
-                let held = holds.records(privacy::KIND, &ids).await?;
+                let (holds, mut hold_guard) =
+                    bilibi_personal_data::RecordHolds::acquire(client, tenant).await?;
+                let client = hold_guard.client();
+                let held = holds.records(&*client, privacy::KIND, &ids).await?;
                 let ids: Vec<i64> = ids
                     .into_iter()
                     .filter(|id| !held.contains_key(id))
@@ -835,7 +848,7 @@ impl Integration {
                         .await?;
                     tx.commit().await?;
                 }
-                holds.release().await?;
+                hold_guard.release().await?;
             }
             if done {
                 return Ok(pruned);
@@ -851,7 +864,7 @@ impl Integration {
     /// is the audited one.
     pub async fn prune_rows(
         &self,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         days: i64,
         now: SystemTime,
     ) -> Result<u64> {
@@ -875,8 +888,10 @@ impl Integration {
                 by_tenant.entry(row.get(1)).or_default().push(row.get(0));
             }
             for (tenant, ids) in by_tenant {
-                let holds = bilibi_personal_data::RecordHolds::acquire(tenant).await?;
-                let held = holds.records(privacy::KIND, &ids).await?;
+                let (holds, mut hold_guard) =
+                    bilibi_personal_data::RecordHolds::acquire(client, tenant).await?;
+                let client = hold_guard.client();
+                let held = holds.records(&*client, privacy::KIND, &ids).await?;
                 held_back += held.len() as i64;
                 let ids: Vec<i64> = ids
                     .into_iter()
@@ -890,7 +905,7 @@ impl Integration {
                         )
                         .await?;
                 }
-                holds.release().await?;
+                hold_guard.release().await?;
             }
             if done {
                 return Ok(pruned);
@@ -921,11 +936,16 @@ inventory::submit! {
             ("base-integration-004-client-identity", include_str!("../migrations/004-client-identity.sql")),
             ("base-integration-005-agent-activity-index", include_str!("../migrations/005-agent-activity-index.sql")),
             ("base-integration-006-agent-targets", include_str!("../migrations/006-agent-targets.sql")),
-            ("base-integration-007-payload-index", include_str!("../migrations/007-payload-index.sql"))],
+            ("base-integration-007-payload-index", include_str!("../migrations/007-payload-index.sql")),
+            ("base-integration-008-scorer-deliveries", include_str!("../migrations/008-scorer-deliveries.sql"))],
         services: &[Service { id: SERVICE, factory: |services| {
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
             let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
-            let integration = Integration::new(db, boundary)
+            let settings = services.get::<bilibi_settings::Settings>("base/settings.store")?;
+            let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
+            let composition = services.get::<bilibi_module_registry::Composition>("bootstrap.composition")?;
+            let scorers = scorer::Scorers::from_catalog(&catalog, &composition)?;
+            let integration = Integration::new(db, boundary, settings, scorers)
                 .map_err(|_| bilibi_module_registry::RegistryError::Service("base/integration HTTP client".into()))?;
             Ok(Arc::new(integration))
         } }, Service { id: "base/integration.pages", factory: |services| {

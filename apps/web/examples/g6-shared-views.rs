@@ -61,15 +61,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         second_admin = auth.authenticate(&**client, 1, 6, String::new()).await?;
         reader = auth.authenticate(&**client, 1, 1, String::new()).await?;
         client.execute(
-            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,1,4,$2,now()+interval '1 hour')",
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) VALUES($1,1,4,$2,now()+interval '1 hour','portable')",
             &[&session_id(&token), &uuid::Uuid::new_v4().simple().to_string()],
         ).await?;
         client.execute(
-            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,1,6,$2,now()+interval '1 hour')",
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) VALUES($1,1,6,$2,now()+interval '1 hour','portable')",
             &[&session_id(&second_token), &uuid::Uuid::new_v4().simple().to_string()],
         ).await?;
         client.execute(
-            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,1,1,$2,now()+interval '1 hour')",
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) VALUES($1,1,1,$2,now()+interval '1 hour','portable')",
             &[&session_id(&reader_token), &uuid::Uuid::new_v4().simple().to_string()],
         ).await?;
         client.execute(

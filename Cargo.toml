@@ -20,6 +20,9 @@ allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 
 [workspace.dependencies]
+rquickjs = "0.14"
+seccompiler = "0.5"
+rlimit = "0.11"
 icu_datetime = "2.3.0"
 icu_locale = "2.3.1"
 icu_properties = "2.4.0"
@@ -92,13 +95,16 @@ bilibi-extensions = { path = "apps/extensions" }
 bilibi-notifications = { path = "apps/base/notifications" }
 bilibi-menu = { path = "apps/base/menu" }
 bilibi-menu-order = { path = "apps/base/menu_order" }
+bilibi-branding = { path = "apps/base/branding" }
 bilibi-principal-directory = { path = "apps/base/principal_directory" }
 bilibi-agent-api = { path = "apps/base/agent_api" }
+bilibi-ai = { path = "apps/base/ai" }
 bilibi-artifacts = { path = "apps/base/artifacts" }
 bilibi-bulk-data = { path = "apps/base/bulk_data" }
 bilibi-audit-views = { path = "apps/base/audit_views" }
 bilibi-authz = { path = "apps/base/authz" }
 bilibi-dashboard = { path = "apps/base/dashboard" }
+bilibi-dashboard-agent = { path = "apps/base/dashboard_agent" }
 bilibi-datetime = { path = "apps/base/datetime" }
 bilibi-events = { path = "apps/base/events" }
 bilibi-design-library = { path = "apps/base/design_library" }
@@ -133,6 +139,7 @@ bilibi-tenancy = { path = "apps/base/tenancy" }
 bilibi-tiling = { path = "apps/base/tiling" }
 bilibi-personal-data = { path = "apps/base/personal_data" }
 bilibi-privacy = { path = "apps/base/privacy" }
+bilibi-public = { path = "apps/base/public" }
 bilibi-visitor = { path = "apps/base/visitor" }
 bilibi-workflow = { path = "apps/base/workflow" }
 bilibi-activity = { path = "apps/core/activity" }

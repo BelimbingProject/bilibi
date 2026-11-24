@@ -195,8 +195,8 @@ impl Handler for Companies {
                 )
                 .await?;
             let found: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
-            let held = holds.records(grant, KIND, &found).await?;
-            let person_hold = holds.person_hold(grant).await?;
+            let held = holds.records(tx.sql(), grant, KIND, &found).await?;
+            let person_hold = holds.person_hold(tx.sql(), grant).await?;
             let mut count = 0;
             for row in rows {
                 let (id, sole, version): (i64, bool, i64) = (row.get(0), row.get(1), row.get(2));

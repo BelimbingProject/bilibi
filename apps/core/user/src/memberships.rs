@@ -2,7 +2,7 @@
 //! invitation boundary while keeping the invited account tenant-owned and the
 //! accepted sign-in installation-wide.
 use crate::{
-    accounts::{email_taken, field_error, validate_email, validate_name, FieldError},
+    accounts::{field_error, validate_email, validate_name, FieldError},
     contributions::INVITE,
     password::{self, check_policy},
     tenant_owner::DEDICATED_OWNER_SIGN_IN,
@@ -10,7 +10,6 @@ use crate::{
 };
 use bilibi_audit::{record_action, Attribution};
 use bilibi_database::{Change, Context, Error, Result};
-use bilibi_mail::{Address, Message};
 use bilibi_security::Scope;
 use bilibi_settings::Target;
 use serde_json::json;
@@ -128,7 +127,7 @@ impl UserService {
             .query_opt(
                 "SELECT t.name,b.invitation_id IS NOT NULL,EXISTS(SELECT 1 FROM user_identities d
                      WHERE lower(d.email)=v.email AND d.kind='staff' AND d.deleted_at IS NULL
-                       AND (d.status='active' OR b.invitation_id IS NOT NULL))
+                       AND (b.invitation_id IS NOT NULL OR (d.status='active' AND d.orphaned_at IS NULL)))
                  FROM user_invitations v
                  JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id
                  JOIN tenants t ON t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL
@@ -205,13 +204,14 @@ impl UserService {
             }
             Err(error) => return Err(error),
         };
-        let message = Message::text(Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?, format!("You're invited to {tenant_name}"), format!("You are invited to join {tenant_name}.\n\nOpen this link to accept:\n\n{}/accept/{new_token}\n\nThe link works once. If you did not expect this, you can ignore this email.\n", self.origin));
+        let (message, link) =
+            self.invitation_mail((&name, &email), &tenant_name, None, &new_token)?;
         let mailer = self.mailer.clone();
         let db = self.db.clone();
         let mutations = self.mutations.clone();
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver(&message).await {
+                if let Err(error) = mailer.deliver_linked_for(tenant, &message, Some(&link)).await {
                     eprintln!("mail: user invitation {id} was not delivered: {error}");
                     let restore = async {
                         let mut client = db.get().await?;
@@ -385,18 +385,16 @@ impl UserService {
                 )
                 .await?;
         }
-        let message = Message::text(
-            Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
-            format!("You're invited to {tenant_name}"),
-            format!(
-                "You are invited to join {tenant_name}.\n\nOpen this link to accept:\n\n{}/accept/{raw_token}\n\nThe link works once and expires in {days} day(s). If you did not expect this, you can ignore this email.\n",
-                self.origin
-            ),
-        );
+        let tenant = scope.tenant();
+        let (message, link) =
+            self.invitation_mail((&name, &email), &tenant_name, Some(days), &raw_token)?;
         let (mailer, id) = (self.mailer.clone(), invitation.id);
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver(&message).await {
+                if let Err(error) = mailer
+                    .deliver_linked_for(tenant, &message, Some(&link))
+                    .await
+                {
                     eprintln!("mail: user invitation {id} was not delivered: {error}");
                 }
             });
@@ -510,7 +508,6 @@ impl UserService {
                 error.to_string(),
             )]));
         }
-        let hash = password::hash(password).await?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let row = client
             .query_opt(
@@ -528,13 +525,17 @@ impl UserService {
             .ok_or(InvitationError::Link)?;
         let (tenant, user, email): (i64, i64, String) = (row.get(0), row.get(1), row.get(2));
         let owner: bool = row.get(3);
-        if email_taken(&**client, &email, None).await? {
-            return Err(if owner {
-                InvitationError::DedicatedSignIn
-            } else {
-                InvitationError::Link
-            });
+        let existing: Option<i64> = client
+            .query_opt(
+                "SELECT id FROM user_identities WHERE kind='staff' AND deleted_at IS NULL AND lower(email)=$1",
+                &[&email],
+            )
+            .await?
+            .map(|row| row.get(0));
+        if owner && existing.is_some() {
+            return Err(InvitationError::DedicatedSignIn);
         }
+        let hash = password::hash(password).await?;
         let mut tx = self
             .mutations
             .begin(
@@ -543,19 +544,23 @@ impl UserService {
             )
             .await?;
         self.lock_tenant_owner_in(&tx, tenant, user).await?;
-        let invitation =
-            match finish_new_acceptance(&mut tx, raw_token, tenant, user, email, hash).await {
-                Ok(invitation) => invitation,
-                Err(error) => {
-                    let refusal = match error {
-                        Error::Conflict if owner => Err(InvitationError::DedicatedSignIn),
-                        Error::NotFound | Error::Conflict => Err(InvitationError::Link),
-                        other => Err(other.into()),
-                    };
-                    tx.rollback().await?;
-                    return refusal;
-                }
-            };
+        let invitation = match match existing {
+            Some(identity) => {
+                finish_orphan_acceptance(&mut tx, raw_token, tenant, user, identity, hash).await
+            }
+            None => finish_new_acceptance(&mut tx, raw_token, tenant, user, email, hash).await,
+        } {
+            Ok(invitation) => invitation,
+            Err(error) => {
+                let refusal = match error {
+                    Error::Conflict if owner => Err(InvitationError::DedicatedSignIn),
+                    Error::NotFound | Error::Conflict => Err(InvitationError::Link),
+                    other => Err(other.into()),
+                };
+                tx.rollback().await?;
+                return refusal;
+            }
+        };
         self.settle_tenant_owner_in(&mut tx, tenant, user, invitation)
             .await?;
         tx.commit().await?;
@@ -665,11 +670,11 @@ async fn finish_new_acceptance(
                 .get(0);
             let identity: i64 = sql
                 .query_opt(
-                    "INSERT INTO user_identities(kind,email,password_hash,email_verified_at,home_tenant_id,home_user_id,last_tenant_id)
-                     VALUES('staff',$1,$2,now(),$3,$4,$3)
+                    "INSERT INTO user_identities(kind,email,password_hash,email_verified_at,last_tenant_id)
+                     VALUES('staff',$1,$2,now(),$3)
                      ON CONFLICT (lower(email)) WHERE deleted_at IS NULL AND kind='staff' DO NOTHING
                      RETURNING id",
-                    &[&email, &hash, &tenant, &user],
+                    &[&email, &hash, &tenant],
                 )
                 .await?
                 .ok_or(Error::Conflict)?
@@ -694,8 +699,6 @@ async fn finish_new_acceptance(
                             "kind": "staff",
                             "email": email,
                             "password_hash": "set",
-                            "home_tenant_id": tenant,
-                            "home_user_id": user,
                         }),
                     },
                     Change {
@@ -752,20 +755,103 @@ async fn finish_acceptance(
             if changed != 1 {
                 return Err(Error::NotFound);
             }
+            let lifecycle = crate::identity_lifecycle::clear_orphaned(sql, identity).await?;
+            let mut changes = vec![
+                Change {
+                    kind: "user".into(),
+                    id: user,
+                    old: json!({"status": "invited"}),
+                    new: json!({"status": "active", "identity_id": identity}),
+                },
+                Change {
+                    kind: "user.invitation".into(),
+                    id: invitation,
+                    old: json!({"status": "pending"}),
+                    new: json!({"status": "accepted"}),
+                },
+            ];
+            if let Some(change) = lifecycle {
+                changes.push(change);
+            }
             Ok((
                 (),
+                changes,
+            ))
+        })
+    })
+    .await
+}
+
+async fn finish_orphan_acceptance(
+    tx: &mut bilibi_database::MutationTransaction<'_>,
+    raw_token: &str,
+    tenant: i64,
+    user: i64,
+    identity: i64,
+    hash: String,
+) -> Result<i64> {
+    let token_hash = digest(raw_token);
+    tx.mutate(move |sql| {
+        Box::pin(async move {
+            sql.query_opt(
+                "SELECT id FROM user_identities i WHERE i.id=$1 AND i.kind='staff'
+                   AND i.status='active' AND i.deleted_at IS NULL AND i.orphaned_at IS NOT NULL
+                   AND NOT EXISTS(SELECT 1 FROM users m WHERE m.identity_id=i.id AND m.deleted_at IS NULL)
+                 FOR UPDATE",
+                &[&identity],
+            )
+            .await?
+            .ok_or(Error::Conflict)?;
+            let invitation: i64 = sql
+                .query_opt(
+                    "UPDATE user_invitations SET accepted_at=now()
+                     WHERE tenant_id=$1 AND user_id=$2 AND token_hash=$3 AND accepted_at IS NULL
+                       AND revoked_at IS NULL AND expires_at>clock_timestamp() RETURNING id",
+                    &[&tenant, &user, &token_hash],
+                )
+                .await?
+                .ok_or(Error::NotFound)?
+                .get(0);
+            let changed = sql
+                .execute(
+                    "UPDATE users SET identity_id=$3,status='active',version=version+1,updated_at=now()
+                     WHERE tenant_id=$1 AND id=$2 AND status='invited' AND identity_id IS NULL AND deleted_at IS NULL",
+                    &[&tenant, &user, &identity],
+                )
+                .await?;
+            if changed != 1 {
+                return Err(Error::NotFound);
+            }
+            sql.execute(
+                "UPDATE user_identities SET password_hash=$2,password_version=password_version+1,email_verified_at=now(),orphaned_at=NULL,last_tenant_id=$3,updated_at=now() WHERE id=$1",
+                &[&identity, &hash, &tenant],
+            )
+            .await?;
+            sql.execute(
+                "DELETE FROM password_reset_tokens WHERE identity_id=$1",
+                &[&identity],
+            )
+            .await?;
+            Ok((
+                invitation,
                 vec![
+                    Change {
+                        kind: "user_identity".into(),
+                        id: identity,
+                        old: json!({"membership_state":"unused"}),
+                        new: json!({"membership_state":"in_use","password_hash":"replaced","retention_cancelled":true}),
+                    },
                     Change {
                         kind: "user".into(),
                         id: user,
-                        old: json!({"status": "invited"}),
-                        new: json!({"status": "active", "identity_id": identity}),
+                        old: json!({"status":"invited"}),
+                        new: json!({"status":"active","identity_id":identity}),
                     },
                     Change {
                         kind: "user.invitation".into(),
                         id: invitation,
-                        old: json!({"status": "pending"}),
-                        new: json!({"status": "accepted"}),
+                        old: json!({"status":"pending"}),
+                        new: json!({"status":"accepted"}),
                     },
                 ],
             ))

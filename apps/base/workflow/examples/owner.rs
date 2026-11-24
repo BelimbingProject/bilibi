@@ -555,13 +555,48 @@ async fn main() -> Result<()> {
                 row.get::<_, Option<i64>>(4),
             );
         }
+        "run-attribution" => {
+            let client = db.get().await?;
+            for row in client.query(
+                "WITH work_items AS (
+                    SELECT id FROM base_workflow_process_work_items WHERE tenant_id=$1 AND run_id=$2
+                )
+                SELECT m.event,m.auditable_type,m.actor_type,m.actor_id,m.system_principal,m.impersonator_id
+                FROM base_audit_mutations m
+                WHERE m.tenant_id=$1 AND (
+                    (m.auditable_type IN ('workflow.process_run','workflow.process_start','workflow.process_command','workflow.work_claim')
+                        AND m.auditable_id=($2::bigint)::text)
+                    OR (m.auditable_type IN ('workflow.process_work','workflow.work_command')
+                        AND m.auditable_id IN (SELECT id::text FROM work_items))
+                    OR (m.auditable_type='workflow.process_event' AND m.auditable_id IN (
+                        SELECT id::text FROM base_workflow_process_events WHERE tenant_id=$1 AND run_id=$2))
+                    OR (m.auditable_type='workflow.process_dependency' AND m.auditable_id IN (
+                        SELECT id::text FROM base_workflow_process_dependencies
+                        WHERE tenant_id=$1 AND work_item_id IN (SELECT id FROM work_items)))
+                ) ORDER BY m.id",
+                &[&scope.tenant(), &id],
+            ).await? {
+                println!(
+                    "event={} type={} actor_type={} actor_id={} system_principal={:?} impersonator={:?}",
+                    row.get::<_, String>(0),
+                    row.get::<_, String>(1),
+                    row.get::<_, String>(2),
+                    row.get::<_, i64>(3),
+                    row.get::<_, Option<String>>(4),
+                    row.get::<_, Option<i64>>(5),
+                );
+            }
+        }
         "available" => println!(
             "{}",
             serde_json::to_string(&engine.available(&scope, "reference.record", id).await?)
                 .map_err(|_| Error::Internal)?
         ),
-        "start" | "start-v1" | "start-changed" | "start-deny" | "drift" | "start-lifecycle"
-        | "start-worker" | "start-human" => {
+        "start" | "start-v1" | "start-changed" | "start-deny" | "start-borrowed" | "drift"
+        | "start-lifecycle" | "start-worker" | "start-human" => {
+            if command == "start-borrowed" && scope.principal().is_none() {
+                return Err(Error::Forbidden);
+            }
             // Keep the v1 drift proof separate from the default v2 replay key.
             let attempt = if matches!(command, "start-v1" | "drift") {
                 1
@@ -583,6 +618,9 @@ async fn main() -> Result<()> {
             if command == "start-deny" {
                 options.idempotency_key = format!("record:{id}:denied");
                 options.input = json!({"deny":true});
+            }
+            if command == "start-borrowed" {
+                options.idempotency_key = format!("record:{id}:borrowed");
             }
             let engine = if command == "drift" {
                 // Registry::build is the boot validator; the drifted process
@@ -620,10 +658,37 @@ async fn main() -> Result<()> {
                 )
             };
             println!("compiled {key} v{version} fingerprint={fingerprint}");
-            match engine
-                .start_run(&scope, process_key, "ReferenceRecord", id, options)
-                .await
-            {
+            let result = if command == "start-borrowed" {
+                let mut client = db.get().await?;
+                let person = authentication
+                    .authenticate_session(&**client, 1, 4, None, None, String::new())
+                    .await?;
+                let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
+                let mut tx = boundary
+                    .begin(
+                        &mut client,
+                        person.mutation_context("workflow.process.started"),
+                    )
+                    .await?;
+                match engine
+                    .start_run_in(&mut tx, &scope, process_key, "ReferenceRecord", id, options)
+                    .await
+                {
+                    Ok(run) => {
+                        tx.commit().await?;
+                        Ok(run)
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                engine
+                    .start_run(&scope, process_key, "ReferenceRecord", id, options)
+                    .await
+            };
+            match result {
+                Ok(run) if scope.principal().is_some() => {
+                    println!("started run={} status={}", run.id, run.status)
+                }
                 Ok(run) => print_view(&engine.get_run(&scope, run.id).await?),
                 Err(error) => println!("start refused: {error:?}"),
             }

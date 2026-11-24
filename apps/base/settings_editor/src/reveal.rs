@@ -2,7 +2,10 @@
 //! Base Step-up. The capability must be granted by name; the reveal is a
 //! step-up operation on the installation floor, and every attempt is
 //! recorded before plaintext can leave. No audit row, no value.
-use crate::{form::Plan, SECRET_VIEW};
+use crate::{
+    form::{Field, Plan},
+    SECRET_VIEW,
+};
 use bilibi_audit::{record_action, Attribution};
 use bilibi_authz::{decide, explicitly_granted};
 use bilibi_database::{Error, Result};
@@ -84,9 +87,7 @@ impl Reveal<'_> {
             && explicitly_granted(client, scope, SECRET_VIEW)
                 .await
                 .unwrap_or(false);
-        let stored = plan
-            .field(key)
-            .is_some_and(|field| field.encrypted() && field.stored_secret);
+        let stored = plan.field(key).is_some_and(Field::revealable);
         if !granted || !stored || !self.settings.encryption_available() {
             return Err(Refusal::Refused);
         }

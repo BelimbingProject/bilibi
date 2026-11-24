@@ -208,6 +208,33 @@ fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .split(';')
         .find_map(|cookie| cookie.trim().strip_prefix(name)?.strip_prefix('='))
 }
+fn tenant_entry(headers: &HeaderMap) -> Option<i64> {
+    cookie(headers, "bilibi_tenant_entry")?
+        .parse()
+        .ok()
+        .filter(|id| *id > 0)
+}
+pub(crate) fn set_tenant_entry(
+    app: &App,
+    response: &mut Response,
+    tenant: i64,
+) -> Result<(), Error> {
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&format!(
+            "bilibi_tenant_entry={tenant}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600{}",
+            secure(app)
+        ))
+        .map_err(|_| Error::Internal)?,
+    );
+    Ok(())
+}
+fn clear_tenant_entry(response: &mut Response) {
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static("bilibi_tenant_entry=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"),
+    );
+}
 pub(crate) fn secure(app: &App) -> &'static str {
     if app.origin.starts_with("https://") {
         "; Secure"
@@ -296,17 +323,21 @@ async fn card<T: Template>(
     app: &App,
     title: &str,
     card: T,
+    workspace: Option<LoginWorkspace>,
     flash: FlashMap<'_>,
     status: StatusCode,
 ) -> std::result::Result<Response, HttpError> {
+    let brand = app.branding.current().await;
     let body = AuthLayout {
         body: Html::render(&card).map_err(|_| Error::Internal)?,
+        brand: &brand,
+        workspace,
         instance: instance_badge(app).await?,
         flash,
     }
     .render()
     .map_err(|_| Error::Internal)?;
-    let mut response = document_titled(title, &body)?.into_response();
+    let mut response = document_titled(title, &body, &brand)?.into_response();
     *response.status_mut() = status;
     Ok(response)
 }
@@ -323,8 +354,7 @@ pub(crate) async fn provider_signed_out(
         body: Html::text("Continue signing out"),
         ..Default::default()
     };
-    let mut body =
-        Html::text("You are signed out of Bilibi. Continuing to your company's sign-out page.");
+    let mut body = Html::text("You are signed out. Continuing to your company's sign-out page.");
     body.push(&Html::render(&link).map_err(|_| Error::Internal)?);
     let mut response = card(
         app,
@@ -333,6 +363,7 @@ pub(crate) async fn provider_signed_out(
             body,
             ..Default::default()
         },
+        None,
         FlashMap::default(),
         StatusCode::OK,
     )
@@ -420,12 +451,20 @@ pub async fn home(
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
 ) -> std::result::Result<Response, HttpError> {
-    if signed_in(&app, &headers).await {
+    let target = tenant_entry(&headers);
+    let signed_in = signed_in(&app, &headers).await;
+    if target.is_some() && query.contains_key("cancel-tenant-entry") && signed_in {
+        let mut response = Redirect::to(WORKSPACE).into_response();
+        clear_tenant_entry(&mut response);
+        return Ok(response);
+    }
+    if target.is_none() && signed_in {
         return Ok(Redirect::to(WORKSPACE).into_response());
     }
     let key = flash_key(&headers);
     let mut form = LoginForm {
         session_expired: key == Some(FLASH_EXPIRED),
+        reauthenticating: target.is_some() && signed_in,
         ..LoginForm::default()
     };
     if let Some(public) = query.get("sso") {
@@ -448,22 +487,22 @@ pub async fn home(
 }
 async fn login_card(
     app: &App,
-    mut form: LoginForm,
+    form: LoginForm,
     flash: FlashMap<'_>,
     status: StatusCode,
 ) -> std::result::Result<Response, HttpError> {
-    form.workspace = login_workspace(app).await;
     card(
         app,
         "Sign in",
         LoginPage::new(&form).map_err(|_| Error::Internal)?,
+        Some(login_workspace(app).await),
         flash,
         status,
     )
     .await
 }
-/// The sign-in card's workspace strip. A failed lookup degrades the strip and
-/// is logged; it never fails the sign-in card.
+/// The installation company on the sign-in card. A failed lookup degrades
+/// the line and is logged without failing the card.
 async fn login_workspace(app: &App) -> LoginWorkspace {
     let lookup = async {
         let client = app.db.get().await.map_err(Error::from)?;
@@ -491,17 +530,20 @@ pub struct LoginSubmission {
 pub async fn login(
     State(app): State<App>,
     headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Form(submission): Form<LoginSubmission>,
 ) -> std::result::Result<Response, HttpError> {
     origin(&app, &headers)?;
     let mut form = LoginForm {
         email: bounded(&submission.email),
-        // A rejected attempt re-renders the card at the address it was posted
-        // from, password kept.
-        password: submission.password.clone(),
+        reauthenticating: tenant_entry(&headers).is_some(),
         ..LoginForm::default()
     };
+    if let Some(public) = query.get("sso") {
+        form.sso_label = app.user.identity_label(public).await?;
+        form.sso_public = public.clone();
+    }
     form.email_errors = validate_email(&form.email);
     form.password_errors = validate_required(&submission.password);
     if !(form.email_errors.is_empty() && form.password_errors.is_empty()) {
@@ -531,16 +573,29 @@ pub async fn login(
         )
         .await;
     }
-    match app.user.login(&form.email, &submission.password).await {
+    let admission = match tenant_entry(&headers) {
+        Some(target) => {
+            app.user
+                .login_to_tenant(target, &form.email, &submission.password)
+                .await
+        }
+        None => app.user.login(&form.email, &submission.password).await,
+    };
+    match admission {
         Ok(session) if session.pending => {
             let mut response = Redirect::to("/login/challenge").into_response();
             set_pending(&app, &mut response, &session.token)?;
-            response.headers_mut().append(
-                header::SET_COOKIE,
-                HeaderValue::from_static(
-                    "bilibi_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
-                ),
-            );
+            // Keep the old session cookie during target-bound
+            // reauthentication so admission can retire that exact session.
+            // A normal sign-in has no old session to preserve.
+            if tenant_entry(&headers).is_none() {
+                response.headers_mut().append(
+                    header::SET_COOKIE,
+                    HeaderValue::from_static(
+                        "__Host-bilibi_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0",
+                    ),
+                );
+            }
             Ok(response)
         }
         Ok(session) => admitted(&app, &headers, peer, session).await,
@@ -605,6 +660,11 @@ async fn admitted(
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     session: bilibi_user::Login,
 ) -> std::result::Result<Response, HttpError> {
+    if let Some(target) = tenant_entry(headers) {
+        if app.security.guard(&session.token).await?.tenant() != target {
+            return Err(Error::Forbidden.into());
+        }
+    }
     {
         // Release the connection before `landing_route` takes its own, or
         // concurrent logins can hold the whole pool while waiting for a second.
@@ -635,9 +695,8 @@ async fn admitted(
             .await?;
     }
     let cookie = format!(
-        "bilibi_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400{}",
-        session.token,
-        secure(app)
+        "__Host-bilibi_session={}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=86400",
+        session.token
     );
     // The account's chosen landing page when it still may open it; else the
     // workspace.
@@ -655,6 +714,7 @@ async fn admitted(
         HeaderValue::from_str(&cookie).map_err(|_| Error::Internal)?,
     );
     clear_pending(app, &mut response);
+    clear_tenant_entry(&mut response);
     clear_return(&mut response);
     Ok(response)
 }
@@ -685,6 +745,7 @@ async fn challenge_card(
         "Confirm sign-in",
         bilibi_ui::SignInChallengePage::new(&pending.csrf, &methods, method, message, error)
             .map_err(|_| Error::Internal)?,
+        None,
         FlashMap::default(),
         StatusCode::OK,
     )
@@ -765,7 +826,7 @@ pub async fn forgot_page(
     State(app): State<App>,
     headers: HeaderMap,
 ) -> std::result::Result<Response, HttpError> {
-    if signed_in(&app, &headers).await {
+    if tenant_entry(&headers).is_none() && signed_in(&app, &headers).await {
         return Ok(Redirect::to(WORKSPACE).into_response());
     }
     forgot_card(&app, &ForgotForm::default(), StatusCode::OK).await
@@ -779,6 +840,7 @@ async fn forgot_card(
         app,
         "Forgot password",
         ForgotPasswordPage::new(form).map_err(|_| Error::Internal)?,
+        None,
         FlashMap::default(),
         status,
     )
@@ -827,7 +889,7 @@ pub async fn reset_page(
     Path(token): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> std::result::Result<Response, HttpError> {
-    if signed_in(&app, &headers).await {
+    if tenant_entry(&headers).is_none() && signed_in(&app, &headers).await {
         return Ok(Redirect::to(WORKSPACE).into_response());
     }
     let form = ResetForm {
@@ -866,6 +928,7 @@ async fn reset_card(
         app,
         "Reset password",
         ResetPasswordPage::new(form).map_err(|_| Error::Internal)?,
+        None,
         FlashMap::default(),
         status,
     )
@@ -946,6 +1009,7 @@ async fn invitation_card(
         app,
         "Join workspace",
         InvitationPage::new(form).map_err(|_| Error::Internal)?,
+        None,
         FlashMap::default(),
         status,
     )
@@ -970,6 +1034,7 @@ async fn invitation_result(
             action,
             resend: false,
         },
+        None,
         FlashMap::default(),
         status,
     )
@@ -1002,6 +1067,7 @@ async fn invitation_unavailable(
             action: "Send me a new link",
             resend: true,
         },
+        None,
         FlashMap::default(),
         StatusCode::OK,
     )
@@ -1291,7 +1357,7 @@ pub async fn sso_callback(
             let secret=bilibi_ui::SecretInput::new("provider-proof","provider-proof","Confirmation code").label("Confirmation code").value(code).hint("Use this once for the access you requested. It expires in two minutes.");
             let link=bilibi_ui::Button{href:&back,body:Html::text("Continue"),..Default::default()};
             let mut body=Html::render(&secret).map_err(|_|Error::Internal)?;body.push(&Html::render(&link).map_err(|_|Error::Internal)?);
-            card(&app,"Confirm access",bilibi_ui::Card{body,..Default::default()},FlashMap::default(),StatusCode::OK).await?
+            card(&app,"Confirm access",bilibi_ui::Card{body,..Default::default()},None,FlashMap::default(),StatusCode::OK).await?
         },
         Ok(bilibi_user::IdentityOutcome::Linked(back)|bilibi_user::IdentityOutcome::StepUp(back))=>Redirect::to(&back).into_response(),
         Err(_)=>login_card(&app,LoginForm{form_error:"Company sign-in was refused or expired. Start again, or ask your company administrator for help.".into(),..LoginForm::default()},FlashMap::default(),StatusCode::UNAUTHORIZED).await?,

@@ -76,7 +76,7 @@ server=$!
 trap 'kill "$server" 2>/dev/null || true' EXIT
 for _ in $(seq 1 60); do
     kill -0 "$server" 2>/dev/null || { echo 'The app exited during boot (module graph, contribution or migration refusal)' >&2; exit 1; }
-    status=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/" || true)
+    status=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: localhost:$port" "http://127.0.0.1:$port/" || true)
     [[ $status =~ ^(200|30[1-8])$ ]] && { echo "GET / answered $status"; exit 0; }
     sleep 1
 done

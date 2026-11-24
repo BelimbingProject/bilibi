@@ -258,7 +258,10 @@
     // product's name, by its heading.
     frameTitle(doc) {
       const title = (doc.title || '').trim();
-      if (title && title !== PRODUCT) return title;
+      if (title && title !== PRODUCT) {
+        const suffix = ` · ${PRODUCT}`;
+        return title.endsWith(suffix) ? title.slice(0, -suffix.length) : title;
+      }
       return doc.querySelector('#app-content h1')?.textContent.replace(/\s+/g, ' ').trim() || '';
     },
 
@@ -269,7 +272,9 @@
         const win = frame.contentWindow;
         const doc = frame.contentDocument;
         if (!win?.location || !doc) return;
-        path = win.location.pathname + win.location.search;
+        const url = new URL(win.location.href);
+        if (url.searchParams.has('return_to')) url.searchParams.delete('return_to');
+        path = url.pathname + url.search;
         title = this.frameTitle(doc);
       } catch {
         return;

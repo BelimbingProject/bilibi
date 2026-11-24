@@ -65,6 +65,21 @@ pub struct TableDecl {
     /// The field holding the Core team a row is filed under (a case's queue
     /// team), which "my team's" reach also admits. Needs `owner`.
     pub team: Option<&'static str>,
+    /// The record each row is about; see [`Subject`].
+    pub subject: Option<Subject>,
+}
+
+/// The record a table's rows are about (an escalation's customer): the field
+/// holding its id and its Base Records kind (#877). The field then reads as
+/// the record that id names now, so rows about records merged since group and
+/// filter under their survivor, and the report builder's reads
+/// ([`crate::report_summary`], [`crate::report_page`]) keep rows whose
+/// subject passes the Base Records owner's read rule. A row
+/// without a subject stays.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Subject {
+    pub field: &'static str,
+    pub kind: &'static str,
 }
 impl TableDecl {
     pub const fn new(
@@ -88,6 +103,15 @@ impl TableDecl {
             record_types: &[],
             owner: None,
             team: None,
+            subject: None,
+        }
+    }
+    /// Names the integer or text field holding the id of the record each
+    /// row is about, and that record's Base Records kind. See [`Subject`].
+    pub const fn subject(self, field: &'static str, kind: &'static str) -> Self {
+        Self {
+            subject: Some(Subject { field, kind }),
+            ..self
         }
     }
     pub const fn list_address(self, address: &'static str) -> Self {
@@ -251,6 +275,7 @@ pub struct Table {
     /// In a scoped catalog: the reader's reach on an owner-declaring table
     /// when it is narrower than all (#683).
     reach: Option<bilibi_authz::Reach>,
+    pub(crate) report_subjects: bool,
     /// In a scoped catalog: the tenant's custom fields among `fields`, by id,
     /// with their current label and value SQL over the row alias `{alias}`.
     custom: BTreeMap<&'static str, CustomField>,
@@ -329,6 +354,20 @@ impl Table {
     }
     pub fn custom_reference(&self, id: &str) -> Option<&'static str> {
         self.custom.get(id).and_then(|custom| custom.reference)
+    }
+    /// The record each row is about, when the owner declares one.
+    pub fn subject(&self) -> Option<Subject> {
+        self.decl.subject
+    }
+    /// The Base Records kind a field's value names: a tenant's custom record
+    /// field, or the table's subject field.
+    pub fn reference(&self, id: &str) -> Option<&'static str> {
+        self.custom_reference(id)
+            .or_else(|| self.report_subject(id).map(|subject| subject.kind))
+    }
+    pub(crate) fn report_subject(&self, id: &str) -> Option<Subject> {
+        self.subject()
+            .filter(|subject| self.report_subjects && subject.field == id)
     }
     pub(crate) fn remove_custom_references(&mut self) {
         self.fields.retain(|field| {
@@ -706,6 +745,20 @@ impl Table {
         if decl.team.is_some() && decl.owner.is_none() {
             return Err(bad("a team field needs an owner field".into()));
         }
+        if let Some(subject) = decl.subject {
+            let field_valid = subject.field != decl.key
+                && decl
+                    .fields
+                    .iter()
+                    .find(|f| f.id == subject.field)
+                    .is_some_and(|f| matches!(f.ty, FieldType::Integer | FieldType::String));
+            if !field_valid || !decl.source.tenant_scoped {
+                return Err(bad(
+                    "a subject names a declared integer or text field other than the key and needs a tenant source"
+                        .into(),
+                ));
+            }
+        }
         let mut kinds = BTreeSet::new();
         if !decl
             .record_types
@@ -733,6 +786,7 @@ impl Table {
             links: Vec::new(),
             protected,
             reach: None,
+            report_subjects: false,
             custom: BTreeMap::new(),
         })
     }

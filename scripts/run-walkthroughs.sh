@@ -95,13 +95,15 @@ WALKTHROUGHS=(
   'base|bulk-export|apps/base/bulk_data|export-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-update|apps/base/bulk_data|update-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|custom-fields-structured|apps/base/custom_fields|structured-fields-walkthrough|migrate|BILIBI_CUSTOM_FIELDS_DEMO=disposable BILIBI_CUSTOM_FIELDS_ROOT=@/artifacts|-'
-  'base|setup-packs|apps/base/setup_packs|setup-packs-walkthrough|migrate|BILIBI_SETUP_PACKS_DEMO=disposable|-'
+  'base|setup-packs|apps/base/setup_packs|setup-packs-walkthrough|none|BILIBI_SETUP_PACKS_DEMO=disposable|-'
   'base|database-pool|apps/base/database|pool-walkthrough|none||-'
+  'base|ai|apps/base/ai|ai-walkthrough|migrate|BILIBI_DISPOSABLE_AI_DEMO=yes|-'
   'base|integration|apps/base/integration|integration-walkthrough|migrate|BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes|-'
   'base|integration-connector-destinations|apps/base/integration|connector-destinations-walkthrough|migrate|BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes|-'
   'base|language-detection|apps/base/language_detection|language-detection-walkthrough|none|BILIBI_DISPOSABLE_LANGUAGE_WALKTHROUGH=yes|@model'
   'base|mail-inbound|apps/base/mail|inbound-walkthrough|none||@/parsed'
   'base|mail|apps/base/mail|mail-walkthrough|none||@/wire.eml'
+  'base|templated-wording|apps/web|wording-walkthrough|migrate|BILIBI_WORDING_DEMO=disposable BILIBI_WORDING_PREVIEW=@/preview BILIBI_MAIL_DIR=@/mailbox -MAIL_HOST|-'
   'base|mail-unset-relay|apps/base/mail|unset-relay-walkthrough|migrate|BILIBI_DISPOSABLE_MAIL_DEMO=yes|-'
   'base|media|apps/base/media|media-walkthrough|migrate|BILIBI_DISPOSABLE_MEDIA_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'base|media-attachments|apps/base/media|attachments-walkthrough|migrate|BILIBI_DISPOSABLE_MEDIA_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
@@ -118,7 +120,7 @@ WALKTHROUGHS=(
   'base|settings|apps/base/settings|settings-walkthrough|operator|BILIBI_DISPOSABLE_SETTINGS_DEMO=yes|-;inspect'
   'base|workflow-owner|apps/base/workflow|owner|migrate|BILIBI_DISPOSABLE_WORKFLOW_DEMO=yes|init;available 4 1;approve 4 1;history 4 1;proof-delivery 4 2;proof-maintenance 4;approval-init 4;proof-bell 4'
 
-  'privacy|privacy-requests|apps/base/privacy|requests-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
+  'privacy|privacy-requests|apps/base/privacy|requests-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium PUBLIC_ORIGIN=https://privacy-public.localhost PUBLIC_TENANT_ID=1|seed;-'
   'privacy|privacy-job-read|apps/base/privacy|requests-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy|seed;job-read'
   'privacy|privacy-failures|apps/base/privacy|failures-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-job-ends|apps/base/privacy|job-ends-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
@@ -189,6 +191,7 @@ WALKTHROUGHS=(
   'core|user-credentials|apps/core/user|credentials-walkthrough|migrate|BILIBI_DISPOSABLE_CREDENTIALS_DEMO=yes|-'
   'core|user-database-queries|apps/core/user|database-queries-walkthrough|migrate|BILIBI_DISPOSABLE_QUERY_DEMO=yes|-'
   'core|user-identity|apps/core/user|identity-walkthrough|migrate|BILIBI_IDENTITY_DEMO=disposable|-'
+  'core|user-identity-lifecycle|apps/core/user|identity-lifecycle-walkthrough|migrate|BILIBI_IDENTITY_LIFECYCLE_DEMO=disposable|-'
   'core|user-impersonation-capabilities|apps/core/user|impersonation-capabilities-walkthrough|migrate|BILIBI_IMPERSONATION_CAPABILITIES_DEMO=disposable|-'
   'core|user-memberships|apps/core/user|memberships-walkthrough|migrate|BILIBI_MEMBERSHIPS_DEMO=disposable|-'
   'core|user-tenant-owner-bootstrap|apps/core/user|tenant-owner-bootstrap-walkthrough|migrate|BILIBI_TENANT_OWNER_DEMO=disposable DATABASE_POOL_SIZE=1 BILIBI_MAIL_DIR=@/mailbox -MAIL_HOST|-'
@@ -203,8 +206,8 @@ WALKTHROUGHS=(
 
   'web|credential-refusals|apps/web|credential-reference|none||--refusals'
   'web|portal-refusals|apps/web|portal-reference|none||--refusals'
-  'web|public-endpoint-refusals|apps/web|public-endpoint-reference|none||--refusals'
-  'web|public-sender-admission|apps/web|public-endpoint-reference|migrate||--sender-admission'
+  'web|public-site-refusals|apps/web|public-site-reference|none||--refusals'
+  'web|public-sender-admission|apps/web|public-site-reference|migrate||--sender-admission'
   'web|scheduled-owner-catalog|apps/web|scheduled-owner-reference|none||catalog'
   'web|optional-capabilities-catalogs|apps/web|optional-capabilities|none||--catalogs'
   'web|optional-capabilities|apps/web|optional-capabilities|seed|BILIBI_OPTIONAL_PROOF=disposable|-'
@@ -227,16 +230,19 @@ WALKTHROUGHS=(
   'web|authz|apps/web|p6-authz|seed|BILIBI_AUTHZ_DEMO=disposable|-'
   'web|picklists|apps/web|picklists-reference|none||-'
   'web|customisations|apps/web|customisations-walkthrough|none|BILIBI_CUSTOMISATIONS_DEMO=disposable|-'
+  'web|workspace|apps/web|workspace-walkthrough|none|BILIBI_WORKSPACE_DEMO=disposable|-'
   'web|records|apps/web|records-reference|none|-APP_ORIGIN|-'
   'web|records-equivalence|apps/web|records-equivalence|none||-'
   'web|role-assignment-bounds|apps/web|role-assignment-bounds|seed|BILIBI_ASSIGNMENT_PROOF=disposable|-'
   'web|record-reach|apps/web|record-reach|fixture-seed|BILIBI_RECORD_REACH=disposable|-'
+  'web|report-subjects|apps/web|report-subjects|none|BILIBI_REPORT_SUBJECTS=disposable|-'
   'web|system-principal-grants|apps/web|system-principal-grants|seed-app|BILIBI_PRINCIPAL_PROOF=disposable|-'
   'web|visitor|apps/web|visitor-walkthrough|migrate|BILIBI_DISPOSABLE_VISITOR_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'web|agent-edge|apps/web|agent-edge-walkthrough|migrate|BILIBI_DISPOSABLE_EDGE_DEMO=yes|-'
   'web|two-doors|apps/cli|two-doors-walkthrough|migrate|BILIBI_TWO_DOORS_DEMO=disposable|-'
   'web|tenant-settings|apps/web|tenant-settings-walkthrough|migrate|BILIBI_TENANT_SETTINGS_DEMO=disposable|-'
   'web|sign-in-throttle|apps/web|sign-in-throttle-walkthrough|migrate|BILIBI_DISPOSABLE_THROTTLE_DEMO=yes|-'
+  'web|site-boundary|apps/web|site-boundary-walkthrough|migrate||-'
   'web|session-place|apps/web|session-place-walkthrough|none|BILIBI_SESSION_PLACE_WALKTHROUGH=disposable BILIBI_SESSION_PLACE_ROOT=@/place|-'
 
   # Each mounts a container from fixtures/containers, rebuilds, runs and unmounts.
@@ -247,6 +253,9 @@ WALKTHROUGHS=(
   'mounted|events-mounted|apps/web|events-reference|seed||@mount:event_publisher;-;@expect:("event_publisher/receiving";@absent:("event_subscriber/payables";@mount:event_subscriber;-;@expect:("event_publisher/receiving";@expect:("event_subscriber/payables";@unmount:event_publisher;-;@expect:("event_subscriber/payables";@absent:("event_publisher/receiving"'
   'mounted|ports-mounted|apps/web|ports-reference|none||@mount:port_reference;-;@expect:port_reference/orders'
   # The reference owner (watcher_cases) mounted; the heading is printed only then.
+  'mounted|setup-packs-watchers|apps/base/setup_packs|setup-packs-walkthrough|none|BILIBI_SETUP_PACKS_DEMO=disposable|@mount:watcher_cases;-;@expect:ok  A repeat draft import is empty'
+  'mounted|watcher-scripts|apps/web|watchers-walkthrough|seed||@mount:watcher_cases;--scripts;@expect:the script checks passed'
+  'mounted|watcher-observations|apps/web|watchers-walkthrough|seed||@mount:watcher_cases;--observations;@expect:the observation checks passed'
   'mounted|watchers-mounted|apps/web|watchers-walkthrough|seed||@mount:watcher_cases;-;@expect:== Same facts, two tenants, two destinations'
   # `end`, then `deliver` in a new process: the notices outlive the first one.
   'mounted|session-ended|apps/web|session-ended-walkthrough|none||@mount:session_listener;end;@expect:session_listener/presence.sessions;deliver;@expect:session_listener/presence.sessions'
@@ -254,6 +263,7 @@ WALKTHROUGHS=(
 
 # Examples no line above runs, each with the reason. `module folder|example|reason`.
 NOT_RUN=(
+  'apps/base/integration|scorer-walkthrough|needs public HTTPS ingress to its local fixture and BILIBI_SETTINGS_KEY; run manually on a fresh database'
   'apps/web|watchers-domains-walkthrough|needs official Domain mounts; run each Domain source walkthrough first'
   # They only serve the app, with a reference page, for a person to use in a browser.
   'apps/core/document|upload-resume-proof|serves the New document dialog for a browser upload'
@@ -761,8 +771,6 @@ known=()
 fixed=()
 passed=0
 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
-second_connections="$logs/second-connections.txt"
-: >"$second_connections"
 printf '| Walkthrough | Result | Seconds |\n| --- | --- | --- |\n' >>"$summary"
 
 # One module at a time: build its examples, run them, remove them.
@@ -799,11 +807,6 @@ for folder in "${folders[@]}"; do
     started=$SECONDS
     run_one "$name" "$example" "$prepare" "$environment" "${steps:--}" "${kind:-}"
     elapsed=$((SECONDS - started))
-    # A task that held a pooled connection and asked for another
-    # (bilibi_database::Db logs it once per pair of call sites). Not a failure
-    # while the check only warns: every hit of the run is listed at the end.
-    awk -v name="$name" '/^warning: second pooled connection: / && !seen[$0]++ { print name ": " $0 }' \
-      "$logs/$name.log" >>"$second_connections" 2>/dev/null || true
     if [[ $entry_group == mounted ]]; then
       # Whatever the verdict, the next walkthrough starts unmounted. A checkout
       # that cannot be restored ends the run: nothing after it can be trusted.
@@ -846,18 +849,6 @@ for folder in "${folders[@]}"; do
     done
   fi
 done
-
-if [[ -s $second_connections ]]; then
-  hits=$(wc -l <"$second_connections")
-  echo "::warning title=Second pooled connections::$hits in this run; fix each or name it with Db::get_detached (apps/base/database/README.md). They are listed in the job summary."
-  printf '\nSecond pooled connections (%s):\n' "$hits"
-  cat "$second_connections"
-  {
-    printf '\n### Second pooled connections (%s)\n\n' "$hits"
-    printf 'A task held a pooled connection and asked for another. Pass the held one, release it first, or name a real exception with `Db::get_detached`.\n\n'
-    sed -e 's/: warning: second pooled connection: this task already holds a pooled connection / /' -e 's/\. Pass the one you hold.*$//' -e 's/^/- /' "$second_connections"
-  } >>"$summary"
-fi
 
 printf '\n%s passed' "$passed"
 [[ ${#known[@]} -gt 0 ]] && printf '; known failures, still failing: %s' "${known[*]}"

@@ -118,6 +118,7 @@ async fn describe_source(
 /// What one account may read: the visible tables with restricted fields removed.
 #[derive(Clone, Debug)]
 pub struct Catalog {
+    pub(crate) subject_scope: Option<Scope>,
     tenant: i64,
     user: i64,
     tables: BTreeMap<&'static str, Table>,
@@ -127,6 +128,18 @@ pub struct Catalog {
     names: Arc<bilibi_labels::FieldLabels>,
 }
 impl Catalog {
+    pub async fn for_report(
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<Self, CatalogError> {
+        let mut catalog = Self::for_scope(client, scope).await?;
+        catalog.subject_scope = Some(scope.clone());
+        for table in catalog.tables.values_mut() {
+            table.report_subjects = true;
+        }
+        Ok(catalog)
+    }
+
     pub(crate) fn without_custom_references(mut self) -> Self {
         for table in self.tables.values_mut() {
             table.remove_custom_references();
@@ -146,7 +159,7 @@ impl Catalog {
         client: &(impl GenericClient + Sync),
         scope: &Scope,
     ) -> Result<Self, CatalogError> {
-        Self::build(client, scope, None).await
+        Self::build(client, scope, None, &[]).await
     }
     /// [`Catalog::for_scope`] with one masked field of one table unmasked, for
     /// a reveal the caller has already authorized and recorded.
@@ -156,12 +169,22 @@ impl Catalog {
         table: &str,
         field: &str,
     ) -> Result<Self, CatalogError> {
-        Self::build(client, scope, Some((table, field))).await
+        Self::build(client, scope, Some((table, field)), &[]).await
     }
+    /// Describe additions proposed by the custom-field owner before saving them.
+    pub async fn for_setup_preview(
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        fields: &[crate::CustomTable],
+    ) -> Result<Self, CatalogError> {
+        Self::build(client, scope, None, fields).await
+    }
+
     async fn build(
         client: &(impl GenericClient + Sync),
         scope: &Scope,
         reveal: Option<(&str, &str)>,
+        proposed: &[crate::CustomTable],
     ) -> Result<Self, CatalogError> {
         let installed = crate::installed().map_err(|_| Error::Internal)?;
         // One read for what the reader holds and how far it reaches (#683).
@@ -268,7 +291,12 @@ impl Catalog {
                 add_custom(&mut tables, custom, &withheld);
             }
         }
+        for custom in proposed {
+            let withheld = restricted.get(custom.table).cloned().unwrap_or_default();
+            add_custom(&mut tables, custom.clone(), &withheld);
+        }
         let catalog = Self {
+            subject_scope: None,
             tenant: scope.tenant(),
             user: scope.user(),
             tables,
@@ -294,7 +322,8 @@ impl Catalog {
         for table in catalog.tables.values() {
             // A child's rows have no owner in the parent's teams: a parent
             // that reaches a table only partly reads none of it (#683).
-            if !table.oversight_classified() || table.reach().is_some() {
+            if table.subject().is_some() || !table.oversight_classified() || table.reach().is_some()
+            {
                 continue;
             }
             let rule = &grant.tables()[table.id()];

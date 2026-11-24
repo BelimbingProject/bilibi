@@ -4,9 +4,12 @@
 //! the dev mailbox exactly as a developer would to follow an emailed link. It
 //! stores the development instance role first: the dev mailbox sends nowhere
 //! else.
-use bilibi_database::{pool, Error, Result};
-use bilibi_mail::{Mailbox, Mailer};
+use bilibi_agent_api::plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans};
+use bilibi_database::{pool, Error};
+use bilibi_mail::{parse, Mailbox, Mailer, ParseLimits, Parsed};
 use bilibi_module_registry::Services;
+use bilibi_session::Sessions;
+use bilibi_tenancy::ProofFuture;
 use bilibi_user::{CredentialError, UserService};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -26,45 +29,59 @@ fn count(mailbox: &Mailbox) -> usize {
 }
 /// The newest message after `before` arrived, giving the sender a moment: reset
 /// mail is delivered after the request returns.
-async fn arrival(mailbox: &Mailbox, before: usize) -> Option<String> {
+async fn arrival(mailbox: &Mailbox, before: usize) -> Option<Parsed> {
     for _ in 0..50 {
         if count(mailbox) > before {
             let newest = mailbox.entries().ok()?.into_iter().next()?;
-            return mailbox.read(&newest.id).ok();
+            let wire = mailbox.read(&newest.id).ok()?;
+            return parse(wire.as_bytes(), &ParseLimits::default()).ok();
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     None
 }
 /// The first http link in a message body.
-fn link(message: &str) -> Option<String> {
+fn link(message: &Parsed) -> Option<String> {
     message
+        .text
+        .as_deref()?
         .lines()
         .find(|line| line.starts_with("http"))
         .map(str::to_owned)
 }
-fn show_mail(label: &str, message: &str) {
-    let header = |name: &str| {
-        message
-            .lines()
-            .find_map(|line| line.strip_prefix(name))
-            .unwrap_or("?")
-            .trim()
-            .to_owned()
-    };
+fn show_mail(label: &str, message: &Parsed) {
     println!(
         "{label}: To={} Subject={} Link received={}",
-        header("To:"),
-        header("Subject:"),
+        message.to.first().map_or("?", |to| to.email.as_str()),
+        message.subject.as_deref().unwrap_or("?"),
         link(message).is_some()
     );
 }
 
+struct Browser<'a> {
+    sessions: &'a Sessions,
+    token: &'a str,
+}
+
+impl PlanAuthority for Browser<'_> {
+    fn verify<'a>(
+        &'a self,
+        tx: &'a tokio_postgres::Transaction<'_>,
+    ) -> ProofFuture<'a, PlanIdentity> {
+        Box::pin(async move {
+            Ok(PlanIdentity {
+                scope: self.sessions.hold(tx, self.token).await?,
+                credential_binding: format!("browser:{}", self.token),
+            })
+        })
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // The explicit opt-in protects normal development data from fixture writes.
     if std::env::var("BILIBI_DISPOSABLE_CREDENTIALS_DEMO").as_deref() != Ok("yes") {
-        return Err(Error::Invalid);
+        return Err(Error::Invalid.into());
     }
     bilibi_base::link();
     bilibi_core::link();
@@ -392,6 +409,88 @@ async fn main() -> Result<()> {
             );
         }
         None => println!("no verification mail arrived (is BILIBI_USER_SIGNING_KEY set?)"),
+    }
+
+    println!("\n== platform wording and workspace sender name ==");
+    let admin = users
+        .login("admin@example.test", seeded)
+        .await
+        .map_err(|_| Error::Unauthorized)?;
+    let sessions = services.get::<Sessions>("base/session.sessions")?;
+    let plans = services.get::<Plans>("base/agent_api.plans")?;
+    let browser = Browser {
+        sessions: &sessions,
+        token: &admin.token,
+    };
+    let result = plans
+        .preview(
+            &browser,
+            &[PlannedOperation {
+                key: "base.templates.template.publish".into(),
+                input: serde_json::json!({
+                    "key": "core.user.password_reset",
+                    "language": "en",
+                    "revision": 0,
+                    "slots": {
+                        "subject": "Reset your Example Trading password",
+                        "intro": "Open this link to choose a new password:",
+                        "closing": "Ask the Example Trading help desk if you did not request this.",
+                    },
+                }),
+            }],
+        )
+        .await?;
+    assert_eq!(result["valid"], false);
+    assert_eq!(
+        result["results"][0]["error"]["fields"]["key"][0],
+        "This template uses platform-controlled wording.",
+    );
+    client
+        .execute(
+            "INSERT INTO base_settings (key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES ('mail.sender_name',1,'tenant',1,'\"Example Trading\"',false)",
+            &[],
+        )
+        .await?;
+    client
+        .execute("DELETE FROM password_reset_tokens", &[])
+        .await?;
+    let before = count(&mailbox);
+    println!(
+        "reset requested: {}",
+        outcome(&users.request_password_reset(email).await)
+    );
+    let message = arrival(&mailbox, before).await.ok_or(Error::Internal)?;
+    show_mail("received", &message);
+    let text = message.text.as_deref().unwrap_or_default();
+    let html = message.html.as_deref().unwrap_or_default();
+    let checks = [
+        (
+            "sender name",
+            message.from.first().and_then(|from| from.name.as_deref()) == Some("Example Trading"),
+        ),
+        (
+            "subject",
+            message.subject.as_deref() == Some("Reset your password"),
+        ),
+        (
+            "platform wording in the plain-text alternative",
+            text.contains("Reset your password by opening this link:")
+                && text.contains("If you did not request this, you can ignore this email."),
+        ),
+        (
+            "the same owner-built link is the only HTML action",
+            link(&message).is_some_and(|url| {
+                url.contains("/reset-password/")
+                    && html.matches("href=").count() == 1
+                    && html.contains(&format!("href=\"{url}\""))
+            }),
+        ),
+    ];
+    for (name, passed) in checks {
+        println!("{}: {name}", if passed { "PASS" } else { "FAIL" });
+    }
+    if checks.iter().any(|(_, passed)| !passed) {
+        return Err(Error::refused("the workspace's reset mail is wrong").into());
     }
 
     println!("\n== audit (secrets redacted) ==");

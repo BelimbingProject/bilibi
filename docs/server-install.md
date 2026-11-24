@@ -7,16 +7,20 @@
 Publish your application's protected setup tag, then download its setup archive, installer and server-tools assets. Verify `bilibi-server-tools.tar.gz` with `gh attestation verify` before you extract or run its root-owned script. The runtime needs neither Cargo nor a Rust compiler; Production receives the tested programs and never builds them. On a fresh Ubuntu, Debian, Rocky Linux 10 or RHEL 10 server, run:
 
 ```sh
-sudo scripts/install-server.sh create production --role production --site erp.example.com
+sudo scripts/install-server.sh create production --role production --site app.example.com --public-site shop.example.com
 sudo scripts/install-server.sh release production /path/to/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
 ```
 
 ```sh
-sudo scripts/install-server.sh create-owner production
+printf '%s\n' "$RELAY_PASSWORD" | sudo scripts/install-server.sh mail production --host smtp.example.net --port 587 \
+    --tls starttls --username relay-user --from-address bilibi@example.com --password-stdin
+sudo scripts/install-server.sh create-owner production --email owner@example.com --company-name "Example Operations"
 sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
 ```
 
-The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and the proxy site, and prints what to do next. The second copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The third asks you for your organisation's name, your email and a password, and creates the first account: the server owner. The fourth starts the installer, the service that puts later releases into service when the owner asks on the Software page. Open `https://erp.example.com`, sign in with that email, and Caddy serves the app, with a certificate it fetched itself.
+The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and two proxy site blocks, and prints what to do next. The second copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The third sets the mail relay. The fourth creates the first account, the server owner, and emails the owner a claim link: the owner chooses a password there and sets up 2FA. The fifth starts the installer, the service that puts later releases into service when the owner asks on the Software page. Open `https://app.example.com`, sign in with that email, and Caddy serves the staff site, with a certificate it fetched itself. `https://shop.example.com` is the public site.
+
+Letting an AI assistant do the install? Give it [the Install Bilibi skill](install-with-ai/SKILL.md). Every command takes `--json` for one machine-readable line per step, with a stable error code and what to do next.
 
 ### Verify the server tools first
 
@@ -34,7 +38,7 @@ gh attestation verify bilibi-server-tools.tar.gz \
   awk -v expected="$EXPECTED_REPOSITORY_ID" 'NF { found=1; if ($0 != expected) exit 1 } END { if (!found) exit 1 }'
 ```
 
-Copy `EXPECTED_REPOSITORY_ID` from the application repository's GitHub **Settings › General** page or another trusted record before you start the install. Never derive it from the repository name during the install. For a private application repository, set a fine-grained read token in `GH_TOKEN` only for this command. Extract and run the tools only after the whole pipeline succeeds. If it fails, delete the archive and download it again from the official release; do not run or repair it by hand. `install-server.sh create` installs the same current GitHub CLI for later release checks.
+Copy `EXPECTED_REPOSITORY_ID` from the application repository's GitHub **Settings › General** page or another trusted record before you start the install. Never derive it from the repository name during the install. For a private application repository, run this check on your own computer, where `gh auth login` already reads the repository, then copy the checked archive to the server. After the first install, the server checks newer tools itself with its GitHub App; see [Private application repositories](#private-application-repositories). Extract and run the tools only after the whole pipeline succeeds. If it fails, delete the archive and download it again from the official release; do not run or repair it by hand. `install-server.sh create` installs the same current GitHub CLI for later release checks.
 
 Want a Dev instance on the same machine to try changes first? Add one:
 
@@ -76,6 +80,7 @@ Each instance lives in one folder:
     site/waiting.html the page Caddy shows while the service is stopped
   dev/                the same, for Dev
   build/              home of bilibi-build: bin/bilibi-installer
+  github-app.json     the GitHub App that reads a private application repository, when you add one (root:bilibi, 0640)
 ```
 
 Two system users share the work, so the program that serves pages can never rewrite itself:
@@ -91,7 +96,23 @@ Each instance has its own PostgreSQL role and database (`bilibi_production`, `bi
 
 The offline waiting page identifies the instance folder and address; it does not cache a server role.
 
-Caddy has one site per instance in `/etc/caddy/sites/bilibi-<instance>.caddy`, imported by `/etc/caddy/Caddyfile`. The site proxies to the instance's local port and serves the waiting page while the backend is down.
+Caddy has one generated file per instance in `/etc/caddy/sites/bilibi-<instance>.caddy`, imported by `/etc/caddy/Caddyfile`. An instance with `--public-site` has two site blocks and two loopback upstreams in that file. Both serve the waiting page while their listener is down.
+
+## Keep the staff site private
+
+**The public hostname goes to the internet; the staff hostname goes to a private address or an identity-aware proxy.** Bilibi still checks the exact `Host` on both listeners, but a host check is not a network boundary.
+
+On a server with a VPN or private interface, give Caddy separate IP addresses for staff and public traffic. Replace the example addresses with IPs assigned to the server.
+
+```sh
+printf '%s\n' "$CLOUDFLARE_API_TOKEN" | sudo scripts/install-server.sh create production \
+  --role production --site app.example.com --public-site shop.example.com \
+  --staff-bind 10.20.0.5 --public-bind 203.0.113.10 --tls cloudflare --cloudflare-token-stdin
+```
+
+`--staff-bind` takes the server's private or VPN IP and binds Caddy’s staff block to that address. `--public-bind` binds the public block to a different interface. Point each hostname at its corresponding address. `--tls cloudflare` obtains certificates by DNS without making the staff address public; `--tls internal` is the alternative when every staff device trusts Caddy's local authority. If the machine has only one reachable address, an address allow-list on the staff block is a weaker last resort.
+
+For a tunnel running on the same server, use `--staff-bind 127.0.0.1 --public-bind 203.0.113.10` with the installation command above. Point the identity-aware tunnel at `https://127.0.0.1:443` and configure the staff hostname as both the HTTP Host and the TLS server name. Require the proxy’s identity check before staff sign-in. For a proxy running elsewhere, use a private staff IP and restrict ingress on that interface to the proxy. Send the public hostname directly to the public Caddy address. Staff invitation and password-reset links intentionally require that same private path. If a cloud identity provider or AI application must reach the staff machine edge, publish only the [machine paths](#a-firewall-identity-proxy-or-cdn-in-front-of-bilibi), with the provider or application authentication that fits that path; do not publish all staff pages.
 
 ## Which certificate should I use?
 
@@ -156,7 +177,7 @@ In code, `bilibi_base::system::Instance::resolve` returns the role, label and co
 
 **Dev and Production on two machines** use the same verified release archive from GitHub, either downloaded directly or saved and uploaded again. Each instance keeps its own local release numbers, database and backup. No instance serves release files to another.
 
-**Install from GitHub**: on Software › Releases, name your application repository (for example your-company/my-bilibi), save a read-only token only when the repository is private, and accept the repository. That asks for your 2FA code. Then review one setup file for this server. The server downloads that file, checks it, backs up, switches and can switch back or Undo, the same way as an upload. Uploading a saved copy of that published asset still works when you do not want GitHub to supply the bytes.
+**Install from GitHub**: on Software › Releases, name your application repository (for example your-company/my-bilibi) and accept the repository. A private repository is read with the server's [GitHub App](#private-application-repositories). That asks for your 2FA code. Then review one setup file for this server. The server downloads that file, checks it, backs up, switches and can switch back or Undo, the same way as an upload. Uploading a saved copy of that published asset still works when you do not want GitHub to supply the bytes.
 
 Staging is optional. When used, install and check the exact GitHub asset there first, then review a separate Production install of that asset with fresh 2FA. See [Staging and Production](../apps/base/software/README.md#staging-and-production) for the agent report and identity checks.
 
@@ -170,7 +191,7 @@ The first release has no program to ask through, so `release` puts a published s
 sudo scripts/install-server.sh release production /home/me/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
 ```
 
-Add `--repo-id <number>` with your application repository's GitHub number, copied beforehand from its GitHub **Settings › General** page or another trusted record. Never look it up from the repository name during the install. The script refuses a release signed by any other number, so a reused repository name cannot pass. The official `BelimbingProject` repositories need no `--repo-id`. The `installer` command takes the same flags. Public repositories need no GitHub login. For a private repository, set a fine-grained read token in `GH_TOKEN` for this command. If the checksum, repository, tag or signer workflow does not match, the command stops before unpacking, migration or service changes. Download the asset from the official release again; never bypass the check.
+Add `--repo-id <number>` with your application repository's GitHub number, copied beforehand from its GitHub **Settings › General** page or another trusted record. Never look it up from the repository name during the install. The script refuses a release signed by any other number, so a reused repository name cannot pass. The official `BelimbingProject` repositories need no `--repo-id`. The `installer` command takes the same flags. Public repositories need no GitHub login. A private repository is read with the server's [GitHub App](#private-application-repositories). If the checksum, repository, tag or signer workflow does not match, the command stops before unpacking, migration or service changes. Download the asset from the official release again; never bypass the check.
 
 Step by step, we:
 
@@ -189,7 +210,49 @@ sudo scripts/install-server.sh switch production 1
 > [!WARNING]
 > Migrations are forward-only. Switching back to an older release after a newer one changed tables leaves those changes in place; the older program may not expect them. That case is the Software page's Undo, which restores the backup the installer took first and says what would be lost, with a count. Use `switch` only for releases that share the same database shape.
 
-`status` lists every instance, its role, address, service and installer states, and releases.
+`status` names the server's GitHub App, if any, then lists every instance, its role, address, service, installer and mail states, and releases. It says so first when another run is still working: only one run goes at a time, a rerun waits for the earlier one, and a dropped connection does not stop a run on the server.
+
+## Private application repositories
+
+**Give the server a GitHub App once, and every later check reads your private repository with a new token that expires within the hour.** Nobody makes or renews a token again, so upgrades can run unattended.
+
+On your own computer, in your application workspace, run:
+
+```sh
+./bilibi connect-servers --server admin@erp.example.com
+```
+
+It asks you for two clicks on GitHub, "Create GitHub App" and "Install", and sends the App's private key over ssh, on standard input, to this command on each server. By hand, you pipe the key file GitHub gave you:
+
+```sh
+sudo scripts/install-server.sh github-app --client-id Iv23li0a1b2c3d4e5f6g --repo your-company/my-bilibi < app.pem
+```
+
+```text
+GitHub App Iv23li0a1b2c3d4e5f6g saved in /opt/bilibi/github-app.json for your-company/my-bilibi. It can read your-company/my-bilibi (repository 123456789) and cannot change anything.
+```
+
+The application maker's [guide to connecting servers](https://github.com/BelimbingProject/bilibi-app-maker/blob/main/docs/guides/connecting-servers.md) explains each step, and how to do it by hand. The key arrives on standard input only, so it never enters the shell history or the process list.
+
+From then on:
+
+- `release`, `installer` and `verify` ask GitHub for a token that can only read the `--repo` you name, give it to that one `gh attestation verify` as `GH_TOKEN`, and drop it. It is never printed, logged or written to disk.
+- **Software › Releases** does the same for each list, review, download and upload check. The page's saved read token is used only for a repository the App is not installed on.
+- A repository the App is not installed on, such as the official `BelimbingProject/bilibi` for the installer, is read with the saved read token, or without a login, as before.
+- A `GH_TOKEN` you set yourself for one command still wins.
+
+The App lives in `/opt/bilibi/github-app.json`, one per server, because every instance on the machine serves the same application. Root and the Bilibi services can read it, like each instance's `env`, which already holds the key that unlocks saved secrets.
+
+| Command | What it does |
+| --- | --- |
+| `github-app --client-id <id> --repo <owner/name>` | Check the key on standard input against GitHub, then keep it. Rerun with a new key to replace it |
+| `github-app --check` | Get a token and read the repository, then say whether the App works |
+| `github-app --remove` | Forget the App on this server. Also delete the App, or its key, on GitHub |
+| `verify <file> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Check a file's GitHub provenance without installing it, such as a newer `bilibi-server-tools.tar.gz` before you extract it |
+
+Every use refuses, and says what to change on GitHub, when the App can change anything, cannot read Contents and Attestations, is installed on all of the owner's repositories, or its key was deleted. A server only ever needs to read.
+
+**Why an App and not a token?** A fine-grained token expires, at the latest after a year, and someone has to remember how to make a new one. The App's key does not expire, but it can only ask for tokens that read the repositories you installed it on. Revoke it in one place: delete the key on the App's settings page on GitHub.
 
 ## The installer service
 
@@ -207,53 +270,53 @@ The installer unit is skipped quietly while `/opt/bilibi/build/bin/bilibi-instal
 
 ## The first account
 
-A fresh database has no accounts, so nobody can sign in. `create-owner` creates the platform operator's first account. This server owner is a Core Administrator of the organisation that runs the server. Run it once, after the first release is in service:
+A fresh database has no accounts, so nobody can sign in. `create-owner` creates the platform operator's first account, the server owner (a Core Administrator of the organisation that runs the server), and emails the owner a link to claim it. No password passes through the command: the owner chooses it from the link, then sets up 2FA. Set up [outgoing mail](#outgoing-mail) first, then run it after the first release is in service:
 
 ```sh
-sudo scripts/install-server.sh create-owner production
+sudo scripts/install-server.sh create-owner production --email owner@example.com --name "Ng Kiat Siong" --company-name "Example Operations"
 ```
 
-It asks at the terminal, and what you type for the password is not shown:
-
 ```
-Operator company name (your organisation): Example Operations
-Operator company code [example_operations]:
-Owner email: owner@example.com
-Owner name [owner]: Ng Kiat Siong
-Password:
-Confirm password:
 Platform operator ready: tenant 1 “Example Operations”, company 1 “Example Operations”.
 Owner created: owner@example.com (account 1), Core Administrator of the platform operator.
 The owner now has a Person, business affiliation and desk in the platform operator's company.
-Sign in at https://erp.example.com/login as owner@example.com.
+A claim link was emailed to owner@example.com. The owner opens it, chooses a password, signs in at https://erp.example.com/login and sets up 2FA.
+Next: when the owner has done both, rerun the same command to confirm.
+Owner claim: sent
 ```
 
-Notice that the company questions come first only on a database that has no operator company yet. If you ran `bilibi-web platform-provision` before, the command finds that company and asks only about the account. The password must be at least 8 characters; a shorter one is refused and asked for again.
+- `--company-name` (and optional `--company-code`, `--tenant-name`) is needed only while no operator company exists; `bilibi-web platform-provision` may have made one.
+- `--name` defaults to the part of the email before `@`.
+- **Run it again at any time.** It never creates a second owner. It finishes an unfinished Person, affiliation and desk, resends the link while the owner has not chosen a password, and reports the claim. The last line is always `Owner claim: <state>`:
 
-**Run it a second time and it refuses**, because the server already has an owner:
+| State | Meaning |
+| --- | --- |
+| `sent` | The link was emailed now |
+| `recently-sent` | A link went out less than a minute ago and still works |
+| `password-chosen` | The owner chose a password; 2FA is not set up yet |
+| `claimed` | Password and 2FA are set up: the install is finished |
+| `mail-not-ready`, `not-delivered` | Mail cannot be sent; fix [outgoing mail](#outgoing-mail) and rerun |
 
-```
-Not created: this install already has an owner. The platform operator holds 1 account(s); the first is owner@example.com.
-Sign in as one of them at https://erp.example.com/login. To add people, use Users > New user there.
-If nobody can sign in any more, that is account recovery, which this command does not do. If an owner only lost their phone, see [Lost phone](#lost-phone).
-```
+The link is a password-reset link and expires with the **Password reset link lifetime** setting (three days by default). The command has no option to create or claim the owner without that email, on purpose: whoever runs the install never holds the owner's sign-in. Root on the server can still change anything; this guards against mistakes and shortcuts, not a malicious administrator.
 
-If the earlier run left the existing owner's Person, business affiliation and first desk unfinished, rerunning completes that setup.
-
-The command is the same `bilibi-web create-owner` the script runs for you, in the instance's environment. From a script with no terminal, give every answer as a flag and the password on standard input:
-
-```sh
-printf '%s\n' "$PASSWORD" | sudo scripts/install-server.sh create-owner production \
-    --company-name "Example Operations" --company-code example_operations \
-    --email owner@example.com --name "Ng Kiat Siong" --password-stdin
-```
-
-> [!WARNING]
-> There is no `--password` flag, on purpose: an argument lands in your shell history and in the process list. Type it, or pipe it in with `--password-stdin`.
-
-Everything the command creates is written the way the app writes it, so it shows in the audit log under Administration → Audit Log → Actions as **System · create-owner**: the retained `user.bootstrap.completed` action with the account, email and role, and the data changes for the account, its Core Administrator role and the bootstrap receipt that marks the account as the server owner. The command works with any `BILIBI_ENV`; on Dev, the development seed's `ai@agent.my` already exists and the command refuses, which is the point.
+Everything the command creates is written the way the app writes it, so it shows in the audit log under Administration → Audit Log → Actions as **System · create-owner**: the retained `user.bootstrap.completed` action with the account, email and role, and the data changes for the account, its Core Administrator role and the bootstrap receipt that marks the account as the server owner. The emailed link is recorded as `user.reset_requested`. On Dev, the development seed's `ai@agent.my` already exists and the command reports that owner instead.
 
 Behind the scenes this is the development seed's bootstrap with your details instead of the seed's, through the same owners: Company provisions the operator company, User creates the account and receipt, Authz grants the role, and User gives the owner a Person, business affiliation and first desk ([`apps/core/user/README.md`](../apps/core/user/README.md), Bootstrap administrator).
+
+## Outgoing mail
+
+Staging and Production send no mail until the instance has an SMTP relay, and the owner's claim link is the first mail. `mail` writes the relay into the instance's `env` and restarts a running service. The password comes on standard input:
+
+```sh
+printf '%s\n' "$RELAY_PASSWORD" | sudo scripts/install-server.sh mail production --host smtp.example.net --port 587 \
+    --tls starttls --username relay-user --from-address bilibi@example.com --from-name "Example Operations" --password-stdin
+```
+
+Use `--tls implicit_tls` for port 465. Rerun it to change any value. The variables are described in [Mail](../apps/base/mail/README.md#choosing-the-transport).
+
+## Machine-readable mode
+
+Put `--json` before any command (`create`, `release`, `installer`, `mail`, `create-owner`, `switch`, `status`) to get one JSON object per line instead of text, for an AI assistant or script: a `started` line, then the result with `state` (`completed` or `failed`), `code` (`OK` or a stable error name), `next` (what to do), `claim` (from `create-owner`) and `detail` (the full text output). The codes are listed in [the Install Bilibi skill](install-with-ai/SKILL.md#error-codes). Every command is safe to rerun after a failure or interruption: `create` keeps what exists and reuses the saved database password, `release` completes without changes when the same verified release is already in service, and `create-owner` never creates a second owner. A public site (no `--tls`) is refused with `DNS_NOT_FOUND` until its name resolves.
 
 ### The first owner of a customer tenant
 
@@ -274,13 +337,13 @@ The command exits unsuccessfully if delivery fails after commit. To recover from
 
 Use the signed-in Users page to invite later administrators.
 
-Ordinary membership invitations can link the owner’s sign-in to another tenant. Cross-tenant access through shared sign-ins, including SSO, remains a [known limitation](https://github.com/BelimbingProject/bilibi/issues/787).
+Ordinary membership invitations can link the owner's portable identity to another tenant. Company SSO proof remains confined to its issuing tenant; entering another tenant requires portable proof or that target's own SSO ([ADR 21](architecture/decisions/21-one-sign-in-several-tenant-memberships.md)).
 
 When running the binary directly, use the same flags with `bilibi-web tenant-provision` and load the instance's database and mail settings and `APP_ORIGIN` into its environment. The installer wrapper loads these settings and runs the command as the Bilibi service account.
 
 ## Lost phone
 
-Bilibi has no 2FA recovery codes. A person who loses their phone asks another admin to reset their 2FA (Users › the person › **Reset 2FA**, which needs the admin's own code). When the person is the only admin, the server owner resets it from the server:
+Bilibi has no 2FA recovery codes, and customer administrators cannot reset another person's installation-wide factor. A staff member who loses their phone asks the server owner to reset it from the server.
 
 ```sh
 sudo scripts/install-server.sh two-factor-reset production --email owner@example.com
@@ -294,6 +357,23 @@ sudo scripts/install-server.sh two-factor-reset production --email owner@example
 - Already off is not an error: it says so and changes nothing.
 - It shows in the audit log as **System · two-factor-reset**.
 - The command is `bilibi-web two-factor-reset --email <address>` in the instance's environment.
+
+## Portable sign-in recovery and retention
+
+Customer administrators can remove memberships but cannot recover or delete the installation-wide sign-in. The server owner handles the exceptional lifecycle from the server.
+
+```sh
+sudo scripts/install-server.sh identity-recover production --email old@example.com --new-email new@example.com
+sudo scripts/install-server.sh identity-delete production --email unused@example.com --confirm unused@example.com
+sudo scripts/install-server.sh identity-retention production
+```
+
+- `identity-recover` is for a person who lost the old mailbox. It treats the new mailbox as operator-verified, revokes pending reset links, signs every membership out, notifies the new address and records **System · identity-recover**. It refuses an address already used by another portable identity.
+- Recovery remains available while an identity is unused but still inside its retention window, so losing the old mailbox does not prevent a later invitation from reactivating it.
+- Removing the last membership starts the **Unused sign-in retention** clock (90 days by default, configurable in Settings › Session). Accepting another invitation before it ends cancels the clock.
+- `identity-retention` anonymises at most 100 due identities per run. Run it repeatedly from the server's ordinary maintenance schedule until it reports zero.
+- `identity-delete` performs the same final anonymisation immediately, but only for an identity with no live membership. Repeating the address in `--confirm` prevents an accidental target typo. It records **System · identity-delete**.
+- Final anonymisation releases the address and removes the password, reset token, credential-attempt state, 2FA and pending sign-ins. Historical tenant memberships and their tenant audit evidence remain under their own privacy and retention rules.
 
 ## The waiting page
 
@@ -341,22 +421,32 @@ Script commands:
 
 | Command | What it does |
 | --- | --- |
-| `create <instance> --role dev\|staging\|production --site <host> [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy site. Rerun to change the site; the saved role is preserved and the port stays fixed. Change the role in Instance settings with 2FA |
+| `create <instance> --role dev\|staging\|production --site <staff-host> [--public-site <public-host> or --no-public-site] [--public-tenant <id>] [--staff-bind <address> or --no-staff-bind] [--public-bind <address>] [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy blocks. `--public-site` enables the public listener; `--staff-bind` keeps the staff Caddy block on one private interface. Rerun to change the sites. Omitted public-site and bind settings keep their saved values. Use `--no-public-site` to disable the public listener or `--no-staff-bind` to remove the explicit Caddy binds. Changes to listener configuration restart a running instance and check both active listeners. The saved role and staff port stay fixed |
 | `release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance and checksums, copy into `releases/<n>`, migrate, switch, check |
-| `create-owner <instance> [--email <address>] [--name <name>] [--password-stdin] [--company-name <name> --company-code <code>]` | [Server owner setup](#the-first-account) |
+| `mail <instance> --host <relay> --port <n> --username <user> --tls starttls\|implicit_tls --from-address <address> [--from-name <name>] --password-stdin` | [Outgoing mail](#outgoing-mail) relay in `env`; restarts a running service |
+| `create-owner <instance> --email <address> [--name <name>] [--company-name <name> [--company-code <code>] [--tenant-name <name>]]` | [Server owner setup](#the-first-account): creates the owner and emails the claim link; rerun to resend or check the claim |
+| `--json <command> ...` | [Machine-readable mode](#machine-readable-mode) |
 | `tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>` | [Customer tenant and first-owner setup](#the-first-owner-of-a-customer-tenant) |
-| `two-factor-reset <instance> --email <address>` | Turn off one account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
+| `two-factor-reset <instance> --email <address>` | Turn off one staff account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
+| `identity-recover <instance> --email <old> --new-email <new>` | Recover an installation-wide staff sign-in address and sign it out everywhere |
+| `identity-delete <instance> --email <address> --confirm <address>` | Immediately anonymise a portable identity after its last membership is gone |
+| `identity-retention <instance>` | Anonymise up to 100 unused portable identities whose configured retention ended |
 | `installer <bilibi-installer> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance, copy the installer to `/opt/bilibi/build/bin` and start `bilibi-installer@<instance>` for every instance; rerun to update it |
+| `github-app --client-id <id> --repo <owner/name>` (key on standard input), `github-app --check`, `github-app --remove` | [The server's GitHub App](#private-application-repositories) for a private application repository |
+| `verify <file> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Check a file's GitHub provenance without installing it |
 | `switch <instance> <n>` | Put a kept release in service |
-| `status [<instance>]` | Roles, addresses, service and installer states, releases |
+| `status [<instance>]` | The GitHub App, then each instance's role, address, service and installer states, releases |
 
 Keys in `env` (the service's environment; `README.md` explains each):
 
 | Key | Set to |
 | --- | --- |
 | `BILIBI_ENV` | Initial role for the install seed: `development`, `staging` or `production`; later changes use Instance settings |
-| `APP_ORIGIN` | `https://<site>`, the exact address people browse |
-| `BIND_ADDR` | `127.0.0.1:<port>`, where Caddy forwards to; the first free port from 4300 unless you pass `--port` |
+| `APP_ORIGIN` | `https://<staff-site>`, the exact staff address |
+| `BIND_ADDR` | `127.0.0.1:<port>`, the staff listener where Caddy forwards |
+| `PUBLIC_ORIGIN` | `https://<public-site>`, present only when `--public-site` enables public routes |
+| `PUBLIC_BIND_ADDR` | The public listener’s separate loopback address |
+| `PUBLIC_TENANT_ID` | The one tenant served by the public listener. Set with `--public-tenant <id>`, defaulting to tenant 1 when enabling the public site |
 | `DATABASE_URL` | the instance's own database and role on the local cluster |
 | `BILIBI_SETTINGS_KEY`, `BILIBI_USER_SIGNING_KEY`, `BILIBI_MEDIA_SIGNING_KEY` | generated 64-hex-character keys; keep them, losing `BILIBI_SETTINGS_KEY` loses every secret setting and authenticator key |
 | `BILIBI_MAIL_DIR` | `data/mailbox`, used only by a Dev instance. A Staging or Production instance sends no mail until you add the `MAIL_*` relay variables ([Mail](../apps/base/mail/README.md#choosing-the-transport)); until then every send fails and System Info's Mail line says why |
@@ -384,7 +474,7 @@ The address must be the exact public origin people browse, without a path, query
 
 AI apps register themselves without an operator-maintained client list. Their return addresses must use HTTPS, except HTTP callbacks to the person's own loopback address. Each app supplies its own callback paths; loopback ports may vary. See [Agent](../apps/core/agent/README.md#client-registration) for matching and retention rules.
 
-## A firewall or CDN in front of Bilibi
+## A firewall, identity proxy or CDN in front of Bilibi
 
 AI apps are programs, not browsers. A browser check in front of Bilibi lets a person through and blocks the app, usually after its sign-in already worked.
 
@@ -395,13 +485,16 @@ AI apps are programs, not browsers. A browser check in front of Bilibi lets a pe
 | **Cause** | A rule that expects a browser: Cloudflare's Browser Integrity Check, Bot Fight Mode, or a managed or JavaScript challenge. |
 | **Fix** | Skip that check for the paths programs call, and only for them. |
 
-The paths programs call:
+The staff-site machine paths are:
 
 - `/mcp`
 - `/api/v1/` and everything under it
 - `/oauth/token`, `/oauth/device_authorization` and `/oauth/register`
 - `/.well-known/` and everything under it
-- `/scim/` and `/webhooks/`, when you use them
+- `/scim/v2/` and everything under it
+- `/login/sso/backchannel/` and everything under it
+
+The public-site machine paths are `/webhooks/` and `/visitor/v1/`, with everything under each. They do not belong in a staff-site bypass rule.
 
 The pages people open (`/oauth/device`, `/oauth/authorize`, sign-in) keep the browser check.
 

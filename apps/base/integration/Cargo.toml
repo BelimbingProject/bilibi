@@ -23,6 +23,7 @@ bilibi-settings = { path = "../settings" }
 bilibi-tenancy = { path = "../tenancy" }
 bilibi-ui.workspace = true
 inventory.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

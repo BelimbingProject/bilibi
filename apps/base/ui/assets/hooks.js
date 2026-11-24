@@ -11,6 +11,67 @@
 // `bilibi:event` CustomEvent, and hears a server push as a `window` event
 // `bilibi:<name>` with the payload in detail. ui.js must load first.
 (() => {
+  window.BilibiUI.registerHook("StepUpGate", {
+    mounted() {
+      this.card = this.el.querySelector("#step-up-card")
+      this.controls = () => [...this.card.querySelectorAll(
+        'a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]'
+      )].filter(control => control.tabIndex >= 0 && !control.matches(":disabled") && control.getClientRects().length)
+      this.focusCode = () => {
+        if (!this.el.isConnected) return
+        const controls = this.controls()
+        const target = controls.find(control => control.matches("input")) || controls[0] || this.card
+        target.focus()
+      }
+      this.keydown = async event => {
+        if (event.key === "Escape") {
+          event.preventDefault()
+          if (this.leaving) return
+          this.leaving = true
+          const navigation = window.navigation
+          const current = navigation?.currentEntry
+          const previous = navigation?.entries().find(entry => entry.index === current?.index - 1)
+          const here = location.origin + location.pathname + location.search
+          if (previous?.url && new URL(previous.url).origin === location.origin && previous.url.split("#")[0] !== here) {
+            const response = await fetch(previous.url, {method: "HEAD", cache: "no-store"}).catch(() => null)
+            if (!this.el.isConnected || navigation.currentEntry !== current) {
+              this.leaving = false
+              return
+            }
+            if (response?.ok && !response.headers.has("x-bilibi-step-up")) {
+              history.back()
+              return
+            }
+          }
+          location.assign(this.el.closest('[data-live-socket="/portal/live"]') ? "/portal" : "/")
+          return
+        }
+        if (event.key !== "Tab") return
+        const controls = this.controls()
+        const active = controls.indexOf(document.activeElement)
+        if (active < 0 || (event.shiftKey ? active === 0 : active === controls.length - 1)) {
+          event.preventDefault()
+          const target = (event.shiftKey ? controls.at(-1) : controls[0]) || this.card
+          target.focus()
+        }
+      }
+      this.focusin = event => {
+        if (!this.card.contains(event.target)) this.focusCode()
+      }
+      document.addEventListener("keydown", this.keydown, true)
+      document.addEventListener("focusin", this.focusin)
+      this.focusCode()
+    },
+    updated() {
+      this.card = this.el.querySelector("#step-up-card")
+      if (!this.card.contains(document.activeElement)) this.focusCode()
+    },
+    destroyed() {
+      document.removeEventListener("keydown", this.keydown, true)
+      document.removeEventListener("focusin", this.focusin)
+    },
+  })
+
   // The server owns opening/closing; this hook owns keyboard and focus only.
   window.BilibiUI.registerHook("InlineForm", {
     mounted() {
@@ -600,8 +661,15 @@
         if (focused) this.input.setSelectionRange(selectionStart, selectionEnd)
       }
 
+      // A shown secret goes back to a password box as its form submits, so
+      // the browser offers to save it as a password and never keeps it in
+      // its text-field history.
+      this.form = this.input.form
+      this.onSubmit = () => this.input.setAttribute("type", "password")
+
       this.el.addEventListener("mousedown", this.onMouseDown)
       this.el.addEventListener("click", this.onClick)
+      this.form?.addEventListener("submit", this.onSubmit, true)
 
       this.masking = new MutationObserver(this.sync)
       this.masking.observe(this.input, {attributeFilter: ["type"]})
@@ -615,6 +683,7 @@
 
     destroyed() {
       this.masking.disconnect()
+      this.form?.removeEventListener("submit", this.onSubmit, true)
       this.el.removeEventListener("mousedown", this.onMouseDown)
       this.el.removeEventListener("click", this.onClick)
     },

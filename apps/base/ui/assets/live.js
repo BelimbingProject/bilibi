@@ -67,7 +67,19 @@
   const params = () => Object.fromEntries(new URLSearchParams(location.search));
   const address = () => location.pathname + location.search;
   let shown = address(); // The path and query the page on screen was mounted for.
-  const mountIntent = () => ({type: 'mount', path: location.pathname, params: params()});
+  const addressIntent = () => ({type: 'mount', path: location.pathname, params: params()});
+  const gateSelector = '[data-hook="StepUpGate"]';
+  const promptIntent = (prompt, returnTo) => ({
+    type: 'mount',
+    path: prompt.pathname,
+    params: Object.fromEntries(prompt.searchParams),
+    step_up_return: returnTo,
+  });
+  const mountIntent = () => {
+    const gate = document.querySelector(gateSelector);
+    if (!gate?.dataset.stepUpPrompt || shown !== address()) return addressIntent();
+    return promptIntent(new URL(gate.dataset.stepUpPrompt, location.href), gate.dataset.stepUpReturn);
+  };
 
   function connect() {
     if (stopped || !document.querySelector('[data-live]')) return;
@@ -294,6 +306,18 @@
       loading();
       return;
     }
+    const gate = document.querySelector(gateSelector);
+    if (message.type === 'page' && message.redirect && gate && entry) {
+      const destination = new URL(message.redirect, location.href);
+      const expected = new URL(gate.dataset.stepUpReturn || location.href, location.href);
+      const sameQuery = destination.search === expected.search;
+      const actionCompleted = !gate.dataset.stepUpPrompt && !destination.search;
+      if (destination.origin === expected.origin && destination.pathname === expected.pathname && (sameQuery || actionCompleted)) {
+        enqueue({type: 'navigate', path: expected.pathname, params: Object.fromEntries(expected.searchParams), step_up_complete: true}, {loading: true});
+        loading();
+        return;
+      }
+    }
     if (message.type === 'page') {
       // Consent replies can hand the browser back to an OAuth client.
       if (message.redirect) { location.assign(message.redirect); return; }
@@ -305,8 +329,8 @@
           released = true;
         }
       }
-      if (released || message.html !== lastHTML) {
-        patch(document.getElementById('app'), message.html, options);
+      if (released || message.flash || message.html !== lastHTML) {
+        patch(document.getElementById('app'), message.html, {...options, flash: message.flash});
         lastHTML = message.html;
       }
       panelPath = message.panel_params ? new URL(message.url || location.href, location.href).pathname : null;
@@ -345,6 +369,17 @@
         }
       }
     }
+    // The record's return address belongs to shared navigation, not the page's
+    // query state. Keep it when a live render canonicalizes that same page.
+    if (['page', 'fragment'].includes(message.type) && message.url) {
+      const current = new URL(location.href);
+      const next = new URL(message.url, location.href);
+      const returnTo = current.searchParams.get('return_to');
+      if (returnTo && next.origin === current.origin && next.pathname === current.pathname && !next.searchParams.has('return_to')) {
+        next.searchParams.set('return_to', returnTo);
+        message.url = next.pathname + next.search + next.hash;
+      }
+    }
     if (['page', 'fragment'].includes(message.type) && message.url && message.url !== address()) {
       // Framed pages and background/history corrections replace; a person's
       // action pushes unless the intent explicitly asks to replace.
@@ -368,6 +403,7 @@
     template.innerHTML = html;
     const next = template.content.firstElementChild;
     if (!next) return;
+    if (options.flash) next.insertAdjacentHTML('beforeend', options.flash);
     const focus = captureFocus();
     const scroll = captureScroll(root);
     const context = {
@@ -737,11 +773,19 @@
   window.addEventListener('popstate', () => {
     if (address() === shown) return;
     shown = address();
-    if (panelPath === location.pathname || document.querySelector('#app [data-history="params"]')) {
+    if (!document.querySelector(gateSelector) && (panelPath === location.pathname || document.querySelector('#app [data-history="params"]'))) {
       enqueue({type: 'params', path: location.pathname, params: params()}, {loading: true});
       return;
     }
-    enqueue(mountIntent(), {loading: true, navigation: true});
+    enqueue(addressIntent(), {loading: true, navigation: true});
+  });
+
+  document.addEventListener('click', event => {
+    const link = event.target instanceof Element && event.target.closest('[data-step-up-methods] a[href]');
+    const gate = link && link.closest(gateSelector);
+    if (!gate?.dataset.stepUpPrompt) return;
+    event.preventDefault();
+    enqueue(promptIntent(new URL(link.href), gate.dataset.stepUpReturn), {loading: true});
   });
 
   document.addEventListener('bilibi:navigate', ({detail}) => {

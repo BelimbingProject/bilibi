@@ -249,10 +249,11 @@ impl Engine {
         }
         Ok(())
     }
-    /// A transition or an adoption may be driven by an account or by a named
-    /// system principal. The latter must be the exact principal sealed on the
-    /// scope: it cannot borrow user, agent or impersonator attribution.
-    fn writer_or_principal(
+    /// A transition, adoption or process-run write may be driven by an account
+    /// or by a named system principal. The latter must be the exact principal
+    /// sealed on the scope: it cannot borrow user, agent or impersonator
+    /// attribution.
+    pub(crate) fn writer_or_principal(
         &self,
         context: &bilibi_database::Context,
         scope: &Scope,

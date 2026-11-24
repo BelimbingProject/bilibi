@@ -22,7 +22,9 @@
 //! capability, a restricted field, an archived company, a suspended tenant,
 //! a stale version and a switched-off watcher each stop the effect; a tenant
 //! custom field is a condition only once the tenant offers it to watchers, routes
-//! its case, and refuses the watcher when restricted or archived; a watcher that
+//! its case, and refuses the watcher when restricted or archived; a linked
+//! company's offered custom field (`company.cf_segment`) is a condition once
+//! automation may read companies, in a trial and in a run; a watcher that
 //! would start itself is refused at approval, and a two-watcher loop is refused and a noncyclic chain stops at
 //! the chain budget; a threshold change is a new approved version, no
 //! release; and watchers share a tenant bucket, wait in order for a refill,
@@ -169,6 +171,19 @@ impl Proof {
         self.write(
             scope,
             "base.watchers.approve",
+            json!({"watcher_id": watcher, "version": version}),
+        )
+        .await
+    }
+    async fn restore(
+        &self,
+        scope: &Scope,
+        watcher: i64,
+        version: i64,
+    ) -> std::result::Result<Value, String> {
+        self.write(
+            scope,
+            "base.watchers.restore",
             json!({"watcher_id": watcher, "version": version}),
         )
         .await
@@ -622,8 +637,317 @@ async fn custom_field_proof(
     Ok(())
 }
 
+/// #862: a condition may read an offered custom field of a record the
+/// trigger's record links to (`company.cf_segment`), as the `watchers`
+/// principal with reach to that record, at evaluation.
+async fn linked_custom_field_proof(proof: &Proof) -> Result<()> {
+    let one = proof.one.clone();
+    println!("\n== A linked company's custom field as a condition");
+    let version = || async {
+        let row = proof.db.get().await?.query_one(
+            "SELECT version FROM base_custom_fields WHERE tenant_id=$1 AND record_type='company' AND key='segment'",
+            &[&one.tenant()],
+        ).await?;
+        Ok::<i64, Error>(row.get(0))
+    };
+    let segment = |company: i64, value: &'static str| {
+        let one = one.clone();
+        async move {
+            let version: i64 = proof
+                .db
+                .get()
+                .await?
+                .query_one(
+                    "SELECT version FROM companies WHERE tenant_id=$1 AND id=$2",
+                    &[&one.tenant(), &company],
+                )
+                .await?
+                .get(0);
+            proof
+                .write(&one, "core.company.update", json!({"company_id": company, "version": version, "fields": {"custom": [{"key": "segment", "value": value}]}}))
+                .await
+                .map_err(|why| {
+                    println!("     company update refused: {why}");
+                    Error::Invalid
+                })
+        }
+    };
+    let defined = proof
+        .write(
+            &one,
+            "base.custom_fields.define",
+            json!({"record_type": "company", "key": "segment", "label": "Segment", "kind": "text"}),
+        )
+        .await;
+    check(
+        defined.is_ok(),
+        "an administrator adds a Segment text field to companies",
+    );
+    segment(1, "Gold").await?;
+    segment(5, "Silver").await?;
+    let watcher = json!({"name": "Gold companies' cases to the gold desk", "watch": OPENED, "if": {"match": "all", "conditions": [{"field": "company.cf_segment", "op": "eq", "value": "Gold"}]},
+    "do": [{"operation": "watcher_cases.cases.route", "input": json!({"queue": "gold-desk"})}],
+    "examples": [
+        {"facts": json!({"company.cf_segment": "Gold"}).to_string(), "expect": "match"},
+        {"facts": json!({"company.cf_segment": "Silver"}).to_string(), "expect": "no_match"}
+    ]});
+    let linked = |vocabulary: &Value| -> Option<String> {
+        vocabulary["triggers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["trigger"] == OPENED)
+            .flat_map(|t| t["fields"].as_array().cloned().unwrap_or_default())
+            .find(|f| f["field"] == "company.cf_segment")
+            .map(|f| f["label"].as_str().unwrap_or_default().to_owned())
+    };
+    let client = proof.db.get().await?;
+    let offered = linked(&proof.watchers.vocabulary(&**client, &one).await?);
+    drop(client);
+    check(
+        offered.is_none(),
+        "a linked record's custom field not offered to watchers is not in the vocabulary",
+    );
+    let refused = proof
+        .write(&one, "base.watchers.draft", watcher.clone())
+        .await;
+    println!("     draft on an unoffered linked field: {refused:?}");
+    check(
+        refused.is_err_and(|why| why.contains("not offered to watchers")),
+        "a draft on a linked record's unoffered custom field is refused with the reason",
+    );
+    let offer = proof
+        .write(&one, "base.custom_fields.update", json!({"record_type": "company", "key": "segment", "label": "Segment", "watcher_condition": true, "version": version().await?}))
+        .await;
+    check(
+        offer.is_ok(),
+        "the administrator offers the company's Segment to watcher conditions",
+    );
+    let client = proof.db.get().await?;
+    let offered = linked(&proof.watchers.vocabulary(&**client, &one).await?);
+    drop(client);
+    println!("     vocabulary: company.cf_segment as {offered:?}");
+    check(
+        offered.as_deref() == Some("Company \u{203a} Segment"),
+        "the offered field is in the vocabulary by its path, under the link and the tenant label",
+    );
+    let (watcher_id, number) = proof.draft(&one, watcher.clone()).await?;
+    let client = proof.db.get().await?;
+    let review = proof
+        .watchers
+        .review_approval(&**client, &one, watcher_id, number as i32)
+        .await?;
+    drop(client);
+    println!("     approval review: {:?}", review.problems);
+    check(
+        review.problems.iter().any(|(path, reason)| {
+            path == "if.conditions.0.field" && reason.contains("hidden from automation")
+        }),
+        "the approval review refuses the linked field while automation cannot read companies",
+    );
+    proof
+        .grant(&one, "watchers", "admin.company.list", Some(true))
+        .await?;
+
+    proof
+        .grant(&one, "watchers", "watcher-cases.case.view", None)
+        .await?;
+    check(
+        proof.approve(&one, watcher_id, number).await.is_err(),
+        "approval is refused while automation cannot read the trigger table",
+    );
+    proof
+        .grant(&one, "watchers", "watcher-cases.case.view", Some(true))
+        .await?;
+
+    println!("\n== A trial reads the linked field the same way");
+    let silver_subject = proof
+        .open(
+            &one,
+            5,
+            "Silver company's earlier question",
+            "low",
+            "800.00",
+        )
+        .await?;
+    proof.settled().await?;
+    let registry = proof
+        .services
+        .get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
+    let trial = registry
+        .read(
+            &proof.db,
+            &one,
+            "base.watchers.trial",
+            &json!({"draft": watcher.clone(), "days": 30, "limit": 100}),
+        )
+        .await
+        .map_err(|error| {
+            println!("     trial: {error:?}");
+            Error::Invalid
+        })?;
+    let rows = trial["result"]["results"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let silver_subject = silver_subject.to_string();
+    check(
+        rows.iter().any(|r| {
+            r["state"] == "match" && r["current_record"]["condition_outcomes"] == json!([true])
+        }),
+        "a trial on past events matches a Gold company's case",
+    );
+    check(
+        rows.iter().any(|r| {
+            r["subject"] == silver_subject
+                && r["state"] == "near_miss"
+                && r["current_record"]["condition_outcomes"] == json!([false])
+        }),
+        "the Silver company's case is a near miss with a false condition outcome",
+    );
+    check(
+        rows.iter()
+            .filter(|r| matches!(r["state"].as_str(), Some("match" | "near_miss")))
+            .all(|r| {
+                r["current_record"]["facts"]["company.cf_segment"]
+                    == json!({"omitted": "linked custom field"})
+            }),
+        "trial evidence records the linked path without its value",
+    );
+
+    println!("\n== The approved watcher routes by the company's value");
+    let approved = proof.approve(&one, watcher_id, number).await;
+    println!("     approval: {approved:?}");
+    check(
+        approved.is_ok(),
+        "once automation may read companies, the watcher is approved",
+    );
+    let gold = proof
+        .open(&one, 1, "Gold company's question", "low", "800.00")
+        .await?;
+    let silver = proof
+        .open(&one, 5, "Silver company's question", "low", "800.00")
+        .await?;
+    proof.settled().await?;
+    proof.show(gold).await?;
+    check(
+        proof.case(gold).await?.0.as_deref() == Some("gold-desk"),
+        "a Gold company's case is routed to the gold desk",
+    );
+    check(
+        proof.case(silver).await?.0.is_none()
+            && proof
+                .receipts(silver)
+                .await?
+                .iter()
+                .any(|r| r.0 == watcher_id && r.1 == "no_match"),
+        "a Silver company's case does not match, and its receipt says so",
+    );
+    let client = proof.db.get().await?;
+    for (subject, held) in [(gold, true), (silver, false)] {
+        let row = client
+            .query_one(
+                "SELECT facts,outcomes FROM base_watcher_runs WHERE watcher_id=$1 AND subject=$2",
+                &[&watcher_id, &subject.to_string()],
+            )
+            .await?;
+        let facts: Option<Value> = row.get(0);
+        let outcomes: Option<Value> = row.get(1);
+        check(
+            facts.is_some_and(|facts| {
+                facts["company.cf_segment"] == json!({"omitted": "linked custom field"})
+            }) && outcomes == Some(json!([held])),
+            "the receipt keeps the linked path and condition outcome without its value",
+        );
+    }
+    drop(client);
+    proof.setting(&one, "watchers.facts_read", json!(1)).await?;
+    let over_budget = proof
+        .open(&one, 1, "Gold over the fact budget", "low", "800.00")
+        .await?;
+    proof.settled().await?;
+    check(
+        proof.receipts(over_budget).await?.iter().any(|r| {
+            r.0 == watcher_id && r.1 == "refused" && r.2.as_deref() == Some("watcher_limit")
+        }) && proof.case(over_budget).await?.0.is_none(),
+        "the linked condition and trigger version exceed a one-fact budget, so no action runs",
+    );
+    proof
+        .setting(&one, "watchers.facts_read", json!(21))
+        .await?;
+    segment(5, "Gold").await?;
+    let promoted = proof
+        .open(&one, 5, "Promoted company's question", "low", "800.00")
+        .await?;
+    proof.settled().await?;
+    check(
+        proof.case(promoted).await?.0.as_deref() == Some("gold-desk"),
+        "the value is read at evaluation: a company made Gold routes its next case",
+    );
+
+    println!("\n== Without reach to the linked record the watcher is refused");
+    proof
+        .grant(&one, "watchers", "admin.company.list", None)
+        .await?;
+    let unreachable = proof
+        .open(&one, 1, "Gold while companies are closed", "low", "800.00")
+        .await?;
+    proof.settled().await?;
+    proof.show(unreachable).await?;
+    check(
+        proof.receipts(unreachable).await?.iter().any(|r| {
+            r.0 == watcher_id && r.1 == "refused" && r.2.as_deref() == Some("read_refused")
+        }) && proof.case(unreachable).await?.0.is_none(),
+        "when automation may no longer read companies, the run is refused and the case stays",
+    );
+    proof
+        .grant(&one, "watchers", "admin.company.list", Some(true))
+        .await?;
+
+    println!("\n== Withdrawing the linked field refuses its watcher");
+    let withdrawn = proof
+        .write(&one, "base.custom_fields.update", json!({"record_type": "company", "key": "segment", "label": "Segment", "watcher_condition": false, "version": version().await?}))
+        .await;
+    check(
+        withdrawn.is_ok(),
+        "the administrator withdraws the company's Segment from watchers",
+    );
+    let after = proof
+        .open(&one, 1, "Gold after withdrawing", "low", "800.00")
+        .await?;
+    proof.settled().await?;
+    proof.show(after).await?;
+    check(
+        proof.receipts(after).await?.iter().any(|r| {
+            r.0 == watcher_id && r.1 == "refused" && r.2.as_deref() == Some("catalog_changed")
+        }) && proof.case(after).await?.0.is_none(),
+        "the watcher is refused as changed, not read as an empty value",
+    );
+    let needs_review: bool = proof
+        .db
+        .get()
+        .await?
+        .query_one(
+            "SELECT needs_review FROM base_watchers WHERE id=$1",
+            &[&watcher_id],
+        )
+        .await?
+        .get(0);
+    check(needs_review, "and the watcher is marked Needs review");
+    proof
+        .switch(&one, watcher_id, false)
+        .await
+        .map_err(|_| Error::Internal)?;
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    bilibi_base::watchers::enter_worker();
+    walkthrough()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn walkthrough() -> Result<()> {
     bilibi_base::link();
     bilibi_core::link();
     bilibi_domains::link();
@@ -811,7 +1135,13 @@ async fn main() -> Result<()> {
         return finish();
     }
     proof.start()?;
-    let result = mounted_proof(&mut proof).await;
+    let result = if std::env::args().any(|arg| arg == "--scripts") {
+        scripts::walkthrough(&proof).await
+    } else if std::env::args().any(|arg| arg == "--observations") {
+        observations::walkthrough(&mut proof).await
+    } else {
+        mounted_proof(&mut proof).await
+    };
     proof.stop().await;
     result?;
     finish()
@@ -1339,6 +1669,7 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         .await
         .map_err(|_| Error::Internal)?;
     custom_field_proof(proof, &restrictions).await?;
+    linked_custom_field_proof(proof).await?;
 
     println!("\n== Cycles are refused at approval; a chain stops at the depth budget");
     let selfish = json!({"name": "Reroute forever", "watch": ROUTED,
@@ -1546,6 +1877,30 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         proof.case(mid).await?.0.is_none()
             && proof.case(large).await?.0.as_deref() == Some("priority-desk"),
         "version 2 runs: 3000 stays, 6000 goes to the priority desk",
+    );
+    check(
+        proof.restore(&one, r1, 1).await.is_ok(),
+        "an earlier approved version is restored after its checks pass again",
+    );
+    let restored = proof
+        .open(&one, 1, "Restored threshold", "urgent", "3000.00")
+        .await?;
+    proof.settled().await?;
+    check(
+        proof.case(restored).await?.0.as_deref() == Some("priority-desk"),
+        "the restored version 1 is active",
+    );
+    check(
+        proof.restore(&one, r1, 2).await.is_ok(),
+        "version 2 can be restored after version 1",
+    );
+    let current = proof
+        .open(&one, 1, "Current threshold again", "urgent", "3000.00")
+        .await?;
+    proof.settled().await?;
+    check(
+        proof.case(current).await?.0.is_none(),
+        "restoring version 2 makes its higher threshold active again",
     );
 
     println!("\n== Watchers share a tenant bucket and resume in order");
@@ -2060,3 +2415,8 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         .await?;
     Ok(())
 }
+
+#[path = "watchers/observations.rs"]
+mod observations;
+#[path = "watchers/scripts.rs"]
+mod scripts;

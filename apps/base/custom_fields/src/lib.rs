@@ -301,7 +301,7 @@ fn customisation_choices(reads: &[serde_json::Value]) -> Vec<bilibi_labels::Choi
 }
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.customisations", provenance!(), &bilibi_labels::CustomisationSection {
     title: "Custom fields",
-    undo: Some(bilibi_labels::Undo { read: "base.custom_fields.list", read_input: customisation_input, operation: "base.custom_fields.archive", event: "customisation.fields", action: "Archive", detail: "The field is hidden and records keep their saved values. Approved watchers that use this field may stop running and require review and reapproval.", rows: customisation_rows }),
+    undo: Some(bilibi_labels::Undo { read: "base.custom_fields.list", read_input: customisation_input, action: Some(bilibi_labels::UndoAction { operation: "base.custom_fields.archive", event: "customisation.fields", label: "Archive", detail: "The field is hidden and records keep their saved values. Approved watchers that use this field may stop running and require review and reapproval." }), rows: customisation_rows }),
     changes: Some(bilibi_labels::Changes {
         purpose: "Add your own typed fields to a kind of record, rename them, and archive or bring back the ones you no longer use.",
         limits: "A field's key and type never change and a key is never reused. Each kind of record takes a limited number of active fields (the base.custom_fields.max_fields setting). Archive a field to remove it; records keep their saved values.",
@@ -317,7 +317,7 @@ inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "b
 
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.archived_customisations", provenance!(), &bilibi_labels::CustomisationSection {
     title: "Archived custom fields",
-    undo: Some(bilibi_labels::Undo { read: "base.custom_fields.list", read_input: customisation_input, operation: "base.custom_fields.restore", event: "customisation.fields_restore", action: "Restore", detail: "The field and its saved values become available again. Watchers already marked for review still need reapproval.", rows: archived_customisation_rows }),
+    undo: Some(bilibi_labels::Undo { read: "base.custom_fields.list", read_input: customisation_input, action: Some(bilibi_labels::UndoAction { operation: "base.custom_fields.restore", event: "customisation.fields_restore", label: "Restore", detail: "The field and its saved values become available again. Watchers already marked for review still need reapproval." }), rows: archived_customisation_rows }),
     changes: None,
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.restore", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields_restore", contract: "base.custom_fields.restore" }) }

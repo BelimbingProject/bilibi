@@ -156,7 +156,7 @@ async fn main() -> Result {
     let client: &tokio_postgres::Client = &client;
     client
         .batch_execute(
-            "INSERT INTO user_identities(id,kind,email,password_hash,home_tenant_id,home_user_id,last_tenant_id) OVERRIDING SYSTEM VALUE VALUES(900,'staff','nora@example.test','!',1,900,1),(901,'staff','gary@example.test','!',1,901,1) ON CONFLICT DO NOTHING;
+            "INSERT INTO user_identities(id,kind,email,password_hash,last_tenant_id) OVERRIDING SYSTEM VALUE VALUES(900,'staff','nora@example.test','!',1),(901,'staff','gary@example.test','!',1) ON CONFLICT DO NOTHING;
              INSERT INTO users(id,tenant_id,identity_id,name) VALUES(900,1,900,'Nora Nocaps') ON CONFLICT DO NOTHING;
              INSERT INTO users(id,tenant_id,identity_id,name,deleted_at) VALUES(901,1,901,'Gone Gary',now()) ON CONFLICT DO NOTHING",
         )

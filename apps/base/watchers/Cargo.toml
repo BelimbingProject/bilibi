@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+rquickjs.workspace = true
+libc.workspace = true
+rlimit.workspace = true
+seccompiler.workspace = true
+bilibi-ai.workspace = true
 bilibi-custom-fields.workspace = true
 askama.workspace = true
 bilibi-agent-api.workspace = true
@@ -14,6 +19,7 @@ bilibi-database.workspace = true
 bilibi-datetime.workspace = true
 bilibi-events.workspace = true
 bilibi-grid.workspace = true
+bilibi-labels.workspace = true
 bilibi-locale.workspace = true
 bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
@@ -25,6 +31,7 @@ bilibi-ui.workspace = true
 inventory.workspace = true
 jiff.workspace = true
 rust_decimal.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio-postgres.workspace = true

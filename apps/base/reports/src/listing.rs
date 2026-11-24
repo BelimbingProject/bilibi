@@ -1,8 +1,4 @@
-//! A list result's question as the run resolved it for the reader: the
-//! record type, filters, sorts, columns, read bounds and time zone. A run
-//! reads its one page through it; a file keeps it and reads the remaining
-//! pages with only the keys and the cells (`export::tabulate`), never a
-//! whole run per page.
+//! A row report's resolved filters, sorts, columns, bounds and time zone.
 use crate::{grid, Outcome};
 use bilibi_grid::{Bounds, Column, Filter, PageSpec, Sort};
 use bilibi_tenancy::Scope;
@@ -23,6 +19,7 @@ pub(crate) struct Listing {
 pub(crate) struct ListPage {
     pub reference_names: Vec<crate::ReferenceName>,
     pub total: i64,
+    pub totals: Vec<Value>,
     pub columns: Vec<Column>,
     pub rows: Vec<(Value, Vec<Value>)>,
 }
@@ -36,8 +33,10 @@ impl Listing {
         scope: &Scope,
         offset: usize,
         limit: usize,
+        measures: &[bilibi_grid::Measure],
+        file_cap: Option<usize>,
     ) -> Outcome<ListPage> {
-        let keys = bilibi_grid::page_keys(
+        let (keys, projection, totals) = bilibi_grid::report_page(
             &reports.db,
             scope,
             &self.record_type,
@@ -49,17 +48,9 @@ impl Listing {
                 offset,
                 limit,
             },
-        )
-        .await
-        .map_err(grid)?;
-        let specs: Vec<&str> = self.specs.iter().map(String::as_str).collect();
-        let projection = bilibi_grid::project_within(
-            &reports.db,
-            scope,
-            &self.record_type,
-            &keys.keys,
-            &specs,
-            self.bounds,
+            &self.specs,
+            measures,
+            file_cap,
         )
         .await
         .map_err(grid)?;
@@ -86,6 +77,7 @@ impl Listing {
         Ok(ListPage {
             reference_names,
             total: keys.total,
+            totals,
             columns: projection.columns,
             rows,
         })

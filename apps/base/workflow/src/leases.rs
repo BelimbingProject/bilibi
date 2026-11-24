@@ -214,7 +214,7 @@ impl Engine {
             let result = tx
                 .mutate(move |sql| {
                     Box::pin(async move {
-                        engine.writer(&context, &scope, run_id)?;
+                        engine.writer_or_principal(&context, &scope, run_id)?;
                         let scope = engine.live(sql, &scope).await?;
                         let (run, _, items, dependencies) = engine
                             .locked_run(sql, &scope, run_id, Operation::ClaimWork)
@@ -317,7 +317,7 @@ impl Engine {
                 if !claim.valid() {
                     return Err(Error::Invalid);
                 }
-                engine.writer(&context, &scope, claim.run_id)?;
+                engine.writer_or_principal(&context, &scope, claim.run_id)?;
                 let scope = engine.live(sql, &scope).await?;
                 let (run, _, items, dependencies) = engine
                     .locked_run(sql, &scope, claim.run_id, command.operation())

@@ -61,6 +61,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "ammonia"
 version = "4.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -286,11 +292,13 @@ dependencies = [
  "bilibi-party-ids",
  "bilibi-person",
  "bilibi-principal-directory",
+ "bilibi-public",
  "bilibi-queue",
  "bilibi-records",
  "bilibi-schedule",
  "bilibi-settings",
  "bilibi-step-up",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-user",
@@ -449,6 +457,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-ai"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "axum",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-base",
+ "bilibi-core",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-grid",
+ "bilibi-integration",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-queue",
+ "bilibi-schedule",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "data-encoding",
+ "inventory",
+ "jiff",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "bilibi-artifacts"
 version = "0.2.1"
 dependencies = [
@@ -598,14 +640,17 @@ name = "bilibi-base"
 version = "0.2.1"
 dependencies = [
  "bilibi-agent-api",
+ "bilibi-ai",
  "bilibi-artifacts",
  "bilibi-audit",
  "bilibi-audit-views",
  "bilibi-authz",
  "bilibi-authz-agent",
+ "bilibi-branding",
  "bilibi-bulk-data",
  "bilibi-custom-fields",
  "bilibi-dashboard",
+ "bilibi-dashboard-agent",
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-design-library",
@@ -628,6 +673,7 @@ dependencies = [
  "bilibi-ports",
  "bilibi-principal-directory",
  "bilibi-privacy",
+ "bilibi-public",
  "bilibi-queue",
  "bilibi-records",
  "bilibi-reports",
@@ -649,6 +695,27 @@ dependencies = [
  "bilibi-visitor",
  "bilibi-watchers",
  "bilibi-workflow",
+]
+
+[[package]]
+name = "bilibi-branding"
+version = "0.2.1"
+dependencies = [
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-labels",
+ "bilibi-mail",
+ "bilibi-media",
+ "bilibi-module-registry",
+ "bilibi-settings",
+ "bilibi-settings-editor",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "inventory",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
 ]
 
 [[package]]
@@ -729,6 +796,7 @@ dependencies = [
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-walkthrough-fixture",
+ "bilibi-watchers",
  "bilibi-web",
  "bilibi-workflow",
  "hmac 0.13.0",
@@ -884,7 +952,24 @@ dependencies = [
  "inventory",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "bilibi-dashboard-agent"
+version = "0.2.1"
+dependencies = [
+ "bilibi-agent-api",
+ "bilibi-dashboard",
+ "bilibi-database",
+ "bilibi-labels",
+ "bilibi-module-registry",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "inventory",
+ "serde_json",
 ]
 
 [[package]]
@@ -975,6 +1060,7 @@ dependencies = [
  "bilibi-search",
  "bilibi-settings",
  "bilibi-step-up",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-user",
@@ -1076,6 +1162,7 @@ dependencies = [
  "bytes",
  "inventory",
  "jiff",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-postgres",
@@ -1123,6 +1210,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "rustls-native-certs",
+ "serde",
  "serde_json",
  "sha2 0.11.1",
  "thiserror",
@@ -1200,11 +1288,13 @@ name = "bilibi-mail"
 version = "0.2.1"
 dependencies = [
  "ammonia",
+ "askama",
  "bilibi-base",
  "bilibi-core",
  "bilibi-database",
  "bilibi-module-registry",
  "bilibi-settings",
+ "bilibi-ui",
  "bilibi-walkthrough-fixture",
  "bilibi-web",
  "data-encoding",
@@ -1216,6 +1306,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "url",
  "uuid",
 ]
 
@@ -1454,6 +1545,7 @@ dependencies = [
  "bilibi-privacy",
  "bilibi-records",
  "bilibi-settings",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-user",
@@ -1567,6 +1659,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-public"
+version = "0.2.1"
+dependencies = [
+ "bilibi-database",
+ "bilibi-module-registry",
+ "bilibi-settings",
+ "bilibi-ui",
+ "inventory",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "bilibi-queue"
 version = "0.2.1"
 dependencies = [
@@ -1630,6 +1735,7 @@ dependencies = [
  "bilibi-records",
  "bilibi-schedule",
  "bilibi-settings",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-ui",
  "inventory",
@@ -1811,10 +1917,12 @@ dependencies = [
  "bilibi-authz",
  "bilibi-custom-fields",
  "bilibi-database",
+ "bilibi-grid",
  "bilibi-labels",
  "bilibi-module-registry",
  "bilibi-tenancy",
  "bilibi-walkthrough-fixture",
+ "bilibi-watchers",
  "bilibi-web",
  "inventory",
  "serde",
@@ -1843,9 +1951,11 @@ dependencies = [
  "bilibi-system",
  "bilibi-tenancy",
  "bilibi-ui",
+ "data-encoding",
  "flate2",
  "inventory",
  "jiff",
+ "jsonwebtoken",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -1940,6 +2050,7 @@ dependencies = [
  "bilibi-labels",
  "bilibi-module-registry",
  "bilibi-party-ids",
+ "bilibi-settings",
  "bilibi-tenancy",
  "icu_locale",
  "inventory",
@@ -1998,8 +2109,10 @@ name = "bilibi-tiling"
 version = "0.2.1"
 dependencies = [
  "askama",
+ "bilibi-agent-api",
  "bilibi-authz",
  "bilibi-database",
+ "bilibi-labels",
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-settings",
@@ -2008,6 +2121,7 @@ dependencies = [
  "inventory",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tokio-postgres",
 ]
 
@@ -2048,6 +2162,7 @@ dependencies = [
  "bilibi-events",
  "bilibi-grid",
  "bilibi-integration",
+ "bilibi-labels",
  "bilibi-locale",
  "bilibi-mail",
  "bilibi-media",
@@ -2065,6 +2180,7 @@ dependencies = [
  "bilibi-settings",
  "bilibi-step-up",
  "bilibi-system",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-walkthrough-fixture",
@@ -2126,12 +2242,14 @@ version = "0.2.1"
 dependencies = [
  "askama",
  "bilibi-agent-api",
+ "bilibi-ai",
  "bilibi-authz",
  "bilibi-custom-fields",
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-events",
  "bilibi-grid",
+ "bilibi-labels",
  "bilibi-locale",
  "bilibi-menu",
  "bilibi-module-registry",
@@ -2142,7 +2260,12 @@ dependencies = [
  "bilibi-ui",
  "inventory",
  "jiff",
+ "libc",
+ "rlimit",
+ "rquickjs",
  "rust_decimal",
+ "seccompiler",
+ "serde",
  "serde_json",
  "sha2 0.11.1",
  "tokio",
@@ -2192,7 +2315,6 @@ dependencies = [
  "icu_properties",
  "inventory",
  "jiff",
- "libc",
  "mmdb-writer",
  "rust_decimal",
  "serde",
@@ -3034,6 +3156,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3202,6 +3330,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "hashify"
@@ -4584,6 +4717,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "relative-path"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38540a682c6e9bca04a8bca9e5ec5a6ba168dfbb04c9998fe517a9befb92eb68"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4640,6 +4782,44 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rlimit"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f35ee2729c56bb610f6dba436bf78135f728b7373bdffae2ec815b2d3eb98cc3"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "rquickjs"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0a22bf72f515cc4189dd7c63d016f6de92a11eee98ddf7dd64794198f6eb34e"
+dependencies = [
+ "rquickjs-core",
+]
+
+[[package]]
+name = "rquickjs-core"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6657979a24d543e5fc66f32cef2f47ca82ce8eb55cec5f7d59a12b7b570bbf24"
+dependencies = [
+ "hashbrown",
+ "relative-path",
+ "rquickjs-sys",
+]
+
+[[package]]
+name = "rquickjs-sys"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cee271d0eeba64f0915b846cb7ae02e16faf3dfdffdca91731101d9d30fe3423"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -4830,6 +5010,15 @@ dependencies = [
  "pkcs8",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

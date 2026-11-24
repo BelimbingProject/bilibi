@@ -28,8 +28,8 @@ use bilibi_ui::{
     params, BackLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ColumnType,
     ColumnsOutcome, CreateButton, Fact, Facts, Field, FilterToolbar, FlashGroup, FlashMap, FlexRow,
     FlexTable, Header, Html, InputKind, ListColumns, ListSpec, ListState, NamedKind, PageCounts,
-    PageVariant, Pagination, RecordPicker, RowMode, SectionHeading, SortDir, StatusKind,
-    TableEmpty, ToolbarControl,
+    PageVariant, Pagination, RecordLink, RecordPicker, RowMode, SectionHeading, SortDir,
+    StatusKind, TableEmpty, ToolbarControl,
 };
 use std::{
     collections::HashMap,
@@ -136,12 +136,11 @@ fn scope_badge(role: &RoleSummary) -> Badge<'static> {
 
 #[derive(Template)]
 #[template(
-    source = r#"<a href="/authz/roles/{{ id }}" class="font-medium text-ink-strong hover:underline">{{ name }}</a>{% if !description.is_empty() %}<p class="text-xs text-ink-subtle">{{ description }}</p>{% endif %}"#,
+    source = r#"{{ link }}{% if !description.is_empty() %}<p class="text-xs text-ink-subtle">{{ description }}</p>{% endif %}"#,
     ext = "html"
 )]
 struct NameCell<'a> {
-    id: i64,
-    name: &'a str,
+    link: Html,
     description: &'a str,
 }
 
@@ -177,8 +176,14 @@ fn role_row(
     row.dom_id = Some(format!("roles-{}", role.id));
     let cells = vec![
         render(NameCell {
-            id: role.id,
-            name: &role.name,
+            link: render(RecordLink {
+                workspace: false,
+                kind: "",
+                record_id: &row.key,
+                href: &format!("/authz/roles/{}", role.id),
+                class: "font-medium text-ink-strong hover:underline",
+                body: Html::text(&role.name),
+            })?,
             description: if mode == RowMode::Normal {
                 &role.description
             } else {

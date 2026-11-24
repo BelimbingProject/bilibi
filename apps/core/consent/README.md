@@ -1,6 +1,6 @@
 # core/consent
 
-Core Consent keeps one company-scoped answer to whether a person may receive an elective message on a channel for a purpose.
+Core Consent keeps one company-scoped answer to whether a person may be contacted on a channel for an elective purpose.
 
 ## The boundary
 
@@ -54,7 +54,7 @@ All tables carry `tenant_id` and `company_id`. A subject is either one Core pers
 - The first erasure that needs the key creates it. Without `BILIBI_SETTINGS_KEY` that erasure refuses; once a tenant has a key, a check that cannot open it refuses rather than miss a suppression. Never replace a key: every hashed suppression would stop matching.
 - An erased address's decisions no longer answer for it; only its suppressions do.
 - A Domain that keeps a do-not-contact record of its own copies this pattern: keep the reason, replace the address with the keyed hash, and match the hash where it checks.
-- Runtime proof: `cargo run -p bilibi-consent --example consent-walkthrough --locked` (`seed` first; same variables as the [`base/privacy`](../../base/privacy/README.md#runtime-checks) walkthroughs) on a disposable database. It checks that locate offers one candidate per matched address without showing it; the access export holds every decision version, suppression, lift reason and check of the person and confirmed addresses, nothing of another person's address or tenant 2; erasure leaves no address, evidence or correlation key in the four tables or their audit evidence and keeps both active address suppressions as keyed hashes that still answer `suppressed` on their own channel only; the lifted suppression keeps no hash; tenant 2's rows are untouched and it gets no key.
+- Runtime proof: `cargo run -p bilibi-consent --example consent-walkthrough --locked` (`seed` first; same variables as the [`base/privacy`](../../base/privacy/README.md#runtime-checks) walkthroughs) on a disposable database. It also records and checks a grant and suppression for each manual channel. It checks that locate offers one candidate per matched address without showing it; the access export holds every decision version, suppression, lift reason and check of the person and confirmed addresses, nothing of another person's address or tenant 2; erasure leaves no address, evidence or correlation key in the four tables or their audit evidence and keeps both active address suppressions as keyed hashes that still answer `suppressed` on their own channel only; the lifted suppression keeps no hash; tenant 2's rows are untouched and it gets no key.
 
 ## Retention
 
@@ -109,13 +109,15 @@ The public capability keys are `core.consent.view`, `core.consent.record`, `core
 
 | Code | Values |
 | --- | --- |
-| Channel | `email`, `sms`, `messaging`, `voice`, `chat`; a decision may use `any` |
+| Channel | `email`, `sms`, `messaging`, `voice`, `chat`, `postal`, `in_person`; a decision may use `any` |
 | Source | `portal`, `preference_link`, `agent`, `import`, `inbound_keyword`, `api` |
-| Capture channel | A sending channel, `web`, or `in_person` |
+| Capture channel | `email`, `sms`, `messaging`, `voice`, `chat`, `web`, `in_person` |
 | Suppression reason | `hard_bounce`, `complaint`, `unsubscribe` |
 | Refusal | `no_consent`, `withdrawn`, `suppressed` |
 
 Purposes come from the `core.consent.purposes` pick-list. The starting values are `service` and `marketing`.
+
+For a postal or in-person opt-out, use the corresponding channel when recording the suppression. Suppressions and eligibility checks require a specific channel. The capture channel records how the decision was obtained independently of which channel it governs.
 
 ## Address matching
 

@@ -25,6 +25,8 @@
       this.phone = window.matchMedia('(width < 640px)')
       this.onPhoneChange = () => this.orderColumns()
       this.phone.addEventListener('change', this.onPhoneChange)
+      this.onLocation = () => this.applyReturnAddress()
+      window.addEventListener('bilibi:location', this.onLocation)
       this.drag = null
 
       this.onDragStart = (event) => this.dragStart(event)
@@ -45,15 +47,18 @@
 
       this.orderColumns()
       this.applyBars()
+      this.applyReturnAddress()
     },
 
     updated() {
       this.orderColumns()
       this.applyBars()
+      this.applyReturnAddress()
     },
 
     destroyed() {
       this.phone.removeEventListener('change', this.onPhoneChange)
+      window.removeEventListener('bilibi:location', this.onLocation)
       clearTimeout(this.opReset)
       this.el.removeEventListener('dragstart', this.onDragStart)
       this.el.removeEventListener('dragover', this.onDragOver)
@@ -62,6 +67,23 @@
       this.el.removeEventListener('dragend', this.onDragEnd)
       this.el.removeEventListener('keydown', this.onKeyDown)
       this.el.removeEventListener('click', this.onClick)
+    },
+
+    applyReturnAddress() {
+      const grid = new URL(location.href)
+      if (grid.searchParams.has('return_to')) grid.searchParams.delete('return_to')
+      const controls = 'a[data-record-link][href], button[data-record-select][data-path]'
+      const source = grid.pathname + grid.search
+      for (const control of this.el.querySelectorAll(`tbody td :is(${controls})`)) {
+        if (control.closest('[data-table-frame]') !== this.el) continue
+        const attribute = control.matches('a') ? 'href' : 'data-path'
+        const path = control.getAttribute(attribute)
+        const target = URL.parse(path, location.href)
+        if (!target || target.origin !== location.origin || target.pathname === location.pathname || target.pathname.startsWith('//')) continue
+        target.searchParams.set('return_to', source)
+        const address = target.pathname + target.search + target.hash
+        if (address !== path) control.setAttribute(attribute, address)
+      }
     },
 
     // Move the actual cells so reading and keyboard order match the display.

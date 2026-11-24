@@ -8,13 +8,14 @@
 //! gets the one refusal. Only the SHA-256 of the key is stored; the key is
 //! shown once, when it is made. README, Calendar feed.
 use crate::{
-    ics, Activities, Filter, Mine, Sort, State, WriteError, WriteResult, MANAGE_FEEDS, VIEW,
+    ics, Activities, FieldError, Filter, Mine, Sort, State, WriteError, WriteResult, MANAGE_FEEDS,
+    VIEW,
 };
 use bilibi_authz::authorize_proof;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_principal_directory::{DirectoryError, PrincipalKind, PrincipalRef, Query, MAX_CEILING};
+use bilibi_public::{Cache, Link, LinkFuture, LinkRequest, Reply};
 use bilibi_tenancy::{ReadClient, Scope};
-use bilibi_ui::endpoint::{Cache, Endpoint, EndpointFuture, EndpointRequest, Reply};
 use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -122,6 +123,20 @@ async fn own(client: &dyn ReadClient, scope: &Scope, capability: &str) -> WriteR
         return Err(WriteError::Forbidden);
     }
     Ok(())
+}
+
+fn public_feed_origin(tenant: i64) -> WriteResult<String> {
+    let configured = std::env::var("PUBLIC_TENANT_ID")
+        .ok()
+        .and_then(|id| id.parse().ok());
+    std::env::var("PUBLIC_ORIGIN")
+        .ok()
+        .filter(|origin| configured == Some(tenant) && !origin.is_empty())
+        .map(|origin| origin.trim_end_matches('/').to_owned())
+        .ok_or_else(|| WriteError::Invalid(vec![FieldError::new(
+            "site",
+            "Configure the public listener for this workspace before creating a calendar feed link.",
+        )]))
 }
 
 impl Activities {
@@ -238,7 +253,9 @@ impl Activities {
         client: &dyn ReadClient,
         scope: &Scope,
     ) -> WriteResult<()> {
-        own(client, scope, VIEW).await
+        own(client, scope, VIEW).await?;
+        public_feed_origin(scope.tenant())?;
+        Ok(())
     }
 
     /// Makes the reader's feed key, replacing the one they had (its link
@@ -248,9 +265,10 @@ impl Activities {
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
-    ) -> WriteResult<(FeedKey, String)> {
+    ) -> WriteResult<(FeedKey, String, String)> {
         let scope = self.fresh(tx.sql(), scope).await?;
         own(tx.sql(), &scope, VIEW).await?;
+        let origin = public_feed_origin(scope.tenant())?;
         // A link anyone holding it can read: ask for the second factor first.
         self.step_up
             .require(
@@ -302,6 +320,7 @@ impl Activities {
                 last_used_at: None,
             },
             token,
+            origin,
         ))
     }
 
@@ -369,7 +388,7 @@ impl Activities {
     /// exist, was revoked or replaced, or whose owner can no longer be acted
     /// as (deactivated, or without `core.activity.view`). The calendar is the
     /// owner's own `Activities::list` view: the same rule as the page.
-    pub async fn feed(&self, token: &str) -> Result<Option<String>> {
+    pub async fn feed(&self, tenant: i64, token: &str) -> Result<Option<String>> {
         if !token_shaped(token) {
             return Ok(None);
         }
@@ -377,14 +396,17 @@ impl Activities {
         let hash = digest(token);
         let Some(row) = client
             .query_opt(
-                "SELECT tenant_id,user_id FROM core_activity_feed_keys WHERE key_hash=$1",
-                &[&hash],
+                "SELECT user_id FROM core_activity_feed_keys WHERE key_hash=$1 AND tenant_id=$2",
+                &[&hash, &tenant],
             )
             .await?
         else {
             return Ok(None);
         };
-        let (tenant, user): (i64, i64) = (row.get(0), row.get(1));
+        let user: i64 = row.get(0);
+        if public_feed_origin(tenant).is_err() {
+            return Ok(None);
+        }
         let scope = match self
             .authentication
             .authenticate_job(&**client, tenant, user, None)
@@ -445,11 +467,12 @@ impl Activities {
 
 /// The public endpoint's owner (`core/activity.feed`): the token in the path
 /// is the only credential, and any refusal is the one 404.
-pub(crate) struct FeedEndpoint(pub Arc<Activities>);
-impl Endpoint<Error> for FeedEndpoint {
-    fn answer<'a>(&'a self, request: EndpointRequest<'a>) -> EndpointFuture<'a, Error> {
+pub(crate) struct FeedLink(pub Arc<Activities>);
+impl Link<Error> for FeedLink {
+    fn answer<'a>(&'a self, request: LinkRequest<'a>) -> LinkFuture<'a, Error> {
         Box::pin(async move {
-            match self.0.feed(request.token()).await? {
+            // Only a key of the tenant whose public site was asked answers.
+            match self.0.feed(request.scope.tenant(), request.token()).await? {
                 Some(body) => Ok(Reply::Bytes {
                     bytes: body.into_bytes(),
                     content_type: "text/calendar; charset=utf-8".into(),

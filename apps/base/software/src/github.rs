@@ -3,9 +3,13 @@
 //!
 //! The repository name, the remembered GitHub repository number, the optional
 //! read token and the refresh interval are settings (`lib.rs`). The token is
-//! encrypted. Listings are cached on disk so a live page does not call GitHub
-//! on every refresh. Downloads go through `base/integration` and drop the
-//! token when GitHub redirects to the file host (`redirect.rs`).
+//! encrypted. A server with a GitHub App (`app.rs`) mints a fresh read token
+//! for each use instead, so nothing expires. Listings are cached on disk so a
+//! live page does not call GitHub on every refresh. Downloads go through
+//! `base/integration` and drop the token when GitHub redirects to the file
+//! host (`redirect.rs`).
+mod app;
+
 use crate::{review::Review, transport, Software, SoftwareError, SoftwareResult, STEP_UP};
 use bilibi_authz::authorize_operator;
 use bilibi_database::{MutationTransaction, Result};
@@ -19,6 +23,8 @@ use tokio_postgres::GenericClient;
 pub const REPOSITORY: &str = "software.github_repository";
 pub const REPOSITORY_ID: &str = "software.github_repository_id";
 pub const REPOSITORY_BOUND: &str = "software.github_repository_bound";
+/// The saved read token. Read it only through `Software::github_token`, which
+/// prefers a fresh token from the server's GitHub App (`app.rs`).
 pub const TOKEN: &str = "software.github_token";
 pub const REFRESH_MINUTES: &str = "software.github_refresh_minutes";
 pub const DEFAULT_REFRESH_MINUTES: i64 = 15;
@@ -116,6 +122,8 @@ struct Saved {
     bound: Option<String>,
     refresh_minutes: i64,
     token_set: bool,
+    /// This server's GitHub App client ID, when it has one.
+    app: Option<String>,
 }
 
 pub(crate) struct Verification {
@@ -163,6 +171,10 @@ impl Software {
             bound,
             refresh_minutes,
             token_set,
+            app: app::load(self.paths.as_ref())
+                .ok()
+                .flatten()
+                .map(|app| app.client_id),
         })
     }
 
@@ -185,7 +197,10 @@ impl Software {
         if saved.bound.as_deref() != Some(repository.as_str()) {
             return Ok(Err("The application repository name has changed since it was accepted. Accept it again before uploading a release.".into()));
         }
-        let token = self.github_token(scope).await?;
+        let token = match self.github_token(scope, &repository).await {
+            Ok(token) => token,
+            Err(why) => return Ok(Err(why)),
+        };
         Ok(Ok(Verification {
             repository,
             repository_id,
@@ -209,6 +224,7 @@ impl Software {
             return Ok(json!({
                 "available": false,
                 "token_set": saved.token_set,
+                "app": saved.app,
                 "refresh_minutes": saved.refresh_minutes,
                 "message": "No GitHub repository is set. A server owner sets Software › Application repository on GitHub, like your-company/my-bilibi.",
             }));
@@ -218,6 +234,7 @@ impl Software {
                 "available": false,
                 "repository": repository,
                 "token_set": saved.token_set,
+                "app": saved.app,
                 "refresh_minutes": saved.refresh_minutes,
                 "message": "This server is not a Linux x86-64 or ARM 64-bit computer, so it cannot choose a GitHub setup file.",
             }));
@@ -237,16 +254,20 @@ impl Software {
                 return Ok(present(&cached, &saved, target, prerelease, false));
             }
         }
-        let token = self.github_token(scope).await?;
-        let fetched = fetch_listing(
-            &self.integration,
-            scope,
-            &repository,
-            token.as_deref(),
-            target,
-            cache_path.as_deref(),
-        )
-        .await;
+        let fetched = match self.github_token(scope, &repository).await {
+            Ok(token) => {
+                fetch_listing(
+                    &self.integration,
+                    scope,
+                    &repository,
+                    token.as_deref(),
+                    target,
+                    cache_path.as_deref(),
+                )
+                .await
+            }
+            Err(why) => Err(why),
+        };
         let cached = match fetched {
             Ok(value) => value,
             Err(message) => {
@@ -267,12 +288,30 @@ impl Software {
         Ok(present(&cached, &saved, target, prerelease, false))
     }
 
-    pub(crate) async fn github_token(&self, scope: &Scope) -> Result<Option<String>> {
-        let client = self.db.get().await?;
-        let resolved = self
-            .settings
-            .get(&**client, scope, Target::Global, TOKEN)
-            .await?;
+    /// The read token for one use of `repository`: a fresh one from this
+    /// server's GitHub App when it has one and is installed on `repository`,
+    /// else the saved read token, else none (a public repository). Never stored; drop it after the use.
+    pub(crate) async fn github_token(
+        &self,
+        scope: &Scope,
+        repository: &str,
+    ) -> std::result::Result<Option<String>, String> {
+        if let Some(app) = app::load(self.paths.as_ref())? {
+            match app::mint(&self.integration, scope, &app, repository).await {
+                Ok(token) => return Ok(Some(token)),
+                Err(app::Refusal::NotInstalled(_)) => {}
+                Err(refusal) => return Err(refusal.sentence()),
+            }
+        }
+        let read = async {
+            let client = self.db.get().await?;
+            self.settings
+                .get(&**client, scope, Target::Global, TOKEN)
+                .await
+        };
+        let resolved = read
+            .await
+            .map_err(|_| "The saved GitHub read token could not be read. Ask again.".to_owned())?;
         Ok(resolved.value.as_str().map(str::to_owned))
     }
 
@@ -373,7 +412,10 @@ async fn github_review(
         } else if let Some(token) = input.get("token").and_then(Value::as_str) {
             Some(token.to_owned())
         } else {
-            software.github_token(scope).await?
+            software
+                .github_token(scope, &repository)
+                .await
+                .map_err(|message| SoftwareError::field("repository", &message))?
         };
         let repo = fetch_repo(&software.integration, scope, &repository, token.as_deref())
             .await
@@ -564,7 +606,7 @@ impl Pin {
 /// Read the setup tag's commit only for a Staging comparison. A missing
 /// answer leaves the comparison unknown and never blocks installation.
 pub(crate) async fn setup_commit(software: &Software, scope: &Scope, pin: &Pin) -> Option<String> {
-    let token = software.github_token(scope).await.ok()?;
+    let token = software.github_token(scope, &pin.repository).await.ok()?;
     let mut url = url::Url::parse(&format!("{API}/repos/{}/commits", pin.repository)).ok()?;
     url.path_segments_mut()
         .ok()?
@@ -589,19 +631,11 @@ pub(crate) async fn recheck(
     software: &Software,
     scope: &Scope,
     pin: &Pin,
+    token: Option<&str>,
 ) -> std::result::Result<(), String> {
-    let token = software
-        .github_token(scope)
+    let repo = fetch_repo(&software.integration, scope, &pin.repository, token)
         .await
-        .map_err(|_| "The GitHub token could not be read. Ask again.".to_owned())?;
-    let repo = fetch_repo(
-        &software.integration,
-        scope,
-        &pin.repository,
-        token.as_deref(),
-    )
-    .await
-    .map_err(|message| format!("Could not check the GitHub repository: {message}"))?;
+        .map_err(|message| format!("Could not check the GitHub repository: {message}"))?;
     if repo.0 != pin.repository_id {
         return Err(format!(
             "GitHub repository {} is number {} now, not {}. Nothing was downloaded. Accept the repository again, then review the release.",
@@ -612,7 +646,7 @@ pub(crate) async fn recheck(
         &software.integration,
         scope,
         &format!("{API}/repos/{}/releases/{}", pin.repository, pin.release_id),
-        token.as_deref(),
+        token,
         "releases.get",
     )
     .await
@@ -726,6 +760,7 @@ fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: 
         "fetched_at": cache["fetched_at"],
         "stale": stale || cache["stale"].as_bool().unwrap_or(false),
         "token_set": saved.token_set,
+        "app": saved.app,
         "refresh_minutes": saved.refresh_minutes,
         "limited_until": cache["limited_until"],
         "message": if message.is_empty() { Value::Null } else { json!(message) },

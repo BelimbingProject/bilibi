@@ -19,6 +19,7 @@ dev_env_exports=$(python3 scripts/dev-env.py)
 eval "$dev_env_exports"
 # Refuse an address clash before creating keys, a status server or a database.
 python3 "$root/scripts/local-https-api.py" --check "$BILIBI_DEV_HOST" "${BILIBI_DEV_PORT:-4300}"
+python3 "$root/scripts/local-https-api.py" --check "shop.$BILIBI_DEV_HOST" "$((${BILIBI_DEV_PORT:-4300} + 1))"
 # A full local copy needs these keys. When a variable is already set, leave it
 # and its file alone. Otherwise read the file, or create it once: 64 hex
 # characters from 32 random bytes, mode 0600, under gitignored .local/dev/.
@@ -137,6 +138,10 @@ pg_isready -d "$DATABASE_URL" >/dev/null || { echo 'PostgreSQL is not ready for 
 # A supplied URL must point at an existing database.
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atc 'select 1' >/dev/null
 host=$BILIBI_DEV_HOST
+public_host=shop.$host
+# The registrar normally retires this checkout's previous hostname. Keep this
+# launcher's pair while each route is registered in turn.
+export BILIBI_DEV_HOSTS="$host,$public_host"
 # Plan before calling local-https.sh: a checkout registers only the host it
 # owns, and every host has its own Caddy route, so instances run side by side.
 # The registrar rechecks ownership under its lock in case two first launches race.
@@ -155,33 +160,30 @@ plan=$(python3 "$root/scripts/local-https-api.py" --plan "$host" "${BILIBI_DEV_P
 readarray -t origin_plan <<< "$plan"
 scheme=${origin_plan[0]}
 instance=("${origin_plan[1]}" "${origin_plan[2]}" "${origin_plan[3]}")
-if [[ $scheme == https ]]; then
-    if "$root/scripts/local-https.sh"; then
-        readarray -t instance < "$root/.local/https/instance"
-    else
-        # A different checkout may have claimed the host since planning.
-        python3 "$root/scripts/local-https-api.py" --check "$host" "${BILIBI_DEV_PORT:-4300}"
-        echo "Local HTTPS is unavailable for this checkout. Continuing with its loopback HTTP address." >&2
-        plan=$(python3 "$root/scripts/local-https-api.py" --http "$host" "${BILIBI_DEV_PORT:-4300}")
-        readarray -t origin_plan <<< "$plan"
-        scheme=${origin_plan[0]}
-        instance=("${origin_plan[1]}" "${origin_plan[2]}" "${origin_plan[3]}")
-    fi
-fi
-if [[ $scheme == https ]]; then
-    export APP_ORIGIN="https://${instance[0]}"
-    [[ ${instance[2]} == 443 ]] || APP_ORIGIN+=":${instance[2]}"
-else
-    export APP_ORIGIN="http://${instance[0]}:${instance[1]}"
-fi
+[[ $scheme == https ]] || { echo 'Local HTTPS is required because staff and public pages use separate hostnames.' >&2; exit 1; }
+"$root/scripts/local-https.sh" "$host" "${instance[1]}" "$root/.local/https/instance"
+readarray -t instance < "$root/.local/https/instance"
+public_plan=$(python3 "$root/scripts/local-https-api.py" --plan "$public_host" "$((instance[1] + 1))")
+readarray -t public_origin_plan <<< "$public_plan"
+[[ ${public_origin_plan[0]} == https ]] || { echo 'Local HTTPS is required for the public hostname.' >&2; exit 1; }
+public_instance=("${public_origin_plan[1]}" "${public_origin_plan[2]}" "${public_origin_plan[3]}")
+env -u BILIBI_DEV_STATUS_PORT "$root/scripts/local-https.sh" "$public_host" "${public_instance[1]}" "$root/.local/https/public-instance"
+readarray -t public_instance < "$root/.local/https/public-instance"
+export APP_ORIGIN="https://${instance[0]}"
+[[ ${instance[2]} == 443 ]] || APP_ORIGIN+=":${instance[2]}"
+export PUBLIC_ORIGIN="https://${public_instance[0]}"
+[[ ${public_instance[2]} == 443 ]] || PUBLIC_ORIGIN+=":${public_instance[2]}"
 export BIND_ADDR="127.0.0.1:${instance[1]}"
-if [[ -n $(ss -H -ltn "sport = :${instance[1]}") ]]; then
+export PUBLIC_TENANT_ID="${PUBLIC_TENANT_ID:-1}"
+export PUBLIC_BIND_ADDR="127.0.0.1:${public_instance[1]}"
+if [[ -n $(ss -H -ltn "sport = :${instance[1]}") || -n $(ss -H -ltn "sport = :${public_instance[1]}") ]]; then
     echo "This checkout already has a listener at $APP_ORIGIN. Stop its dev command before starting another." >&2
     exit 1
 fi
 # exec below keeps this process ID, so the reservation lasts as long as the launcher.
 mkdir -p "/tmp/bilibi-ports-$(id -u)"
 printf '%s\n' "$$" > "/tmp/bilibi-ports-$(id -u)/${instance[1]}"
+printf '%s\n' "$$" > "/tmp/bilibi-ports-$(id -u)/${public_instance[1]}"
 flock -u "$ports_lock"
 exec {ports_lock}>&-
 # Colour the address on a terminal without NO_COLOR, as the app's own "listening" line does.
@@ -191,6 +193,7 @@ else
     highlight() { printf '%s%s' "$1" "$2"; }
 fi
 echo "$(highlight 'Open ' "$APP_ORIGIN") — sign in as ai@agent.my / bilibi-dev (the platform operator's administrator)."
+echo "$(highlight 'Public site ' "$PUBLIC_ORIGIN")"
 echo "After changing BILIBI_DEV_HOST in $BILIBI_DEV_ENV_FILE, restart the launcher to use the new address."
 # Open the sign-in page in the browser once the app answers, on the first start
 # of this checkout only: later starts would add a tab beside the one already

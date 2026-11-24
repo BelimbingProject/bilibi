@@ -99,7 +99,7 @@
 
 {#- The flexible table; t is a bilibi_ui::FlexTable. -#}
 {% macro flex_table(t) %}
-<div id="{{ t.id }}" data-hook="FlexTable" data-event="{{ t.event }}"{% if !t.target.is_empty() %} data-target="{{ t.target }}"{% endif %} data-mode="{{ t.mode().as_str() }}" data-zoom="{{ t.zoom() }}" data-table-frame{% if !t.framed %} data-unframed{% endif %} class="flex-table ui-compact-controls{% if !t.framed %} relative{% endif %}{% if !t.class.is_empty() %} {{ t.class }}{% endif %}">
+<div id="{{ t.id }}" data-hook="FlexTable" data-event="{{ t.event }}"{% if !t.target.is_empty() %} data-target="{{ t.target }}"{% endif %} data-mode="{{ t.mode().as_str() }}" data-zoom="{{ t.zoom() }}" data-table-frame{% if !t.framed %} data-unframed{% endif %} class="flex-table ui-compact-controls min-w-0 max-w-full{% if !t.framed %} relative{% endif %}{% if !t.class.is_empty() %} {{ t.class }}{% endif %}">
 {% if let Some(cost) = t.cost %}{% if cost.heavy %}<p id="{{ t.id }}-cost" class="mb-2 flex items-center gap-1 text-xs text-warning-ink">{% call ui::icon(name="warning", class="size-3.5") %}{% endcall %}{{ t.cost_text(cost) }}</p>{% endif %}{% endif %}
 {% if let Some(sel) = t.selection %}{% call selection_bar(t=t, sel=sel) %}{% endcall %}{% endif %}
 {% if let Some(v) = t.views %}{% call views_strip(t=t, v=v) %}{% endcall %}{% endif %}

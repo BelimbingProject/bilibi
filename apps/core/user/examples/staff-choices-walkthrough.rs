@@ -181,7 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One batch is one transaction: an identity and its account name each other.
     client
         .batch_execute(
-            "INSERT INTO user_identities(id,kind,email,password_hash,home_tenant_id,home_user_id,last_tenant_id) OVERRIDING SYSTEM VALUE SELECT 100+n,'staff','bulk'||n||'@example.test','x',1,100+n,1 FROM generate_series(1,25) n ON CONFLICT DO NOTHING;
+            "INSERT INTO user_identities(id,kind,email,password_hash,last_tenant_id) OVERRIDING SYSTEM VALUE SELECT 100+n,'staff','bulk'||n||'@example.test','x',1 FROM generate_series(1,25) n ON CONFLICT DO NOTHING;
              INSERT INTO users(id,tenant_id,identity_id,name) SELECT 100+n,1,100+n,'Bulk '||lpad(n::text,2,'0') FROM generate_series(1,25) n ON CONFLICT DO NOTHING",
         )
         .await?;

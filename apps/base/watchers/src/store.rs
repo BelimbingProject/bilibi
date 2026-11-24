@@ -1,7 +1,7 @@
 //! The `Watchers` facade and the reads the page and agents share: the tenant's
 //! watchers, one watcher with its versions and receipts, and what watchers may use
 //! here. Writing a watcher is `review.rs`.
-use crate::catalog::{OfferedAction, OfferedTrigger, Offers};
+use crate::catalog::{OfferedAction, OfferedLookup, OfferedTrigger, Offers};
 use crate::definition;
 use crate::{
     ACTIONS_PER_RUN, ACTIVE_PER_TRIGGER, CHAIN_DEPTH, CONDITIONS, EXAMPLES, FACTS_READ,
@@ -22,11 +22,14 @@ use tokio_postgres::GenericClient;
 pub struct Watchers {
     pub(crate) db: Db,
     pub(crate) jobs: Arc<JobContracts>,
+    pub(crate) registry: Arc<bilibi_agent_api::Registry>,
+    pub(crate) mutations: Arc<bilibi_database::MutationBoundary>,
     pub(crate) events: Arc<bilibi_events::Events>,
     pub(crate) queue: Arc<bilibi_queue::Queue>,
     pub(crate) settings: Arc<Settings>,
     pub(crate) authentication: Arc<Authentication>,
     pub(crate) directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
+    pub(crate) ai: Arc<bilibi_ai::Ai>,
     pub(crate) offers: Offers,
 }
 
@@ -42,6 +45,15 @@ pub enum WatcherState {
     Off,
 }
 impl WatcherState {
+    pub(crate) fn from_flags(approved: bool, off: bool, needs_review: bool) -> Self {
+        match (approved, off, needs_review) {
+            (false, _, _) => Self::Draft,
+            (true, _, true) => Self::NeedsReview,
+            (true, false, false) => Self::On,
+            (true, true, false) => Self::Off,
+        }
+    }
+
     pub fn key(self) -> &'static str {
         match self {
             Self::Draft => "draft",
@@ -109,6 +121,8 @@ pub struct RunView {
     pub reason: Option<String>,
     pub facts: Value,
     pub outcomes: Value,
+    /// The AI observation the conditions read, or null when none was asked.
+    pub observation: Value,
     pub created_at: Timestamp,
     pub finished_at: Option<Timestamp>,
     pub effects: Vec<EffectView>,
@@ -139,6 +153,9 @@ impl Watchers {
     pub(crate) fn action(&self, key: &str) -> Option<&OfferedAction> {
         self.offers.actions.get(key)
     }
+    pub(crate) fn lookup(&self, key: &str) -> Option<&OfferedLookup> {
+        self.offers.lookups.get(key)
+    }
     fn summary(&self, row: &tokio_postgres::Row) -> WatcherSummary {
         let trigger: String = row.get(2);
         let (approved, off): (bool, bool) = (row.get(3), row.get(4));
@@ -149,12 +166,7 @@ impl Watchers {
                 .trigger(&trigger)
                 .map_or_else(|| trigger.clone(), |t| t.definition.title.to_owned()),
             trigger,
-            state: match (approved, off, row.get::<_, bool>(11)) {
-                (false, _, _) => WatcherState::Draft,
-                (true, _, true) => WatcherState::NeedsReview,
-                (true, false, false) => WatcherState::On,
-                (true, true, false) => WatcherState::Off,
-            },
+            state: WatcherState::from_flags(approved, off, row.get(11)),
             running: row.get(5),
             latest: row.get(6),
             pending: row.get(7),
@@ -190,12 +202,12 @@ impl Watchers {
         let mut problems = Vec::new();
         for (field, count, key) in [
             ("if.conditions", definition.conditions.len(), CONDITIONS),
-            ("do", definition.actions.len(), WATCHER_ACTIONS),
-            ("do", definition.actions.len(), ACTIONS_PER_RUN),
+            ("do", definition.actions().count(), WATCHER_ACTIONS),
+            ("do", definition.actions().count(), ACTIONS_PER_RUN),
             ("examples", examples, EXAMPLES),
             (
                 "if.conditions",
-                definition.fact_fields(version_field).len(),
+                definition.fact_fields(version_field, true).len(),
                 FACTS_READ,
             ),
         ] {
@@ -358,7 +370,7 @@ impl Watchers {
         bilibi_authz::authorize_key(client, scope, VIEW).await?;
         let tenant = scope.tenant();
         let rows = client.query(
-            "SELECT u.id,u.watcher_id,v.number,u.event_id,u.event_name,u.subject,u.depth,u.state,u.reason,u.facts,u.outcomes,u.created_at,u.finished_at,v.definition,v.catalog_digest FROM base_watcher_runs u JOIN base_watcher_versions v ON v.tenant_id=u.tenant_id AND v.id=u.version_id WHERE u.tenant_id=$1 AND ($2::bigint IS NULL OR u.watcher_id=$2) ORDER BY u.id DESC LIMIT $3",
+            "SELECT u.id,u.watcher_id,v.number,u.event_id,u.event_name,u.subject,u.depth,u.state,u.reason,u.facts,u.outcomes,u.created_at,u.finished_at,v.definition,v.catalog_digest,u.observation FROM base_watcher_runs u JOIN base_watcher_versions v ON v.tenant_id=u.tenant_id AND v.id=u.version_id WHERE u.tenant_id=$1 AND ($2::bigint IS NULL OR u.watcher_id=$2) ORDER BY u.id DESC LIMIT $3",
             &[&tenant, &watcher, &limit.clamp(1, 200)],
         ).await?;
         let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
@@ -387,23 +399,39 @@ impl Watchers {
                 saved.is_some() && saved == self.catalog_digest(event, definition, &custom)
             });
             let allowed = match self.trigger(event).filter(|_| compatible) {
-                Some(trigger) => self
-                    .read_facts(client, scope, trigger.definition.table, row.get(5), &fields)
-                    .await?
-                    .is_ok(),
+                Some(trigger) => {
+                    // A script's or an observation's outcome tells about the
+                    // fields it read, so the reader must read them all.
+                    let fields = match definition {
+                        Some(definition)
+                            if definition.scripts().next().is_some()
+                                || definition.observe.is_some() =>
+                        {
+                            definition.fact_fields(trigger.definition.version, true)
+                        }
+                        _ => fields,
+                    };
+                    self.read_facts(client, scope, trigger.definition.table, row.get(5), &fields)
+                        .await?
+                        .is_ok()
+                }
                 None => false,
             };
-            readable.insert(row.get::<_, i64>(0), allowed);
+            let scripted = definition.as_ref().is_none_or(|definition| {
+                definition.scripts().next().is_some() || definition.observe.is_some()
+            });
+            readable.insert(row.get::<_, i64>(0), (allowed, scripted));
         }
         let hidden = json!({"restricted": true});
         Ok(rows
             .iter()
             .map(|row| {
-                let shown = readable
+                let (shown, scripted) = readable
                     .get(&row.get::<_, i64>(0))
                     .copied()
-                    .unwrap_or(false);
+                    .unwrap_or_default();
                 let id: i64 = row.get(0);
+                let hidden_outcome = scripted && !shown;
                 RunView {
                     id,
                     watcher_id: row.get(1),
@@ -412,8 +440,12 @@ impl Watchers {
                     event_name: row.get(4),
                     subject: if shown { row.get(5) } else { String::new() },
                     depth: row.get(6),
-                    state: row.get(7),
-                    reason: row.get(8),
+                    state: if hidden_outcome {
+                        "restricted".into()
+                    } else {
+                        row.get(7)
+                    },
+                    reason: if hidden_outcome { None } else { row.get(8) },
                     facts: if shown {
                         row.get::<_, Option<Value>>(9).unwrap_or(Value::Null)
                     } else {
@@ -424,11 +456,20 @@ impl Watchers {
                     } else {
                         hidden.clone()
                     },
+                    observation: match row.get::<_, Option<Value>>(15) {
+                        Some(observation) if shown => observation,
+                        Some(_) => hidden.clone(),
+                        None => Value::Null,
+                    },
                     created_at: time(row, 11),
-                    finished_at: time_opt(row, 12),
+                    finished_at: if hidden_outcome {
+                        None
+                    } else {
+                        time_opt(row, 12)
+                    },
                     effects: effects
                         .iter()
-                        .filter(|e| e.get::<_, i64>(0) == id)
+                        .filter(|e| (shown || !scripted) && e.get::<_, i64>(0) == id)
                         .map(|e| EffectView {
                             position: e.get(1),
                             operation: e.get(2),
@@ -477,13 +518,29 @@ impl Watchers {
                     Ok(column)
                         if column.agg.is_none()
                             && column.many.is_none()
-                            && column
-                                .field
-                                .is_some_and(|field| !catalog.masked(column.table, field.id)) =>
+                            && column.field.is_some_and(|field| {
+                                !catalog.masked(column.table, field.id)
+                                    && (crate::review::custom_path(path).is_some()
+                                        || catalog
+                                            .table(column.table)
+                                            .is_some_and(|owner| !owner.is_custom(field.id)))
+                            }) =>
                     {
                         column
                     }
-                    _ => return Ok(Err("restricted_field")),
+                    _ => {
+                        let closed = crate::review::custom_path(path)
+                            .and_then(|(link, _)| {
+                                let grid = bilibi_grid::installed().ok()?;
+                                crate::review::custom_owner(grid, grid.table(table)?, Some(link?))
+                            })
+                            .is_some_and(|(_, owner)| catalog.table(owner.id()).is_none());
+                        return Ok(Err(if closed {
+                            "read_refused"
+                        } else {
+                            "restricted_field"
+                        }));
+                    }
                 };
                 reached.push(
                     bilibi_grid::scalar_access(&catalog, table, path)
@@ -592,6 +649,7 @@ impl Watchers {
         let catalog = Catalog::for_scope(client, scope)
             .await
             .map_err(Error::from)?;
+        let catalog = &catalog;
         let triggers: Vec<Value> = self
             .offers
             .triggers
@@ -602,11 +660,25 @@ impl Watchers {
                     .map(|table| {
                         // A tenant custom field is offered only when the tenant
                         // opted it into watcher conditions.
-                        table
+                        let own = table
                             .visible_fields()
                             .filter(|f| !table.is_custom(f.id) || table.custom_watcher_condition(f.id))
-                            .map(|f| json!({"field": f.id, "label": table.field_label(f), "type": format!("{:?}", f.ty).to_lowercase(), "values": f.values, "masked": catalog.masked(table.id(), f.id), "custom": table.is_custom(f.id)}))
-                            .collect()
+                            .map(|f| json!({"field": f.id, "label": table.field_label(f), "type": format!("{:?}", f.ty).to_lowercase(), "values": f.values, "masked": catalog.masked(table.id(), f.id), "custom": table.is_custom(f.id)}));
+                        // So are the offered custom fields of a record one
+                        // link away (`company.cf_segment`, #862), when the
+                        // reader may read that record's table.
+                        let linked = table
+                            .links()
+                            .iter()
+                            .filter(|link| link.kind() == bilibi_grid::LinkKind::One)
+                            .filter_map(|link| Some((link, catalog.table(link.to())?)))
+                            .flat_map(|(link, target)| {
+                                target
+                                    .visible_fields()
+                                    .filter(|f| target.custom_watcher_condition(f.id))
+                                    .map(move |f| json!({"field": format!("{}.{}", link.id(), f.id), "label": format!("{} \u{203a} {}", link.label(), target.field_label(f)), "type": format!("{:?}", f.ty).to_lowercase(), "values": f.values, "masked": catalog.masked(target.id(), f.id), "custom": true}))
+                            });
+                        own.chain(linked).collect()
                     })
                     .unwrap_or_default();
                 json!({"trigger": t.event, "title": t.definition.title, "table": t.definition.table, "fields": fields,
@@ -627,13 +699,35 @@ impl Watchers {
                     required.retain(|r| r.as_str() != Some(a.definition.subject) && r.as_str() != Some(a.definition.version));
                 }
                 json!({"operation": a.key, "title": a.title, "summary": a.summary, "table": a.definition.table,
-                    "subject": a.definition.subject, "records": a.definition.records, "input": input})
+                    "subject": a.definition.subject, "records": a.definition.records, "local_script": a.local_script, "input": input,
+                    "outbound": a.outbound.map(|o| json!({"destination": o.destination, "data": o.data}))})
             })
             .collect();
+        let mut lookups = Vec::new();
+        for lookup in self.offers.lookups.values() {
+            lookups.push(json!({
+                "operation": lookup.key,
+                "title": lookup.title,
+                "input": lookup.input,
+                "output": lookup.output,
+                "available": bilibi_authz::decide(client, scope, lookup.capability).await?.allowed,
+            }));
+        }
         Ok(json!({
             "triggers": triggers,
             "actions": actions,
+            "lookups": lookups,
             "operators": definition::Op::ALL,
+            "observation": {
+                "facts": [
+                    {"field": crate::observe::LABEL, "type": "enum", "values": "the draft's observe.labels"},
+                ],
+                "available_to_automation": match self.principal(client, scope.tenant()).await {
+                    Ok(principal) => self.observation_available(client, &principal).await?.map_or_else(|| json!(true), |reason| json!(reason)),
+                    Err(Error::Unauthorized) => return Err(Error::Unauthorized),
+                    Err(_) => json!("automation_unavailable"),
+                },
+            },
             "limits": {
                 "actions_per_run": self.limit(client, scope, ACTIONS_PER_RUN).await?,
                 "chain_depth": self.limit(client, scope, CHAIN_DEPTH).await?,
@@ -644,6 +738,10 @@ impl Watchers {
                 "values_per_list": self.limit(client, scope, VALUES_PER_LIST).await?,
                 "facts_read": self.limit(client, scope, FACTS_READ).await?,
                 "max_attempts": self.limit(client, scope, MAX_ATTEMPTS).await?,
+                "trial_days": self.limit(client, scope, crate::TRIAL_DAYS).await?,
+                "trial_events": self.limit(client, scope, crate::TRIAL_EVENTS).await?,
+                "ai_observations_per_day": self.limit(client, scope, crate::AI_OBSERVATIONS_PER_DAY).await?,
+                "trial_observations": self.limit(client, scope, crate::TRIAL_OBSERVATIONS).await?,
             },
         }))
     }

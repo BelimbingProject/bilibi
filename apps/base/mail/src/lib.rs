@@ -10,6 +10,7 @@
 //! Received mail: `parse` reads one message's bytes into its parts (bounces and
 //! complaints included) and `sanitise_html` makes its HTML safe to store and show.
 mod bounds;
+mod branded;
 mod delivery;
 mod limits;
 mod mailbox;
@@ -19,11 +20,12 @@ mod report;
 mod sanitise;
 mod smtp;
 
+pub use branded::{BrandFuture, BrandSource, MailBrand};
 pub use delivery::{
     reference, DeliveryReport, DeliveryReports, ObserveFuture, Observer, Outcome, OBSERVERS,
     REFERENCE_HEADER, REPORTS,
 };
-pub use limits::{Limits, MAX_MESSAGE_BYTES, MAX_RECIPIENTS};
+pub use limits::{Limits, MAX_MESSAGE_BYTES, MAX_RECIPIENTS, SENDER_NAME};
 pub use mailbox::{Mailbox, MailboxEntry};
 pub use message::{
     render, Address, Attachment, Envelope, ListUnsubscribe, Message, Rendered, Sent,
@@ -41,7 +43,14 @@ pub const SERVICE: &str = "base/mail.mailer";
 /// `base/system`'s stored instance role, read by key: System Info shows this
 /// mailer, so mail cannot depend on that module.
 const INSTANCE_ROLE: &str = "instance.role";
-use std::{future::Future, pin::Pin, sync::Arc};
+/// `base/branding`'s display name, read by key for the same reason: Branding
+/// stands above this module. Blank keeps the configured sender name.
+const INSTALLATION_NAME: &str = "branding.name";
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+};
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub type SendFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
@@ -76,6 +85,7 @@ pub struct Mailer {
     transport: Arc<dyn Transport>,
     limits: Limits,
     settings: Option<(Db, Arc<Settings>)>,
+    brand: OnceLock<Arc<dyn BrandSource>>,
 }
 impl Mailer {
     pub fn new(sender: Address, transport: Arc<dyn Transport>, limits: Limits) -> Self {
@@ -84,7 +94,14 @@ impl Mailer {
             transport,
             limits,
             settings: None,
+            brand: OnceLock::new(),
         }
+    }
+    /// Bind the installation's branding owner once at registry construction.
+    pub fn bind_brand(&self, brand: Arc<dyn BrandSource>) -> bilibi_module_registry::Result<()> {
+        self.brand.set(brand).map_err(|_| {
+            bilibi_module_registry::RegistryError::Service("mail brand is already bound".into())
+        })
     }
     pub fn describe(&self) -> String {
         format!("{} from {}", self.transport.describe(), self.sender.email)
@@ -148,10 +165,112 @@ impl Mailer {
         Ok(self.limits().await?.into())
     }
     pub async fn render(&self, message: &Message) -> Result<Rendered> {
-        render(message, &self.sender, self.limits().await?)
+        self.render_message(message, &self.sender().await, None)
+            .await
+    }
+
+    async fn render_message(
+        &self,
+        message: &Message,
+        from: &Address,
+        action: Option<&str>,
+    ) -> Result<Rendered> {
+        let limits = self.limits().await?;
+        if self.settings.is_none() || message.html.is_some() {
+            return render(message, from, limits);
+        }
+        let brand = match self.brand.get() {
+            Some(source) => source.current().await,
+            None => MailBrand::default(),
+        };
+        branded::render(message, from, limits, &brand, action)
+    }
+
+    /// The installation sender: the configured address under the adopter's
+    /// display name when one is set, else under the configured name. A name
+    /// that cannot be read or does not fit a header keeps the configured one,
+    /// so branding never stops mail.
+    async fn sender(&self) -> Address {
+        let Some((db, settings)) = &self.settings else {
+            return self.sender.clone();
+        };
+        let name = async {
+            let client = db.get().await.ok()?;
+            let value = settings
+                .get_global(&**client, INSTALLATION_NAME)
+                .await
+                .ok()?;
+            value.as_str().map(str::to_owned)
+        };
+        name.await
+            .filter(|name| !name.trim().is_empty())
+            .and_then(|name| Address::new(Some(&name), &self.sender.email).ok())
+            .unwrap_or_else(|| self.sender.clone())
     }
     pub async fn deliver(&self, message: &Message) -> Result<Sent> {
         self.deliver_rendered(self.render(message).await?).await
+    }
+    /// Sends a workspace's own mail: when the message names no sender, From
+    /// carries that workspace's `mail.sender_name` at the installation
+    /// address. `tenant` is one the caller proved from its own record or
+    /// session. A blank name, and a standalone mailer, use the installation
+    /// sender (the adopter's display name when one is set); a settings read
+    /// failure refuses delivery, as for limits.
+    pub async fn deliver_for(&self, tenant: i64, message: &Message) -> Result<Sent> {
+        self.deliver_workspace(tenant, message, None).await
+    }
+
+    /// Like [Self::deliver_for], also allowing the HTML layout to turn one
+    /// caller-built URL on its own line into an action. Supply only a link
+    /// constructed by the owner. Prose and facts never become markup.
+    pub async fn deliver_linked_for(
+        &self,
+        tenant: i64,
+        message: &Message,
+        action: Option<&str>,
+    ) -> Result<Sent> {
+        self.deliver_workspace(tenant, message, action).await
+    }
+
+    async fn deliver_workspace(
+        &self,
+        tenant: i64,
+        message: &Message,
+        action: Option<&str>,
+    ) -> Result<Sent> {
+        let Some((db, settings)) = &self.settings else {
+            return self.deliver(message).await;
+        };
+        let from = if let Some(from) = &message.from {
+            from.clone()
+        } else if let Some(from) = self.tenant_sender(db, settings, tenant).await? {
+            from
+        } else {
+            self.sender().await
+        };
+        let rendered = self.render_message(message, &from, action).await?;
+        self.deliver_rendered(rendered).await
+    }
+
+    async fn tenant_sender(
+        &self,
+        db: &Db,
+        settings: &Settings,
+        tenant: i64,
+    ) -> Result<Option<Address>> {
+        let unavailable = || Error::Config("the mail sender name is unavailable".into());
+        let name = {
+            let client = db.get().await.map_err(|_| unavailable())?;
+            settings
+                .get_tenant(&**client, tenant, SENDER_NAME)
+                .await
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .ok_or_else(unavailable)?
+        };
+        (!name.trim().is_empty())
+            .then(|| Address::new(Some(&name), &self.sender.email))
+            .transpose()
     }
     /// Send a trusted renderer's output without rebuilding headers or MIME.
     /// Taking ownership returns the exact wire allocation in `Sent`.
@@ -229,7 +348,7 @@ impl Mailer {
 inventory::submit! {
     Module {
         id: "base/mail", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/settings"], migrations: &[],
+        dependencies: &["base/module_registry", "base/database", "base/settings", "base/ui"], migrations: &[],
         services: &[Service { id: REPORTS, factory: |_| Ok(Arc::new(DeliveryReports::from_inventory())) }, Service { id: SERVICE, factory: |services| {
             let mut mailer = Mailer::from_env().map_err(|error| bilibi_module_registry::RegistryError::Service(error.to_string()))?;
             mailer.settings = Some((services.get::<Db>("base/database.pool")?.as_ref().clone(), services.get("base/settings.store")?));

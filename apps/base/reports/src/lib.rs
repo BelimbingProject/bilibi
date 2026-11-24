@@ -13,6 +13,7 @@ mod oversight;
 mod schedules;
 mod store;
 mod web;
+mod wording;
 
 #[doc(hidden)]
 pub use bilibi_module_registry::{Contribution, Provenance};
@@ -258,6 +259,8 @@ pub struct Reports {
     authentication: Arc<bilibi_tenancy::Authentication>,
     mutations: Arc<bilibi_database::MutationBoundary>,
     mailer: Arc<bilibi_mail::Mailer>,
+    templates: Arc<bilibi_templates::Templates>,
+    locales: Arc<bilibi_locale::Locales>,
     directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
     labels: Arc<bilibi_labels::Labels>,
     /// The public origin emailed links point at (`APP_ORIGIN`).
@@ -389,6 +392,7 @@ fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Reco
     };
     let d = &report.definition;
     let mut references = std::collections::BTreeSet::new();
+    let mut live_subjects = root.subject().is_some();
     let seen: String = d
         .columns
         .iter()
@@ -399,20 +403,35 @@ fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Reco
         // A masked column still resolves; its values are read partial, so
         // masking it changes what the reader sees (ADR 05).
         .map(|spec| match catalog.resolve(root, spec) {
-            Ok(column) => match column.reference {
-                Some(kind) => {
+            Ok(column) => {
+                live_subjects |= column
+                    .hops
+                    .iter()
+                    .chain(&column.many)
+                    .chain(&column.tail)
+                    .any(|link| {
+                        catalog
+                            .table(link.to())
+                            .is_some_and(|table| table.subject().is_some())
+                    });
+                if let Some(kind) = column.reference {
                     let readable = records
                         .kind(kind)
                         .is_some_and(|kind| catalog.table(kind.table).is_some());
                     references.insert(format!("ref:{}:{kind}:{}", column.spec, u8::from(readable)));
                     'r'
+                } else if catalog.mask(&column).is_some() {
+                    'm'
+                } else {
+                    '1'
                 }
-                None if catalog.mask(&column).is_some() => 'm',
-                None => '1',
-            },
+            }
             Err(_) => '0',
         })
         .collect();
+    if live_subjects {
+        return format!("{}:subject:live", report.version);
+    }
     format!(
         "{}:{seen}:{}",
         report.version,
@@ -586,6 +605,9 @@ impl Reports {
         draft: &Draft,
     ) -> Outcome<()> {
         let catalog = if draft.definition.oversight {
+            self.oversight
+                .check_source(&draft.record_type)
+                .map_err(grid)?;
             let tx = tx.ok_or(Error::Internal)?;
             self.oversight
                 .builder_catalog_on(tx, scope, draft.kind == Kind::Rows)
@@ -593,7 +615,7 @@ impl Reports {
                 .map_err(grid)?
         } else {
             let tx = tx.ok_or(Error::Internal)?;
-            Catalog::for_scope(tx, scope)
+            Catalog::for_report(tx, scope)
                 .await
                 .map_err(|e| ReportError::Database(e.into()))?
         };
@@ -905,41 +927,44 @@ impl Reports {
     /// restriction or a lost share shows at the next refresh, not the next
     /// run. Cheaper than a run: no Grid read. Needs `reports.view`.
     pub async fn access(&self, scope: &Scope, id: i64) -> Outcome<String> {
+        self.access_report(scope, id)
+            .await
+            .map(|(_, access)| access)
+    }
+
+    async fn access_report(&self, scope: &Scope, id: i64) -> Outcome<(Report, String)> {
         let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, VIEW).await?;
         let report = match store::read(&**client, scope.tenant(), scope.user(), id, false).await {
             Err(Error::NotFound) => return Err(ReportError::NotFound),
             other => other?,
         };
-        if report.definition.oversight {
+        let access = if report.definition.oversight {
             drop(client);
             self.oversight.prove(scope).await.map_err(grid)?;
-            // Drawing caches cannot skip child audit or live consent checks.
-            return Ok(format!(
-                "{}:oversight:{}",
-                report.version,
-                jiff::Timestamp::now()
-            ));
-        }
-        let catalog = Catalog::for_scope(&**client, scope)
-            .await
-            .map_err(|e| ReportError::Database(e.into()))?;
-        Ok(access_key(&catalog, &report, &self.records))
+            format!("{}:oversight:{}", report.version, jiff::Timestamp::now())
+        } else {
+            let catalog = Catalog::for_report(&**client, scope)
+                .await
+                .map_err(|e| ReportError::Database(e.into()))?;
+            access_key(&catalog, &report, &self.records)
+        };
+        Ok((report, access))
     }
 
     /// One dashboard update shares a fresh catalog across all placed reports.
     /// Unplaced offers are read only while Customize is open.
     pub(crate) async fn dashboard_entries(
         &self,
+        client: &tokio_postgres::Client,
         scope: &Scope,
         placed: &[String],
         offers: bool,
     ) -> Outcome<Vec<(Report, String)>> {
-        let client = self.db.get().await.map_err(Error::from)?;
-        authorize(&**client, scope, VIEW).await?;
+        authorize(client, scope, VIEW).await?;
         let reports =
-            store::dashboard(&**client, scope.tenant(), scope.user(), placed, offers).await?;
-        let catalog = Catalog::for_scope(&**client, scope)
+            store::dashboard(client, scope.tenant(), scope.user(), placed, offers).await?;
+        let catalog = Catalog::for_report(client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         Ok(reports
@@ -1064,18 +1089,6 @@ impl Reports {
         self.run_report(scope, report, input).await
     }
 
-    /// A run for a file: no record links, and a list's question kept so its
-    /// other pages are read with only their keys and cells.
-    pub(crate) async fn run_for_file(
-        &self,
-        scope: &Scope,
-        id: i64,
-        input: &RunInput,
-    ) -> Outcome<(Run, Option<listing::Listing>)> {
-        let report = self.get(scope, id).await?;
-        self.run_report_for(scope, report, input, true).await
-    }
-
     /// Runs a built-in report as the reader, like a stored one.
     pub async fn run_builtin(&self, scope: &Scope, key: &str, input: &RunInput) -> Outcome<Run> {
         let report = self.builtin(scope, key).await?;
@@ -1094,7 +1107,7 @@ impl Reports {
         scope: &Scope,
     ) -> Outcome<Vec<Report>> {
         authorize(client, scope, VIEW).await?;
-        let catalog = Catalog::for_scope(client, scope)
+        let catalog = Catalog::for_report(client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         Ok(self
@@ -1136,7 +1149,7 @@ impl Reports {
     }
 
     async fn run_report(&self, scope: &Scope, report: Report, input: &RunInput) -> Outcome<Run> {
-        Ok(self.run_report_for(scope, report, input, false).await?.0)
+        self.run_report_for(scope, report, input, None).await
     }
 
     async fn run_report_for(
@@ -1144,10 +1157,10 @@ impl Reports {
         scope: &Scope,
         report: Report,
         input: &RunInput,
-        file: bool,
-    ) -> Outcome<(Run, Option<listing::Listing>)> {
+        file_cap: Option<usize>,
+    ) -> Outcome<Run> {
         if report.definition.oversight {
-            return Ok((self.run_oversight(scope, report, input).await?, None));
+            return self.run_oversight(scope, report, input).await;
         }
         let bounds = self.bounds(scope, input.background).await?;
         let client = self.db.get().await.map_err(Error::from)?;
@@ -1156,7 +1169,7 @@ impl Reports {
             .display(&**client, scope, None, "en")
             .await?
             .timezone;
-        let catalog = Catalog::for_scope(&**client, scope)
+        let catalog = Catalog::for_report(&**client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         let root = catalog
@@ -1188,7 +1201,6 @@ impl Reports {
             filters.extend(typed);
         }
         let as_rows = report.kind == Kind::Rows || input.as_rows;
-        let mut kept = None;
         let reference_names;
         let result = match report.kind {
             _ if as_rows => {
@@ -1215,22 +1227,22 @@ impl Reports {
                 } else {
                     Vec::new()
                 };
-                let totals_of: Vec<Option<bilibi_grid::Measure>> = if report.kind == Kind::Rows
-                    && definition.totals
-                {
-                    columns
-                        .iter()
-                        .map(|c| {
-                            (c.ty.number() && c.spec != root.key()).then(|| bilibi_grid::Measure {
-                                column: c.spec.clone(),
-                                agg: bilibi_grid::Agg::Sum,
+                let totals_of: Vec<Option<bilibi_grid::Measure>> =
+                    if report.kind == Kind::Rows && definition.totals {
+                        columns
+                            .iter()
+                            .map(|c| {
+                                (c.reference.is_none() && c.ty.number() && c.spec != root.key())
+                                    .then(|| bilibi_grid::Measure {
+                                        column: c.spec.clone(),
+                                        agg: bilibi_grid::Agg::Sum,
+                                    })
                             })
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let totals_filters = filters.clone();
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                let measures: Vec<_> = totals_of.iter().flatten().cloned().collect();
                 // A value saved before the setting's bound was 100 still runs.
                 let page_size = self
                     .setting(&**client, scope, contributions::PAGE_SIZE_KEY)
@@ -1246,40 +1258,25 @@ impl Reports {
                     timezone: timezone.clone(),
                 };
                 let page = listing
-                    .page(self, scope, input.page.saturating_mul(page_size), page_size)
+                    .page(
+                        self,
+                        scope,
+                        input.page.saturating_mul(page_size),
+                        page_size,
+                        &measures,
+                        file_cap,
+                    )
                     .await?;
                 reference_names = page.reference_names;
                 let rows = page.rows;
                 // A file holds no links: the reader opens records from the page.
-                let pages = if file {
+                let pages = if file_cap.is_some() {
                     Vec::new()
                 } else {
                     self.record_pages(scope, root, &rows).await?
                 };
-                let totals = if totals_of.iter().any(Option::is_some) {
-                    // Grid totals up to 8 measures a read; a wider list
-                    // (up to 32 columns) takes one read per eight.
-                    let measures: Vec<_> = totals_of.iter().flatten().cloned().collect();
-                    let mut values = Vec::with_capacity(measures.len());
-                    for chunk in measures.chunks(bilibi_grid::MAX_MEASURES) {
-                        let summary = bilibi_grid::summarize(
-                            &self.db,
-                            scope,
-                            &report.record_type,
-                            &SummarySpec {
-                                bounds,
-                                filters: totals_filters.clone(),
-                                groupings: Vec::new(),
-                                measures: chunk.to_vec(),
-                                timezone: timezone.clone(),
-                                max_groups: 1,
-                            },
-                        )
-                        .await
-                        .map_err(grid)?;
-                        values.extend(summary.total.values);
-                    }
-                    let mut sums = values.into_iter();
+                let totals = if !measures.is_empty() {
+                    let mut sums = page.totals.into_iter();
                     Some(
                         totals_of
                             .iter()
@@ -1295,7 +1292,6 @@ impl Reports {
                 } else {
                     None
                 };
-                kept = Some(listing);
                 RunResult::Rows {
                     columns: page.columns.iter().map(info).collect(),
                     rows,
@@ -1321,7 +1317,7 @@ impl Reports {
                     .setting(&**client, scope, contributions::MAX_GROUPS_KEY)
                     .await?;
                 drop(client);
-                let mut summary = bilibi_grid::summarize(
+                let mut summary = bilibi_grid::report_summary(
                     &self.db,
                     scope,
                     &report.record_type,
@@ -1375,7 +1371,7 @@ impl Reports {
             timezone,
             result,
         };
-        Ok((run, kept))
+        Ok(run)
     }
 
     /// Saves a new report owned by the actor, inside the caller's audited
@@ -1668,7 +1664,7 @@ fn line(out: &mut String, fields: impl IntoIterator<Item = String>) {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/reports", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/records", "base/principal_directory", "base/labels"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/templates", "base/records", "base/principal_directory", "base/labels"],
         migrations: &MIGRATIONS,
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let reports = Arc::new(Reports {
@@ -1683,6 +1679,8 @@ inventory::submit! {
                 authentication: services.get("base/tenancy.authentication")?,
                 mutations: services.get("base/database.mutations")?,
                 mailer: services.get("base/mail.mailer")?,
+                templates: services.get(bilibi_templates::SERVICE)?,
+                locales: services.get("base/locale.locales")?,
                 directory: services.get("base/principal_directory.directory")?,
                 labels: services.get(bilibi_labels::SERVICE)?,
                 origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),

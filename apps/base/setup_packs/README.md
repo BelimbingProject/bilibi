@@ -1,56 +1,45 @@
 # Setup packs
 
-**Use it for:** copying selected label overrides and active custom field definitions between tenants through agent operations.
+**Use it for:** copying selected label overrides, active custom field definitions, shared list views and watcher drafts between tenants through agent operations.
 
-**Not for:** copying records, credentials, grants, approvals, record values, pick-list values, shared views or watchers.
+**Not for:** copying records, credentials, grants, record values, pick-list contents, watcher approvals or run evidence.
 
 ## Transfer setup
 
 | Operation | Tenant | Capability | Result |
 | --- | --- | --- | --- |
-| `base.setup_packs.export` | Source | `base.setup-packs.view` | Select overrides by `{kind, subject}` and fields by `{record_type, key}` to export one pack. |
-| `base.setup_packs.preview` | Destination | `base.setup-packs.view` | Compare the pack to the destination and see the proposed additions and any refusals without changing setup. |
-| `base.setup_packs.apply` | Destination | `base.setup-packs.manage` | Dry-run, review, and commit the unchanged operation to add the reviewed entries in one audited transaction. |
+| `base.setup_packs.export` | Source | `base.setup-packs.view` | Export the selected setup in one versioned pack. |
+| `base.setup_packs.preview` | Destination | `base.setup-packs.view` | Compare with the destination and see proposed additions and any refusals. |
+| `base.setup_packs.apply` | Destination | `base.setup-packs.manage` | Add the reviewed entries in one audited transaction. |
 
-Export also needs each selected owner's view capability (`base.labels.view`, `base.custom-fields.view`). Preview and apply need each included owner's manage capability (`base.labels.manage`, `base.custom-fields.manage`). The authenticated scope identifies the tenant for every call. Export and import use separate connections when the caller has distinct accounts in the two tenants.
+The authenticated scope identifies the tenant. Use a source connection for export and a destination connection for preview and apply.
 
-Choose entries with `base.labels.list` and `base.custom_fields.list`. Export requires each selection to exist as an override or an active definition. Every selection and pack carries at most 100 entries in total. Duplicate stable keys are refused.
+| Setup | Export selection | Source access | Destination access |
+| --- | --- | --- | --- |
+| Labels | `labels` entries of `{kind, subject}` from `base.labels.list` | `base.labels.view` | `base.labels.manage` |
+| Custom fields | `custom_fields` entries of `{record_type, key}` from `base.custom_fields.list` | `base.custom-fields.view` | `base.custom-fields.manage` |
+| Shared views | `views` entries of `{page, id}` from `base.grid.view.pages` | Page access, view visibility and `grid.views.share` | Page access and `grid.views.share` |
+| Watcher drafts | `watchers` IDs from `base.watchers.list` | `admin.watchers.view` and access to the condition fields | `admin.watchers.view`, `admin.watchers.manage` and access to the condition fields |
 
-## Version 2 format
+## Version 3
 
-```json
-{
-  "version": 2,
-  "labels": [
-    {"kind": "menu", "subject": "admin.labels", "label": "Vocabulary"}
-  ],
-  "custom_fields": [
-    {
-      "record_type": "company",
-      "key": "contract_stage",
-      "label": "Contract stage",
-      "help": "The stage of the contract",
-      "kind": "choice",
-      "picklist": "core.document.status",
-      "watcher_condition": false
-    }
-  ]
-}
-```
+A pack has `version: 3` and the four arrays `labels`, `custom_fields`, `views` and `watchers`. At most 100 entries travel in one pack. Export a new pack when using an earlier version.
 
-The labels use the [label owner's stable subject IDs](../labels/README.md). Field definitions use the [custom field owner's field kinds and stable keys](../custom_fields/README.md#behaviour). `help` is optional. `picklist` is required for choice and several-choices fields. `target` is required for reference fields and names a stable record kind. `watcher_condition` carries whether the field is offered to watchers. No watcher or condition using it travels. Tenant and row IDs, edit versions, archived definitions and absolute positions stay with the source; exported field order becomes append order within each destination record type.
-
-Version 1 packs are refused; export a new version 2 pack. Preview takes `{pack, picklist_map?}`. Version 2 maps pick-lists only. Each mapping is `{from, to}` and names a source key used in the pack and an eligible destination key. An unmapped list uses the same stable key. Maintain the destination list's values in [Pick-lists](../picklists/README.md).
+- Labels use the [label owner's stable subject IDs](../labels/README.md). Field definitions use the [custom field owner's field kinds and stable keys](../custom_fields/README.md#behaviour). Field order becomes append order within each destination record type.
+- A view carries `{page, name, view, params, roles}`. The arrangement contains columns, lenses, row height and change-since date. Portable parameters include declared fixed choices, sort and page size. Clear free-text searches and record-specific filters before exporting. An empty `roles` array means everyone. Other audiences carry role keys, with `code:` for system roles and `name:` for custom roles. The destination caller owns the added view.
+- A watcher carries `{name, watch, definition, warnings?}` from its latest unapproved version. It contains authored conditions and declared action parameters. Replace conditions or parameters that identify source records before exporting. The pack omits examples, the source explanation, account IDs, receipts and approval state. A watcher can refer to a custom field supplied by the same pack. An imported watcher must pass the destination's separate approval before it can run.
+- A script step travels with its source, declared fields, calls, lookups, outbound terms and examples, without its source digest (the destination computes it). Export and preview refuse a script with an email address or phone number in its source, examples or fixtures, an example value for a record identifier or personal field, or a lookup input that names a record. They flag each free-text string literal in the source (by line and column), each free-text example or fixture value and each outbound destination by path. Replace source recipients and record data before applying; the destination approves the outbound terms again. Previewing a script needs `watchers.script.execute` to run its examples.
 
 ## Review and apply
 
-- `additions` holds the overrides and definitions that would be added, including destination pick-list keys. Identical entries leave no difference.
-- `collisions` lists a different override at the same subject, or a different or archived definition at the same record type and key. A collision must be resolved before any changes can apply.
-- `missing` identifies unavailable label subjects, record types, destination pick-lists and reference kinds by their keys. Preview reports each unavailable dependency of a field separately. Resolve those dependencies before preview can compare the field with a destination definition or validate the proposed addition.
-- `invalid` lists owner validation failures, including the destination's active-field limit across the proposed additions for each record type.
-- When `ready` is true, copy `expected_additions` from preview into the apply input with the same pack and mapping. Dry-run the apply operation, show the additions and wait for approval before committing the unchanged plan. A new addition discovered after review requires a new preview. An addition another writer already made identically can become a no-op.
-- Apply rechecks the destination and uses the ordinary label set and custom field define paths on the agent plan's transaction. Owner writes and their audit rows commit together. An empty difference writes zero changes, including when retrying an already-applied pack.
+Preview takes `{pack, picklist_map?, role_map?, watcher_examples?}`. Use `picklist_map` entries of `{from, to}` with eligible pick-list keys. Unmapped lists use the same stable key. Use `role_map` entries of `{from, to}` with an exported role key and an existing destination role ID from `base.authz_agent.role.list`. Unmapped system roles match their code. Custom role names require explicit mapping. Maintain the destination role memberships and [pick-list values](../picklists/README.md) through their owners.
 
-The two-tenant proof is registered as `scripts/run-walkthroughs.sh setup-packs`.
+- Supply destination-local examples for new watchers with conditions in `watcher_examples`, keyed by exact watcher name. Each example has a `facts` object and `expect` set to `match` or `no_match`. Export flags free-text condition operands and action inputs. Destination preview recomputes those warnings and identifies each literal by its path. Review the warnings and remove any source record values before applying.
+- `additions` shows what will be added, including mapped pick-list keys and destination view audiences.
+- `collisions` identifies different entries using the same key or name. Archived fields and ambiguous watcher names also collide.
+- `missing` identifies unavailable subjects, record kinds, pick-lists, pages, columns, roles, watcher triggers and actions. `invalid` reports owner validation failures, including capacity limits.
+- When `ready` is true, copy `expected_additions` into apply with the same pack, mappings and destination examples. Dry-run the operation, show the additions and obtain approval before committing the unchanged plan. A newly required addition or changed role binding needs another preview.
+- All additions and their audit rows commit together. The same pack and mappings yield an empty difference when the destination matches, even when retrying the original review.
+- Inspect and reverse a saved view or an initial unapproved watcher draft through Administration → Customisations. Watcher review and approval remain on Watchers.
 
-Part of [#800](https://github.com/BelimbingProject/bilibi/issues/800). See [ADR 33](../../../docs/architecture/decisions/33-pages-for-business-actions-and-customisations.md) for the planned Customisations page.
+The two-tenant walkthroughs are `scripts/run-walkthroughs.sh setup-packs` and `scripts/run-walkthroughs.sh setup-packs-watchers`. See [ADR 33](../../../docs/architecture/decisions/33-pages-for-business-actions-and-customisations.md).

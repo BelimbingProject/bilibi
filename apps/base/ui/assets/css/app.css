@@ -203,6 +203,16 @@
   src: url("/fonts/instrument-sans-variable-italic.woff2") format("woff2");
 }
 
+/* The wordmark's face: the three letters of "bilibi" from Lexend SemiBold
+ * (assets/README.md, Pinned sources). Nothing else uses it. */
+@font-face {
+  font-family: "Bilibi Wordmark";
+  font-style: normal;
+  font-weight: 600;
+  font-display: block;
+  src: url("/fonts/lexend-wordmark.woff2") format("woff2");
+}
+
 /* Semantic color roles — the shared theme rules required by DESIGN.md.
  *
  * Components and templates use these roles (`bg-surface`, `text-ink-muted`,
@@ -476,6 +486,87 @@
   --color-day-holiday-ink: var(--color-orange-300);
 }
 
+/* Adopter accent (`bilibi_ui::Accent`, stamped on <html> as data-accent): an
+ * installation may draw the orientation roles (brand, action, selection) in
+ * one of these palettes instead of lime. A light page keeps the lime steps.
+ * A dark page takes the 400 step for the action and strong roles with dark
+ * text on the button: the 600 step of indigo or violet is too dim to read
+ * as a page heading on the dark canvas. A fixed set: the Content
+ * Security Policy allows no inline style, and none is a status colour.
+ */
+:root[data-accent] {
+  color-scheme: light;
+  --color-action: light-dark(var(--accent-950), var(--accent-400));
+  --color-action-hover: light-dark(var(--accent-600), var(--accent-300));
+  --color-action-ink: light-dark(var(--accent-50), var(--accent-950));
+  --color-brand: light-dark(var(--accent-300), var(--accent-400));
+  --color-brand-surface: light-dark(var(--accent-50), var(--accent-950));
+  --color-brand-strong: light-dark(var(--accent-600), var(--accent-400));
+  --color-brand-ink: light-dark(var(--accent-950), var(--accent-100));
+  --color-selection-line: light-dark(var(--accent-300), var(--accent-800));
+  --color-selection-ink: var(--accent-950);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-accent]:not([data-theme='light']) {
+    color-scheme: dark;
+  }
+}
+
+:root[data-accent][data-theme='dark'] {
+  color-scheme: dark;
+}
+
+:root[data-accent='teal'] {
+  --accent-50: var(--color-teal-50);
+  --accent-100: var(--color-teal-100);
+  --accent-300: var(--color-teal-300);
+  --accent-400: var(--color-teal-400);
+  --accent-600: var(--color-teal-600);
+  --accent-800: var(--color-teal-800);
+  --accent-950: var(--color-teal-950);
+}
+
+:root[data-accent='cyan'] {
+  --accent-50: var(--color-cyan-50);
+  --accent-100: var(--color-cyan-100);
+  --accent-300: var(--color-cyan-300);
+  --accent-400: var(--color-cyan-400);
+  --accent-600: var(--color-cyan-600);
+  --accent-800: var(--color-cyan-800);
+  --accent-950: var(--color-cyan-950);
+}
+
+:root[data-accent='indigo'] {
+  --accent-50: var(--color-indigo-50);
+  --accent-100: var(--color-indigo-100);
+  --accent-300: var(--color-indigo-300);
+  --accent-400: var(--color-indigo-400);
+  --accent-600: var(--color-indigo-600);
+  --accent-800: var(--color-indigo-800);
+  --accent-950: var(--color-indigo-950);
+}
+
+:root[data-accent='violet'] {
+  --accent-50: var(--color-violet-50);
+  --accent-100: var(--color-violet-100);
+  --accent-300: var(--color-violet-300);
+  --accent-400: var(--color-violet-400);
+  --accent-600: var(--color-violet-600);
+  --accent-800: var(--color-violet-800);
+  --accent-950: var(--color-violet-950);
+}
+
+:root[data-accent='fuchsia'] {
+  --accent-50: var(--color-fuchsia-50);
+  --accent-100: var(--color-fuchsia-100);
+  --accent-300: var(--color-fuchsia-300);
+  --accent-400: var(--color-fuchsia-400);
+  --accent-600: var(--color-fuchsia-600);
+  --accent-800: var(--color-fuchsia-800);
+  --accent-950: var(--color-fuchsia-950);
+}
+
 [data-phx-session],
 [data-phx-teleported-src] {
   display: contents;
@@ -491,6 +582,93 @@ body {
   font-size: var(--text-sm);
   line-height: var(--text-sm--line-height);
   min-width: 20rem;
+}
+
+/* The Bilibi wordmark (the `wordmark` macro in templates/components.html):
+ * the mark, then "bilibi" in lowercase, on one line. Everything follows the
+ * one font size its size class sets, so the mark and the gap keep their
+ * proportion to the name wherever it is drawn. */
+.ui-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  color: var(--color-ink-strong);
+  font-family: "Bilibi Wordmark", var(--font-sans);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.015em;
+  white-space: nowrap;
+}
+
+.ui-wordmark > img {
+  width: 1.08em;
+  height: 1.08em;
+  flex: none;
+  object-fit: contain;
+}
+
+.ui-wordmark-bar {
+  font-size: 1.125rem;
+}
+
+@media (width < 40rem) {
+  .ui-wordmark-bar {
+    font-size: 0.8125rem;
+  }
+}
+
+.ui-wordmark-credential {
+  font-size: 2rem;
+}
+
+/* An installation's own brand in the wordmark's place (`Brand::custom`): its
+ * logo at the line's height, whatever its shape, then its name in the
+ * interface face. A long name is cut with an ellipsis in the top bar and
+ * wraps under the logo on a credential page; neither widens its page. */
+.ui-wordmark-own {
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--font-sans);
+  letter-spacing: -0.01em;
+}
+
+.ui-wordmark-own > img {
+  width: auto;
+  max-width: 8em;
+  height: 1.3em;
+}
+
+.ui-wordmark-own > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ui-wordmark-bar.ui-wordmark-own {
+  max-width: 16rem;
+  font-size: 0.875rem;
+}
+
+@media (width < 40rem) {
+  .ui-wordmark-bar.ui-wordmark-own {
+    max-width: 9rem;
+    font-size: 0.8125rem;
+  }
+}
+
+.ui-wordmark-credential.ui-wordmark-own {
+  flex-direction: column;
+  gap: 0.5rem;
+  font-size: 1.5rem;
+  line-height: 1.25;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ui-wordmark-credential.ui-wordmark-own > img {
+  max-width: min(100%, 15rem);
+  height: 3rem;
 }
 
 /* The shared button is one size everywhere: 24 px with 8 px side padding
@@ -682,6 +860,11 @@ body:has(dialog:modal) #flash-group > #connection-server-error {
     }
   }
 }
+
+/* Keep the horizontal scroll affordance visible against the table surface. */
+.flex-table [data-viewport]::-webkit-scrollbar:horizontal { height: 12px; }
+.flex-table [data-viewport]::-webkit-scrollbar-track:horizontal { background: var(--color-surface-sunken); }
+.flex-table [data-viewport]::-webkit-scrollbar-thumb:horizontal { background: var(--color-ink-subtle); border: 3px solid var(--color-surface-sunken); border-radius: 6px; }
 
 /* The notch of an unframed `flex_table/1` is placed its own height (`h-3.5`)
  * above the table, out of flow, so that it stands on the page body rather

@@ -13,6 +13,10 @@ with the registry's `Contribution` and source `Provenance`. No central host list
 or module-specific endpoint is needed. [src/reference.rs](src/reference.rs) is a
 complete non-business contribution example.
 
+A reviewed write handler can declare `local_script_action` if its effects stay within the installation. One that sends data outside declares `outbound` instead (an `Outbound`: what the destination is and every data field it can send) and implements `resolve_outbound`, which returns the `OutboundSend` (destination and data fields) this input would send, read under the same lock its `commit` takes. An action is one or the other, never both. Watchers also requires the owner’s registered Watcher action and checks its normal contract and permissions.
+
+An approved tenant script validates its complete selection through `Registry::preview_script_calls` before the first effect and applies it through `commit_script_calls` on the caller's existing `MutationTransaction`. Each call is a `ScriptCall` (operation, input and the approved `OutboundTerms` when its owner is outbound). Both methods admit only `local_script_action` owners and `outbound` owners whose resolved send stays within those terms (the same destination, no data field beyond them), checking again right before each commit; otherwise they refuse with `script_outbound_refused`. Queued runs that commit through the job door call `check_outbound_call` on the action's transaction before the commit. Both methods reject step-up and unavailable channels, and repeat each operation's schema, capability, preview and owner commit checks. Script engines never call a handler directly or open one transaction per selected action.
+
 Keys start with the contributing module ID with `/` changed to `.`. Operations
 need an additional segment; guides may use the module prefix itself. Keys must
 be unique across operations and guides. Discovery rejects malformed metadata,
@@ -43,6 +47,8 @@ or cache reach across requests.
 **Doors release the capability-check connection before dispatch.** The `/api/v1`, MCP and page doors call `Registry::read(db, scope, key, input)`. The handler's `OperationClient` takes one connection on its first query and keeps it until the read ends. A handler that only calls its facade (Base Search, Base Records) takes none. A handler that requires a transaction declares `ReadHandler::requires_transaction`. The registry supplies one on the read connection. Normal owner refusals retain authorization decisions, while infrastructure failures roll back. MCP's `Session` carries the pool, and `search`, `describe` and `guide` each take a connection for that call only.
 
 `Registry::call(&mut client, scope, key, input)` and `JobContracts::read(&mut client, execution, key, input)` reuse the caller's connection and open a transaction only when the handler requires one. A read handler that gathers other owners' reads calls `Registry::call_on(client, scope, key, input)` with the `OperationClient` it was handed: the same admission and logged capability decision on that one connection, for direct reads. Transaction-required handlers use `Registry::call_in`. [Customisation discovery](../labels/README.md#what-can-be-changed-agents) is the first caller. `Registry::call_in(tx, scope, key, input)` runs the same checks and handler on an existing transaction, with the caller responsible for completion.
+
+A bounded simulation can call `JobContracts::preview_principal` with a freshly authenticated system-principal scope. It checks that the principal is admitted to the job action, validates the input and capability, and calls the same owner preview in the caller’s transaction. The caller owns transaction completion and recovery. The caller must apply its reader's record and field access before returning any evidence, and must not expose an owner preview body that the reader cannot see. Watcher trials use this contract and require detached read dispatch through `Registry::read`.
 
 On `Backend(UnrecoveredTransaction)`, a caller supplying the connection follows [Database's connection recovery contract](../database/README.md#transaction-continuations). The registry and plan service discard the connections they own. Job preview bounds its rollback attempt before returning that error, and job commit marks the caller's transaction poisoned if the owner preview returns it.
 
@@ -324,7 +330,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, SERVICE, provenance!(), &Pag
 }) }
 ```
 
-- **Boot.** Module Registry refuses a malformed declaration (a service of another module, an event named twice, an allowance without a reason). `PageContracts` refuses a contract that is not a registered write, and a service no route or embed serves.
+- **Boot.** Module Registry refuses a malformed declaration (a service of another module, a duplicate contract or allowance, an allowance without a reason). `PageContracts` refuses a contract that is not a registered write, and a service no route or embed serves.
 - **Every live event.** The host dispatches a page or panel event under the permit its declaration gives (`bilibi_database::page_write`). `MutationBoundary::begin` then refuses a business transaction the permit does not cover: only the event's contracts (marked by `PageContracts`), or anything for an event listed as pending. An undeclared service or event may write nothing. The refusal is `Error::Internal`, logged with the service, event and action.
 - **The call.** `PageContracts` refuses a contract the page did not declare for that event.
 - A person's own view state (list columns, dashboard arrangement, theme, pins) is not business data: its owner opens `MutationBoundary::begin_view_state`, which the check leaves alone.
@@ -332,7 +338,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, SERVICE, provenance!(), &Pag
 
 ### Allowance: pages not yet migrated
 
-Each gap is a `Pending` declaration in the owning module, with its reason. Remove it when the event calls its contract. `grep -rn "Pending::Every\|Pending::Events" apps` lists them.
+Each gap is a `Pending` declaration in the owning module, with its reason. A form that saves several values may list its migrated contracts and keep an explicit `Pending::Events` allowance for writes still handled by its facade. Remove the allowance once the remaining writes use contracts. `grep -rn "Pending::Every\|Pending::Events" apps` lists them.
 
 | Service | Why it is pending |
 |---|---|
@@ -345,7 +351,6 @@ Each gap is a `Pending` declaration in the owning module, with its reason. Remov
 | `base/session.pages` | Ending sessions |
 | `base/settings_editor.pages` | Saving and restoring settings |
 | `base/system.pages` | Localization changes |
-| `base/tiling.pages` | Workspace and shared layouts |
 | `base/workflow.pages` | The workflow reference page |
 | `core/agent.pages` | Device approval and connection revocation |
 | `core/company.pages` | Company edits, lifecycle, activities, departments, reference types; the create form records activities `core.company.create` does not take |

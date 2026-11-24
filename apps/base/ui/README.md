@@ -18,6 +18,10 @@ List toolbars put search first and filter boxes to its right, and on a phone fol
 
 Page headers include a pin for the current address in signed-in pages, including workspace tiles. The shell keeps its state with the account. Dialogs do not show it.
 
+Opening a record from a `FlexTable` carries the grid path and query into the record page when a record opens in the same tab or tile as the grid. `BackLink` restores that address when it matches the link’s same-origin destination. Page pins and workspace layouts omit the grid return address.
+
+`StepUpGate` is the host-owned cover for a page or action that still owes 2FA. It embeds only the factor provider's prompt over shared skeleton placeholders; the protected page owner is not rendered until proof succeeds. `Page::step_up_title` may retain a route-specific title only from route parameters, never a protected read. Its browser hook moves focus into the prompt, traps Tab there and lets Escape leave the page.
+
 ## Phone lists and header actions
 
 Header action labels and row-link touch targets follow [DESIGN.md’s record-page](../../../DESIGN.md#record-pages) and [list rules](../../../DESIGN.md#lists).
@@ -71,9 +75,20 @@ let reading = Html::render(&Markdown::new(&stored_source))?;
 
 The running specimen at `/assets/ui-components.html#specimen-markdown` pairs the reading view with an ordinary textarea and includes literal HTML, unsafe links, images and plain text.
 
+## Wordmark and credential pages
+
+`ui::wordmark` draws the [installation wordmark](../branding/README.md#where-it-shows).
+
+- **Brand:** pass the `Brand` the host put on the layout (`ShellContext::brand`, `AuthLayout::brand`). `Brand::default()` is Bilibi's own. [Branding](../branding/README.md) owns the settings behind it; `Document` uses the same brand for the tab title, the tab icon and the accent.
+
+- **Sizes:** `WordmarkSize::Bar` for the workspace top bar, with a smaller one-line wordmark below `sm`. Use `WordmarkSize::Credential` above a credential card.
+- **Link:** pass the home or dashboard address as `href`. The `label` says where it goes after the brand's name ("home", "dashboard") for assistive technology.
+- **Font:** `static/fonts/lexend-wordmark.woff2` holds only the letters b, i and l. See [assets](assets/README.md#pinned-sources-and-licenses).
+- **Credential pages:** `AuthLayout` wraps one card body with the wordmark and instance badge. On sign-in, the installation owner's company (`LoginWorkspace`) appears between them. Card bodies use the macros in `templates/credential.html` (`heading`, `link`, `back`).
+
 ## Signed-in standalone reviews
 
-Return `PageChrome::StandaloneReview` from a page operation that needs the signed-in credential layout instead of the workspace shell. Web keeps the normal route guard, session binding, CSRF and live transport, then `StandaloneReview` draws the Bilibi mark, the installation banner and one review card. OAuth consent is the running use. The page supplies only the card body; it never draws its own logo, instance banner or shell.
+Return `PageChrome::StandaloneReview` from a page operation that needs the signed-in credential layout instead of the workspace shell. Web keeps the normal route guard, session binding, CSRF and live transport, then `StandaloneReview` draws the wordmark, the installation banner and one review card. OAuth consent is the running use. The page supplies only the card body; it never draws its own logo, instance banner or shell.
 
 ## Embedded application frames
 

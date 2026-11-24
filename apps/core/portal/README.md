@@ -25,8 +25,13 @@ The [capability rename migration](migrations/009-capability-rename.sql) updates 
 - Changing the address breaks links already emailed.
 - **Off until staff turn it on** (`enabled`, issue 137 behaviour 1). While off, its anonymous pages answer 404 (`portal_site` returns `None`), its signed-in customers' pages, downloads and live socket answer 404 (the host checks `site_of`), and no invitation is sent or redeemed.
 
+## Welcome notice
+
+The signed-in home page renders `core.portal.welcome_notice` through [Base Templates](../../base/templates/README.md#word-a-portal-notice). The customer's own company or tenant can choose the language and publish wording through the template operations. The text can name the portal and the customer's sign-in address. Administrators inspect, preview and restore published wording on **Administration → Customisations**.
+
 ## Invitations
 
+- Configure the public listener for the workspace before inviting customers. Invitation, registration verification and customer password reset links use its public origin.
 - Staff invite a **Person**, optionally through one of its **affiliations** (a business customer, signing in for that company); without one the customer is a private individual.
 - The invite dialog finds the Person by name on the server (`base/records` search, with the actor's permission to see people), so any number of people can be invited. An agent Person is refused: agents act through Agent Access, never the portal.
 - The address must not already belong to a customer of the tenant. Inviting it again revokes the open invitation first.
@@ -66,9 +71,9 @@ The [capability rename migration](migrations/009-capability-rename.sql) updates 
 
 ## Second sign-in step
 
-- A tenant turns on the step-up operation `core.user.portal_sign_in` (default off, on its 2FA requirements page) to ask customers for an authenticator code after the password. The portal sign-in then sends the customer to `/portal/sign-in/{site}/challenge` (the host's page; the pending sign-in is kept in the `bilibi_portal_sign_in` cookie, `Path=/portal/sign-in`), where they start the challenge and enter the code, or cancel. Core User proves the code and admits the session as for staff (`portal_pending_sign_in`, `portal_start_sign_in_challenge`, `portal_complete_sign_in`).
+- A tenant turns on the step-up operation `core.user.portal_sign_in` (default off, on its 2FA requirements page) to ask customers for an authenticator code after the password. The portal sign-in then sends the customer to `/portal/sign-in/{site}/challenge` (the host's page; the pending sign-in is kept in the public host's `__Host-bilibi_portal_sign_in` cookie), where they start the challenge and enter the code, or cancel. Core User proves the code and admits the session as for staff (`portal_pending_sign_in`, `portal_start_sign_in_challenge`, `portal_complete_sign_in`).
 - **Step-up on a portal page.** A portal route wrapped in `Access::StepUp`, or a portal owner's facade that calls `StepUp::require` with the customer's scope, works as on the staff side: the host sends a customer who owes the check to `/portal/account/two-factor/confirm?return=<address>` (`bilibi_user::PortalConfirm`: "Confirm it is you", a code from the authenticator app), which opens the portal session's step-up window and returns to the page. A customer with no authenticator goes to `/portal/account/two-factor?return=<address>` instead, and setting it up returns the same way. `return` is kept only when it is a portal address: a dot segment or an encoded slash is dropped, since it could resolve outside the portal. Whether an operation asks is the tenant's policy on its Step-up 2FA page; a Domain declares the operation and returns `Error::StepUpRequired` unchanged.
-- A customer sets up the authenticator app on `/portal/account/two-factor` (linked from My account): the staff page's stages (password, QR code and key, first code, move to a new phone) drawn without the settings shell (`bilibi_user::PortalTwoFactor`). A customer who never set one up cannot finish a sign-in while the tenant asks for it; staff reset the factor as for staff.
+- A customer sets up the authenticator app on `/portal/account/two-factor` (linked from My account): the staff page's stages (password, QR code and key, first code, move to a new phone) drawn without the settings shell (`bilibi_user::PortalTwoFactor`). A customer who never set one up cannot finish a sign-in while the tenant asks for it; after a lost phone, the customer should contact their portal administrator for help.
 
 ## Delivery of the invitation email
 

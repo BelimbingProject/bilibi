@@ -190,8 +190,8 @@ async fn erase_rows(
     let keys: Vec<(i64, Option<i64>)> = rows.iter().map(|row| (row.get(0), row.get(1))).collect();
     let ids: Vec<i64> = keys.iter().map(|(id, _)| *id).collect();
     let people: Vec<i64> = keys.iter().filter_map(|(_, person)| *person).collect();
-    let record_holds = holds.records(grant, KIND, &ids).await?;
-    let person_holds = holds.persons(grant, &people).await?;
+    let record_holds = holds.records(tx.sql(), grant, KIND, &ids).await?;
+    let person_holds = holds.persons(tx.sql(), grant, &people).await?;
     let mut erased = Erased::default();
     let mut due = Vec::new();
     let mut persons = BTreeMap::new();

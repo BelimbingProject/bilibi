@@ -75,6 +75,10 @@ pub trait OperationClient: bilibi_tenancy::ReadClient {
     fn transaction(&self) -> Option<&tokio_postgres::Transaction<'_>> {
         None
     }
+    /// Whether dispatch released its admission connection before calling this read.
+    fn detached_read(&self) -> bool {
+        false
+    }
     fn reserve_preview_value(&self, _namespace: &'static str, _value: &str) -> bool {
         true
     }
@@ -158,6 +162,9 @@ impl bilibi_tenancy::ReadClient for Pooled<'_> {
     }
 }
 impl OperationClient for Pooled<'_> {
+    fn detached_read(&self) -> bool {
+        self.connection.get().is_none()
+    }
     fn sql_client(&self) -> bilibi_tenancy::ProofFuture<'_, &tokio_postgres::Client> {
         Box::pin(async move { Ok(&***self.connection().await?) })
     }
@@ -191,6 +198,48 @@ pub enum Kind {
     Read,
     Write,
 }
+/// What an outbound write can send outside the installation, declared by its
+/// owner. Approval of a tenant script names one destination and a subset of
+/// `data`; every run checks the resolved send against those terms.
+pub struct Outbound {
+    /// What the destination is, as a reviewer reads it ("Partner desk address").
+    pub destination: &'static str,
+    /// Every data field this write can send.
+    pub data: &'static [&'static str],
+}
+
+/// The destination and data fields one input would send now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundSend {
+    pub destination: String,
+    pub data: Vec<String>,
+}
+
+/// Approved terms for one outbound operation: the one destination and the
+/// data fields it may send.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboundTerms {
+    pub destination: String,
+    pub data: Vec<String>,
+}
+
+impl OutboundTerms {
+    /// Whether a resolved send stays inside these terms: the same destination
+    /// and no data field beyond the approved ones.
+    pub fn admit(&self, send: &OutboundSend) -> bool {
+        send.destination == self.destination
+            && send.data.iter().all(|field| self.data.contains(field))
+    }
+}
+
+pub type OutboundFuture<'a> = Pin<Box<dyn Future<Output = Result<OutboundSend>> + Send + 'a>>;
+
+/// The refusal for a send outside its approved terms (or with none).
+pub fn outbound_refused() -> Error {
+    Error::PlanRejected(json!({"reason": "script_outbound_refused"}))
+}
+
 /// Read handlers receive the owner's scoped facade boundary, never untrusted
 /// identity fields. They must apply owner authorization and field restrictions.
 pub trait ReadHandler: Send + Sync {
@@ -210,6 +259,29 @@ pub trait ReadHandler: Send + Sync {
 /// them, enforce owner field policy, and record every mutation through the
 /// supplied transaction. Never open or commit a separate transaction.
 pub trait WriteHandler: Send + Sync {
+    fn local_script_action(&self) -> bool {
+        false
+    }
+
+    /// An owner whose write sends data outside the installation declares it
+    /// here; a tenant script may then select it only under approved terms.
+    fn outbound(&self) -> Option<&'static Outbound> {
+        None
+    }
+
+    /// Where this input would send and which data fields, resolved now on the
+    /// caller's transaction under the lock `commit` takes, so the check and
+    /// the send see the same destination. Only an [`WriteHandler::outbound`]
+    /// owner is asked; the default fails closed.
+    fn resolve_outbound<'a>(
+        &'a self,
+        _client: &'a dyn OperationClient,
+        _scope: &'a Scope,
+        _input: &'a Value,
+    ) -> OutboundFuture<'a> {
+        Box::pin(async { Err(Error::ChannelNotAllowed) })
+    }
+
     fn check_review_draft<'a>(
         &'a self,
         _client: &'a dyn OperationClient,
@@ -601,7 +673,142 @@ impl RegisteredDefinitions {
         Ok(result)
     }
 }
+/// One write a tenant script selected, with the approved outbound terms when
+/// its owner declares it outbound.
+pub struct ScriptCall {
+    pub key: String,
+    pub input: Value,
+    pub terms: Option<OutboundTerms>,
+}
+
 impl Registry {
+    /// Preview every write selected by an approved tenant script, without
+    /// changing business data. Script callers may reach only operations whose
+    /// owners explicitly declared `local_script_action`, or `outbound` under
+    /// approved terms checked against the resolved send; ordinary channel,
+    /// schema and capability checks still apply to the current caller.
+    pub async fn preview_script_calls(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+        calls: &[ScriptCall],
+    ) -> Result<Vec<Value>> {
+        let reservations = PreviewReservations::default();
+        let mut previews = Vec::with_capacity(calls.len());
+        for ScriptCall { key, input, terms } in calls {
+            let registered = self
+                .operations
+                .get(key.as_str())
+                .ok_or(Error::UnknownOperation)?;
+            let operation = registered.definition;
+            let Handler::SafeWrite(owner) = operation.handler else {
+                return Err(Error::WritesNotEnabled);
+            };
+            if !(owner.local_script_action() || owner.outbound().is_some())
+                || !operation.step_up.is_empty()
+                || !operation.channels.allows(scope.channel())
+            {
+                return Err(Error::ChannelNotAllowed);
+            }
+            schema::validate(&registered.input, input).map_err(Error::InvalidInput)?;
+            authorize_target(tx, scope, operation.capability, input).await?;
+            let client = TransactionRead(tx, &reservations);
+            let send = Self::check_outbound(owner, &client, scope, input, terms.as_ref()).await?;
+            let mut preview = owner.preview(&client, scope, input).await?.envelope(key);
+            if let Some(send) = send {
+                preview["meta"]["outbound"] = json!(send);
+            }
+            previews.push(preview);
+        }
+        Ok(previews)
+    }
+
+    /// Commit a complete, already-selected tenant-script plan on the caller's
+    /// mutation transaction. The whole plan is previewed before its first
+    /// effect, then every owner commits on that same transaction.
+    pub async fn commit_script_calls(
+        &self,
+        tx: &mut bilibi_database::MutationTransaction<'_>,
+        scope: &Scope,
+        calls: &[ScriptCall],
+    ) -> Result<Vec<Value>> {
+        self.preview_script_calls(tx.sql(), scope, calls).await?;
+        let mut results = Vec::with_capacity(calls.len());
+        for ScriptCall { key, input, terms } in calls {
+            let registered = self
+                .operations
+                .get(key.as_str())
+                .ok_or(Error::UnknownOperation)?;
+            let Handler::SafeWrite(owner) = registered.definition.handler else {
+                return Err(Error::WritesNotEnabled);
+            };
+            // An earlier step of this plan may have changed what this one
+            // resolves to: check again right before its own commit.
+            let reservations = PreviewReservations::default();
+            Self::check_outbound(
+                owner,
+                &TransactionRead(tx.sql(), &reservations),
+                scope,
+                input,
+                terms.as_ref(),
+            )
+            .await?;
+            results.push(owner.commit(tx, scope, input).await?.envelope(key));
+        }
+        Ok(results)
+    }
+
+    /// The owner's outbound declaration for an operation, if it sends data
+    /// outside the installation.
+    pub fn outbound(&self, key: &str) -> Option<&'static Outbound> {
+        match self.operations.get(key)?.definition.handler {
+            Handler::SafeWrite(owner) => owner.outbound(),
+            _ => None,
+        }
+    }
+
+    /// Check one outbound call against its approved terms on the caller's
+    /// connection (its transaction, right before its commit): refused without terms, or when the
+    /// owner resolves another destination or a field beyond them. A local
+    /// operation passes with `None`.
+    pub async fn check_outbound_call(
+        &self,
+        client: &dyn OperationClient,
+        scope: &Scope,
+        key: &str,
+        input: &Value,
+        terms: Option<&OutboundTerms>,
+    ) -> Result<Option<OutboundSend>> {
+        let registered = self.operations.get(key).ok_or(Error::UnknownOperation)?;
+        let Handler::SafeWrite(owner) = registered.definition.handler else {
+            return Err(Error::WritesNotEnabled);
+        };
+        Self::check_outbound(owner, client, scope, input, terms).await
+    }
+
+    async fn check_outbound(
+        owner: &dyn WriteHandler,
+        client: &dyn OperationClient,
+        scope: &Scope,
+        input: &Value,
+        terms: Option<&OutboundTerms>,
+    ) -> Result<Option<OutboundSend>> {
+        let Some(declared) = owner.outbound() else {
+            return Ok(None);
+        };
+        let terms = terms.ok_or_else(outbound_refused)?;
+        let send = owner.resolve_outbound(client, scope, input).await?;
+        if !terms.admit(&send)
+            || !send
+                .data
+                .iter()
+                .all(|field| declared.data.contains(&field.as_str()))
+        {
+            return Err(outbound_refused());
+        }
+        Ok(Some(send))
+    }
+
     /// The app entries alone: shape and uniqueness. Whether each names a
     /// read operation of its own module is checked with the operations in
     /// `from_catalog`.

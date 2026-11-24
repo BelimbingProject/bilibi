@@ -10,6 +10,7 @@ jsonwebtoken.workspace = true
 url.workspace = true
 bilibi-integration.workspace = true
 bilibi-agent-api.workspace = true
+bilibi-labels.workspace = true
 bilibi-audit.workspace = true
 bilibi-menu = { path = "../../base/menu" }
 bilibi-grid = { path = "../../base/grid" }
@@ -40,6 +41,7 @@ bilibi-ui.workspace = true
 askama.workspace = true
 serde.workspace = true
 bilibi-mail = { path = "../../base/mail" }
+bilibi-templates.workspace = true
 bilibi-media.workspace = true
 bilibi-settings = { path = "../../base/settings" }
 bilibi-session.workspace = true

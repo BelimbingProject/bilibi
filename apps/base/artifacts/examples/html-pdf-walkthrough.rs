@@ -232,12 +232,14 @@ async fn count(client: &Client) -> Result<i64> {
         .await?;
     Ok(row.get(0))
 }
-async fn get(port: u16, path: &str) -> Result<String> {
+async fn get(port: u16, host_port: u16, path: &str) -> Result<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
     stream
         .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-                .as_bytes(),
+            format!(
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{host_port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
         )
         .await?;
     let mut response = Vec::new();
@@ -280,8 +282,6 @@ async fn main() -> Result<()> {
     )?;
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
-    let app = bilibi_web::App::new(db.clone(), "http://127.0.0.1")?;
-    let store = app.services.get::<Artifacts>("base/artifacts.store")?;
     // Three consecutive free ports; pick a base outside the ephemeral range.
     let base: u16 = std::env::var("BILIBI_PDF_DEMO_PORT")
         .ok()
@@ -289,11 +289,15 @@ async fn main() -> Result<()> {
         .unwrap_or(48210);
     let listener = TcpListener::bind(("127.0.0.1", base)).await?;
     let app_port = listener.local_addr()?.port();
-    let router = bilibi_web::router(app.clone());
-    tokio::spawn(async move { axum::serve(listener, router).await });
     let wire = Arc::new(Mutex::new(Wire::default()));
     let proxy_port = proxy(base + 1, app_port, wire.clone(), db.clone()).await?;
     let (probe_port, hits) = probe(base + 2).await?;
+    // The reverse proxy preserves its browser-facing authority for the exact Host guard.
+    let origin = format!("http://127.0.0.1:{proxy_port}");
+    let app = bilibi_web::App::new(db.clone(), &origin)?;
+    let store = app.services.get::<Artifacts>("base/artifacts.store")?;
+    let router = bilibi_web::staff_router(app.clone());
+    tokio::spawn(async move { axum::serve(listener, router).await });
     println!("app :{app_port}, browser-facing proxy :{proxy_port}, hostile probe :{probe_port}");
 
     let authentication = app
@@ -414,17 +418,23 @@ async fn main() -> Result<()> {
     println!("== route behaviour (token path is not printed)");
     println!(
         "replay of the used token: {}",
-        get(app_port, &token_path).await?
+        get(app_port, proxy_port, &token_path).await?
     );
     let mut forged = token_path.clone();
     forged.pop();
     forged.push(if token_path.ends_with('A') { 'B' } else { 'A' });
-    println!("altered signature: {}", get(app_port, &forged).await?);
+    println!(
+        "altered signature: {}",
+        get(app_port, proxy_port, &forged).await?
+    );
     println!(
         "unsigned id only: {}",
-        get(app_port, "/pdf/render/abc").await?
+        get(app_port, proxy_port, "/pdf/render/abc").await?
     );
-    println!("no token: {}", get(app_port, "/pdf/render/").await?);
+    println!(
+        "no token: {}",
+        get(app_port, proxy_port, "/pdf/render/").await?
+    );
     println!(
         "serve_render(garbage): {}",
         matches!(store.serve_render("x.y").await, Served::NotFound)

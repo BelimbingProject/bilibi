@@ -628,6 +628,23 @@ fn defects() -> Result<(), Box<dyn std::error::Error>> {
             links: &[]
         }
     );
+    static SUBJECT: TableDecl = TableDecl::new(
+        "t_subject",
+        "Subject",
+        "grid.reference.view",
+        Source::tenant("SELECT id FROM base_grid_ref_groups WHERE tenant_id = $1"),
+        "id",
+        &[Field::new("id", "ID", T::Integer)],
+    )
+    .subject("id", "reference_item");
+    defect!(
+        "subject that names the key",
+        GridContribution {
+            record_fields: &[],
+            tables: std::slice::from_ref(&SUBJECT),
+            links: &[]
+        }
+    );
     // An undeclared capability is a boot-time check against the Authz vocabulary.
     static GHOST: TableDecl = TableDecl::new(
         "t_ghost",

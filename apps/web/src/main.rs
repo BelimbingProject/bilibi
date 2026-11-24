@@ -1,8 +1,14 @@
 use bilibi_database::{pool, Error, Result};
+use std::future::IntoFuture;
 use std::io::IsTerminal;
 use std::sync::Arc;
+fn main() -> Result<()> {
+    bilibi_base::watchers::enter_worker();
+    serve()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn serve() -> Result<()> {
     bilibi_web::verify_descriptors()?;
     // What this program is made of needs no database (docs/versions.md).
     if std::env::args().nth(1).as_deref() == Some("status") {
@@ -63,6 +69,18 @@ async fn main() -> Result<()> {
         Some("two-factor-reset") => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             bilibi_web::two_factor_reset(&db, &args).await?;
+        }
+        Some("identity-recover") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            bilibi_web::recover_identity(&db, &args).await?;
+        }
+        Some("identity-delete") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            bilibi_web::delete_identity(&db, &args).await?;
+        }
+        Some("identity-retention") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            bilibi_web::retain_identities(&db, &args).await?;
         }
         Some(command @ ("tenant-provision" | "platform-provision")) => {
             let args: Vec<String> = std::env::args().skip(2).collect();
@@ -142,6 +160,43 @@ async fn main() -> Result<()> {
             let origin =
                 std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into());
             let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".into());
+            let public_site = match (
+                std::env::var("PUBLIC_ORIGIN").ok(),
+                std::env::var("PUBLIC_BIND_ADDR").ok(),
+                std::env::var("PUBLIC_TENANT_ID").ok(),
+            ) {
+                (Some(origin), Some(bind), Some(tenant)) => {
+                    let tenant =
+                        tenant
+                            .parse::<i64>()
+                            .ok()
+                            .filter(|id| *id > 0)
+                            .ok_or_else(|| {
+                                eprintln!("PUBLIC_TENANT_ID must be a positive tenant ID");
+                                Error::Invalid
+                            })?;
+                    Some((origin, bind, tenant))
+                }
+                (None, None, None) => None,
+                _ => {
+                    eprintln!(
+                        "PUBLIC_ORIGIN, PUBLIC_BIND_ADDR and PUBLIC_TENANT_ID must be set together"
+                    );
+                    return Err(Error::Invalid);
+                }
+            };
+            if public_site
+                .as_ref()
+                .is_some_and(|(public_origin, public_bind, _)| {
+                    public_bind == &bind
+                        || origin_host(public_origin)
+                            .zip(origin_host(&origin))
+                            .is_none_or(|(public, staff)| public.eq_ignore_ascii_case(&staff))
+                })
+            {
+                eprintln!("The public site must use a different hostname and bind address from the staff site");
+                return Err(Error::Invalid);
+            }
             let mut app = bilibi_web::App::new(db, &origin)?;
             match app
                 .services
@@ -170,6 +225,23 @@ async fn main() -> Result<()> {
             let listener = tokio::net::TcpListener::bind(&bind)
                 .await
                 .map_err(|_| Error::Internal)?;
+            let public = if let Some((public_origin, public_bind, tenant)) = &public_site {
+                let public = app.clone().at_public_site(public_origin, *tenant);
+                match public.secure_origin().await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        eprintln!("PUBLIC_ORIGIN must use HTTPS. Only a Dev copy on this computer may use HTTP on a loopback address.");
+                        return Err(Error::Invalid);
+                    }
+                    Err(error) => return Err(error),
+                }
+                let listener = tokio::net::TcpListener::bind(public_bind)
+                    .await
+                    .map_err(|_| Error::Internal)?;
+                Some((public, listener, public_origin.clone(), public_bind.clone()))
+            } else {
+                None
+            };
             // Colour only on a terminal without NO_COLOR, so logs and services stay plain.
             let colour = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
             if let Some(seconds) = launcher_start_seconds() {
@@ -183,6 +255,13 @@ async fn main() -> Result<()> {
                 println!("\x1b[1;32mBilibi listening at \x1b[4m{origin}\x1b[0m");
             } else {
                 println!("Bilibi listening at {origin}");
+            }
+            if let Some((_, _, public_origin, _)) = &public {
+                if colour {
+                    println!("\x1b[1;32mPublic site listening at \x1b[4m{public_origin}\x1b[0m");
+                } else {
+                    println!("Public site listening at {public_origin}");
+                }
             }
             app.listen_address = Some(listen_host(&bind).into());
             let executor = bilibi_base::queue::Executor::from_services(
@@ -211,19 +290,51 @@ async fn main() -> Result<()> {
             let worker = tokio::spawn(executor.run(stopped.clone()));
             let readers = tokio::spawn(residents.run(stopped.clone()));
             let ticker = tokio::spawn(scheduler.run(stopped));
-            let shutdown = stop.clone();
-            // The peer address feeds the OAuth per-sender throttle.
-            let result = axum::serve(
-                listener,
-                bilibi_web::router(app)
-                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .with_graceful_shutdown(async move {
+            let signal = stop.clone();
+            tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;
-                let _ = shutdown.send(true);
-            })
-            .await
-            .map_err(|_| Error::Internal);
+                let _ = signal.send(true);
+            });
+            let mut staff_stopped = stop.subscribe();
+            // The peer address feeds the OAuth per-sender throttle.
+            let mut staff_server = Box::pin(
+                axum::serve(
+                    listener,
+                    bilibi_web::staff_router(app)
+                        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(async move {
+                    while !*staff_stopped.borrow() && staff_stopped.changed().await.is_ok() {}
+                })
+                .into_future(),
+            );
+            let result = if let Some((public_app, public_listener, _, _)) = public {
+                let mut public_stopped = stop.subscribe();
+                let mut public_server = Box::pin(
+                    axum::serve(
+                        public_listener,
+                        bilibi_web::public_router(public_app)
+                            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(async move {
+                        while !*public_stopped.borrow() && public_stopped.changed().await.is_ok() {}
+                    })
+                    .into_future(),
+                );
+                let (first, staff_finished) = tokio::select! {
+                    result = &mut staff_server => (result, true),
+                    result = &mut public_server => (result, false),
+                };
+                let _ = stop.send(true);
+                if staff_finished {
+                    let _ = public_server.await;
+                } else {
+                    let _ = staff_server.await;
+                }
+                first.map_err(|_| Error::Internal)
+            } else {
+                staff_server.await.map_err(|_| Error::Internal)
+            };
             let _ = stop.send(true);
             settling.await.map_err(|_| Error::Internal)??;
             downloading.await.map_err(|_| Error::Internal)??;
@@ -259,6 +370,14 @@ fn listen_host(bind: &str) -> &str {
     host.strip_prefix('[')
         .and_then(|host| host.strip_suffix(']'))
         .unwrap_or(host)
+}
+
+fn origin_host(origin: &str) -> Option<String> {
+    origin
+        .parse::<axum::http::Uri>()
+        .ok()?
+        .host()
+        .map(str::to_owned)
 }
 
 /// Exactly the named `--flag value` pairs, each once, in any order.

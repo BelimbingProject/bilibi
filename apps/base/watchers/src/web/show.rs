@@ -1,6 +1,7 @@
 //! `/watchers/{id}`: one watcher, the version that awaits approval or runs (with
 //! the approval review and Approve through a confirmation), the on/off
 //! switch and the latest receipts in words.
+use super::words::{effect_reason, observed, reason};
 use super::*;
 
 #[derive(Template)]
@@ -41,42 +42,8 @@ fn sentence(text: &str) -> String {
     out
 }
 
-/// Why a run ended as it did, in words.
-fn reason(code: &str) -> &'static str {
-    match code {
-        "catalog_changed" => "Not run: the installed fields or actions changed. Draft a new version for review.",
-        "record_changed" => "Skipped: the record changed after the watcher matched.",
-        "event_before_enabled" => "Skipped: this event was recorded before the watcher was switched on.",
-        "stale_activation" => "Skipped: the watcher was switched off and on after this run was queued.",
-        "event_before_approval" => "Skipped: this event was recorded before the watcher version was approved.",
-        "chain_budget" => "Stopped: another watcher started it, and the chain reached the limit of watchers in a row.",
-        "watcher_off" => "Not run: the watcher was switched off.",
-        "stale_version" => "Not run: a newer version was approved after this event, so this one no longer runs.",
-        "watcher_limit" => "Not run: the watcher exceeds a configured size or fact limit in System Settings.",
-        "attempt_limit" => "Not run: the watchers job reached its configured attempt limit.",
-        "action_limit" => "Not run: it has more actions than allowed per run.",
-        "read_refused" => "Not run: automation may not read these records yet. An administrator allows it in Automation access.",
-        "restricted_field" => "Not run: a condition reads a field that is hidden from automation.",
-        "subject_unavailable" => "Not run: the record is gone or out of reach.",
-        "action_refused" => "An action was refused; see its outcome.",
-        "actor_refused" => "Not run: automation was stopped here (the workspace is suspended or Automation access was withdrawn).",
-        _ => "Not run.",
-    }
-}
-fn effect_reason(code: &str) -> &'static str {
-    match code {
-        "forbidden" => "refused: automation is not allowed to do this",
-        "invalid" => "refused by the record's owner",
-        "refused" => "refused by the record's owner",
-        "not_found" => "refused: the record is gone",
-        "record_changed" => "skipped: the record changed after the watcher matched",
-        "conflict" => "refused: the record changed",
-        "actor_refused" => "refused: automation was stopped",
-        _ => "refused",
-    }
-}
-fn why(run: &RunView, described: &crate::review::Described) -> Vec<String> {
-    let mut lines = Vec::new();
+fn why(run: &RunView, described: &crate::describe::Described) -> Vec<String> {
+    let mut lines: Vec<String> = observed(run).into_iter().collect();
     match run.state.as_str() {
         _ if run.outcomes.get("restricted").is_some() => {
             lines.push("Which conditions held is hidden: you may not read these records.".into());
@@ -107,11 +74,15 @@ fn why(run: &RunView, described: &crate::review::Described) -> Vec<String> {
         }
     }
     for effect in &run.effects {
-        let action = described
-            .actions
-            .get(effect.position as usize)
-            .cloned()
-            .unwrap_or_else(|| effect.operation.clone());
+        let action = if described.scripted {
+            effect.operation.clone()
+        } else {
+            described
+                .actions
+                .get(effect.position as usize)
+                .cloned()
+                .unwrap_or_else(|| effect.operation.clone())
+        };
         lines.push(match effect.state.as_str() {
             "done" => format!("Did: {action}"),
             _ => {
@@ -149,6 +120,7 @@ fn outcomes_empty(run: &RunView) -> bool {
 }
 fn outcome_badge(run: &RunView) -> Result<Html> {
     render(match run.state.as_str() {
+        "restricted" => Badge::status(BadgeKind::Plain, "Restricted"),
         "done" => Badge::status(BadgeKind::Success, "Acted"),
         "no_match" => Badge::status(BadgeKind::Neutral, "No match"),
         "partial" => Badge::status(BadgeKind::Warning, "Partly done"),
@@ -278,6 +250,35 @@ impl Show {
                     },
                 )?;
             }
+            "run_script" => {
+                let number = get("version")
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .ok_or(Error::Invalid)?;
+                let script = get("script")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .ok_or(Error::Invalid)?;
+                let call = Call {
+                    scope,
+                    credential,
+                    service: crate::PAGES,
+                    event: "run_script",
+                    contract: "base.watchers.script.run",
+                };
+                let outcome = self
+                    .pages
+                    .contracts
+                    .submit(
+                        &call,
+                        json!({
+                            "watcher_id": self.id,
+                            "version": number,
+                            "script": script,
+                            "subject": get("subject").unwrap_or_default(),
+                        }),
+                    )
+                    .await;
+                self.answer(outcome, format!("Script {script} ran as you."))?;
+            }
             _ => return Err(Error::Invalid),
         }
         Ok(())
@@ -303,6 +304,13 @@ impl Show {
                     format!("Nothing changed: {}.", problems.join("; ")),
                 ))
             }
+            // A script refusal names its reason, as the run receipts do.
+            Err(ContractError::Backend(Error::Refused(code))) if code.starts_with("script_") => {
+                self.flash = Some((
+                    StatusKind::Error,
+                    format!("Nothing changed. {}", reason(&code)),
+                ))
+            }
             Err(_) => {
                 self.flash = Some((
                     StatusKind::Error,
@@ -317,13 +325,16 @@ impl Show {
         &self,
         view: &WatcherView,
         version: &VersionView,
-        display: &DisplayContext,
+        context: (&DisplayContext, Option<&bilibi_grid::Catalog>),
         review: Option<&crate::Review>,
         running: bool,
         can_approve: bool,
+        can_run: bool,
     ) -> Result<Html> {
+        let (display, labels) = context;
         let watchers = &self.pages.watchers;
         let described = watchers.describe(
+            labels,
             &view.summary.trigger,
             &version.definition,
             &version.examples,
@@ -385,12 +396,19 @@ impl Show {
                 .render(version.drafted_at, Format::DateTime, Precision::Minute)
                 .text
         );
-        let mut items = vec![
-            Fact {
-                title: "Watch",
+        let mut items = vec![Fact {
+            title: "Watch",
+            id: "",
+            value: Html::text(&view.summary.trigger_title),
+        }];
+        if let Some(observation) = &described.observation {
+            items.push(Fact {
+                title: "AI observation",
                 id: "",
-                value: Html::text(&view.summary.trigger_title),
-            },
+                value: Html::text(observation),
+            });
+        }
+        items.extend([
             Fact {
                 title: "If",
                 id: "",
@@ -410,7 +428,16 @@ impl Show {
                     lines: &described.examples,
                 })?,
             },
-        ];
+        ]);
+        if let Some(review) = review.filter(|review| !review.script_examples.is_empty()) {
+            items.push(Fact {
+                title: "Script example results",
+                id: "",
+                value: render(Lines {
+                    lines: &review.script_examples,
+                })?,
+            });
+        }
         if let Some(words) = &version.explanation {
             items.push(Fact {
                 title: "Asked for",
@@ -439,6 +466,18 @@ impl Show {
             id: &format!("{dom}-facts"),
             items,
         })?);
+        if can_run && version.approved_at.is_some() {
+            let mut problems = Vec::new();
+            if let Some(definition) =
+                crate::definition::Definition::parse(&version.definition, &mut problems)
+            {
+                body.push(&super::script_run::cards(
+                    &definition,
+                    &dom,
+                    version.number,
+                )?);
+            }
+        }
         if let Some(review) = review.filter(|_| version.approved_at.is_none()) {
             if !review.problems.is_empty() {
                 let mut lines: Vec<String> = review
@@ -486,6 +525,9 @@ impl Show {
         let can_draft = bilibi_authz::decide(&**client, scope, MANAGE)
             .await?
             .allowed;
+        let can_run = bilibi_authz::decide(&**client, scope, crate::RUN_SCRIPT)
+            .await?
+            .allowed;
         let latest = view.versions.first();
         let review = match latest {
             Some(version) if can_approve && version.approved_at.is_none() => Some(
@@ -496,6 +538,33 @@ impl Show {
             ),
             _ => None,
         };
+        let running = view
+            .versions
+            .iter()
+            .skip(1)
+            .find(|v| Some(v.number) == view.summary.running);
+        let run_version = |run: &RunView| view.versions.iter().find(|v| v.number == run.version);
+        let needs_labels = latest
+            .into_iter()
+            .chain(running)
+            .any(|v| crate::describe::needs_linked_labels(&v.definition, Some(&v.examples)))
+            || view.runs.iter().any(|run| {
+                matches!(
+                    run.state.as_str(),
+                    "no_match" | "done" | "partial" | "matched"
+                ) && run
+                    .outcomes
+                    .as_array()
+                    .is_some_and(|outcomes| !outcomes.is_empty())
+                    && run_version(run)
+                        .is_some_and(|v| crate::describe::needs_linked_labels(&v.definition, None))
+            });
+        let labels = if needs_labels {
+            bilibi_grid::Catalog::for_scope(&**client, scope).await.ok()
+        } else {
+            None
+        };
+        let labels = labels.as_ref();
         drop(client);
         let header = render(Header {
             title: Html::text(&view.summary.name),
@@ -596,30 +665,31 @@ impl Show {
             versions.push(self.version_card(
                 &view,
                 version,
-                &display,
+                (&display, labels),
                 review.as_ref(),
                 running,
                 can_approve,
+                can_run,
             )?);
         }
-        if let Some(running) = view
-            .versions
-            .iter()
-            .skip(1)
-            .find(|v| Some(v.number) == view.summary.running)
-        {
-            versions.push(self.version_card(&view, running, &display, None, true, can_approve)?);
+        if let Some(running) = running {
+            versions.push(self.version_card(
+                &view,
+                running,
+                (&display, labels),
+                None,
+                true,
+                can_approve,
+                can_run,
+            )?);
         }
         let mut rows = Vec::new();
         for run in &view.runs {
-            let described = latest
-                .filter(|v| v.number == run.version)
-                .or_else(|| view.versions.iter().find(|v| v.number == run.version))
-                .map(|v| {
-                    pages
-                        .watchers
-                        .describe(&view.summary.trigger, &v.definition, &v.examples)
-                });
+            let described = run_version(run).map(|v| {
+                pages
+                    .watchers
+                    .describe(labels, &view.summary.trigger, &v.definition, &v.examples)
+            });
             let lines = described.as_ref().map(|d| why(run, d)).unwrap_or_default();
             let id = run.id.to_string();
             let mut row = FlexRow::new(id.clone())
@@ -660,10 +730,31 @@ impl Show {
                     "Approve version {} of \u{201c}{}\u{201d}?",
                     request.number, view.summary.name
                 );
-                let detail = format!(
-                    "From now on it runs each time \u{201c}{}\u{201d}, without AI. A run still waiting for an earlier version will not act.",
-                    view.summary.trigger_title
-                );
+                let observation = view
+                    .versions
+                    .iter()
+                    .find(|version| version.number == request.number)
+                    .and_then(|version| {
+                        self.pages
+                            .watchers
+                            .describe(
+                                labels,
+                                &view.summary.trigger,
+                                &version.definition,
+                                &version.examples,
+                            )
+                            .observation
+                    });
+                let detail = match observation {
+                    None => format!(
+                        "From now on it runs each time \u{201c}{}\u{201d}, without AI. A run still waiting for an earlier version will not act.",
+                        view.summary.trigger_title
+                    ),
+                    Some(observation) => format!(
+                        "From now on it runs each time \u{201c}{}\u{201d}. {observation} The answer only decides whether the approved actions run. A run still waiting for an earlier version will not act.",
+                        view.summary.trigger_title
+                    ),
+                };
                 render(ConfirmDialog {
                     id: "watcher-approve-confirm",
                     consequence: &consequence,

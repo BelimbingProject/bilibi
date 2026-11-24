@@ -38,6 +38,8 @@ Values are read with `Settings::resolve_masked`, so an encrypted value is never 
 
 A module can contribute `ImageSetting` under `base/settings_editor.image-settings` with the same ID as a company-scoped setting. Its Value editor becomes a PNG/JPEG/WebP file input backed by Media, with Upload and Remove actions; real bytes are inspected and the stored setting is the Media asset ID.
 
+A `StagedImage` contribution under `base/settings_editor.staged-images` shows a standalone upload in Global scope for callers with the declared capability. Use a unique upload input name accepted by `UploadSpec`. It returns a checked Media asset ID for the owner's reviewed operation and leaves the setting untouched.
+
 Saved overrides and runtime state live in `base_settings`; inherited module defaults have no stored row.
 
 ## Writes
@@ -49,6 +51,8 @@ A setting that a Base Step-up operation guards (`Operation::guards_setting`, dec
 ## Stored-secret reveal
 
 "Show stored value" appears only for an actor holding `base.settings.secret.view` by name (`authz::explicitly_granted`; `grant_all` does not count) when the key is configured. Showing it is the Base Step-up operation `base.settings_editor.secret.reveal` ("Show a stored secret setting"), on the installation floor; it replaced the password prompt. When the session owes a check, the Value cell asks for the code inline and the person submits again; the authenticator locks repeated failures. Every attempt, including a forged request, records a retained `settings.secret.reveal` audit action without the value, and a reveal whose audit row cannot be written shows nothing. The value reaches the browser only as a `LiveBody.events` push to the `SecretStored` hook (`bilibi:secret:reveal`), which re-masks it after the definition's `reveal_duration_ms`.
+
+A definition whose editor sets `NEVER_REVEALED` (`base/settings`) has no "Show stored value", and a request to reveal it is refused and recorded like a forged one.
 
 ## Tenant scope
 

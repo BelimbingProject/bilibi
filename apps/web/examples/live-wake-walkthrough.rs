@@ -254,7 +254,7 @@ async fn open(
     let token = uuid::Uuid::new_v4().simple().to_string();
     let csrf = uuid::Uuid::new_v4().simple().to_string();
     db.get().await?.execute(
-        "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,$4,now()+interval '24 hours')",
+        "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) VALUES($1,$2,$3,$4,now()+interval '24 hours','portable')",
         &[&bilibi_base::session::session_id(&token), &tenant, &user, &csrf],
     ).await?;
     let mut request = format!("ws://{addr}/live?framed=true")
@@ -264,7 +264,7 @@ async fn open(
     headers.insert("Origin", host.parse().map_err(internal)?);
     headers.insert(
         "Cookie",
-        format!("bilibi_session={token}")
+        format!("__Host-bilibi_session={token}")
             .parse()
             .map_err(internal)?,
     );
@@ -344,7 +344,8 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         let _ = axum::serve(
             listener,
-            bilibi_web::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            bilibi_web::staff_router(app)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .await;
     });

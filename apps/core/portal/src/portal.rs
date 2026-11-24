@@ -73,10 +73,26 @@ impl Pages {
             subtitle: "Your customer portal",
             ..Header::default()
         })?;
-        let mut card = Html::text(&format!(
-            "You are signed in to {title} as {}. Use the menu above to open what {title} shares with you.",
-            scope.email
-        ));
+        let client = self.db.get().await?;
+        let notice = self
+            .access
+            .templates
+            .wording(
+                &**client,
+                scope,
+                crate::wording::WELCOME_NOTICE,
+                portal.organisation(),
+                "en",
+                (
+                    &[
+                        ("site_title", bilibi_templates::Value::Text(&title)),
+                        ("email", bilibi_templates::Value::Text(&scope.email)),
+                    ],
+                    &[],
+                ),
+            )
+            .await?;
+        let mut card = Html::text(&notice["body"]);
         card.push(&render(&ActionLink {
             id: "portal-home-account",
             icon: "user-circle",

@@ -1059,7 +1059,7 @@ async fn main() -> Outcome {
     // stores. The scopes above carry the same CSRF value.
     client
         .execute(
-            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) SELECT encode(sha256(convert_to('records-'||u,'UTF8')),'hex'),1,u,'records',now()+interval '24 hours' FROM unnest(ARRAY[4,1]::bigint[]) u ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) SELECT encode(sha256(convert_to('records-'||u,'UTF8')),'hex'),1,u,'records',now()+interval '24 hours','portable' FROM unnest(ARRAY[4,1]::bigint[]) u ON CONFLICT (id) DO NOTHING",
             &[],
         )
         .await?;
@@ -1127,7 +1127,7 @@ async fn main() -> Outcome {
         .to_owned();
     let served = tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
         listener,
-        bilibi_web::router(app.clone()),
+        bilibi_web::staff_router(app.clone()),
     )));
     page_discovery(addr, &host, &token).await?;
     let resolved = call(addr, &host, &token, "base.records.resolve", json!({"references": [{"kind": "company", "id": "61"}, {"kind": "company", "id": "01"}, {"kind": "person", "id": "1"}, {"kind": "finance.receivables.document", "id": "7"}]})).await?;
@@ -1342,7 +1342,7 @@ async fn main() -> Outcome {
     if let Ok(bind) = std::env::var("BIND_ADDR") {
         let listener = tokio::net::TcpListener::bind(bind).await?;
         println!("Records reference listening at {origin}/reference/notes");
-        axum::serve(listener, bilibi_web::router(app))
+        axum::serve(listener, bilibi_web::staff_router(app))
             .with_graceful_shutdown(async {
                 let _ = tokio::signal::ctrl_c().await;
             })

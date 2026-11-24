@@ -35,7 +35,6 @@ pub(crate) fn pages(
             return false;
         }
         match route.access.base() {
-            Access::Public { .. } => false,
             Access::OperatorCapability(bilibi_base::system::INSTANCE_MANAGE) => manage_instance,
             access => access.admits(&viewer),
         }

@@ -4,7 +4,6 @@
 //! the vendored asset allowlist. Only shared fragments may use `safe`.
 use askama::Template;
 pub mod download;
-pub mod endpoint;
 pub mod page;
 
 // Lets the shared macro file name this crate's items as `bilibi_ui::...` from
@@ -59,12 +58,16 @@ pub use record_reference::{NamedKind, PickerHit, RecordPicker, RecordState, Rela
 mod portal;
 mod search_multi;
 pub use search_multi::{SearchMultiOption, SearchMultiSelect};
+mod brand;
 mod section;
 mod settings;
 mod shell;
 mod softphone;
 mod specimen;
 mod statusbar;
+mod step_up_gate;
+mod wordmark;
+pub use brand::{Accent, Brand, PRODUCT};
 pub use softphone::{CallAction, CallPhase, PhoneHealth, Softphone, SoftphoneAction};
 pub mod upload;
 pub mod workspace;
@@ -72,8 +75,8 @@ pub use portal::{
     PortalCard, PortalCardLink, PortalDocument, PortalForm, PortalLayout, PortalLink,
 };
 pub use shell::{
-    company_bar, navigation, navigation_unpinned, tenant_bar, tenant_changed, version_badges,
-    AppShell, CompanyChoice, DisplayPreferences, Framed, NavNode, ShellContext, StandaloneReview,
+    company_bar, navigation, navigation_unpinned, tenant_bar, tenant_changed, AppShell,
+    CompanyChoice, DisplayPreferences, Framed, NavNode, ShellContext, StandaloneReview,
     TenantChoice, VersionBadge,
 };
 
@@ -132,15 +135,20 @@ pub use page_search::{page_search, RecordGroup, RecordHit, SearchPage, SearchRec
 pub use settings::{SettingsTab, SETTINGS_LOCATION};
 pub use specimen::ComponentsSpecimen;
 pub use statusbar::StatusbarTag;
+pub use step_up_gate::StepUpGate;
 pub use upload::{
     ChunkOutcome, ClientEntry, FileInput, Registration, UploadBudget, UploadEntry, UploadError,
     UploadSpec, UploadedFile, Uploads,
 };
+pub use wordmark::WordmarkSize;
 
-/// The HTML document around a page. `title` is the page's own name, or the product name when a page has none.
+/// The HTML document around a page. `title` is the page's own name, or the brand's name when a page has none.
 #[derive(Template)]
 #[template(path = "document.html")]
 pub struct Document<'a> {
+    /// Whose name ends the tab title, whose logo is the tab icon and whose
+    /// accent the page is drawn in.
+    pub brand: &'a Brand,
     pub title: &'a str,
     pub body: &'a str,
     /// The account's explicit `light`/`dark` choice, stamped on `<html>` so the

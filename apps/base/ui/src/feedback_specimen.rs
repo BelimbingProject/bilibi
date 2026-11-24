@@ -92,12 +92,14 @@ impl FeedbackSpecimen {
                     role: "development",
                     label: "Dev",
                     title: "You are on Dev. This is a development copy. Changes here do not affect production.",
+                    message: "This is a development copy. Changes here do not affect production.",
                 },
                 InstanceBadge {
                     tone: StatusKind::Warning,
                     role: "staging",
                     label: "SBG Staging",
                     title: "You are on SBG Staging. This is a test copy. Changes here do not affect production.",
+                    message: "This is a test copy. Changes here do not affect production.",
                 },
             ],
             instance_banners: vec![

@@ -16,6 +16,9 @@ pub const TRIGGERS: &str = "base/watchers.triggers";
 /// The catalog an owner offers a watcher action in:
 /// `Contribution::new(ACTIONS, "<its write contract key>", provenance, &Action { .. })`.
 pub const ACTIONS: &str = "base/watchers.actions";
+/// The catalog an owner uses to offer one of its read contracts to approved
+/// tenant scripts.
+pub const LOOKUPS: &str = "base/watchers.lookups";
 
 /// An event of the contributor's own, offered as a watcher trigger. The watcher
 /// engine subscribes to it through Base Events, so it is recorded in the
@@ -56,6 +59,13 @@ pub struct Action {
     pub approval_capabilities: &'static [&'static str],
 }
 
+/// A read contract of the contributor's own that an approved script may call.
+/// The operation's schema, capability and channel checks remain authoritative.
+pub struct Lookup {
+    /// What the read supplies, as an administrator reads it.
+    pub title: &'static str,
+}
+
 /// Contract owners never offered: an action that grants access, changes
 /// identity or decides an approval runs only by a person's hand.
 const NEVER: [&str; 10] = [
@@ -82,6 +92,25 @@ pub(crate) struct OfferedAction {
     pub summary: &'static str,
     pub capability: &'static str,
     pub input: Value,
+    pub local_script: bool,
+    /// The owner's outbound declaration: what it can send outside.
+    pub outbound: Option<&'static bilibi_agent_api::Outbound>,
+}
+
+impl OfferedAction {
+    /// A script may select this action when its owner certified it local, or
+    /// when it is outbound and the script approves terms for it.
+    pub(crate) fn script_callable(&self, script: &crate::script::Script) -> bool {
+        self.local_script || (self.outbound.is_some() && script.terms(self.key).is_some())
+    }
+}
+
+pub(crate) struct OfferedLookup {
+    pub key: &'static str,
+    pub title: &'static str,
+    pub capability: &'static str,
+    pub input: Value,
+    pub output: Value,
 }
 
 /// The mounted triggers and actions, checked against the Events, Grid,
@@ -89,6 +118,7 @@ pub(crate) struct OfferedAction {
 pub(crate) struct Offers {
     pub triggers: BTreeMap<&'static str, OfferedTrigger>,
     pub actions: BTreeMap<&'static str, OfferedAction>,
+    pub lookups: BTreeMap<&'static str, OfferedLookup>,
 }
 
 fn refuse(entry: &Entry, why: impl std::fmt::Display) -> RegistryError {
@@ -239,6 +269,28 @@ impl Offers {
                     format!("{event} is not a declared event type"),
                 ));
             }
+            let (local_script, outbound) = match op.handler {
+                bilibi_agent_api::Handler::SafeWrite(handler) => {
+                    (handler.local_script_action(), handler.outbound())
+                }
+                _ => (false, None),
+            };
+            if local_script && outbound.is_some() {
+                return Err(refuse(
+                    entry,
+                    "an action is either local or outbound, not both",
+                ));
+            }
+            if outbound.is_some_and(|declared| {
+                declared.destination.trim().is_empty()
+                    || declared.data.is_empty()
+                    || declared.data.iter().any(|field| field.trim().is_empty())
+            }) {
+                return Err(refuse(
+                    entry,
+                    "an outbound action names its destination and every data field it can send",
+                ));
+            }
             actions.insert(
                 entry.id,
                 OfferedAction {
@@ -248,10 +300,54 @@ impl Offers {
                     summary: op.summary,
                     capability: op.capability,
                     input: registered.input.clone(),
+                    local_script,
+                    outbound,
                 },
             );
         }
-        Ok(Self { triggers, actions })
+        let mut lookups = BTreeMap::new();
+        for entry in catalog.entries::<Lookup>(LOOKUPS)? {
+            let lookup = entry.get::<Lookup>()?;
+            let Some(registered) = registry.operations.get(entry.id) else {
+                return Err(refuse(entry, "not a registered operation"));
+            };
+            if registered.provenance.module != entry.provenance.module {
+                return Err(refuse(entry, "the contract belongs to another module"));
+            }
+            if !matches!(
+                registered.definition.handler,
+                bilibi_agent_api::Handler::Read(_)
+            ) {
+                return Err(refuse(entry, "a script lookup must be a read contract"));
+            }
+            if !bounds.contains(&registered.definition.capability) {
+                return Err(refuse(
+                    entry,
+                    format!(
+                        "the watchers principal cannot hold {}: offer it (OFFERED_CAPABILITIES)",
+                        registered.definition.capability
+                    ),
+                ));
+            }
+            if lookup.title.trim().is_empty() {
+                return Err(refuse(entry, "needs a title"));
+            }
+            lookups.insert(
+                entry.id,
+                OfferedLookup {
+                    key: entry.id,
+                    title: lookup.title,
+                    capability: registered.definition.capability,
+                    input: registered.input.clone(),
+                    output: registered.output.clone(),
+                },
+            );
+        }
+        Ok(Self {
+            triggers,
+            actions,
+            lookups,
+        })
     }
 }
 
@@ -266,3 +362,4 @@ pub(crate) fn trigger_events(catalog: &Catalog) -> Result<Vec<&'static On>> {
 
 inventory::submit! { Consumer::new::<Trigger>(TRIGGERS, "base/watchers", |entries| entries.iter().try_for_each(|entry| entry.get::<Trigger>().map(|_| ()))) }
 inventory::submit! { Consumer::new::<Action>(ACTIONS, "base/watchers", |entries| entries.iter().try_for_each(|entry| entry.get::<Action>().map(|_| ()))) }
+inventory::submit! { Consumer::new::<Lookup>(LOOKUPS, "base/watchers", |entries| entries.iter().try_for_each(|entry| entry.get::<Lookup>().map(|_| ()))) }

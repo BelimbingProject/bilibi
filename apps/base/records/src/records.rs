@@ -246,15 +246,18 @@ impl Records {
         if !bilibi_ui::workspace::record_id(id) {
             return None;
         }
-        let integer = bilibi_grid::installed()
-            .ok()
-            .and_then(|installed| installed.table(kind.table))
-            .is_some_and(|table| table.key_field().ty == FieldType::Integer);
-        if integer {
+        if Self::integer_key(kind) {
             id.parse::<i64>().ok().map(|id| id.to_string())
         } else {
             Some(id.to_owned())
         }
+    }
+
+    fn integer_key(kind: &RecordKind) -> bool {
+        bilibi_grid::installed()
+            .ok()
+            .and_then(|installed| installed.table(kind.table))
+            .is_some_and(|table| table.key_field().ty == FieldType::Integer)
     }
 
     /// The survivors of merged records, by stored id.
@@ -716,5 +719,29 @@ impl Records {
             });
         }
         Ok(counts)
+    }
+}
+
+impl bilibi_grid::SubjectAccess for Records {
+    fn integer_key(&self, kind: &str) -> bool {
+        self.kind(kind).is_some_and(Self::integer_key)
+    }
+
+    fn readable<'a>(
+        &'a self,
+        client: &'a dyn bilibi_tenancy::ProofClient,
+        scope: &'a Scope,
+        kind: &'a str,
+        id: &'a str,
+    ) -> bilibi_tenancy::ProofFuture<'a, bool> {
+        Box::pin(async move {
+            let Some(kind) = self.kind(kind) else {
+                return Ok(false);
+            };
+            let Some(id) = Self::canonical(kind, id) else {
+                return Ok(false);
+            };
+            Ok(kind.owner.authorize(client, scope, &id).await? == Access::Readable)
+        })
     }
 }

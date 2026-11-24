@@ -1,7 +1,10 @@
-use crate::{catalogue, Origin, Resolved, Template, Text, CATALOGUE, MANAGE, VIEW};
+use crate::{
+    catalogue, Origin, Resolved, Template, Text, Value, CATALOGUE, MANAGE, PLATFORM_CATALOGUE, VIEW,
+};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::Catalog;
 use bilibi_party_ids::OrganisationId;
+use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{NamedOrganisation, PartyProofs, ReadClient, Scope};
 use serde::Serialize;
 use serde_json::json;
@@ -9,6 +12,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 pub struct Templates {
     entries: BTreeMap<&'static str, &'static Template>,
+    platform: BTreeMap<&'static str, &'static Template>,
+    settings: Arc<Settings>,
     pub(crate) parties: Arc<PartyProofs>,
 }
 
@@ -43,25 +48,48 @@ impl Templates {
     pub(crate) fn new(
         catalogue: &Catalog,
         parties: Arc<PartyProofs>,
+        settings: Arc<Settings>,
     ) -> bilibi_module_registry::Result<Self> {
-        let entries = catalogue
-            .entries::<Template>(CATALOGUE)?
-            .iter()
-            .map(|entry| Ok((entry.id, entry.get::<Template>()?)))
-            .collect::<bilibi_module_registry::Result<_>>()?;
-        Ok(Self { entries, parties })
+        let collect = |id| {
+            catalogue
+                .entries::<Template>(id)?
+                .iter()
+                .map(|entry| Ok((entry.id, entry.get::<Template>()?)))
+                .collect::<bilibi_module_registry::Result<BTreeMap<_, _>>>()
+        };
+        let entries = collect(CATALOGUE)?;
+        let platform = collect(PLATFORM_CATALOGUE)?;
+        if let Some(key) = platform.keys().find(|key| entries.contains_key(*key)) {
+            return Err(bilibi_module_registry::RegistryError::Contribution(
+                format!("Template {key} is declared in both catalogues."),
+            ));
+        }
+        Ok(Self {
+            entries,
+            platform,
+            parties,
+            settings,
+        })
     }
 
     pub fn list(&self) -> impl Iterator<Item = &'static Template> + '_ {
-        self.entries.values().copied()
+        self.entries.values().chain(self.platform.values()).copied()
     }
 
     pub fn get(&self, key: &str) -> Result<&'static Template> {
-        self.entries.get(key).copied().ok_or(Error::NotFound)
+        self.entries
+            .get(key)
+            .or_else(|| self.platform.get(key))
+            .copied()
+            .ok_or(Error::NotFound)
     }
 
-    /// Resolve text for a business record. The consumer authorizes its record
-    /// and supplies that record's company. The selected desk is irrelevant.
+    pub(crate) fn editable(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    /// Resolve an explicitly selected language for an authorized record.
+    /// The consumer supplies the record's company, independent of the desk.
     pub async fn resolve(
         &self,
         client: &dyn ReadClient,
@@ -74,8 +102,137 @@ impl Templates {
         let entry = self.get(key)?;
         let languages = catalogue::languages(requested, fallback, entry.base_language)
             .map_err(|problem| Error::refused(problem.to_string()))?;
-        let heads = heads(client, scope, key, company, &languages).await?;
-        Ok(select(entry, &languages, &heads, None))
+        self.select_for(client, scope.tenant(), entry, company, &languages)
+            .await
+    }
+
+    async fn select_for(
+        &self,
+        client: &dyn ReadClient,
+        tenant: i64,
+        entry: &Template,
+        company: Option<OrganisationId>,
+        languages: &[String],
+    ) -> Result<Resolved> {
+        let heads = if self.editable(entry.key) {
+            heads(client, tenant, entry.key, company, languages).await?
+        } else {
+            Vec::new()
+        };
+        Ok(select(entry, languages, &heads, None))
+    }
+
+    /// Render a platform-controlled template in its base language without a
+    /// database read. Every text fact is flattened to one line.
+    pub fn platform_wording(&self, key: &str, values: &[(&str, Value<'_>)]) -> Result<Text> {
+        let entry = self.platform.get(key).ok_or(Error::NotFound)?;
+        let languages = [entry.base_language.to_owned()];
+        let resolved = select(entry, &languages, &[], None);
+        // A name someone chose (a workspace, a portal) is one line of text
+        // here: a line break in it could set a second link apart from the
+        // message's own.
+        let flat: Vec<(&str, Option<String>)> = values
+            .iter()
+            .map(|(id, value)| match value {
+                Value::Text(text) => (
+                    *id,
+                    Some(
+                        text.chars()
+                            .map(|c| if c.is_control() { ' ' } else { c })
+                            .collect(),
+                    ),
+                ),
+                Value::Date(_) => (*id, None),
+            })
+            .collect();
+        let values: Vec<(&str, Value<'_>)> = values
+            .iter()
+            .zip(&flat)
+            .map(|((id, value), (_, text))| match text {
+                Some(text) => (*id, Value::Text(text)),
+                None => (*id, *value),
+            })
+            .collect();
+        render_wording(entry, &languages, resolved, &values, &[])
+    }
+
+    /// Wording for unattended mail with no company. The caller proves the
+    /// tenant from its own record before asking for the workspace language.
+    pub async fn tenant_wording(
+        &self,
+        client: &dyn ReadClient,
+        tenant: i64,
+        key: &str,
+        values: &[(&str, Value<'_>)],
+    ) -> Result<Text> {
+        let entry = self.get(key)?;
+        let language = self
+            .settings
+            .get_tenant(client, tenant, crate::LANGUAGE)
+            .await?;
+        let languages = catalogue::language_chain(language.as_str(), entry.base_language);
+        let resolved = self
+            .select_for(client, tenant, entry, None, &languages)
+            .await?;
+        render_wording(entry, &languages, resolved, values, &[])
+    }
+
+    /// Render wording for an authorized record, using company and tenant
+    /// language preferences before the consumer's locale and packaged base.
+    pub async fn wording(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        key: &str,
+        company: Option<OrganisationId>,
+        language: &str,
+        (values, omitted): (&[(&str, Value<'_>)], &[&str]),
+    ) -> Result<Text> {
+        let entry = self.get(key)?;
+        let languages = self
+            .preferred_languages(client, scope, entry, company, language)
+            .await?;
+        let resolved = self
+            .select_for(client, scope.tenant(), entry, company, &languages)
+            .await?;
+        render_wording(entry, &languages, resolved, values, omitted)
+    }
+
+    async fn preferred_languages(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        entry: &Template,
+        company: Option<OrganisationId>,
+        requested: &str,
+    ) -> Result<Vec<String>> {
+        let fallback_chain = catalogue::languages(requested, None, entry.base_language)
+            .map_err(|problem| Error::refused(problem.to_string()))?;
+        if !self.editable(entry.key) {
+            return Ok(fallback_chain);
+        }
+
+        let tenant_language = self
+            .settings
+            .get(client, scope, Target::Tenant, crate::LANGUAGE)
+            .await?;
+        let company_language = match company {
+            Some(id) => {
+                self.settings
+                    .get(client, scope, Target::Company(id), crate::LANGUAGE)
+                    .await?
+                    .value
+            }
+            None => serde_json::Value::Null,
+        };
+        Ok(catalogue::language_chain(
+            company_language
+                .as_str()
+                .into_iter()
+                .chain(tenant_language.value.as_str())
+                .chain(std::iter::once(requested)),
+            entry.base_language,
+        ))
     }
 
     pub(crate) async fn companies(
@@ -121,7 +278,18 @@ impl Templates {
         let entry = self.get(selection.key)?;
         let languages = catalogue::languages(selection.language, None, entry.base_language)
             .map_err(|problem| Error::refused(problem.to_string()))?;
-        let heads = heads(client, scope, entry.key, selection.company, &languages).await?;
+        let heads = if self.editable(entry.key) {
+            heads(
+                client,
+                scope.tenant(),
+                entry.key,
+                selection.company,
+                &languages,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
         let company = selection.company.map(OrganisationId::get);
         let head = heads
             .iter()
@@ -164,7 +332,7 @@ impl Templates {
             .into_iter()
             .filter_map(|row| {
                 let key: &str = row.get("template_key");
-                let entry = self.get(key).ok()?;
+                let entry = self.entries.get(key)?;
                 let company: Option<i64> = row.get("company_id");
                 let name = company
                     .and_then(|id| names.get(&id).copied())
@@ -216,6 +384,27 @@ impl Templates {
     }
 }
 
+fn render_wording(
+    entry: &Template,
+    languages: &[String],
+    resolved: Resolved,
+    values: &[(&str, Value<'_>)],
+    omitted: &[&str],
+) -> Result<Text> {
+    let problem = match entry.render_delivery(&resolved.slots, values, omitted) {
+        Ok(text) => return Ok(text),
+        Err(problem) => problem,
+    };
+    if let Origin::Company { revision, .. } | Origin::Tenant { revision } = resolved.origin {
+        let packaged = select(entry, languages, &[], None);
+        if let Ok(text) = entry.render_delivery(&packaged.slots, values, omitted) {
+            eprintln!("templates: {} revision {revision} could not be filled in ({problem}); the packaged wording was used", entry.key);
+            return Ok(text);
+        }
+    }
+    Err(Error::refused(problem.to_string()))
+}
+
 impl Edit {
     pub(crate) fn check(&self, change: &Revision<'_>) -> Result<()> {
         if self.revision != change.expected {
@@ -232,7 +421,7 @@ impl Edit {
 
 async fn heads(
     client: &dyn ReadClient,
-    scope: &Scope,
+    tenant: i64,
     key: &str,
     company: Option<OrganisationId>,
     languages: &[String],
@@ -244,12 +433,7 @@ async fn heads(
          WHERE tenant_id=$1 AND template_key=$2 AND language=ANY($3)
            AND (company_id=$4 OR company_id IS NULL)
          ORDER BY language,company_id,id DESC",
-            &[
-                &scope.tenant(),
-                &key,
-                &languages,
-                &company.map(OrganisationId::get),
-            ],
+            &[&tenant, &key, &languages, &company.map(OrganisationId::get)],
         )
         .await?;
     rows.into_iter()

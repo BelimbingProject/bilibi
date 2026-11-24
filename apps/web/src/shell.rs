@@ -14,7 +14,7 @@ use axum::{
 };
 use bilibi_base::{authz, menu, tenancy};
 use bilibi_database::{Error, Result};
-use bilibi_module_registry::contributions::{Access, Embed, EmbedContext, Method, Viewer, EMBEDS};
+use bilibi_module_registry::contributions::{Access, Embed, EmbedContext, Viewer, EMBEDS};
 use bilibi_security::Scope;
 use bilibi_ui::page::{PageRequest, PageService};
 use bilibi_ui::{
@@ -93,6 +93,8 @@ fn account_session_security(
 pub struct Rendered {
     pub html: String,
     pub theme: &'static str,
+    /// The brand the chrome was drawn under, for the document around it.
+    pub brand: bilibi_ui::Brand,
 }
 
 /// Renders `body` inside the full shell, the chromeless framed root, or as is
@@ -114,6 +116,7 @@ pub async fn render(
         .as_ref()
         .map_or_else(DisplayPreferences::default, preferences);
     let theme = presentation.as_ref().map_or("system", |p| p.theme);
+    let brand = app.branding.current().await;
     let html = if chrome == PageChrome::Framed {
         Framed {
             body,
@@ -134,6 +137,7 @@ pub async fn render(
             .map_err(|_| Error::Internal)?;
         StandaloneReview {
             body,
+            brand: &brand,
             instance: &instance,
             live,
             tenant_id: scope.tenant(),
@@ -151,7 +155,16 @@ pub async fn render(
             timezone: presentation.timezone.clone(),
             locale: presentation.locale,
         };
-        let context = context(app, scope, path, preferences, display, topbar_actions).await?;
+        let context = context(
+            app,
+            scope,
+            path,
+            &brand,
+            preferences,
+            display,
+            topbar_actions,
+        )
+        .await?;
         AppShell {
             context: &context,
             live,
@@ -162,12 +175,11 @@ pub async fn render(
         return Ok(Rendered {
             html: body.to_owned(),
             theme,
+            brand,
         });
     };
-    Ok(Rendered {
-        html: html.map_err(|_| Error::Internal)?,
-        theme,
-    })
+    let html = html.map_err(|_| Error::Internal)?;
+    Ok(Rendered { html, theme, brand })
 }
 
 /// The account's theme and time display: its own saved choices over the
@@ -184,6 +196,7 @@ async fn context<'a>(
     app: &'a App,
     scope: &'a Scope,
     path: &str,
+    brand: &'a bilibi_ui::Brand,
     preferences: DisplayPreferences,
     display: bilibi_base::datetime::DisplayContext,
     topbar_actions: Html,
@@ -350,10 +363,10 @@ async fn context<'a>(
         manage_instance,
         operator_company_missing,
     );
-    let served = served_routes(app);
+    let served = app.user.pin_routes();
     let pins: Vec<_> = pins
         .into_iter()
-        .filter(|pin| is_served(&served, &pin.url))
+        .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
         .collect();
     let mut pin_icons: Vec<String> = pins
         .iter()
@@ -374,7 +387,9 @@ async fn context<'a>(
         .filter_map(|part| part.chars().next())
         .collect::<String>()
         .to_uppercase();
+    let composition = crate::composition();
     Ok(ShellContext {
+        brand,
         user: &scope.user_name,
         email: &scope.email,
         tenant: &scope.tenant_name,
@@ -399,13 +414,13 @@ async fn context<'a>(
         notifications,
         ai,
         home,
-        served_routes: serde_json::to_string(&served).map_err(|_| Error::Internal)?,
+        served_routes: serde_json::to_string(served).map_err(|_| Error::Internal)?,
         pins: serde_json::to_string(&pins).map_err(|_| Error::Internal)?,
         pin_icons,
-        instance: if instance.role == bilibi_base::system::Role::Dev {
-            Html::EMPTY
-        } else {
+        instance: if instance.role == bilibi_base::system::Role::Staging {
             instance.badge().map_err(|_| Error::Internal)?
+        } else {
+            Html::EMPTY
         },
         instance_status: instance
             .status(manage_instance)
@@ -416,7 +431,12 @@ async fn context<'a>(
         } else {
             None
         },
-        versions: bilibi_ui::version_badges(&crate::composition()),
+        version: crate::application_version::application_version(
+            instance.role,
+            composition.version,
+            &display,
+        ),
+        components: composition.containers,
         topbar_actions,
         page_search: bilibi_ui::page_search(&pages, records).map_err(|_| Error::Internal)?,
     })
@@ -470,7 +490,7 @@ async fn permits(app: &App, scope: &Scope, access: Access) -> Result<bool> {
     let client = app.db.get().await?;
     let client = &**client;
     let result = match access.base() {
-        Access::Public { .. } | Access::SignedIn | Access::StepUp { .. } => Ok(()),
+        Access::SignedIn | Access::StepUp { .. } => Ok(()),
         Access::Capability(key) => authz::authorize_key(client, scope, key).await,
         Access::Operator => tenancy::prove_operator(client, scope).await.map(|_| ()),
         Access::AnyOf(keys) => authz::authorize_any(client, scope, keys).await,
@@ -552,22 +572,6 @@ fn nav_node(
             .map(|child| nav_node(child, active, labels))
             .collect(),
     }
-}
-
-/// Whether a normalized pin URL names a page this deployment serves; a route
-/// pattern's `{param}` segments match any one segment. A pin to a page that is
-/// gone stays stored but is not drawn.
-fn is_served(routes: &[&str], url: &str) -> bool {
-    let path = url.split('?').next().unwrap_or("");
-    let actual: Vec<_> = path.split('/').filter(|s| !s.is_empty()).collect();
-    routes.iter().any(|route| {
-        let pattern: Vec<_> = route.split('/').filter(|s| !s.is_empty()).collect();
-        pattern.len() == actual.len()
-            && pattern
-                .iter()
-                .zip(&actual)
-                .all(|(p, a)| p.starts_with('{') || p == a)
-    })
 }
 
 /// The session behind a write of the account's own preferences: same Origin
@@ -758,9 +762,8 @@ pub async fn choose_tenant(
     {
         Ok(bilibi_user::TenantEntry::Entered(login)) => {
             let cookie = format!(
-                "bilibi_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400{}",
-                login.token,
-                crate::auth::secure(&app)
+                "__Host-bilibi_session={}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=86400",
+                login.token
             );
             let mut response = Redirect::to("/dashboard").into_response();
             response.headers_mut().insert(
@@ -797,6 +800,14 @@ pub async fn choose_tenant(
                 header::CACHE_CONTROL,
                 "no-store".parse().map_err(|_| Error::Internal)?,
             );
+            crate::auth::set_tenant_entry(&app, &mut response, form.tenant)?;
+            Ok(response)
+        }
+        Ok(bilibi_user::TenantEntry::Reauthenticate { tenant, provider }) => {
+            let location =
+                provider.map_or_else(|| "/login".into(), |public| format!("/login?sso={public}"));
+            let mut response = Redirect::to(&location).into_response();
+            crate::auth::set_tenant_entry(&app, &mut response, tenant)?;
             Ok(response)
         }
         Err(bilibi_user::TenantChoiceRefusal::Unavailable) => {
@@ -840,7 +851,13 @@ pub async fn tenant_changed(
         Html::EMPTY,
     )
     .await?;
-    Ok(crate::document_themed("Tenant changed", &rendered.html, rendered.theme)?.into_response())
+    Ok(crate::document_themed(
+        "Tenant changed",
+        &rendered.html,
+        rendered.theme,
+        &rendered.brand,
+    )?
+    .into_response())
 }
 /// The account's pins for a client that must refresh: the shell renders the
 /// same list into `data-pins`.
@@ -850,22 +867,13 @@ pub async fn pins(
 ) -> std::result::Result<Response, HttpError> {
     let scope = app.security.guard(&token(&headers)?).await?;
     let client = app.db.get().await.map_err(Error::from)?;
-    let served = served_routes(&app);
+    let served = app.user.pin_routes();
     let pins: Vec<_> = bilibi_user::list_pins(&**client, &scope)
         .await?
         .into_iter()
-        .filter(|pin| is_served(&served, &pin.url))
+        .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
         .collect();
     Ok(json_response(StatusCode::OK, json!({"pins": pins})))
-}
-
-fn served_routes(app: &App) -> Vec<&'static str> {
-    app.routes
-        .staff
-        .iter()
-        .filter(|bound| bound.route.method == Method::Get)
-        .map(|bound| bound.route.path)
-        .collect()
 }
 
 #[derive(Deserialize)]
@@ -901,10 +909,10 @@ pub async fn toggle_pin(
         .await
     {
         Ok((pinned, pins)) => {
-            let served = served_routes(&app);
+            let served = app.user.pin_routes();
             let pins: Vec<_> = pins
                 .into_iter()
-                .filter(|pin| is_served(&served, &pin.url))
+                .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
                 .collect();
             Ok(json_response(
                 StatusCode::OK,
@@ -953,10 +961,10 @@ pub async fn reorder_pins(
     };
     match app.user.reorder_pins(&credential, &scope.csrf, &ids).await {
         Ok(pins) => {
-            let served = served_routes(&app);
+            let served = app.user.pin_routes();
             let pins: Vec<_> = pins
                 .into_iter()
-                .filter(|pin| is_served(&served, &pin.url))
+                .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
                 .collect();
             Ok(json_response(StatusCode::OK, json!({"pins": pins})))
         }

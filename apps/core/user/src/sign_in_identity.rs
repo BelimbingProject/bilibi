@@ -12,9 +12,8 @@ pub(crate) struct Created {
     pub change: Change,
 }
 
-/// Reserves the home account id and creates its credential identity. The
-/// caller inserts the account in the same transaction; both circular foreign
-/// keys are deferred until commit, so neither half can survive alone.
+/// Reserves the account id and creates its credential identity. Staff
+/// identities are installation-owned; customer identities retain a tenant.
 pub(crate) async fn create(
     sql: &(impl GenericClient + Sync),
     tenant: i64,
@@ -32,8 +31,8 @@ pub(crate) async fn create(
         .get(0);
     let identity: i64 = sql
         .query_one(
-            "INSERT INTO user_identities(kind,tenant_id,email,password_hash,email_verified_at,home_tenant_id,home_user_id,last_tenant_id) VALUES($1,CASE WHEN $1='customer' THEN $2::bigint END,$3,$4,CASE WHEN $5 THEN now() END,$2,$6,$2) RETURNING id",
-            &[&kind.as_str(), &tenant, &email, &password_hash, &verified, &user],
+            "INSERT INTO user_identities(kind,tenant_id,email,password_hash,email_verified_at,last_tenant_id) VALUES($1,CASE WHEN $1='customer' THEN $2::bigint END,$3,$4,CASE WHEN $5 THEN now() END,$2) RETURNING id",
+            &[&kind.as_str(), &tenant, &email, &password_hash, &verified],
         )
         .await?
         .get(0);
@@ -48,8 +47,6 @@ pub(crate) async fn create(
                 "kind": kind.as_str(),
                 "email": email,
                 "password_hash": "set",
-                "home_tenant_id": tenant,
-                "home_user_id": user,
             }),
         },
     })
@@ -62,20 +59,6 @@ pub(crate) async fn id(sql: &(impl GenericClient + Sync), tenant: i64, user: i64
     )
     .await?
     .map(|row| row.get(0))
-    .ok_or(Error::NotFound)
-}
-
-pub(crate) async fn identity_and_home(
-    sql: &(impl GenericClient + Sync),
-    tenant: i64,
-    user: i64,
-) -> Result<(i64, bool)> {
-    sql.query_opt(
-        "SELECT i.id,i.home_tenant_id=$1 AND i.home_user_id=$2 FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2",
-        &[&tenant, &user],
-    )
-    .await?
-    .map(|row| (row.get(0), row.get(1)))
     .ok_or(Error::NotFound)
 }
 

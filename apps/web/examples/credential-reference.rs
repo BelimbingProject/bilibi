@@ -1,9 +1,12 @@
 //! Running proof for contributed bearer routes. The reference module owns a
-//! failing `/survey/{token}` page so Web's log, debug report and response
-//! policy can be inspected without a real credential or a mounted Domain.
+//! failing public `/survey/{token}` page so Web's log, debug report and
+//! response policy can be inspected without a real credential or a mounted
+//! Domain.
 //!
-//! `--refusals` adds a second token route without its `CredentialPath` and
-//! exits non-zero unless catalog discovery refuses it.
+//! `--refusals` adds a staff token route without its `CredentialPath` and
+//! exits non-zero unless catalog discovery refuses it. The same rule for a
+//! public page or link is in `public-site-reference --refusals`.
+use bilibi_base::public::{PublicPage, PublicScope, SenderBudget, PUBLIC_PAGES};
 use bilibi_database::Error;
 use bilibi_module_registry::{
     contributions::{
@@ -11,8 +14,7 @@ use bilibi_module_registry::{
     },
     Consumer, Contribution, Layer, Module, Provenance, Service,
 };
-use bilibi_security::Scope;
-use bilibi_ui::page::{Page, PageFuture, PageRequest, PageService};
+use bilibi_ui::page::{Page, PageFuture, PageRequest};
 use std::sync::Arc;
 
 const MODULE: &str = "extensions/credential_reference";
@@ -29,8 +31,8 @@ macro_rules! provenance {
 }
 
 struct Reference;
-impl Page<Scope, Error> for Reference {
-    fn render<'a>(&'a self, _request: PageRequest<'a, Scope>) -> PageFuture<'a, Error> {
+impl Page<PublicScope, Error> for Reference {
+    fn render<'a>(&'a self, _request: PageRequest<'a, PublicScope>) -> PageFuture<'a, Error> {
         Box::pin(async { Err(Error::Internal) })
     }
 }
@@ -39,25 +41,20 @@ inventory::submit! {
     Module {
         id: MODULE,
         layer: Layer::Extensions,
-        dependencies: &["base/ui", "base/security"],
+        dependencies: &["base/ui", "base/public"],
         migrations: &[],
         services: &[Service {
             id: PAGES,
-            factory: |_| Ok(Arc::new(PageService::<Scope, Error>(Arc::new(Reference)))),
+            factory: |_| Ok(Arc::new(bilibi_ui::page::PageService::<PublicScope, Error>(Arc::new(Reference)))),
         }],
     }
 }
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "credential_reference.survey", provenance!(), &CredentialPath { path: "/survey/{token}" }) }
-inventory::submit! { Contribution::new(ROUTES, "credential_reference.survey", provenance!(), &Route {
-    company_scope: CompanyScope::Tenant,
-    method: Method::Get,
+inventory::submit! { Contribution::new(PUBLIC_PAGES, "credential_reference.survey", provenance!(), &PublicPage {
     path: "/survey/{token}",
     service: PAGES,
     operation: "answer",
-    access: Access::Public {
-        sender_budget: None,
-    },
-    framed: false,
+    budget: SenderBudget { per_minute: 60, per_hour: 600 },
 }) }
 
 static FORGOTTEN: Contribution = Contribution::new(
@@ -70,9 +67,7 @@ static FORGOTTEN: Contribution = Contribution::new(
         path: "/forgotten/{token}",
         service: PAGES,
         operation: "forgotten",
-        access: Access::Public {
-            sender_budget: None,
-        },
+        access: Access::SignedIn,
         framed: false,
     },
 );
@@ -110,12 +105,12 @@ async fn main() -> Result<std::process::ExitCode, Error> {
     bilibi_walkthrough_fixture::install(&db).await?;
     let origin = std::env::var("APP_ORIGIN").map_err(|_| Error::Invalid)?;
     let bind = std::env::var("BIND_ADDR").map_err(|_| Error::Invalid)?;
-    let app = bilibi_web::App::new(db, &origin)?;
+    let app = bilibi_web::App::new(db, &origin)?.at_public_site(&origin, 1);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|_| Error::Internal)?;
     println!("Credential reference listening at {origin}");
-    axum::serve(listener, bilibi_web::router(app))
+    axum::serve(listener, bilibi_web::public_router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
