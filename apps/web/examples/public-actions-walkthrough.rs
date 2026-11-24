@@ -285,6 +285,16 @@ fn form(ticket: &str, email: &str, trap: &str) -> String {
 async fn main() -> Result<std::process::ExitCode> {
     let db = bilibi_database::pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
+    // The places count by the UTC hour, and this proof takes about a minute
+    // and a half: start it clear of the hour's end.
+    let into_hour = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Error::Internal)?
+        .as_secs()
+        % 3600;
+    if into_hour > 3600 - 180 {
+        tokio::time::sleep(Duration::from_secs(3601 - into_hour)).await;
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|_| Error::Internal)?;
