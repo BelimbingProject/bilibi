@@ -32,13 +32,15 @@ const COLUMNS: &[PrintField] = &[
         label: "Description",
         kind: PrintKind::Text,
         optional: false,
-        sample: PrintValue::Text("Sample <material>"),
+        required_output: true,
+        sample: PrintValue::Text("Sample <material>\r\nHandle & store"),
     },
     PrintField {
         id: "quantity",
         label: "Quantity",
         kind: PrintKind::Integer,
         optional: false,
+        required_output: true,
         sample: PrintValue::Integer(2),
     },
 ];
@@ -72,6 +74,7 @@ static CONTRACT: PrintContract = PrintContract {
             label: "Reference",
             kind: PrintKind::Text,
             optional: false,
+            required_output: true,
             sample: PrintValue::Text("WS-1"),
         },
         PrintField {
@@ -79,6 +82,7 @@ static CONTRACT: PrintContract = PrintContract {
             label: "Address",
             kind: PrintKind::Address,
             optional: true,
+            required_output: false,
             sample: PrintValue::Address(&["Sample building", "Sample city"]),
         },
         PrintField {
@@ -86,6 +90,7 @@ static CONTRACT: PrintContract = PrintContract {
             label: "Lines",
             kind: PrintKind::Rows(COLUMNS),
             optional: false,
+            required_output: true,
             sample: PrintValue::Rows(&[SAMPLE_ROW, SAMPLE_ROW]),
         },
     ],
@@ -163,15 +168,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let layout = contract.compile(EN)?;
     let preview = layout.preview()?;
     assert!(preview.contains("Sample building<br>Sample city"));
-    assert!(preview.contains("Sample &lt;material&gt;"));
+    assert!(preview.contains("<td>Sample &lt;material&gt;<br>Handle &amp; store</td>"));
     let rows = vec![SAMPLE_ROW; 230];
     let values = [
-        ("reference", PrintValue::Text("<script>")),
+        ("reference", PrintValue::Text("<script>\nWS-2")),
         ("lines", PrintValue::Rows(&rows)),
     ];
     let document = layout.render("issued", &values)?;
     assert_eq!(document.matches("<tr>").count(), rows.len() + 1);
-    assert!(document.contains("&lt;script&gt;"));
+    assert!(document.contains("<dd>&lt;script&gt;<br>WS-2</dd>"));
     assert!(!document.contains("<script>"));
     assert!(!document.contains("Sample building"));
     let oversized = vec![SAMPLE_ROW; 2_001];
@@ -194,6 +199,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .field,
         "lines[1].description"
     );
+    let reference = r#"{"type":"field","field":"reference","label":"Reference"}"#;
+    let table = r#"{"type":"table","rows":"lines","columns":[
+        {"field":"description","heading":"Description"},
+        {"field":"quantity","heading":"Quantity"}
+    ]}"#;
+    let conditional =
+        |block| format!(r#"{{"type":"if_present","field":"address","blocks":[{block}]}}"#);
+    for (source, missing) in [
+        (format!(r#"{{"blocks":[{table}]}}"#), "reference"),
+        (format!(r#"{{"blocks":[{reference}]}}"#), "lines"),
+        (
+            format!(r#"{{"blocks":[{},{table}]}}"#, conditional(reference)),
+            "reference",
+        ),
+        (
+            format!(r#"{{"blocks":[{reference},{}]}}"#, conditional(table)),
+            "lines",
+        ),
+        (
+            format!(
+                r#"{{"blocks":[{reference},{{"type":"table","rows":"lines","columns":[{{"field":"description","heading":"Description"}}]}}]}}"#
+            ),
+            "lines.quantity",
+        ),
+    ] {
+        assert_eq!(contract.compile(&source).err().unwrap().field, missing);
+    }
+    let section = format!(
+        r#"{{"blocks":[{{"type":"section","heading":"Sheet","blocks":[{reference},{table}]}}]}}"#
+    );
+    assert!(contract.compile(&section).is_ok());
     assert!(contract
         .compile(&EN.replace("description", "unknown"))
         .is_err());

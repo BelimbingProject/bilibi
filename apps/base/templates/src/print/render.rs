@@ -54,7 +54,15 @@ impl Html {
 
     fn value(&mut self, value: PrintValue<'_>) -> fmt::Result {
         match value {
-            PrintValue::Text(text) => self.escaped(text),
+            PrintValue::Text(text) => {
+                for (index, line) in text.split('\n').enumerate() {
+                    if index != 0 {
+                        self.write_str("<br>")?;
+                    }
+                    self.escaped(line.strip_suffix('\r').unwrap_or(line))?;
+                }
+                Ok(())
+            }
             PrintValue::Integer(number) => write!(self, "{number}"),
             PrintValue::Decimal(number) => write!(self, "{number}"),
             PrintValue::Money { amount, currency } => write!(self, "{currency} {amount}"),

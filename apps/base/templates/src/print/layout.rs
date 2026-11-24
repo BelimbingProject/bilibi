@@ -44,7 +44,24 @@ pub(super) fn compile<'a>(contract: &'a PrintContract, source: &str) -> Checked<
     let layout: Layout = serde_json::from_str(source)
         .map_err(|error| Problem::new("layout", format!("Invalid print layout: {error}")))?;
     let mut remaining = MAX_NODES;
-    validate_blocks(contract.fields, &layout.blocks, 1, &mut remaining)?;
+    let mut shown = BTreeSet::new();
+    validate_blocks(
+        contract.fields,
+        &layout.blocks,
+        1,
+        &mut remaining,
+        Some(&mut shown),
+    )?;
+    for field in contract.fields {
+        let required = field.required_output
+            || matches!(field.kind, PrintKind::Rows(columns) if columns.iter().any(|column| column.required_output));
+        if required && !shown.contains(field.id) {
+            return Err(Problem::new(
+                field.id,
+                "Required print output must appear outside presence conditions.",
+            ));
+        }
+    }
     Ok(CompiledPrint {
         contract,
         blocks: layout.blocks,
@@ -80,11 +97,12 @@ impl CompiledPrint<'_> {
     }
 }
 
-fn validate_blocks(
+fn validate_blocks<'a>(
     fields: &[PrintField],
-    blocks: &[Block],
+    blocks: &'a [Block],
     depth: usize,
     remaining: &mut usize,
+    mut shown: Option<&mut BTreeSet<&'a str>>,
 ) -> Checked<()> {
     if blocks.is_empty() || depth > MAX_DEPTH {
         return Err(Problem::new(
@@ -101,10 +119,13 @@ fn validate_blocks(
             Block::Field { field, label } => {
                 scalar(fields, field)?;
                 literal("label", label)?;
+                if let Some(shown) = shown.as_deref_mut() {
+                    shown.insert(field.as_str());
+                }
             }
             Block::Section { heading, blocks } => {
                 literal("heading", heading)?;
-                validate_blocks(fields, blocks, depth + 1, remaining)?;
+                validate_blocks(fields, blocks, depth + 1, remaining, shown.as_deref_mut())?;
             }
             Block::IfPresent { field, blocks } => {
                 if !lookup(fields, field)?.optional {
@@ -113,9 +134,14 @@ fn validate_blocks(
                         "Presence conditions require an optional fact.",
                     ));
                 }
-                validate_blocks(fields, blocks, depth + 1, remaining)?;
+                validate_blocks(fields, blocks, depth + 1, remaining, None)?;
             }
-            Block::Table { rows, columns } => validate_table(fields, rows, columns)?,
+            Block::Table { rows, columns } => {
+                validate_table(fields, rows, columns)?;
+                if let Some(shown) = shown.as_deref_mut() {
+                    shown.insert(rows.as_str());
+                }
+            }
         }
     }
     Ok(())
@@ -156,10 +182,18 @@ fn validate_table(fields: &[PrintField], rows: &str, columns: &[Column]) -> Chec
     for column in columns {
         scalar(fields, &column.field)?;
         literal("heading", &column.heading)?;
-        if !seen.insert(&column.field) {
+        if !seen.insert(column.field.as_str()) {
             return Err(Problem::new(
                 &column.field,
                 "A column can appear only once in a table.",
+            ));
+        }
+    }
+    for field in fields {
+        if field.required_output && !seen.contains(field.id) {
+            return Err(Problem::new(
+                &format!("{rows}.{}", field.id),
+                "Required print column is missing.",
             ));
         }
     }

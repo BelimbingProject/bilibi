@@ -41,6 +41,7 @@ pub struct PrintField {
     pub label: &'static str,
     pub kind: PrintKind,
     pub optional: bool,
+    pub required_output: bool,
     pub sample: PrintValue<'static>,
 }
 
