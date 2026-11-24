@@ -1,21 +1,26 @@
-//! Public endpoints: the owner half of a `PublicEndpoint` contribution, for an
+//! Public links: the owner half of a [`PublicLink`](crate::PublicLink), an
 //! address a mail client, image proxy or mail provider calls with no session:
 //! an open-tracking pixel, a click-tracking redirect, an RFC 8058 one-click
-//! unsubscribe. The `{token}` in the path is the only credential, so the owner
-//! answers from the record that token names and nothing else.
+//! unsubscribe, a calendar feed. The `{token}` in the path is the only
+//! credential, so the owner answers from the record that token names, in the
+//! tenant of the public site the request reached, and nothing else.
 //!
 //! The delivery rules live here, in [`Reply::headers`], so no owner composes
 //! its own cache, framing or referrer policy: a reply is never framed, never
 //! sniffed, never scripted, and a redirect sends no referrer. A redirect goes
 //! only to a [`Target`], which an owner builds from the address its record
 //! stored: the request carries no query string to build one from.
+use crate::PublicScope;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
-pub type EndpointFuture<'a, Error> =
-    Pin<Box<dyn Future<Output = Result<Reply, Error>> + Send + 'a>>;
+pub type LinkFuture<'a, Error> = Pin<Box<dyn Future<Output = Result<Reply, Error>> + Send + 'a>>;
 
-pub struct EndpointRequest<'a> {
+pub struct LinkRequest<'a> {
     pub operation: &'static str,
+    /// The public site the request reached. Find the token's record in
+    /// `scope.tenant()` only, so a link of one tenant answers nothing on
+    /// another tenant's site.
+    pub scope: &'a PublicScope,
     /// The path parameters; `token` is always present. The query string is
     /// never passed on, so no request can choose where a redirect goes.
     pub path: &'a HashMap<String, String>,
@@ -24,7 +29,7 @@ pub struct EndpointRequest<'a> {
     /// The bounded request body; empty for a GET.
     pub body: &'a [u8],
 }
-impl EndpointRequest<'_> {
+impl LinkRequest<'_> {
     /// The bearer token from the path. Look it up by its digest, never by
     /// comparing the raw value in SQL or with `==`.
     pub fn token(&self) -> &str {
@@ -41,7 +46,7 @@ pub enum Cache {
     Private { max_age_seconds: u32 },
 }
 
-/// The owner's answer. Anything the owner refuses is an `Err`, which Web turns
+/// The owner's answer. Anything the owner refuses is an `Err`, which the host turns
 /// into one fixed refusal whatever the cause, so an unknown token and a known
 /// one whose stored target is unusable look the same.
 #[derive(Debug)]
@@ -54,6 +59,9 @@ pub enum Reply {
     },
     /// `302` to an address the owner stored and validated.
     Redirect(Target),
+    /// `303` to a page of this same public site: where a page's own form
+    /// returns after its POST link acted (`/preferences/{token}?saved=1`).
+    SeeOther(Local),
     /// `204` with no body: the action was taken (or, to say nothing about
     /// whether the token exists, would have been).
     NoContent,
@@ -82,6 +90,7 @@ impl Reply {
         match self {
             Self::Bytes { .. } => 200,
             Self::Redirect(_) => 302,
+            Self::SeeOther(_) => 303,
             Self::NoContent => 204,
         }
     }
@@ -101,12 +110,17 @@ impl Reply {
             ("content-security-policy", POLICY.into()),
         ];
         match self {
-            Self::Bytes { content_type, .. } => {
-                headers.push(("content-type", crate::download::content_type(content_type)))
-            }
+            Self::Bytes { content_type, .. } => headers.push((
+                "content-type",
+                bilibi_ui::download::content_type(content_type),
+            )),
             // The destination learns nothing of the token link it came from.
             Self::Redirect(target) => {
                 headers.push(("location", target.0.clone()));
+                headers.push(("referrer-policy", "no-referrer".into()));
+            }
+            Self::SeeOther(local) => {
+                headers.push(("location", local.0.clone()));
                 headers.push(("referrer-policy", "no-referrer".into()));
             }
             Self::NoContent => {}
@@ -127,7 +141,7 @@ const TARGET_LIMIT: usize = 2048;
 /// A redirect destination the owner validated: an absolute `http` or `https`
 /// address with a host and no user name or password, at most 2048 characters
 /// once normalized. Build it from the address your record stored: an
-/// endpoint sees no query string, so a link cannot name its own destination
+/// link sees no query string, so a link cannot name its own destination
 /// (an open redirect).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Target(String);
@@ -157,13 +171,36 @@ impl Target {
     }
 }
 
-/// The owner's endpoint adapter. Web calls `answer` with no scope: the owner
-/// finds the tenant and record from the token, answers the same for an
-/// unknown token wherever a different answer would reveal which tokens exist,
-/// and writes through its facade like any other unattended work.
-pub trait Endpoint<Error>: Send + Sync {
-    fn answer<'a>(&'a self, request: EndpointRequest<'a>) -> EndpointFuture<'a, Error>;
+/// A path on the public site the request reached, with an optional query:
+/// it starts with one `/`, has no backslash, whitespace or control
+/// character, and is at most 2048 characters. The browser stays on the
+/// hostname it asked, so the owner needs no origin to send it back.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Local(String);
+impl Local {
+    /// `None` for an absolute or protocol-relative address (`//host`, `/\host`)
+    /// or anything else that could leave this site.
+    pub fn parse(path: &str) -> Option<Self> {
+        (path.starts_with('/')
+            && !path.starts_with("//")
+            && path.len() <= TARGET_LIMIT
+            && !path.contains(['\\', '#'])
+            && !path.chars().any(|c| c.is_control() || c.is_whitespace()))
+        .then(|| Self(path.to_owned()))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
-/// Registry service type (Web uses Database Error): contribute its service ID
-/// in `PublicEndpoint.service`.
-pub struct EndpointService<Error>(pub Arc<dyn Endpoint<Error>>);
+
+/// The owner's link adapter. The host calls `answer` after the listener and
+/// link budgets admitted the sender: the owner finds the record from the
+/// token in the scope's tenant, answers the same for an unknown token
+/// wherever a different answer would reveal which tokens exist, and writes
+/// through its facade like any other unattended work.
+pub trait Link<Error>: Send + Sync {
+    fn answer<'a>(&'a self, request: LinkRequest<'a>) -> LinkFuture<'a, Error>;
+}
+/// Registry service type (the host uses Database Error): contribute its
+/// service ID in `PublicLink.service`.
+pub struct LinkService<Error>(pub Arc<dyn Link<Error>>);

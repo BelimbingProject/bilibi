@@ -128,7 +128,7 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 
 **A person can publish their own calendar as a read-only iCalendar link** and subscribe to it from Google Calendar, Outlook or Apple Calendar. The feed is one more key to the same door, not a second set of rules.
 
-- **Address.** `GET /feeds/activities/{key}` (a `PUBLIC_ENDPOINTS` contribution, so Web redacts the key from logs, sends no referrer and rate-limits each sender per minute: Base Integration setting `public_endpoints.sender_per_minute`). The key is the only credential.
+- **Address.** `GET /feeds/activities/{key}` on the public site (a [`base/public`](../../base/public/README.md) `PUBLIC_LINKS` contribution, so the host redacts the key from logs, sends no referrer and budgets each sender: 600 a minute and 10,000 an hour per address, since calendar services fetch every subscriber's feed from a few addresses). The key is the only credential, and it answers only on its own tenant's public site.
 - **Key.** The public listener must be configured for the workspace. The settings page and the agent operation return its absolute feed URL. The key contains 256 random bits as 64 hex characters, one per person and tenant. Only its SHA-256 is stored (`core_activity_feed_keys`); the key is shown once, when it is made, on **My settings › Calendar feed** (`/settings/calendar-feed`) and in the result of `core.activity.create_feed_key`.
 - **Same rule as the page and the agent API.** Each read acts as the key's owner: it proves the account live, then reads `Activities::list` for calls and meetings between 30 days ago and a year ahead, and tasks due in that range, the activities the owner takes part in (creator, assignee, or an account guest who has not declined; [Who sees an activity](#who-sees-an-activity)): theirs, never another person's, whoever holds the link. A holder of `core.activity.all.view` gets their own calendar too, not the tenant's. If the owner loses `core.activity.view` or is deactivated, the feed answers as for an unknown key.
 - **What it shows.** Subject (tasks start with "Task: "), start and end, location, and the join link of a meeting. Never the description, internal notes, guests, related record, status or reminders.
@@ -210,7 +210,7 @@ The subject is `core.activity.activity:<id>` and the key `<id>:<version>`. The p
 - Settings (Settings › Activities, tenant): `core.activity.reminder_minutes`, `core.activity.reminder_email`, `core.activity.imminent_hours`. Personal (user scope, set with Reminder defaults on the Activities list): `core.activity.default_reminder_minutes`, `core.activity.default_reminder_email`.
 - Schedule `core/activity.reminders` and its Queue worker `core/activity-reminders`; Queue workers `core/activity-invites` and `core/activity-guest-reminders`.
 - Registry `core/activity.invitation_gates` (declared here; Domains contribute).
-- Public endpoint and credential path `/feeds/activities/{token}` (service `core/activity.feed`); page `/settings/calendar-feed`, a tab of My settings.
+- Public link and credential path `/feeds/activities/{token}` (service `core/activity.feed`); page `/settings/calendar-feed`, a tab of My settings.
 - Uses `core/work_calendar` (default calendar and resolved days) for "working days only" and the calendar's day marks.
 - Record kind `core.activity.activity` (page `/activities/{id}`); holder table `activities`.
 - Menu item Activities under Core.

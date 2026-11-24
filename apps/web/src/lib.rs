@@ -7,7 +7,6 @@ mod application_version;
 mod auth;
 mod composition;
 mod create_owner;
-mod endpoints;
 mod errors;
 mod identity_lifecycle;
 mod impersonation;
@@ -22,9 +21,9 @@ mod portal;
 mod portal_auth;
 mod provision;
 mod proxies;
+mod public;
 mod routes;
 mod scim;
-mod sender_admission;
 mod shell;
 mod two_factor_reset;
 mod visitor;
@@ -61,7 +60,9 @@ pub const STAFF_COOKIE: &str = "__Host-bilibi_session";
 pub struct App {
     routes: Arc<routes::Pages>,
     downloads: Arc<routes::Downloads>,
-    endpoints: Arc<endpoints::Endpoints>,
+    public_routes: Arc<public::PublicRoutes>,
+    /// The public site's listener budget and scope (`base/public`).
+    public: Arc<bilibi_base::public::Public>,
     moved: Arc<routes::MovedRoutes>,
     credential_paths: Arc<CredentialPaths>,
     pub db: Db,
@@ -157,10 +158,14 @@ impl App {
         }
         let routes = Arc::new(routes::bind(&services)?);
         let downloads = Arc::new(routes::bind_downloads(&services, &routes)?);
-        let endpoints = Arc::new(endpoints::bind(&services, &routes, &downloads)?);
+        let public_routes = Arc::new(public::bind(&services, &routes, &downloads)?);
         let moved = Arc::new(routes::bind_moved(
-            &services, &routes, &downloads, &endpoints,
+            &services,
+            &routes,
+            &downloads,
+            &public_routes,
         )?);
+        let public = services.get(bilibi_base::public::SERVICE)?;
         let credential_paths = Arc::new(CredentialPaths::from_catalog(services.catalog()?)?);
         let api = Arc::new(api::Edge::new(&services)?);
         let webhooks = Arc::new(webhooks::Boundary::bind(&services)?);
@@ -169,7 +174,8 @@ impl App {
         Ok(Self {
             routes,
             downloads,
-            endpoints,
+            public_routes,
+            public,
             moved,
             credential_paths,
             db,
@@ -196,6 +202,13 @@ impl App {
             proxies,
             services: Arc::new(services),
         })
+    }
+
+    /// The scope of the public site this listener serves; the staff listener
+    /// serves none.
+    fn public_scope(&self) -> Result<bilibi_base::public::PublicScope> {
+        let tenant = self.public_tenant.ok_or(Error::NotFound)?;
+        Ok(self.public.site(tenant))
     }
 
     pub fn at_public_site(mut self, origin: &str, tenant: i64) -> Self {
@@ -396,7 +409,7 @@ pub fn public_router(app: App) -> Router {
     debug_assert_eq!(app.site, Site::Public);
     let perf = app.perf.clone();
     let pages = routes::install_public(Router::new(), &app.routes, &app.downloads);
-    let pages = endpoints::install(pages, &app.endpoints);
+    let pages = public::install(pages, &app.public_routes);
     let router = routes::install_moved(pages, &app.moved.public)
         .merge(webhooks::router())
         .merge(visitor::router())
@@ -435,7 +448,11 @@ pub fn public_router(app: App) -> Router {
         .route("/fonts/{name}", get(embedded_asset))
         .route("/assets/{name}", get(embedded_asset))
         .route("/favicon.svg", get(embedded_asset))
-        .route("/favicon.ico", get(embedded_asset));
+        .route("/favicon.ico", get(embedded_asset))
+        .layer(middleware::from_fn_with_state(
+            app.clone(),
+            public::listener,
+        ));
     finish_router(router, app, perf)
 }
 

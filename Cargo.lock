@@ -292,6 +292,7 @@ dependencies = [
  "bilibi-party-ids",
  "bilibi-person",
  "bilibi-principal-directory",
+ "bilibi-public",
  "bilibi-queue",
  "bilibi-records",
  "bilibi-schedule",
@@ -672,6 +673,7 @@ dependencies = [
  "bilibi-ports",
  "bilibi-principal-directory",
  "bilibi-privacy",
+ "bilibi-public",
  "bilibi-queue",
  "bilibi-records",
  "bilibi-reports",
@@ -1648,6 +1650,19 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+]
+
+[[package]]
+name = "bilibi-public"
+version = "0.2.1"
+dependencies = [
+ "bilibi-database",
+ "bilibi-module-registry",
+ "bilibi-settings",
+ "bilibi-ui",
+ "inventory",
+ "serde_json",
+ "url",
 ]
 
 [[package]]

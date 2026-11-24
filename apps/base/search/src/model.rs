@@ -272,9 +272,6 @@ pub(crate) fn installed(catalog: &Catalog) -> Result<&'static [Kind]> {
             .find(|route| route.method == Method::Get && route.path == decl.link)
             .map(|route| route.access)
             .ok_or_else(|| invalid(at, format!("link {} is no page route", decl.link)))?;
-        if matches!(access.base(), Access::Public { .. }) {
-            return Err(invalid(at, format!("link {} is a public page", decl.link)));
-        }
         kinds.push(Kind {
             id: decl.table,
             label: table.label(),

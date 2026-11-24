@@ -68,7 +68,7 @@ pub const HAPPENED: &str = "core/activity.happened";
 /// Revoke anyone's calendar feed key and see who has one (an administrator;
 /// no contributed role holds it).
 pub const MANAGE_FEEDS: &str = "core.activity.feed.manage";
-/// The feed's endpoint service (`core/activity.feed`).
+/// The feed's public link service (`core/activity.feed`).
 pub const FEED_SERVICE: &str = "core/activity.feed";
 /// Named background principal permission to create a task for an originating account.
 pub const SYSTEM_CREATE: &str = "core.activity.system.create";
@@ -912,7 +912,7 @@ impl Activities {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/templates", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/watchers", "base/schedule", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
+    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/templates", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/public", "base/queue", "base/records", "base/watchers", "base/schedule", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
     migrations: &[
         ("core-activity-001-activities", include_str!("../migrations/001-activities.sql")),
         ("core-activity-002-invitations", include_str!("../migrations/002-invitations.sql")),
@@ -985,7 +985,7 @@ inventory::submit! { Module {
             authentication: s.get("base/tenancy.authentication")?,
         }))))
     }}, Service { id: FEED_SERVICE, factory: |s| {
-        Ok(Arc::new(bilibi_ui::endpoint::EndpointService::<Error>(Arc::new(feed::FeedEndpoint(s.get(SERVICE)?)))))
+        Ok(Arc::new(bilibi_public::LinkService::<Error>(Arc::new(feed::FeedLink(s.get(SERVICE)?)))))
     }}, Service { id: web::SERVICE, factory: |s| {
         Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages {
             activities: s.get(SERVICE)?,
