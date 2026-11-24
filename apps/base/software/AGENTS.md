@@ -1,0 +1,1 @@
+Use the release discovery result in `src/update.rs` for both owner notices and agent reads, so stale, partial and ambiguous listings give the same answer everywhere. The exact install review and proof checks remain authoritative; see “Update notices” in the module README.
