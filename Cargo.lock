@@ -717,6 +717,7 @@ dependencies = [
  "bilibi-ui",
  "inventory",
  "serde_json",
+ "tokio",
  "tokio-postgres",
 ]
 
