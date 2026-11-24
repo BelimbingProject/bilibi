@@ -72,40 +72,48 @@ impl Layout {
             .parent()
             .ok_or_else(|| format!("{} has no Bilibi server folder", self.dir.display()))
     }
-    pub fn check_release_tag(&self, tag: &str) -> Result<(), String> {
-        self.release_proof(&["check-replay", "--state"], tag, None)
+    pub fn check_release(&self, source: &serde_json::Value, resumed: bool) -> Result<(), String> {
+        let helper = self.server_root()?.join("release-proof.py");
+        let trust = self.dir.join("trust/release.json");
+        let output = Command::new("python3")
+            .arg(&helper)
+            .args(["check-admission", "--trust"])
+            .arg(trust)
+            .args(["--source", &source.to_string()])
+            .output();
+        proof_result(output)?;
+        self.release_replay("check-replay", source, resumed)
     }
-    pub fn record_release(&self, tag: &str, digest: &str) -> Result<(), String> {
-        self.release_proof(&["record-replay", "--state"], tag, Some(digest))
+
+    pub fn record_release(&self, source: &serde_json::Value) -> Result<(), String> {
+        self.release_replay("record-replay", source, false)
     }
-    fn release_proof(
+
+    fn release_replay(
         &self,
-        operation: &[&str],
-        tag: &str,
-        digest: Option<&str>,
+        operation: &str,
+        source: &serde_json::Value,
+        resumed: bool,
     ) -> Result<(), String> {
-        let root = self.server_root()?;
-        let state = self.dir.join("trust/release-state.json");
+        let helper = self.server_root()?.join("release-proof.py");
         let mut command = Command::new("python3");
         command
-            .arg(root.join("release-proof.py"))
-            .args(operation)
-            .arg(&state);
-        command.args(["--tag", tag]);
-        if let Some(digest) = digest {
-            command.args(["--digest", digest]);
+            .arg(helper)
+            .args([operation, "--state"])
+            .arg(self.dir.join("trust/release-state.json"))
+            .args([
+                "--tag",
+                source["tag"].as_str().unwrap_or(""),
+                "--digest",
+                source["digest"].as_str().unwrap_or(""),
+            ]);
+        if resumed {
+            command.arg("--resume");
         }
-        let output = command
-            .output()
-            .map_err(|error| format!("could not run the release proof verifier: {error}"))?;
-        if output.status.success() {
-            return Ok(());
-        }
-        Err(String::from_utf8_lossy(&output.stderr)
-            .trim()
-            .trim_start_matches("release-proof: ")
-            .to_owned())
+        let output = command.output();
+        proof_result(output)
     }
+
     pub fn replace_release_trust(
         &self,
         job: i64,
@@ -144,7 +152,13 @@ impl Layout {
             .as_str()
             .ok_or("the release trust request names no minimum tag")?;
         let root = self.server_root()?;
-        let trust = root.join("trust");
+        let trust = self.dir.join("trust");
+        if !trust.join("release.json").is_file() {
+            return Err(
+                "the instance has no release trust record; pin the first policy from the terminal"
+                    .into(),
+            );
+        }
         let next = trust.join(format!(".release-{job}.json"));
         let public = trust.join(format!(".release-{job}.pem"));
         let _ = fs::remove_file(&next);
@@ -255,8 +269,8 @@ impl Layout {
     /// What to tell the owner when `converted` is false.
     pub fn conversion_advice(&self) -> String {
         format!(
-            "{} still has the older folder layout, so a release cannot be switched here. Run `sudo scripts/install-server.sh installer <bilibi-installer>` (or `create {}`) on the server to convert it, then start again.",
-            self.name, self.name
+            "{} still has the older folder layout, so a release cannot be switched here. Run `sudo scripts/install-server.sh installer {} <bilibi-installer>` (or `create {}`) on the server to convert it, then start again.",
+            self.name, self.name, self.name
         )
     }
     /// One value from the instance's `env` file (`BIND_ADDR`, `APP_ORIGIN`).
@@ -314,6 +328,18 @@ pub fn verify_checksum(dir: &Path) -> Result<String, String> {
     Ok(sha.to_ascii_lowercase())
 }
 
+fn proof_result(output: io::Result<std::process::Output>) -> Result<(), String> {
+    let output =
+        output.map_err(|error| format!("could not run the release proof verifier: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&output.stderr)
+        .trim()
+        .trim_start_matches("release-proof: ")
+        .to_owned())
+}
+
 /// Copies a release folder's files, and its add-ons, into `dst` and
 /// returns the program's size.
 pub fn copy_release(src: &Path, dst: &Path) -> io::Result<u64> {
@@ -345,7 +371,7 @@ pub fn copy_release(src: &Path, dst: &Path) -> io::Result<u64> {
 /// list as it is. A file that cannot be read as a list is an error: the
 /// release was damaged on the way.
 pub fn read_plugins(dir: &Path) -> Result<Option<Vec<serde_json::Value>>, String> {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     let path = dir.join(PLUGINS_DIR).join(PLUGINS_ENABLED);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,

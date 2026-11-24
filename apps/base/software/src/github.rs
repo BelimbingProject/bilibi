@@ -11,14 +11,14 @@
 mod app;
 
 use crate::{
-    release_proof, review::Review, transport, Software, SoftwareError, SoftwareResult, STEP_UP,
+    STEP_UP, Software, SoftwareError, SoftwareResult, release_proof, review::Review, transport,
 };
 use bilibi_authz::authorize_operator;
 use bilibi_database::{MutationTransaction, Result};
 use bilibi_integration::{Call, Failure, Origin, Outgoing, RedirectPolicy, Reply};
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::Scope;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{fs, path::Path, sync::Mutex, time::Duration};
 use tokio_postgres::GenericClient;
 
@@ -102,6 +102,7 @@ impl Software {
         &self,
         client: &(impl GenericClient + Sync),
         _scope: &Scope,
+        policy: Option<&release_proof::Policy>,
     ) -> Result<Saved> {
         let refresh_minutes = self
             .settings
@@ -119,9 +120,7 @@ impl Software {
                 .flatten()
                 .map(|app| app.client_id),
         };
-        if let Some(paths) = self.paths.as_ref() {
-            let policy =
-                release_proof::Policy::load(paths).map_err(bilibi_database::Error::refused)?;
+        if let Some(policy) = policy {
             saved.repository = Some(policy.repository.clone());
             saved.repository_id = Some(policy.repository_id);
         }
@@ -133,37 +132,15 @@ impl Software {
     /// GitHub marks as a pre-release. Drafts are never listed.
     pub(crate) async fn github_listing(
         &self,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         force: bool,
         prerelease: bool,
+        policy: &release_proof::Policy,
     ) -> Result<Value> {
-        let client = self.db.get().await?;
-        let mut saved = self.github_saved(&**client, scope).await?;
-        drop(client);
-        let policy = match self.paths.as_ref() {
-            Some(paths) => {
-                release_proof::Policy::load(paths).map_err(bilibi_database::Error::refused)?
-            }
-            None => {
-                return Ok(json!({
-                    "available": false,
-                    "app": saved.app,
-                    "refresh_minutes": saved.refresh_minutes,
-                    "message": "This program is not running from an installed instance, so it has no release trust record.",
-                }))
-            }
-        };
-        saved.repository = Some(policy.repository.clone());
-        saved.repository_id = Some(policy.repository_id);
-        let repository = policy.repository;
-        if repository.is_empty() {
-            return Ok(json!({
-                "available": false,
-                "app": saved.app,
-                "refresh_minutes": saved.refresh_minutes,
-                "message": "No GitHub repository is set. A server owner sets Software › Application repository on GitHub, like your-company/my-bilibi.",
-            }));
-        }
+        let saved = self.github_saved(client, scope, Some(policy)).await?;
+        let repository = &policy.repository;
+        let proof_required = policy.requires_operator_proof();
         let Some(target) = this_target() else {
             return Ok(json!({
                 "available": false,
@@ -178,22 +155,36 @@ impl Software {
             .as_ref()
             .map(|paths| paths.dir.join("data").join("github-listing.json"));
         if !force {
-            if let Some(cached) = read_cache(cache_path.as_deref(), &repository) {
+            if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
                 if fresh(&cached, saved.refresh_minutes) || limited(&cached) {
-                    return Ok(present(&cached, &saved, target, prerelease, false));
+                    return Ok(present(
+                        &cached,
+                        &saved,
+                        target,
+                        prerelease,
+                        false,
+                        proof_required,
+                    ));
                 }
             }
-        } else if let Some(cached) = read_cache(cache_path.as_deref(), &repository) {
+        } else if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
             if limited(&cached) {
-                return Ok(present(&cached, &saved, target, prerelease, false));
+                return Ok(present(
+                    &cached,
+                    &saved,
+                    target,
+                    prerelease,
+                    false,
+                    proof_required,
+                ));
             }
         }
-        let fetched = match self.github_token(scope, &repository).await {
+        let fetched = match self.github_token(scope, repository).await {
             Ok(token) => {
                 fetch_listing(
                     &self.integration,
                     scope,
-                    &repository,
+                    repository,
                     token.as_deref(),
                     target,
                     cache_path.as_deref(),
@@ -208,18 +199,25 @@ impl Software {
                 // Remember the failed attempt so every page render does not
                 // ask a GitHub that just refused or did not answer. Refresh
                 // still asks again.
-                let mut kept = read_cache(cache_path.as_deref(), &repository).unwrap_or_else(
+                let mut kept = read_cache(cache_path.as_deref(), repository).unwrap_or_else(
                     || json!({"available": false, "repository": repository, "releases": []}),
                 );
                 kept["attempt_at"] = json!(jiff::Timestamp::now().to_string());
                 kept["message"] = json!(message);
                 write_cache(cache_path.as_deref(), &kept);
-                let mut shown = present(&kept, &saved, target, prerelease, true);
+                let mut shown = present(&kept, &saved, target, prerelease, true, proof_required);
                 shown["message"] = json!(message);
                 return Ok(shown);
             }
         };
-        Ok(present(&cached, &saved, target, prerelease, false))
+        Ok(present(
+            &cached,
+            &saved,
+            target,
+            prerelease,
+            false,
+            proof_required,
+        ))
     }
 
     /// A fresh read token for one use of `repository`, minted by this server's
@@ -235,7 +233,6 @@ impl Software {
         };
         match app::mint(&self.integration, scope, &app, repository).await {
             Ok(token) => Ok(Some(token)),
-            Err(app::Refusal::NotInstalled(_)) => Ok(None),
             Err(refusal) => Err(refusal.sentence()),
         }
     }
@@ -248,9 +245,23 @@ impl Software {
     ) -> SoftwareResult<Review> {
         let client = self.db.get().await?;
         authorize_operator(&**client, scope, crate::MANAGE).await?;
-        let saved = self.github_saved(&**client, scope).await?;
-        drop(client);
-        github_review(self, scope, input, &saved).await
+        self.github_review_with(&**client, scope, input).await
+    }
+
+    async fn github_review_with(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        let policy = self
+            .paths
+            .as_ref()
+            .map(release_proof::Policy::load)
+            .transpose()
+            .map_err(bilibi_database::Error::refused)?;
+        let saved = self.github_saved(client, scope, policy.as_ref()).await?;
+        github_review(input, &saved)
     }
 
     pub(crate) async fn github_in(
@@ -260,52 +271,27 @@ impl Software {
         input: &Value,
     ) -> SoftwareResult<Value> {
         authorize_operator(tx.sql(), scope, crate::MANAGE).await?;
-        let saved = self.github_saved(tx.sql(), scope).await?;
-        let review = github_review(self, scope, input, &saved).await?;
+        let review = self.github_review_with(tx.sql(), scope, input).await?;
         self.step_up.require(scope, STEP_UP, &review.target).await?;
-        apply_github(tx, &self.settings, scope, input, &review).await?;
+        apply_github(tx, &self.settings, scope, input).await?;
         Ok(
             json!({"review": review.facts, "github": {"repository": review.facts["repository"], "repository_id": review.facts["repository_id"]}}),
         )
     }
 }
 
-async fn github_review(
-    _software: &Software,
-    _scope: &Scope,
-    input: &Value,
-    saved: &Saved,
-) -> SoftwareResult<Review> {
+fn github_review(input: &Value, saved: &Saved) -> SoftwareResult<Review> {
     let object = input.as_object().ok_or_else(|| {
         SoftwareError::field("github", "Give the GitHub release-list settings to review.")
     })?;
-    let allowed = ["repository", "refresh_minutes"];
+    let allowed = ["refresh_minutes"];
     if object.keys().any(|key| !allowed.contains(&key.as_str())) {
         return Err(SoftwareError::field(
             "github",
-            "GitHub release access accepts only the pinned repository and check interval; servers do not accept GitHub tokens.",
+            "GitHub release access accepts only the check interval; servers do not accept GitHub tokens.",
         ));
     }
-    let repository = match input.get("repository") {
-        Some(Value::String(name)) => {
-            parse_repository(name)
-                .map_err(|message| SoftwareError::field("repository", &message))?;
-            Some(name.trim().to_owned())
-        }
-        Some(Value::Null) | None => saved.repository.clone(),
-        Some(_) => {
-            return Err(SoftwareError::field(
-                "repository",
-                "Enter the repository as owner/name, like your-company/my-bilibi.",
-            ))
-        }
-    };
-    if repository != saved.repository {
-        return Err(SoftwareError::field(
-            "repository",
-            "The application repository is pinned in Release trust. Ask the installation owner to change Release trust with a fresh 2FA code instead.",
-        ));
-    }
+    let repository = &saved.repository;
     let refresh_minutes = match input.get("refresh_minutes") {
         Some(value) => value
             .as_i64()
@@ -326,8 +312,6 @@ async fn github_review(
         "The release list is checked at most every {refresh_minutes} minutes, and when you choose Refresh."
     ));
     let request = json!({
-        "repository": repository,
-        "repository_id": saved.repository_id,
         "refresh_minutes": refresh_minutes,
     });
     Ok(Review {
@@ -350,7 +334,6 @@ async fn apply_github(
     settings: &Settings,
     scope: &Scope,
     input: &Value,
-    _review: &Review,
 ) -> SoftwareResult<()> {
     if let Some(minutes) = input.get("refresh_minutes").and_then(Value::as_i64) {
         settings
@@ -542,7 +525,14 @@ pub(crate) fn asset_request(repository: &str, asset_id: i64, token: Option<&str>
     outgoing
 }
 
-fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: bool) -> Value {
+fn present(
+    cache: &Value,
+    saved: &Saved,
+    target: &str,
+    prerelease: bool,
+    stale: bool,
+    proof_required: bool,
+) -> Value {
     let repository = cache["repository"].as_str().unwrap_or("");
     let live_id = cache["repository_id"].as_i64();
     let accepted = saved.repository.as_deref() == Some(repository)
@@ -561,6 +551,28 @@ fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: 
         .collect();
     releases.retain(|row| row["target"].as_str() == Some(target));
     let mut message = cache["message"].as_str().unwrap_or("").to_owned();
+    if proof_required {
+        let before = releases.len();
+        releases.retain(|row| {
+            row["proof_asset_id"].as_i64().is_some() && row["proof_digest"].as_str().is_some()
+        });
+        if before > 0 && releases.is_empty() {
+            message = "The setup files have no matching .proof.json assets. Publish each operator proof beside the exact archive.".into();
+        }
+    } else {
+        for row in &mut releases {
+            if let Some(fields) = row.as_object_mut() {
+                for key in [
+                    "proof_asset_id",
+                    "proof_name",
+                    "proof_digest",
+                    "proof_bytes",
+                ] {
+                    fields.remove(key);
+                }
+            }
+        }
+    }
     if identity_changed {
         message = format!(
             "GitHub now says {repository} is repository {}, not the number {} pinned in Release trust. Installation is refused until the installation owner reviews a Release trust change with fresh 2FA.",
@@ -600,6 +612,7 @@ fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: 
         "refresh_minutes": saved.refresh_minutes,
         "limited_until": cache["limited_until"],
         "message": if message.is_empty() { Value::Null } else { json!(message) },
+        "proof_required": proof_required,
         "releases": releases,
     })
 }
@@ -994,10 +1007,14 @@ fn github_status(repository: &str, status: u16, _authenticated: bool, reply: &Re
         if header_text(reply, "retry-after").is_some() || rate_headers_remaining(reply) == 0 {
             return "GitHub is limiting requests from this server. The last saved list is shown, when there is one. Try Refresh later.".into();
         }
-        return format!("GitHub refused the request for {repository}. Check that the server GitHub App is installed on the pinned repository with read access.");
+        return format!(
+            "GitHub refused the request for {repository}. Check that the server GitHub App is installed on the pinned repository with read access."
+        );
     }
     if status == 404 {
-        return format!("GitHub has no repository {repository} that this server's App can read. Check the pinned name and App installation.");
+        return format!(
+            "GitHub has no repository {repository} that this server's App can read. Check the pinned name and App installation."
+        );
     }
     if (300..400).contains(&status) {
         return "GitHub sent the request to another address. Nothing was read.".into();

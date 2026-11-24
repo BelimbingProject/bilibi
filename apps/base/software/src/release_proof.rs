@@ -6,8 +6,8 @@
 //! verifier; an operator proof is checked by the installed verifier without
 //! making a network call.
 use crate::{transport, transport::Paths};
-use serde::Deserialize;
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -21,14 +21,14 @@ const ED25519_SPKI_PREFIX: &[u8] = &[
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
 ];
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Github,
     Operator,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     version: u8,
@@ -39,7 +39,9 @@ pub struct Policy {
     pub minimum_tag: String,
     pub changed_at: String,
     pub changed_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub public_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
 }
 
@@ -126,7 +128,7 @@ pub fn review_change(input: &Value) -> Result<Change, (String, String)> {
             return field(
                 "public_key",
                 "GitHub release trust does not use an operator public key.",
-            )
+            );
         }
         _ => None,
     };
@@ -186,7 +188,7 @@ fn public_key_fingerprint(public_key: &str) -> Result<String, String> {
 
 impl Policy {
     pub fn load(paths: &Paths) -> Result<Self, String> {
-        let path = trust_path(paths)?;
+        let path = paths.dir.join("trust/release.json");
         let bytes = fs::read(&path).map_err(|error| {
             format!(
                 "This server has no readable release trust record ({}: {error}). Run scripts/install-server.sh trust before installing a release.",
@@ -286,6 +288,33 @@ impl Policy {
         Ok(())
     }
 
+    pub fn admission(&self, tag: &str, target: &str, digest: &str) -> Value {
+        json!({
+            "version": VERSION,
+            "proof": self.kind,
+            "repository": self.repository,
+            "repository_id": self.repository_id,
+            "workflow": self.workflow,
+            "tag": tag,
+            "target": target,
+            "archive_sha256": digest,
+            "fingerprint": self.fingerprint,
+        })
+    }
+
+    pub fn check_admission(&self, source: &Value) -> Result<(), String> {
+        let facts = self.facts();
+        if source["proof"] != facts["kind"]
+            || source["repository"] != facts["repository"]
+            || source["repository_id"] != facts["repository_id"]
+            || source["workflow"] != facts["workflow"]
+            || source["fingerprint"] != facts["fingerprint"]
+        {
+            return Err("This release was verified under a different Release trust policy.".into());
+        }
+        self.check_tag(source["tag"].as_str().unwrap_or(""))
+    }
+
     pub fn verify(
         &self,
         paths: &Paths,
@@ -311,23 +340,36 @@ impl Policy {
                         .to_owned()
                 })?;
                 let helper = helper_path(paths)?;
-                let trust = trust_path(paths)?;
-                let output = Command::new("python3")
+                let mut verifier = Command::new("python3")
                     .arg(&helper)
                     .args(["verify-operator", "--artifact"])
                     .arg(artifact)
                     .arg("--proof")
                     .arg(proof)
-                    .arg("--trust")
-                    .arg(trust)
+                    .args(["--trust", "/dev/stdin"])
                     .args(["--tag", tag, "--kind", "setup", "--target", target])
-                    .output()
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
                     .map_err(|error| {
                         format!(
                             "The installed release proof verifier could not run ({}: {error}).",
                             helper.display()
                         )
                     })?;
+                let mut stdin = verifier
+                    .stdin
+                    .take()
+                    .ok_or("The release proof verifier has no input.")?;
+                let sent = serde_json::to_writer(&mut stdin, self);
+                drop(stdin);
+                let output = verifier.wait_with_output().map_err(|error| {
+                    format!("The release proof verifier did not finish: {error}.")
+                })?;
+                sent.map_err(|error| {
+                    format!("The release trust could not be sent to the verifier: {error}.")
+                })?;
                 if output.status.success() {
                     return Ok(());
                 }
@@ -348,7 +390,7 @@ pub fn check_replay(paths: &Paths, tag: &str) -> Result<(), String> {
     };
     if wanted <= version(&replay.highest_tag)? {
         return Err(format!(
-            "Release {tag} is not newer than the highest admitted release {}. Use Software Undo for a deliberate rollback.",
+            "Release {tag} conflicts with the highest admitted release {}. Use Software Undo for a deliberate rollback.",
             replay.highest_tag
         ));
     }
@@ -376,7 +418,7 @@ fn load_replay(paths: &Paths) -> Result<Option<Replay>, String> {
             return Err(format!(
                 "The release replay record could not be read ({}: {error}).",
                 path.display()
-            ))
+            ));
         }
     };
     let replay: Replay = serde_json::from_slice(&bytes)
@@ -392,10 +434,6 @@ fn load_replay(paths: &Paths) -> Result<Option<Replay>, String> {
     }
     version(&replay.highest_tag)?;
     Ok(Some(replay))
-}
-
-pub fn trust_path(paths: &Paths) -> Result<PathBuf, String> {
-    Ok(server_root(paths)?.join("trust/release.json"))
 }
 
 pub fn helper_path(paths: &Paths) -> Result<PathBuf, String> {

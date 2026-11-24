@@ -13,10 +13,10 @@ use crate::{
     backup::{self, PgEnv},
     composition,
     jobs::{self, Job, Step},
-    layout::{self, human, Layout},
+    layout::{self, Layout, human},
     service::Service,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{fs, path::PathBuf, process::Command, time::Duration};
 use tokio_postgres::Client;
 
@@ -267,6 +267,18 @@ impl<'a> Run<'a> {
         }
     }
 
+    pub async fn check_release(&mut self) -> Db<bool> {
+        if let Err(reason) = self
+            .layout
+            .check_release(&self.job.request["source"], self.resumed)
+        {
+            self.drop_download();
+            self.nothing_changed("fetch", &reason).await?;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     // ------------------------------------------------------------- resume
     /// What a restart means for a job found running. True when the restart
     /// ended the job; false when the flow carries on from the first step not
@@ -318,9 +330,13 @@ impl<'a> Run<'a> {
         let back = match self.start_current().await {
             Ok(()) => match self.service.wait_healthy(HEALTH_LIMIT).await {
                 Ok(_) => "The release that was in service is back and answers.".to_owned(),
-                Err(why) => format!("The release that was in service was started again but does not answer: {why}. Check the service."),
+                Err(why) => format!(
+                    "The release that was in service was started again but does not answer: {why}. Check the service."
+                ),
             },
-            Err(why) => format!("The release that was in service could not be started again: {why}. Check the service."),
+            Err(why) => format!(
+                "The release that was in service could not be started again: {why}. Check the service."
+            ),
         };
         self.interrupted(&format!(
             "The installer was interrupted during the pause, before the database was changed. {back} Nothing changed. Start again."
@@ -405,15 +421,6 @@ impl<'a> Run<'a> {
 
     // ------------------------------------------------------------ install
     pub async fn install(&mut self) -> Db<()> {
-        let tag = self.job.request["source"]["tag"]
-            .as_str()
-            .unwrap_or("")
-            .to_owned();
-        if !self.resumed {
-            if let Err(reason) = self.layout.check_release_tag(&tag) {
-                return self.nothing_changed("fetch", &reason).await;
-            }
-        }
         let fetched = if self.is_done("fetch") {
             self.detail("fetch")
         } else {
@@ -567,17 +574,6 @@ impl<'a> Run<'a> {
         if fetched.get("staging").is_some() {
             result["staging"] = fetched["staging"].clone();
         }
-        let archive_digest = self.job.request["source"]["digest"].as_str().unwrap_or("");
-        if let Err(reason) = self.layout.record_release(&tag, archive_digest) {
-            self.fail(
-                "verify",
-                &format!(
-                    "The release is in service, but its replay record could not be saved: {reason}"
-                ),
-            )
-            .await?;
-            return self.after_failure().await;
-        }
         self.finish_with_plugins("done", result, after.as_deref())
             .await?;
         self.prune(&[release, previous]);
@@ -679,6 +675,32 @@ impl<'a> Run<'a> {
             }
             _ => return Err("the request names no source".into()),
         };
+        let admission: Value =
+            serde_json::from_reader(fs::File::open(source.from.join("admission.json")).map_err(
+                |error| format!("could not read the incoming release admission: {error}"),
+            )?)
+            .map_err(|error| format!("the incoming release admission is invalid: {error}"))?;
+        let reviewed = &request["source"];
+        for field in [
+            "proof",
+            "repository",
+            "repository_id",
+            "workflow",
+            "tag",
+            "target",
+            "fingerprint",
+        ] {
+            if admission[field] != reviewed[field] {
+                return Err(
+                    "the incoming release admission does not match the reviewed release".into(),
+                );
+            }
+        }
+        if admission["version"] != 1 || admission["archive_sha256"] != reviewed["digest"] {
+            return Err(
+                "the incoming release admission does not match the reviewed archive".into(),
+            );
+        }
         let checked = self.copy_checked(&source, wanted).await;
         if let Some(dir) = &source.uploaded {
             // An uploaded file waits for another try, unless it is now copied
@@ -768,6 +790,7 @@ impl<'a> Run<'a> {
                 ));
             }
         }
+        self.layout.record_release(&self.job.request["source"])?;
         let n = self.layout.next_release();
         let dst = self.layout.release(n);
         jobs::step_set(
@@ -948,7 +971,7 @@ impl<'a> Run<'a> {
                         "failed",
                         json!({"message": format!("{reason}. {why} Check the service.")}),
                     )
-                    .await
+                    .await;
             }
         };
         let label = format!("Switch back to release {}", back.to);
@@ -992,7 +1015,8 @@ impl<'a> Run<'a> {
                     result["restored"] = json!(false);
                     result["message"] = json!(format!(
                         "{} The database could not be put back: {why}. The service was left stopped; restore {} by hand before starting it.",
-                        back.lead, file.display()
+                        back.lead,
+                        file.display()
                     ));
                     self.set("switch_back", "failed", result.clone()).await?;
                     return self.finish("failed", result).await;
@@ -1067,7 +1091,9 @@ impl<'a> Run<'a> {
             .as_bool()
             .unwrap_or(false);
         let lead = if self.failed_step().is_some_and(|step| step.key == "migrate") {
-            format!("The database update of release {release} failed after it had changed the database: {reason}.")
+            format!(
+                "The database update of release {release} failed after it had changed the database: {reason}."
+            )
         } else {
             format!("Release {release} failed its check: {reason}.")
         };

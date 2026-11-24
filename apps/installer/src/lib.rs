@@ -141,6 +141,21 @@ impl Installer {
     /// One job, if there is one for this worker: first the one it was running
     /// when last stopped, then the oldest waiting. True when it did some work.
     async fn scan(&self, client: &mut Client) -> Result<bool, tokio_postgres::Error> {
+        let lock = match std::fs::File::open(&self.layout.dir) {
+            Ok(lock) => lock,
+            Err(error) => {
+                eprintln!("bilibi-installer: could not open the instance folder: {error}");
+                return Ok(false);
+            }
+        };
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+            Err(error) => {
+                eprintln!("bilibi-installer: could not lock the instance: {error}");
+                return Ok(false);
+            }
+        }
         let result = self.scan_job(client).await;
         client
             .batch_execute("SELECT pg_advisory_unlock_all()")
@@ -177,6 +192,9 @@ impl Installer {
         let _alive = Heartbeat(self.heartbeat(job.tenant, job.id));
         let mut run =
             flow::Run::new(client, &self.layout, &self.service, &self.pg, job, resumed).await?;
+        if run.job().kind == "install" && !run.check_release().await? {
+            return Ok(true);
+        }
         if resumed && run.job().kind != "trust" && run.resume().await? {
             return Ok(true);
         }

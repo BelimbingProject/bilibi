@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -205,17 +206,17 @@ def save(path, client_id, repository):
 
 
 def run(path, repository, command, log):
-    """Run `command` with GH_TOKEN for `repository`; its error output goes to `log`, its output stays its own.
-
-    Without an App installed there (an official public repository), it runs without a login."""
-    env = {name: value for name, value in os.environ.items() if name not in ('GH_TOKEN', 'GITHUB_TOKEN')}
-    try:
-        env['GH_TOKEN'] = mint(load(path), repository)
-    except NotInstalled:
-        print(f'The GitHub App on this server is not installed on {repository}, so GitHub is asked without a login.',
-              file=sys.stderr)
-    with open(log or os.devnull, 'a', encoding='utf-8') as errors:
+    """Run the GitHub command with a repository-scoped App token."""
+    env = {name: value for name, value in os.environ.items() if name not in (
+        'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_HOST',
+    )}
+    env['GH_TOKEN'] = mint(load(path), repository)
+    env['GH_HOST'] = 'github.com'
+    env['GH_PROMPT_DISABLED'] = '1'
+    with tempfile.TemporaryDirectory() as config, open(log or os.devnull, 'a', encoding='utf-8') as errors:
+        env['GH_CONFIG_DIR'] = config
         return subprocess.run(command, env=env, stderr=errors).returncode
+
 
 
 def main(argv):

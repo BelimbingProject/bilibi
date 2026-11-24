@@ -104,9 +104,9 @@ Go on only after `"state": "completed"`. On `failed`, do what `code` and `next` 
 | Step | Command | Done when |
 | --- | --- | --- |
 | Create | `$i --json create production --role production --site erp.example.com` | `completed` |
-| Release trust | `$i --json trust --github --repo BelimbingProject/bilibi-try --repo-id 1462459642 --minimum-tag "$tag"` | `completed` |
+| Release trust | `$i --json trust production --github --repo BelimbingProject/bilibi-try --repo-id 1462459642 --minimum-tag "$tag"` | `completed` |
 | First release | `$i --json release production bilibi-setup-*.tar.gz --tag "$tag"` | `completed` |
-| Installer service | `$i --json installer bilibi-installer-x86_64-unknown-linux-gnu --tag "$tag"` | `completed` |
+| Installer service | `$i --json installer production bilibi-installer-x86_64-unknown-linux-gnu --tag "$tag"` | `completed` |
 
 `release` is safe to repeat: the same verified release already in service completes without changes. Its `detail` may warn about integration settings that are unset; those are for later and do not block the install.
 
@@ -171,7 +171,7 @@ Rerunning a finished step is harmless. A `next` line names the plain command; ru
 | `PORT_IN_USE` | The chosen backend port is taken | Rerun with another `--port` or without it |
 | `NO_INSTANCE` | `create` has not run | Run `create` |
 | `NO_RELEASE` | No release in service | Run `release` |
-| `TRUST_NOT_SET`, `TRUST_INVALID`, `PROOF_METHOD_WRONG` | The server has no valid pinned release policy, or the command gave the other proof kind | Run the Release trust step exactly once before the first release; after that the installation owner changes trust through Software with fresh 2FA |
+| `TRUST_NOT_SET`, `TRUST_INVALID`, `PROOF_METHOD_WRONG` | The server has no valid pinned release policy, or the command gave the other proof kind | Pin each instance once through the terminal. For an existing instance, choose a minimum tag newer than its previously installed releases. Later changes use Software with fresh 2FA |
 | `SIGNATURE_INVALID`, `SIGNATURE_WRONG_REPOSITORY`, `SIGNATURE_REPLAY` | The asset is not the official signed release, or its setup tag is not newer than the highest admitted one | Download the correct newer release from step 4; use Software Undo for a deliberate rollback; never bypass |
 | `ARCHIVE_INVALID` | The archive or its checksum is damaged | Download again, rerun |
 | `MAIL_NOT_READY`, `MAIL_NOT_DELIVERED` | `create-owner` cannot email the claim link: mail is not set up, or the relay refused | Step 6 (or the cause in `detail`), rerun |

@@ -221,7 +221,16 @@ def make_trust(args: argparse.Namespace) -> None:
         "changed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "changed_by": valid_workflow(args.changed_by),
     }
-    version(args.minimum_tag)
+    minimum = version(args.minimum_tag)
+    if args.repository_id <= 0:
+        refuse("the trusted repository ID must be a positive number")
+    if args.existing_releases is not None:
+        for recipe in args.existing_releases.glob("*/release.json"):
+            if not recipe.parent.name.isdecimal():
+                continue
+            setup = read_json(recipe).get("setup")
+            if isinstance(setup, dict) and setup.get("tag") and version(setup["tag"]) >= minimum:
+                refuse(f"the initial minimum tag must be newer than the existing release {setup['tag']}")
     if args.kind == "operator":
         if args.public_key is None:
             refuse("operator trust needs --public-key")
@@ -232,16 +241,6 @@ def make_trust(args: argparse.Namespace) -> None:
         refuse("GitHub trust does not take --public-key")
     atomic_json(args.output, value)
     print(json.dumps({key: value[key] for key in value if key != "public_key"}, sort_keys=True))
-
-
-def keygen(args: argparse.Namespace) -> None:
-    if args.private.exists() or args.public.exists():
-        refuse("the key output already exists")
-    command(["openssl", "genpkey", "-algorithm", "Ed25519", "-out", str(args.private)])
-    os.chmod(args.private, 0o600)
-    args.public.write_bytes(public_key_from_private(args.private))
-    os.chmod(args.public, 0o644)
-    print(fingerprint(public_key(args.public, der=True)))
 
 
 def sign(args: argparse.Namespace) -> None:
@@ -336,7 +335,7 @@ def verify_operator(args: argparse.Namespace) -> None:
         if got[key] != wanted:
             refuse(f"the release proof has the wrong {key.replace('_', ' ')}")
     valid_token(str(artifact["target"]), "target")
-    if args.target is not None and artifact["target"] != args.target:
+    if artifact["target"] != args.target:
         refuse("the release proof has the wrong target")
     actual_digest = digest(args.artifact)
     if artifact["sha256"] != actual_digest:
@@ -379,37 +378,50 @@ def trust_values(args: argparse.Namespace) -> None:
 
 def check_tag(args: argparse.Namespace) -> None:
     trust = load_trust(args.trust)
-    if version(args.tag) < version(str(trust["minimum_tag"])):
-        refuse(f"release {args.tag} is below this installation's minimum trusted tag {trust['minimum_tag']}")
+    check_policy_tag(trust, args.tag)
 
 
-def check_replay(args: argparse.Namespace) -> None:
-    version(args.tag)
+def check_policy_tag(trust: dict[str, object], tag: str) -> None:
+    if version(tag) < version(str(trust["minimum_tag"])):
+        refuse(f"release {tag} is below this installation's minimum trusted tag {trust['minimum_tag']}")
+
+
+def check_admission(args: argparse.Namespace) -> None:
+    trust = load_trust(args.trust)
+    source = json.loads(args.source)
+    for policy_field, source_field in (
+        ("kind", "proof"), ("repository", "repository"),
+        ("repository_id", "repository_id"), ("workflow", "workflow"),
+        ("fingerprint", "fingerprint"),
+    ):
+        if trust.get(policy_field) != source.get(source_field):
+            refuse("the release was verified under a different release trust policy")
+    check_policy_tag(trust, source.get("tag") or "")
+
+
+def check_replay(args: argparse.Namespace, *, resume: bool = False) -> None:
+    wanted = version(args.tag)
+    if not re.fullmatch(r"[0-9a-f]{64}", args.digest):
+        refuse("the admitted release digest is invalid")
     if not args.state.exists():
         return
     state = read_json(args.state)
     exact_fields(state, {"version", "highest_tag", "highest_digest"}, "release replay state")
-    if state["version"] != 1:
-        refuse("the release replay state version is not supported")
+    if state["version"] != 1 or not re.fullmatch(r"[0-9a-f]{64}", str(state["highest_digest"])):
+        refuse("the release replay state is not valid")
     highest = str(state["highest_tag"])
-    if version(args.tag) <= version(highest):
-        refuse(f"release {args.tag} is not newer than the highest admitted release {highest}")
+    floor = version(highest)
+    if wanted < floor:
+        refuse(f"release {args.tag} is older than the highest admitted release {highest}")
+    if wanted == floor:
+        if args.digest != state["highest_digest"]:
+            refuse(f"release {args.tag} cannot replace the admitted bytes for that tag")
+        if not (resume or args.resume):
+            refuse(f"release {args.tag} has already been admitted")
 
 
 def record_replay(args: argparse.Namespace) -> None:
-    version(args.tag)
-    if not re.fullmatch(r"[0-9a-f]{64}", args.digest):
-        refuse("the admitted release digest is invalid")
-    if args.state.exists():
-        state = read_json(args.state)
-        exact_fields(state, {"version", "highest_tag", "highest_digest"}, "release replay state")
-        if state["version"] != 1:
-            refuse("the release replay state version is not supported")
-        highest = str(state["highest_tag"])
-        if version(args.tag) < version(highest):
-            refuse(f"release {args.tag} cannot lower the replay record from {highest}")
-        if args.tag == highest and args.digest != state["highest_digest"]:
-            refuse(f"release {args.tag} cannot replace the admitted bytes for that tag")
+    check_replay(args, resume=True)
     atomic_json(args.state, {"version": 1, "highest_tag": args.tag, "highest_digest": args.digest})
 
 
@@ -417,17 +429,13 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
 
-    generated = commands.add_parser("keygen")
-    generated.add_argument("--private", type=Path, required=True)
-    generated.add_argument("--public", type=Path, required=True)
-    generated.set_defaults(run=keygen)
-
     trusted = commands.add_parser("make-trust")
     trusted.add_argument("--kind", choices=("github", "operator"), required=True)
     trusted.add_argument("--repository", required=True)
     trusted.add_argument("--repository-id", type=int, required=True)
     trusted.add_argument("--workflow", required=True)
     trusted.add_argument("--minimum-tag", required=True)
+    trusted.add_argument("--existing-releases", type=Path)
     trusted.add_argument("--changed-by", required=True)
     trusted.add_argument("--public-key", type=Path)
     trusted.add_argument("--output", type=Path, required=True)
@@ -451,7 +459,7 @@ def parser() -> argparse.ArgumentParser:
     verified.add_argument("--trust", type=Path, required=True)
     verified.add_argument("--tag", required=True)
     verified.add_argument("--kind", choices=KINDS, required=True)
-    verified.add_argument("--target")
+    verified.add_argument("--target", required=True)
     verified.set_defaults(run=verify_operator)
 
     shown = commands.add_parser("trust-values")
@@ -463,9 +471,16 @@ def parser() -> argparse.ArgumentParser:
     checked_tag.add_argument("--tag", required=True)
     checked_tag.set_defaults(run=check_tag)
 
+    admission = commands.add_parser("check-admission")
+    admission.add_argument("--trust", type=Path, required=True)
+    admission.add_argument("--source", required=True)
+    admission.set_defaults(run=check_admission)
+
     replayed = commands.add_parser("check-replay")
     replayed.add_argument("--state", type=Path, required=True)
     replayed.add_argument("--tag", required=True)
+    replayed.add_argument("--digest", required=True)
+    replayed.add_argument("--resume", action="store_true")
     replayed.set_defaults(run=check_replay)
 
     recorded = commands.add_parser("record-replay")

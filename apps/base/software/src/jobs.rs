@@ -1,7 +1,7 @@
 //! The job rows: what a server owner asked for and what the worker reported.
 //! Every statement binds the operator tenant the request was made in.
 use bilibi_database::{Change, Error, MutationTransaction, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_postgres::GenericClient;
 
 /// The PostgreSQL channel the installer listens on; the payload is
@@ -170,7 +170,7 @@ pub async fn recent(client: &impl GenericClient, tenant: i64, limit: i64) -> Res
 pub async fn last_done(client: &impl GenericClient, tenant: i64) -> Result<Option<Job>> {
     let row = client
         .query_opt(
-            &format!("SELECT {JOB_COLUMNS} FROM base_software_jobs WHERE tenant_id=$1 AND state='done' ORDER BY id DESC LIMIT 1"),
+            &format!("SELECT {JOB_COLUMNS} FROM base_software_jobs WHERE tenant_id=$1 AND state='done' AND kind IN ('install', 'undo') ORDER BY id DESC LIMIT 1"),
             &[&tenant],
         )
         .await?;
@@ -236,7 +236,9 @@ pub fn backup_rule(keep: Option<u64>) -> String {
         || "removes the oldest ones".to_owned(),
         |keep| format!("keeps only the newest {keep} and removes the older ones"),
     );
-    format!("Bilibi backs up the database before every install and undo. After a successful install or undo it {kept}, so a listed file may no longer exist. Undo switches back to the previous program. Only if the install changed the database structure does Undo also restore its backup, which loses data entered since. Undo takes a new backup first.")
+    format!(
+        "Bilibi backs up the database before every install and undo. After a successful install or undo it {kept}, so a listed file may no longer exist. Undo switches back to the previous program. Only if the install changed the database structure does Undo also restore its backup, which loses data entered since. Undo takes a new backup first."
+    )
 }
 /// Hides where a backup file is from anyone who cannot manage software:
 /// they see that the backup exists, when it was taken and its size. The
@@ -697,8 +699,12 @@ pub async fn download_step(
     detail: &Value,
 ) -> Result<()> {
     let sql = match state {
-        "running" => "UPDATE base_software_steps SET state='running', started_at=coalesce(started_at, now()), detail=$3 WHERE tenant_id=$1 AND job_id=$2 AND key='download' AND EXISTS (SELECT 1 FROM base_software_jobs j WHERE j.tenant_id=$1 AND j.id=$2 AND j.state='queued')",
-        _ => "UPDATE base_software_steps SET state=$4, finished_at=now(), detail=$3 WHERE tenant_id=$1 AND job_id=$2 AND key='download' AND EXISTS (SELECT 1 FROM base_software_jobs j WHERE j.tenant_id=$1 AND j.id=$2 AND j.state='queued')",
+        "running" => {
+            "UPDATE base_software_steps SET state='running', started_at=coalesce(started_at, now()), detail=$3 WHERE tenant_id=$1 AND job_id=$2 AND key='download' AND EXISTS (SELECT 1 FROM base_software_jobs j WHERE j.tenant_id=$1 AND j.id=$2 AND j.state='queued')"
+        }
+        _ => {
+            "UPDATE base_software_steps SET state=$4, finished_at=now(), detail=$3 WHERE tenant_id=$1 AND job_id=$2 AND key='download' AND EXISTS (SELECT 1 FROM base_software_jobs j WHERE j.tenant_id=$1 AND j.id=$2 AND j.state='queued')"
+        }
     };
     if state == "running" {
         client.execute(sql, &[&tenant, &job, detail]).await?;

@@ -22,26 +22,26 @@ mod transport;
 mod web;
 
 use bilibi_authz::{
-    authorize_operator, effective_capabilities, CapabilityDefinition, VocabularyContribution,
-    VOCABULARY,
+    CapabilityDefinition, VOCABULARY, VocabularyContribution, authorize_operator,
+    effective_capabilities,
 };
 use bilibi_database::{Context, Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_integration::Integration;
 use bilibi_module_registry::{
-    contributions::{Access, Method, PageWrites, Pending, Route, PAGE_WRITES, ROUTES},
     Composition, Contribution, Provenance,
+    contributions::{Access, Method, PAGE_WRITES, PageWrites, Pending, ROUTES, Route},
 };
 use bilibi_notifications::{Notice, NotificationBoundary};
 use bilibi_settings::{
-    Definition, Editor, ScopeKind, Setting, Settings, Validator, ValueType, DEFINITIONS,
+    DEFINITIONS, Definition, Editor, ScopeKind, Setting, Settings, Validator, ValueType,
 };
 use bilibi_step_up::StepUp;
 use bilibi_system::Instance;
 use bilibi_tenancy::{Authentication, Scope};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
 
-pub use catalogue::{Catalogue, Version, DEFAULT_URL as DEFAULT_CATALOGUE_URL};
+pub use catalogue::{Catalogue, DEFAULT_URL as DEFAULT_CATALOGUE_URL, Version};
 pub use jobs::{CHANNEL, RECORD};
 pub use review::Review;
 /// The MCP App card (`card/software-v1.html`): the Software page as one
@@ -483,9 +483,18 @@ impl Software {
     /// What replacing this installation's release trust would do.
     pub async fn review_trust(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
         let client = self.db.get().await?;
-        authorize_operator(&**client, scope, MANAGE).await?;
-        bilibi_tenancy::prove_owner(&**client, scope).await?;
-        if let Some(job) = jobs::active(&**client, scope.tenant()).await? {
+        self.review_trust_with(&**client, scope, input).await
+    }
+
+    async fn review_trust_with(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        authorize_operator(client, scope, MANAGE).await?;
+        bilibi_tenancy::prove_owner(client, scope).await?;
+        if let Some(job) = jobs::active(client, scope.tenant()).await? {
             return Err(SoftwareError::field(
                 "job",
                 &format!(
@@ -496,13 +505,14 @@ impl Software {
         }
         let change = release_proof::review_change(input)
             .map_err(|(field, message)| SoftwareError::field(&field, &message))?;
-        let current = self
-            .paths
-            .as_ref()
-            .map(release_proof::facts)
-            .transpose()
-            .map_err(|message| SoftwareError::field("trust", &message))?
-            .unwrap_or(Value::Null);
+        let paths = self.paths.as_ref().ok_or_else(|| {
+            SoftwareError::field(
+                "trust",
+                "This program is not running from an installed instance.",
+            )
+        })?;
+        let current = release_proof::facts(paths)
+            .map_err(|message| SoftwareError::field("trust", &message))?;
         let method = if change.facts["kind"] == "operator" {
             "operator Ed25519 signatures"
         } else {
@@ -540,10 +550,10 @@ impl Software {
         scope: &Scope,
         input: &Value,
     ) -> SoftwareResult<Value> {
-        authorize_operator(tx.sql(), scope, MANAGE).await?;
-        bilibi_tenancy::prove_owner(tx.sql(), scope).await?;
-        let review = self.review_trust(scope, input).await?;
-        self.step_up.require(scope, STEP_UP, &review.target).await?;
+        let review = self.review_trust_with(tx.sql(), scope, input).await?;
+        self.step_up
+            .require_code(scope, STEP_UP, &review.target)
+            .await?;
         let new = jobs::NewJob {
             kind: "trust",
             request: review.request.clone(),
@@ -713,11 +723,21 @@ impl Software {
         let instance = Instance::resolve(&self.settings, client).await?;
         let active = jobs::active(client, scope.tenant()).await?;
         let github_install = input.get("asset").is_some();
+        let paths = self.paths.as_ref().ok_or_else(|| {
+            SoftwareError::field(
+                "release",
+                "This program is not running from an installed instance, so it cannot install a release.",
+            )
+        })?;
+        let policy = release_proof::Policy::load(paths)
+            .map_err(|message| SoftwareError::field("release", &message))?;
         let github = if github_install {
             // Ask GitHub now, including pre-releases, so a file replaced
             // after review is refused here. A rate limit still serves the
             // saved list; the download checks the file again.
-            let mut listing = self.github_listing(scope, true, true).await?;
+            let mut listing = self
+                .github_listing(client, scope, true, true, &policy)
+                .await?;
             if input.get("staging").is_some() {
                 let pin = github::pin_from_listing(&listing, input)?;
                 let commit = github::setup_commit(self, scope, &pin).await;
@@ -754,30 +774,14 @@ impl Software {
                 enabled_plugins: &jobs::enabled_plugins(client, scope.tenant()).await?,
             },
         )?;
-        let paths = self.paths.as_ref().ok_or_else(|| {
-            SoftwareError::field(
-                "release",
-                "This program is not running from an installed instance, so it cannot install a release.",
-            )
-        })?;
-        let policy = release_proof::Policy::load(paths)
-            .map_err(|message| SoftwareError::field("release", &message))?;
-        let source = &review.request["source"];
-        if source["repository"].as_str() != Some(policy.repository.as_str())
-            || source["repository_id"].as_i64() != Some(policy.repository_id)
-        {
-            return Err(SoftwareError::field(
-                "release",
-                "This release is not from the repository pinned in Release trust.",
-            ));
+        let source = &mut review.request["source"];
+        if github_install {
+            source["workflow"] = json!(policy.workflow);
+            source["fingerprint"] = json!(policy.fingerprint);
         }
-        let tag = source["tag"].as_str().ok_or_else(|| {
-            SoftwareError::field("release", "This release has no verified setup tag.")
-        })?;
         policy
-            .check_tag(tag)
-            .map_err(|message| SoftwareError::field("release", &message))?;
-        release_proof::check_replay(paths, tag)
+            .check_admission(source)
+            .and_then(|()| release_proof::check_replay(paths, source["tag"].as_str().unwrap_or("")))
             .map_err(|message| SoftwareError::field("release", &message))?;
         review.facts["current_asset"] = self.installed_asset(client, scope).await?;
         Ok(review)

@@ -40,7 +40,7 @@ The catalogue recommends the newest compatible release tested with this exact Pl
 | Available software and CI evidence | Published `catalogue.json` ([versions contract](../../../docs/versions.md)) |
 | Jobs, steps and enabled add-ons | `base_software_jobs`, `base_software_steps`, `base_software_plugins` |
 | What a backup restore loses | Server-wide `base_audit_mutations` since the backup |
-| Trusted release proof | `/opt/bilibi/trust/release.json`, pinned at setup and replaceable only by the installer from an owner-reviewed fresh-2FA job |
+| Trusted release proof | `/opt/bilibi/<instance>/trust/release.json`, pinned at setup and replaceable only by the installer from an owner-reviewed fresh-2FA job |
 | Highest admitted release | `/opt/bilibi/<instance>/trust/release-state.json`, outside the database and release backups |
 
 ## Access
@@ -116,7 +116,7 @@ Migration `base-software-003-local-builds` cancels legacy queued or running `cha
 
 The separate installer (`apps/installer`) reads and writes the durable job tables with its own connection. It never creates audit or notification rows itself.
 
-1. Listen on `bilibi_software_jobs` and poll on startup. Claim the oldest queued install, undo or trust change with a conditional update; ignore installs whose download step has not finished. A trust job validates the reviewed request again and atomically replaces the server-wide record without pausing the instance.
+1. Listen on `bilibi_software_jobs` and poll on startup. Claim the oldest queued install, undo or trust change with a conditional update; ignore installs whose download step has not finished. A trust job validates the reviewed request again and atomically replaces the instance’s record without pausing the instance.
 2. Mark each step running, then done, failed or skipped, with timestamps and a plain `detail.message`. Send `NOTIFY` after changes. A switch-back step may be appended after failure.
 2a. While it works on a job, write `heartbeat_at = now()` every 30 seconds (its own connection), so the server can tell a silent installer from a slow step.
 3. Lock the job before starting the pausing step. Honour `cancel_requested_at` there, or start the pause under the same lock, so cancel cannot cross it. In the same transaction set `paused_at`: a restart reads it to know the service was stopped, never a step's state.
@@ -141,7 +141,7 @@ Release trust is one closed policy, never a fallback list:
 | `github` | GitHub artifact attestation for the archive from the pinned repository number, workflow and tag | Yes; anonymous for public repositories, server GitHub App for private repositories |
 | `operator` | One canonical DSSE statement signed by the pinned Ed25519 key, binding archive SHA-256, repository name and number, workflow, tag, kind and target | No; local archive, proof, trust record and OpenSSL only |
 
-The initial `scripts/install-server.sh trust` writes `/opt/bilibi/trust/release.json` before the first release and records `server-setup` with the UTC time. The web process can read it but cannot write the file or its directory. A later `base.software.trust` safe write requires the installation owner's fresh 2FA and queues a one-step installer job; the reviewed step-up target includes the complete new facts and derived key fingerprint. The installer records the requesting account, validates the key again and atomically replaces the record. Software shows that actor and time plus the instance's highest admitted tag. Operator verification uses no transparency log, so private repository and asset names are not published to Rekor.
+The initial `scripts/install-server.sh trust` writes the first `/opt/bilibi/<instance>/trust/release.json` and records the terminal operator’s UID with the UTC time. Existing instances can enroll using a minimum tag newer than their installed releases. The web process can read it but cannot write the file or its directory. A later `base.software.trust` safe write requires the installation owner's fresh 2FA and queues a one-step installer job; the reviewed step-up target includes the complete new facts and derived key fingerprint. The installer records the requesting account, validates the key again and atomically replaces the record. Software shows that actor and time plus the instance's highest admitted tag. Operator verification uses no transparency log, so private repository and asset names are not published to Rekor.
 
 ### Install from GitHub
 

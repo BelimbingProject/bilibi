@@ -134,7 +134,7 @@ The audit trail is the app's job, not the installer's: `base/software` records e
 Build `bilibi-installer` on your build machine, which may be a separate account on a Dev server, then install the finished program ([build releases](../../docs/server-install.md#build-releases)). On the server, run:
 
 ```sh
-sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --tag setup-v1.0.0
+sudo scripts/install-server.sh installer production /path/to/bilibi-installer-x86_64-unknown-linux-gnu --tag setup-v1.0.0
 ```
 
 The server's setup-time trust record already pins the proof method, repository name and immutable number, workflow and minimum tag. For operator trust, add `--proof /path/to/bilibi-installer-x86_64-unknown-linux-gnu.proof.json`. The command checks that one policy, copies the program to `/opt/bilibi/build/bin/bilibi-installer` and starts `bilibi-installer@<instance>` for every instance. Nothing is replaced when verification fails. A later `create` starts one for the new instance too. Rerun `installer` with a newer verified program to update it; the services restart and a job in progress is settled as in "If the server restarts mid-way".

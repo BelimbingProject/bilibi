@@ -1,13 +1,13 @@
 //! Shared Software reads and reviewed installs.
-use crate::{bound, SoftwareError, CARD_URI, MANAGE, STEP_UP, VIEW};
+use crate::{CARD_URI, MANAGE, STEP_UP, SoftwareError, VIEW, bound};
 use bilibi_agent_api::{
-    App, Channels, Definitions, Error as AgentError, Guide, Handler, Operation, OperationClient,
-    OperationFuture, ReadHandler, WriteHandler, APPS, DEFINITIONS,
+    APPS, App, Channels, DEFINITIONS, Definitions, Error as AgentError, Guide, Handler, Operation,
+    OperationClient, OperationFuture, ReadHandler, WriteHandler,
 };
 use bilibi_database::MutationTransaction;
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_tenancy::Scope;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 impl From<SoftwareError> for AgentError {
@@ -150,7 +150,6 @@ fn install_schema() -> Value {
 }
 fn github_schema() -> Value {
     json!({"type":"object","properties":{
-        "repository":{"type":"string","maxLength":140,"description":"The repository pinned in Release trust. A different repository is refused."},
         "refresh_minutes":{"type":"integer","minimum":1,"maximum":1440,"description":"How many minutes to wait between GitHub checks. 15 checks about four times an hour."}
     }})
 }

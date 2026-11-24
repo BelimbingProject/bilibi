@@ -50,7 +50,7 @@ The proof envelope can travel beside a GitHub release asset fetched through the 
 
 ### Trust ownership
 
-Initial server setup records the proof policy before the first release is admitted. For operator signatures it records the public key fingerprint, repository name and immutable ID, workflow and minimum setup tag. For GitHub attestations it records the repository ID, workflow and minimum setup tag. The initial bootstrap is the only time no Bilibi installation owner exists to authorize that write.
+Root records each instance’s first proof policy from the terminal, with the operator UID and UTC time. On an existing instance without a pin, the operator sets a minimum tag newer than its previous releases. For operator signatures it records the public key fingerprint, repository name and immutable ID, workflow and minimum setup tag. For GitHub attestations it records the repository ID, workflow and minimum setup tag.
 
 After bootstrap, only the installation owner may replace the policy, repository, workflow or public key, and every replacement requires fresh 2FA. There is no environment-variable override, automatic key discovery, repository-name lookup or ordinary settings-editor path. The change is audited and preserves the release high-water mark.
 

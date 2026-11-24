@@ -1,7 +1,7 @@
 //! Release archive unpacking, safe file paths and compatibility checks.
 //! Used by GitHub downloads and manual uploads.
 use flate2::read::GzDecoder;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -240,7 +240,7 @@ fn unpack_into(reader: impl Read, into: &Path) -> Result<Unpacked, String> {
             _ => {
                 return Err(format!(
                     "The release file holds {name} as something other than a plain file. Download it again from the source."
-                ))
+                ));
             }
         }
         total += entry.size();
@@ -390,16 +390,25 @@ pub fn verify_attestation(
         "--jq",
         ".[].verificationResult.signature.certificate.sourceRepositoryIdentifier",
     ]);
-    command.env("GH_PROMPT_DISABLED", "1").env("NO_COLOR", "1");
-    match token {
-        Some(token) => {
-            command.env("GH_TOKEN", token);
-        }
-        None => {
-            command.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
-        }
+    let config = artifact.with_extension("gh-config");
+    fs::create_dir(&config)
+        .map_err(|error| format!("Could not isolate GitHub CLI configuration: {error}."))?;
+    command
+        .env("GH_CONFIG_DIR", &config)
+        .env("GH_HOST", "github.com")
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("NO_COLOR", "1")
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("GH_ENTERPRISE_TOKEN")
+        .env_remove("GITHUB_ENTERPRISE_TOKEN");
+    if let Some(token) = token {
+        command.env("GH_TOKEN", token);
+    } else {
+        command.env_remove("GH_TOKEN");
     }
-    let output = command.output().map_err(|error| {
+    let output = command.output();
+    let _ = fs::remove_dir_all(config);
+    let output = output.map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             "GitHub CLI is not installed, so the release provenance cannot be checked. Run scripts/install-server.sh create again, then retry.".to_owned()
         } else {
