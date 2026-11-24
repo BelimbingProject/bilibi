@@ -76,6 +76,7 @@ cd "$root"
 #   @absent:TEXT     the previous step did not print TEXT
 WALKTHROUGHS=(
   'base|restore-policy|apps/installer|restore-policy-walkthrough|none|RESTORE_POLICY_ROOT=@/restore-policy|-'
+  'base|print-contract|apps/base/templates|print-contract-walkthrough|none||-'
   'base|report-periods|apps/base/datetime|report-periods|none||-'
   'web|field-vocabulary|apps/web|field-vocabulary|none||-'
   'base|agent|apps/base/agent_api|agent-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'

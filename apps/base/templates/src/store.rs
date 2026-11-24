@@ -1,5 +1,6 @@
 use crate::{
-    catalogue, Origin, Resolved, Template, Text, Value, CATALOGUE, MANAGE, PLATFORM_CATALOGUE, VIEW,
+    catalogue, Origin, PrintContract, Resolved, Template, Text, Value, CATALOGUE, MANAGE,
+    PLATFORM_CATALOGUE, PRINT_CATALOGUE, VIEW,
 };
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::Catalog;
@@ -14,6 +15,7 @@ pub struct Templates {
     entries: BTreeMap<&'static str, &'static Template>,
     platform: BTreeMap<&'static str, &'static Template>,
     settings: Arc<Settings>,
+    print: BTreeMap<&'static str, &'static PrintContract>,
     pub(crate) parties: Arc<PartyProofs>,
 }
 
@@ -64,8 +66,14 @@ impl Templates {
                 format!("Template {key} is declared in both catalogues."),
             ));
         }
+        let print = catalogue
+            .entries::<PrintContract>(PRINT_CATALOGUE)?
+            .iter()
+            .map(|entry| Ok((entry.id, entry.get::<PrintContract>()?)))
+            .collect::<bilibi_module_registry::Result<BTreeMap<_, _>>>()?;
         Ok(Self {
             entries,
+            print,
             platform,
             parties,
             settings,
@@ -82,6 +90,10 @@ impl Templates {
             .or_else(|| self.platform.get(key))
             .copied()
             .ok_or(Error::NotFound)
+    }
+
+    pub fn print_contract(&self, key: &str) -> Result<&'static PrintContract> {
+        self.print.get(key).copied().ok_or(Error::NotFound)
     }
 
     pub(crate) fn editable(&self, key: &str) -> bool {

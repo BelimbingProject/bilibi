@@ -2054,6 +2054,7 @@ dependencies = [
  "icu_locale",
  "inventory",
  "jiff",
+ "rust_decimal",
  "serde",
  "serde_json",
  "tokio-postgres",
