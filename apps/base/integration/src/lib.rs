@@ -22,7 +22,8 @@ mod transport;
 mod web;
 pub mod webhooks;
 pub use contributions::{
-    WebhookLimits, DELETE, EXCHANGE_RETENTION_DAYS, LIST, PAYLOAD, RETENTION_DAYS, WEBHOOK_SETTINGS,
+    WebhookLimits, CONNECTOR_ALLOWED_DESTINATIONS, CONNECTOR_PRIVATE_NETWORKS, DELETE,
+    EXCHANGE_RETENTION_DAYS, LIST, PAYLOAD, RETENTION_DAYS, WEBHOOK_SETTINGS,
 };
 pub use destination::{ConnectorPolicy, Destination, Unusable, DESTINATION_REFUSED};
 pub use redirect::RedirectPolicy;
