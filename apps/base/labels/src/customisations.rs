@@ -7,6 +7,16 @@ use serde_json::Value;
 /// Registry key for customisation section contributions.
 pub const SECTIONS: &str = "base/labels.customisation_sections";
 
+pub const PREVIEW_LINKS: &str = "base/labels.customisation_preview_links";
+
+/// A file preview link alongside a section's current override. The named
+/// read identifies the section. The owning download rechecks access.
+pub struct PreviewLink {
+    pub read: &'static str,
+    pub label: &'static str,
+    pub path: fn(&CustomisationRow) -> Option<String>,
+}
+
 /// A row returned by a section's adapter. `input` is held by the server until
 /// confirmation and passed unchanged to the owner's reviewed write contract.
 #[derive(Clone, Debug)]

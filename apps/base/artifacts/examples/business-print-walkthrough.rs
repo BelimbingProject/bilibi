@@ -245,7 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("ms-MY", PdfPaper::Letter, "work-sheet-ms-letter.pdf"),
     ] {
         let layout = CONTRACT.packaged(locale, None)?;
-        let compiled = CONTRACT.compile(&layout.language, layout.layout)?;
+        let compiled = CONTRACT.compile(&layout.language, &layout.layout)?;
         let document = compiled.document("issued", &facts, accent)?;
         let html = document.html();
         assert_eq!(document.paper(), paper);

@@ -92,6 +92,10 @@ impl Templates {
             .ok_or(Error::NotFound)
     }
 
+    pub(crate) fn print_contracts(&self) -> impl Iterator<Item = &'static PrintContract> + '_ {
+        self.print.values().copied()
+    }
+
     pub fn print_contract(&self, key: &str) -> Result<&'static PrintContract> {
         self.print.get(key).copied().ok_or(Error::NotFound)
     }
@@ -255,7 +259,7 @@ impl Templates {
         self.parties.organisations_in_scope(client, scope).await
     }
 
-    async fn authorize(
+    pub(crate) async fn authorize(
         &self,
         client: &dyn ReadClient,
         scope: &Scope,

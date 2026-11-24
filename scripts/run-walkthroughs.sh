@@ -76,6 +76,7 @@ cd "$root"
 #   @absent:TEXT     the previous step did not print TEXT
 WALKTHROUGHS=(
   'base|restore-policy|apps/installer|restore-policy-walkthrough|none|RESTORE_POLICY_ROOT=@/restore-policy|-'
+  'web|print-customisations|apps/web|print-customisations-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts BILIBI_PDF_CHROMIUM=@chromium|-'
   'base|print-contract|apps/base/templates|print-contract-walkthrough|none||-'
   'base|report-periods|apps/base/datetime|report-periods|none||-'
   'web|field-vocabulary|apps/web|field-vocabulary|none||-'

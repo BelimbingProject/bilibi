@@ -11,8 +11,9 @@ mod store;
 mod web;
 
 pub use customisations::{
-    Changes, Choice, CustomisationRow, CustomisationSection, Read, ReceiptCorrection,
-    ReceiptFuture, ReceiptSource, ReceiptUndo, Undo, UndoAction, RECEIPT_SOURCES, SECTIONS,
+    Changes, Choice, CustomisationRow, CustomisationSection, PreviewLink, Read, ReceiptCorrection,
+    ReceiptFuture, ReceiptSource, ReceiptUndo, Undo, UndoAction, PREVIEW_LINKS, RECEIPT_SOURCES,
+    SECTIONS,
 };
 
 pub use store::{
@@ -76,12 +77,21 @@ inventory::submit! {
                 let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
                 let entries = catalog.entries::<CustomisationSection>(SECTIONS)?;
                 let sections = entries.iter().map(|entry| entry.get::<CustomisationSection>()).collect::<Result<Vec<_>, _>>()?;
+                let previews = catalog.entries::<PreviewLink>(PREVIEW_LINKS)?.iter().map(|entry| {
+                    let link = entry.get::<PreviewLink>()?;
+                    if !sections.iter().any(|section| section.undo.as_ref().is_some_and(|undo| undo.read == link.read)) {
+                        return Err(bilibi_module_registry::RegistryError::Contribution(
+                            format!("Customisation preview {} needs an existing override read", entry.id),
+                        ));
+                    }
+                    Ok((link.read, link))
+                }).collect::<Result<std::collections::HashMap<_, _>, _>>()?;
                 discovery::bind(services.get("base/agent_api.registry")?, entries.iter().map(|entry| entry.id).zip(sections.iter().copied()).collect())?;
                 Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(customisations_web::Pages {
                     db: services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
                     settings: services.get("base/settings.store")?,
                     display: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?, directory: services.get("base/principal_directory.directory")?,
-                    contracts: services.get(bilibi_agent_api::page::SERVICE)?, sections,
+                    contracts: services.get(bilibi_agent_api::page::SERVICE)?, sections, previews,
                     receipt_sources: catalog.entries::<ReceiptSource>(RECEIPT_SOURCES)?.iter().map(|entry| entry.get::<ReceiptSource>()).collect::<Result<Vec<_>, _>>()?,
                 }))))
             } },
@@ -92,6 +102,19 @@ inventory::submit! {
         ],
     }
 }
+
+inventory::submit! { bilibi_module_registry::Consumer::new::<PreviewLink>(PREVIEW_LINKS, "base/labels", |entries| {
+    let mut reads = std::collections::BTreeSet::new();
+    for entry in entries {
+        let preview = entry.get::<PreviewLink>()?;
+        if preview.label.trim().is_empty() || !reads.insert(preview.read) {
+            return Err(bilibi_module_registry::RegistryError::Contribution(
+                format!("Invalid or duplicate customisation preview {}", entry.id),
+            ));
+        }
+    }
+    Ok(())
+}) }
 
 inventory::submit! { bilibi_module_registry::Consumer::new::<SubjectSource>(SUBJECTS, "base/labels", |_| Ok(())) }
 

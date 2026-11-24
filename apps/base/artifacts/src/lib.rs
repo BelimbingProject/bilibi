@@ -614,12 +614,16 @@ impl<O: Owner> Owned<'_, O> {
             }
         };
         let bytes = protected.as_deref().unwrap_or(bytes);
-        let metadata = match options.retention() {
-            Some(retention) => {
+        let metadata = match (options.retention(), options.expiry()) {
+            (Some(retention), _) => {
                 self.put_retained(client, reference, bytes, PDF, retention.clone())
                     .await?
             }
-            None => self.put(client, reference, bytes, PDF).await?,
+            (None, Some(days)) => {
+                self.put_expiring(client, reference, bytes, PDF, days)
+                    .await?
+            }
+            (None, None) => self.put(client, reference, bytes, PDF).await?,
         };
         let produced_at = self.clock(&*client).await?;
         Ok(PdfArtifact::new(
