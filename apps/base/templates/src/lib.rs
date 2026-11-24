@@ -39,7 +39,7 @@ use provenance;
 inventory::submit! {
     Module {
         id: MODULE, layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/agent_api","base/authz","base/database","base/datetime","base/labels","base/module_registry","base/party_ids","base/settings","base/tenancy"],
+        dependencies: &["base/agent_api","base/artifacts","base/authz","base/branding","base/database","base/datetime","base/labels","base/module_registry","base/party_ids","base/settings","base/tenancy","base/ui"],
         migrations: &[("base-templates-001-revisions", include_str!("../migrations/001-revisions.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {

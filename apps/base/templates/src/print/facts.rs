@@ -45,6 +45,13 @@ pub struct PrintField {
     pub sample: PrintValue<'static>,
 }
 
+impl PrintField {
+    pub(super) fn requires_output(&self) -> bool {
+        self.required_output
+            || matches!(self.kind, PrintKind::Rows(columns) if columns.iter().any(|column| column.required_output))
+    }
+}
+
 pub(super) type CheckedFacts<'a> = BTreeMap<&'a str, PrintValue<'a>>;
 
 pub(super) fn validate_fields(fields: &[PrintField], allow_rows: bool) -> Checked<()> {
@@ -60,6 +67,12 @@ pub(super) fn validate_fields(fields: &[PrintField], allow_rows: bool) -> Checke
             return Err(Problem::new(
                 field.id,
                 "Print fields need unique identifiers.",
+            ));
+        }
+        if field.optional && field.requires_output() {
+            return Err(Problem::new(
+                field.id,
+                "Required print output needs a required fact.",
             ));
         }
         if let PrintKind::Rows(columns) = field.kind {
@@ -106,7 +119,7 @@ fn read_facts<'a>(
         check_value(field, value, budget, allow_rows)?;
     }
     for field in fields {
-        if !field.optional && !values.contains_key(field.id) {
+        if (!field.optional || field.requires_output()) && !values.contains_key(field.id) {
             return Err(Problem::new(field.id, "Required print fact is missing."));
         }
     }
@@ -146,6 +159,12 @@ fn check_value(
                 && lines.iter().all(|line| valid_text(line))
         }
         (PrintKind::Rows(columns), PrintValue::Rows(rows)) if allow_rows => {
+            if rows.is_empty() && field.requires_output() {
+                return Err(Problem::new(
+                    field.id,
+                    "Required print output needs at least one row.",
+                ));
+            }
             if rows.len() > MAX_ROWS {
                 return Err(Problem::new(
                     field.id,
