@@ -214,10 +214,11 @@
           if (reply.type === 'error') {
             if (this.draft === draft) this.message(reply.message || 'The change was not confirmed. Open the field to retry, or press Escape to discard the draft.');
           } else if (this.el.dataset.status === 'saved') {
-            const confirmed = this.el.dataset.value;
-            if (this.active && this.original === draft.original) this.original = confirmed;
-            for (const pending of this.pending) {
-              if (pending.original === draft.original) pending.original = confirmed;
+            if (this.el.dataset.value === draft.value) {
+              if (this.active && this.original === draft.original) this.original = draft.value;
+              for (const pending of this.pending) {
+                if (pending.original === draft.original) pending.original = draft.value;
+              }
             }
             if (this.draft === draft) this.draft = null;
           } else if (this.draft === draft && this.el.dataset.status === 'conflict') {
