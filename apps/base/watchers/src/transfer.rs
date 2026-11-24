@@ -1,6 +1,6 @@
 //! Watcher configuration only, with no runtime evidence or approval state.
 use crate::{
-    definition::{examples_json, Problems},
+    definition::{examples_json, Problems, Step},
     review::Draft,
     Watchers, MANAGE, VIEW,
 };
@@ -38,9 +38,20 @@ fn setup(row: &Row) -> WatcherSetup {
     WatcherSetup {
         name: row.get(0),
         watch: row.get(1),
-        definition: row.get(2),
+        definition: portable(row.get(2)),
         warnings: Vec::new(),
     }
+}
+
+/// A definition as it travels: a script's source digest is left out, since
+/// the destination computes it again from the source it receives.
+fn portable(mut definition: Value) -> Value {
+    for step in definition["do"].as_array_mut().into_iter().flatten() {
+        if let Some(script) = step.get_mut("script").and_then(Value::as_object_mut) {
+            script.remove("source_digest");
+        }
+    }
+    definition
 }
 
 impl WatcherSetup {
@@ -57,17 +68,6 @@ impl WatcherSetup {
         input["examples"] = examples.clone();
         let mut problems = Vec::new();
         let mut draft = Draft::parse(&input, &mut problems);
-        if draft
-            .definition
-            .as_ref()
-            .is_some_and(|definition| definition.scripts().next().is_some())
-        {
-            problems.push((
-                "do".into(),
-                "Setup packs cannot transfer script steps.".into(),
-            ));
-            draft.definition = None;
-        }
         draft.watcher_id = None;
         draft.explanation = None;
         if draft.name != self.name
@@ -75,7 +75,7 @@ impl WatcherSetup {
             || draft
                 .definition
                 .as_ref()
-                .is_some_and(|definition| definition.to_json() != self.definition)
+                .is_some_and(|definition| portable(definition.to_json()) != self.definition)
             || (!examples.is_null() && examples_json(&draft.examples) != *examples)
         {
             problems.push((
@@ -205,22 +205,24 @@ impl Watchers {
             .trigger(&draft.trigger)
             .and_then(|trigger| catalog.table(trigger.definition.table));
         let mut warnings = Vec::new();
+        // A field that identifies a record or a person never travels as a value.
+        let sensitive = |column: &bilibi_grid::column::Column| {
+            catalog.table(column.table).is_some_and(|table| {
+                column.field.is_some_and(|field| {
+                    table.custom_reference(field.id).is_some()
+                        || field.id == table.key()
+                        || record_id(field.id)
+                        || field.personal.is_some()
+                        || table
+                            .record_fields()
+                            .iter()
+                            .any(|record| record.id == field.id && record.personal.is_some())
+                })
+            })
+        };
         for (index, condition) in definition.conditions.iter().enumerate() {
             let column = table.and_then(|table| catalog.resolve(table, &condition.field).ok());
-            if column.as_ref().is_some_and(|column| {
-                catalog.table(column.table).is_some_and(|table| {
-                    column.field.is_some_and(|field| {
-                        table.custom_reference(field.id).is_some()
-                            || field.id == table.key()
-                            || record_id(field.id)
-                            || field.personal.is_some()
-                            || table
-                                .record_fields()
-                                .iter()
-                                .any(|record| record.id == field.id && record.personal.is_some())
-                    })
-                })
-            }) {
+            if column.as_ref().is_some_and(sensitive) {
                 problems.push((
                     "if".into(),
                     "A condition on a record identifier or personal field cannot travel.".into(),
@@ -251,25 +253,92 @@ impl Watchers {
                 }
             }
         }
-        for (index, action) in definition.actions().enumerate() {
-            let offered = self.action(&action.operation);
-            for (key, value) in &action.input {
-                let schema =
-                    offered.map_or(&Value::Null, |action| &action.input["properties"][key]);
-                if offered.is_some() && !portable_input(schema, key, value) {
+        // Every declared input that travels, by its path, with the schema of
+        // the contract it is checked against.
+        let mut inputs: Vec<DeclaredInput> = Vec::new();
+        for (index, step) in definition.steps.iter().enumerate() {
+            match step {
+                Step::Operation(call) => inputs.push((
+                    format!("/do/{index}"),
+                    &call.operation,
+                    &call.input,
+                    self.action(&call.operation).map(|action| &action.input),
+                )),
+                Step::Script { script } => {
+                    for (at, call) in script.calls.iter().enumerate() {
+                        inputs.push((
+                            format!("/do/{index}/script/calls/{at}"),
+                            &call.operation,
+                            &call.input,
+                            self.action(&call.operation).map(|action| &action.input),
+                        ));
+                    }
+                    for (at, call) in script.lookups.iter().enumerate() {
+                        inputs.push((
+                            format!("/do/{index}/script/lookups/{at}"),
+                            &call.operation,
+                            &call.input,
+                            self.lookup(&call.operation).map(|lookup| &lookup.input),
+                        ));
+                    }
+                }
+            }
+        }
+        for (path, _, input, schema) in &inputs {
+            for (key, value) in *input {
+                let field = schema.map_or(&Value::Null, |schema| &schema["properties"][key]);
+                if schema.is_some() && !portable_input(field, key, value) {
                     problems.push((
                         "do".into(),
                         "Use only declared action parameters that do not identify a record or hold a secret.".into(),
                     ));
                 } else {
                     warn_action_text(
-                        schema,
+                        field,
                         value,
-                        &format!("/do/{index}/input/{}", pointer_key(key)),
+                        &format!("{path}/input/{}", pointer_key(key)),
                         &mut warnings,
                     );
                 }
             }
+        }
+        for (index, step) in definition.steps.iter().enumerate() {
+            let Step::Script { script } = step else {
+                continue;
+            };
+            // Text the definition already declares may repeat in the source.
+            let mut known: Vec<String> = script.fields.clone();
+            let mut declared = Vec::new();
+            for (_, operation, input, _) in &inputs {
+                known.push((*operation).to_owned());
+                for (key, value) in *input {
+                    known.push(key.clone());
+                    transfer_scan_strings(value, &mut declared);
+                }
+            }
+            known.extend(declared);
+            for terms in &script.outbound {
+                known.extend(terms.data.iter().cloned());
+            }
+            let column = |field: &str| table.and_then(|table| catalog.resolve(table, field).ok());
+            for field in &script.fields {
+                if let Some(values) = column(field)
+                    .and_then(|column| column.field)
+                    .map(|field| field.values)
+                {
+                    known.extend(values.iter().map(|value| (*value).to_owned()));
+                }
+            }
+            let fact = |field: &str| {
+                column(field).map_or((false, true), |column| {
+                    (
+                        sensitive(&column),
+                        column.ty == FieldType::String
+                            && column.field.is_none_or(|field| field.values.is_empty()),
+                    )
+                })
+            };
+            crate::transfer_scan::scan(script, index, &known, &fact, problems, &mut warnings);
         }
         warnings
     }
@@ -307,8 +376,28 @@ fn portable_input(schema: &Value, key: &str, value: &Value) -> bool {
         })
 }
 
-fn pointer_key(key: &str) -> String {
-    key.replace('~', "~0").replace('/', "~1")
+use crate::transfer_scan::pointer_key;
+
+/// A declared input that travels: its path, operation, input and the schema
+/// of the contract it is checked against.
+type DeclaredInput<'a> = (
+    String,
+    &'a str,
+    &'a serde_json::Map<String, Value>,
+    Option<&'a Value>,
+);
+
+fn transfer_scan_strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) => out.push(text.clone()),
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| transfer_scan_strings(item, out)),
+        Value::Object(fields) => fields
+            .values()
+            .for_each(|item| transfer_scan_strings(item, out)),
+        _ => {}
+    }
 }
 
 fn warn_action_text(schema: &Value, value: &Value, path: &str, warnings: &mut Vec<String>) {

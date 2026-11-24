@@ -476,6 +476,119 @@ async fn watcher_draft(source: &Person<'_>, target: &Person<'_>) -> Result<(), F
     )
 }
 
+/// A script step travels once its source and examples hold no value that
+/// identifies a person or a source record; free text is flagged by path.
+async fn script_drafts(source: &Person<'_>, target: &Person<'_>) -> Result<(), Failure> {
+    let call = json!({"operation":"watcher_cases.cases.route","input":{"queue":"priority"}});
+    let script = |name: &str, body: &str, facts: Value| {
+        json!({"name":name,"watch":OPENED,"do":[{"script":{
+            "name":name,"fields":["priority","title"],"calls":[call],
+            "source":format!("if (facts.priority !== 'urgent') return [];\n{body}\nreturn [{{operation:'watcher_cases.cases.route',input:{{queue:'priority'}}}}];"),
+            "examples":[{"facts":facts,"expect":[call]}]
+        }}]})
+    };
+    let draft = |watcher: Value| async move {
+        let done = source.write(&[op("base.watchers.draft", watcher)]).await?;
+        Ok::<_, Failure>(done["results"][0]["result"]["result"]["watcher_id"].clone())
+    };
+    let export = |id: Value| async move {
+        source
+            .read(
+                EXPORT,
+                &json!({"labels":[],"custom_fields":[],"watchers":[id]}),
+            )
+            .await
+    };
+    let good = draft(script(
+        "Route urgent cases by script",
+        "const note = 'Escalate before lunch';",
+        json!({"priority":"urgent","title":"Printer jam"}),
+    ))
+    .await?;
+    let pack = export(good).await?;
+    let flags = pack["watchers"][0]["warnings"].to_string();
+    check(
+        "A scripted watcher exports without its source digest and flags free text by path",
+        pack["watchers"][0]["definition"]["do"][0]["script"]
+            .get("source_digest")
+            .is_none()
+            && flags.contains("/do/0/script/source line 2")
+            && flags.contains("/do/0/script/examples/0/facts/title"),
+    )?;
+    let request = json!({"pack":pack});
+    let preview = target.read(PREVIEW, &request).await?;
+    check(
+        "The destination previews the script step and recomputes its flags",
+        preview["ready"] == true
+            && preview["warnings"]
+                .to_string()
+                .contains("/do/0/script/source line 2"),
+    )?;
+    let outcome = target.write(&[apply(&request, &preview)]).await?;
+    let imported = target
+        .read(
+            "base.watchers.list",
+            &json!({"search":"Route urgent cases by script"}),
+        )
+        .await?;
+    check(
+        "Import creates an unapproved scripted draft that the destination must approve",
+        outcome["results"][0]["result"]["result"]["watchers_added"] == 1
+            && imported["watchers"][0]["awaiting_approval"] == true
+            && imported["watchers"][0]["running_version"].is_null(),
+    )?;
+    for (name, body, facts, why) in [
+        (
+            "Phone number in source",
+            "const desk = 'call +60 12 345 6789';",
+            json!({"priority":"urgent","title":"Printer jam"}),
+            "a phone number in the script source",
+        ),
+        (
+            "Email in an example",
+            "",
+            json!({"priority":"urgent","title":"From jane@customer.example"}),
+            "an email address in an example fact",
+        ),
+    ] {
+        let id = draft(script(name, body, facts)).await?;
+        check(&format!("Export refuses {why}"), export(id).await.is_err())?;
+    }
+    let notify = json!({"operation":"watcher_cases.cases.notify","input":{"include":["title"]}});
+    let outbound = draft(json!({"name":"Share urgent cases","watch":OPENED,"do":[{"script":{
+        "name":"Share urgent cases","fields":["priority"],"calls":[notify],
+        "outbound":[{"operation":"watcher_cases.cases.notify","destination":"desk@partner.example","data":["title"]}],
+        "source":format!("return facts.priority === 'urgent' ? [{notify}] : [];"),
+        "examples":[{"facts":{"priority":"urgent"},"expect":[notify]}]
+    }}]}))
+    .await?;
+    let shared = export(outbound).await?;
+    check(
+        "Export flags an outbound destination for the destination tenant to confirm",
+        shared["watchers"][0]["warnings"]
+            .to_string()
+            .contains("/do/0/script/outbound/0/destination"),
+    )?;
+    let case = source
+        .write(&[op(
+            "watcher_cases.cases.open",
+            json!({"company_id":1,"title":"Desk settings","priority":"normal","amount":"1"}),
+        )])
+        .await?["results"][0]["result"]["result"]["case_id"]
+        .clone();
+    let lookup = json!({"operation":"watcher_cases.cases.lookup","input":{"case_id":case}});
+    let looked_up = draft(json!({"name":"Lookup a source case","watch":OPENED,"do":[{"script":{
+        "name":"Lookup a source case","fields":["priority"],"calls":[call],"lookups":[lookup],
+        "source":format!("const desk = lookup('watcher_cases.cases.lookup', {{case_id:{case}}}); return facts.priority === 'urgent' ? [{call}] : [];"),
+        "examples":[{"facts":{"priority":"urgent"},"lookup_fixtures":[{"operation":"watcher_cases.cases.lookup","input":{"case_id":case},"reply":{"title":"Desk"}}],"expect":[call]}]
+    }}]}))
+    .await?;
+    check(
+        "Export refuses a script lookup that names a source record",
+        export(looked_up).await.is_err(),
+    )
+}
+
 async fn refusals(target: &Person<'_>, mut request: Value) -> Result<(), Failure> {
     request["pack"]["labels"][0]["label"] = json!("A different label");
     request["pack"]["custom_fields"][0]["key"] = json!("new_stage");
@@ -574,8 +687,16 @@ async fn stale_review(target: &Person<'_>, request: &Value) -> Result<(), Failur
     )
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Failure> {
+fn main() -> Result<(), Failure> {
+    // Script steps are checked in a worker process started from this binary.
+    bilibi_watchers::enter_worker();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(walkthrough())
+}
+
+async fn walkthrough() -> Result<(), Failure> {
     if std::env::var("BILIBI_SETUP_PACKS_DEMO").as_deref() != Ok("disposable") {
         return Err(
             "set BILIBI_SETUP_PACKS_DEMO=disposable against a disposable migrated database".into(),
@@ -594,7 +715,8 @@ async fn main() -> Result<(), Failure> {
          SELECT 2,5,capability,true FROM unnest(ARRAY[
              'base.setup-packs.view','base.setup-packs.manage','base.labels.view',
              'base.labels.manage','base.labels.customisations.view','base.custom-fields.view','base.custom-fields.manage',
-             'grid.views.share','admin.watchers.view','admin.watchers.manage','watcher-cases.case.view'
+             'grid.views.share','admin.watchers.view','admin.watchers.manage','watcher-cases.case.view',
+             'watchers.script.execute'
          ]) capability ON CONFLICT DO NOTHING",
         )
         .await?;
@@ -606,7 +728,8 @@ async fn main() -> Result<(), Failure> {
         .as_array()
         .is_some_and(|triggers| triggers.iter().any(|trigger| trigger["trigger"] == OPENED))
     {
-        return watcher_draft(&source, &target).await;
+        watcher_draft(&source, &target).await?;
+        return script_drafts(&source, &target).await;
     }
     let request = round_trip(&source, &target).await?;
     let staff = Person::login(&app, &db, "staff@example.test").await?;

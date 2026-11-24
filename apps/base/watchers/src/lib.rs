@@ -23,6 +23,7 @@ mod script;
 pub use sandbox::enter_worker;
 mod store;
 mod transfer;
+mod transfer_scan;
 mod trial;
 mod web;
 
