@@ -1,13 +1,13 @@
 //! Discovered HTTP pages and downloads: validate/bind once, authorize before
 //! owner dispatch, on every request.
-use crate::{origin, sender_admission::SenderAdmission, token, App, HttpError};
+use crate::{origin, token, App, HttpError};
 use axum::{
     body::Bytes,
-    extract::{ConnectInfo, Path, Query, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, on, MethodFilter},
-    Extension, Router,
+    Router,
 };
 use bilibi_database::{Error, Result};
 use bilibi_module_registry::{
@@ -19,7 +19,7 @@ use bilibi_module_registry::{
 };
 use bilibi_tenancy::PortalScope;
 use bilibi_ui::{download::DownloadRequest, page::PageChrome, page::PageRequest, StatusKind};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 type PageService = bilibi_ui::page::PageService<bilibi_security::Scope, Error>;
 type DownloadService = bilibi_ui::download::DownloadService<bilibi_security::Scope, Error>;
@@ -31,7 +31,6 @@ pub struct BoundRoute {
     pub route: &'static Route,
     pub page: Arc<PageService>,
     pub sections: Vec<&'static PageSection>,
-    sender_admission: Option<Arc<SenderAdmission>>,
 }
 /// A `Download` contribution with its owner service. Downloads share the page
 /// routes' path rules and may not intersect a page or a host path.
@@ -55,9 +54,9 @@ pub struct BoundPortalDownload {
     pub service: Arc<PortalDownloadService>,
 }
 /// Every discovered page, staff and portal, which share one pattern space.
+/// Anonymous pages are `base/public`'s (`crate::public`), never a route.
 pub struct Pages {
     pub staff: Vec<BoundRoute>,
-    pub public: Vec<BoundRoute>,
     pub portal: Vec<BoundPortalRoute>,
 }
 pub struct Downloads {
@@ -73,11 +72,6 @@ impl Pages {
         self.staff
             .iter()
             .map(|bound| (bound.route.method, bound.route.path))
-            .chain(
-                self.public
-                    .iter()
-                    .map(|bound| (bound.route.method, bound.route.path)),
-            )
             .chain(
                 self.portal
                     .iter()
@@ -130,7 +124,6 @@ const HOST_PATHS: [&str; 23] = [
 pub fn bind(services: &Services) -> Result<Pages> {
     let mut bound = Pages {
         staff: Vec::new(),
-        public: Vec::new(),
         portal: Vec::new(),
     };
     for entry in services.catalog()?.entries::<Route>(ROUTES)? {
@@ -146,20 +139,11 @@ pub fn bind(services: &Services) -> Result<Pages> {
                 page: services.get(route.service)?,
             });
         } else {
-            let bound_route = BoundRoute {
+            bound.staff.push(BoundRoute {
                 route,
                 page: services.get(route.service)?,
                 sections: Vec::new(),
-                sender_admission: route
-                    .access
-                    .sender_budget()
-                    .map(|budget| Arc::new(SenderAdmission::new(budget))),
-            };
-            if matches!(route.access.base(), Access::Public { .. }) {
-                bound.public.push(bound_route);
-            } else {
-                bound.staff.push(bound_route);
-            }
+            });
         }
     }
     for entry in services
@@ -207,7 +191,6 @@ fn bind_page_sections(services: &Services, staff: &mut [BoundRoute]) -> Result<(
         });
         let Some(page) = page.filter(|page| {
             page.route.framed
-                && !matches!(page.route.access.base(), Access::Public { .. })
                 && !page.route.path.contains('{')
                 && page.page.0.redirect(page.route.operation).is_none()
         }) else {
@@ -283,8 +266,8 @@ pub(crate) fn validate_host_free(entry: &bilibi_module_registry::Entry, path: &s
     Ok(())
 }
 /// Step-up wraps a signed-in access once, for an operation some module
-/// declared: a public page has no session to step up, a nested wrapper would
-/// mean nothing more, and an undeclared key could never be configured.
+/// declared: a nested wrapper would mean nothing more, and an undeclared key
+/// could never be configured.
 fn validate_access(
     services: &Services,
     entry: &bilibi_module_registry::Entry,
@@ -297,9 +280,9 @@ fn validate_access(
         "{} at {}:{}",
         entry.id, entry.provenance.source, entry.provenance.line
     );
-    if matches!(inner, Access::Public { .. } | Access::StepUp { .. }) {
+    if matches!(inner, Access::StepUp { .. }) {
         return Err(invalid(format!(
-            "{at} steps up a public or already stepped-up access"
+            "{at} steps up an already stepped-up access"
         )));
     }
     let step_up: Arc<bilibi_base::step_up::StepUp> = services.get(bilibi_base::step_up::SERVICE)?;
@@ -419,35 +402,6 @@ pub fn install_public(
             ),
         );
     }
-    for bound in &routes.public {
-        let bound = bound.clone();
-        router = router.route(
-            bound.route.path,
-            on(
-                method_filter(bound.route.method),
-                move |State(app): State<App>,
-                      method: axum::http::Method,
-                      uri: Uri,
-                      headers: HeaderMap,
-                      peer: Option<Extension<ConnectInfo<SocketAddr>>>,
-                      Path(path): Path<HashMap<String, String>>,
-                      Query(query): Query<HashMap<String, String>>,
-                      body: Bytes| {
-                    dispatch(
-                        app,
-                        bound,
-                        uri,
-                        headers,
-                        peer,
-                        path,
-                        query,
-                        body,
-                        method == axum::http::Method::HEAD,
-                    )
-                },
-            ),
-        );
-    }
     router
 }
 
@@ -481,7 +435,6 @@ pub fn install_staff(
                       method: axum::http::Method,
                       uri: Uri,
                       headers: HeaderMap,
-                      peer: Option<Extension<ConnectInfo<SocketAddr>>>,
                       Path(path): Path<HashMap<String, String>>,
                       Query(query): Query<HashMap<String, String>>,
                       body: Bytes| {
@@ -490,7 +443,6 @@ pub fn install_staff(
                         bound,
                         uri,
                         headers,
-                        peer,
                         path,
                         query,
                         body,
@@ -512,7 +464,7 @@ pub(crate) fn method_filter(method: Method) -> MethodFilter {
     }
 }
 
-/// Retired page paths, bound after the pages, downloads and public endpoints:
+/// Retired page paths, bound after the pages, downloads and public routes:
 /// each claims no host path, collides with none of them, and lands on a GET page whose
 /// pattern is exactly its `to`, so a rename that drops the new page fails boot
 /// instead of redirecting into a 404.
@@ -520,7 +472,7 @@ pub fn bind_moved(
     services: &Services,
     pages: &Pages,
     downloads: &Downloads,
-    endpoints: &crate::endpoints::Endpoints,
+    public: &crate::public::PublicRoutes,
 ) -> Result<MovedRoutes> {
     let mut bound: Vec<&'static Moved> = Vec::new();
     for entry in services.catalog()?.entries::<Moved>(MOVED)? {
@@ -530,14 +482,15 @@ pub fn bind_moved(
         let taken = pages
             .patterns()
             .chain(downloads.patterns())
-            .chain(endpoints.patterns())
+            .chain(public.patterns())
             .chain(bound.iter().map(|other| (Method::Get, other.from)));
         for other in taken {
             validate_pair(other, (Method::Get, moved.from))?;
         }
-        if !pages
-            .patterns()
-            .any(|(method, path)| method == Method::Get && path == moved.to)
+        if !public.serves(moved.to)
+            && !pages
+                .patterns()
+                .any(|(method, path)| method == Method::Get && path == moved.to)
         {
             return Err(invalid(format!(
                 "{} at {}:{} moves to {}, which no page serves",
@@ -551,10 +504,7 @@ pub fn bind_moved(
         public: Vec::new(),
     };
     for moved in bound {
-        let is_public = pages
-            .public
-            .iter()
-            .any(|page| page.route.method == Method::Get && page.route.path == moved.to)
+        let is_public = public.serves(moved.to)
             || pages
                 .portal
                 .iter()
@@ -612,7 +562,7 @@ fn moved_destination(moved: &Moved, uri: &Uri) -> String {
 
 /// What a request's access check concluded.
 pub enum Admission {
-    /// Through, with the proven scope (none for a public route).
+    /// Through, with the proven scope.
     Admitted(Option<bilibi_security::Scope>),
     /// A step-up route outside development, and this session has not
     /// confirmed access within the window: a GET goes to the prompt first.
@@ -653,9 +603,6 @@ async fn check_base(
     access: Access,
     credential: Option<&str>,
 ) -> Result<Option<bilibi_security::Scope>> {
-    if matches!(access, Access::Public { .. }) {
-        return Ok(None);
-    }
     let scope = app
         .security
         .guard(credential.ok_or(Error::Unauthorized)?)
@@ -678,7 +625,6 @@ async fn check_base(
         Access::StepUp { .. } => return Err(Error::Internal),
         // Portal pages are bound apart; a staff session never opens one.
         Access::Portal(_) => return Err(Error::Forbidden),
-        Access::Public { .. } => unreachable!(),
     }
     Ok(Some(scope))
 }
@@ -796,21 +742,11 @@ async fn dispatch(
     bound: BoundRoute,
     uri: Uri,
     headers: HeaderMap,
-    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     path: HashMap<String, String>,
     query: HashMap<String, String>,
     body: Bytes,
     head: bool,
 ) -> std::result::Result<Response, HttpError> {
-    if let Some(admission) = &bound.sender_admission {
-        let sender = crate::api::sender_key(crate::api::client_address(
-            peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
-            &headers,
-        ));
-        if !admission.allow(&sender) {
-            return Ok((StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response());
-        }
-    }
     let credential = token(&headers).ok();
     let framed = matches!(
         headers.get("sec-fetch-dest").and_then(|h| h.to_str().ok()),

@@ -41,6 +41,7 @@ bilibi-picklists = { path = "picklists" }
 bilibi-ports = { path = "ports" }
 bilibi-principal-directory = { path = "principal_directory" }
 bilibi-privacy = { path = "privacy" }
+bilibi-public = { path = "public" }
 bilibi-queue = { path = "queue" }
 bilibi-records = { path = "records" }
 bilibi-reports = { path = "reports" }

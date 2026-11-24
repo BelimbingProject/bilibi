@@ -1,6 +1,6 @@
 # Two sites
 
-Bilibi serves one staff router and, when `PUBLIC_ORIGIN`, `PUBLIC_BIND_ADDR` and `PUBLIC_TENANT_ID` are set, one public router from separate listeners ([ADR 34](../../docs/architecture/decisions/34-two-sites-listener-boundary.md)). The listener selects the site; each router also requires the exact `Host` from its own origin and answers another host with 404. Staff credentials, pages, downloads, `/live`, `/api/v1`, `/mcp`, OAuth, `/.well-known` and SCIM exist only on the staff listener. Public pages and token endpoints, the customer portal, `/visitor/v1` and `/webhooks` exist only on the public listener. The public listener admits customer and visitor sessions for the configured tenant. Omit all three public settings to serve only the staff site.
+Bilibi serves one staff router and, when `PUBLIC_ORIGIN`, `PUBLIC_BIND_ADDR` and `PUBLIC_TENANT_ID` are set, one public router from separate listeners ([ADR 34](../../docs/architecture/decisions/34-two-sites-listener-boundary.md)). The listener selects the site; each router also requires the exact `Host` from its own origin and answers another host with 404. Staff credentials, pages, downloads, `/live`, `/api/v1`, `/mcp`, OAuth, `/.well-known` and SCIM exist only on the staff listener. Public pages and token links (`base/public`), the customer portal, `/visitor/v1` and `/webhooks` exist only on the public listener. The public listener admits customer and visitor sessions for the configured tenant. Omit all three public settings to serve only the staff site.
 
 # Sign-in
 
@@ -42,7 +42,7 @@ at boot under the same shadow and ambiguity rules, requires `to` to be a GET
 page's exact pattern, and answers GET with a 308 that keeps the parameter
 segments and the query string. It checks no access; the destination does.
 
-Access is checked before the owner renders: Public, SignedIn, Capability(key),
+Access is checked before the owner renders: SignedIn, Capability(key),
 AnyOf(keys), Operator, OperatorCapability(key), Owner, or StepUp { operation, inner }. AnyOf opens a combined page for an account that holds any one of its keys (a menu leaf's `Requirement::AnyOf` is the matching link): boot refuses an empty, blank or repeated key and an undeclared one, a direct deny removes only its own key, and the owner still enforces each section and write with `Capability`. Operator requires the persisted Tenancy
 proof, never a tenant-ID convention or an admin grant. OperatorCapability
 requires both proof and capability; direct denials still win. Browser GETs
@@ -76,7 +76,7 @@ The agent search uses the same visible pages and sections as the top bar. Both m
 
 Step-up (`apps/base/step_up/README.md`) is the same on every surface:
 
-- `StepUp { operation, inner }` checks `inner`, then `StepUp::require` for the declared `operation`. A GET that owes a check keeps its address and shell and mounts the 2FA prompt (the method choice when several are enrolled) in `StepUpGate`; the protected owner is not rendered. After proof, the live socket mounts the requested page in place. A protected live action uses the same gate. Any other HTTP method, an embed or a panel is refused with 403. Boot refuses a step-up of `Public`, of another step-up, or of an undeclared operation. Menus and tile pickers check only `inner`.
+- `StepUp { operation, inner }` checks `inner`, then `StepUp::require` for the declared `operation`. A GET that owes a check keeps its address and shell and mounts the 2FA prompt (the method choice when several are enrolled) in `StepUpGate`; the protected owner is not rendered. After proof, the live socket mounts the requested page in place. A protected live action uses the same gate. Any other HTTP method, an embed or a panel is refused with 403. Boot refuses a step-up of another step-up or of an undeclared operation. Menus and tile pickers check only `inner`.
 - A live socket on such a page rereads the window on each event and 15 s refresh without extending it. Once the window has run out, the socket reloads its address so the HTTP guard asks again.
 - When an owner's facade answers `Error::StepUpRequired` during a GET render or a live event, the browser goes to the prompt and comes back to the page; nothing acted.
 - `/api/v1` commit and the MCP `commit` tool take an optional `step_up_code` and answer `step_up_required` (`bilibi_step_up::refusal`): 403 on the API, an `isError` result on MCP.
@@ -96,7 +96,7 @@ The adapter receives the operation, proven optional scope, path/query values,
 bounded request body and presentation flag. HTML escaping belongs to the owner.
 An authenticated page uses the workspace shell by default. A page operation may return `PageChrome::StandaloneReview`; Web then keeps the same guarded live transport, CSRF and session binding but wraps it in [Base UI’s credential-style review layout](../base/ui/README.md#signed-in-standalone-reviews). Core Agent Access uses this for OAuth consent.
 
-A public GET page that needs sender admission declares `Access::Public { sender_budget: Some(SenderBudget { per_minute, per_hour }) }`. Web derives the sender exactly as the Visitor edge does (IPv4 address or IPv6 /64, through the trusted-proxy boundary), checks the budget before calling the page owner and answers excess traffic with `429 Too many requests`; the owner never receives an address. `sender_budget: None` keeps the page unthrottled. Each route has its own bounded fixed-window counters in the server process, and allowed traffic performs no database write.
+Nothing on the staff site is anonymous: an anonymous page is a `base/public` page on the public site (see Public pages and links).
 
 Framing comes from `Sec-Fetch-Dest: iframe` (or `frame`) on each HTTP navigation,
 never a cookie, account setting or query parameter. A route with `framed: false`
@@ -117,7 +117,7 @@ media type the owner knows, the file's own name, `Attachment` or `Inline`).
 `apps/web/examples/download-reference.rs` is the running specimen.
 
 Downloads are GET only, share the page routes' path rules and pattern space
-(an intersecting page or host path fails boot), and are never `Public`: access
+(an intersecting page or host path fails boot), and never anonymous: access
 is proven on every request exactly as for a page, so an anonymous browser is
 sent to sign in and a revoked grant refuses the next click with 403, and the
 owner's facade is expected to authorize once more. A successful download
@@ -136,30 +136,15 @@ return `live: false`. F6 owns queued events and retained fragment/iframe lifecyc
 
 A subscription's `Change` wakes only the sockets of its tenant (and of its recipient, when it names one): the host drops any other where the socket hears it, before a session guard or a capability check runs, and merges the wakes waiting for one page or panel into one refresh. A wake or 15-second refresh that renders what the browser already holds sends nothing and does not draw the shell, and a tab out of view is not refreshed on the timer. `apps/web/examples/live-wake-walkthrough.rs` is the running proof (`docs/live-pages.md`, running reference specimen).
 
-# Public endpoints (`src/endpoints.rs`)
+# Public pages and links (`src/public.rs`)
 
-**A token link that a mail client, image proxy or mail provider calls with no session is a `PUBLIC_ENDPOINTS` contribution, not a `Public` page.** Use one for an open-tracking pixel, a click-tracking redirect or an RFC 8058 one-click unsubscribe.
+**Anything anonymous on the public site is a [`base/public`](../base/public/README.md) contribution: a `PUBLIC_PAGES` page or a `PUBLIC_LINKS` token link.** The host binds them on the public router only, in the same pattern space as the portal's routes and the host paths, and refuses an overlap at boot.
 
-```rust
-inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "email.click", provenance!(), &CredentialPath { path: "/email/c/{token}" }) }
-inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "email.click", provenance!(), &PublicEndpoint {
-    method: Method::Get, path: "/email/c/{token}", service: "cx/email.links", operation: "click",
-    post_sender_budget: None,
-}) }
-```
+- **Order on every request.** The listener budget (`Public::admit`, every request of one sender to the public site except signed `/webhooks` calls), then the route's own budget, then a framed request is refused, then the owner is called with `PublicScope` for the listener's tenant. Over either budget the answer is `429 Too many requests`; the owner never sees the sender.
+- **Pages** render the owner's HTML in the shared document, without shell or live socket. **Links** answer with the owner's `Reply` and the headers `Reply::headers` decides; every refusal of a link, and a framed request, is one bare `404 Not found`. A server fault is a 500, logged with the token redacted.
+- The sender is the IPv4 address or IPv6 /64 the trusted-proxy boundary resolved, as for the sign-in limiter and the visitor edge.
 
-- **The token is the only credential.** The path must carry `{token}`, and the module declares the same pattern under `CREDENTIAL_PATHS`, so the token is `[redacted]` in logs and debug reports and never sent on in a referrer. Boot refuses an endpoint without `{token}` or without its declaration.
-- **Shape.** GET or POST only, never under `/portal`; it shares the page routes' path rules and pattern space, so a page, download, moved path or host path of the same method at an intersecting path fails boot. A GET page and a POST endpoint may share one path (an unsubscribe page and its one-click POST).
-- **Owner.** The service resolves to `bilibi_ui::endpoint::EndpointService<Error>` wrapping the owner's `Endpoint`. `answer` gets the operation, the path parameters, the request's content type and the bounded body (empty for a GET), and no scope: the owner finds the tenant and record from the token and writes as unattended work.
-- **Reply.** `Reply::Bytes { bytes, content_type, cache }` (`Reply::pixel()` is a transparent 1×1 GIF), `Reply::Redirect(Target)` (302) or `Reply::NoContent` (204). `Reply::headers` decides every header: `no-store` unless the owner asks for `Cache::Private`, `nosniff`, `X-Frame-Options: DENY` and `default-src 'none'; frame-ancestors 'none'; sandbox`; a redirect also sends `Referrer-Policy: no-referrer`.
-- **No open redirect.** A `Target` exists only through `Target::parse`, which accepts an absolute `http`/`https` address with a host, no user name or password, no backslash, whitespace or control character, at most 2048 characters. Parse the address your record stored. The owner never sees the query string, so `?to=` on a link cannot choose the destination.
-- **No session, no Origin, no CSRF.** Web reads no cookie, `Origin` or CSRF secret here and renders no shell, which is why a mail provider's POST (no `Origin`) is admitted. Nothing here acts as a signed-in person.
-- **One refusal.** Any refusal from the owner (`NotFound`, `Invalid`, `Forbidden`, ...) and a framed request (`Sec-Fetch-Dest: iframe`) get the same bare `404 Not found` (the error card for a browser), so an unknown token and a known one with an unusable target look alike. A server fault is a 500, logged with the token redacted.
-- **Same answer for unknown tokens.** Where a different answer would reveal which tokens exist, answer as for a known one: the pixel for any token, 204 for any one-click POST whose body says `List-Unsubscribe=One-Click`.
-- **Token lookup.** Store a digest of the token (SHA-256) and look the row up by digest, as Session does; never compare the raw token in SQL or with `==`.
-- **Rate limit.** Each sender (IPv4 address or IPv6 /64, through the same trusted-proxy boundary as Visitor) gets `public_endpoints.sender_per_minute` requests per endpoint per minute on each server (Base Integration setting, default 600); more get `429`. A POST endpoint may also declare `post_sender_budget: Some(SenderBudget { per_minute, per_hour })` for a tighter route-specific budget. GET endpoints use the global minute limit. Each endpoint has its own bounded fixed-window counters in the server process, and allowed traffic performs no database write. The owner never receives the sender address.
-
-`apps/web/examples/public-endpoint-reference.rs` is the running specimen; `--sender-admission` proves GET and POST refusal, minute and hour limits, sender isolation and minute reset, while `--refusals` prints each boot refusal without a database.
+`apps/web/examples/public-site-reference.rs` is the running specimen (`--sender-admission`, `--refusals`; [base/public proof](../base/public/README.md#proof)).
 
 # Visitor edge (`src/visitor.rs`)
 

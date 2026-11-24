@@ -146,9 +146,9 @@ Each Domain and each Extension lives in its own repository, with one or more mod
 
 - **Stack:** Axum on Tokio, Askama templates and a native WebSocket adapter. There is no single-page-app framework and no client-side model.
 - **Pages are contributions.** A module registers a `Route` that names a `PageService`. The host checks access, then the owner renders. *built*
-- **Access kinds:** Public pages are installed only on the public listener. SignedIn, Capability, AnyOf (one of several capabilities), Operator, OperatorCapability, Owner and StepUp pages are installed only on the staff listener. Portal pages join the public listener under their customer scope.
+- **Access kinds:** SignedIn, Capability, AnyOf (one of several capabilities), Operator, OperatorCapability, Owner and StepUp pages are installed only on the staff listener. Portal pages join the public listener under their customer scope. Nothing on the staff site is anonymous.
 - **Downloads** are `DOWNLOADS` contributions: GET only, never public.
-- **Public endpoints** are `PUBLIC_ENDPOINTS` contributions on the public listener: a GET or POST token link (tracking pixel, click redirect, one-click unsubscribe) with no session, answered with bytes, a validated redirect or a 204.
+- **The public site** belongs to `base/public` (`apps/base/public/README.md`): anonymous `PUBLIC_PAGES` and token `PUBLIC_LINKS` (tracking pixel, click redirect, one-click unsubscribe, calendar feed), each with a required sender budget under the listener's own, and the sealed `PublicScope` their owners receive.
 - **Live pages:** the server renders HTML and the browser patches it by element id. Every intent is queued and acknowledged by request ID. Contract: `docs/live-pages.md`.
 - **Agent edge:** `/api/v1`, `/mcp` and device-code OAuth. Both resolve to the `base/agent_api` registry.
 

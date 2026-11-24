@@ -224,9 +224,6 @@ impl Catalog {
         for entry in self.entries.get(DOWNLOADS).into_iter().flatten() {
             check(entry, entry.get::<Download>()?.service)?;
         }
-        for entry in self.entries.get(PUBLIC_ENDPOINTS).into_iter().flatten() {
-            check(entry, entry.get::<PublicEndpoint>()?.service)?;
-        }
         let mut versions = BTreeSet::new();
         for entry in self.entries.get(SEEDS).into_iter().flatten() {
             let seed = entry.get::<Seed>()?;
@@ -292,9 +289,6 @@ impl Catalog {
         for entry in of(MOVED) {
             check(entry, entry.get::<Moved>()?.from)?;
         }
-        for entry in of(PUBLIC_ENDPOINTS) {
-            check(entry, entry.get::<PublicEndpoint>()?.path)?;
-        }
         Ok(())
     }
 }
@@ -344,7 +338,6 @@ fn validate_page_sections(entries: &[Entry]) -> Result<()> {
 }
 inventory::submit! { Consumer::new::<PageSection>(PAGE_SECTIONS, "base/module_registry", validate_page_sections) }
 pub const CREDENTIAL_PATHS: &str = "base/module_registry.credential_paths";
-pub const PUBLIC_ENDPOINTS: &str = "base/module_registry.public_endpoints";
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Method {
     Get,
@@ -355,11 +348,8 @@ pub enum Method {
 }
 #[derive(Clone, Copy, Debug)]
 pub enum Access {
-    /// No session is required. A public GET page may declare a host-owned
-    /// sender budget; `None` keeps the unthrottled page behavior.
-    Public {
-        sender_budget: Option<SenderBudget>,
-    },
+    /// Any signed-in staff session. Nothing on the staff site is anonymous:
+    /// an anonymous page is a `base/public` page on the public site.
     SignedIn,
     Capability(&'static str),
     Operator,
@@ -378,8 +368,8 @@ pub enum Access {
     /// The inner access, then Base Step-up's check of `operation` (a key
     /// the route's owner declared with `bilibi_step_up::declare!`): when the
     /// tenant's policy requires it, a GET without a holding check is sent to
-    /// confirm first. Wrap a signed-in access, never `Public` or another
-    /// `StepUp`; Web refuses either, and an undeclared operation, at boot.
+    /// confirm first. Wrap a signed-in access, never another `StepUp`; Web
+    /// refuses that, and an undeclared operation, at boot.
     StepUp {
         operation: &'static str,
         inner: &'static Access,
@@ -437,7 +427,7 @@ impl Access {
     pub fn admits(self, viewer: &Viewer<'_>) -> bool {
         let held = |key: &str| viewer.capabilities.contains(key);
         match self.base() {
-            Access::Public { .. } | Access::SignedIn => true,
+            Access::SignedIn => true,
             Access::Capability(key) => held(key),
             Access::AnyOf(keys) => keys.iter().any(|key| held(key)),
             Access::Operator => viewer.operator,
@@ -448,21 +438,6 @@ impl Access {
             Access::StepUp { .. } => false,
         }
     }
-
-    /// The host-owned sender budget declared for a public page, if any.
-    pub fn sender_budget(self) -> Option<SenderBudget> {
-        match self {
-            Access::Public { sender_budget } => sender_budget,
-            _ => None,
-        }
-    }
-}
-/// A per-server fixed-window budget for one sender on one public route.
-/// Web derives the sender from trusted transport evidence; owners never see it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SenderBudget {
-    pub per_minute: u32,
-    pub per_hour: u32,
 }
 /// Who is looking, for [`Access::admits`]: the effective capabilities and
 /// whether the operator and owner proofs held. The caller proves them; this
@@ -516,30 +491,6 @@ pub struct Download {
     pub service: &'static str,
     pub operation: &'static str,
     pub access: Access,
-}
-/// A public machine-facing address that answers outside the shell with a
-/// small typed reply: bytes (an open-tracking pixel), a redirect to an
-/// address the owner stored and validated (a click-tracking link), or an
-/// empty 204 (an RFC 8058 one-click unsubscribe POST from a mail provider).
-///
-/// The `{token}` segment of `path` is the only credential: Web reads no
-/// cookie, session, `Origin` or CSRF secret for it, so a POST from a mail
-/// provider, which carries no `Origin`, is admitted. Boot therefore refuses
-/// a path without `{token}`, and the owning module declares the same
-/// pattern under [`CREDENTIAL_PATHS`] so the token never reaches a log,
-/// debug report or referrer. GET or POST only; never under `/portal`.
-/// Web rate-limits each sender, never frames the reply and never renders
-/// the shell. The service resolves to
-/// `bilibi_ui::endpoint::EndpointService`; contract in `apps/web/README.md`.
-#[derive(Clone, Copy, Debug)]
-pub struct PublicEndpoint {
-    pub method: Method,
-    pub path: &'static str,
-    pub service: &'static str,
-    pub operation: &'static str,
-    /// An additional budget for POST. `None` keeps only Web's global
-    /// public-endpoint per-minute limit.
-    pub post_sender_budget: Option<SenderBudget>,
 }
 /// A retired page path that answers a GET with a permanent redirect to the
 /// page that replaced it, so bookmarks, pins and saved workspace tiles keep
@@ -663,14 +614,6 @@ fn validate_routes(entries: &[Entry]) -> Result<()> {
         if !path_valid(route.path, route.operation, route.access) {
             return Err(invalid(format!("invalid route {}", entry.id)));
         }
-        if let Some(budget) = route.access.sender_budget() {
-            if route.method != Method::Get || budget.per_minute == 0 || budget.per_hour == 0 {
-                return Err(invalid(format!(
-                    "public route {} needs a positive GET sender budget",
-                    entry.id
-                )));
-            }
-        }
         validate_portal(entry, route.path, route.access, route.framed)?;
         if !paths.insert((route.method, normalized(route.path))) {
             return Err(invalid(format!("duplicate route {}", route.path)));
@@ -684,9 +627,7 @@ fn validate_downloads(entries: &[Entry]) -> Result<()> {
     let mut paths = BTreeSet::new();
     for entry in entries {
         let download = entry.get::<Download>()?;
-        if !path_valid(download.path, download.operation, download.access)
-            || matches!(download.access, Access::Public { .. })
-        {
+        if !path_valid(download.path, download.operation, download.access) {
             return Err(invalid(format!("invalid download {}", entry.id)));
         }
         validate_portal(entry, download.path, download.access, false)?;
@@ -736,51 +677,6 @@ fn validate_credential_paths(entries: &[Entry]) -> Result<()> {
     Ok(())
 }
 inventory::submit! { Consumer::new::<CredentialPath>(CREDENTIAL_PATHS, "base/module_registry", validate_credential_paths) }
-/// A public endpoint is a GET or a POST whose `{token}` is its credential,
-/// outside the portal; Web refuses one that intersects a page, download,
-/// moved or host path.
-fn validate_public_endpoints(entries: &[Entry]) -> Result<()> {
-    let mut paths = BTreeSet::new();
-    for entry in entries {
-        let endpoint = entry.get::<PublicEndpoint>()?;
-        let at = format!(
-            "public endpoint {} at {}:{}",
-            entry.id, entry.provenance.source, entry.provenance.line
-        );
-        if endpoint.post_sender_budget.is_some_and(|budget| {
-            endpoint.method != Method::Post || budget.per_minute == 0 || budget.per_hour == 0
-        }) {
-            return Err(invalid(format!("{at} needs a positive POST sender budget")));
-        }
-        if !path_valid(
-            endpoint.path,
-            endpoint.operation,
-            Access::Public {
-                sender_budget: None,
-            },
-        ) || !matches!(endpoint.method, Method::Get | Method::Post)
-            || !parameters(endpoint.path).any(|name| name == "token")
-        {
-            return Err(invalid(format!(
-                "{at} must be a GET or POST whose path carries {{token}}"
-            )));
-        }
-        if in_portal(endpoint.path) {
-            return Err(invalid(format!(
-                "{at} claims the portal path {}",
-                endpoint.path
-            )));
-        }
-        if !paths.insert((endpoint.method, normalized(endpoint.path))) {
-            return Err(invalid(format!(
-                "duplicate public endpoint {}",
-                endpoint.path
-            )));
-        }
-    }
-    Ok(())
-}
-inventory::submit! { Consumer::new::<PublicEndpoint>(PUBLIC_ENDPOINTS, "base/module_registry", validate_public_endpoints) }
 fn validate_moved(entries: &[Entry]) -> Result<()> {
     let mut paths = BTreeSet::new();
     for entry in entries {

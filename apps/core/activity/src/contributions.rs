@@ -3,8 +3,8 @@ use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribu
 use bilibi_database::Error;
 use bilibi_grid::{Field, FieldType, GridContribution, Source, TableDecl};
 use bilibi_module_registry::contributions::{
-    Access, CompanyScope, CredentialPath, Embed, EmbedContext, Method, PageWrites, Pending,
-    PublicEndpoint, Route, CREDENTIAL_PATHS, EMBEDS, PAGE_WRITES, PUBLIC_ENDPOINTS, ROUTES,
+    Access, CompanyScope, CredentialPath, Embed, EmbedContext, Method, PageWrites, Pending, Route,
+    CREDENTIAL_PATHS, EMBEDS, PAGE_WRITES, ROUTES,
 };
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_records::{Holder, RecordKind, RecordOwner};
@@ -169,13 +169,15 @@ inventory::submit! { Contribution::new(ROUTES, "core/activity.detail", provenanc
 }) }
 
 // The calendar feed: a read-only iCalendar link a person's calendar app
-// subscribes to. The key in the path is the only credential, so Web redacts it
-// from logs and rate-limits each sender; the owner proves the person and
-// their rights on every read (`feed.rs`).
+// subscribes to, on the public site. The key in the path is the only
+// credential, so the host redacts it from logs and budgets each sender; the
+// owner proves the person and their rights on every read (`feed.rs`).
+// Calendar services fetch every subscriber's feed from a few addresses, so
+// the budget is sized for them.
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/activity.feed", provenance!(), &CredentialPath { path: crate::FEED_PATH }) }
-inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "core/activity.feed", provenance!(), &PublicEndpoint {
+inventory::submit! { Contribution::new(bilibi_public::PUBLIC_LINKS, "core/activity.feed", provenance!(), &bilibi_public::PublicLink {
     method: Method::Get, path: crate::FEED_PATH, service: crate::FEED_SERVICE, operation: "feed",
-    post_sender_budget: None,
+    budget: bilibi_public::SenderBudget { per_minute: 600, per_hour: 10_000 },
 }) }
 // The person's own page for it, among their settings.
 inventory::submit! { Contribution::new(ROUTES, "core/activity.feed_settings", provenance!(), &Route {

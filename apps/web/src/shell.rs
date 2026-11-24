@@ -490,7 +490,7 @@ async fn permits(app: &App, scope: &Scope, access: Access) -> Result<bool> {
     let client = app.db.get().await?;
     let client = &**client;
     let result = match access.base() {
-        Access::Public { .. } | Access::SignedIn | Access::StepUp { .. } => Ok(()),
+        Access::SignedIn | Access::StepUp { .. } => Ok(()),
         Access::Capability(key) => authz::authorize_key(client, scope, key).await,
         Access::Operator => tenancy::prove_operator(client, scope).await.map(|_| ()),
         Access::AnyOf(keys) => authz::authorize_any(client, scope, keys).await,
