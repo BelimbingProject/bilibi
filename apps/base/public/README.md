@@ -18,7 +18,7 @@
 | Owner types | `PageService` (`bilibi_ui::page::PageService<PublicScope, Error>`), `LinkService`, `Link`, `LinkRequest`, `Reply`, `Target`, `Cache`, `PIXEL`; `ActionService`, `Action`, `ActionRequest`, `Acted`, `Ticket`, `Receipt`, `Tally` |
 | Budgets | `SenderBudget { per_minute, per_hour }`, required on every page and link; `Counter` holds one budget's counters |
 | Settings | Installation-wide: `public.lookups_per_minute` (default 120) and `public.lookups_per_hour` (default 2,000), the lookup budget; `public.sender_per_minute` (default 1,200) and `public.sender_per_hour` (default 20,000), the listener budget |
-| Tables | `public_sites` (one per tenant: address, title, logo, on or off, its ticket key), `public_site_hostnames` (unique across the installation, one primary per site), `public_receipts` (one per used ticket, kept 7 days), `public_abuse_counts` (per action, subject and hour) |
+| Tables | `public_sites` (one per tenant: address, title, logo, on or off, its ticket key), `public_site_hostnames` (unique across the installation, one primary per site), `public_receipts` (one per used ticket, kept 7 days), `public_abuse_counts` (per action, subject and hour, kept 30 days) |
 
 ## Sites and hostnames
 
@@ -88,7 +88,7 @@ inventory::submit! { Contribution::new(PUBLIC_ACTIONS, "cx/forms.submit", proven
 - **The owner** gets the operation, the site's `PublicScope`, the subject the ticket named, the path parameters and each posted name's first value (at most 100 names; `public[...]` removed). It writes as its own system principal in `scope.tenant()` and answers `Acted::Accepted` or `Acted::Refused(words)`: words about what was typed (at most 500 characters), never about the tenant's records. An `Invalid`, `NotFound`, `Forbidden` or `Refused` error settles the receipt as refused with no words; any other error is a server fault.
 - **The answer** is always a 303 to the request's own path with `?receipt=<token>`. The page reads `Public::receipt(scope, action_id, token)` for a day: `Accepted` (also while pending, and for spam) or `Refused(words)`. Another tenant's or an older receipt reads `None`.
 - **Receipts** keep the ticket's and the receipt's SHA-256 digests, the outcome and the refusal's words, never a typed value; later actions remove those older than 7 days, 100 at a time. Receipts and counts are audited as `system · public-site`.
-- **Abuse counts** (trap, too fast, busy, expired) are kept per tenant, action, subject and hour. Each server writes a subject's counts at most once a minute, so a flood writes little; the owner's staff page reads them with `Public::tally`.
+- **Abuse counts** (trap, too fast, busy, expired) are kept per tenant, action, subject and hour. Each server writes a subject's counts at most once a minute, so a flood writes little; later writes remove hours older than 30 days, 100 at a time. The owner's staff page reads them with `Public::tally`.
 - **Each site signs with its own key**, so a ticket from one tenant's page is an expired ticket on another tenant's hostname.
 
 ## Budgets

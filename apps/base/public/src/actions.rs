@@ -37,6 +37,8 @@ pub const TICKET_SECONDS: i64 = 24 * 3600;
 const RECEIPT_HOURS: i32 = 24;
 /// Receipts are kept this long, then removed by later actions in batches.
 const KEEP_DAYS: i32 = 7;
+/// Abuse counts are kept this long, then removed by later writes in batches.
+const COUNT_DAYS: i32 = 30;
 const PRUNE_BATCH: i64 = 100;
 /// The longest subject a page may name.
 pub const SUBJECT_MAX: usize = 100;
@@ -344,6 +346,12 @@ impl Public {
                 sql.execute(
                     "INSERT INTO public_abuse_counts(tenant_id,action,subject,hour,trap,too_fast,busy,expired) VALUES($1,$2,$3,to_timestamp($4::float8*3600),$5,$6,$7,$8) ON CONFLICT (tenant_id,action,subject,hour) DO UPDATE SET trap=public_abuse_counts.trap+excluded.trap,too_fast=public_abuse_counts.too_fast+excluded.too_fast,busy=public_abuse_counts.busy+excluded.busy,expired=public_abuse_counts.expired+excluded.expired",
                     &[&tenant, &action, &subject, &(hour as f64), &tally.trap, &tally.too_fast, &tally.busy, &tally.expired],
+                )
+                .await?;
+                // Old hours go, a batch at a time.
+                sql.execute(
+                    "DELETE FROM public_abuse_counts WHERE (tenant_id,action,subject,hour) IN (SELECT tenant_id,action,subject,hour FROM public_abuse_counts WHERE tenant_id=$1 AND hour<now()-make_interval(days => $2) LIMIT $3)",
+                    &[&tenant, &COUNT_DAYS, &PRUNE_BATCH],
                 )
                 .await?;
                 let change = Change {

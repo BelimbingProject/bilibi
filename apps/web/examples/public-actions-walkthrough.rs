@@ -405,6 +405,14 @@ async fn main() -> Result<std::process::ExitCode> {
     // The tenant's places: 2 an hour, both taken (the accepted and the
     // refused submission). A server writes a subject's abuse counts at most
     // once a minute: the busy request a minute on writes them all.
+    // An hour of counts over 30 days old, which that write removes.
+    db.get()
+        .await?
+        .execute(
+            "INSERT INTO public_abuse_counts(tenant_id,action,subject,hour,trap) VALUES(1,$1,'contact:1',date_trunc('hour',now()-interval '31 days'),5)",
+            &[&ACTION],
+        )
+        .await?;
     let ticket = ticket_of(&page().await?.body)?;
     tokio::time::sleep(Duration::from_secs(61)).await;
     let calls = CALLS.load(Ordering::SeqCst);
@@ -440,6 +448,17 @@ async fn main() -> Result<std::process::ExitCode> {
     check(
         "the abuse counts were written: a trap, a too-fast and a busy request",
         tally.trap == 1 && tally.too_fast == 1 && tally.busy == 1,
+    )?;
+    let old: i64 = client
+        .query_one(
+            "SELECT count(*) FROM public_abuse_counts WHERE tenant_id=1 AND hour<now()-interval '30 days'",
+            &[],
+        )
+        .await?
+        .get(0);
+    check(
+        "an hour of counts over 30 days old was removed by the next write",
+        old == 0,
     )?;
     let receipts: i64 = client
         .query_one(
