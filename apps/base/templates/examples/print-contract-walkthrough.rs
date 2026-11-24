@@ -83,7 +83,10 @@ static CONTRACT: PrintContract = PrintContract {
             kind: PrintKind::Address,
             optional: true,
             required_output: false,
-            sample: PrintValue::Address(&["Sample building", "Sample city"]),
+            sample: PrintValue::Address(&[
+                "Sample <building>\rFloor 2\r\nEast wing\nReception",
+                "Sample city",
+            ]),
         },
         PrintField {
             id: "lines",
@@ -167,18 +170,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let layout = contract.compile(EN)?;
     let preview = layout.preview()?;
-    assert!(preview.contains("Sample building<br>Sample city"));
+    assert!(preview
+        .contains("Sample &lt;building&gt;<br>Floor 2<br>East wing<br>Reception<br>Sample city"));
     assert!(preview.contains("<td>Sample &lt;material&gt;<br>Handle &amp; store</td>"));
     let rows = vec![SAMPLE_ROW; 230];
     let values = [
-        ("reference", PrintValue::Text("<script>\nWS-2")),
+        ("reference", PrintValue::Text("<script>\rWS-2")),
         ("lines", PrintValue::Rows(&rows)),
     ];
     let document = layout.render("issued", &values)?;
     assert_eq!(document.matches("<tr>").count(), rows.len() + 1);
     assert!(document.contains("<dd>&lt;script&gt;<br>WS-2</dd>"));
     assert!(!document.contains("<script>"));
-    assert!(!document.contains("Sample building"));
+    assert!(!document.contains("Sample &lt;building&gt;"));
     let oversized = vec![SAMPLE_ROW; 2_001];
     assert!(layout
         .render(

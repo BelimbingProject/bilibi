@@ -52,17 +52,20 @@ impl Html {
         write!(self, "</{tag}>")
     }
 
+    fn multiline(&mut self, text: &str) -> fmt::Result {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        for (index, line) in text.split('\n').enumerate() {
+            if index != 0 {
+                self.write_str("<br>")?;
+            }
+            self.escaped(line)?;
+        }
+        Ok(())
+    }
+
     fn value(&mut self, value: PrintValue<'_>) -> fmt::Result {
         match value {
-            PrintValue::Text(text) => {
-                for (index, line) in text.split('\n').enumerate() {
-                    if index != 0 {
-                        self.write_str("<br>")?;
-                    }
-                    self.escaped(line.strip_suffix('\r').unwrap_or(line))?;
-                }
-                Ok(())
-            }
+            PrintValue::Text(text) => self.multiline(text),
             PrintValue::Integer(number) => write!(self, "{number}"),
             PrintValue::Decimal(number) => write!(self, "{number}"),
             PrintValue::Money { amount, currency } => write!(self, "{currency} {amount}"),
@@ -73,7 +76,7 @@ impl Html {
                     if index != 0 {
                         self.write_str("<br>")?;
                     }
-                    self.escaped(line)?;
+                    self.multiline(line)?;
                 }
                 Ok(())
             }
