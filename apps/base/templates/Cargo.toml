@@ -13,6 +13,7 @@ bilibi-datetime.workspace = true
 bilibi-labels.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-party-ids.workspace = true
+bilibi-settings.workspace = true
 bilibi-tenancy.workspace = true
 icu_locale.workspace = true
 inventory.workspace = true

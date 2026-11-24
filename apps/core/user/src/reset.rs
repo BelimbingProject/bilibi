@@ -204,10 +204,18 @@ impl ResetMail {
     /// withdraws the token it carried (audited as
     /// `user.reset_withdrawn`), which releases the throttle so the person
     /// can ask again.
-    fn deliver(&self, tenant: i64, user: i64, message: Message, token: Option<&str>) {
-        let (mail, hash) = (self.clone(), token.map(digest));
+    fn deliver(&self, tenant: i64, user: i64, message: Message, reset: Option<(&str, String)>) {
+        let mail = self.clone();
+        let (hash, action) = match reset {
+            Some((token, link)) => (Some(digest(token)), Some(link)),
+            None => (None, None),
+        };
         tokio::spawn(async move {
-            let Err(error) = mail.mailer.deliver_for(tenant, &message).await else {
+            let Err(error) = mail
+                .mailer
+                .deliver_linked_for(tenant, &message, action.as_deref())
+                .await
+            else {
                 return;
             };
             eprintln!("mail: reset link for user {user} was not delivered: {error}");
@@ -280,12 +288,11 @@ impl ResetMail {
             &[("duration", Fact::Text(&duration))],
         )?;
         let token = self.issue_token(tenant, user, &address, false).await?;
-        let link = match &token {
-            Some(token) => format!(
-                "{}\n\n{}\n",
-                wording["reset_with_link"],
-                reset_link(&self.origin, &address, token)
-            ),
+        let reset = token
+            .as_deref()
+            .map(|token| (token, reset_link(&self.origin, &address, token)));
+        let link = match &reset {
+            Some((_, url)) => format!("{}\n\n{url}\n", wording["reset_with_link"]),
             None => format!("{}\n", wording["reset_without_link"]),
         };
         let message = Message::text(
@@ -293,7 +300,7 @@ impl ResetMail {
             wording["subject"].clone(),
             format!("{}\n\n{link}", wording["intro"]),
         );
-        self.deliver(tenant, user, message, token.as_deref());
+        self.deliver(tenant, user, message, reset);
         Ok(())
     }
 
@@ -320,11 +327,11 @@ impl ResetMail {
         drop(client);
         let (name, address): (String, String) = (row.get(0), row.get(1));
         let token = self.issue_token(tenant, user, &address, verified).await?;
-        let link = match &token {
-            Some(token) => format!(
-                "Reset your password with this link:\n\n{}\n",
-                reset_link(&self.origin, &address, token)
-            ),
+        let reset = token
+            .as_deref()
+            .map(|token| (token, reset_link(&self.origin, &address, token)));
+        let link = match &reset {
+            Some((_, url)) => format!("Reset your password with this link:\n\n{url}\n"),
             None => {
                 "Reset your password with \"Forgot your password?\" on the sign-in page.\n".into()
             }
@@ -334,7 +341,7 @@ impl ResetMail {
             subject,
             format!("{text}\n\n{link}"),
         );
-        self.deliver(tenant, user, message, token.as_deref());
+        self.deliver(tenant, user, message, reset);
         Ok(())
     }
 
@@ -354,18 +361,22 @@ impl ResetMail {
             return Ok(ClaimMail::RecentlySent);
         };
         let origin = &self.origin;
+        let link = reset_link(origin, address, &token);
         let message = Message::text(
             Address::new(Some(name), address).map_err(|_| Error::Invalid)?,
             "Claim your Bilibi server",
             format!(
                 "You are the owner of the Bilibi server at {origin}.\n\n\
-                 1. Choose your password with this link:\n\n{}\n\n\
+                 1. Choose your password with this link:\n\n{link}\n\n\
                  2. Sign in, then set up two-factor authentication with your phone:\n\n{origin}/settings/two-factor?method=core.user.authenticator\n\n\
                  The server is yours once both are done. The link works once. If you did not expect this email, ignore it: nobody can sign in as you without it.\n",
-                reset_link(origin, address, &token)
             ),
         );
-        match self.mailer.deliver_for(tenant, &message).await {
+        match self
+            .mailer
+            .deliver_linked_for(tenant, &message, Some(&link))
+            .await
+        {
             Ok(_) => Ok(ClaimMail::Sent),
             Err(error) => {
                 self.withdraw(tenant, user, digest(&token)).await?;
@@ -605,7 +616,7 @@ impl UserService {
             wording["subject"].clone(),
             crate::wording::around_link(&wording, &link),
         );
-        mail.deliver(tenant, user, message, Some(&token));
+        mail.deliver(tenant, user, message, Some((&token, link)));
         finish_reset_request().await
     }
 

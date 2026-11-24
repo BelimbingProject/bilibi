@@ -705,6 +705,7 @@ dependencies = [
  "bilibi-authz",
  "bilibi-database",
  "bilibi-labels",
+ "bilibi-mail",
  "bilibi-media",
  "bilibi-module-registry",
  "bilibi-settings",
@@ -713,6 +714,7 @@ dependencies = [
  "bilibi-ui",
  "inventory",
  "serde_json",
+ "tokio",
  "tokio-postgres",
 ]
 
@@ -1286,11 +1288,13 @@ name = "bilibi-mail"
 version = "0.2.1"
 dependencies = [
  "ammonia",
+ "askama",
  "bilibi-base",
  "bilibi-core",
  "bilibi-database",
  "bilibi-module-registry",
  "bilibi-settings",
+ "bilibi-ui",
  "bilibi-walkthrough-fixture",
  "bilibi-web",
  "data-encoding",
@@ -1302,6 +1306,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "url",
  "uuid",
 ]
 
@@ -2045,6 +2050,7 @@ dependencies = [
  "bilibi-labels",
  "bilibi-module-registry",
  "bilibi-party-ids",
+ "bilibi-settings",
  "bilibi-tenancy",
  "icu_locale",
  "inventory",

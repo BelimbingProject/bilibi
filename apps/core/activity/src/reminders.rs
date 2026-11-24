@@ -375,15 +375,21 @@ impl Sweep {
             );
             return;
         };
+        let link = format!("{}/activities/{}", self.origin, reminder.id);
         let message = bilibi_mail::Message::text(
             address,
             wording["subject"].clone(),
             format!(
-                "{}\n{}\n\n{}\n{}/activities/{}\n",
-                wording["intro"], wording[timing], wording["link_label"], self.origin, reminder.id
+                "{}\n{}\n\n{}\n{link}\n",
+                wording["intro"], wording[timing], wording["link_label"]
             ),
         );
-        if self.mailer.deliver_for(tenant, &message).await.is_err() {
+        if self
+            .mailer
+            .deliver_linked_for(tenant, &message, Some(&link))
+            .await
+            .is_err()
+        {
             eprintln!(
                 "error: activity reminder {} could not be emailed",
                 reminder.id

@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+askama.workspace = true
+url.workspace = true
+bilibi-ui.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-database.workspace = true
 bilibi-settings.workspace = true

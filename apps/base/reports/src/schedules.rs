@@ -1007,15 +1007,11 @@ impl Reports {
         let Some(wording) = wording else {
             return JobOutcome::Retry("mail_not_written");
         };
+        let link = format!("{}{}", self.origin, exports::path(export));
         let message = bilibi_mail::Message::text(
             address,
             wording["subject"].clone(),
-            format!(
-                "{}\n{}{}\n",
-                wording["intro"],
-                self.origin,
-                exports::path(export)
-            ),
+            format!("{}\n{link}\n", wording["intro"]),
         );
         match self.mail_attempt(execution, scope, delivery, true).await {
             Ok(true) => {}
@@ -1024,7 +1020,7 @@ impl Reports {
         }
         if self
             .mailer
-            .deliver_for(scope.tenant(), &message)
+            .deliver_linked_for(scope.tenant(), &message, Some(&link))
             .await
             .is_err()
         {

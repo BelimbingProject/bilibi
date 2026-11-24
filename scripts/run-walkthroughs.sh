@@ -102,6 +102,7 @@ WALKTHROUGHS=(
   'base|language-detection|apps/base/language_detection|language-detection-walkthrough|none|BILIBI_DISPOSABLE_LANGUAGE_WALKTHROUGH=yes|@model'
   'base|mail-inbound|apps/base/mail|inbound-walkthrough|none||@/parsed'
   'base|mail|apps/base/mail|mail-walkthrough|none||@/wire.eml'
+  'base|templated-wording|apps/web|wording-walkthrough|migrate|BILIBI_WORDING_DEMO=disposable BILIBI_WORDING_PREVIEW=@/preview BILIBI_MAIL_DIR=@/mailbox -MAIL_HOST|-'
   'base|mail-unset-relay|apps/base/mail|unset-relay-walkthrough|migrate|BILIBI_DISPOSABLE_MAIL_DEMO=yes|-'
   'base|media|apps/base/media|media-walkthrough|migrate|BILIBI_DISPOSABLE_MEDIA_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'base|media-attachments|apps/base/media|attachments-walkthrough|migrate|BILIBI_DISPOSABLE_MEDIA_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'

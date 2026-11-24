@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <title>{{ subject }}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    @media (prefers-color-scheme: dark) {
+      .canvas { background: #181715 !important; }
+      .paper { background: #24221f !important; color: #f5f2ed !important; }
+      .footer { border-color: #514d46 !important; color: #c1bbb1 !important; }
+      .link { color: #a9d4ff !important; }
+    }
+  </style>
+</head>
+<body class="canvas" style="margin:0;background:#f5f3ef;padding:24px 12px;font:16px/1.55 Arial,sans-serif">
+  <table role="presentation" class="paper" width="100%" cellspacing="0" cellpadding="0" style="width:100%;max-width:600px;margin:0 auto;background:#fff;color:#26231f;border-top:4px solid {{ accent }};border-radius:8px">
+    <tr><td style="padding:24px 24px 16px;font-size:18px;font-weight:bold">
+      {% if let Some(id) = logo_id %}<img src="cid:{{ id }}" alt="" width="40" style="height:auto;max-height:40px;object-fit:contain;vertical-align:middle;margin-right:10px">{% endif %}
+      {{ name }}
+    </td></tr>
+    <tr><td style="padding:0 24px 24px;overflow-wrap:anywhere;word-break:break-word">
+      {%- for line in body.lines() -%}
+        {%- if self.is_action(line) -%}<a class="link" href="{{ line }}" style="color:#174878">{{ line }}</a>
+        {%- else -%}{{ line }}{%- endif -%}
+        {%- if !loop.last -%}<br>{%- endif -%}
+      {%- endfor -%}
+    </td></tr>
+    <tr><td class="footer" style="padding:12px 24px;border-top:1px solid #e2ddd4;color:#645e54;font-size:13px">Powered by Bilibi</td></tr>
+  </table>
+</body>
+</html>

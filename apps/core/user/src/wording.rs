@@ -29,7 +29,7 @@ impl UserService {
         tenant_name: &str,
         days: Option<i32>,
         token: &str,
-    ) -> Result<Message, Error> {
+    ) -> Result<(Message, String), Error> {
         let closing = if days.is_some() {
             "closing"
         } else {
@@ -41,14 +41,13 @@ impl UserService {
             values.push(("days", Value::Text(days)));
         }
         let wording = self.templates.platform_wording(INVITATION, &values)?;
-        Ok(Message::text(
+        let link = format!("{}/accept/{token}", self.origin);
+        let message = Message::text(
             Address::new(Some(name), email).map_err(|_| Error::Invalid)?,
             wording["subject"].clone(),
-            format!(
-                "{}\n\n{}/accept/{token}\n\n{}\n",
-                wording["intro"], self.origin, wording[closing]
-            ),
-        ))
+            format!("{}\n\n{link}\n\n{}\n", wording["intro"], wording[closing]),
+        );
+        Ok((message, link))
     }
 }
 

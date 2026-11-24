@@ -6,7 +6,7 @@
 //! else.
 use bilibi_agent_api::plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans};
 use bilibi_database::{pool, Error};
-use bilibi_mail::{Mailbox, Mailer};
+use bilibi_mail::{parse, Mailbox, Mailer, ParseLimits, Parsed};
 use bilibi_module_registry::Services;
 use bilibi_session::Sessions;
 use bilibi_tenancy::ProofFuture;
@@ -29,36 +29,31 @@ fn count(mailbox: &Mailbox) -> usize {
 }
 /// The newest message after `before` arrived, giving the sender a moment: reset
 /// mail is delivered after the request returns.
-async fn arrival(mailbox: &Mailbox, before: usize) -> Option<String> {
+async fn arrival(mailbox: &Mailbox, before: usize) -> Option<Parsed> {
     for _ in 0..50 {
         if count(mailbox) > before {
             let newest = mailbox.entries().ok()?.into_iter().next()?;
-            return mailbox.read(&newest.id).ok();
+            let wire = mailbox.read(&newest.id).ok()?;
+            return parse(wire.as_bytes(), &ParseLimits::default()).ok();
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     None
 }
 /// The first http link in a message body.
-fn link(message: &str) -> Option<String> {
+fn link(message: &Parsed) -> Option<String> {
     message
+        .text
+        .as_deref()?
         .lines()
         .find(|line| line.starts_with("http"))
         .map(str::to_owned)
 }
-fn show_mail(label: &str, message: &str) {
-    let header = |name: &str| {
-        message
-            .lines()
-            .find_map(|line| line.strip_prefix(name))
-            .unwrap_or("?")
-            .trim()
-            .to_owned()
-    };
+fn show_mail(label: &str, message: &Parsed) {
     println!(
         "{label}: To={} Subject={} Link received={}",
-        header("To:"),
-        header("Subject:"),
+        message.to.first().map_or("?", |to| to.email.as_str()),
+        message.subject.as_deref().unwrap_or("?"),
         link(message).is_some()
     );
 }
@@ -464,23 +459,31 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         "reset requested: {}",
         outcome(&users.request_password_reset(email).await)
     );
-    let message = arrival(&mailbox, before).await.unwrap_or_default();
+    let message = arrival(&mailbox, before).await.ok_or(Error::Internal)?;
     show_mail("received", &message);
-    let from = message
-        .lines()
-        .find(|line| line.starts_with("From:"))
-        .unwrap_or_default();
+    let text = message.text.as_deref().unwrap_or_default();
+    let html = message.html.as_deref().unwrap_or_default();
     let checks = [
-        ("sender name", from.contains("Example Trading")),
-        ("subject", message.contains("Subject: Reset your password")),
         (
-            "platform wording",
-            message.contains("Reset your password by opening this link:")
-                && message.contains("If you did not request this, you can ignore this email."),
+            "sender name",
+            message.from.first().and_then(|from| from.name.as_deref()) == Some("Example Trading"),
         ),
         (
-            "the module's own link",
-            link(&message).is_some_and(|url| url.contains("/reset-password/")),
+            "subject",
+            message.subject.as_deref() == Some("Reset your password"),
+        ),
+        (
+            "platform wording in the plain-text alternative",
+            text.contains("Reset your password by opening this link:")
+                && text.contains("If you did not request this, you can ignore this email."),
+        ),
+        (
+            "the same owner-built link is the only HTML action",
+            link(&message).is_some_and(|url| {
+                url.contains("/reset-password/")
+                    && html.matches("href=").count() == 1
+                    && html.contains(&format!("href=\"{url}\""))
+            }),
         ),
     ];
     for (name, passed) in checks {

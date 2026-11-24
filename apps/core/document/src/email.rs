@@ -337,15 +337,19 @@ impl EmailJob {
                 let ends = ends
                     .map(|_| format!("\n{}", wording["access_ends_line"]))
                     .unwrap_or_default();
+                let link = format!("{}/documents/{document}", self.origin);
                 let message = bilibi_mail::Message::text(
                     address,
                     wording["subject"].clone(),
                     format!(
-                        "{}{ends}\n\n{}\n{}/documents/{document}\n\n{}\n",
-                        wording["intro"], wording["link_label"], self.origin, wording["closing"]
+                        "{}{ends}\n\n{}\n{link}\n\n{}\n",
+                        wording["intro"], wording["link_label"], wording["closing"]
                     ),
                 );
-                self.mailer.deliver_for(tenant, &message).await.is_ok()
+                self.mailer
+                    .deliver_linked_for(tenant, &message, Some(&link))
+                    .await
+                    .is_ok()
             }
             _ => false,
         };
