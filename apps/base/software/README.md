@@ -143,6 +143,21 @@ Release trust is one closed policy, never a fallback list:
 
 The initial `scripts/install-server.sh trust` writes the first `/opt/bilibi/<instance>/trust/release.json` and records the terminal operator’s UID with the UTC time. Existing instances can enroll using a minimum tag newer than their installed releases. Root owns both the policy and replay files. The instance’s application and installer can read them. Only the instance’s privileged installer helper may write them after enrollment. A later `base.software.trust` safe write requires the installation owner's fresh 2FA and queues a one-step installer job; the reviewed step-up target includes the complete new facts and derived key fingerprint. The installer’s privileged helper records the requesting account, validates the key again and atomically replaces the record. A queued trust job can be cancelled until the installer claims it. Software shows that actor and time plus the instance's highest admitted tag. Operator verification uses no transparency log, so private repository and asset names are not published to Rekor.
 
+### Update notices
+
+The installation schedule **Check for software updates** sends the active installation owner one bell notice per newly discovered stable setup tag in the accepted repository. The notice opens Software › Releases. Publisher-written change notes appear as plain text. When the release body contains only App Maker’s standard packaging instructions, the notice reads “No change notes were supplied.”
+
+Enable the reviewed installation schedule during setup. Schedule checks every 15 minutes and respects the listing cache and GitHub rate limits. The notice receipt and the bell notification commit together, so retries cannot announce the same release twice.
+
+The `update` field of `base.software.releases` reports the running setup version and one of the following states.
+
+| State | Meaning |
+| --- | --- |
+| `ready` | A complete, fresh listing has a newer stable setup with one matching file. The result includes the publisher’s notes and the exact asset for review. Admission and proof verification occur during installation. |
+| `current` | The running setup version is at least as new as the newest stable setup found. |
+| `unavailable` | Source acceptance, the running setup, the listing or a unique compatible file could not be established. The reason identifies the missing check. |
+| `source_checkout` | This program has no installed release folder. |
+
 ### Install from GitHub
 
 The repository shown on **Software › Releases** comes from Release trust; changing GitHub settings cannot redirect installation to another repository.
