@@ -189,6 +189,8 @@ fn sample(value: PrintValue<'_>) -> Value {
         PrintValue::Date(value) => json!(value.to_string()),
         PrintValue::Boolean(value) => json!(value),
         PrintValue::Address(value) => json!(value),
+        PrintValue::Raster { mime, bytes } => json!({"mime":mime,"bytes":bytes.len()}),
+        PrintValue::QrCode(url) => json!(url),
         PrintValue::Rows(rows) => json!(rows
             .iter()
             .map(|row| {
@@ -210,6 +212,8 @@ fn fields(items: &[PrintField]) -> Vec<Value> {
             PrintKind::Date => ("date", Vec::new()),
             PrintKind::Boolean => ("boolean", Vec::new()),
             PrintKind::Address => ("address", Vec::new()),
+            PrintKind::Raster => ("raster", Vec::new()),
+            PrintKind::QrCode => ("qr_code", Vec::new()),
             PrintKind::Rows(columns) => ("rows", fields(columns)),
         };
         json!({
