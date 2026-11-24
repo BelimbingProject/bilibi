@@ -140,14 +140,27 @@ pub fn hostname_shaped(hostname: &str) -> bool {
             .is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()))
 }
 /// The hostname of a `Host` header, lowercased, when its port is `port`
-/// (or absent where `port` is `None`).
+/// (or absent where `port` is `None`). A port that is not a number is no
+/// port at all: the header names nothing.
 pub fn host_name(host: &str, port: Option<u16>) -> Option<String> {
     let host = host.trim().to_ascii_lowercase();
     let (name, given) = match host.rsplit_once(':') {
-        Some((name, given)) if !name.contains(']') => (name.to_owned(), given.parse().ok()),
+        Some((name, given)) if !name.contains(']') => {
+            (name.to_owned(), Some(given.parse::<u16>().ok()?))
+        }
         _ => (host.clone(), None),
     };
     (given == port && hostname_shaped(&name)).then_some(name)
+}
+
+/// What a request's `Host` reached ([`Public::resolve_from`]).
+#[derive(Clone, Debug)]
+pub enum Reached {
+    Site(PublicScope),
+    /// No live site has this hostname.
+    Nothing,
+    /// Its sender spent the lookup budget, and the answer was not at hand.
+    Busy,
 }
 
 async fn site_row(client: &(impl GenericClient + Sync), tenant: i64) -> Result<Option<Site>> {
@@ -596,16 +609,53 @@ impl Public {
         let Some(name) = host_name(host, port) else {
             return Ok(None);
         };
-        if let Some((read, tenant)) = self
-            .resolved
+        if let Some(tenant) = self.cached(&name) {
+            return Ok(tenant.map(|tenant| PublicScope { tenant }));
+        }
+        self.look_up(name).await
+    }
+    /// The public listener's lookup of a request's `Host` from `sender`:
+    /// an answer read in the last few seconds is free; a database lookup
+    /// first spends one of the sender's lookups
+    /// (`public.lookups_per_minute`, `public.lookups_per_hour`), so a
+    /// flood of made-up hostnames from one sender reaches the database a
+    /// bounded number of times, whatever its path.
+    pub async fn resolve_from(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        sender: &str,
+    ) -> Result<Reached> {
+        let Some(name) = host_name(host, port) else {
+            return Ok(Reached::Nothing);
+        };
+        let tenant = match self.cached(&name) {
+            Some(tenant) => tenant,
+            None => {
+                if !self.charge_lookup(sender, self.lookup_policy().await?) {
+                    return Ok(Reached::Busy);
+                }
+                return Ok(match self.look_up(name).await? {
+                    Some(site) => Reached::Site(site),
+                    None => Reached::Nothing,
+                });
+            }
+        };
+        Ok(match tenant {
+            Some(tenant) => Reached::Site(PublicScope { tenant }),
+            None => Reached::Nothing,
+        })
+    }
+    /// A hostname's answer read in the last few seconds.
+    fn cached(&self, name: &str) -> Option<Option<i64>> {
+        self.resolved
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .get(&name)
-        {
-            if read.elapsed() < crate::POLICY_FRESH {
-                return Ok(tenant.map(|tenant| PublicScope { tenant }));
-            }
-        }
+            .get(name)
+            .filter(|(read, _)| read.elapsed() < crate::POLICY_FRESH)
+            .map(|(_, tenant)| *tenant)
+    }
+    async fn look_up(&self, name: String) -> Result<Option<PublicScope>> {
         let client = self.db.get().await?;
         let tenant: Option<i64> = client
             .query_opt(

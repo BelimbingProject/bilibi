@@ -33,7 +33,7 @@
 //! shape to the real catalog and prints its refusal; it needs no database.
 use bilibi_base::public::{
     Link, LinkFuture, LinkRequest, LinkService, Local, Public, PublicLink, PublicPage, PublicScope,
-    Reply, SenderBudget, Target, PUBLIC_LINKS, PUBLIC_PAGES, SENDER_PER_MINUTE,
+    Reply, SenderBudget, Target, LOOKUPS_PER_MINUTE, PUBLIC_LINKS, PUBLIC_PAGES, SENDER_PER_MINUTE,
 };
 use bilibi_database::{Error, Result};
 use bilibi_module_registry::{
@@ -636,12 +636,17 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
     // site, assets included, before any route's own budget.
     {
         let client = db.get().await?;
-        client
-            .execute(
-                "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES($1,0,'global',0,'3'::jsonb,false) ON CONFLICT(key,tenant_id,scope_type,scope_id) DO UPDATE SET value=excluded.value",
-                &[&SENDER_PER_MINUTE],
-            )
-            .await?;
+        for (key, value) in [
+            (SENDER_PER_MINUTE, "3"),
+            ("webhooks.sender_rate_limit", "1"),
+        ] {
+            client
+                .execute(
+                    "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES($1,0,'global',0,$2::text::jsonb,false) ON CONFLICT(key,tenant_id,scope_type,scope_id) DO UPDATE SET value=excluded.value",
+                    &[&key, &value],
+                )
+                .await?;
+        }
     }
     // A reading of the setting is reused for a few seconds.
     tokio::time::sleep(Duration::from_secs(6)).await;
@@ -669,6 +674,109 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
         "listener budget of 3: another sender admitted",
         request(&address, "GET", "/reference/mail/o/open-1", "203.0.113.8").await?,
         200,
+    )?;
+
+    // A registered signed webhook is a machine with its own limits
+    // (`base/integration`): past the visitor's listener budget every delivery
+    // still reaches the webhook boundary, which answers each refusal (no
+    // secret here, or its own rate limit) with one 403, never the listener's
+    // 429; any other path under /webhooks/ is counted like a visitor's.
+    expect(
+        "listener budget spent: a path under /webhooks/ that is no webhook is refused",
+        request(&address, "POST", "/webhooks/no-such-hook", flood).await?,
+        429,
+    )?;
+    for n in 1..=5 {
+        expect(
+            &format!("listener budget spent: delivery {n} to the registered webhook reaches its boundary"),
+            request(&address, "POST", "/webhooks/integration-reference", flood).await?,
+            403,
+        )?;
+    }
+
+    // Made-up hostnames: each one the server has not read in the last few
+    // seconds costs its sender one database lookup, on any path, before any
+    // other count; past the lookup budget the answer is 429 without a
+    // lookup. With a lookup budget of 5 a minute, a sender rotating fake
+    // hostnames on /webhooks/x gets five 404s (five lookups), then 429 for
+    // every new name, while another sender's lookup still answers.
+    {
+        let client = db.get().await?;
+        client
+            .execute(
+                "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES($1,0,'global',0,'5'::jsonb,false) ON CONFLICT(key,tenant_id,scope_type,scope_id) DO UPDATE SET value=excluded.value",
+                &[&LOOKUPS_PER_MINUTE],
+            )
+            .await?;
+    }
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    if second_now()? % 60 > 45 {
+        tokio::time::sleep(Duration::from_secs(61 - second_now()? % 60)).await;
+    }
+    let rotating = "203.0.113.60";
+    for n in 0..5 {
+        expect(
+            &format!("lookup budget of 5: made-up hostname {n} on /webhooks/x looked up, 404"),
+            request_to(
+                &address,
+                &format!("fake-{n}.example"),
+                "POST",
+                "/webhooks/x",
+                rotating,
+            )
+            .await?,
+            404,
+        )?;
+    }
+    for n in 5..25 {
+        expect(
+            &format!(
+                "lookup budget of 5: made-up hostname {n} on /webhooks/x refused without a lookup"
+            ),
+            request_to(
+                &address,
+                &format!("fake-{n}.example"),
+                "POST",
+                "/webhooks/x",
+                rotating,
+            )
+            .await?,
+            429,
+        )?;
+    }
+    expect(
+        "lookup budget of 5: another sender's made-up hostname is still looked up",
+        request_to(
+            &address,
+            "fake-99.example",
+            "POST",
+            "/webhooks/x",
+            "203.0.113.61",
+        )
+        .await?,
+        404,
+    )?;
+    expect(
+        "another sender reads tenant 1's hostname",
+        request_to(&address, ONE, "GET", "/favicon.svg", "203.0.113.63").await?,
+        200,
+    )?;
+    expect(
+        "lookup budget spent: a hostname read in the last few seconds still answers without a lookup",
+        request_to(&address, ONE, "GET", "/favicon.svg", rotating).await?,
+        200,
+    )?;
+    expect(
+        "a Host whose port is not a number names nothing",
+        request_to(
+            &address,
+            &format!("{ONE}:garbage"),
+            "GET",
+            "/favicon.svg",
+            "203.0.113.62",
+        )
+        .await?,
+        404,
     )?;
 
     let _ = stop.send(());

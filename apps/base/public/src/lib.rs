@@ -24,9 +24,11 @@ mod web;
 
 pub use budget::{Counter, SenderBudget};
 pub use contributions::{
-    PublicLink, PublicPage, PUBLIC_LINKS, PUBLIC_PAGES, SENDER_PER_HOUR, SENDER_PER_MINUTE,
+    PublicLink, PublicPage, LOOKUPS_PER_HOUR, LOOKUPS_PER_MINUTE, PUBLIC_LINKS, PUBLIC_PAGES,
+    SENDER_PER_HOUR, SENDER_PER_MINUTE,
 };
 pub use link::{Cache, Link, LinkFuture, LinkRequest, LinkService, Local, Reply, Target, PIXEL};
+pub use sites::Reached;
 pub use sites::{
     address_shaped, hostname_shaped, Checked, FieldError, Hostname, LogoChange, Site, SiteInput,
     MANAGE, TITLE_MAX, VIEW,
@@ -82,6 +84,9 @@ pub struct Public {
     media: Arc<bilibi_media::Media>,
     listener: Counter,
     policy: Mutex<Option<(Instant, SenderBudget)>>,
+    /// Database lookups of a hostname per sender, before any other count.
+    lookups: Counter,
+    lookup_policy: Mutex<Option<(Instant, SenderBudget)>>,
     /// Hostname to its live site's tenant (`None`: no site), as last read.
     resolved: Mutex<HashMap<String, (Instant, Option<i64>)>>,
     /// The staff site's hostname, which no public site may take.
@@ -105,6 +110,8 @@ impl Public {
             media,
             listener: Counter::with_capacity(LISTENER_SENDERS),
             policy: Mutex::default(),
+            lookups: Counter::with_capacity(LISTENER_SENDERS),
+            lookup_policy: Mutex::default(),
             resolved: Mutex::default(),
             staff_host: origin("APP_ORIGIN")
                 .and_then(|url| url.host_str().map(str::to_ascii_lowercase)),
@@ -162,7 +169,24 @@ impl Public {
     }
 
     async fn policy(&self) -> Result<SenderBudget> {
-        if let Some((read, budget)) = *self.policy.lock().unwrap_or_else(|p| p.into_inner()) {
+        self.budget(&self.policy, SENDER_PER_MINUTE, SENDER_PER_HOUR)
+            .await
+    }
+    /// The lookup budget ([`Public::resolve_from`]).
+    pub(crate) async fn lookup_policy(&self) -> Result<SenderBudget> {
+        self.budget(&self.lookup_policy, LOOKUPS_PER_MINUTE, LOOKUPS_PER_HOUR)
+            .await
+    }
+    pub(crate) fn charge_lookup(&self, sender: &str, budget: SenderBudget) -> bool {
+        self.lookups.allow(sender, budget)
+    }
+    async fn budget(
+        &self,
+        cache: &Mutex<Option<(Instant, SenderBudget)>>,
+        minute: &str,
+        hour: &str,
+    ) -> Result<SenderBudget> {
+        if let Some((read, budget)) = *cache.lock().unwrap_or_else(|p| p.into_inner()) {
             if read.elapsed() < POLICY_FRESH {
                 return Ok(budget);
             }
@@ -175,14 +199,10 @@ impl Public {
                 .ok_or(Error::Internal)
         };
         let budget = SenderBudget {
-            per_minute: limit(
-                self.settings
-                    .get_global(&**client, SENDER_PER_MINUTE)
-                    .await?,
-            )?,
-            per_hour: limit(self.settings.get_global(&**client, SENDER_PER_HOUR).await?)?,
+            per_minute: limit(self.settings.get_global(&**client, minute).await?)?,
+            per_hour: limit(self.settings.get_global(&**client, hour).await?)?,
         };
-        *self.policy.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), budget));
+        *cache.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), budget));
         Ok(budget)
     }
 }

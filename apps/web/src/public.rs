@@ -19,7 +19,7 @@ use axum::{
     Extension, Router,
 };
 use bilibi_base::public::{
-    Counter, LinkRequest, LinkService, PageService, Public, PublicLink, PublicPage, Reply,
+    Counter, LinkRequest, LinkService, PageService, Public, PublicLink, PublicPage, Reached, Reply,
     PUBLIC_LINKS, PUBLIC_PAGES,
 };
 use bilibi_database::{Error, Result};
@@ -180,8 +180,12 @@ pub(crate) fn site() -> Result<bilibi_base::public::PublicScope> {
         .map_err(|_| Error::NotFound)
 }
 
-/// The public listener's door: the `Host` must name a hostname of a site that
-/// is on, of a live tenant (`Public::resolve`); anything else is a bare 404.
+/// The public listener's door, first for every request on every path: the
+/// `Host` must name a hostname of a site that is on, of a live tenant
+/// (`Public::resolve_from`); anything else is a bare 404. A hostname whose
+/// answer is not at hand costs its sender one of the lookup budget's
+/// lookups, and past that budget the answer is 429 without a lookup, so a
+/// flood of made-up hostnames is bounded before it reaches the database.
 /// The request then runs with that site's scope.
 pub(crate) async fn door(
     State(app): State<App>,
@@ -195,9 +199,18 @@ pub(crate) async fn door(
         .unwrap_or_default()
         .to_owned();
     let port = url::Url::parse(&app.origin).ok().and_then(|url| url.port());
-    match app.public.resolve(&host, port).await {
-        Ok(Some(site)) => PUBLIC_SITE.scope(site, next.run(request)).await,
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| *peer);
+    match app
+        .public
+        .resolve_from(&host, port, &sender(peer, request.headers()))
+        .await
+    {
+        Ok(Reached::Site(site)) => PUBLIC_SITE.scope(site, next.run(request)).await,
+        Ok(Reached::Nothing) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Reached::Busy) => too_many(),
         Err(error) => HttpError::from(error).into_response(),
     }
 }
@@ -217,11 +230,13 @@ fn framed(headers: &HeaderMap) -> bool {
     )
 }
 
-/// The listener budget, before any route: one count per sender for the whole
-/// public site. Signed webhook calls are machines with their own limits
-/// (`base/integration`), not visitors, so they are not counted here.
+/// The listener budget, after the door and before any route: one count per
+/// sender for the whole public site. A delivery to a registered signed
+/// webhook, on a site's own hostname, is a machine with its own limits
+/// (`base/integration`), not a visitor, so it is not counted here; any
+/// other path under `/webhooks/` is.
 pub(crate) async fn listener(State(app): State<App>, request: Request, next: Next) -> Response {
-    if request.uri().path().starts_with("/webhooks/") {
+    if request.method() == axum::http::Method::POST && app.webhooks.serves(request.uri().path()) {
         return next.run(request).await;
     }
     let peer = request

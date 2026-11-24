@@ -476,9 +476,10 @@ fn finish_router(router: Router<App>, app: App, perf: Arc<bilibi_base::perf::Rec
         )
         .layer(middleware::from_fn_with_state(perf, perf::requests));
     // Outermost last. The staff door checks its one host first. The public
-    // one first finds the client behind a trusted proxy, then counts it
-    // against the listener budget, and only then looks the hostname up, so
-    // a flood of made-up hostnames is bounded before it reaches the database.
+    // one first finds the client behind a trusted proxy, then looks the
+    // hostname up, a database lookup spending the sender's lookup budget so
+    // a flood of made-up hostnames is bounded before it reaches the
+    // database, on every path; then the listener budget counts the visitor.
     let router = match app.site {
         Site::Staff => router
             .layer(middleware::from_fn_with_state(
@@ -487,11 +488,11 @@ fn finish_router(router: Router<App>, app: App, perf: Arc<bilibi_base::perf::Rec
             ))
             .layer(middleware::from_fn_with_state(app.clone(), host_guard)),
         Site::Public => router
-            .layer(middleware::from_fn_with_state(app.clone(), public::door))
             .layer(middleware::from_fn_with_state(
                 app.clone(),
                 public::listener,
             ))
+            .layer(middleware::from_fn_with_state(app.clone(), public::door))
             .layer(middleware::from_fn_with_state(
                 app.clone(),
                 proxies::resolve,
