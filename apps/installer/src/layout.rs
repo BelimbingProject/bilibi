@@ -317,7 +317,7 @@ pub fn copy_release(src: &Path, dst: &Path) -> io::Result<u64> {
 /// list as it is. A file that cannot be read as a list is an error: the
 /// release was damaged on the way.
 pub fn read_plugins(dir: &Path) -> Result<Option<Vec<serde_json::Value>>, String> {
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     let path = dir.join(PLUGINS_DIR).join(PLUGINS_ENABLED);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,

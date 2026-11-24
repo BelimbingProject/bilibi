@@ -1,7 +1,7 @@
 //! The job rows: what a server owner asked for and what the worker reported.
 //! Every statement binds the operator tenant the request was made in.
 use bilibi_database::{Change, Error, MutationTransaction, Result};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio_postgres::GenericClient;
 
 /// The PostgreSQL channel the installer listens on; the payload is

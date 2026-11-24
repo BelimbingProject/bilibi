@@ -11,14 +11,14 @@
 mod app;
 
 use crate::{
-    STEP_UP, Software, SoftwareError, SoftwareResult, release_proof, review::Review, transport,
+    release_proof, review::Review, transport, Software, SoftwareError, SoftwareResult, STEP_UP,
 };
 use bilibi_authz::authorize_operator;
 use bilibi_database::{MutationTransaction, Result};
 use bilibi_integration::{Call, Failure, Origin, Outgoing, RedirectPolicy, Reply};
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::Scope;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{fs, path::Path, sync::Mutex, time::Duration};
 use tokio_postgres::GenericClient;
 
@@ -240,12 +240,12 @@ impl Software {
     /// What changing GitHub release-list access would do.
     pub(crate) async fn review_github(
         &self,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         input: &Value,
     ) -> SoftwareResult<Review> {
-        let client = self.db.get().await?;
-        authorize_operator(&**client, scope, crate::MANAGE).await?;
-        self.github_review_with(&**client, scope, input).await
+        authorize_operator(client, scope, crate::MANAGE).await?;
+        self.github_review_with(client, scope, input).await
     }
 
     async fn github_review_with(

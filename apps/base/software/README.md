@@ -65,7 +65,7 @@ Reads and reviewed writes use the shared Agent API; the page uses the same contr
 | `base.software.open` | optional `propose.domains`, `propose.extensions` | Status plus catalogue, matching and unknown proposals, local next step and `card.resource` |
 | `base.software.releases` | optional `refresh`, `prerelease` | Read-only release trust, exact GitHub assets with a required proof sidecar under operator trust, installed identity and uploads; `github.app` is the client ID of this server's GitHub App, or null |
 | `base.software.install` | Uploaded `bundle`, or GitHub `asset` with `repository_id`, `release_id`, `tag`, `target` and `digest`; optional `switch`, `staging` report | Source, composition changes, add-on changes, checks, pause and installer steps |
-| `base.software.github` | optional pinned `repository`, `refresh_minutes` | Configure refresh for the repository already pinned in Release trust; a different repository or any supplied credential is refused (see [Install from GitHub](#install-from-github)) |
+| `base.software.github` | optional `refresh_minutes` | Configure refresh for the repository pinned in Release trust (see [Install from GitHub](#install-from-github)) |
 | `base.software.trust` | `kind`, `repository`, `repository_id`, `workflow`, `minimum_tag`, and `public_key` for `operator` | Review and queue replacement of the installation's one release-proof policy; the review shows the exact key fingerprint and every pinned identity |
 | `base.software.undo` | optional `job` | Previous release, backup restore and backup time; only the newest completed job can be undone |
 | `base.software.go` | optional `job` | Go-ahead for a running install copied and waiting with `switch: ask`, before any later step starts |
@@ -145,11 +145,9 @@ The initial `scripts/install-server.sh trust` writes the first `/opt/bilibi/<ins
 
 ### Install from GitHub
 
-The repository shown on **Software › Releases** comes from Release trust; changing GitHub settings cannot redirect installation to another repository. Public repositories use anonymous access; private repositories use only the server's GitHub App. Bilibi never accepts a person's `gh` login or a hand-made token on the server.
+The repository shown on **Software › Releases** comes from Release trust; changing GitHub settings cannot redirect installation to another repository.
 
-**A private repository is read with the server's GitHub App, so no token has to be renewed and no person's GitHub login exists on the server.** The server owner puts the App on the server once with `scripts/install-server.sh github-app` ([Private application repositories](../../../docs/server-install.md#private-application-repositories)). Each list and download asks GitHub for a new token restricted to this one repository and expiring within the hour. GitHub trust also uses it to read attestations; operator trust uses GitHub only to fetch bytes, then verifies offline. The token is held in memory for that one use: never saved, shown or logged. A refusal is the plain sentence the page shows, for example when the App can change anything or is installed on all of the owner's repositories. The App code is `src/github/app.rs`; terminal GitHub checks use `scripts/lib/github-app.py` with the same rules.
-
-Without an App, private GitHub listing, download and attestation checks are refused. Public repositories remain anonymous. Uploading an archive and its operator proof is offline and does not contact GitHub.
+Set up the server’s [GitHub App for private releases](../../../docs/server-install.md#private-application-repositories). Software shows the reason when GitHub access is refused. The App client for Software lives in `src/github/app.rs`.
 
 The repository name and immutable number are accepted when Release trust is pinned. If GitHub later reports a different number for the same name, installs stop. Only an installation-owner release-trust change with fresh 2FA can accept a different identity; Bilibi never replaces it by itself.
 
@@ -157,7 +155,7 @@ The list shows setup files for this server: names that start with `bilibi-setup-
 
 Choose **Review** on a file. The install records the repository number, release number, file number, tag, target and archive check code; operator trust also records the proof asset number and check code. Before download, Bilibi reads the release again and refuses when any identity differs. It follows only GitHub's own file hosts and drops the token when the host changes. Under GitHub trust, GitHub CLI verifies the pinned attestation. Under operator trust, Bilibi downloads the proof with a 64 KiB bound, checks its reviewed digest and runs the offline verifier. The files inside are checked after copying. The job result keeps the GitHub and proof identity. Undo does not call GitHub.
 
-An upload is verified before it is kept: its published file name supplies the exact tag and target, and `release.json` must name the pinned repository and tag. GitHub trust verifies the archive online. Operator trust requires the detached `.proof.json` in the second upload control and verifies it offline, so neither GitHub nor any transparency log must be reachable. Verification failure removes the archive, proof and unpacked copy; the running release is untouched.
+An upload is verified before it is kept: its published file name supplies the exact tag and target, and `release.json` must name the pinned repository and tag. GitHub trust retrieves the attestation using the server’s [GitHub access rules](../../../docs/server-install.md#private-application-repositories). Operator trust requires the detached `.proof.json` in the second upload control and verifies it offline, so neither GitHub nor any transparency log must be reachable. Verification failure removes the archive, proof and unpacked copy; the running release is untouched.
 
 ### What happens on the target
 

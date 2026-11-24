@@ -13,10 +13,10 @@ use crate::{
     backup::{self, PgEnv},
     composition,
     jobs::{self, Job, Step},
-    layout::{self, Layout, human},
+    layout::{self, human, Layout},
     service::Service,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
 use tokio_postgres::Client;
 

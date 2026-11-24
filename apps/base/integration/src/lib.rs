@@ -550,7 +550,12 @@ impl Integration {
             "ix_{}",
             data_encoding::BASE32_NOPAD.encode(uuid::Uuid::new_v4().as_bytes())
         );
-        let client = self.db.get().await?;
+        let client = self
+            .db
+            .get_independent(
+                "the HTTP exchange must be recorded even if the caller's transaction rolls back",
+            )
+            .await?;
         client
             .execute(
                 "INSERT INTO base_integration_exchanges(public_id,tenant_id,direction,system,provider,operation,endpoint,method,host,path,\

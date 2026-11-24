@@ -131,13 +131,7 @@ The audit trail is the app's job, not the installer's: `base/software` records e
 
 ## Running it
 
-Build `bilibi-installer` on your build machine, which may be a separate account on a Dev server, then install the finished program ([build releases](../../docs/server-install.md#build-releases)). On the server, run:
-
-```sh
-sudo scripts/install-server.sh installer production /path/to/bilibi-installer-x86_64-unknown-linux-gnu --tag setup-v1.0.0
-```
-
-The instance’s pin supplies the proof method, repository name and immutable number, workflow and minimum tag. For operator trust, add `--proof /path/to/bilibi-installer-x86_64-unknown-linux-gnu.proof.json`. The command verifies the installer against that instance’s policy, writes its root-owned binary to `/opt/bilibi/<instance>/installer`, and starts its service. Repeat for each instance. The installer runs candidate programs under the instance’s application account. Root alone writes trust and replay files through the terminal or the instance’s privileged installer path.
+Build `bilibi-installer` on your build machine and follow the [installer service setup](../../docs/server-install.md#the-installer-service) to verify and deploy it for each instance.
 
 By hand, for one instance, with its `env` file loaded:
 

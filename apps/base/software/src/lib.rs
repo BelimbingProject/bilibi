@@ -22,26 +22,26 @@ mod transport;
 mod web;
 
 use bilibi_authz::{
-    CapabilityDefinition, VOCABULARY, VocabularyContribution, authorize_operator,
-    effective_capabilities,
+    authorize_operator, effective_capabilities, CapabilityDefinition, VocabularyContribution,
+    VOCABULARY,
 };
 use bilibi_database::{Context, Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_integration::Integration;
 use bilibi_module_registry::{
+    contributions::{Access, Method, PageWrites, Pending, Route, PAGE_WRITES, ROUTES},
     Composition, Contribution, Provenance,
-    contributions::{Access, Method, PAGE_WRITES, PageWrites, Pending, ROUTES, Route},
 };
 use bilibi_notifications::{Notice, NotificationBoundary};
 use bilibi_settings::{
-    DEFINITIONS, Definition, Editor, ScopeKind, Setting, Settings, Validator, ValueType,
+    Definition, Editor, ScopeKind, Setting, Settings, Validator, ValueType, DEFINITIONS,
 };
 use bilibi_step_up::StepUp;
 use bilibi_system::Instance;
 use bilibi_tenancy::{Authentication, Scope};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 
-pub use catalogue::{Catalogue, DEFAULT_URL as DEFAULT_CATALOGUE_URL, Version};
+pub use catalogue::{Catalogue, Version, DEFAULT_URL as DEFAULT_CATALOGUE_URL};
 pub use jobs::{CHANNEL, RECORD};
 pub use review::Review;
 /// The MCP App card (`card/software-v1.html`): the Software page as one
@@ -452,10 +452,14 @@ impl Software {
     }
 
     /// What installing the chosen GitHub release asset or uploaded release would do.
-    pub async fn review_install(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
-        let client = self.db.get().await?;
-        authorize_operator(&**client, scope, MANAGE).await?;
-        self.install_review(&**client, scope, input).await
+    pub(crate) async fn review_install(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        authorize_operator(client, scope, MANAGE).await?;
+        self.install_review(client, scope, input).await
     }
     pub async fn install_in(
         &self,
@@ -481,12 +485,7 @@ impl Software {
     }
 
     /// What replacing this installation's release trust would do.
-    pub async fn review_trust(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
-        let client = self.db.get().await?;
-        self.review_trust_with(&**client, scope, input).await
-    }
-
-    async fn review_trust_with(
+    pub(crate) async fn review_trust(
         &self,
         client: &(impl tokio_postgres::GenericClient + Sync),
         scope: &Scope,
@@ -550,7 +549,7 @@ impl Software {
         scope: &Scope,
         input: &Value,
     ) -> SoftwareResult<Value> {
-        let review = self.review_trust_with(tx.sql(), scope, input).await?;
+        let review = self.review_trust(tx.sql(), scope, input).await?;
         self.step_up
             .require_code(scope, STEP_UP, &review.target)
             .await?;
@@ -566,10 +565,14 @@ impl Software {
     }
 
     /// What taking back the last finished change would do, and what it costs.
-    pub async fn review_undo(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
-        let client = self.db.get().await?;
-        authorize_operator(&**client, scope, MANAGE).await?;
-        self.undo_review(&**client, scope, input).await
+    pub(crate) async fn review_undo(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        authorize_operator(client, scope, MANAGE).await?;
+        self.undo_review(client, scope, input).await
     }
     pub async fn undo_in(
         &self,
@@ -598,10 +601,14 @@ impl Software {
 
     /// Whether the job waiting or running can still be stopped, and what
     /// stopping it means.
-    pub async fn review_cancel(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
-        let client = self.db.get().await?;
-        authorize_operator(&**client, scope, MANAGE).await?;
-        self.cancel_review(&**client, scope, input).await
+    pub(crate) async fn review_cancel(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        authorize_operator(client, scope, MANAGE).await?;
+        self.cancel_review(client, scope, input).await
     }
     pub async fn cancel_in(
         &self,
@@ -637,10 +644,14 @@ impl Software {
     }
 
     /// What giving a copied install its go-ahead would do.
-    pub async fn review_go(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
-        let client = self.db.get().await?;
-        authorize_operator(&**client, scope, MANAGE).await?;
-        self.go_review(&**client, scope, input).await
+    pub(crate) async fn review_go(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        authorize_operator(client, scope, MANAGE).await?;
+        self.go_review(client, scope, input).await
     }
     /// Turns a parked job's `switch` to `auto` inside the caller's
     /// transaction, after the owner's fresh 2FA check.

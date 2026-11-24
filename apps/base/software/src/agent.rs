@@ -1,13 +1,13 @@
 //! Shared Software reads and reviewed installs.
-use crate::{CARD_URI, MANAGE, STEP_UP, SoftwareError, VIEW, bound};
+use crate::{bound, SoftwareError, CARD_URI, MANAGE, STEP_UP, VIEW};
 use bilibi_agent_api::{
-    APPS, App, Channels, DEFINITIONS, Definitions, Error as AgentError, Guide, Handler, Operation,
-    OperationClient, OperationFuture, ReadHandler, WriteHandler,
+    App, Channels, Definitions, Error as AgentError, Guide, Handler, Operation, OperationClient,
+    OperationFuture, ReadHandler, WriteHandler, APPS, DEFINITIONS,
 };
 use bilibi_database::MutationTransaction;
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_tenancy::Scope;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 impl From<SoftwareError> for AgentError {
@@ -72,19 +72,20 @@ impl WriteHandler for Write {
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let software = bound()?;
+            let sql = client.sql_client().await?;
             let mut review = match self {
-                Self::Install => software.review_install(scope, input).await?,
-                Self::Undo => software.review_undo(scope, input).await?,
-                Self::Go => software.review_go(scope, input).await?,
-                Self::Cancel => software.review_cancel(scope, input).await?,
-                Self::Github => software.review_github(scope, input).await?,
-                Self::Trust => software.review_trust(scope, input).await?,
+                Self::Install => software.review_install(sql, scope, input).await?,
+                Self::Undo => software.review_undo(sql, scope, input).await?,
+                Self::Go => software.review_go(sql, scope, input).await?,
+                Self::Cancel => software.review_cancel(sql, scope, input).await?,
+                Self::Github => software.review_github(sql, scope, input).await?,
+                Self::Trust => software.review_trust(sql, scope, input).await?,
             };
             if !matches!(self, Self::Cancel) {
                 let methods = software.step_up.enrolled_methods(scope).await?;

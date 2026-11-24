@@ -97,7 +97,7 @@ Each instance lives in one folder:
 ```
 /opt/bilibi/
   production/
-    env               the instance's settings for the service: role, address, database, keys (root:bilibi, 0640)
+    env               the instance's settings for the service: role, address, database, keys (root and the instance’s group, 0640)
     caddy-env         the Cloudflare token when DNS certificates are used (root:caddy, 0640)
     releases/1/       bilibi-web, SHA256SUMS, and the build's manifest.txt and Cargo.lock when it has them
     releases/2/
@@ -225,19 +225,19 @@ sudo scripts/install-server.sh release production /home/me/bilibi-setup-v1.0.0-x
 
 For an operator key, use `trust <instance> --operator-key <public.pem>` and name the CI workflow with `--workflow`; then add `--proof <asset>.proof.json` to `release`, `installer` and `verify`. The proof is a DSSE envelope over the archive SHA-256, repository name and number, workflow, tag, artifact kind and target. Verification is offline and never falls back to GitHub. GitHub trust refuses an operator proof, and operator trust refuses a missing or wrong proof.
 
-Copy `--repo-id <number>` beforehand from the application repository's GitHub **Settings › General** page or another trusted record. Never look it up from the repository name during the install. The official `BelimbingProject` repository numbers remain built-in, but `trust` still records the number. Public GitHub-attested repositories need no GitHub login. A private repository is read only through the server's [GitHub App](#private-application-repositories). If the checksum, key or attestation, repository, workflow, tag, kind or target does not match, the command stops before unpacking, migration or service changes.
+Copy `--repo-id <number>` beforehand from the application repository's GitHub **Settings › General** page or another trusted record. Never look it up from the repository name during the install. For known official `BelimbingProject` repositories, `trust` checks the supplied number against its built-in value. Public GitHub-attested repositories need no GitHub login. A private repository is read only through the server's [GitHub App](#private-application-repositories). If the checksum, key or attestation, repository, workflow, tag, kind or target does not match, the command stops before unpacking, migration or service changes.
 
 On an existing instance with no pin, root can run `trust <instance>` once. Set the minimum tag to the first eligible upgrade, newer than every release previously installed there. The command checks tags recorded in retained release recipes and records the terminal operator’s UID and UTC time. Once a pin exists, the terminal command refuses to change it. Later replacement is `base.software.trust`: the installation owner reviews the complete new policy and key fingerprint, gives a fresh 2FA code, and the separate installer atomically applies the audited job. Software shows the current policy read-only. There is no compatibility fallback.
 
 Step by step, we:
 
-1. Verify the archive with the one pinned proof policy, unpack only the expected files, check its SHA-256 list, and copy it into the next numbered folder, `releases/<n>`.
+1. Verify the archive with the one pinned proof policy, unpack only the expected files, and check its SHA-256 list. Record the admitted setup tag and archive digest in the instance’s trust directory before copying into the next numbered folder, `releases/<n>`.
 2. Stop the service. From here Caddy shows the waiting page.
-3. Update the database with the new program's `migrate` and apply its production seeds. Nothing migrates on boot, so this must happen before the new program serves. If it fails, the previous release is started again and nothing has changed.
+3. Update the database with the new program's `migrate` and apply its production seeds. Nothing migrates on boot, so this must happen before the new program serves. If it fails, the previous release is started again.
 4. Point `releases/current` at `<n>` and start the service. The instance's `current` is a fixed link to `releases/current`, so the link that moves lives in the folder the instance installer owns, and the installer can move it too; an instance created before this shape is converted the next time you run `create`, `installer`, `release` or `switch`. A job that finds an unconverted instance ends before the pause with "Nothing changed" and says to run `installer` or `create`.
 5. Check that the backend answers within 60 seconds. If it does not, point `current` back at the previous release and start that.
 
-After a release answers, the instance records its setup tag and archive digest outside the database and release folders. A later install must have a strictly newer setup tag. Use audited Software Undo for a deliberate rollback; copying or restoring an old release cannot lower the replay record.
+If a terminal release fails after admission, fix the failure and publish a newer setup tag. See [Replay and rollback](architecture/decisions/35-server-release-proof-follows-installation-trust.md#replay-and-rollback) for the admission rules and audited rollback path.
 
 `switch` goes to any kept release the same way, after checking its checksum:
 
@@ -274,9 +274,9 @@ The application maker's [guide to connecting servers](https://github.com/Belimbi
 
 From then on:
 
-- Under GitHub trust, `release`, `installer` and `verify` ask GitHub for a token that can only read the pinned repository, give it to one `gh attestation verify`, and drop it. Under operator trust, signature verification is offline and needs no token.
-- **Software › Releases** uses the App for private release lists and downloads. GitHub trust also uses it for attestation verification. Operator trust downloads the archive and its matching `.proof.json`, then verifies both offline. With no App configured, the server fetches public attestations by digest and verifies the bundles locally with GitHub CLI. See the [GitHub attestation API](https://docs.github.com/en/rest/repos/attestations?apiVersion=2022-11-28).
-- A private repository the App is not installed on is refused. Install the App on the one repository pinned in Release trust.
+- A configured App must be installed on the repository pinned in Release trust. Its short-lived token is scoped to that repository and used for release listing, downloads and GitHub attestation verification.
+- With no App configured, the terminal and Software can fetch public attestations by digest and verify the bundles locally with GitHub CLI. See the [GitHub attestation API](https://docs.github.com/en/rest/repos/attestations?apiVersion=2022-11-28).
+- Operator signature verification runs offline. Software uses GitHub credentials only to obtain private release files.
 - Bilibi ignores a person's `gh` login and environment tokens. Servers accept no hand-made GitHub token; only public-repository requests are anonymous.
 
 The App lives in `/opt/bilibi/github-app.json`, one per server, because every instance on the machine serves the same application. Root and the Bilibi services can read it, like each instance's `env`, which already holds the key that unlocks saved secrets.

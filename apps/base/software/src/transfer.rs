@@ -1,21 +1,22 @@
 //! GitHub downloads and manual uploads, handed to the separate installer.
 //! Archive checks live in `transport.rs`.
 use crate::{
-    MANAGE, Software, VIEW, jobs, release_proof, review,
+    jobs, release_proof, review,
     transport::{self, Paths},
+    Software, MANAGE, VIEW,
 };
 use bilibi_authz::authorize_operator;
 use bilibi_database::{Error, Result};
 use bilibi_integration::{Call, Failure, Origin};
 use bilibi_system::Instance;
 use bilibi_tenancy::Scope;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     fs,
     path::Path,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
     time::Duration,
 };

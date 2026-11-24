@@ -5,7 +5,7 @@ use crate::layout::Layout;
 use std::{process::Command, time::Duration};
 use tokio::{
     io::AsyncWriteExt,
-    time::{Instant, sleep, timeout},
+    time::{sleep, timeout, Instant},
 };
 
 pub struct Service {
