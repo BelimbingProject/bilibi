@@ -177,12 +177,13 @@ impl Installer {
         let _alive = Heartbeat(self.heartbeat(job.tenant, job.id));
         let mut run =
             flow::Run::new(client, &self.layout, &self.service, &self.pg, job, resumed).await?;
-        if resumed && run.resume().await? {
+        if resumed && run.job().kind != "trust" && run.resume().await? {
             return Ok(true);
         }
         match run.job().kind.as_str() {
             "install" => run.install().await?,
             "undo" => run.undo().await?,
+            "trust" => run.trust().await?,
             other => {
                 eprintln!(
                     "job {}: an installer cannot carry out a {other}; leaving it",

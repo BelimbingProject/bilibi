@@ -43,9 +43,10 @@ Run the product installer inside the lab:
 
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create production --role production --site prod.10.77.61.2.sslip.io --tls internal'
-docs/server-proof/lab.sh run "/src/scripts/install-server.sh release production /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh trust --github --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --minimum-tag $PROOF_TAG"
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh release production /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --tag $PROOF_TAG"
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner production --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner"'
-docs/server-proof/lab.sh run "/src/scripts/install-server.sh installer /data/assets/bilibi-installer-x86_64-unknown-linux-gnu --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh installer /data/assets/bilibi-installer-x86_64-unknown-linux-gnu --tag $PROOF_TAG"
 docs/server-proof/lab.sh run 'if command -v cargo || command -v rustc; then exit 1; fi'
 docs/server-proof/drive.py login
 docs/server-proof/drive.py enrol
@@ -71,7 +72,7 @@ Add Finance to the disposable application's saved composition before you publish
 
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create dev --role dev --site dev.10.77.61.2.sslip.io --tls internal'
-docs/server-proof/lab.sh run "/src/scripts/install-server.sh release dev /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh release dev /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --tag $PROOF_TAG"
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner dev --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner"'
 LAB_ORIGIN=https://dev.10.77.61.2.sslip.io docs/server-proof/drive.py login
 chrome-devtools-axi open https://dev.10.77.61.2.sslip.io/finance/payroll

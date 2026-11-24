@@ -11,13 +11,14 @@ use std::{
 /// The files the installer copies with a release, when the build wrote them
 /// (`release.json`) or the release came as a file (`bundle.json`). Add-ons
 /// that travel with the release are the `plugins/` folder beside them.
-const RELEASE_FILES: [&str; 6] = [
+const RELEASE_FILES: [&str; 7] = [
     "bilibi-web",
     "SHA256SUMS",
     "manifest.txt",
     "Cargo.lock",
     "release.json",
     "bundle.json",
+    "admission.json",
 ];
 const PLUGINS_DIR: &str = "plugins";
 /// The add-ons a release switches on, included by the local build in the
@@ -65,6 +66,130 @@ impl Layout {
     }
     pub fn backups(&self) -> PathBuf {
         self.dir.join("backups")
+    }
+    fn server_root(&self) -> Result<&Path, String> {
+        self.dir
+            .parent()
+            .ok_or_else(|| format!("{} has no Bilibi server folder", self.dir.display()))
+    }
+    pub fn check_release_tag(&self, tag: &str) -> Result<(), String> {
+        self.release_proof(&["check-replay", "--state"], tag, None)
+    }
+    pub fn record_release(&self, tag: &str, digest: &str) -> Result<(), String> {
+        self.release_proof(&["record-replay", "--state"], tag, Some(digest))
+    }
+    fn release_proof(
+        &self,
+        operation: &[&str],
+        tag: &str,
+        digest: Option<&str>,
+    ) -> Result<(), String> {
+        let root = self.server_root()?;
+        let state = self.dir.join("trust/release-state.json");
+        let mut command = Command::new("python3");
+        command
+            .arg(root.join("release-proof.py"))
+            .args(operation)
+            .arg(&state);
+        command.args(["--tag", tag]);
+        if let Some(digest) = digest {
+            command.args(["--digest", digest]);
+        }
+        let output = command
+            .output()
+            .map_err(|error| format!("could not run the release proof verifier: {error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .trim_start_matches("release-proof: ")
+            .to_owned())
+    }
+    pub fn replace_release_trust(
+        &self,
+        job: i64,
+        requested_by: i64,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let object = request
+            .as_object()
+            .ok_or("the release trust request is not an object")?;
+        let allowed = [
+            "kind",
+            "repository",
+            "repository_id",
+            "workflow",
+            "minimum_tag",
+            "public_key",
+        ];
+        if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err("the release trust request has an unexpected field".into());
+        }
+        let kind = request["kind"]
+            .as_str()
+            .filter(|kind| matches!(*kind, "github" | "operator"))
+            .ok_or("the release trust kind must be github or operator")?;
+        let repository = request["repository"]
+            .as_str()
+            .ok_or("the release trust request names no repository")?;
+        let repository_id = request["repository_id"]
+            .as_i64()
+            .filter(|id| *id > 0)
+            .ok_or("the release trust request names no repository number")?;
+        let workflow = request["workflow"]
+            .as_str()
+            .ok_or("the release trust request names no workflow")?;
+        let minimum_tag = request["minimum_tag"]
+            .as_str()
+            .ok_or("the release trust request names no minimum tag")?;
+        let root = self.server_root()?;
+        let trust = root.join("trust");
+        let next = trust.join(format!(".release-{job}.json"));
+        let public = trust.join(format!(".release-{job}.pem"));
+        let _ = fs::remove_file(&next);
+        let _ = fs::remove_file(&public);
+        if kind == "operator" {
+            let key = request["public_key"]
+                .as_str()
+                .filter(|key| !key.trim().is_empty())
+                .ok_or("operator release trust has no public key")?;
+            fs::write(&public, key)
+                .map_err(|error| format!("could not stage the operator public key: {error}"))?;
+            fs::set_permissions(&public, fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("could not protect the staged public key: {error}"))?;
+        } else if !request["public_key"].is_null() {
+            return Err("GitHub release trust must not carry an operator public key".into());
+        }
+        let mut command = Command::new("python3");
+        command
+            .arg(root.join("release-proof.py"))
+            .args(["make-trust", "--kind", kind, "--repository", repository])
+            .args(["--repository-id", &repository_id.to_string()])
+            .args(["--workflow", workflow, "--minimum-tag", minimum_tag])
+            .args(["--changed-by", &format!("account:{requested_by}")])
+            .arg("--output")
+            .arg(&next);
+        if kind == "operator" {
+            command.arg("--public-key").arg(&public);
+        }
+        let output = command
+            .output()
+            .map_err(|error| format!("could not run the release proof verifier: {error}"))?;
+        let _ = fs::remove_file(&public);
+        if !output.status.success() {
+            let _ = fs::remove_file(&next);
+            return Err(String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .trim_start_matches("release-proof: ")
+                .to_owned());
+        }
+        fs::set_permissions(&next, fs::Permissions::from_mode(0o640))
+            .map_err(|error| format!("could not protect the release trust record: {error}"))?;
+        fs::rename(&next, trust.join("release.json"))
+            .map_err(|error| format!("could not replace the release trust record: {error}"))?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|_| "the release proof verifier returned no trust facts".into())
     }
     /// Where the program puts a release that came from another machine or
     /// from an uploaded file, for this installer to take (`base/software`,

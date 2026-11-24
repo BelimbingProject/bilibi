@@ -20,6 +20,9 @@ pub const RELEASE_FILES: [&str; 6] = [
     "release.json",
     "bundle.json",
 ];
+/// The local record of the proof that admitted an archive. It is written
+/// after verification, never trusted from the archive itself.
+pub const ADMISSION_FILE: &str = "admission.json";
 /// Add-ons that travel with the release live here, inside the folder.
 pub const PLUGINS_DIR: &str = "plugins";
 /// The add-ons the release switches on, a list of `{id, name, publisher,
@@ -153,6 +156,7 @@ pub fn folder_facts(dir: &Path) -> Value {
     };
     let recipe = read_json("release.json");
     let bundle = read_json("bundle.json");
+    let admission = read_json(ADMISSION_FILE);
     let bytes = fs::metadata(dir.join("bilibi-web"))
         .map(|meta| meta.len())
         .unwrap_or(0);
@@ -171,6 +175,7 @@ pub fn folder_facts(dir: &Path) -> Value {
         "from": bundle["from"].clone(),
         "program": recipe["status"].as_str().and_then(|s| s.lines().next()).map(|s| s.chars().take(200).collect::<String>()),
         "plugins": plugins,
+        "proof": admission,
     })
 }
 
@@ -357,17 +362,15 @@ pub fn sha256_of(path: &Path) -> io::Result<String> {
 }
 
 /// Verify GitHub's signed build provenance before an archive is unpacked or
-/// handed to the installer. The accepted repository ID closes the offline-name
-/// reuse gap; the signer and source ref bind the artifact to release.yml and
-/// the reviewed setup tag.
+/// handed to the installer. The pinned repository ID closes the offline-name
+/// reuse gap; the pinned signer and source ref bind the artifact to its
+/// trusted workflow and reviewed setup tag.
 pub fn verify_attestation(
     artifact: &Path,
-    repository: &str,
-    repository_id: i64,
+    policy: &crate::release_proof::Policy,
     tag: &str,
     token: Option<&str>,
 ) -> Result<(), String> {
-    let workflow = format!("{repository}/.github/workflows/release.yml");
     let source_ref = format!("refs/tags/{tag}");
     let mut command = Command::new("gh");
     command.args([
@@ -377,9 +380,9 @@ pub fn verify_attestation(
             .to_str()
             .ok_or("The release file path cannot be verified.")?,
         "--repo",
-        repository,
+        &policy.repository,
         "--signer-workflow",
-        &workflow,
+        &policy.workflow,
         "--source-ref",
         &source_ref,
         "--format",
@@ -405,16 +408,17 @@ pub fn verify_attestation(
     })?;
     if !output.status.success() {
         return Err(format!(
-            "GitHub build provenance did not verify for {repository} tag {tag}. Nothing was unpacked; download the asset from the official Release setup workflow and retry."
+            "GitHub artifact attestation did not verify for {} tag {tag}. Nothing was unpacked; download the asset from the pinned release workflow and retry.",
+            policy.repository
         ));
     }
     let ids = String::from_utf8_lossy(&output.stdout);
-    let expected_id = repository_id.to_string();
+    let expected_id = policy.repository_id.to_string();
     let mut found = false;
     for id in ids.lines().map(str::trim).filter(|id| !id.is_empty()) {
         found = true;
         if id != expected_id {
-            return Err("The release provenance belongs to a different GitHub repository number. Nothing was unpacked; accept the repository again and retry.".into());
+            return Err("The release provenance belongs to a different GitHub repository number. Nothing was unpacked; the installation owner must review release trust before retrying.".into());
         }
     }
     if !found {

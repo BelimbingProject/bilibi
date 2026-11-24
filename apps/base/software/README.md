@@ -19,7 +19,7 @@ Copy **Installation commands** from the Software grid, or use the `local_steps` 
 
 The block starts with `./bilibi add` using `--kind`, `--source` and `--commit` to mount the exact release, even when the local checkout’s catalogue does not list it. If the folder already exists at another commit, `add` leaves it in place and prints the steps for moving it after you have saved your work. Extensions mount under `apps/extensions/<id>`.
 
-Run the composition locally with its own database and check its pages in the browser. Then publish it through your application’s release workflow, which creates the installable archive, checksums and GitHub build provenance. See [Application releases](../../../docs/server-install.md#application-releases).
+Run the composition locally with its own database and check its pages in the browser. Then publish it through your application’s trusted release workflow, which creates the installable archive, checksums and either GitHub build provenance or an operator-key proof. See [Application releases](../../../docs/server-install.md#application-releases).
 
 ## Compatibility
 
@@ -40,6 +40,8 @@ The catalogue recommends the newest compatible release tested with this exact Pl
 | Available software and CI evidence | Published `catalogue.json` ([versions contract](../../../docs/versions.md)) |
 | Jobs, steps and enabled add-ons | `base_software_jobs`, `base_software_steps`, `base_software_plugins` |
 | What a backup restore loses | Server-wide `base_audit_mutations` since the backup |
+| Trusted release proof | `/opt/bilibi/trust/release.json`, pinned at setup and replaceable only by the installer from an owner-reviewed fresh-2FA job |
+| Highest admitted release | `/opt/bilibi/<instance>/trust/release-state.json`, outside the database and release backups |
 
 ## Access
 
@@ -48,9 +50,9 @@ Only a server owner with the appropriate platform capability can manage software
 | Capability | Allows |
 | --- | --- |
 | `admin.system.software.view` | Status, catalogue, release listings, Software page and card |
-| `admin.system.software.manage` | Install, undo, go-ahead, cancel, release upload and GitHub settings |
+| `admin.system.software.manage` | Install, undo, go-ahead, cancel, release upload, GitHub read access and release-trust replacement |
 
-Install, undo, go-ahead and GitHub settings require the owner’s own fresh 2FA code on every commit, including Dev. The existing step-up key `base.software.change` remains `.always()` to preserve its policy and audit identity; it is **not a build operation**. Cancel requires no code. The facade rechecks authorization inside the mutation transaction. Other organisations fail closed with `denied_platform_scope`; a missing grant is `denied_missing_capability`.
+Install, undo, go-ahead, GitHub settings and release-trust replacement require the owner’s own fresh 2FA code on every commit, including Dev. The existing step-up key `base.software.change` remains `.always()` to preserve its policy and audit identity; it is **not a build operation**. Cancel requires no code. The facade rechecks authorization inside the mutation transaction. Other organisations fail closed with `denied_platform_scope`; a missing grant is `denied_missing_capability`.
 
 ## Agent contracts
 
@@ -58,19 +60,20 @@ Reads and reviewed writes use the shared Agent API; the page uses the same contr
 
 | Contract | Input | Answer or review |
 | --- | --- | --- |
-| `base.software.status` | none | Instance, installed composition, add-ons, uploads, current or last job with steps and cancel state, Undo and recent history |
+| `base.software.status` | none | Instance, read-only release trust, installed composition, add-ons, uploads, current or last job with steps and cancel state, Undo and recent history |
 | `base.software.catalogue` | none | Discovery, compatibility and local build instructions on every instance |
 | `base.software.open` | optional `propose.domains`, `propose.extensions` | Status plus catalogue, matching and unknown proposals, local next step and `card.resource` |
-| `base.software.releases` | optional `refresh`, `prerelease` | Exact GitHub assets, installed identity and uploads; `github.app` is the client ID of this server's GitHub App, or null |
+| `base.software.releases` | optional `refresh`, `prerelease` | Read-only release trust, exact GitHub assets with a required proof sidecar under operator trust, installed identity and uploads; `github.app` is the client ID of this server's GitHub App, or null |
 | `base.software.install` | Uploaded `bundle`, or GitHub `asset` with `repository_id`, `release_id`, `tag`, `target` and `digest`; optional `switch`, `staging` report | Source, composition changes, add-on changes, checks, pause and installer steps |
-| `base.software.github` | `repository`, optional `repository_id`, `token`, `clear_token`, `refresh_minutes`, `accept` | Save the GitHub repository, the read token and how often to check; accept the repository number before installing. The token is never shown back. A server with a GitHub App needs no token (see [Install from GitHub](#install-from-github)) |
+| `base.software.github` | optional pinned `repository`, `refresh_minutes` | Configure refresh for the repository already pinned in Release trust; a different repository or any supplied credential is refused (see [Install from GitHub](#install-from-github)) |
+| `base.software.trust` | `kind`, `repository`, `repository_id`, `workflow`, `minimum_tag`, and `public_key` for `operator` | Review and queue replacement of the installation's one release-proof policy; the review shows the exact key fingerprint and every pinned identity |
 | `base.software.undo` | optional `job` | Previous release, backup restore and backup time; only the newest completed job can be undone |
 | `base.software.go` | optional `job` | Go-ahead for a running install copied and waiting with `switch: ask`, before any later step starts |
 | `base.software.cancel` | optional `job` | Remove a queued job, or request stop before the pause; refused after the pause starts |
 
 The `base.software.change` agent operation is removed; only its step-up key stays (see Access). There is no server build operation, builder worker, compiler setting or builder service.
 
-Install takes an exact GitHub asset or an uploaded bundle from the accepted application repository. Both need valid GitHub build provenance from that repository's `.github/workflows/release.yml`; a checksum alone is refused. Installing the program already in service or starting a second active job is refused. `switch: auto` proceeds after copying; `switch: ask` waits for `go` before the pause.
+Install takes an exact GitHub asset or an uploaded bundle from the repository pinned in Release trust. The one selected proof method must bind the archive SHA-256 to that repository and immutable number, exact workflow, setup tag, artifact kind and target; a checksum alone is refused. Installing the program already in service, a tag at or below the instance's replay record, or a second active job is refused. `switch: auto` proceeds after copying; `switch: ask` waits for `go` before the pause.
 
 ## Page and ChatGPT card
 
@@ -80,7 +83,7 @@ Installed Domains and Extensions missing from the selected catalogue also have a
 
 The page, ChatGPT card and agents read the same installed facts from the compiled composition. The `uncatalogued` field in `base.software.catalogue` (and so in `base.software.open`) lists installed modules missing from the catalogue; `base.software.status` stays free of catalogue reads.
 
-**Releases** (`?tab=releases`) shows the installed version, the current or last install (its **Install steps** stay open while the job is active, failed or interrupted, and fold when it completes), a short backup table with folded backup details, and **Get an update**. Backup file locations are folded and only available to accounts that can manage software. GitHub releases and their identities appear above a folded **Upload a release file** section, with queued files and their review on the same mounted page; switching tabs preserves pending uploads and reviews. The old `/system/software/releases` page redirects to the Releases tab.
+**Releases** (`?tab=releases`) shows Release trust as read-only proof, repository, workflow, minimum tag and key fingerprint facts, then the installed version, current or last install, backups and **Get an update**. GitHub releases and their identities appear above a folded **Upload a release file** section, with queued files and their review on the same mounted page; switching tabs preserves pending uploads and reviews. Backup file locations are folded and only available to accounts that can manage software. The old `/system/software/releases` page redirects to the Releases tab.
 
 The MCP App (`ui://bilibi/software-v1.html`, `card/software-v1.html`) is titled **Manage domains and extensions** and uses the same software contracts. Its catalogue cards show the repository under **Source** and the generated **Installation commands** when available.
 
@@ -94,7 +97,7 @@ The MCP App (`ui://bilibi/software-v1.html`, `card/software-v1.html`) is titled 
 
 ## Jobs and upgrades
 
-**Only install and undo jobs are queued.** One job per tenant can be queued or running. Jobs finish as `done`, `failed`, `cancelled` or `interrupted`; their result explains the outcome. A running job whose installer is gone for good would hold that rule for ever, so the installer marks it alive every half minute (`heartbeat_at`) and the server's settle loop (every 15 seconds) ends a running job that has not begun its pause (`paused_at` empty) as `interrupted` once its installer has been silent for `software.installer_silence_minutes` (20; 5–1440, server owner only). Nothing changed, so the owner starts the install again; the job is then audited and announced like any outcome. A job whose installer never reported is left to it, and one past its pause is left to the installer's recovery, which alone knows how far the switch got.
+**Install, undo and release-trust changes are queued.** One job per tenant can be queued or running. Jobs finish as `done`, `failed`, `cancelled` or `interrupted`; their result explains the outcome. A trust job has one atomic, non-pausing step. A running job whose installer is gone for good would hold that rule for ever, so the installer marks it alive every half minute (`heartbeat_at`) and the server's settle loop (every 15 seconds) ends a running job that has not begun its pause (`paused_at` empty) as `interrupted` once its installer has been silent for `software.installer_silence_minutes` (20; 5–1440, server owner only). Nothing changed, so the owner starts the operation again; the job is then audited and announced like any outcome. A job whose installer never reported is left to it, and one past an install or undo pause is left to the installer's recovery, which alone knows how far the switch got.
 
 Install steps are *fetch, backup, migrate, switch, verify*, with *download* first for a GitHub file. Undo uses *backup, restore* (when needed), *switch, verify*. The first `backup` pauses the instance; cancellation is refused after it starts. The installer backs up before updating, checks the new program, and automatically switches back on a failed check. Undo restores the earlier backup when migrations changed the database; its review names the backup time and the page separately refreshes the count of later audited changes. The committed review records `lost_at_commit`.
 
@@ -113,7 +116,7 @@ Migration `base-software-003-local-builds` cancels legacy queued or running `cha
 
 The separate installer (`apps/installer`) reads and writes the durable job tables with its own connection. It never creates audit or notification rows itself.
 
-1. Listen on `bilibi_software_jobs` and poll on startup. Claim the oldest queued install or undo with a conditional update; ignore installs whose download step has not finished.
+1. Listen on `bilibi_software_jobs` and poll on startup. Claim the oldest queued install, undo or trust change with a conditional update; ignore installs whose download step has not finished. A trust job validates the reviewed request again and atomically replaces the server-wide record without pausing the instance.
 2. Mark each step running, then done, failed or skipped, with timestamps and a plain `detail.message`. Send `NOTIFY` after changes. A switch-back step may be appended after failure.
 2a. While it works on a job, write `heartbeat_at = now()` every 30 seconds (its own connection), so the server can tell a silent installer from a slow step.
 3. Lock the job before starting the pausing step. Honour `cancel_requested_at` there, or start the pause under the same lock, so cancel cannot cross it. In the same transaction set `paused_at`: a restart reads it to know the service was stopped, never a step's state.
@@ -125,33 +128,43 @@ Before a database update committed, a restarted install ends interrupted and res
 
 ## Release archives
 
-Install a published GitHub asset or upload a saved archive. Both paths use the same installer checks, backup, switch-back and Undo.
+Install a published GitHub asset or upload a saved archive. Both paths apply the one proof policy pinned at server setup, then use the same installer checks, replay protection, backup, switch-back and Undo.
 
 The upload is resumable: while Media has a staging disk (`media.upload.staging_disk`), a dropped connection or a restarted server carries on from the bytes already sent, and choosing the same file again within `media.upload.staging_hours` does too. It is still at most 64 MiB.
 
-A gzip-compressed tar carries `bilibi-web`, `SHA256SUMS` and optionally `manifest.txt`, `Cargo.lock`, `release.json`, `bundle.json` and `plugins/`. The application repository created by `./bilibi new <name>` builds and packages the complete composition on GitHub; see [application workspaces](../../../docs/application-workspaces.md). Only that published, attested archive is installable. Archive parsing, safe paths and compatibility checks live in private `src/transport.rs`.
+A gzip-compressed tar carries `bilibi-web`, `SHA256SUMS` and optionally `manifest.txt`, `Cargo.lock`, `release.json`, `bundle.json` and `plugins/`. The application repository created by `./bilibi new <name>` builds and packages the complete composition in the operator's chosen CI; see [application workspaces](../../../docs/application-workspaces.md). Only an archive accepted by Release trust is installable. After verification, Bilibi writes `admission.json` beside the unpacked files with the proof kind, archive digest and pinned identities; it never trusts that file from inside an archive. Archive parsing, safe paths and compatibility checks live in private `src/transport.rs`.
+
+Release trust is one closed policy, never a fallback list:
+
+| Kind | Proof | Network needed to verify |
+| --- | --- | --- |
+| `github` | GitHub artifact attestation for the archive from the pinned repository number, workflow and tag | Yes; anonymous for public repositories, server GitHub App for private repositories |
+| `operator` | One canonical DSSE statement signed by the pinned Ed25519 key, binding archive SHA-256, repository name and number, workflow, tag, kind and target | No; local archive, proof, trust record and OpenSSL only |
+
+The initial `scripts/install-server.sh trust` writes `/opt/bilibi/trust/release.json` before the first release and records `server-setup` with the UTC time. The web process can read it but cannot write the file or its directory. A later `base.software.trust` safe write requires the installation owner's fresh 2FA and queues a one-step installer job; the reviewed step-up target includes the complete new facts and derived key fingerprint. The installer records the requesting account, validates the key again and atomically replaces the record. Software shows that actor and time plus the instance's highest admitted tag. Operator verification uses no transparency log, so private repository and asset names are not published to Rekor.
 
 ### Install from GitHub
 
-Name one repository on **Software › Releases**, as owner/name, for example your-company/my-bilibi. A public repository needs no token, but GitHub then allows only 60 calls an hour from a server's address, and each install review uses about three. A token raises that to 5,000 an hour.
+The repository shown on **Software › Releases** comes from Release trust; changing GitHub settings cannot redirect installation to another repository. Public repositories use anonymous access; private repositories use only the server's GitHub App. Bilibi never accepts a person's `gh` login or a hand-made token on the server.
 
-**A private repository is read with the server's GitHub App, so no token has to be renewed.** The server owner puts the App on the server once with `scripts/install-server.sh github-app` ([Private application repositories](../../../docs/server-install.md#private-application-repositories)). Then each list, review, download and upload check asks GitHub for a new token that can only read this one repository, Contents and Attestations, and expires within the hour. The token is held in memory for that one use: never saved, shown or logged. The page names the App under **Read access**, and its saved read token is used only for a repository the App is not installed on (or none, for a public one). A refusal is the plain sentence the page shows, for example when the App can change anything, or is installed on all of the owner's repositories. The App code is `src/github/app.rs`; the terminal installs use `scripts/lib/github-app.py` with the same rules.
+**A private repository is read with the server's GitHub App, so no token has to be renewed and no person's GitHub login exists on the server.** The server owner puts the App on the server once with `scripts/install-server.sh github-app` ([Private application repositories](../../../docs/server-install.md#private-application-repositories)). Each list and download asks GitHub for a new token restricted to this one repository and expiring within the hour. GitHub trust also uses it to read attestations; operator trust uses GitHub only to fetch bytes, then verifies offline. The token is held in memory for that one use: never saved, shown or logged. A refusal is the plain sentence the page shows, for example when the App can change anything or is installed on all of the owner's repositories. The App code is `src/github/app.rs`; terminal GitHub checks use `scripts/lib/github-app.py` with the same rules.
 
-Without an App, a private repository needs a fine-grained token that can only read that repository, and someone must make a new one when it expires. The token is stored encrypted and never shown again. Changing or clearing it asks for your 2FA code, including in the settings editor.
+Without an App, private GitHub listing, download and attestation checks are refused. Public repositories remain anonymous. Uploading an archive and its operator proof is offline and does not contact GitHub.
 
-The first time you save a repository, Bilibi asks GitHub for its number and remembers that number only when you choose **Accept this repository**. That also asks for your 2FA code. If GitHub later reports a different number for the same name, installs stop until you accept the new number. Bilibi does not replace a remembered number by itself.
+The repository name and immutable number are accepted when Release trust is pinned. If GitHub later reports a different number for the same name, installs stop. Only an installation-owner release-trust change with fresh 2FA can accept a different identity; Bilibi never replaces it by itself.
 
-The list shows setup files for this server: names that start with `bilibi-setup-` and end with this computer's target, such as `-x86_64-unknown-linux-gnu.tar.gz`. Drafts stay hidden. Pre-releases stay hidden until you choose **Show pre-releases**. The list is kept on this server and refreshed at most as often as **Check GitHub every this many minutes** (15 by default), and again when you choose **Refresh**. The list is saved in the instance's `data/` folder. If GitHub is limiting this server, or cannot be reached, the saved list stays on the page, and a failed look is not repeated before the interval has passed; **Refresh** asks again. The running program, Undo and a file already downloaded do not call GitHub.
+The list shows setup files for this server: names that start with `bilibi-setup-` and end with this computer's target, such as `-x86_64-unknown-linux-gnu.tar.gz`. Under operator trust, each archive must have a release asset named exactly `<archive>.proof.json`; a file without its sidecar is not offered. Drafts stay hidden. Pre-releases stay hidden until you choose **Show pre-releases**. The list is kept on this server and refreshed at most as often as **Check GitHub every this many minutes** (15 by default), and again when you choose **Refresh**. The list is saved in the instance's `data/` folder. If GitHub is limiting this server, or cannot be reached, the saved list stays on the page, and a failed look is not repeated before the interval has passed; **Refresh** asks again. The running program, Undo and a file already downloaded do not call GitHub.
 
-Choose **Review** on a file. The install records the repository number, the release number, the file number, the tag, the target and the file's check code. Before the download, Bilibi reads that release from GitHub again and refuses when any of those differ. It then downloads the file through the shared outgoing calls, follows only GitHub's own file hosts, and drops the token when the host changes. The download address is not stored. Before opening the archive, GitHub CLI checks its digest, signed build provenance, repository number, setup tag and signer workflow. A public repository needs no GitHub login; a private repository uses a new token from the server's GitHub App, or the read token saved in Software. The files inside are checked after they are copied. The job result keeps the GitHub identity. Undo does not call GitHub.
+Choose **Review** on a file. The install records the repository number, release number, file number, tag, target and archive check code; operator trust also records the proof asset number and check code. Before download, Bilibi reads the release again and refuses when any identity differs. It follows only GitHub's own file hosts and drops the token when the host changes. Under GitHub trust, GitHub CLI verifies the pinned attestation. Under operator trust, Bilibi downloads the proof with a 64 KiB bound, checks its reviewed digest and runs the offline verifier. The files inside are checked after copying. The job result keeps the GitHub and proof identity. Undo does not call GitHub.
 
-An upload is verified before it is kept: its `release.json` must name the accepted repository and setup tag, and GitHub must return valid build provenance for the complete uploaded archive. Uploading therefore needs GitHub to be reachable at upload time. Verification failure removes the unpacked copy and says to download the official release asset again; the running release is untouched.
+An upload is verified before it is kept: its published file name supplies the exact tag and target, and `release.json` must name the pinned repository and tag. GitHub trust verifies the archive online. Operator trust requires the detached `.proof.json` in the second upload control and verifies it offline, so neither GitHub nor any transparency log must be reachable. Verification failure removes the archive, proof and unpacked copy; the running release is untouched.
 
 ### What happens on the target
 
 1. Review an exact GitHub asset or a queued upload. GitHub review binds repository, release and asset IDs, tag, target and archive SHA-256. It checks the selected identity again at commit.
 2. The server's supervised `run_downloads` loop downloads queued GitHub installs through `base/integration` as the reauthenticated requester. It rechecks GitHub, streams into `incoming/job-<id>/`, checks the approved digest before unpacking, and wakes the installer. Cancel stops a download within about two seconds; failures finish before any pause.
-3. The installer takes `incoming/job-<id>/` or `incoming/upload-<n>/` only after the complete archive's GitHub provenance verified. It checks checksums, processor, system libraries and disk space, refuses the program already in service, then copies and checks again. For GitHub, it compares the program with the downloader's recorded SHA-256 before executing `status`. A downloaded folder is removed after the attempt; an upload stays for retry unless installed, corrupt or discarded.
+3. The installer takes `incoming/job-<id>/` or `incoming/upload-<n>/` only after the complete archive's pinned proof verified. It rechecks the instance replay record, checks checksums, processor, system libraries and disk space, refuses the program already in service, then copies and checks again. For GitHub, it compares the program with the downloader's recorded SHA-256 before executing `status`. A downloaded folder is removed after the attempt; an upload stays for retry unless installed, corrupt or discarded.
+4. After the new release answers, the installer atomically records its tag and archive SHA-256 in the instance's trust directory. A later tag must be strictly newer. Database restore, release-folder restore and manual `switch` cannot lower this high-water mark; Software Undo remains the deliberate rollback path.
 
 Each failed check is a plain sentence that says what to do next: "This release was built for Linux ARM 64-bit computers, and this server is Linux x86-64. Build it locally for the same kind of server."
 
@@ -161,7 +174,7 @@ Each failed check is a plain sentence that says what to do next: "This release w
 
 The **Releases** tab uses `release_files.rs` within `web.rs`. Each GitHub row names its asset and full archive SHA-256, and marks the installed asset. Installed facts show the local release number separately from repository/release/asset IDs, target, tag, setup commit, archive SHA-256 and program SHA-256. `status.installed_asset` and `releases.installed_asset` return the same evidence, recovered from successful install history and the current release folder. Missing older evidence is null, never inferred from a tag. Undo returns the identity of the restored release.
 
-Upload and queued files live inside **Upload a release file**. Uploads require manage permission. Saving or accepting GitHub settings requires a fresh 2FA code. The repository number comes from GitHub, never from a typed guess. Opening the tab uses the cached list; **Refresh**, expiry or an install review asks GitHub. Job polling does not.
+Upload and queued files live inside **Upload a release file**. Uploads require manage permission. The operator proof input appears beside the archive and is required only by operator trust. GitHub release-list settings and release-trust replacement require fresh 2FA. Opening the tab uses the cached list; **Refresh**, expiry or an install review asks GitHub through the App. Job polling does not.
 
 ### Staging and Production
 
@@ -209,7 +222,7 @@ Finish or cancel all active installs using instance sources before applying `bas
 ## Caveats
 
 - An unpinned program cannot prove its exact Domain versions or CI pair. Pin before building locally.
-- A local source build is still supported for `./bilibi start`, checks and development. It is not installable on a server: publish the saved application composition through its Release setup workflow so the archive has `release.json` and GitHub build provenance.
+- A local source build is still supported for `./bilibi start`, checks and development. It is not installable on a server: publish the saved application composition so the archive has `release.json` and the proof selected by that server's pinned release-trust policy.
 - Live uploads are limited to 64 MB. GitHub downloads stream with bounded archive checks.
 
 ## Where to go next

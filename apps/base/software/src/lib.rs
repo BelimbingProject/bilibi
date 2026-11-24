@@ -15,6 +15,7 @@ mod github;
 mod jobs;
 mod promotion;
 mod release_files;
+mod release_proof;
 mod review;
 mod transfer;
 mod transport;
@@ -82,6 +83,7 @@ pub const CATALOGUE_URL_KEY: &str = "software.catalogue_url";
 pub const ACTION_INSTALL: &str = "software.install";
 pub const ACTION_UNDO: &str = "software.undo";
 pub const ACTION_CANCEL: &str = "software.cancel";
+pub const ACTION_TRUST: &str = "software.trust";
 /// The action a worker's outcome is settled under (`Software::settle`).
 pub const ACTION_FINISHED: &str = "software.finished";
 /// The action a notification of a settled outcome is sent under.
@@ -98,22 +100,8 @@ const DEFAULT_SILENCE_MINUTES: i64 = 20;
 
 bilibi_step_up::declare!(
     "base/software",
-    bilibi_step_up::Operation::new(
-        STEP_UP,
-        "Change the server's software (install, undo, GitHub releases)"
-    )
-    .always()
-);
-// Saving the GitHub read token in the settings editor. The token can read
-// the application repository, so changing it asks for a fresh code.
-bilibi_step_up::declare!(
-    "base/software",
-    bilibi_step_up::Operation::new(
-        github::STEP_UP_TOKEN,
-        "Change the GitHub read token in the settings"
-    )
-    .always()
-    .guards_setting(github::TOKEN)
+    bilibi_step_up::Operation::new(STEP_UP, "Change the server's software or release trust")
+        .always()
 );
 
 /// The facade: reviews a request without writing, and records it inside the
@@ -229,6 +217,7 @@ impl Software {
         }
         Ok(json!({
             "instance": review::instance_json(&instance),
+            "release_trust": self.paths.as_ref().map(release_proof::facts).transpose().map_err(Error::refused)?,
             "installed": review::installed_json(&self.composition),
             "installed_asset": self.installed_asset(&**client, scope).await?,
             "plugins": jobs::plugins_json(&**client, tenant).await?,
@@ -491,6 +480,81 @@ impl Software {
         self.queue(tx, scope, new, &review).await
     }
 
+    /// What replacing this installation's release trust would do.
+    pub async fn review_trust(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
+        let client = self.db.get().await?;
+        authorize_operator(&**client, scope, MANAGE).await?;
+        bilibi_tenancy::prove_owner(&**client, scope).await?;
+        if let Some(job) = jobs::active(&**client, scope.tenant()).await? {
+            return Err(SoftwareError::field(
+                "job",
+                &format!(
+                    "Job {} is {} on this instance. Wait for it to finish before changing release trust.",
+                    job.id, job.state
+                ),
+            ));
+        }
+        let change = release_proof::review_change(input)
+            .map_err(|(field, message)| SoftwareError::field(&field, &message))?;
+        let current = self
+            .paths
+            .as_ref()
+            .map(release_proof::facts)
+            .transpose()
+            .map_err(|message| SoftwareError::field("trust", &message))?
+            .unwrap_or(Value::Null);
+        let method = if change.facts["kind"] == "operator" {
+            "operator Ed25519 signatures"
+        } else {
+            "GitHub artifact attestations"
+        };
+        let summary = format!(
+            "Trust {method} from {} ({}) starting at {}",
+            change.facts["repository"].as_str().unwrap_or(""),
+            change.facts["repository_id"],
+            change.facts["minimum_tag"].as_str().unwrap_or("")
+        );
+        let target = format!(
+            "release trust: {}",
+            serde_json::to_string(&change.facts).map_err(|_| Error::Internal)?
+        );
+        Ok(Review {
+            target,
+            request: change.request,
+            facts: json!({
+                "summary": summary,
+                "current": current,
+                "new": change.facts,
+                "warnings": ["Only releases matching this one proof method, repository, workflow and tag floor will be accepted. There is no fallback."],
+                "checks": ["The repository name and immutable number are pinned", "The exact workflow identity is pinned", "Operator signatures verify offline with the pinned public key"],
+                "steps": jobs::trust_steps().iter().map(|step| json!({"seq": step.seq, "key": step.key, "label": step.label, "pauses": step.pauses})).collect::<Vec<_>>(),
+                "step_up": [STEP_UP],
+            }),
+            switch: "auto".into(),
+        })
+    }
+
+    pub async fn trust_in(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Value> {
+        authorize_operator(tx.sql(), scope, MANAGE).await?;
+        bilibi_tenancy::prove_owner(tx.sql(), scope).await?;
+        let review = self.review_trust(scope, input).await?;
+        self.step_up.require(scope, STEP_UP, &review.target).await?;
+        let new = jobs::NewJob {
+            kind: "trust",
+            request: review.request.clone(),
+            review: review.facts.clone(),
+            undo_of: None,
+            switch: "auto".into(),
+            steps: jobs::trust_steps(),
+        };
+        self.queue(tx, scope, new, &review).await
+    }
+
     /// What taking back the last finished change would do, and what it costs.
     pub async fn review_undo(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
         let client = self.db.get().await?;
@@ -607,6 +671,7 @@ impl Software {
         let job = jobs::queue(tx, scope.tenant(), scope.user(), new).await?;
         let title = match kind {
             "install" => format!("Software install queued as job {}", job.id),
+            "trust" => format!("Release trust change queued as job {}", job.id),
             _ => format!("Software undo queued as job {}", job.id),
         };
         self.notifications
@@ -689,6 +754,31 @@ impl Software {
                 enabled_plugins: &jobs::enabled_plugins(client, scope.tenant()).await?,
             },
         )?;
+        let paths = self.paths.as_ref().ok_or_else(|| {
+            SoftwareError::field(
+                "release",
+                "This program is not running from an installed instance, so it cannot install a release.",
+            )
+        })?;
+        let policy = release_proof::Policy::load(paths)
+            .map_err(|message| SoftwareError::field("release", &message))?;
+        let source = &review.request["source"];
+        if source["repository"].as_str() != Some(policy.repository.as_str())
+            || source["repository_id"].as_i64() != Some(policy.repository_id)
+        {
+            return Err(SoftwareError::field(
+                "release",
+                "This release is not from the repository pinned in Release trust.",
+            ));
+        }
+        let tag = source["tag"].as_str().ok_or_else(|| {
+            SoftwareError::field("release", "This release has no verified setup tag.")
+        })?;
+        policy
+            .check_tag(tag)
+            .map_err(|message| SoftwareError::field("release", &message))?;
+        release_proof::check_replay(paths, tag)
+            .map_err(|message| SoftwareError::field("release", &message))?;
         review.facts["current_asset"] = self.installed_asset(client, scope).await?;
         Ok(review)
     }
@@ -812,34 +902,6 @@ inventory::submit! { Contribution::new(DEFINITIONS, CATALOGUE_URL_KEY, provenanc
         help: "The published catalogue.json that lists the Platform and Domain releases and which were tested together. Change it only to read a catalogue you publish yourself (server owner only).",
         capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
 })) }
-inventory::submit! { Contribution::new(DEFINITIONS, github::REPOSITORY, provenance!(), &Setting::Definition(Definition {
-    value_type: ValueType::String, scopes: &[ScopeKind::Global], default: || json!(null), nullable: true, encrypted: false,
-    minimum: None, maximum: None,
-    validator: Some(Validator { accepts: github::accepts_repository, message: "Enter the repository as owner/name, like your-company/my-bilibi." }),
-    editor: Some(Editor { group: "Software", label: "Application repository on GitHub",
-        help: "Your application repository, like your-company/my-bilibi. Software reads its releases from here. Server owner only.",
-        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
-})) }
-inventory::submit! { Contribution::new(DEFINITIONS, github::REPOSITORY_ID, provenance!(), &Setting::Definition(Definition {
-    value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(null), nullable: true, encrypted: false,
-    minimum: Some(1.0), maximum: None,
-    validator: Some(Validator { accepts: github::accepts_id, message: "The GitHub repository number is recorded when you accept the repository." }),
-    editor: None,
-})) }
-inventory::submit! { Contribution::new(DEFINITIONS, github::REPOSITORY_BOUND, provenance!(), &Setting::Definition(Definition {
-    value_type: ValueType::String, scopes: &[ScopeKind::Global], default: || json!(null), nullable: true, encrypted: false,
-    minimum: None, maximum: None,
-    validator: Some(Validator { accepts: github::accepts_bound, message: "The remembered repository must be owner/name." }),
-    editor: None,
-})) }
-inventory::submit! { Contribution::new(DEFINITIONS, github::TOKEN, provenance!(), &Setting::Definition(Definition {
-    value_type: ValueType::String, scopes: &[ScopeKind::Global], default: || json!(null), nullable: true, encrypted: true,
-    minimum: None, maximum: None,
-    validator: Some(Validator { accepts: github::accepts_token, message: "The GitHub token must be 20 to 255 characters with no spaces." }),
-    editor: Some(Editor { group: "Software", label: "GitHub read token for a private setup repository",
-        help: "Leave empty for a public repository. For a private one, use a fine-grained token that can read this repository only. Stored encrypted and never shown back. Changing or clearing it asks for your authenticator code every time (server owner only).",
-        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
-})) }
 inventory::submit! { Contribution::new(DEFINITIONS, github::REFRESH_MINUTES, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(github::DEFAULT_REFRESH_MINUTES), nullable: false, encrypted: false,
     minimum: Some(1.0), maximum: Some(1440.0),
@@ -876,7 +938,7 @@ bilibi_menu::contribute!(
 // plan for an install, undo or go-ahead, and a plain submit for cancel.
 inventory::submit! { Contribution::new(PAGE_WRITES, web::PAGES, provenance!(), &PageWrites {
     service: web::PAGES,
-    contracts: &[("install", "base.software.install"), ("undo", "base.software.undo"), ("go", "base.software.go"), ("cancel_job", "base.software.cancel"), ("github_source", "base.software.github"), ("github_accept", "base.software.github"), ("clear_github_token", "base.software.github")],
+    contracts: &[("install", "base.software.install"), ("undo", "base.software.undo"), ("go", "base.software.go"), ("cancel_job", "base.software.cancel"), ("github_source", "base.software.github")],
     pending: Pending::None,
 }) }
 // Keep existing bookmarks; the only page is Software with its Releases tab.
@@ -888,7 +950,7 @@ inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/software", layer: bilibi_module_registry::Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/step_up", "base/system", "base/notifications", "base/integration", "base/audit", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql")), ("base-software-005-paused", include_str!("../migrations/005-paused.sql")), ("base-software-006-installer-heartbeat", include_str!("../migrations/006-installer-heartbeat.sql"))],
+        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql")), ("base-software-005-paused", include_str!("../migrations/005-paused.sql")), ("base-software-006-installer-heartbeat", include_str!("../migrations/006-installer-heartbeat.sql")), ("base-software-007-release-trust", include_str!("../migrations/007-release-trust.sql"))],
         // Declaration order is build order: the page service reads this one.
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let software = Arc::new(Software {

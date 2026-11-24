@@ -121,6 +121,9 @@ pub fn undo_steps(restores_backup: bool) -> Vec<Step> {
     list.push(("verify", "Check that it works", false));
     steps(&list)
 }
+pub fn trust_steps() -> Vec<Step> {
+    steps(&[("trust", "Replace the server's release trust record", false)])
+}
 fn steps(list: &[(&'static str, &'static str, bool)]) -> Vec<Step> {
     list.iter()
         .enumerate()

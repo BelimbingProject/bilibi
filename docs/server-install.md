@@ -4,27 +4,41 @@
 
 ## The short version
 
-Publish your application's protected setup tag, then download its setup archive, installer and server-tools assets. Verify `bilibi-server-tools.tar.gz` with `gh attestation verify` before you extract or run its root-owned script. The runtime needs neither Cargo nor a Rust compiler; Production receives the tested programs and never builds them. On a fresh Ubuntu, Debian, Rocky Linux 10 or RHEL 10 server, run:
+Publish your application's protected setup tag, then download its setup archive, installer and server-tools assets. Verify `bilibi-server-tools.tar.gz` before you extract or run its root-owned script. Pin one release proof policy on the server: GitHub artifact attestations, or the operator's Ed25519 public key for builds from any CI. The runtime needs neither Cargo nor a Rust compiler; Production receives the tested programs and never builds them. On a fresh Ubuntu, Debian, Rocky Linux 10 or RHEL 10 server, a GitHub-attested application uses:
 
 ```sh
 sudo scripts/install-server.sh create production --role production --site app.example.com --public-site shop.example.com
-sudo scripts/install-server.sh release production /path/to/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
+sudo scripts/install-server.sh trust --github --repo your-company/my-bilibi --repo-id 123456789 --minimum-tag setup-v1.0.0
+sudo scripts/install-server.sh release production /path/to/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --tag setup-v1.0.0
 ```
 
 ```sh
 printf '%s\n' "$RELAY_PASSWORD" | sudo scripts/install-server.sh mail production --host smtp.example.net --port 587 \
     --tls starttls --username relay-user --from-address bilibi@example.com --password-stdin
 sudo scripts/install-server.sh create-owner production --email owner@example.com --company-name "Example Operations"
-sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
+sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --tag setup-v1.0.0
 ```
 
-The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and two proxy site blocks, and prints what to do next. The second copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The third sets the mail relay. The fourth creates the first account, the server owner, and emails the owner a claim link: the owner chooses a password there and sets up 2FA. The fifth starts the installer, the service that puts later releases into service when the owner asks on the Software page. Open `https://app.example.com`, sign in with that email, and Caddy serves the staff site, with a certificate it fetched itself. `https://shop.example.com` is the public site.
+An operator-signed application pins the public key instead, then gives the proof published beside each asset:
+
+```sh
+sudo scripts/install-server.sh trust --operator-key /path/to/operator-release.pub \
+  --repo your-company/my-bilibi --repo-id 123456789 --workflow your-ci/release --minimum-tag setup-v1.0.0
+sudo scripts/install-server.sh release production /path/to/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz \
+  --tag setup-v1.0.0 --proof /path/to/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz.proof.json
+sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu \
+  --tag setup-v1.0.0 --proof /path/to/bilibi-installer-x86_64-unknown-linux-gnu.proof.json
+```
+
+The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and two proxy site blocks, and prints what to do next. The second pins the repository, immutable repository number, workflow and oldest acceptable tag. The third verifies and copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The remaining commands set mail, create the first account and start the installer service that carries out later owner-reviewed Software jobs. Open `https://app.example.com`, sign in with the owner's claimed account and Caddy serves the staff site. `https://shop.example.com` is the public site.
 
 Letting an AI assistant do the install? Give it [the Install Bilibi skill](install-with-ai/SKILL.md). Every command takes `--json` for one machine-readable line per step, with a stable error code and what to do next.
 
 ### Verify the server tools first
 
-The server-tools archive contains a script that runs as root, so verify the archive before extracting it. A public repository needs no GitHub login. Install a current GitHub CLI from its official package repository if `gh attestation verify --help` is not available; [GitHub maintains the package commands](https://github.com/cli/cli/blob/trunk/docs/install_linux.md). Then run:
+The server-tools archive contains a script that runs as root, so verify the archive on a trusted computer before extracting it. Use the same proof method you will pin on the server; never try one and fall back to the other.
+
+For a GitHub-attested build, a public repository needs no GitHub login. Install a current GitHub CLI from its official package repository if `gh attestation verify --help` is not available; [GitHub maintains the package commands](https://github.com/cli/cli/blob/trunk/docs/install_linux.md). Then run:
 
 ```sh
 set -o pipefail
@@ -38,13 +52,27 @@ gh attestation verify bilibi-server-tools.tar.gz \
   awk -v expected="$EXPECTED_REPOSITORY_ID" 'NF { found=1; if ($0 != expected) exit 1 } END { if (!found) exit 1 }'
 ```
 
-Copy `EXPECTED_REPOSITORY_ID` from the application repository's GitHub **Settings › General** page or another trusted record before you start the install. Never derive it from the repository name during the install. For a private application repository, run this check on your own computer, where `gh auth login` already reads the repository, then copy the checked archive to the server. After the first install, the server checks newer tools itself with its GitHub App; see [Private application repositories](#private-application-repositories). Extract and run the tools only after the whole pipeline succeeds. If it fails, delete the archive and download it again from the official release; do not run or repair it by hand. `install-server.sh create` installs the same current GitHub CLI for later release checks.
+Copy `EXPECTED_REPOSITORY_ID` from the application repository's GitHub **Settings › General** page or another trusted record before you start the install. Never derive it from the repository name during the install.
+
+For an operator-signed build, take the public key from the operator through a separate trusted channel. Use `release-proof.py` from a Bilibi Platform checkout whose commit you already trust, not the copy inside the unverified archive:
+
+```sh
+python3 /trusted/bilibi/scripts/lib/release-proof.py make-trust \
+  --kind operator --repository your-company/my-bilibi --repository-id 123456789 \
+  --workflow your-ci/release --minimum-tag setup-v1.0.0 \
+  --changed-by trusted-workstation --public-key operator-release.pub --output release-trust.json
+python3 /trusted/bilibi/scripts/lib/release-proof.py verify-operator \
+  --artifact bilibi-server-tools.tar.gz --proof bilibi-server-tools.tar.gz.proof.json \
+  --trust release-trust.json --tag setup-v1.0.0 --kind server-tools --target server-tools
+```
+
+This check is offline: it reads only the archive, proof, pinned trust record and local OpenSSL. It sends no private repository or asset name to a transparency log. Extract and run the tools only after the selected check succeeds. If it fails, delete both files and get them again from the operator's release; never run or repair them by hand. `install-server.sh create` installs the current GitHub CLI for GitHub-attested releases and the offline verifier for operator-signed releases.
 
 Want a Dev instance on the same machine to try changes first? Add one:
 
 ```sh
 sudo scripts/install-server.sh create dev --role dev --site dev.erp.example.com
-sudo scripts/install-server.sh release dev /path/to/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
+sudo scripts/install-server.sh release dev /path/to/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --tag setup-v1.0.0
 ```
 
 Notice what you did **not** do: pick ports, write database passwords, write a unit file or a proxy config, or edit the database to get a first login. The script generated them, and it tells you when something you asked for conflicts with what exists.
@@ -76,10 +104,13 @@ Each instance lives in one folder:
     current -> releases/current  fixed, so the service always starts current/bilibi-web
     backups/job-<n>/  the database backup the installer took before job <n> changed anything
     incoming/         a release on its way in: downloaded from the source or uploaded as a file, until the installer copies it
+    trust/release-state.json  highest admitted setup tag and archive digest (bilibi-build:bilibi, 0640)
     data/             the folder the running program writes: media/ uploads, mailbox/ outgoing mail
     site/waiting.html the page Caddy shows while the service is stopped
   dev/                the same, for Dev
   build/              home of bilibi-build: bin/bilibi-installer
+  trust/release.json  one pinned release proof policy (root or bilibi-build:bilibi, 0640; web service read-only)
+  release-proof.py    installed offline verifier
   github-app.json     the GitHub App that reads a private application repository, when you add one (root:bilibi, 0640)
 ```
 
@@ -88,9 +119,9 @@ Two system users share the work, so the program that serves pages can never rewr
 | User | Runs | Owns |
 | --- | --- | --- |
 | `bilibi` | the service `bilibi@<instance>` | `data/`, and `incoming/` together with `bilibi-build`; it can read `releases/` and `env` |
-| `bilibi-build` | the installer `bilibi-installer@<instance>`: put releases into service | `releases/`, `backups/`, `/opt/bilibi/build`, and `incoming/` with `bilibi`; it may start, stop and restart `bilibi@*` and reload Caddy through sudo, nothing else |
+| `bilibi-build` | the installer `bilibi-installer@<instance>`: put releases into service and apply an owner-reviewed trust change | `releases/`, `backups/`, `/opt/bilibi/build`, the release-trust directories, and `incoming/` with `bilibi`; it may start, stop and restart `bilibi@*` and reload Caddy through sudo, nothing else |
 
-Two systemd unit templates serve every instance: `bilibi@<instance>` runs `current/bilibi-web run` as `bilibi`, reads `env`, restarts after a crash and permits writes under `data/` and `incoming/`. `bilibi-installer@<instance>` runs `/opt/bilibi/build/bin/bilibi-installer` as `bilibi-build` and carries out install and undo jobs from Software. These services never compile source and need no toolchain. Test source locally or with a separate account on a Dev server, then publish the saved composition through the application repository’s GitHub Actions; see [Build releases](#build-releases) and [application workspaces](application-workspaces.md).
+Two systemd unit templates serve every instance: `bilibi@<instance>` runs `current/bilibi-web run` as `bilibi`, reads `env`, restarts after a crash and permits writes under `data/` and `incoming/`. It can read release trust but cannot replace it. `bilibi-installer@<instance>` runs `/opt/bilibi/build/bin/bilibi-installer` as `bilibi-build` and carries out install, undo and owner-reviewed trust jobs from Software. These services never compile source and need no toolchain. Test source locally or with a separate account on a Dev server, then publish the saved composition through the operator's chosen CI; see [Build releases](#build-releases) and [application workspaces](application-workspaces.md).
 
 Each instance has its own PostgreSQL role and database (`bilibi_production`, `bilibi_dev`) on the server's PostgreSQL 18 cluster, with a generated password kept only in `env`. Dev cannot read Production's data.
 
@@ -185,21 +216,28 @@ Staging is optional. When used, install and check the exact GitHub asset there f
 
 **After the first release, the owner does this from the Software page**, and the installer service does the work: copy and check, pause, back up, update the database, switch, check, and switch back by itself when the check fails. The page also offers Undo. What each step does, and what Undo loses, is in [`apps/installer/README.md`](../apps/installer/README.md).
 
-The first release has no program to ask through, so `release` puts a published setup archive in service from the terminal. Name the application repository and protected setup tag so the script can verify GitHub build provenance before it opens the archive:
+The first release has no program to ask through, so `release` puts a published setup archive in service from the terminal. First run `trust` once, after `create` and before any release. It pins one proof method, repository name and immutable number, workflow identity and minimum setup tag for the whole server:
 
 ```sh
-sudo scripts/install-server.sh release production /home/me/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
+sudo scripts/install-server.sh trust --github --repo your-company/my-bilibi --repo-id 123456789 --minimum-tag setup-v1.0.0
+sudo scripts/install-server.sh release production /home/me/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --tag setup-v1.0.0
 ```
 
-Add `--repo-id <number>` with your application repository's GitHub number, copied beforehand from its GitHub **Settings › General** page or another trusted record. Never look it up from the repository name during the install. The script refuses a release signed by any other number, so a reused repository name cannot pass. The official `BelimbingProject` repositories need no `--repo-id`. The `installer` command takes the same flags. Public repositories need no GitHub login. A private repository is read with the server's [GitHub App](#private-application-repositories). If the checksum, repository, tag or signer workflow does not match, the command stops before unpacking, migration or service changes. Download the asset from the official release again; never bypass the check.
+For an operator key, use `trust --operator-key <public.pem>` and name the CI workflow with `--workflow`; then add `--proof <asset>.proof.json` to `release`, `installer` and `verify`. The proof is a DSSE envelope over the archive SHA-256, repository name and number, workflow, tag, artifact kind and target. Verification is offline and never falls back to GitHub. GitHub trust refuses an operator proof, and operator trust refuses a missing or wrong proof.
+
+Copy `--repo-id <number>` beforehand from the application repository's GitHub **Settings › General** page or another trusted record. Never look it up from the repository name during the install. The official `BelimbingProject` repository numbers remain built-in, but `trust` still records the number. Public GitHub-attested repositories need no GitHub login. A private repository is read only through the server's [GitHub App](#private-application-repositories). If the checksum, key or attestation, repository, workflow, tag, kind or target does not match, the command stops before unpacking, migration or service changes.
+
+The setup command cannot replace trust after any release has been admitted. Later replacement is `base.software.trust`: the installation owner reviews the complete new policy and key fingerprint, gives a fresh 2FA code, and the separate installer atomically applies the audited job. Software shows the current policy read-only. There is no compatibility fallback.
 
 Step by step, we:
 
-1. Verify the archive with GitHub, unpack only the expected files, check its SHA-256 list, and copy it into the next numbered folder, `releases/<n>`.
+1. Verify the archive with the one pinned proof policy, unpack only the expected files, check its SHA-256 list, and copy it into the next numbered folder, `releases/<n>`.
 2. Stop the service. From here Caddy shows the waiting page.
 3. Update the database with the new program's `migrate` and apply its production seeds. Nothing migrates on boot, so this must happen before the new program serves. If it fails, the previous release is started again and nothing has changed.
 4. Point `releases/current` at `<n>` and start the service. The instance's `current` is a fixed link to `releases/current`, so the link that moves lives in the folder `bilibi-build` owns, and the installer can move it too; an instance created before this shape is converted the next time you run `create`, `installer`, `release` or `switch`. A job that finds an unconverted instance ends before the pause with "Nothing changed" and says to run `installer` or `create`.
 5. Check that the backend answers within 60 seconds. If it does not, point `current` back at the previous release and start that.
+
+After a release answers, the instance records its setup tag and archive digest outside the database and release folders. A later install must have a strictly newer setup tag. Use audited Software Undo for a deliberate rollback; copying or restoring an old release cannot lower the replay record.
 
 `switch` goes to any kept release the same way, after checking its checksum:
 
@@ -236,10 +274,10 @@ The application maker's [guide to connecting servers](https://github.com/Belimbi
 
 From then on:
 
-- `release`, `installer` and `verify` ask GitHub for a token that can only read the `--repo` you name, give it to that one `gh attestation verify` as `GH_TOKEN`, and drop it. It is never printed, logged or written to disk.
-- **Software › Releases** does the same for each list, review, download and upload check. The page's saved read token is used only for a repository the App is not installed on.
-- A repository the App is not installed on, such as the official `BelimbingProject/bilibi` for the installer, is read with the saved read token, or without a login, as before.
-- A `GH_TOKEN` you set yourself for one command still wins.
+- Under GitHub trust, `release`, `installer` and `verify` ask GitHub for a token that can only read the pinned repository, give it to one `gh attestation verify`, and drop it. Under operator trust, signature verification is offline and needs no token.
+- **Software › Releases** uses the App for private release lists and downloads. GitHub trust also uses it for attestation verification. Operator trust downloads the archive and its matching `.proof.json`, then verifies both offline. Public repositories use anonymous access.
+- A private repository the App is not installed on is refused. Install the App on the one repository pinned in Release trust.
+- Bilibi ignores a person's `gh` login and environment tokens. Servers accept no hand-made GitHub token; only public-repository requests are anonymous.
 
 The App lives in `/opt/bilibi/github-app.json`, one per server, because every instance on the machine serves the same application. Root and the Bilibi services can read it, like each instance's `env`, which already holds the key that unlocks saved secrets.
 
@@ -248,7 +286,7 @@ The App lives in `/opt/bilibi/github-app.json`, one per server, because every in
 | `github-app --client-id <id> --repo <owner/name>` | Check the key on standard input against GitHub, then keep it. Rerun with a new key to replace it |
 | `github-app --check` | Get a token and read the repository, then say whether the App works |
 | `github-app --remove` | Forget the App on this server. Also delete the App, or its key, on GitHub |
-| `verify <file> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Check a file's GitHub provenance without installing it, such as a newer `bilibi-server-tools.tar.gz` before you extract it |
+| `verify <file> --kind server-tools\|installer\|setup --tag <setup-vX.Y.Z> [--proof <proof.json>]` | Check a file with the pinned release proof policy without installing it, such as newer server tools before extraction |
 
 Every use refuses, and says what to change on GitHub, when the App can change anything, cannot read Contents and Attestations, is installed on all of the owner's repositories, or its key was deleted. A server only ever needs to read.
 
@@ -259,10 +297,17 @@ Every use refuses, and says what to change on GitHub, when the App can change an
 Download the installer asset from the same published application release, then run:
 
 ```sh
-sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
+sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --tag setup-v1.0.0
 ```
 
-The script verifies the installer's GitHub provenance before it replaces anything. It then copies the program to `/opt/bilibi/build/bin/bilibi-installer`, owned by root so neither Bilibi user can change it, and starts `bilibi-installer@<instance>` for every instance on the machine. A `create` after that starts one for the new instance too. Run `installer` again with a newer verified program to update it: the services restart, and a job one of them was in the middle of is settled by the rules in [`apps/installer/README.md`](../apps/installer/README.md) ("If the server restarts mid-way"): before the database changed it ends `interrupted` and nothing changed; after, it finishes.
+For operator trust, add the detached proof:
+
+```sh
+sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu \
+  --tag setup-v1.0.0 --proof /path/to/bilibi-installer-x86_64-unknown-linux-gnu.proof.json
+```
+
+The script applies the pinned proof policy before it replaces anything. It then copies the program to `/opt/bilibi/build/bin/bilibi-installer`, owned by root so neither Bilibi user can change it, and starts `bilibi-installer@<instance>` for every instance on the machine. A `create` after that starts one for the new instance too. Run `installer` again with a newer verified program to update it: the services restart, and a job one of them was in the middle of is settled by the rules in [`apps/installer/README.md`](../apps/installer/README.md) ("If the server restarts mid-way"): before the database changed it ends `interrupted` and nothing changed; after, it finishes.
 
 The installer reads the instance's `env` for its database and port. It copies a release from `incoming/`, where the program puts a verified GitHub download or uploaded archive.
 
@@ -399,11 +444,21 @@ For example, from the build account's composed checkout:
 nice -n 15 ionice -c 3 cargo build --release --locked -j 2 -p bilibi-web -p bilibi-installer
 ```
 
-Local builds are for development checks. They are not server releases. An application release must come from the protected setup tag and GitHub release workflow below. **Production never builds or resolves source dependencies.**
+Local builds are for development checks. They are not server releases. An application release must come from the protected setup tag and the workflow identity pinned on the server. The operator may use GitHub Actions or any other CI. **Production never builds or resolves source dependencies.**
 
 ### Application releases
 
-**Prepare application releases from the outer application repository.** Create it from your trial with `./bilibi new <name>`. Commit and push component changes in their own repositories. Run `./bilibi check` with a separate empty disposable database, then `./bilibi build`. Each asks whether to use new commits and saves the record when you accept. Commit and review that record on the application's default branch, then run `./bilibi release` to create the protected tag and start the release workflow. GitHub builds from that record. The builder verifies the source selection and saved lock; the application's README describes publication. See [application workspaces](application-workspaces.md) for the directory layout and migration.
+**Prepare application releases from the outer application repository.** Create it from your trial with `./bilibi new <name>`. Commit and push component changes in their own repositories. Run `./bilibi check` with a separate empty disposable database, then `./bilibi build`. Each asks whether to use new commits and saves the record when you accept. Commit and review that record on the application's default branch, then create the protected `setup-vX.Y.Z` tag and run the workflow whose identity the server trusts. The builder verifies the source selection and saved lock; the application's README describes publication. See [application workspaces](application-workspaces.md) for the directory layout and migration.
+
+GitHub-attested public builds keep the existing release workflow. An operator-key workflow keeps the Ed25519 private key only in its CI secret store and publishes one detached proof beside every asset, named `<asset>.proof.json`. After building an immutable asset, run the trusted helper with the exact pinned values:
+
+```sh
+python3 path/to/release-proof.py sign --artifact "$asset" --private-key "$RELEASE_SIGNING_KEY" \
+  --repository your-company/my-bilibi --repository-id 123456789 --workflow your-ci/release \
+  --tag setup-v1.0.0 --kind setup --target x86_64-unknown-linux-gnu --output "$asset.proof.json"
+```
+
+Use `--kind installer --target x86_64-unknown-linux-gnu` for the installer and `--kind server-tools --target server-tools` for server tools. The workflow must not modify an asset after signing it. Bilibi accepts exactly one signature from the pinned key and exact canonical statement; a different digest, repository, workflow, tag, kind or target is refused. The public key is not secret. Rotate it only through the installation owner's fresh-2FA `base.software.trust` operation.
 
 Before preparing a release with customer code, follow the [installation policy](../apps/base/system/README.md#installation-policy-srcinstallation_editorrs) and [build-time admission requirements](versions.md#versions-inside-the-program). The [installer contract](../apps/installer/README.md) covers admission, rollback and preservation of the owner's policy during recovery.
 
@@ -411,7 +466,7 @@ Before preparing a release with customer code, follow the [installation policy](
 
 Direct Platform and component clones remain supported for focused contributions. Follow the [Software installation commands](../apps/base/software/README.md#add-a-domain) to mount and check a recommended release in your local checkout. Build for the server’s operating system, processor and system library version.
 
-Do not turn this local binary into a server archive. Create an application with `./bilibi new <name>` and use its release workflow; see [application workspaces](application-workspaces.md). That workflow publishes the complete archive, its checksums and GitHub build provenance. Install the same published asset on Staging and Production with separate reviews and fresh 2FA. Backup, automatic switch-back, audit and Undo use the same path for a GitHub download and an uploaded copy of that verified asset.
+Do not turn this local binary into a server archive. Create an application with `./bilibi new <name>` and use its trusted release workflow; see [application workspaces](application-workspaces.md). That workflow publishes the complete archive, its checksums and the proof method pinned on the server. Install the same published asset on Staging and Production with separate reviews and fresh 2FA. Backup, automatic switch-back, audit and Undo use the same path for a GitHub download and an uploaded copy of that verified asset.
 
 When upgrading an older installation, `create`, `installer` and `release` stop and disable each former `bilibi-worker@<instance>` service, then remove that obsolete unit and its sudoers rule. Rerunning is safe, and a fresh server is left alone. The new `base-software-003-local-builds` migration cancels queued and running build jobs with local build guidance, preserving their history. Before upgrading to the GitHub-and-upload release, finish or cancel active instance-source installs; the migration refuses while one remains, including the install that delivers the upgrade. Deliver the upgrade itself as a GitHub asset or an uploaded archive, and update the installer alongside the app. Completed history and Undo are preserved.
 
@@ -422,7 +477,8 @@ Script commands:
 | Command | What it does |
 | --- | --- |
 | `create <instance> --role dev\|staging\|production --site <staff-host> [--public-site <public-host> or --no-public-site] [--public-tenant <id>] [--staff-bind <address> or --no-staff-bind] [--public-bind <address>] [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy blocks. `--public-site` enables the public listener; `--staff-bind` keeps the staff Caddy block on one private interface. Rerun to change the sites. Omitted public-site and bind settings keep their saved values. Use `--no-public-site` to disable the public listener or `--no-staff-bind` to remove the explicit Caddy binds. Changes to listener configuration restart a running instance and check both active listeners. The saved role and staff port stay fixed |
-| `release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance and checksums, copy into `releases/<n>`, migrate, switch, check |
+| `trust --github\|--operator-key <public.pem> --repo <owner/name> --repo-id <n> [--workflow <identity>] --minimum-tag <setup-vX.Y.Z>` | Pin the server's one release proof policy before the first release |
+| `release <instance> <setup archive> --tag <setup-vX.Y.Z> [--proof <proof.json>]` | Verify the pinned proof and checksums, reject replay, copy into `releases/<n>`, migrate, switch, check |
 | `mail <instance> --host <relay> --port <n> --username <user> --tls starttls\|implicit_tls --from-address <address> [--from-name <name>] --password-stdin` | [Outgoing mail](#outgoing-mail) relay in `env`; restarts a running service |
 | `create-owner <instance> --email <address> [--name <name>] [--company-name <name> [--company-code <code>] [--tenant-name <name>]]` | [Server owner setup](#the-first-account): creates the owner and emails the claim link; rerun to resend or check the claim |
 | `--json <command> ...` | [Machine-readable mode](#machine-readable-mode) |
@@ -431,9 +487,9 @@ Script commands:
 | `identity-recover <instance> --email <old> --new-email <new>` | Recover an installation-wide staff sign-in address and sign it out everywhere |
 | `identity-delete <instance> --email <address> --confirm <address>` | Immediately anonymise a portable identity after its last membership is gone |
 | `identity-retention <instance>` | Anonymise up to 100 unused portable identities whose configured retention ended |
-| `installer <bilibi-installer> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance, copy the installer to `/opt/bilibi/build/bin` and start `bilibi-installer@<instance>` for every instance; rerun to update it |
+| `installer <bilibi-installer> --tag <setup-vX.Y.Z> [--proof <proof.json>]` | Verify the pinned proof, copy the installer to `/opt/bilibi/build/bin` and start `bilibi-installer@<instance>` for every instance; rerun to update it |
 | `github-app --client-id <id> --repo <owner/name>` (key on standard input), `github-app --check`, `github-app --remove` | [The server's GitHub App](#private-application-repositories) for a private application repository |
-| `verify <file> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Check a file's GitHub provenance without installing it |
+| `verify <file> --kind server-tools\|installer\|setup --tag <setup-vX.Y.Z> [--proof <proof.json>]` | Check a file with the pinned proof policy without installing it |
 | `switch <instance> <n>` | Put a kept release in service |
 | `status [<instance>]` | The GitHub App, then each instance's role, address, service and installer states, releases |
 

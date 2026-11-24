@@ -93,7 +93,7 @@ fn movement(from: Option<&str>, to: &str) -> &'static str {
 /// The release the owner means: a GitHub setup file or a file uploaded here. The request records which, so the installer
 /// knows where to look.
 enum Chosen {
-    GitHub(crate::github::Pin),
+    GitHub(Box<crate::github::Pin>),
     Uploaded { bundle: String, facts: Value },
 }
 
@@ -139,7 +139,7 @@ pub fn install(
                 "Bilibi has not read the GitHub release list, so it cannot check this request.",
             )
         })?;
-        Chosen::GitHub(crate::github::pin_from_listing(listing, input)?)
+        Chosen::GitHub(Box::new(crate::github::pin_from_listing(listing, input)?))
     } else {
         match input["bundle"].as_str() {
         Some(bundle) => {
@@ -176,7 +176,19 @@ pub fn install(
                 None => format!("the file {bundle} you uploaded"),
             };
             (
-                json!({"kind": "upload", "bundle": bundle, "from": facts["from"]}),
+                json!({
+                    "kind": "upload",
+                    "bundle": bundle,
+                    "from": facts["from"],
+                    "proof": facts["proof"]["proof"],
+                    "repository": facts["proof"]["repository"],
+                    "repository_id": facts["proof"]["repository_id"],
+                    "workflow": facts["proof"]["workflow"],
+                    "tag": facts["proof"]["tag"],
+                    "target": facts["proof"]["target"],
+                    "digest": facts["proof"]["archive_sha256"],
+                    "fingerprint": facts["proof"]["fingerprint"],
+                }),
                 text,
                 facts["release"].as_i64(),
                 facts.clone(),
@@ -203,6 +215,11 @@ pub fn install(
                     "bytes": pin.bytes,
                     "prerelease": pin.prerelease,
                     "setup_commit": pin.setup_commit,
+                    "proof": if pin.proof_asset_id.is_some() { "operator" } else { "github" },
+                    "proof_asset_id": pin.proof_asset_id,
+                    "proof_name": pin.proof_name,
+                    "proof_digest": pin.proof_digest,
+                    "proof_bytes": pin.proof_bytes,
                 }),
                 text,
                 None,
@@ -275,17 +292,21 @@ pub fn install(
             pin.name, pin.repository, pin.tag, pin.asset_id, pin.digest
         ),
     };
+    let proof_text = match request["source"]["proof"].as_str() {
+        Some("operator") => "The archive has the operator's offline-verifiable signature for the pinned repository, workflow, tag and target before it is unpacked",
+        _ => "The archive has GitHub build provenance from the pinned repository, workflow and tag before it is unpacked",
+    };
     let rest = if matches!(chosen, Chosen::GitHub(_)) {
         vec![
             "The GitHub file is still the one that was reviewed (repository, release, file, tag and check code)",
-            "The downloaded file matches that check code and has GitHub build provenance from the repository's release workflow before it is unpacked",
+            proof_text,
             "The files inside match their own check codes after copying",
             "The release was built for this kind of server",
             "Enough disk for the program and a backup",
         ]
     } else {
         vec![
-            "The uploaded archive has GitHub build provenance from the accepted repository's release workflow",
+            proof_text,
             "The files inside match their check codes (checksums)",
             "The release was built for this kind of server",
             "Enough disk for the program and a backup",
@@ -310,7 +331,7 @@ pub fn install(
         "pause_minutes": PAUSE_MINUTES,
         "switch": switch,
         "what_happens": format!("{}Then {} pauses for about {PAUSE_MINUTES} minute to back up the database, update it, switch and check. If the check fails it switches back by itself.",
-            if matches!(chosen, Chosen::GitHub(_)) { "The release is downloaded from GitHub, its check code and build provenance are verified, then it is copied and checked. " } else { "The release's build provenance was verified when it was uploaded; it is copied and checked again. " },
+            if matches!(chosen, Chosen::GitHub(_)) { "The release is downloaded from GitHub, its check code and pinned release proof are verified, then it is copied and checked. " } else { "The release's pinned proof was verified when it was uploaded; it is copied and checked again. " },
             instance.label),
         "steps": jobs::install_steps(downloads).iter().map(|s| json!({"seq": s.seq, "key": s.key, "label": s.label, "pauses": s.pauses})).collect::<Vec<_>>(),
         "step_up": [STEP_UP],

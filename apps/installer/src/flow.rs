@@ -371,8 +371,49 @@ impl<'a> Run<'a> {
         }
     }
 
+    // -------------------------------------------------------------- trust
+    pub async fn trust(&mut self) -> Db<()> {
+        self.start("trust", "Replacing the server's release trust record")
+            .await?;
+        match self.layout.replace_release_trust(
+            self.job.id,
+            self.job.requested_by,
+            &self.job.request,
+        ) {
+            Ok(facts) => {
+                self.done(
+                    "trust",
+                    json!({"message": "Release trust replaced", "trust": facts}),
+                )
+                .await?;
+                self.finish(
+                    "done",
+                    json!({"message": "Release trust was replaced.", "trust": facts}),
+                )
+                .await
+            }
+            Err(reason) => {
+                self.fail("trust", &reason).await?;
+                self.finish(
+                    "failed",
+                    json!({"message": format!("Release trust was not replaced: {reason}")}),
+                )
+                .await
+            }
+        }
+    }
+
     // ------------------------------------------------------------ install
     pub async fn install(&mut self) -> Db<()> {
+        let tag = self.job.request["source"]["tag"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        if !self.resumed {
+            if let Err(reason) = self.layout.check_release_tag(&tag) {
+                return self.nothing_changed("fetch", &reason).await;
+            }
+        }
         let fetched = if self.is_done("fetch") {
             self.detail("fetch")
         } else {
@@ -526,6 +567,17 @@ impl<'a> Run<'a> {
         if fetched.get("staging").is_some() {
             result["staging"] = fetched["staging"].clone();
         }
+        let archive_digest = self.job.request["source"]["digest"].as_str().unwrap_or("");
+        if let Err(reason) = self.layout.record_release(&tag, archive_digest) {
+            self.fail(
+                "verify",
+                &format!(
+                    "The release is in service, but its replay record could not be saved: {reason}"
+                ),
+            )
+            .await?;
+            return self.after_failure().await;
+        }
         self.finish_with_plugins("done", result, after.as_deref())
             .await?;
         self.prune(&[release, previous]);
@@ -659,6 +711,9 @@ impl<'a> Run<'a> {
                 "tag": request["source"]["tag"],
                 "target": request["source"]["target"],
                 "archive_sha256": request["source"]["digest"],
+                "proof": request["source"]["proof"],
+                "proof_asset_id": request["source"]["proof_asset_id"],
+                "proof_digest": request["source"]["proof_digest"],
                 "program_sha256": checked["sha256"],
                 "setup_commit": recipe["setup"]["commit"],
             });
