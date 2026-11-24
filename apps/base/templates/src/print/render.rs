@@ -92,7 +92,7 @@ impl Html {
                 Block::Field { field, label } => {
                     if let Some(value) = facts.get(field.as_str()) {
                         self.write_str("<dl>")?;
-                        self.element("dt", label)?;
+                        self.element("dt", label.as_deref().expect("compiled field label"))?;
                         self.write_str("<dd>")?;
                         self.value(*value)?;
                         self.write_str("</dd></dl>")?;
@@ -122,7 +122,10 @@ impl Html {
     fn table(&mut self, rows: &[super::facts::PrintFacts<'_>], columns: &[Column]) -> fmt::Result {
         self.write_str("<table><thead><tr>")?;
         for column in columns {
-            self.element("th", &column.heading)?;
+            self.element(
+                "th",
+                column.heading.as_deref().expect("compiled column heading"),
+            )?;
         }
         self.write_str("</tr></thead><tbody>")?;
         for row in rows {

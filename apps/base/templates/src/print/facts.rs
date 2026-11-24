@@ -38,7 +38,7 @@ pub enum PrintKind {
 
 pub struct PrintField {
     pub id: &'static str,
-    pub label: &'static str,
+    pub labels: &'static [(&'static str, &'static str)],
     pub kind: PrintKind,
     pub optional: bool,
     pub required_output: bool,
@@ -56,10 +56,10 @@ pub(super) fn validate_fields(fields: &[PrintField], allow_rows: bool) -> Checke
     }
     let mut ids = BTreeSet::new();
     for field in fields {
-        if !identifier(field.id) || field.label.trim().is_empty() || !ids.insert(field.id) {
+        if !identifier(field.id) || !ids.insert(field.id) {
             return Err(Problem::new(
                 field.id,
-                "Print fields need unique identifiers and labels.",
+                "Print fields need unique identifiers.",
             ));
         }
         if let PrintKind::Rows(columns) = field.kind {

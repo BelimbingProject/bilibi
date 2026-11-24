@@ -6,7 +6,7 @@ mod render;
 pub use facts::{PrintFacts, PrintField, PrintKind, PrintValue};
 pub use layout::CompiledPrint;
 
-use crate::{catalogue, Audience, Origin, Problem};
+use crate::{catalogue, Origin, Problem};
 use bilibi_module_registry::{Consumer, Entry, RegistryError};
 use std::collections::BTreeSet;
 
@@ -19,7 +19,6 @@ type Checked<T> = Result<T, Problem>;
 pub struct PrintContract {
     pub key: &'static str,
     pub label: &'static str,
-    pub audience: Audience,
     pub version: &'static str,
     pub states: &'static [&'static str],
     pub fields: &'static [PrintField],
@@ -65,8 +64,8 @@ impl PrintContract {
             .ok_or_else(|| Problem::new(self.key, "The print contract has no packaged layout."))
     }
 
-    pub fn compile(&self, source: &str) -> Checked<CompiledPrint<'_>> {
-        layout::compile(self, source)
+    pub fn compile(&self, language: &str, source: &str) -> Checked<CompiledPrint<'_>> {
+        layout::compile(self, language, source)
     }
 
     fn validate(&self, id: &str, owner: &str) -> Checked<()> {
@@ -104,7 +103,7 @@ impl PrintContract {
                     "Packaged layouts need unique canonical languages and versions.",
                 ));
             }
-            self.compile(default.layout)?.preview()?;
+            self.compile(default.language, default.layout)?.preview()?;
         }
         if !languages.contains(self.base_language) {
             return Err(Problem::new(id, "Package a layout for the base language."));

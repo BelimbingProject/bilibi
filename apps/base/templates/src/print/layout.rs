@@ -22,32 +22,53 @@ struct Layout {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Block {
-    Heading { text: String },
-    Paragraph { text: String },
-    Field { field: String, label: String },
-    Section { heading: String, blocks: Vec<Block> },
-    IfPresent { field: String, blocks: Vec<Block> },
-    Table { rows: String, columns: Vec<Column> },
+    Heading {
+        text: String,
+    },
+    Paragraph {
+        text: String,
+    },
+    Field {
+        field: String,
+        label: Option<String>,
+    },
+    Section {
+        heading: String,
+        blocks: Vec<Block>,
+    },
+    IfPresent {
+        field: String,
+        blocks: Vec<Block>,
+    },
+    Table {
+        rows: String,
+        columns: Vec<Column>,
+    },
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Column {
     pub field: String,
-    pub heading: String,
+    pub heading: Option<String>,
 }
 
-pub(super) fn compile<'a>(contract: &'a PrintContract, source: &str) -> Checked<CompiledPrint<'a>> {
+pub(super) fn compile<'a>(
+    contract: &'a PrintContract,
+    language: &str,
+    source: &str,
+) -> Checked<CompiledPrint<'a>> {
     if source.len() > MAX_LAYOUT_BYTES {
         return Err(Problem::new("layout", "The print layout exceeds 48 KiB."));
     }
-    let layout: Layout = serde_json::from_str(source)
+    let mut layout: Layout = serde_json::from_str(source)
         .map_err(|error| Problem::new("layout", format!("Invalid print layout: {error}")))?;
     let mut remaining = MAX_NODES;
     let mut shown = BTreeSet::new();
     validate_blocks(
         contract.fields,
-        &layout.blocks,
+        &mut layout.blocks,
+        language,
         1,
         &mut remaining,
         Some(&mut shown),
@@ -97,12 +118,13 @@ impl CompiledPrint<'_> {
     }
 }
 
-fn validate_blocks<'a>(
+fn validate_blocks(
     fields: &[PrintField],
-    blocks: &'a [Block],
+    blocks: &mut [Block],
+    language: &str,
     depth: usize,
     remaining: &mut usize,
-    mut shown: Option<&mut BTreeSet<&'a str>>,
+    mut shown: Option<&mut BTreeSet<&'static str>>,
 ) -> Checked<()> {
     if blocks.is_empty() || depth > MAX_DEPTH {
         return Err(Problem::new(
@@ -117,15 +139,22 @@ fn validate_blocks<'a>(
         match block {
             Block::Heading { text } | Block::Paragraph { text } => literal("text", text)?,
             Block::Field { field, label } => {
-                scalar(fields, field)?;
-                literal("label", label)?;
+                let field = scalar(fields, field)?;
+                resolve_label(field, language, label)?;
                 if let Some(shown) = shown.as_deref_mut() {
-                    shown.insert(field.as_str());
+                    shown.insert(field.id);
                 }
             }
             Block::Section { heading, blocks } => {
                 literal("heading", heading)?;
-                validate_blocks(fields, blocks, depth + 1, remaining, shown.as_deref_mut())?;
+                validate_blocks(
+                    fields,
+                    blocks,
+                    language,
+                    depth + 1,
+                    remaining,
+                    shown.as_deref_mut(),
+                )?;
             }
             Block::IfPresent { field, blocks } => {
                 if !lookup(fields, field)?.optional {
@@ -134,12 +163,13 @@ fn validate_blocks<'a>(
                         "Presence conditions require an optional fact.",
                     ));
                 }
-                validate_blocks(fields, blocks, depth + 1, remaining, None)?;
+                validate_blocks(fields, blocks, language, depth + 1, remaining, None)?;
             }
             Block::Table { rows, columns } => {
-                validate_table(fields, rows, columns)?;
+                let rows = lookup(fields, rows)?;
+                validate_table(rows, language, columns)?;
                 if let Some(shown) = shown.as_deref_mut() {
-                    shown.insert(rows.as_str());
+                    shown.insert(rows.id);
                 }
             }
         }
@@ -161,15 +191,40 @@ fn lookup<'a>(fields: &'a [PrintField], id: &str) -> Checked<&'a PrintField> {
         .ok_or_else(|| Problem::new(id, "The print contract does not declare this field."))
 }
 
-fn scalar(fields: &[PrintField], id: &str) -> Checked<()> {
-    if matches!(lookup(fields, id)?.kind, PrintKind::Rows(_)) {
+fn scalar<'a>(fields: &'a [PrintField], id: &str) -> Checked<&'a PrintField> {
+    let field = lookup(fields, id)?;
+    if matches!(field.kind, PrintKind::Rows(_)) {
         return Err(Problem::new(id, "Repeated facts require a table."));
     }
-    Ok(())
+    Ok(field)
 }
 
-fn validate_table(fields: &[PrintField], rows: &str, columns: &[Column]) -> Checked<()> {
-    let PrintKind::Rows(fields) = lookup(fields, rows)?.kind else {
+fn resolve_label(field: &PrintField, language: &str, label: &mut Option<String>) -> Checked<()> {
+    if field.required_output {
+        if label.is_some() {
+            return Err(Problem::new(
+                field.id,
+                "Required print wording comes from the owner.",
+            ));
+        }
+        let mut matches = field
+            .labels
+            .iter()
+            .filter(|(locale, _)| *locale == language);
+        let Some((_, wording)) = matches.next().filter(|_| matches.next().is_none()) else {
+            return Err(Problem::new(
+                field.id,
+                "Declare one owner label for the print language.",
+            ));
+        };
+        *label = Some((*wording).to_owned());
+    }
+    literal(field.id, label.as_deref().unwrap_or_default())
+}
+
+fn validate_table(table: &PrintField, language: &str, columns: &mut [Column]) -> Checked<()> {
+    let rows = table.id;
+    let PrintKind::Rows(fields) = table.kind else {
         return Err(Problem::new(rows, "A table needs a repeated field."));
     };
     if columns.is_empty() || columns.len() > MAX_COLUMNS {
@@ -180,9 +235,9 @@ fn validate_table(fields: &[PrintField], rows: &str, columns: &[Column]) -> Chec
     }
     let mut seen = BTreeSet::new();
     for column in columns {
-        scalar(fields, &column.field)?;
-        literal("heading", &column.heading)?;
-        if !seen.insert(column.field.as_str()) {
+        let field = scalar(fields, &column.field)?;
+        resolve_label(field, language, &mut column.heading)?;
+        if !seen.insert(field.id) {
             return Err(Problem::new(
                 &column.field,
                 "A column can appear only once in a table.",

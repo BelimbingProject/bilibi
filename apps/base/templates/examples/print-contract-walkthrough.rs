@@ -1,35 +1,35 @@
 //! Synthetic owner for the print compiler and boot checks. Never linked into the app.
 use bilibi_module_registry::{Catalog, Consumer, Contribution, Layer, Module, Provenance};
 use bilibi_templates::{
-    Audience, Origin, PrintContract, PrintDefault, PrintFacts, PrintField, PrintKind, PrintValue,
+    Origin, PrintContract, PrintDefault, PrintFacts, PrintField, PrintKind, PrintValue,
     PRINT_CATALOGUE,
 };
 
 const KEY: &str = "base.templates.work_sheet";
 const EN: &str = r#"{"blocks":[
     {"type":"heading","text":"Work sheet"},
-    {"type":"field","field":"reference","label":"Reference"},
+    {"type":"field","field":"reference"},
     {"type":"if_present","field":"address","blocks":[
         {"type":"field","field":"address","label":"Address"}
     ]},
     {"type":"table","rows":"lines","columns":[
-        {"field":"description","heading":"Description"},
-        {"field":"quantity","heading":"Quantity"}
+        {"field":"description"},
+        {"field":"quantity"}
     ]}
 ]}"#;
 const MS: &str = r#"{"blocks":[
     {"type":"heading","text":"Lembaran kerja"},
-    {"type":"field","field":"reference","label":"Rujukan"},
+    {"type":"field","field":"reference"},
     {"type":"table","rows":"lines","columns":[
-        {"field":"description","heading":"Perihal"},
-        {"field":"quantity","heading":"Kuantiti"}
+        {"field":"description"},
+        {"field":"quantity"}
     ]}
 ]}"#;
 
 const COLUMNS: &[PrintField] = &[
     PrintField {
         id: "description",
-        label: "Description",
+        labels: &[("en", "Description"), ("ms", "Perihal")],
         kind: PrintKind::Text,
         optional: false,
         required_output: true,
@@ -37,7 +37,7 @@ const COLUMNS: &[PrintField] = &[
     },
     PrintField {
         id: "quantity",
-        label: "Quantity",
+        labels: &[("en", "Quantity"), ("ms", "Kuantiti")],
         kind: PrintKind::Integer,
         optional: false,
         required_output: true,
@@ -65,13 +65,12 @@ const DEFAULTS: &[PrintDefault] = &[
 static CONTRACT: PrintContract = PrintContract {
     key: KEY,
     label: "Work sheet",
-    audience: Audience::Staff,
     version: "1",
     states: STATES,
     fields: &[
         PrintField {
             id: "reference",
-            label: "Reference",
+            labels: &[("en", "Reference"), ("ms", "Rujukan")],
             kind: PrintKind::Text,
             optional: false,
             required_output: true,
@@ -79,7 +78,7 @@ static CONTRACT: PrintContract = PrintContract {
         },
         PrintField {
             id: "address",
-            label: "Address",
+            labels: &[],
             kind: PrintKind::Address,
             optional: true,
             required_output: false,
@@ -90,7 +89,7 @@ static CONTRACT: PrintContract = PrintContract {
         },
         PrintField {
             id: "lines",
-            label: "Lines",
+            labels: &[],
             kind: PrintKind::Rows(COLUMNS),
             optional: false,
             required_output: true,
@@ -168,7 +167,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(contract.packaged("de-DE", Some("ms"))?.language, "ms");
     assert_eq!(contract.packaged("de-DE", None)?.language, "en");
 
-    let layout = contract.compile(EN)?;
+    let malay_preview = contract.compile(&malay.language, malay.layout)?.preview()?;
+    assert!(malay_preview.contains("<dt>Rujukan</dt>"));
+    assert!(malay_preview.contains("<th>Perihal</th><th>Kuantiti</th>"));
+    assert!(contract.compile("de", EN).is_err());
+    for (key, replacement) in [
+        (
+            r#""field":"reference""#,
+            r#""field":"reference","label":"Quantity""#,
+        ),
+        (
+            r#""field":"quantity""#,
+            r#""field":"quantity","heading":"Reference""#,
+        ),
+    ] {
+        assert!(contract
+            .compile("en", &EN.replace(key, replacement))
+            .is_err());
+    }
+
+    let layout = contract.compile("en", EN)?;
     let preview = layout.preview()?;
     assert!(preview
         .contains("Sample &lt;building&gt;<br>Floor 2<br>East wing<br>Reception<br>Sample city"));
@@ -180,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let document = layout.render("issued", &values)?;
     assert_eq!(document.matches("<tr>").count(), rows.len() + 1);
-    assert!(document.contains("<dd>&lt;script&gt;<br>WS-2</dd>"));
+    assert!(document.contains("<dt>Reference</dt><dd>&lt;script&gt;<br>WS-2</dd>"));
     assert!(!document.contains("<script>"));
     assert!(!document.contains("Sample &lt;building&gt;"));
     let oversized = vec![SAMPLE_ROW; 2_001];
@@ -203,10 +221,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .field,
         "lines[1].description"
     );
-    let reference = r#"{"type":"field","field":"reference","label":"Reference"}"#;
+    let reference = r#"{"type":"field","field":"reference"}"#;
     let table = r#"{"type":"table","rows":"lines","columns":[
-        {"field":"description","heading":"Description"},
-        {"field":"quantity","heading":"Quantity"}
+        {"field":"description"},
+        {"field":"quantity"}
     ]}"#;
     let conditional =
         |block| format!(r#"{{"type":"if_present","field":"address","blocks":[{block}]}}"#);
@@ -223,25 +241,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         (
             format!(
-                r#"{{"blocks":[{reference},{{"type":"table","rows":"lines","columns":[{{"field":"description","heading":"Description"}}]}}]}}"#
+                r#"{{"blocks":[{reference},{{"type":"table","rows":"lines","columns":[{{"field":"description"}}]}}]}}"#
             ),
             "lines.quantity",
         ),
     ] {
-        assert_eq!(contract.compile(&source).err().unwrap().field, missing);
+        assert_eq!(
+            contract.compile("en", &source).err().unwrap().field,
+            missing
+        );
     }
     let section = format!(
         r#"{{"blocks":[{{"type":"section","heading":"Sheet","blocks":[{reference},{table}]}}]}}"#
     );
-    assert!(contract.compile(&section).is_ok());
+    assert!(contract.compile("en", &section).is_ok());
     assert!(contract
-        .compile(&EN.replace("description", "unknown"))
+        .compile("en", &EN.replace("description", "unknown"))
         .is_err());
     assert!(contract
-        .compile(&EN.replace("address", "reference"))
+        .compile("en", &EN.replace("address", "reference"))
         .is_err());
     assert!(contract
-        .compile(&EN.replace("\"Work sheet\"", "\"Work sheet\",\"html\":\"<script>\""))
+        .compile(
+            "en",
+            &EN.replace("\"Work sheet\"", "\"Work sheet\",\"html\":\"<script>\"")
+        )
         .is_err());
     println!("Print registry, locale resolution, conditional facts, escaped output and repeated rows passed.");
     Ok(())
