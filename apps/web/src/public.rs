@@ -167,6 +167,41 @@ pub fn install(mut router: Router<App>, routes: &PublicRoutes) -> Router<App> {
     router
 }
 
+tokio::task_local! {
+    /// The site of the public request being served, set by `public_host`.
+    pub(crate) static PUBLIC_SITE: bilibi_base::public::PublicScope;
+}
+
+/// The public site the request being served reached; none on the staff
+/// listener.
+pub(crate) fn site() -> Result<bilibi_base::public::PublicScope> {
+    PUBLIC_SITE
+        .try_with(Clone::clone)
+        .map_err(|_| Error::NotFound)
+}
+
+/// The public listener's door: the `Host` must name a hostname of a site that
+/// is on, of a live tenant (`Public::resolve`); anything else is a bare 404.
+/// The request then runs with that site's scope.
+pub(crate) async fn door(
+    State(app): State<App>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let port = url::Url::parse(&app.origin).ok().and_then(|url| url.port());
+    match app.public.resolve(&host, port).await {
+        Ok(Some(site)) => PUBLIC_SITE.scope(site, next.run(request)).await,
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => HttpError::from(error).into_response(),
+    }
+}
+
 /// The key a sender is budgeted under, from the connection the trusted-proxy
 /// boundary already resolved.
 fn sender(peer: Option<SocketAddr>, headers: &HeaderMap) -> String {

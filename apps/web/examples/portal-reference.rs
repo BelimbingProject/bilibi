@@ -414,7 +414,22 @@ async fn main() -> std::result::Result<std::process::ExitCode, Error> {
     bilibi_walkthrough_fixture::install(&db).await?;
     let origin = std::env::var("APP_ORIGIN").map_err(|_| Error::Invalid)?;
     let bind = std::env::var("BIND_ADDR").map_err(|_| Error::Invalid)?;
-    let app = bilibi_web::App::new(db, &origin)?.at_public_site(&origin, 1);
+    // Tenant 1's public site answers at the origin's hostname.
+    let app = bilibi_web::App::new(db, &origin)?;
+    if let Some(name) = url::Url::parse(&origin)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+    {
+        if let Ok(Err(_)) | Err(_) = app
+            .services
+            .get::<bilibi_base::public::Public>(bilibi_base::public::SERVICE)?
+            .bind_hostname(&app.mutations, 1, &name, true)
+            .await
+        {
+            eprintln!("{name} cannot name a public site; use an APP_ORIGIN with a hostname such as reference.localhost");
+        }
+    }
+    let app = app.at_public_site(&origin);
     app.services
         .get::<bilibi_authz::grants::Grants>("base/authz.grants")?
         .reconcile()

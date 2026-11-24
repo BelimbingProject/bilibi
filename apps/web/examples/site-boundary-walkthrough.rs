@@ -1,4 +1,5 @@
-//! Observable proof that the socket selects the staff or public site.
+//! Observable proof that the socket selects the staff or public site, and
+//! that on the public socket the hostname names the tenant's site.
 use bilibi_base::session::session_id;
 use bilibi_database::{pool, Db, Error, Result};
 use std::future::IntoFuture;
@@ -46,10 +47,6 @@ async fn sessions(db: &Db) -> Result<(String, String)> {
     bilibi_walkthrough_fixture::install(db).await?;
     let mut client = db.get().await?;
     let tx = client.transaction().await?;
-    tx.execute(
-        "INSERT INTO customer_portal_sites(tenant_id,address,title,enabled) VALUES (1,'boundary','Boundary',true),(2,'other-boundary','Other Boundary',true) ON CONFLICT (tenant_id) DO UPDATE SET address=EXCLUDED.address, enabled=true",
-        &[],
-    ).await?;
     let customer: i64 = tx
         .query_one(
             "WITH identity AS (
@@ -104,10 +101,19 @@ async fn main() -> Result<()> {
         .port();
     let staff_host = format!("staff.localhost:{staff_port}");
     let public_host = format!("shop.staff.localhost:{public_port}");
+    // Tenant 2's site is on its own hostname at the same public listener.
+    let other_host = format!("other.staff.localhost:{public_port}");
     let app = bilibi_web::App::new(db, &format!("http://{staff_host}"))?;
-    let public = app
-        .clone()
-        .at_public_site(&format!("http://{public_host}"), 1);
+    let sites = app
+        .services
+        .get::<bilibi_base::public::Public>(bilibi_base::public::SERVICE)?;
+    for (tenant, host) in [(1, "shop.staff.localhost"), (2, "other.staff.localhost")] {
+        sites
+            .bind_hostname(&app.mutations, tenant, host, true)
+            .await?
+            .map_err(|_| Error::Invalid)?;
+    }
+    let public = app.clone().at_public_site(&format!("http://{public_host}"));
     let staff_server = tokio::spawn(
         axum::serve(
             staff_listener,
@@ -128,8 +134,6 @@ async fn main() -> Result<()> {
     for (method, path, staff, public) in [
         ("GET", "/login", 200, 404),
         ("GET", "/portal/sign-in", 404, 200),
-        ("GET", "/portal/sign-in/boundary", 404, 200),
-        ("GET", "/portal/sign-in/other-boundary", 404, 404),
         ("GET", "/api/v1/hello", 401, 404),
         ("GET", "/visitor/v1/client.js", 404, 200),
         ("POST", "/webhooks/integration-reference", 404, 403),
@@ -152,6 +156,47 @@ async fn main() -> Result<()> {
     assert_eq!(
         status(public_port, &staff_host, "GET", "/portal/sign-in", None).await?,
         404
+    );
+    // The hostname names the site: tenant 2's answers on its own name, an
+    // unknown name and the right name at another port do not.
+    assert_eq!(
+        status(public_port, &other_host, "GET", "/portal/sign-in", None).await?,
+        200
+    );
+    assert_eq!(
+        status(
+            public_port,
+            &format!("nobody.staff.localhost:{public_port}"),
+            "GET",
+            "/portal/sign-in",
+            None
+        )
+        .await?,
+        404
+    );
+    assert_eq!(
+        status(
+            public_port,
+            "shop.staff.localhost:1",
+            "GET",
+            "/portal/sign-in",
+            None
+        )
+        .await?,
+        404
+    );
+    // A customer of tenant 1 is nobody on tenant 2's hostname.
+    assert_eq!(
+        status(
+            public_port,
+            &other_host,
+            "GET",
+            "/portal/sign-in",
+            Some((CUSTOMER_COOKIE, customer_token.as_str()))
+        )
+        .await?,
+        200,
+        "tenant 1's customer on tenant 2's site sees the sign-in card"
     );
 
     for (port, host, path, own_name, own_token, other_name, other_token) in [
@@ -190,6 +235,6 @@ async fn main() -> Result<()> {
 
     staff_server.abort();
     public_server.abort();
-    println!("site boundary: staff and public routes, Host checks and cookie realms passed");
+    println!("site boundary: staff and public routes, Host checks, per-tenant hostnames and cookie realms passed");
     Ok(())
 }

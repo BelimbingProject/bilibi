@@ -258,7 +258,20 @@ pub async fn pages(
     };
     // A panicking handler would drop the connection, which the proxy reports
     // as an outage; run it as its own task so the visitor gets a 500 instead.
-    let response = match tokio::spawn(next.run(request)).await {
+    // The handler runs in a task of its own so a panic becomes an error page;
+    // the public site the door resolved goes with it.
+    let site = crate::public::PUBLIC_SITE.try_with(Clone::clone).ok();
+    let handled = async move {
+        match site {
+            Some(site) => {
+                crate::public::PUBLIC_SITE
+                    .scope(site, next.run(request))
+                    .await
+            }
+            None => next.run(request).await,
+        }
+    };
+    let response = match tokio::spawn(handled).await {
         Ok(response) => response,
         Err(join) => {
             let mut response = Response::new(Body::empty());

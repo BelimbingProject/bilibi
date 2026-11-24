@@ -437,13 +437,19 @@ fn encode_component(value: &str) -> String {
         .collect()
 }
 
-/// Whether `site` can be a portal address segment, so a reset link never
-/// carries anything else into a path.
-pub(crate) fn site_shaped(site: &str) -> bool {
-    (1..=63).contains(&site.len())
-        && site
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+/// Whether `origin` is a bare `https://host[:port]` (or `http://` for a
+/// development copy), so a reset link never carries anything else.
+pub(crate) fn origin_shaped(origin: &str) -> bool {
+    url::Url::parse(origin).is_ok_and(|url| {
+        matches!(url.scheme(), "https" | "http")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && !origin.ends_with('/')
+    })
 }
 
 impl UserService {
@@ -542,31 +548,16 @@ impl UserService {
         self.request_reset(Audience::Staff, None, email).await
     }
     /// [`UserService::request_password_reset`] for one audience; a customer's
-    /// link opens its portal's reset page at `site`.
+    /// link opens the portal's reset page on the public site at `origin`,
+    /// the one the request came to.
     pub(crate) async fn request_reset(
         &self,
         audience: Audience,
-        site: Option<&str>,
+        origin: Option<&str>,
         email: &str,
     ) -> Result<(), CredentialError> {
         let email = normalize_email(email)?;
-        let public = if let Some(site) = site {
-            let Some(origin) = std::env::var("PUBLIC_ORIGIN")
-                .ok()
-                .filter(|origin| !origin.is_empty())
-                .filter(|_| {
-                    std::env::var("PUBLIC_TENANT_ID")
-                        .ok()
-                        .and_then(|id| id.parse().ok())
-                        == audience.tenant()
-                })
-            else {
-                return finish_reset_request().await;
-            };
-            Some((origin, site))
-        } else {
-            None
-        };
+        let public = origin;
         let client = self.db.get().await.map_err(Error::from)?;
         // The account sign-in would choose (`identity::password_identity`):
         // last used, then the lowest live membership. Ambiguity (two
@@ -604,9 +595,8 @@ impl UserService {
             return finish_reset_request().await;
         };
         let link = match public {
-            Some((origin, site)) => format!(
-                "{}/portal/reset/{site}/{token}?email={}",
-                origin.trim_end_matches('/'),
+            Some(origin) => format!(
+                "{origin}/portal/reset/{token}?email={}",
                 encode_component(&address)
             ),
             None => self.reset_link(&address, &token),

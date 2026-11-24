@@ -310,17 +310,17 @@ impl UserService {
     /// [`UserService::request_password_reset`], but the address is looked up
     /// among the customers of `tenant`, which the caller resolved from the
     /// portal address the customer opened, and the link opens that portal's
-    /// reset page (`/portal/reset/{site}/{token}`).
+    /// reset page (`/portal/reset/{token}`) on the public site at `origin`.
     pub async fn request_portal_password_reset(
         &self,
         tenant: i64,
-        site: &str,
+        origin: &str,
         email: &str,
     ) -> std::result::Result<(), CredentialError> {
-        if tenant <= 0 || !crate::reset::site_shaped(site) {
+        if tenant <= 0 || !crate::reset::origin_shaped(origin) {
             return Err(CredentialError::Rejected);
         }
-        self.request_reset(Audience::Customer { tenant }, Some(site), email)
+        self.request_reset(Audience::Customer { tenant }, Some(origin), email)
             .await
     }
 

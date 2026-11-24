@@ -1,7 +1,8 @@
 //! Running specimen of the public site's pages and links (`base/public`'s
 //! `PUBLIC_PAGES` and `PUBLIC_LINKS`), separate from product routes. Run with
 //! a migrated, disposable DATABASE_URL, APP_ORIGIN and BIND_ADDR; no one
-//! signs in. The public listener serves tenant 1.
+//! signs in. The walkthrough fixture's tenants 1 and 2 each get a public site
+//! on its own hostname (`one.` and `two.reference.localhost`).
 //!
 //! A reference mail module owns three token links, as an email Domain would:
 //! - `GET /reference/mail/o/{token}`: the open pixel, the same 1×1 GIF for
@@ -25,8 +26,10 @@
 //! nothing. The owner prints one line per action it took.
 //!
 //! `--sender-admission` proves the route budgets (refusal, sender isolation,
-//! minute and hour limits, minute reset), the cross-tenant refusal and the
-//! listener budget through the real HTTP host. `--refusals` adds each wrong
+//! minute and hour limits, minute reset), hostname resolution (each hostname
+//! names its tenant; an unknown hostname and a site that is off answer a bare
+//! 404), the cross-tenant refusal and the listener budget through the real
+//! HTTP host. `--refusals` adds each wrong
 //! shape to the real catalog and prints its refusal; it needs no database.
 use bilibi_base::public::{
     Link, LinkFuture, LinkRequest, LinkService, Local, Public, PublicLink, PublicPage, PublicScope,
@@ -376,17 +379,30 @@ fn refusals() -> std::process::ExitCode {
     }
 }
 
-async fn request(address: &str, method: &str, path: &str, sender: &str) -> Result<u16> {
+/// One request to the public listener at `address`, for the site named by
+/// `host`, as `sender` behind the local proxy: its status.
+async fn request_to(
+    address: &str,
+    host: &str,
+    method: &str,
+    path: &str,
+    sender: &str,
+) -> Result<u16> {
     let mut stream = tokio::net::TcpStream::connect(address)
         .await
         .map_err(|_| Error::Internal)?;
+    // A site's hostname at the listener's own port, as a browser sends it.
+    let host = match (host.contains(':'), address.rsplit_once(':')) {
+        (false, Some((_, port))) => format!("{host}:{port}"),
+        _ => host.to_owned(),
+    };
     let body = if method == "POST" {
         "List-Unsubscribe=One-Click"
     } else {
         ""
     };
     let wire = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nX-Forwarded-For: {sender}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nX-Forwarded-For: {sender}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream
@@ -405,6 +421,13 @@ async fn request(address: &str, method: &str, path: &str, sender: &str) -> Resul
         .nth(1)
         .and_then(|status| status.parse().ok())
         .ok_or(Error::Internal)
+}
+
+/// Tenant 1's public site; tenant 2's is [`TWO`].
+const ONE: &str = "one.reference.localhost";
+const TWO: &str = "two.reference.localhost";
+async fn request(address: &str, method: &str, path: &str, sender: &str) -> Result<u16> {
+    request_to(address, ONE, method, path, sender).await
 }
 
 fn expect(label: &str, actual: u16, expected: u16) -> Result<()> {
@@ -432,7 +455,18 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
         parsed.host_str().ok_or(Error::Invalid)?,
         parsed.port_or_known_default().ok_or(Error::Invalid)?
     );
-    let app = bilibi_web::App::new(db.clone(), &origin)?.at_public_site(&origin, 1);
+    // Two workspaces (the walkthrough fixture's tenants 1 and 2), each with
+    // a public site on its own hostname; the hostname alone names the tenant.
+    bilibi_walkthrough_fixture::install(&db).await?;
+    let app = bilibi_web::App::new(db.clone(), &origin)?;
+    let public = app.services.get::<Public>(bilibi_base::public::SERVICE)?;
+    for (tenant, host) in [(1, ONE), (2, TWO)] {
+        public
+            .bind_hostname(&app.mutations, tenant, host, true)
+            .await?
+            .map_err(|_| Error::Invalid)?;
+    }
+    let app = app.at_public_site(&origin);
     let listener = tokio::net::TcpListener::bind(&address)
         .await
         .map_err(|_| Error::Internal)?;
@@ -503,16 +537,51 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
         )?;
     }
 
-    // A tenant's link answers only on that tenant's site.
+    // The hostname names the tenant, and a tenant's link answers only on
+    // that tenant's site.
     let reader = "198.51.100.20";
     expect(
-        "click of tenant 1's message on tenant 1's site",
+        "click of tenant 1's message on tenant 1's hostname",
         request(&address, "GET", "/reference/mail/c/click-1", reader).await?,
         302,
     )?;
     expect(
-        "click of tenant 2's message on tenant 1's site: refused like an unknown token",
+        "click of tenant 2's message on tenant 1's hostname: refused like an unknown token",
         request(&address, "GET", "/reference/mail/c/click-other", reader).await?,
+        404,
+    )?;
+    expect(
+        "click of tenant 2's message on tenant 2's hostname",
+        request_to(
+            &address,
+            TWO,
+            "GET",
+            "/reference/mail/c/click-other",
+            reader,
+        )
+        .await?,
+        302,
+    )?;
+    expect(
+        "click of tenant 1's message on tenant 2's hostname: refused",
+        request_to(&address, TWO, "GET", "/reference/mail/c/click-1", reader).await?,
+        404,
+    )?;
+    expect(
+        "a hostname no site has: a bare 404 for every path",
+        request_to(
+            &address,
+            "nobody.reference.localhost",
+            "GET",
+            "/favicon.svg",
+            reader,
+        )
+        .await?,
+        404,
+    )?;
+    expect(
+        "the listener's own address as the hostname: a bare 404",
+        request_to(&address, &address, "GET", "/favicon.svg", reader).await?,
         404,
     )?;
     expect(
@@ -539,6 +608,29 @@ async fn sender_admission() -> Result<std::process::ExitCode> {
             429,
         )?;
     }
+
+    // A site that is off answers nothing at all, like an unknown hostname.
+    {
+        let client = db.get().await?;
+        client
+            .execute(
+                "UPDATE public_sites SET enabled=false WHERE tenant_id=2",
+                &[],
+            )
+            .await?;
+    }
+    // A hostname's answer is reused for a few seconds.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    expect(
+        "tenant 2's site switched off: its hostname answers 404",
+        request_to(&address, TWO, "GET", "/favicon.svg", reader).await?,
+        404,
+    )?;
+    expect(
+        "tenant 1's site still answers",
+        request(&address, "GET", "/favicon.svg", reader).await?,
+        200,
+    )?;
 
     // The listener budget counts every request of one sender to the whole
     // site, assets included, before any route's own budget.
@@ -598,7 +690,8 @@ async fn main() -> Result<std::process::ExitCode> {
     let db = bilibi_database::pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     let origin = std::env::var("APP_ORIGIN").map_err(|_| Error::Invalid)?;
     let bind = std::env::var("BIND_ADDR").map_err(|_| Error::Invalid)?;
-    let app = bilibi_web::App::new(db, &origin)?.at_public_site(&origin, 1);
+    // Bind a hostname to a tenant's site first (`bilibi-web public-hostname`).
+    let app = bilibi_web::App::new(db, &origin)?.at_public_site(&origin);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|_| Error::Internal)?;

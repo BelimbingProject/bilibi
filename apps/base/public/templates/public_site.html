@@ -1,0 +1,51 @@
+{#- Staff Public site page (`src/web.rs`): the tenant's public site and the
+    hostnames it answers at. The site card reads first and opens its form in
+    place; the hostnames table and its cells are rendered by src/web.rs
+    through the shared models; this file lays the page out. The page renders
+    its own flash outlet, and the open dialog owns the same messages. -#}
+{%- import "components.html" as ui -%}
+{%- import "forms.html" as form -%}
+{%- import "feedback.html" as feedback -%}
+{%- import "dialog.html" as dialog -%}
+{% call feedback::flash_group(messages=flash) %}{% endcall %}
+{% call ui::page(id="public-site-page", variant=bilibi_ui::PageVariant::List) %}
+{% call ui::header(subtitle="What visitors, customers and the people your emails reach see, and where.", actions=hostname_actions) %}Public site{% endcall %}
+{% call ui::card(id="public-site-card", title="Site", class="mb-4") %}
+{% if let Some(edit) = site_form %}
+<form id="public-site-form" data-event="refresh_site" data-change data-submit-event="save_site" class="space-y-4">
+{% call feedback::error_summary(summary=edit.summary) %}{% endcall %}
+{% call form::input(field=edit.address) %}{% endcall %}
+{% call form::input(field=edit.title) %}{% endcall %}
+{% call form::input(field=edit.enabled) %}{% endcall %}
+{{ edit.logo }}
+{% for error in edit.logo_errors %}<p class="mt-1.5 text-sm text-danger-ink" id="public-site-logo-error">{{ error }}</p>{% endfor %}
+{% if let Some(note) = edit.logo_note %}<p class="text-sm text-ink-muted" id="public-site-logo-note">{{ note }}</p>{% endif %}
+{% call ui::button(button_type="button", event="store_logo", id="public-site-logo-use", working="Storing…") %}Use this image{% endcall %}
+{% if let Some(remove) = edit.remove_logo %}{% call form::input(field=remove) %}{% endcall %}{% endif %}
+<div class="flex items-center gap-4">
+{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, button_type="submit", id="public-site-save", working="Saving…") %}Save{% endcall %}
+{% call ui::button(button_type="button", event="cancel_site", id="public-site-cancel") %}Cancel{% endcall %}
+</div>
+</form>
+{% else %}
+{{ site_facts }}
+{% endif %}
+{% endcall %}
+{% call ui::card(id="public-site-hostnames-card", title="Hostnames", inner_class="p-0") %}{{ hostnames }}{% endcall %}
+{% endcall %}
+{% if let Some(add) = add %}
+{% call dialog::modal(id="public-site-hostname-modal", title="Add Hostname", cancel_event="cancel_add", owns_flash=true, messages=flash) %}
+<form id="public-site-hostname-form" data-event="refresh_add" data-change data-submit-event="add" class="mt-6 space-y-4" novalidate>
+{% call feedback::error_summary(summary=add.summary) %}{% endcall %}
+{% call form::input(field=add.hostname) %}{% endcall %}
+{% call form::input(field=add.primary) %}{% endcall %}
+<div class="flex items-center gap-4 pt-2">
+{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, button_type="submit", id="public-site-hostname-add", working="Adding…") %}Add hostname{% endcall %}
+{% call ui::button(button_type="button", event="cancel_add", id="public-site-hostname-cancel") %}Cancel{% endcall %}
+</div>
+</form>
+{% endcall %}
+{% endif %}
+{% if remove %}
+{% call dialog::confirm_dialog(id="public-site-hostname-remove-dialog", consequence="Remove this hostname?", detail=remove_detail, confirm="Remove", working="Removing…", confirm_event="confirm_remove", cancel_event="cancel_remove") %}{% endcall %}
+{% endif %}
