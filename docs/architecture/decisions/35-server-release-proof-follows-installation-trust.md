@@ -50,13 +50,13 @@ The proof envelope can travel beside a GitHub release asset fetched through the 
 
 ### Trust ownership
 
-Initial server setup records the proof policy before the first release is admitted. For operator signatures it records the public key fingerprint, repository name and immutable ID, workflow and minimum setup tag. For GitHub attestations it records the repository ID, workflow and minimum setup tag. The initial bootstrap is the only time no Bilibi installation owner exists to authorize that write.
+Root records each instance’s first proof policy from the terminal, with the operator UID and UTC time. On an existing instance without a pin, the operator sets a minimum tag newer than its previous releases. For operator signatures it records the public key fingerprint, repository name and immutable ID, workflow and minimum setup tag. For GitHub attestations it records the repository ID, workflow and minimum setup tag.
 
 After bootstrap, only the installation owner may replace the policy, repository, workflow or public key, and every replacement requires fresh 2FA. There is no environment-variable override, automatic key discovery, repository-name lookup or ordinary settings-editor path. The change is audited and preserves the release high-water mark.
 
 Software shows the current proof policy read-only: proof kind, repository, workflow, public-key fingerprint when applicable, minimum tag, highest admitted tag, and when and by whom the policy was last changed. The private key and repository access credential are never accepted or shown there.
 
-Trust state and its high-water mark live outside release folders and database backups, so installing a release, switching back or restoring a backup cannot replace or rewind them. Release code may read the current record but may change it only through the owner-authorized, fresh-2FA operation.
+Trust state and its high-water mark live outside release folders and database backups, so installing a release, switching back or restoring a backup cannot replace or rewind them. Both records are root-owned. An instance’s installer may invoke only that instance’s privileged trust writer. Candidate releases run under the instance’s unprivileged application account. Each installer binary is verified against the pin for the instance it serves.
 
 ### Replay and rollback
 

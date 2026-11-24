@@ -7,7 +7,8 @@ use tokio_postgres::{Client, GenericClient};
 /// The channel `base/software` notifies on; the payload is the job id.
 pub const CHANNEL: &str = "bilibi_software_jobs";
 const TIME: &str = "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'";
-const JOB_COLUMNS: &str = "id, tenant_id, kind, request, undo_of, result, paused_at IS NOT NULL";
+const JOB_COLUMNS: &str =
+    "id, tenant_id, kind, request, requested_by, undo_of, result, paused_at IS NOT NULL";
 
 #[derive(Clone, Debug)]
 pub struct Job {
@@ -15,6 +16,7 @@ pub struct Job {
     pub tenant: i64,
     pub kind: String,
     pub request: Value,
+    pub requested_by: i64,
     pub undo_of: Option<i64>,
     pub result: Option<Value>,
     /// The pause began: recorded with the pausing step by `begin_pause`.
@@ -27,9 +29,10 @@ impl Job {
             tenant: row.get(1),
             kind: row.get(2),
             request: row.get(3),
-            undo_of: row.get(4),
-            result: row.get(5),
-            paused: row.get(6),
+            requested_by: row.get(4),
+            undo_of: row.get(5),
+            result: row.get(6),
+            paused: row.get(7),
         }
     }
 }
@@ -68,14 +71,14 @@ pub async fn mine_running(
     Ok(row.as_ref().map(Job::from_row))
 }
 /// The oldest job waiting that an installer carries out: an install or an
-/// undo. An install whose release is still being downloaded by the program (its `download` step is
+/// undo or release-trust change. An install whose release is still being downloaded by the program (its `download` step is
 /// not done) waits for that.
 pub async fn next_waiting(
     client: &impl GenericClient,
 ) -> Result<Option<Job>, tokio_postgres::Error> {
     let row = client
         .query_opt(
-            &format!("SELECT {JOB_COLUMNS} FROM base_software_jobs WHERE state='queued' AND kind IN ('install','undo') AND NOT EXISTS (SELECT 1 FROM base_software_steps s WHERE s.tenant_id=base_software_jobs.tenant_id AND s.job_id=base_software_jobs.id AND s.key='download' AND s.state<>'done') ORDER BY id LIMIT 1"),
+            &format!("SELECT {JOB_COLUMNS} FROM base_software_jobs WHERE state='queued' AND kind IN ('install','undo','trust') AND NOT EXISTS (SELECT 1 FROM base_software_steps s WHERE s.tenant_id=base_software_jobs.tenant_id AND s.job_id=base_software_jobs.id AND s.key='download' AND s.state<>'done') ORDER BY id LIMIT 1"),
             &[],
         )
         .await?;

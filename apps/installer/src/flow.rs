@@ -17,7 +17,7 @@ use crate::{
     service::Service,
 };
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf, process::Command, time::Duration};
+use std::{fs, path::PathBuf, time::Duration};
 use tokio_postgres::Client;
 
 /// How long a release gets to answer after a start.
@@ -181,9 +181,18 @@ impl<'a> Run<'a> {
     async fn finish_with_plugins(
         &mut self,
         state: &str,
-        result: Value,
+        mut result: Value,
         plugins: Option<&[Value]>,
     ) -> Db<()> {
+        if matches!(state, "failed" | "cancelled" | "interrupted")
+            && self.job.kind == "install"
+            && self.layout.consumed_tag(&self.job.request["source"])
+        {
+            result["message"] = json!(format!(
+                "{} Publish a new setup tag before trying again.",
+                result["message"].as_str().unwrap_or("")
+            ));
+        }
         self.forget_history();
         jobs::finish_with_plugins(&mut *self.client, &self.job, state, &result, plugins).await?;
         self.log(&format!(
@@ -295,10 +304,8 @@ impl<'a> Run<'a> {
             // A release downloaded for this job is downloaded again when the
             // owner starts again; an uploaded file stays for it.
             self.drop_download();
-            self.interrupted(
-                "The installer was interrupted before the pause. Nothing changed. Start again.",
-            )
-            .await?;
+            self.interrupted("The installer was interrupted before the pause. Nothing changed.")
+                .await?;
             return Ok(true);
         }
         if self.update_committed().await? {
@@ -318,12 +325,16 @@ impl<'a> Run<'a> {
         let back = match self.start_current().await {
             Ok(()) => match self.service.wait_healthy(HEALTH_LIMIT).await {
                 Ok(_) => "The release that was in service is back and answers.".to_owned(),
-                Err(why) => format!("The release that was in service was started again but does not answer: {why}. Check the service."),
+                Err(why) => format!(
+                    "The release that was in service was started again but does not answer: {why}. Check the service."
+                ),
             },
-            Err(why) => format!("The release that was in service could not be started again: {why}. Check the service."),
+            Err(why) => format!(
+                "The release that was in service could not be started again: {why}. Check the service."
+            ),
         };
         self.interrupted(&format!(
-            "The installer was interrupted during the pause, before the database was changed. {back} Nothing changed. Start again."
+            "The installer was interrupted during the pause, before the database was changed. {back} Nothing changed."
         ))
         .await?;
         Ok(true)
@@ -371,8 +382,44 @@ impl<'a> Run<'a> {
         }
     }
 
+    // -------------------------------------------------------------- trust
+    pub async fn trust(&mut self) -> Db<()> {
+        self.start("trust", "Replacing the server's release trust record")
+            .await?;
+        match self
+            .layout
+            .replace_release_trust(self.job.requested_by, &self.job.request)
+        {
+            Ok(facts) => {
+                self.done(
+                    "trust",
+                    json!({"message": "Release trust replaced", "trust": facts}),
+                )
+                .await?;
+                self.finish(
+                    "done",
+                    json!({"message": "Release trust was replaced.", "trust": facts}),
+                )
+                .await
+            }
+            Err(reason) => {
+                self.fail("trust", &reason).await?;
+                self.finish(
+                    "failed",
+                    json!({"message": format!("Release trust was not replaced: {reason}")}),
+                )
+                .await
+            }
+        }
+    }
+
     // ------------------------------------------------------------ install
     pub async fn install(&mut self) -> Db<()> {
+        if self.job.paused && !self.is_done("fetch") {
+            self.fail("fetch", "the paused install has no completed release copy")
+                .await?;
+            return self.after_failure().await;
+        }
         let fetched = if self.is_done("fetch") {
             self.detail("fetch")
         } else {
@@ -540,7 +587,10 @@ impl<'a> Run<'a> {
     /// (a new try downloads again under a new job), so its folder goes
     /// whatever the outcome.
     async fn fetch(&mut self) -> Result<Value, String> {
-        let fetched = self.fetch_release().await;
+        let fetched = match self.layout.check_release(&self.job.request["source"]) {
+            Ok(()) => self.fetch_release().await,
+            Err(reason) => Err(reason),
+        };
         self.drop_download();
         fetched
     }
@@ -627,6 +677,32 @@ impl<'a> Run<'a> {
             }
             _ => return Err("the request names no source".into()),
         };
+        let admission: Value =
+            serde_json::from_reader(fs::File::open(source.from.join("admission.json")).map_err(
+                |error| format!("could not read the incoming release admission: {error}"),
+            )?)
+            .map_err(|error| format!("the incoming release admission is invalid: {error}"))?;
+        let reviewed = &request["source"];
+        for field in [
+            "proof",
+            "repository",
+            "repository_id",
+            "workflow",
+            "tag",
+            "target",
+            "fingerprint",
+        ] {
+            if admission[field] != reviewed[field] {
+                return Err(
+                    "the incoming release admission does not match the reviewed release".into(),
+                );
+            }
+        }
+        if admission["version"] != 1 || admission["archive_sha256"] != reviewed["digest"] {
+            return Err(
+                "the incoming release admission does not match the reviewed archive".into(),
+            );
+        }
         let checked = self.copy_checked(&source, wanted).await;
         if let Some(dir) = &source.uploaded {
             // An uploaded file waits for another try, unless it is now copied
@@ -659,6 +735,9 @@ impl<'a> Run<'a> {
                 "tag": request["source"]["tag"],
                 "target": request["source"]["target"],
                 "archive_sha256": request["source"]["digest"],
+                "proof": request["source"]["proof"],
+                "proof_asset_id": request["source"]["proof_asset_id"],
+                "proof_digest": request["source"]["proof_digest"],
                 "program_sha256": checked["sha256"],
                 "setup_commit": recipe["setup"]["commit"],
             });
@@ -713,6 +792,7 @@ impl<'a> Run<'a> {
                 ));
             }
         }
+        self.layout.record_release(&self.job.request["source"])?;
         let n = self.layout.next_release();
         let dst = self.layout.release(n);
         jobs::step_set(
@@ -893,7 +973,7 @@ impl<'a> Run<'a> {
                         "failed",
                         json!({"message": format!("{reason}. {why} Check the service.")}),
                     )
-                    .await
+                    .await;
             }
         };
         let label = format!("Switch back to release {}", back.to);
@@ -937,7 +1017,8 @@ impl<'a> Run<'a> {
                     result["restored"] = json!(false);
                     result["message"] = json!(format!(
                         "{} The database could not be put back: {why}. The service was left stopped; restore {} by hand before starting it.",
-                        back.lead, file.display()
+                        back.lead,
+                        file.display()
                     ));
                     self.set("switch_back", "failed", result.clone()).await?;
                     return self.finish("failed", result).await;
@@ -1012,7 +1093,9 @@ impl<'a> Run<'a> {
             .as_bool()
             .unwrap_or(false);
         let lead = if self.failed_step().is_some_and(|step| step.key == "migrate") {
-            format!("The database update of release {release} failed after it had changed the database: {reason}.")
+            format!(
+                "The database update of release {release} failed after it had changed the database: {reason}."
+            )
         } else {
             format!("Release {release} failed its check: {reason}.")
         };
@@ -1320,8 +1403,7 @@ fn with_pause(message: &str, seconds: Option<i64>) -> String {
 /// Runs one command of a release's program with the instance's environment
 /// (this process has it from the env file), cut off after `limit` seconds.
 fn run_program(program: &std::path::Path, command: &str, limit: &str) -> Result<(), String> {
-    let out = Command::new("timeout")
-        .arg(limit)
+    let out = layout::release_command(limit)?
         .arg(program)
         .arg(command)
         .output()

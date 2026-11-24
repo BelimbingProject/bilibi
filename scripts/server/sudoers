@@ -1,6 +1,0 @@
-# Installed by scripts/install-server.sh as /etc/sudoers.d/bilibi-build.
-# bilibi-build puts releases into service, so it may only start, stop and
-# restart Bilibi instances and reload the proxy. Nothing else.
-# Each instance is named exactly: sudo-rs (Ubuntu 26.04's sudo) refuses
-# wildcards in command arguments. `create` rewrites the list.
-bilibi-build ALL=(root) NOPASSWD: @COMMANDS@

@@ -1,5 +1,5 @@
 //! The instance's systemd service and its health: stop and start through the
-//! sudo rule `scripts/install-server.sh` gives `bilibi-build`, and the check
+//! sudo rule `scripts/install-server.sh` gives the instance installer, and the check
 //! that the program answers on its own port.
 use crate::layout::Layout;
 use std::{process::Command, time::Duration};

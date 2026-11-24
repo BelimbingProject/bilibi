@@ -121,6 +121,9 @@ pub fn undo_steps(restores_backup: bool) -> Vec<Step> {
     list.push(("verify", "Check that it works", false));
     steps(&list)
 }
+pub fn trust_steps() -> Vec<Step> {
+    steps(&[("trust", "Replace the server's release trust record", false)])
+}
 fn steps(list: &[(&'static str, &'static str, bool)]) -> Vec<Step> {
     list.iter()
         .enumerate()
@@ -167,7 +170,7 @@ pub async fn recent(client: &impl GenericClient, tenant: i64, limit: i64) -> Res
 pub async fn last_done(client: &impl GenericClient, tenant: i64) -> Result<Option<Job>> {
     let row = client
         .query_opt(
-            &format!("SELECT {JOB_COLUMNS} FROM base_software_jobs WHERE tenant_id=$1 AND state='done' ORDER BY id DESC LIMIT 1"),
+            &format!("SELECT {JOB_COLUMNS} FROM base_software_jobs WHERE tenant_id=$1 AND state='done' AND kind IN ('install', 'undo') ORDER BY id DESC LIMIT 1"),
             &[&tenant],
         )
         .await?;
@@ -233,7 +236,9 @@ pub fn backup_rule(keep: Option<u64>) -> String {
         || "removes the oldest ones".to_owned(),
         |keep| format!("keeps only the newest {keep} and removes the older ones"),
     );
-    format!("Bilibi backs up the database before every install and undo. After a successful install or undo it {kept}, so a listed file may no longer exist. Undo switches back to the previous program. Only if the install changed the database structure does Undo also restore its backup, which loses data entered since. Undo takes a new backup first.")
+    format!(
+        "Bilibi backs up the database before every install and undo. After a successful install or undo it {kept}, so a listed file may no longer exist. Undo switches back to the previous program. Only if the install changed the database structure does Undo also restore its backup, which loses data entered since. Undo takes a new backup first."
+    )
 }
 /// Hides where a backup file is from anyone who cannot manage software:
 /// they see that the backup exists, when it was taken and its size. The
@@ -309,12 +314,22 @@ fn scrub_backup_paths(value: &mut Value, paths: &[String]) {
     }
 }
 
-/// Whether a running job has reached its pause: a cancel is then too late.
-pub async fn past_pause(client: &impl GenericClient, tenant: i64, job: i64) -> Result<bool> {
+/// Whether a running job has passed its cancellation cutoff.
+pub async fn cancellation_closed(
+    client: &impl GenericClient,
+    tenant: i64,
+    job: &Job,
+) -> Result<bool> {
+    if job.state != "running" {
+        return Ok(false);
+    }
+    if job.kind == "trust" {
+        return Ok(true);
+    }
     Ok(client
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM base_software_steps WHERE tenant_id=$1 AND job_id=$2 AND pauses AND state<>'pending')",
-            &[&tenant, &job],
+            &[&tenant, &job.id],
         )
         .await?
         .get(0))
@@ -479,7 +494,7 @@ pub async fn end_silent(
     minutes: i32,
 ) -> Result<bool> {
     let result = json!({
-        "message": format!("The installer stopped answering for {minutes} minutes before it paused the service. Nothing changed. Start again."),
+        "message": format!("The installer stopped answering for {minutes} minutes before it paused the service. Check the highest admitted tag in Release trust before trying again. An admitted setup tag requires a new tag."),
         "migrated": false,
         "reason": "installer_silent",
     });
@@ -637,7 +652,7 @@ pub async fn cancel(
                 }
                 "running"
                     if before.cancel_requested_at.is_none()
-                        && !past_pause(sql, tenant, id).await? =>
+                        && !cancellation_closed(sql, tenant, &before).await? =>
                 {
                     sql.query_one(
                         &format!("UPDATE base_software_jobs SET cancel_requested_at=now(), cancel_requested_by=$3 WHERE tenant_id=$1 AND id=$2 RETURNING {JOB_COLUMNS}"),
@@ -694,8 +709,12 @@ pub async fn download_step(
     detail: &Value,
 ) -> Result<()> {
     let sql = match state {
-        "running" => "UPDATE base_software_steps SET state='running', started_at=coalesce(started_at, now()), detail=$3 WHERE tenant_id=$1 AND job_id=$2 AND key='download' AND EXISTS (SELECT 1 FROM base_software_jobs j WHERE j.tenant_id=$1 AND j.id=$2 AND j.state='queued')",
-        _ => "UPDATE base_software_steps SET state=$4, finished_at=now(), detail=$3 WHERE tenant_id=$1 AND job_id=$2 AND key='download' AND EXISTS (SELECT 1 FROM base_software_jobs j WHERE j.tenant_id=$1 AND j.id=$2 AND j.state='queued')",
+        "running" => {
+            "UPDATE base_software_steps SET state='running', started_at=coalesce(started_at, now()), detail=$3 WHERE tenant_id=$1 AND job_id=$2 AND key='download' AND EXISTS (SELECT 1 FROM base_software_jobs j WHERE j.tenant_id=$1 AND j.id=$2 AND j.state='queued')"
+        }
+        _ => {
+            "UPDATE base_software_steps SET state=$4, finished_at=now(), detail=$3 WHERE tenant_id=$1 AND job_id=$2 AND key='download' AND EXISTS (SELECT 1 FROM base_software_jobs j WHERE j.tenant_id=$1 AND j.id=$2 AND j.state='queued')"
+        }
     };
     if state == "running" {
         client.execute(sql, &[&tenant, &job, detail]).await?;

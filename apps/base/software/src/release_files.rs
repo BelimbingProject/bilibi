@@ -8,7 +8,7 @@ use bilibi_database::{Error, Result};
 use bilibi_system::Instance;
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    forms::{Field, InputKind, SecretInput},
+    forms::{Field, InputKind},
     page::{LiveInput, LiveRequest, Uploads},
     BuiltinColumn, Button, ButtonVariant, Card, ColumnsOutcome, Fact, Facts, FlexRow, FlexTable,
     Fold, Form, Html, ListColumns, SectionHeading, StatusKind, TableEmpty, UploadSpec,
@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 pub const PATH: &str = "/system/software/releases";
 /// The file input's name: the key the owner consumes by.
 const UPLOAD: &str = "release_file";
+/// An operator-signed release's detached DSSE proof.
+const PROOF: &str = "release_proof";
 /// A release file is a compressed program: tens of megabytes, so the input
 /// is resumable and a dropped connection carries on where it stopped.
 const UPLOAD_BYTES: u64 = bilibi_ui::upload::MAX_FILE_SIZE;
@@ -65,12 +67,15 @@ impl ReleaseFiles {
     pub(super) fn new(pages: crate::web::Pages) -> Result<Self> {
         Ok(Self {
             pages,
-            uploads: Uploads::new([UploadSpec::resumable(UPLOAD, UPLOAD_BYTES).accept([
-                ".tar.gz",
-                ".tgz",
-                "application/gzip",
-                "application/x-gzip",
-            ])]),
+            uploads: Uploads::new([
+                UploadSpec::resumable(UPLOAD, UPLOAD_BYTES).accept([
+                    ".tar.gz",
+                    ".tgz",
+                    "application/gzip",
+                    "application/x-gzip",
+                ]),
+                UploadSpec::new(PROOF, 64 * 1024).accept([".json", "application/json"]),
+            ]),
             waiting: ListColumns::mount("release-files-waiting", waiting_columns())
                 .map_err(|_| Error::Internal)?,
             github_columns: ListColumns::mount("release-files-github", github_columns())
@@ -148,11 +153,7 @@ impl ReleaseFiles {
             body,
             ..Default::default()
         })?;
-        let heading = match *event {
-            "github_accept" => "Accept GitHub repository",
-            "clear_github_token" => "Clear GitHub read token",
-            _ => "Save GitHub settings",
-        };
+        let heading = "Save GitHub settings";
         let gate = bilibi_ui::StepUpGate::action("Software", heading, form)
             .map_err(|_| Error::Internal)?;
         Ok(Some(render(gate)?))
@@ -176,15 +177,7 @@ impl ReleaseFiles {
         match self.pages.contracts.submit(&call, input.clone()).await {
             Ok(_) => {
                 self.github_refresh = true;
-                let message = if input["accept"].as_bool() == Some(true) {
-                    "GitHub repository accepted. You can review a release below."
-                } else if input["clear_token"].as_bool() == Some(true) {
-                    "GitHub read token cleared."
-                } else if input.get("token").and_then(Value::as_str).is_some() {
-                    "GitHub read token saved. It is not shown again."
-                } else {
-                    "GitHub settings saved."
-                };
+                let message = "GitHub settings saved.";
                 self.say(StatusKind::Success, message);
             }
             Err(AgentError::InvalidInput(fields)) => {
@@ -236,10 +229,16 @@ impl ReleaseFiles {
             self.say(StatusKind::Info, "Choose a release file first.");
             return Ok(());
         };
+        let proof = self
+            .uploads
+            .consume(PROOF)
+            .into_iter()
+            .next()
+            .map(|file| (file.name, file.bytes));
         match self
             .pages
             .software
-            .take_upload(scope, &file.name, file.bytes)
+            .take_upload(scope, &file.name, file.bytes, proof)
             .await?
         {
             Ok(upload) => {
@@ -284,6 +283,7 @@ impl ReleaseFiles {
             .await?;
         let enrolled = self.pages.software.step_up.enrolled(scope).await?;
         let mut body = Html::EMPTY;
+        body.push(&self.trust_section(&facts)?);
         body.push(&self.github_section(&facts, manages, enrolled)?);
         let mut upload = Html::EMPTY;
         if manages {
@@ -309,15 +309,22 @@ impl ReleaseFiles {
     }
     /// The file input for a release file, for a server owner.
     fn upload_section(&self, instance: &Instance) -> Result<Html> {
-        let input = self
+        let archive = self
             .uploads
             .input(UPLOAD, "release-files-upload")
             .label("Release file")
             .hint("Choose a tested .tar.gz release file, up to 64 MB.");
+        let proof = self
+            .uploads
+            .input(PROOF, "release-files-proof")
+            .label("Operator proof")
+            .hint("Required when Release trust says Operator key: choose the .proof.json published beside this exact archive.");
+        let mut inputs = render(archive)?;
+        inputs.push(&render(proof)?);
         let form = render(Form {
             id: "release-files-upload-form",
             event: "upload_release",
-            body: render(input)?,
+            body: inputs,
             actions: render(Button {
                 id: "release-files-upload-submit",
                 button_type: "submit",
@@ -339,6 +346,76 @@ impl ReleaseFiles {
             Html::default(),
             false,
             form,
+        )
+    }
+
+    fn trust_section(&self, facts: &Value) -> Result<Html> {
+        let trust = &facts["release_trust"];
+        let kind = match trust["kind"].as_str() {
+            Some("github") => "GitHub artifact attestations",
+            Some("operator") => "Operator Ed25519 key",
+            _ => "Not set",
+        };
+        let repository = match (
+            trust["repository"].as_str(),
+            trust["repository_id"].as_i64(),
+        ) {
+            (Some(name), Some(id)) => format!("{name} ({id})"),
+            _ => "Not set".into(),
+        };
+        let fingerprint = trust["fingerprint"].as_str().unwrap_or("Not applicable");
+        let body = render(Facts {
+            id: "software-release-trust-facts",
+            items: vec![
+                Fact {
+                    id: "software-release-trust-kind",
+                    title: "Proof",
+                    value: Html::text(kind),
+                },
+                Fact {
+                    id: "software-release-trust-repository",
+                    title: "Repository",
+                    value: Html::text(&repository),
+                },
+                Fact {
+                    id: "software-release-trust-workflow",
+                    title: "Workflow",
+                    value: Html::text(trust["workflow"].as_str().unwrap_or("Not set")),
+                },
+                Fact {
+                    id: "software-release-trust-minimum-tag",
+                    title: "Oldest accepted tag",
+                    value: Html::text(trust["minimum_tag"].as_str().unwrap_or("Not set")),
+                },
+                Fact {
+                    id: "software-release-trust-fingerprint",
+                    title: "Key fingerprint",
+                    value: Html::text(fingerprint),
+                },
+                Fact {
+                    id: "software-release-trust-highest-tag",
+                    title: "Highest admitted tag",
+                    value: Html::text(trust["highest_admitted_tag"].as_str().unwrap_or("None yet")),
+                },
+                Fact {
+                    id: "software-release-trust-changed-at",
+                    title: "Trusted since",
+                    value: Html::text(trust["changed_at"].as_str().unwrap_or("Not recorded")),
+                },
+                Fact {
+                    id: "software-release-trust-changed-by",
+                    title: "Changed by",
+                    value: Html::text(trust["changed_by"].as_str().unwrap_or("Not recorded")),
+                },
+            ],
+        })?;
+        section(
+            "software-release-trust",
+            "Release trust",
+            "Read-only facts pinned for this installation. Changing them requires the installation owner and a fresh 2FA code.",
+            Html::default(),
+            false,
+            body,
         )
     }
     /// The uploaded release files waiting for an install.
@@ -422,7 +499,6 @@ impl ReleaseFiles {
         let repository = github["repository"].as_str().unwrap_or("");
         let accepted = github["accepted"].as_bool() == Some(true);
         let identity_changed = github["identity_changed"].as_bool() == Some(true);
-        let token_set = github["token_set"].as_bool() == Some(true);
         let app = github["app"].as_str();
         let minutes = github["refresh_minutes"].as_i64().unwrap_or(15);
         let mut body = render(Facts {
@@ -438,17 +514,16 @@ impl ReleaseFiles {
                     }),
                 },
                 Fact {
-                    title: "Accepted",
+                    title: "Repository identity",
                     id: "release-files-github-accepted",
-                    value: Html::text(if accepted { "Yes" } else { "No" }),
+                    value: Html::text(if accepted { "Matches Release trust" } else { "Does not match Release trust" }),
                 },
                 Fact {
                     title: "Read access",
                     id: "release-files-github-token-fact",
                     value: Html::text(&match app {
                         Some(client_id) => format!("This server's GitHub App {client_id}: a new read-only token for each check"),
-                        None if token_set => "Saved read token".into(),
-                        None => "None (a public repository)".into(),
+                        None => "Anonymous for public repositories; GitHub App required for private repositories".into(),
                     }),
                 },
                 Fact {
@@ -532,24 +607,6 @@ impl ReleaseFiles {
             ],
         })?);
         if manages {
-            let mut repository_field = Field::in_form("github", "repository")
-                .id("release-files-github-repository")
-                .label("GitHub repository")
-                .value(repository)
-                .hint("owner/name, like your-company/my-bilibi. Saving or accepting asks for your authenticator code.")
-                .wrapper_class("mb-0 w-full sm:w-96");
-            if let Some(error) = &self.github_error {
-                repository_field = repository_field.error(error.clone());
-            }
-            // With the server's GitHub App a saved token is never used, so its
-            // field is not offered (Read access names the App).
-            let mut secret = SecretInput::in_form("github", "token", "GitHub read token")
-                .id("release-files-github-token")
-                .label("GitHub read token")
-                .hint("Leave empty for a public repository. For a private one, give the server a GitHub App with scripts/install-server.sh github-app: it never expires. A fine-grained token that can read this repository only also works, until it expires.");
-            if token_set {
-                secret = secret.stored();
-            }
             let minutes_field = Field::in_form("github", "refresh_minutes")
                 .id("release-files-github-minutes")
                 .label("Check GitHub every this many minutes")
@@ -559,12 +616,8 @@ impl ReleaseFiles {
                 .wrapper_class("mb-0 w-full sm:w-72")
                 .attr("min", "1")
                 .attr("max", "1440");
-            let mut fields = render(repository_field)?;
-            if app.is_none() {
-                fields.push(&render(secret)?);
-            }
-            fields.push(&render(minutes_field)?);
-            let mut actions = render(Button {
+            let fields = render(minutes_field)?;
+            let actions = render(Button {
                 id: "release-files-github-save",
                 button_type: "submit",
                 variant: ButtonVariant::Primary,
@@ -572,16 +625,6 @@ impl ReleaseFiles {
                 body: Html::text("Save"),
                 ..Button::default()
             })?;
-            if token_set {
-                actions.push(&render(Button {
-                    id: "release-files-github-clear-token",
-                    button_type: "button",
-                    event: "clear_github_token",
-                    working: "Clearing…",
-                    body: Html::text("Clear read token"),
-                    ..Button::default()
-                })?);
-            }
             let mut step = bilibi_ui::StepUp::new(enrolled, "/system/software?tab=releases");
             step.body = fields;
             step.actions = actions;
@@ -592,48 +635,6 @@ impl ReleaseFiles {
                 body: render(step)?,
                 ..Form::default()
             })?);
-            if (!accepted || identity_changed) && github["repository_id"].as_i64().is_some() {
-                let repository_id = github["repository_id"].as_i64().unwrap_or(0).to_string();
-                let mut hidden = render(
-                    Field::named("repository")
-                        .id("release-files-github-accept-repository")
-                        .kind(InputKind::Hidden)
-                        .value(repository),
-                )?;
-                hidden.push(&render(
-                    Field::named("repository_id")
-                        .id("release-files-github-accept-id")
-                        .kind(InputKind::Hidden)
-                        .value(repository_id),
-                )?);
-                hidden.push(&render(
-                    Field::named("accept")
-                        .id("release-files-github-accept-flag")
-                        .kind(InputKind::Hidden)
-                        .value("true"),
-                )?);
-                let accept_step = {
-                    let mut step =
-                        bilibi_ui::StepUp::new(enrolled, "/system/software?tab=releases");
-                    step.body = hidden;
-                    step.actions = render(Button {
-                        id: "release-files-github-accept",
-                        button_type: "submit",
-                        variant: ButtonVariant::Primary,
-                        working: "Accepting…",
-                        body: Html::text("Accept this repository"),
-                        ..Button::default()
-                    })?;
-                    step
-                };
-                body.push(&render(Form {
-                    id: "release-files-github-accept-form",
-                    event: "github_accept",
-                    class: "mt-3",
-                    body: render(accept_step)?,
-                    ..Form::default()
-                })?);
-            }
         }
         body.push(&self.github_table(
             github,
@@ -662,7 +663,7 @@ impl ReleaseFiles {
         section(
             "release-files-github",
             "GitHub releases",
-            "Install a setup file from the GitHub repository you name, or upload a saved copy of one. Bilibi verifies GitHub build provenance either way.",
+            "Install a setup file from the repository pinned in Release trust, or upload a saved copy. Bilibi verifies the one proof policy pinned for this server before unpacking either source.",
             actions,
             false,
             body,
@@ -845,12 +846,7 @@ impl ReleaseFiles {
                 self.github_save(request, event, input, &scope).await?;
                 return Ok(true);
             }
-            if value.get("code").is_some()
-                && matches!(
-                    event,
-                    "github_source" | "github_accept" | "clear_github_token"
-                )
-            {
+            if value.get("code").is_some() && event == "github_source" {
                 return Err(Error::Invalid);
             }
             let values =
@@ -859,8 +855,7 @@ impl ReleaseFiles {
             let get = |key: &str| values.get(key).map(String::as_str).unwrap_or("");
             match value["type"].as_str().unwrap_or("") {
                 "github_source" => {
-                    let repository = get("github[repository]").trim().to_owned();
-                    let mut input = json!({"repository": repository});
+                    let mut input = json!({});
                     if let Ok(minutes) = get("github[refresh_minutes]").trim().parse::<i64>() {
                         input["refresh_minutes"] = json!(minutes);
                     } else if !get("github[refresh_minutes]").trim().is_empty() {
@@ -874,24 +869,7 @@ impl ReleaseFiles {
                         );
                         return Ok(true);
                     }
-                    let token = get("github[token]").trim().to_owned();
-                    if !token.is_empty() {
-                        input["token"] = json!(token);
-                    }
                     self.stage_github("github_source", input);
-                }
-                "github_accept" => {
-                    let mut input = json!({
-                        "accept": true,
-                        "repository": get("repository").trim(),
-                    });
-                    if let Ok(id) = get("repository_id").trim().parse::<i64>() {
-                        input["repository_id"] = json!(id);
-                    }
-                    self.stage_github("github_accept", input);
-                }
-                "clear_github_token" => {
-                    self.stage_github("clear_github_token", json!({"clear_token": true}));
                 }
                 "refresh_github" => self.github_refresh = true,
                 "github_prerelease" => self.github_prerelease = !self.github_prerelease,

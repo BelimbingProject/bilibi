@@ -4,12 +4,7 @@
 
 **Not for:** an HTTP client crate (`reqwest`, `hyper`, `ureq`) of your own.
 
-`base/integration` records incoming and outgoing HTTP exchanges in one log,
-`base_integration_exchanges`, and is the only outgoing HTTP client. Domain
-modules own request meaning, response parsing, retries and user-facing
-outcomes. API adapters own authentication and call the incoming recorder after
-dispatch. Business writes keep using the ordinary mutation audit; exchange
-logging is separate.
+`base/integration` records incoming and outgoing HTTP exchanges in one log, `base_integration_exchanges`, and is the only outgoing HTTP client. Domain modules own request meaning, response parsing, retries and user-facing outcomes. API adapters own authentication and call the incoming recorder after dispatch. Business writes keep using the ordinary mutation audit. Exchange logging uses an independent connection so an HTTP exchange remains recorded if the caller’s transaction rolls back.
 
 The service is `base/integration.exchanges` (`Integration`).
 
