@@ -122,7 +122,6 @@
       const describedBy = [
         this.el.querySelector('[data-role="hint"]') && `${this.el.id}-hint`,
         this.el.dataset.status !== 'none' && `${this.el.id}-status`,
-        !this.el.querySelector('[data-role="connection"]')?.classList.contains('hidden') && `${this.el.id}-connection`,
       ].filter(Boolean).join(' ');
       const trigger = this.trigger();
       if (trigger) {
@@ -161,8 +160,8 @@
       this.active = true;
       const current = this.el.dataset.value;
       const draft = this.draft || {value: current, original: current};
-      this.original = this.pending.has(draft) ? draft.value : draft.original;
-      this.message('');
+      this.original = draft.original;
+      this.openedPendingValue = this.pending.has(draft) ? draft.value : undefined;
       const input = this.control();
       if (!input) { this.active = false; return; }
       input.value = value === undefined ? draft.value : value;
@@ -192,7 +191,8 @@
       if (!this.active) return;
       const input = this.control();
       const value = this.long || this.choice ? input.value : input.value.trim();
-      const unchanged = value === this.original;
+      const unchanged = value === this.openedPendingValue
+        || (value === this.original && !this.pending.size);
       if (unchanged || (!value.trim() && !this.el.hasAttribute('data-allow-empty'))) {
         this.cancel(returnFocus);
         return;
@@ -207,12 +207,20 @@
       this.emit(this.el.dataset.saveEvent, {
         id: this.el.dataset.id, field: this.el.dataset.field, value,
         fact: this.el.id, original: draft.original,
+        prepareOriginal: () => draft.original,
         onReply: (reply) => {
           this.pending.delete(draft);
           if (!this.el.isConnected) return;
           if (reply.type === 'error') {
             if (this.draft === draft) this.message(reply.message || 'The change was not confirmed. Open the field to retry, or press Escape to discard the draft.');
-          } else if (this.draft === draft && ['saved', 'conflict'].includes(this.el.dataset.status)) {
+          } else if (this.el.dataset.status === 'saved') {
+            const confirmed = this.el.dataset.value;
+            if (this.active && this.original === draft.original) this.original = confirmed;
+            for (const pending of this.pending) {
+              if (pending.original === draft.original) pending.original = confirmed;
+            }
+            if (this.draft === draft) this.draft = null;
+          } else if (this.draft === draft && this.el.dataset.status === 'conflict') {
             this.draft = null;
           }
           this.updated();

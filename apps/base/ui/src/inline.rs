@@ -11,7 +11,10 @@ pub enum CommitStatus {
     None,
     Saved,
     Error(String),
-    Conflict(String),
+    Conflict {
+        label: String,
+        value: Html,
+    },
 }
 impl CommitStatus {
     pub fn kind(&self) -> &'static str {
@@ -19,13 +22,26 @@ impl CommitStatus {
             Self::None => "none",
             Self::Saved => "saved",
             Self::Error(_) => "error",
-            Self::Conflict(_) => "conflict",
+            Self::Conflict { .. } => "conflict",
         }
     }
     pub fn message(&self) -> &str {
         match self {
-            Self::Error(message) | Self::Conflict(message) => message,
+            Self::Error(message) => message,
             _ => "",
+        }
+    }
+    pub fn conflict(&self) -> Option<(&str, &Html)> {
+        match self {
+            Self::Conflict { label, value } => Some((label, value)),
+            _ => None,
+        }
+    }
+    pub fn stale(message: impl Into<String>) -> Self {
+        if InlineRead::mark_stale() {
+            Self::Error("The record changed again. Edit this field to try again.".into())
+        } else {
+            Self::Error(message.into())
         }
     }
     pub fn present(&self) -> bool {
@@ -91,7 +107,7 @@ tokio::task_local! {
     static INLINE_READ: RefCell<InlineRead>;
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct InlineRead {
     pub fact: String,
     pub id: String,
@@ -100,9 +116,21 @@ pub struct InlineRead {
     pub original: String,
     pub version: Option<String>,
     pub conflict: bool,
+    pub stale: bool,
+    pub writing: bool,
 }
 
 impl InlineRead {
+    pub fn mark_stale() -> bool {
+        INLINE_READ
+            .try_with(|read| {
+                let mut read = read.borrow_mut();
+                read.stale = read.writing;
+                read.stale
+            })
+            .unwrap_or(false)
+    }
+
     pub async fn during<T>(self, render: impl Future<Output = T>) -> (T, Self) {
         INLINE_READ
             .scope(RefCell::new(self), async {
@@ -202,24 +230,39 @@ impl InlineField {
         self
     }
     pub fn rendered_status(&self) -> CommitStatus {
-        INLINE_READ.try_with(|read| {
-            let mut read = read.borrow_mut();
-            if self.id != read.fact || self.id_value != read.id
-                || self.name != read.field || self.save_event != read.event
-            {
-                return self.status.clone();
-            }
-            read.version = Some(self.version.clone());
-            if !self.editable || self.value == read.original {
-                return self.status.clone();
-            }
-            read.conflict = true;
-            let label = self.label.strip_prefix("Edit ").unwrap_or(&self.label);
-            let value = self.display();
-            CommitStatus::Conflict(format!(
-                "Someone else just changed {label} while you were editing, so your change was not saved. It now shows {value}. Edit it again if you still want to change it."
-            ))
-        }).unwrap_or_else(|_| self.status.clone())
+        self.status_with_display(None)
+    }
+
+    pub fn rendered_choice_status(&self, display: &Html) -> CommitStatus {
+        self.status_with_display(Some(display))
+    }
+
+    fn status_with_display(&self, display: Option<&Html>) -> CommitStatus {
+        INLINE_READ
+            .try_with(|read| {
+                let mut read = read.borrow_mut();
+                if read.writing
+                    || self.id != read.fact
+                    || self.id_value != read.id
+                    || self.name != read.field
+                    || self.save_event != read.event
+                {
+                    return self.status.clone();
+                }
+                read.version = Some(self.version.clone());
+                if !self.editable || self.value == read.original {
+                    return self.status.clone();
+                }
+                read.conflict = true;
+                let label = self.label.strip_prefix("Edit ").unwrap_or(&self.label);
+                CommitStatus::Conflict {
+                    label: label.into(),
+                    value: display
+                        .cloned()
+                        .unwrap_or_else(|| Html::text(self.display())),
+                }
+            })
+            .unwrap_or_else(|_| self.status.clone())
     }
 
     /// The trigger's `aria-describedby`: the hint, then the outcome.

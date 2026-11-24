@@ -3,7 +3,7 @@
 {% import "components.html" as ui %}
 {% import "forms.html" as forms %}
 {% macro commit_status(id, status) %}
-{% if status.kind() == "saved" %}<p id="{{ id }}" data-role="outcome" role="status" class="mt-0.5 flex items-center gap-1 text-xs text-success-ink">{% call ui::icon(name="success", class="size-3") %}{% endcall %} Saved</p>{% elif status.kind() == "error" || status.kind() == "conflict" %}<p id="{{ id }}" data-role="outcome" role="alert" class="mt-0.5 flex items-start gap-1 text-xs text-danger-ink">{% call ui::icon(name="error", class="mt-0.5 size-3 shrink-0") %}{% endcall %}<span class="min-w-0 [overflow-wrap:anywhere]">{{ status.message() }}</span></p>{% endif %}
+{% if status.kind() == "saved" %}<p id="{{ id }}" data-role="outcome" role="status" class="mt-0.5 flex items-center gap-1 text-xs text-success-ink">{% call ui::icon(name="success", class="size-3") %}{% endcall %} Saved</p>{% elif status.kind() == "error" || status.kind() == "conflict" %}<p id="{{ id }}" data-role="outcome" role="alert" class="mt-0.5 flex items-start gap-1 text-xs text-danger-ink">{% call ui::icon(name="error", class="mt-0.5 size-3 shrink-0") %}{% endcall %}<span class="min-w-0 [overflow-wrap:anywhere]">{% if let Some((label, value)) = status.conflict() %}Someone else just changed {{ label }} while you were editing, so your change was not saved. It now shows {{ value|safe }}. Edit it again if you still want to change it.{% else %}{{ status.message() }}{% endif %}</span></p>{% endif %}
 {% endmacro %}
 
 {% macro inline_edit(field) %}
@@ -30,7 +30,7 @@
 {% endmacro %}
 
 {% macro inline_choice(field, display, editor) %}
-{% let status = field.rendered_status() %}
+{% let status = field.rendered_choice_status(display) %}
 <div id="{{ field.id }}" data-hook="InlineChoice" data-id="{{ field.id_value }}" data-field="{{ field.name }}" data-value="{{ field.value }}" data-save-event="{{ field.save_event }}" data-editable="{{ field.editable }}" data-initial-edit="{{ field.editing }}" data-autofocus="{{ field.autofocus }}" data-status="{{ status.kind() }}"{% if field.allow_empty %} data-allow-empty{% endif %} class="relative min-w-0 max-w-full {{ field.class }}">
 {% if field.editable %}<button id="{{ field.id }}-display" data-role="trigger" type="button" aria-label="{{ field.label }}"{% if !field.described_by(status).is_empty() %} aria-describedby="{{ field.described_by(status) }}"{% endif %} class="group -mx-1.5 flex max-w-full min-w-0 cursor-pointer items-center gap-1.5 rounded px-1.5 py-0.5 text-left transition-colors hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand-strong">{{ display|safe }}{% call ui::icon(name="edit", class="size-3.5 shrink-0 text-ink-muted opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100") %}{% endcall %}</button><div id="{{ field.id }}-editor" data-role="editor" data-live-ignore data-editor="{{ editor.as_str() }}" class="hidden">{{ editor|safe }}</div>{% else %}<span>{{ display|safe }}</span>{% endif %}
 {% call hint(field=field) %}{% endcall %}

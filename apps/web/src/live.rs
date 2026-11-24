@@ -521,48 +521,74 @@ async fn update_state<S: Side>(
     token: &str,
     input: LiveInput<'_>,
 ) -> Result<LiveBody> {
-    let mut inline_payload;
-    let input = match input {
-        LiveInput::Event(payload) if payload.get("fact").is_some() => {
-            let get = |key| {
-                payload
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or(Error::Invalid)
-            };
-            let read = InlineRead {
-                fact: get("fact")?,
-                id: get("id")?,
-                field: get("field")?,
-                event: get("type")?,
-                original: get("original")?,
-                ..InlineRead::default()
-            };
-            let (body, read) = read
-                .during(crate::render_fields(
-                    app,
-                    Some(S::scope(scope)),
-                    state.state.update(LiveRequest {
-                        scope,
-                        credential: token,
-                        input: LiveInput::Refresh,
-                    }),
-                ))
-                .await;
-            let body = body?;
-            if read.conflict || body.redirect.is_some() {
-                return Ok(body);
-            }
-            let version = read.version.ok_or_else(|| {
-                Error::refused("This field is no longer available. The change was not saved.")
-            })?;
-            inline_payload = payload.clone();
-            inline_payload["version"] = Value::String(version);
-            LiveInput::Event(&inline_payload)
-        }
-        input => input,
+    let LiveInput::Event(payload) = input else {
+        return dispatch::<S>(app, state, scope, token, input).await;
     };
+    if payload.get("fact").is_none() {
+        return dispatch::<S>(app, state, scope, token, input).await;
+    }
+    let get = |key| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or(Error::Invalid)
+    };
+    let fact = InlineRead {
+        fact: get("fact")?,
+        id: get("id")?,
+        field: get("field")?,
+        event: get("type")?,
+        original: get("original")?,
+        ..InlineRead::default()
+    };
+    let mut payload = payload.clone();
+    for attempt in 0..=3 {
+        let (body, read) = fact
+            .clone()
+            .during(dispatch::<S>(app, state, scope, token, LiveInput::Refresh))
+            .await;
+        let body = body?;
+        if read.conflict || body.redirect.is_some() {
+            return Ok(body);
+        }
+        if attempt == 3 {
+            break;
+        }
+        let version = read.version.ok_or_else(|| {
+            Error::refused("This field is no longer available. The change was not saved.")
+        })?;
+        payload["version"] = Value::String(version);
+        let (result, write) = InlineRead {
+            writing: true,
+            ..fact.clone()
+        }
+        .during(dispatch::<S>(
+            app,
+            state,
+            scope,
+            token,
+            LiveInput::Event(&payload),
+        ))
+        .await;
+        match result {
+            Err(Error::Conflict) => {}
+            Ok(body) if write.stale && body.redirect.is_none() => {}
+            result => return result,
+        }
+    }
+    Err(Error::refused(
+        "The record kept changing. Try saving this field again.",
+    ))
+}
+
+async fn dispatch<S: Side>(
+    app: &App,
+    state: &mut Mounted<S::Context>,
+    scope: &S::Context,
+    token: &str,
+    input: LiveInput<'_>,
+) -> Result<LiveBody> {
     let event = page_event(app, state.service, &input)?;
     permitted(
         event,

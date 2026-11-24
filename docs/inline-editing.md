@@ -45,7 +45,9 @@ never treated as stored.
    owner needs a record version for its write contract, supply it through
    `InlineField::version`. The live endpoint reads the current fact and
    compares its edit value with the editor's original value before passing
-   the current record version to the owner.
+   the current record version to the owner. A stale write triggers a fresh
+   field check before another attempt. The server makes at most three write
+   attempts.
 2. Re-check the capability on every save. A forbidden write is the whole
    outcome: call `CommitStates::clear_saved`,
    re-render the facts the actor can no longer edit with `readonly()` (which
@@ -72,7 +74,8 @@ never treated as stored.
 
 The choice shell retains its editor while active, while a reply is outstanding, or while a refused/unconfirmed draft is kept. An idle shell adopts the latest owner-rendered editor, including background changes; a kept draft is released only by its confirmed save or cancellation. This refreshes both native select options and Combobox choices without replacing the trigger or moving focus. A background patch never acknowledges a pending write or replaces an active
 draft's original value. The live transport sends commits in order and matches
-each reply to its draft.
+each reply to its draft. A later save on the same fact waits for the earlier
+reply so its baseline can advance on confirmed success.
 
 ## Draft recovery
 
