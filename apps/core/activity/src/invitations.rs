@@ -312,7 +312,7 @@ impl InviteJob {
             message.reply_to = reply_to.clone();
             if self
                 .mailer
-                .deliver_for(scope.tenant(), &message)
+                .deliver_linked_for(scope.tenant(), &message, activity.join_url.as_deref())
                 .await
                 .is_err()
             {

@@ -1,5 +1,6 @@
 //! Named, versioned prose slots for business owners. See README.md.
 mod catalogue;
+mod language;
 mod operations;
 mod store;
 
@@ -7,6 +8,7 @@ pub use catalogue::{
     bounded, Audience, Context, DefaultText, Origin, Output, Problem, Resolved, Slot, Template,
     Text, Value, Variable, CATALOGUE, PLATFORM_CATALOGUE,
 };
+pub use language::LANGUAGE;
 pub use store::Templates;
 
 use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
@@ -32,12 +34,15 @@ use provenance;
 inventory::submit! {
     Module {
         id: MODULE, layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/agent_api","base/authz","base/database","base/datetime","base/labels","base/module_registry","base/party_ids","base/tenancy"],
+        dependencies: &["base/agent_api","base/authz","base/database","base/datetime","base/labels","base/module_registry","base/party_ids","base/settings","base/tenancy"],
         migrations: &[("base-templates-001-revisions", include_str!("../migrations/001-revisions.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let catalogue = Catalog::discover(&bilibi_module_registry::discover()?)?;
-                let templates = Arc::new(Templates::new(&catalogue, services.get("base/tenancy.parties")?)?);
+                let templates = Arc::new(Templates::new(
+                    &catalogue, services.get("base/tenancy.parties")?,
+                    services.get("base/settings.store")?,
+                )?);
                 operations::bind(templates.clone())?;
                 Ok(templates)
             }},

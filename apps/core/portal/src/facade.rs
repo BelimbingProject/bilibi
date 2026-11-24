@@ -802,17 +802,15 @@ impl PortalService {
                 ("days", bilibi_templates::Value::Text(&days_text)),
             ],
         )?;
+        let link = format!(
+            "{}/portal/accept/{}/{token}",
+            self.public_origin_for(site.tenant).ok_or(Error::Invalid)?,
+            site.address,
+        );
         let mut message = Message::text(
             Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
             wording["subject"].clone(),
-            crate::wording::around_link(
-                &wording,
-                &format!(
-                    "{}/portal/accept/{}/{token}",
-                    self.public_origin_for(site.tenant).ok_or(Error::Invalid)?,
-                    site.address
-                ),
-            ),
+            crate::wording::around_link(&wording, &link),
         );
         // A mail adapter's bounce report finds the invitation by this tag.
         message.extra_headers.push((
@@ -822,7 +820,10 @@ impl PortalService {
         let (mailer, id, desk) = (self.mailer.clone(), invitation.id, self.delivery.clone());
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver_for(tenant, &message).await {
+                if let Err(error) = mailer
+                    .deliver_linked_for(tenant, &message, Some(&link))
+                    .await
+                {
                     eprintln!("mail: customer invitation {id} was not delivered: {error}");
                     // The relay refused it: staff are told, and can invite again.
                     if let Err(error) = desk

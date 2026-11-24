@@ -21,6 +21,7 @@ pub enum Audience {
 #[serde(rename_all = "snake_case")]
 pub enum Output {
     PlainText,
+    PortalNotice,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,17 +217,26 @@ pub(crate) fn languages(
 ) -> Checked<Vec<String>> {
     let requested = language(requested)
         .ok_or_else(|| Problem::new("language", "Enter a language tag such as en or en-MY."))?;
-    let mut choices = vec![requested.clone()];
-    if let Some((parent, _)) = requested.split_once('-') {
-        choices.push(parent.into());
-    }
-    if let Some(fallback) = fallback.and_then(language) {
-        choices.push(fallback);
+    Ok(language_chain(
+        std::iter::once(requested.as_str()).chain(fallback),
+        base,
+    ))
+}
+
+pub(crate) fn language_chain<'a>(
+    preferred: impl IntoIterator<Item = &'a str>,
+    base: &'static str,
+) -> Vec<String> {
+    let mut choices = Vec::new();
+    for tag in preferred.into_iter().filter_map(language) {
+        let parent = tag.split_once('-').map(|(parent, _)| parent.to_owned());
+        choices.push(tag);
+        choices.extend(parent);
     }
     choices.push(base.into());
     let mut seen = BTreeSet::new();
     choices.retain(|tag| seen.insert(tag.clone()));
-    Ok(choices)
+    choices
 }
 
 impl DefaultText {
@@ -483,10 +493,13 @@ fn validate(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
                 .and_then(|suffix| suffix.strip_prefix('.'))
                 .is_some_and(identifier)
             || template.label.trim().is_empty()
-            || template.outputs != [Output::PlainText]
+            || !matches!(
+                template.outputs,
+                [Output::PlainText] | [Output::PortalNotice]
+            )
         {
             return Err(invalid(
-                "declare an owner-prefixed key, label and plain-text output",
+                "declare an owner-prefixed key, label and supported output",
             ));
         }
         let mut slots = BTreeSet::new();

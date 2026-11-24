@@ -60,12 +60,13 @@ impl UserService {
                 ("place", Value::Text(place)),
             ],
         )?;
+        let link = format!("{}/settings/sessions", self.origin);
         let message = Message::text(
             Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
             wording["subject"].clone(),
             format!(
-                "{}\n\n{}\n\n{}\n\n{}/settings/sessions\n",
-                wording["intro"], wording["details"], wording["closing"], self.origin,
+                "{}\n\n{}\n\n{}\n\n{link}\n",
+                wording["intro"], wording["details"], wording["closing"],
             ),
         );
         let mut tx = self
@@ -87,7 +88,11 @@ impl UserService {
         }
         tx.commit().await?;
         drop(client);
-        if let Err(error) = self.mailer.deliver_for(scope.tenant(), &message).await {
+        if let Err(error) = self
+            .mailer
+            .deliver_linked_for(scope.tenant(), &message, Some(&link))
+            .await
+        {
             eprintln!(
                 "mail: new-device sign-in email for user {} was not delivered: {error}",
                 scope.user()

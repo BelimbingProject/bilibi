@@ -90,7 +90,11 @@ async fn newest_link(mailbox: &Mailbox, before: usize) -> Result<String> {
                 .into_iter()
                 .next()
                 .ok_or(Error::Internal)?;
-            let message = mailbox.read(&newest.id).map_err(|_| Error::Internal)?;
+            let wire = mailbox.read(&newest.id).map_err(|_| Error::Internal)?;
+            let message = bilibi_mail::parse(wire.as_bytes(), &bilibi_mail::ParseLimits::default())
+                .map_err(|_| Error::Internal)?
+                .text
+                .ok_or(Error::Internal)?;
             return message
                 .lines()
                 .find(|line| line.starts_with("http"))
@@ -162,52 +166,23 @@ async fn standing(app: &bilibi_web::App, sessions: &[&Login]) -> Vec<bool> {
 }
 
 async fn invitation_token(mailbox: &Mailbox, before: usize) -> Result<String> {
-    for _ in 0..50 {
-        if count(mailbox) > before {
-            let newest = mailbox
-                .entries()
-                .map_err(|_| Error::Internal)?
-                .into_iter()
-                .next()
-                .ok_or(Error::Internal)?;
-            let message = mailbox.read(&newest.id).map_err(|_| Error::Internal)?;
-            let link = message
-                .lines()
-                .find(|line| line.starts_with("http"))
-                .ok_or(Error::Internal)?;
-            return link
-                .rsplit('/')
-                .next()
-                .filter(|token| token.len() == 64)
-                .map(str::to_owned)
-                .ok_or(Error::Internal);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    Err(Error::Internal)
+    newest_link(mailbox, before)
+        .await?
+        .rsplit('/')
+        .next()
+        .filter(|token| token.len() == 64)
+        .map(str::to_owned)
+        .ok_or(Error::Internal)
 }
 
 /// The reset token in the newest mail after `before`.
 async fn reset_token(mailbox: &Mailbox, before: usize) -> Result<String> {
-    for _ in 0..50 {
-        if count(mailbox) > before {
-            let newest = mailbox
-                .entries()
-                .map_err(|_| Error::Internal)?
-                .into_iter()
-                .next()
-                .ok_or(Error::Internal)?;
-            let message = mailbox.read(&newest.id).map_err(|_| Error::Internal)?;
-            return message
-                .lines()
-                .find_map(|line| line.split("/reset-password/").nth(1))
-                .and_then(|rest| rest.split('?').next())
-                .map(str::to_owned)
-                .ok_or(Error::Internal);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    Err(Error::Internal)
+    newest_link(mailbox, before)
+        .await?
+        .split_once("/reset-password/")
+        .and_then(|(_, rest)| rest.split('?').next())
+        .map(str::to_owned)
+        .ok_or(Error::Internal)
 }
 
 fn now_step() -> i64 {

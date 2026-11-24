@@ -4,6 +4,7 @@ use crate::{
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::Catalog;
 use bilibi_party_ids::OrganisationId;
+use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{NamedOrganisation, PartyProofs, ReadClient, Scope};
 use serde::Serialize;
 use serde_json::json;
@@ -12,6 +13,7 @@ use std::{collections::BTreeMap, sync::Arc};
 pub struct Templates {
     entries: BTreeMap<&'static str, &'static Template>,
     platform: BTreeMap<&'static str, &'static Template>,
+    settings: Arc<Settings>,
     pub(crate) parties: Arc<PartyProofs>,
 }
 
@@ -46,6 +48,7 @@ impl Templates {
     pub(crate) fn new(
         catalogue: &Catalog,
         parties: Arc<PartyProofs>,
+        settings: Arc<Settings>,
     ) -> bilibi_module_registry::Result<Self> {
         let collect = |id| {
             catalogue
@@ -65,6 +68,7 @@ impl Templates {
             entries,
             platform,
             parties,
+            settings,
         })
     }
 
@@ -84,8 +88,8 @@ impl Templates {
         self.entries.contains_key(key)
     }
 
-    /// Resolve text for a business record. The consumer authorizes its record
-    /// and supplies that record's company. The selected desk is irrelevant.
+    /// Resolve an explicitly selected language for an authorized record.
+    /// The consumer supplies the record's company, independent of the desk.
     pub async fn resolve(
         &self,
         client: &dyn ReadClient,
@@ -95,34 +99,35 @@ impl Templates {
         requested: &str,
         fallback: Option<&str>,
     ) -> Result<Resolved> {
-        self.resolve_for(client, scope.tenant(), key, company, (requested, fallback))
-            .await
-    }
-
-    async fn resolve_for(
-        &self,
-        client: &dyn ReadClient,
-        tenant: i64,
-        key: &str,
-        company: Option<OrganisationId>,
-        (requested, fallback): (&str, Option<&str>),
-    ) -> Result<Resolved> {
         let entry = self.get(key)?;
         let languages = catalogue::languages(requested, fallback, entry.base_language)
             .map_err(|problem| Error::refused(problem.to_string()))?;
-        if !self.editable(key) {
-            return Ok(select(entry, &languages, &[], None));
-        }
-        let heads = heads(client, tenant, key, company, &languages).await?;
-        Ok(select(entry, &languages, &heads, None))
+        self.select_for(client, scope.tenant(), entry, company, &languages)
+            .await
+    }
+
+    async fn select_for(
+        &self,
+        client: &dyn ReadClient,
+        tenant: i64,
+        entry: &Template,
+        company: Option<OrganisationId>,
+        languages: &[String],
+    ) -> Result<Resolved> {
+        let heads = if self.editable(entry.key) {
+            heads(client, tenant, entry.key, company, languages).await?
+        } else {
+            Vec::new()
+        };
+        Ok(select(entry, languages, &heads, None))
     }
 
     /// Render a platform-controlled template in its base language without a
     /// database read. Every text fact is flattened to one line.
     pub fn platform_wording(&self, key: &str, values: &[(&str, Value<'_>)]) -> Result<Text> {
         let entry = self.platform.get(key).ok_or(Error::NotFound)?;
-        let language = entry.base_language;
-        let resolved = select(entry, &[language.to_owned()], &[], None);
+        let languages = [entry.base_language.to_owned()];
+        let resolved = select(entry, &languages, &[], None);
         // A name someone chose (a workspace, a portal) is one line of text
         // here: a line break in it could set a second link apart from the
         // message's own.
@@ -148,13 +153,11 @@ impl Templates {
                 None => (*id, *value),
             })
             .collect();
-        render_wording(entry, language, resolved, &values, &[])
+        render_wording(entry, &languages, resolved, &values, &[])
     }
 
-    /// The rendered slots of a message a module sends for a workspace, in
-    /// the template's base language. For mail with no business record's
-    /// company, `tenant` is one the caller proved from its own record. A
-    /// published override that cannot render gives way to packaged wording.
+    /// Wording for unattended mail with no company. The caller proves the
+    /// tenant from its own record before asking for the workspace language.
     pub async fn tenant_wording(
         &self,
         client: &dyn ReadClient,
@@ -163,14 +166,19 @@ impl Templates {
         values: &[(&str, Value<'_>)],
     ) -> Result<Text> {
         let entry = self.get(key)?;
-        let language = entry.base_language;
-        let resolved = self
-            .resolve_for(client, tenant, key, None, (language, None))
+        let language = self
+            .settings
+            .get_tenant(client, tenant, crate::LANGUAGE)
             .await?;
-        render_wording(entry, language, resolved, values, &[])
+        let languages = catalogue::language_chain(language.as_str(), entry.base_language);
+        let resolved = self
+            .select_for(client, tenant, entry, None, &languages)
+            .await?;
+        render_wording(entry, &languages, resolved, values, &[])
     }
 
-    /// Render wording for an authorized record using the message's locale.
+    /// Render wording for an authorized record, using company and tenant
+    /// language preferences before the consumer's locale and packaged base.
     pub async fn wording(
         &self,
         client: &dyn ReadClient,
@@ -180,10 +188,51 @@ impl Templates {
         language: &str,
         (values, omitted): (&[(&str, Value<'_>)], &[&str]),
     ) -> Result<Text> {
-        let resolved = self
-            .resolve(client, scope, key, company, language, None)
+        let entry = self.get(key)?;
+        let languages = self
+            .preferred_languages(client, scope, entry, company, language)
             .await?;
-        render_wording(self.get(key)?, language, resolved, values, omitted)
+        let resolved = self
+            .select_for(client, scope.tenant(), entry, company, &languages)
+            .await?;
+        render_wording(entry, &languages, resolved, values, omitted)
+    }
+
+    async fn preferred_languages(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        entry: &Template,
+        company: Option<OrganisationId>,
+        requested: &str,
+    ) -> Result<Vec<String>> {
+        let fallback_chain = catalogue::languages(requested, None, entry.base_language)
+            .map_err(|problem| Error::refused(problem.to_string()))?;
+        if !self.editable(entry.key) {
+            return Ok(fallback_chain);
+        }
+
+        let tenant_language = self
+            .settings
+            .get(client, scope, Target::Tenant, crate::LANGUAGE)
+            .await?;
+        let company_language = match company {
+            Some(id) => {
+                self.settings
+                    .get(client, scope, Target::Company(id), crate::LANGUAGE)
+                    .await?
+                    .value
+            }
+            None => serde_json::Value::Null,
+        };
+        Ok(catalogue::language_chain(
+            company_language
+                .as_str()
+                .into_iter()
+                .chain(tenant_language.value.as_str())
+                .chain(std::iter::once(requested)),
+            entry.base_language,
+        ))
     }
 
     pub(crate) async fn companies(
@@ -337,7 +386,7 @@ impl Templates {
 
 fn render_wording(
     entry: &Template,
-    language: &str,
+    languages: &[String],
     resolved: Resolved,
     values: &[(&str, Value<'_>)],
     omitted: &[&str],
@@ -347,9 +396,7 @@ fn render_wording(
         Err(problem) => problem,
     };
     if let Origin::Company { revision, .. } | Origin::Tenant { revision } = resolved.origin {
-        let languages = catalogue::languages(language, None, entry.base_language)
-            .map_err(|problem| Error::refused(problem.to_string()))?;
-        let packaged = select(entry, &languages, &[], None);
+        let packaged = select(entry, languages, &[], None);
         if let Ok(text) = entry.render_delivery(&packaged.slots, values, omitted) {
             eprintln!("templates: {} revision {revision} could not be filled in ({problem}); the packaged wording was used", entry.key);
             return Ok(text);

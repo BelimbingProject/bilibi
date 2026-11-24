@@ -116,7 +116,7 @@ impl UserService {
         );
         drop(client);
         self.mailer
-            .deliver_for(tenant, &message)
+            .deliver_linked_for(tenant, &message, Some(&link))
             .await
             .map(|_| ())
             .map_err(|error| {

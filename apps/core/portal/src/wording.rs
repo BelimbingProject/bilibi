@@ -1,11 +1,12 @@
-//! The wording of the mail this module sends, as shared templates
+//! The wording of customer mail and the portal welcome notice, as shared templates
 //! (`apps/base/templates/README.md`). Each link and its place in the message
 //! stay in code.
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_templates::{
-    Audience, DefaultText, Output, Slot, Template, Text, Variable, PLATFORM_CATALOGUE,
+    Audience, DefaultText, Output, Slot, Template, Text, Variable, CATALOGUE, PLATFORM_CATALOGUE,
 };
 
+pub(crate) const WELCOME_NOTICE: &str = "core.portal.welcome_notice";
 pub(crate) const REGISTRATION: &str = "core.portal.registration_confirmation";
 pub(crate) const INVITATION: &str = "core.portal.invitation";
 
@@ -68,4 +69,25 @@ inventory::submit! { Contribution::new(PLATFORM_CATALOGUE, INVITATION, provenanc
         ("intro", "You are invited to {{site_title}}.\n\nOpen this link to choose a password and finish setting up your account:"),
         ("closing", "The link works once and expires in {{days}} day(s). If you did not expect this, you can ignore this email."),
     ] }],
+}) }
+
+inventory::submit! { Contribution::new(CATALOGUE, WELCOME_NOTICE, provenance!(), &Template {
+    key: WELCOME_NOTICE,
+    label: "Customer portal welcome notice",
+    audience: Audience::Customer,
+    outputs: &[Output::PortalNotice],
+    slots: &[Slot::text("body", "Welcome notice")],
+    variables: &[
+        Variable::text("site_title", "Portal name", "Example Trading customer portal", &["body"]),
+        Variable::text("email", "Customer email", "customer@example.test", &["body"]),
+    ],
+    base_language: "en",
+    defaults: &[
+        DefaultText { language: "en", version: "1", slots: &[
+            ("body", "You are signed in to {{site_title}} as {{email}}. Use the menu above to open what {{site_title}} shares with you."),
+        ] },
+        DefaultText { language: "ms", version: "1", slots: &[
+            ("body", "Anda telah log masuk ke {{site_title}} sebagai {{email}}. Gunakan menu di atas untuk membuka kandungan yang dikongsi dengan anda."),
+        ] },
+    ],
 }) }

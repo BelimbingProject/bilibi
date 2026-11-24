@@ -43,18 +43,15 @@ fn invitation_token(
         .into_iter()
         .next()
         .ok_or(Error::Internal)?;
-    let message = mailbox.read(&newest.id).map_err(|_| Error::Internal)?;
-    let recipient = format!("<{recipient}>");
-    if !message
-        .lines()
-        .any(|line| line.starts_with("To: ") && line.ends_with(&recipient))
-        || !message.contains(invitation_text)
-    {
+    let wire = mailbox.read(&newest.id).map_err(|_| Error::Internal)?;
+    let message = bilibi_mail::parse(wire.as_bytes(), &bilibi_mail::ParseLimits::default())
+        .map_err(|_| Error::Internal)?;
+    let text = message.text.ok_or(Error::Internal)?;
+    if !message.to.iter().any(|to| to.email == recipient) || !text.contains(invitation_text) {
         return Err(Error::Internal);
     }
     let prefix = format!("{origin}/accept/");
-    message
-        .lines()
+    text.lines()
         .find_map(|line| line.strip_prefix(&prefix))
         .filter(|token| token.len() == 64)
         .map(str::to_owned)

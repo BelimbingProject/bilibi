@@ -28,6 +28,7 @@ Three installation (global) settings hold the brand. Nothing set means Bilibi's 
 | Staff error pages outside debug diagnostics | The same logo and name | The Bilibi wordmark |
 | Buttons, current menu item, selections | The accent | Lime |
 | Account menu | "Powered by Bilibi" | "Powered by Bilibi" |
+| Workspace email HTML | Installation name and accent, with the available logo embedded | Bilibi name and lime accent |
 
 Set the name and logo independently. A name alone draws a text wordmark. An available logo alone draws the image and leaves the default product name in tab titles and accessible labels. An accent on its own keeps the default wordmark and tab icon. The customer portal keeps its workspace title and logo. See [Mail sender names](../mail/README.md#sender-name) for email.
 
@@ -48,4 +49,4 @@ Set the name and logo independently. A name alone draws a text wordmark. An avai
 
 `Branding::current()` returns a `bilibi_ui::Brand` for one render and never fails a page: a failed read is logged and the page carries Bilibi's brand. The Web host passes it to the shell (`ShellContext::brand`), the credential layout (`AuthLayout::brand`), the standalone review, the error document and `Document`. A page never reads the brand or draws a logo itself; it calls `ui::wordmark`.
 
-A logo link is a short-lived signed Media link for the operator workspace's asset (`Media::tenant_stream_url`). A logo that cannot be served is left out. [Media's signed stream contract](../media/README.md#signed-streams) governs public image delivery.
+A logo link on a web page is a short-lived signed Media link for the operator workspace's asset (`Media::tenant_stream_url`). For workspace email, Branding opens the same checked asset through Media and passes its raster bytes to the mailer for inline delivery. A logo that cannot be served is left out. [Media's signed stream contract](../media/README.md#signed-streams) governs public image delivery.

@@ -1,6 +1,7 @@
 //! The installation's own brand in place of Bilibi's: a display name, a logo
 //! and an accent, kept as three installation settings. See README.md for the
 //! contract.
+mod email;
 mod operations;
 
 use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
@@ -173,7 +174,7 @@ impl Branding {
 
 inventory::submit! { Module {
     id: "base/branding", layer: bilibi_module_registry::Layer::Base,
-    dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/settings_editor", "base/media", "base/labels", "base/ui"],
+    dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/settings_editor", "base/media", "base/mail", "base/labels", "base/ui"],
     migrations: &[],
     services: &[Service { id: SERVICE, factory: |services| {
         let branding = Arc::new(Branding {
@@ -181,6 +182,7 @@ inventory::submit! { Module {
             settings: services.get("base/settings.store")?,
             media: services.get(bilibi_media::SERVICE)?,
         });
+        services.get::<bilibi_mail::Mailer>(bilibi_mail::SERVICE)?.bind_brand(branding.clone())?;
         operations::bind(branding.clone())?;
         Ok(branding)
     }}],
