@@ -178,9 +178,18 @@
   function enqueue(intent, meta = {}) {
     const entry = {intent, source: meta.source || null, form: meta.form || null,
       loading: !!meta.loading, navigation: !!meta.navigation, onReply: meta.onReply,
+      prepareOriginal: meta.prepareOriginal,
       history: meta.history === 'replace' ? 'replace' : null};
     entry.ownerForm = entry.form || (entry.source?.tagName === 'FORM' ? entry.source : entry.source?.closest('form'));
     entry.id = ++sequence;
+    if (!entry.prepareOriginal && !encode(entry)) return;
+    if (entry.source) busy(entry.source);
+    queued.push(entry);
+    flush();
+  }
+
+  function encode(entry) {
+    const {intent} = entry;
     entry.wire = JSON.stringify({...intent, request_id: entry.id});
     // Count the actual UTF-8 wire bytes, including escaping and metadata, for
     // every intent (forms, filters, panels and hooks), even while disconnected.
@@ -190,17 +199,23 @@
       showError(eventTooLarge);
       entry.onReply?.({type: 'error', target: intent.target || 'page',
         message: eventTooLarge, clear: false, request_id: entry.id});
-      return;
+      return false;
     }
-    if (entry.source) busy(entry.source);
-    queued.push(entry);
-    flush();
+    return true;
   }
 
   function flush() {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     while (queued.length) {
-      const entry = queued.shift();
+      const entry = queued[0];
+      if (entry.prepareOriginal && [...inflight.values()].some((sent) =>
+        sent.prepareOriginal && sent.intent.target === entry.intent.target
+        && sent.intent.payload.fact === entry.intent.payload.fact)) break;
+      queued.shift();
+      if (entry.prepareOriginal) {
+        entry.intent.payload.original = entry.prepareOriginal();
+        if (!encode(entry)) continue;
+      }
       inflight.set(entry.id, entry);
       socket.send(entry.wire);
     }
@@ -393,6 +408,7 @@
       window.dispatchEvent(new CustomEvent(`bilibi:${push.name}`, {detail: push.detail}));
     }
     entry?.onReply?.(message);
+    if (entry?.prepareOriginal) flush();
     loading();
   }
 
@@ -838,14 +854,15 @@
     const detail = event.detail || {};
     let payload = detail.payload;
     if (!payload) {
-      const {event: type, target: _target, onReply: _onReply, history: _history, ...values} = detail;
+      const {event: type, target: _target, onReply: _onReply, history: _history, prepareOriginal: _prepareOriginal, ...values} = detail;
       if (!type) return;
       payload = {type, ...values};
     }
     const origin = event.target instanceof Element ? event.target : null;
     const owner = origin && origin.closest('[data-target]');
     enqueue({type: 'event', target: detail.target || (owner && owner.dataset.target) || 'page', payload},
-      {onReply: typeof detail.onReply === 'function' ? detail.onReply : null, history: detail.history});
+      {onReply: typeof detail.onReply === 'function' ? detail.onReply : null, history: detail.history,
+        prepareOriginal: typeof detail.prepareOriginal === 'function' ? detail.prepareOriginal : null});
   });
 
   // ---- Uploads -------------------------------------------------------------

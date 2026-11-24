@@ -149,7 +149,7 @@ impl LiveState<Scope, Error> for State {
                         } else if value == "server-error" {
                             Some(CommitStatus::failure())
                         } else if version != record.version {
-                            Some(CommitStatus::Error("The record changed elsewhere. Your draft is kept. Press Escape in the editor to discard it and use the latest value.".into()))
+                            Some(CommitStatus::stale("The record changed elsewhere. Your draft is kept. Press Escape in the editor to discard it and use the latest value."))
                         } else if field == "name" && value.trim().chars().count() < 3 {
                             Some(CommitStatus::refusal(
                                 "Name",
