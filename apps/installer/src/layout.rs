@@ -5,7 +5,7 @@ use std::{
     fs, io,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 /// The files the installer copies with a release, when the build wrote them
@@ -72,138 +72,76 @@ impl Layout {
             .parent()
             .ok_or_else(|| format!("{} has no Bilibi server folder", self.dir.display()))
     }
-    pub fn check_release(&self, source: &serde_json::Value, resumed: bool) -> Result<(), String> {
+    pub fn check_release(&self, source: &serde_json::Value) -> Result<(), String> {
         let helper = self.server_root()?.join("release-proof.py");
-        let trust = self.dir.join("trust/release.json");
         let output = Command::new("python3")
             .arg(&helper)
             .args(["check-admission", "--trust"])
-            .arg(trust)
+            .arg(self.dir.join("trust/release.json"))
             .args(["--source", &source.to_string()])
             .output();
         proof_result(output)?;
-        self.release_replay("check-replay", source, resumed)
+        proof_result(
+            Command::new("python3")
+                .arg(helper)
+                .args(["check-replay", "--state"])
+                .arg(self.dir.join("trust/release-state.json"))
+                .args([
+                    "--tag",
+                    source["tag"].as_str().unwrap_or(""),
+                    "--digest",
+                    source["digest"].as_str().unwrap_or(""),
+                ])
+                .output(),
+        )
+        .map(|_| ())
+    }
+
+    pub fn consumed_tag(&self, source: &serde_json::Value) -> bool {
+        fs::read(self.dir.join("trust/release-state.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|state| {
+                state["highest_tag"] == source["tag"] && state["highest_digest"] == source["digest"]
+            })
     }
 
     pub fn record_release(&self, source: &serde_json::Value) -> Result<(), String> {
-        self.release_replay("record-replay", source, false)
-    }
-
-    fn release_replay(
-        &self,
-        operation: &str,
-        source: &serde_json::Value,
-        resumed: bool,
-    ) -> Result<(), String> {
-        let helper = self.server_root()?.join("release-proof.py");
-        let mut command = Command::new("python3");
-        command
-            .arg(helper)
-            .args([operation, "--state"])
-            .arg(self.dir.join("trust/release-state.json"))
-            .args([
-                "--tag",
-                source["tag"].as_str().unwrap_or(""),
-                "--digest",
-                source["digest"].as_str().unwrap_or(""),
-            ]);
-        if resumed {
-            command.arg("--resume");
-        }
-        let output = command.output();
-        proof_result(output)
+        self.write_trust(serde_json::json!({"operation": "admit", "source": source}))?;
+        Ok(())
     }
 
     pub fn replace_release_trust(
         &self,
-        job: i64,
         requested_by: i64,
         request: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let object = request
-            .as_object()
-            .ok_or("the release trust request is not an object")?;
-        let allowed = [
-            "kind",
-            "repository",
-            "repository_id",
-            "workflow",
-            "minimum_tag",
-            "public_key",
-        ];
-        if object.keys().any(|key| !allowed.contains(&key.as_str())) {
-            return Err("the release trust request has an unexpected field".into());
-        }
-        let kind = request["kind"]
-            .as_str()
-            .filter(|kind| matches!(*kind, "github" | "operator"))
-            .ok_or("the release trust kind must be github or operator")?;
-        let repository = request["repository"]
-            .as_str()
-            .ok_or("the release trust request names no repository")?;
-        let repository_id = request["repository_id"]
-            .as_i64()
-            .filter(|id| *id > 0)
-            .ok_or("the release trust request names no repository number")?;
-        let workflow = request["workflow"]
-            .as_str()
-            .ok_or("the release trust request names no workflow")?;
-        let minimum_tag = request["minimum_tag"]
-            .as_str()
-            .ok_or("the release trust request names no minimum tag")?;
-        let root = self.server_root()?;
-        let trust = self.dir.join("trust");
-        if !trust.join("release.json").is_file() {
-            return Err(
-                "the instance has no release trust record; pin the first policy from the terminal"
-                    .into(),
-            );
-        }
-        let next = trust.join(format!(".release-{job}.json"));
-        let public = trust.join(format!(".release-{job}.pem"));
-        let _ = fs::remove_file(&next);
-        let _ = fs::remove_file(&public);
-        if kind == "operator" {
-            let key = request["public_key"]
-                .as_str()
-                .filter(|key| !key.trim().is_empty())
-                .ok_or("operator release trust has no public key")?;
-            fs::write(&public, key)
-                .map_err(|error| format!("could not stage the operator public key: {error}"))?;
-            fs::set_permissions(&public, fs::Permissions::from_mode(0o600))
-                .map_err(|error| format!("could not protect the staged public key: {error}"))?;
-        } else if !request["public_key"].is_null() {
-            return Err("GitHub release trust must not carry an operator public key".into());
-        }
-        let mut command = Command::new("python3");
-        command
-            .arg(root.join("release-proof.py"))
-            .args(["make-trust", "--kind", kind, "--repository", repository])
-            .args(["--repository-id", &repository_id.to_string()])
-            .args(["--workflow", workflow, "--minimum-tag", minimum_tag])
-            .args(["--changed-by", &format!("account:{requested_by}")])
-            .arg("--output")
-            .arg(&next);
-        if kind == "operator" {
-            command.arg("--public-key").arg(&public);
-        }
-        let output = command
-            .output()
-            .map_err(|error| format!("could not run the release proof verifier: {error}"))?;
-        let _ = fs::remove_file(&public);
-        if !output.status.success() {
-            let _ = fs::remove_file(&next);
-            return Err(String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .trim_start_matches("release-proof: ")
-                .to_owned());
-        }
-        fs::set_permissions(&next, fs::Permissions::from_mode(0o640))
-            .map_err(|error| format!("could not protect the release trust record: {error}"))?;
-        fs::rename(&next, trust.join("release.json"))
-            .map_err(|error| format!("could not replace the release trust record: {error}"))?;
+        let output = self.write_trust(serde_json::json!({
+            "operation": "replace", "actor": requested_by, "policy": request,
+        }))?;
         serde_json::from_slice(&output.stdout)
             .map_err(|_| "the release proof verifier returned no trust facts".into())
+    }
+
+    fn write_trust(&self, request: serde_json::Value) -> Result<std::process::Output, String> {
+        let mut child = Command::new("sudo")
+            .args(["-n", "/usr/bin/python3", "-I"])
+            .arg(self.server_root()?.join("release-proof.py"))
+            .args(["write-instance", &self.name])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("could not start the privileged release verifier: {error}"))?;
+        let sent = child
+            .stdin
+            .take()
+            .map(|stdin| serde_json::to_writer(stdin, &request));
+        let output = proof_result(child.wait_with_output())?;
+        match sent {
+            Some(Ok(())) => Ok(output),
+            _ => Err("could not send the privileged release request".into()),
+        }
     }
     /// Where the program puts a release that came from another machine or
     /// from an uploaded file, for this installer to take (`base/software`,
@@ -328,11 +266,19 @@ pub fn verify_checksum(dir: &Path) -> Result<String, String> {
     Ok(sha.to_ascii_lowercase())
 }
 
-fn proof_result(output: io::Result<std::process::Output>) -> Result<(), String> {
+pub fn release_command(limit: &str) -> Result<Command, String> {
+    let user = std::env::var("BILIBI_RELEASE_USER")
+        .map_err(|_| "the installer has no unprivileged release account".to_owned())?;
+    let mut command = Command::new("sudo");
+    command.args(["-n", "-E", "-u", &user, "--", "/usr/bin/timeout", limit]);
+    Ok(command)
+}
+
+fn proof_result(output: io::Result<std::process::Output>) -> Result<std::process::Output, String> {
     let output =
         output.map_err(|error| format!("could not run the release proof verifier: {error}"))?;
     if output.status.success() {
-        return Ok(());
+        return Ok(output);
     }
     Err(String::from_utf8_lossy(&output.stderr)
         .trim()

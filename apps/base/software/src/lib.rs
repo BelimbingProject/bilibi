@@ -849,8 +849,8 @@ impl Software {
         let job = named.or(active).ok_or_else(|| {
             SoftwareError::field("job", "No job is waiting or running on this instance.")
         })?;
-        let past_pause = jobs::past_pause(client, tenant, job.id).await?;
-        review::cancel(&job, past_pause)
+        let cancellation_closed = jobs::cancellation_closed(client, tenant, &job).await?;
+        review::cancel(&job, cancellation_closed)
     }
 }
 
@@ -874,10 +874,10 @@ async fn cancel_state(
 ) -> Result<&'static str> {
     Ok(if !job.active() {
         "not_running"
+    } else if jobs::cancellation_closed(client, tenant, job).await? {
+        "too_late"
     } else if job.cancel_requested_at.is_some() {
         "requested"
-    } else if job.state == "running" && jobs::past_pause(client, tenant, job.id).await? {
-        "too_late"
     } else {
         "available"
     })

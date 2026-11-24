@@ -192,9 +192,6 @@ impl Installer {
         let _alive = Heartbeat(self.heartbeat(job.tenant, job.id));
         let mut run =
             flow::Run::new(client, &self.layout, &self.service, &self.pg, job, resumed).await?;
-        if run.job().kind == "install" && !run.check_release().await? {
-            return Ok(true);
-        }
         if resumed && run.job().kind != "trust" && run.resume().await? {
             return Ok(true);
         }

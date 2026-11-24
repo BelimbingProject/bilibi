@@ -332,7 +332,7 @@ impl Policy {
                         "This server trusts GitHub attestations, not an operator proof.".into(),
                     );
                 }
-                transport::verify_attestation(artifact, self, tag, token)
+                transport::verify_attestation(&helper_path(paths)?, artifact, self, tag, token)
             }
             Kind::Operator => {
                 let proof = proof.ok_or_else(|| {

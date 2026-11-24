@@ -93,7 +93,7 @@ rm -rf tools && mkdir tools && tar --no-same-owner -xzf bilibi-server-tools.tar.
 i=tools/scripts/install-server.sh
 ```
 
-The tools archive is checked only on your computer in step 4: it holds the root-owned script and checking program. After `create`, `trust` pins GitHub attestations from the official repository, workflow and oldest acceptable tag. `release` and `installer` then apply that record on the server. The repository is public, so the server needs no GitHub account; it does need outgoing internet access. `create` installs PostgreSQL, Caddy and the GitHub CLI from their official package repositories. Run each step with `--json`. It prints a `started` line, then one result line:
+The tools archive is checked only on your computer in step 4: it holds the root-owned script and checking program. After `create`, `trust` pins GitHub attestations from the official repository, workflow and oldest acceptable tag. `release` and `installer` then apply that record on the server. The repository is public. The server retrieves attestation bundles without GitHub credentials and verifies them locally. `create` installs PostgreSQL, Caddy and the GitHub CLI from their official package repositories. Run each step with `--json`. It prints a `started` line, then one result line:
 
 ```json
 {"step": "create", "state": "completed", "code": "OK", "next": "...", "detail": "..."}
@@ -108,7 +108,7 @@ Go on only after `"state": "completed"`. On `failed`, do what `code` and `next` 
 | First release | `$i --json release production bilibi-setup-*.tar.gz --tag "$tag"` | `completed` |
 | Installer service | `$i --json installer production bilibi-installer-x86_64-unknown-linux-gnu --tag "$tag"` | `completed` |
 
-`release` is safe to repeat: the same verified release already in service completes without changes. Its `detail` may warn about integration settings that are unset; those are for later and do not block the install.
+`release` reports success when the same verified release is already in service. If a failed install already recorded the tag in Release trust, publish a new tag before retrying. Its `detail` may warn about integration settings that are unset; those are for later and do not block the install.
 
 ## 6. Outgoing mail
 

@@ -9,7 +9,7 @@ cat > /etc/systemd/system/bilibi-worker@.service <<'UNIT'
 [Unit]
 Description=Legacy worker retirement probe
 [Service]
-User=bilibi-build
+User=nobody
 ExecStart=/usr/bin/sleep infinity
 [Install]
 WantedBy=multi-user.target

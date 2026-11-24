@@ -141,7 +141,7 @@ Release trust is one closed policy, never a fallback list:
 | `github` | GitHub artifact attestation for the archive from the pinned repository number, workflow and tag | Yes; anonymous for public repositories, server GitHub App for private repositories |
 | `operator` | One canonical DSSE statement signed by the pinned Ed25519 key, binding archive SHA-256, repository name and number, workflow, tag, kind and target | No; local archive, proof, trust record and OpenSSL only |
 
-The initial `scripts/install-server.sh trust` writes the first `/opt/bilibi/<instance>/trust/release.json` and records the terminal operator’s UID with the UTC time. Existing instances can enroll using a minimum tag newer than their installed releases. The web process can read it but cannot write the file or its directory. A later `base.software.trust` safe write requires the installation owner's fresh 2FA and queues a one-step installer job; the reviewed step-up target includes the complete new facts and derived key fingerprint. The installer records the requesting account, validates the key again and atomically replaces the record. Software shows that actor and time plus the instance's highest admitted tag. Operator verification uses no transparency log, so private repository and asset names are not published to Rekor.
+The initial `scripts/install-server.sh trust` writes the first `/opt/bilibi/<instance>/trust/release.json` and records the terminal operator’s UID with the UTC time. Existing instances can enroll using a minimum tag newer than their installed releases. Root owns both the policy and replay files. The instance’s application and installer can read them. Only the instance’s privileged installer helper may write them after enrollment. A later `base.software.trust` safe write requires the installation owner's fresh 2FA and queues a one-step installer job; the reviewed step-up target includes the complete new facts and derived key fingerprint. The installer’s privileged helper records the requesting account, validates the key again and atomically replaces the record. A queued trust job can be cancelled until the installer claims it. Software shows that actor and time plus the instance's highest admitted tag. Operator verification uses no transparency log, so private repository and asset names are not published to Rekor.
 
 ### Install from GitHub
 
@@ -168,7 +168,7 @@ An upload is verified before it is kept: its published file name supplies the ex
 
 Each failed check is a plain sentence that says what to do next: "This release was built for Linux ARM 64-bit computers, and this server is Linux x86-64. Build it locally for the same kind of server."
 
-`incoming/` is the one folder the program (user `bilibi`) and the installer (`bilibi-build`) both write: `scripts/install-server.sh create` and `installer` make it (`2770 bilibi:bilibi-build`), and the service unit allows the program to write there (the path has the `-` prefix, so an instance that has no `incoming/` yet still starts). A program run without `BILIBI_INSTANCE_DIR` cannot receive a release, each time with a sentence that says so.
+`incoming/` is the one folder the instance’s application and installer both write. `scripts/install-server.sh` creates it with the instance’s own group and mode `2770`, and the service unit allows the program to write there (the path has the `-` prefix, so an instance that has no `incoming/` yet still starts). A program run without `BILIBI_INSTANCE_DIR` cannot receive a release, each time with a sentence that says so.
 
 ### Release controls
 

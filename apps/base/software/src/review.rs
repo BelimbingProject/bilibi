@@ -676,13 +676,52 @@ pub fn go(instance: &Instance, job: &Job, parked: Option<i64>) -> Result<Review>
 }
 
 /// Stopping the job waiting or running.
-pub fn cancel(job: &Job, past_pause: bool) -> Result<Review> {
+pub fn cancel(job: &Job, cancellation_closed: bool) -> Result<Review> {
     let (summary, effect) = match job.state.as_str() {
-        "queued" => (format!("Cancel job {} before it starts", job.id), "It is removed from the queue. Nothing has changed."),
-        "running" if job.cancel_requested_at.is_some() => return Err(SoftwareError::field("job", &format!("Job {} was already asked to stop; the worker stops before the pause.", job.id))),
-        "running" if past_pause => return Err(SoftwareError::field("job", &format!("Job {} has reached the pause, so it can no longer be stopped. Wait for it to finish; if the check fails it switches back by itself, and Undo is available afterwards.", job.id))),
-        "running" => (format!("Ask job {} to stop", job.id), "The worker stops before the pause, so nothing changes on the instance."),
-        state => return Err(SoftwareError::field("job", &format!("Job {} is {state}; only a job waiting or running can be cancelled.", job.id))),
+        "queued" => (
+            format!("Cancel job {} before it starts", job.id),
+            "It is removed from the queue. Nothing has changed.",
+        ),
+        "running" if cancellation_closed && job.kind == "trust" => {
+            return Err(SoftwareError::field(
+                "job",
+                &format!(
+                    "Job {} is replacing release trust. Wait for it to finish.",
+                    job.id
+                ),
+            ));
+        }
+        "running" if job.cancel_requested_at.is_some() => {
+            return Err(SoftwareError::field(
+                "job",
+                &format!(
+                    "Job {} was already asked to stop; the worker stops before the pause.",
+                    job.id
+                ),
+            ));
+        }
+        "running" if cancellation_closed => {
+            return Err(SoftwareError::field(
+                "job",
+                &format!(
+                    "Job {} has reached the pause, so it can no longer be stopped. Wait for it to finish; if the check fails it switches back by itself, and Undo is available afterwards.",
+                    job.id
+                ),
+            ));
+        }
+        "running" => (
+            format!("Ask job {} to stop", job.id),
+            "The worker stops before the pause, so nothing changes on the instance.",
+        ),
+        state => {
+            return Err(SoftwareError::field(
+                "job",
+                &format!(
+                    "Job {} is {state}; only a job waiting or running can be cancelled.",
+                    job.id
+                ),
+            ));
+        }
     };
     let facts = json!({"summary": summary, "job": job.id, "state": job.state, "effect": effect, "undone": job.review["summary"]});
     Ok(Review {

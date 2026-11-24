@@ -13,6 +13,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import stat
+import urllib.request
 from datetime import datetime, timezone
 
 
@@ -226,7 +228,7 @@ def make_trust(args: argparse.Namespace) -> None:
         refuse("the trusted repository ID must be a positive number")
     if args.existing_releases is not None:
         for recipe in args.existing_releases.glob("*/release.json"):
-            if not recipe.parent.name.isdecimal():
+            if not recipe.parent.name.isdecimal() or recipe.parent.is_symlink() or recipe.is_symlink():
                 continue
             setup = read_json(recipe).get("setup")
             if isinstance(setup, dict) and setup.get("tag") and version(setup["tag"]) >= minimum:
@@ -425,6 +427,115 @@ def record_replay(args: argparse.Namespace) -> None:
     atomic_json(args.state, {"version": 1, "highest_tag": args.tag, "highest_digest": args.digest})
 
 
+def verify_github(args: argparse.Namespace) -> None:
+    repository = valid_repository(args.repository)
+    workflow = valid_workflow(args.workflow)
+    version(args.tag)
+    env = {key: value for key, value in os.environ.items() if key not in (
+        "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+        "GH_CONFIG_DIR", "GH_HOST",
+    )}
+    env.update(GH_HOST="github.com", GH_PROMPT_DISABLED="1", NO_COLOR="1")
+    verify = [
+        "gh", "attestation", "verify", str(args.artifact), "--repo", repository,
+        "--signer-workflow", workflow, "--source-ref", f"refs/tags/{args.tag}",
+        "--format", "json", "--jq",
+        ".[].verificationResult.signature.certificate.sourceRepositoryIdentifier",
+    ]
+    with tempfile.TemporaryDirectory() as temporary:
+        config = Path(temporary)
+        env["GH_CONFIG_DIR"] = temporary
+        if args.app:
+            token = os.environ.get("GH_TOKEN")
+            if not token:
+                refuse("the configured GitHub App did not supply an installation token")
+            env["GH_TOKEN"] = token
+        else:
+            artifact_digest = digest(args.artifact)
+            url = f"https://api.github.com/repos/{repository}/attestations/sha256:{artifact_digest}?per_page=100&predicate_type=provenance"
+            request = urllib.request.Request(url, headers={
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "Bilibi release verifier",
+            })
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    raw = response.read(8 * 1024 * 1024 + 1)
+                if len(raw) > 8 * 1024 * 1024:
+                    refuse("the public GitHub attestation response is too large")
+                rows = json.loads(raw)["attestations"]
+                bundles = [row["bundle"] for row in rows if isinstance(row.get("bundle"), dict)]
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                refuse(f"could not fetch public attestations for {repository}; configure the GitHub App for private repositories")
+            if not bundles:
+                refuse(f"GitHub returned no public attestation bundles for {repository} and this artifact")
+            bundle = config / "bundles.jsonl"
+            bundle.write_text("".join(json.dumps(row) + "\n" for row in bundles), encoding="utf-8")
+            roots = config / "trusted-root.jsonl"
+            with roots.open("wb") as output:
+                subprocess.run(["gh", "attestation", "trusted-root"], env=env, stdout=output, check=True)
+            verify.extend(["--bundle", str(bundle), "--custom-trusted-root", str(roots)])
+        verified = subprocess.run(verify, env=env, stdout=subprocess.PIPE, check=True, text=True)
+    ids = verified.stdout.split()
+    if not ids or any(identifier != str(args.repository_id) for identifier in ids):
+        refuse("the verified attestation does not identify the pinned GitHub repository number")
+
+
+def write_instance(args: argparse.Namespace) -> None:
+    if os.geteuid() != 0 or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", args.instance):
+        refuse("instance trust can only be written by the privileged installer")
+    os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
+    trust_dir = Path("/opt/bilibi") / args.instance / "trust"
+    for directory in (trust_dir.parent, trust_dir):
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            refuse("the instance trust path is not protected")
+    trust = trust_dir / "release.json"
+    state = trust_dir / "release-state.json"
+    for path in (trust, state):
+        if path == state and not path.exists() and not path.is_symlink():
+            continue
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            refuse("the instance trust file is not protected")
+    load_trust(trust)
+    raw = sys.stdin.buffer.read(MAX_PROOF_BYTES + 1)
+    if len(raw) > MAX_PROOF_BYTES:
+        refuse("the instance trust request is too large")
+    request = json.loads(raw, object_pairs_hook=strict_object)
+    if not isinstance(request, dict):
+        refuse("the instance trust request must be an object")
+    if request.get("operation") == "admit":
+        source = request["source"]
+        check_admission(argparse.Namespace(trust=trust, source=json.dumps(source)))
+        replay = argparse.Namespace(state=state, tag=source["tag"],
+                                    digest=source["digest"], resume=False)
+        check_replay(replay)
+        record_replay(replay)
+    elif request.get("operation") == "replace":
+        actor = request["actor"]
+        if type(actor) is not int or actor <= 0:
+            refuse("the release trust request has no account")
+        policy = request["policy"]
+        exact_fields(policy, {"kind", "repository", "repository_id", "workflow", "minimum_tag", "public_key"}, "release trust request")
+        if policy["kind"] not in ("github", "operator") or type(policy["repository_id"]) is not int:
+            refuse("the release trust request has an invalid proof method or repository number")
+        with tempfile.TemporaryDirectory(dir=trust_dir) as temporary:
+            public_key = None
+            if policy["kind"] == "operator":
+                public_key = Path(temporary) / "public.pem"
+                public_key.write_text(policy["public_key"], encoding="ascii")
+            elif policy["public_key"] is not None:
+                refuse("GitHub release trust does not take a public key")
+            make_trust(argparse.Namespace(
+                kind=policy["kind"], repository=policy["repository"], repository_id=policy["repository_id"],
+                workflow=policy["workflow"], minimum_tag=policy["minimum_tag"], changed_by=f"account:{actor}",
+                existing_releases=None, public_key=public_key, output=trust,
+            ))
+    else:
+        refuse("the instance trust request has an unknown operation")
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
@@ -488,6 +599,18 @@ def parser() -> argparse.ArgumentParser:
     recorded.add_argument("--tag", required=True)
     recorded.add_argument("--digest", required=True)
     recorded.set_defaults(run=record_replay)
+    github = commands.add_parser("verify-github")
+    github.add_argument("--artifact", type=Path, required=True)
+    github.add_argument("--repository", required=True)
+    github.add_argument("--repository-id", type=int, required=True)
+    github.add_argument("--workflow", required=True)
+    github.add_argument("--tag", required=True)
+    github.add_argument("--app", action="store_true")
+    github.set_defaults(run=verify_github)
+
+    instance = commands.add_parser("write-instance")
+    instance.add_argument("instance")
+    instance.set_defaults(run=write_instance)
     return root
 
 
@@ -502,6 +625,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Refusal as error:
+    except (Refusal, OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         print(f"release-proof: {error}", file=sys.stderr)
         raise SystemExit(1)

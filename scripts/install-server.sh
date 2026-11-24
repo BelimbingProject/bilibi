@@ -37,7 +37,6 @@ source "$here/lib/versions.sh"
 root=/opt/bilibi
 unit_name='bilibi@'
 installer_unit='bilibi-installer@'
-installer_bin=$root/build/bin/bilibi-installer
 release_proof=$here/lib/release-proof.py
 # The GitHub App that reads a private application repository: one per server,
 # shared by its instances (they serve the same application). root:bilibi 0640
@@ -73,7 +72,11 @@ instance_exists() { valid_name "$1" && [[ -f $(instance_dir "$1")/env ]]; }
 lock_release_policy() {
     local instance=$1
     instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
-    exec {release_lock_fd}<"$(instance_dir "$instance")"
+    local dir
+    dir=$(instance_dir "$instance")
+    [[ ! -L $dir && $(stat -c '%u:%a' "$dir") == 0:755 ]] ||
+        fail 'the instance directory must be owned by root with mode 0755'
+    exec {release_lock_fd}<"$dir"
     flock -n "$release_lock_fd" || fail "$instance has release work in progress" 'wait for the active release job or cancel it in Software, then retry'
 }
 # env_value <instance> <KEY>: one value from the instance's env file.
@@ -108,17 +111,18 @@ role_of() {
 instances() { [[ -d $root ]] || return 0; find "$root" -mindepth 2 -maxdepth 2 -name env -printf '%h\n' | xargs -rn1 basename | sort; }
 release_numbers() { { find "$(instance_dir "$1")/releases" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null || true; } | { grep -E '^[0-9]+$' || true; } | sort -n; }
 # `current` is a fixed root-owned link to `releases/current`; that inner link,
-# owned by bilibi-build like the rest of `releases/`, names the release in
+# owned by the instance installer like the rest of `releases/`, names the release in
 # service, so the installer can move it without owning the instance folder.
 current_release() { local target; target=$(readlink -f "$(instance_dir "$1")/current" 2>/dev/null || true); if [[ -n $target && -d $target ]]; then basename "$target"; fi; }
 point_current() { # <instance> <n>
     local dir; dir=$(instance_dir "$1")
-    ln -sfn "$2" "$dir/releases/current.new" && chown -h bilibi-build:bilibi "$dir/releases/current.new" && mv -T "$dir/releases/current.new" "$dir/releases/current"
+    runuser -u "$(instance_account w "$1")" -- bash -c '
+        set -e
+        ln -sfn "$2" "$1/current.new"
+        mv -T "$1/current.new" "$1/current"
+    ' -- "$dir/releases" "$2"
+
 }
-# ensure_incoming <instance>: `incoming/` is where the program (bilibi) puts a
-# release that arrives from another machine or as an uploaded file, and where
-# the installer (bilibi-build) takes it from: both write, nobody else reads.
-ensure_incoming() { install -d -m 2770 -o bilibi -g bilibi-build "$(instance_dir "$1")/incoming"; }
 # ensure_current_link <instance>: the two-link shape above; an instance made
 # before it (`current -> releases/<n>`) is converted without a pause.
 ensure_current_link() {
@@ -269,36 +273,92 @@ ensure_cloudflare_module() {
     fi
 }
 # ---------------------------------------------------------------- users
-ensure_users() {
-    # RHEL useradd does not create missing parents of a new home directory.
-    install -d -m 0755 -o root -g root "$root"
+instance_account() {
+    local digest
+    digest=$(printf %s "$2" | sha256sum)
+    printf 'bilibi-%s-%.20s' "$1" "$digest"
+}
+installer_bin() { printf '%s/installer' "$(instance_dir "$1")"; }
+
+ensure_trust_directory() {
+    local trust
+    trust=$(instance_dir "$1")/trust
+    [[ ! -L $trust ]] || fail 'the instance trust directory cannot be a symbolic link'
+    install -d -m 2750 -o root -g bilibi "$trust"
+    local file
+    for file in "$trust/release.json" "$trust/release-state.json"; do
+        if [[ -e $file || -L $file ]]; then
+            [[ -f $file && ! -L $file && $(stat -c '%h' "$file") == 1 ]] ||
+                fail 'the instance trust file must be a single regular file'
+            chown root:bilibi "$file"
+            chmod 0640 "$file"
+        fi
+    done
+}
+
+ensure_instance_access() {
+    local name=$1 dir app worker unit dropin contents reload=
+    dir=$(instance_dir "$name"); app=$(instance_account a "$name"); worker=$(instance_account w "$name")
+    [[ ! -L $dir ]] || fail 'the instance directory cannot be a symbolic link'
+    install -d -m 0755 -o root -g root "$root" "$dir"
     getent group bilibi >/dev/null || groupadd --system bilibi
-    getent passwd bilibi >/dev/null ||
-        useradd --system --gid bilibi --no-create-home --home-dir "$root" --shell /usr/sbin/nologin bilibi
-    getent passwd bilibi-build >/dev/null ||
-        useradd --system --user-group --create-home --home-dir "$root/build" --shell /bin/bash bilibi-build
-    # bilibi-build reads each instance's env (the database address) to migrate.
-    id -nG bilibi-build | tr ' ' '\n' | grep -qx bilibi || usermod -aG bilibi bilibi-build
-    install -d -m 0750 -o bilibi-build -g bilibi-build "$root/build"
+    getent group "$app" >/dev/null || groupadd --system "$app"
+    getent passwd "$app" >/dev/null ||
+        useradd --system --gid "$app" --groups bilibi --no-create-home --home-dir "$dir/data" --shell /usr/sbin/nologin "$app"
+    getent passwd "$worker" >/dev/null ||
+        useradd --system --gid "$app" --groups bilibi --no-create-home --home-dir "$dir" --shell /usr/sbin/nologin "$worker"
+    local path owner group mode
+    while read -r path owner group mode; do
+        [[ ! -L $dir/$path ]] || fail "the instance $path directory cannot be a symbolic link"
+        if [[ -d $dir/$path && $(stat -c '%U:%G' "$dir/$path") != "$owner:$group" ]]; then
+            chown -h -R -P "$owner:$group" "$dir/$path"
+        fi
+        install -d -m "$mode" -o "$owner" -g "$group" "$dir/$path"
+    done <<EOF
+releases $worker $app 2755
+backups $worker $app 0750
+incoming $app $app 2770
+data $app $app 0700
+EOF
+    if [[ -f $dir/env ]]; then
+        chown "root:$app" "$dir/env"
+        chmod 0640 "$dir/env"
+    fi
+    ensure_trust_directory "$name"
+    for unit in "$unit_name$name" "$installer_unit$name"; do
+        dropin=/etc/systemd/system/$unit.service.d
+        install -d -m 0755 -o root -g root "$dropin"
+        if [[ $unit == "$installer_unit$name" ]]; then
+            contents=$(printf '[Service]\nUser=%s\nGroup=%s\nEnvironment=BILIBI_RELEASE_USER=%s' "$worker" "$app" "$app")
+        else
+            contents=$(printf '[Service]\nUser=%s\nGroup=%s' "$app" "$app")
+        fi
+        if [[ ! -f $dropin/identity.conf || $(cat "$dropin/identity.conf") != "$contents" ]]; then
+            printf '%s\n' "$contents" >"$dropin/identity.conf"
+            reload=1
+        fi
+    done
+    [[ -z $reload ]] || systemctl daemon-reload
     install_sudoers
 }
-# install_sudoers: the rule for bilibi-build, naming every instance (and the
-# one `create` is making), replaced only when it differs. The new rule is
-# validated before it is moved in, so a refused rule never reaches
-# /etc/sudoers.d where it would break sudo.
+install_release_proof() {
+    install -m 0755 -o root -g bilibi "$release_proof" "$root/release-proof.py"
+}
 install_sudoers() {
     [[ -d /etc/sudoers.d ]] || return 0
-    local name commands='/usr/bin/systemctl reload caddy' rendered
-    for name in $({ instances; [[ -z ${creating_instance:-} ]] || echo "$creating_instance"; } | sort -u); do
-        commands+=", /usr/bin/systemctl start bilibi@$name, /usr/bin/systemctl stop bilibi@$name, /usr/bin/systemctl restart bilibi@$name"
-    done
+    local name app worker rendered
     rendered=$(mktemp /etc/sudoers.d/.bilibi-build.XXXXXX)
-    sed "s|@COMMANDS@|$commands|" "$here/server/sudoers" >"$rendered"
+    for name in $({ instances; [[ -z ${creating_instance:-} ]] || echo "$creating_instance"; } | sort -u); do
+        valid_name "$name" || continue
+        app=$(instance_account a "$name"); worker=$(instance_account w "$name")
+        printf '%s ALL=(root) NOPASSWD: /usr/bin/systemctl start bilibi@%s, /usr/bin/systemctl stop bilibi@%s, /usr/bin/python3 -I /opt/bilibi/release-proof.py write-instance %s\n' "$worker" "$name" "$name" "$name" >>"$rendered"
+        printf '%s ALL=(%s) NOPASSWD: SETENV: /usr/bin/timeout\n' "$worker" "$app" >>"$rendered"
+    done
     chmod 0440 "$rendered"
     if cmp -s "$rendered" /etc/sudoers.d/bilibi-build; then rm -f -- "$rendered"; return 0; fi
     if ! visudo -cf "$rendered" >/dev/null 2>>"$log"; then
         rm -f -- "$rendered"
-        fail 'the sudoers rule for bilibi-build did not validate; nothing was changed' "see $log" SUDOERS_INVALID
+        fail 'the sudoers rule for Bilibi installers did not validate' "see $log" SUDOERS_INVALID
     fi
     mv -T "$rendered" /etc/sudoers.d/bilibi-build
 }
@@ -496,7 +556,7 @@ install_unit() {
 # start_installer <instance>: the installer service for an instance, once the
 # program is in place (`installer` puts it there).
 start_installer() {
-    [[ -x $installer_bin ]] || return 0
+    [[ -x $(installer_bin "$1") ]] || return 0
     systemctl enable --now "$installer_unit$1" >/dev/null 2>&1 || say "Warning: could not start $installer_unit$1; see: systemctl status $installer_unit$1"
 }
 # ================================================================ create
@@ -583,19 +643,17 @@ if tenant and int(tenant) > 2**63 - 1:
 PYTHON
     ensure_github_cli
     [[ $tls == cloudflare ]] && ensure_cloudflare_module
-    ensure_users
-    install -m 0755 -o root -g bilibi "$release_proof" "$root/release-proof.py"
+    local changed_identity=
+    [[ -f /etc/systemd/system/$unit_name$instance.service.d/identity.conf ]] || changed_identity=1
     install_unit
+    ensure_instance_access "$instance"
+    install_release_proof
     retire_worker
     local dir env caddy_env created=
     dir=$(instance_dir "$instance"); env=$dir/env; caddy_env=$dir/caddy-env
-    install -d -m 0755 "$root" "$dir" "$dir/site"
-    install -d -m 0755 -o bilibi-build -g bilibi "$dir/releases"
-    install -d -m 0750 -o bilibi-build -g bilibi-build "$dir/backups"
-    install -d -m 2750 -o bilibi-build -g bilibi "$dir/trust"
-    ensure_incoming "$instance"
+    install -d -m 0755 -o root -g root "$dir/site"
     ensure_current_link "$instance"
-    install -d -m 0700 -o bilibi -g bilibi "$dir/data" "$dir/data/media" "$dir/data/mailbox"
+    install -d -m 0700 -o "$(instance_account a "$instance")" -g "$(instance_account a "$instance")" "$dir/data/media" "$dir/data/mailbox"
 
     local pg_port password database
     pg_port=$(ensure_cluster)
@@ -658,7 +716,7 @@ BILIBI_MAIL_DIR=$dir/data/mailbox
 # Where the program receives releases and the installer keeps them.
 BILIBI_INSTANCE_DIR=$dir
 EOF
-        chown root:bilibi "$env_new"
+        chown "root:$(instance_account a "$instance")" "$env_new"
         chmod 0640 "$env_new"
         mv -T "$env_new" "$env"
         umask 022
@@ -691,7 +749,7 @@ EOF
     if [[ $tls == cloudflare ]] && ! grep -q "^$token_key=" "$caddy_env"; then
         fail '--tls cloudflare needs a zone-scoped API token on standard input' 'pipe the token to this command and add --cloudflare-token-stdin'
     fi
-    chown root:bilibi "$env"; chmod 0640 "$env"
+    chown "root:$(instance_account a "$instance")" "$env"; chmod 0640 "$env"
     [[ ! -f $caddy_env ]] || { chown root:caddy "$caddy_env"; chmod 0640 "$caddy_env"; }
 
     render_waiting_page "$instance" "$site" "$dir/site/waiting.html"
@@ -699,7 +757,7 @@ EOF
     configure_selinux "$instance"
     configure_caddy_environment
     write_caddy_site "$instance" "$site" "$port" "$tls" "$caddy_env" "$public_site" "$public_port" "$staff_bind" "$public_bind"
-    if [[ $old_origin != "https://$site" || $old_public_origin != "$public_origin" || $old_public_bind != "$public_backend" || $old_public_tenant != "$public_tenant" ]]; then
+    if [[ -n $changed_identity || $old_origin != "https://$site" || $old_public_origin != "$public_origin" || $old_public_bind != "$public_backend" || $old_public_tenant != "$public_tenant" ]]; then
         if systemctl is-active --quiet "$unit_name$instance"; then
             systemctl restart "$unit_name$instance"
             wait_healthy "$instance" || fail "$instance did not become ready with the new listener configuration"
@@ -716,7 +774,7 @@ EOF
     elif [[ -z $(current_release "$instance") ]]; then
         say "Next: put a verified release into service with: $0 release $instance <setup archive> --tag <setup-vX.Y.Z> [--proof <proof.json>]"
     fi
-    if [[ ! -x $installer_bin ]]; then
+    if [[ ! -x $(installer_bin "$instance") ]]; then
         say "Then let the Software page install releases here with: $0 installer $instance <bilibi-installer> --tag <setup-vX.Y.Z> [--proof <proof.json>]"
     fi
 }
@@ -770,8 +828,8 @@ trust_command() {
     repository_id=$(expected_repository_id "$repository" "$repository_id")
     actor=${SUDO_UID:-0}
     [[ $actor =~ ^[0-9]+$ ]] || actor=0
-    install -d -m 2750 -o bilibi-build -g bilibi "$dir/trust"
-    install -m 0755 -o root -g bilibi "$release_proof" "$root/release-proof.py"
+    ensure_trust_directory "$instance"
+    install_release_proof
     local -a command=(python3 "$release_proof" make-trust --kind "$kind" --repository "$repository" --repository-id "$repository_id" --workflow "$workflow" --minimum-tag "$minimum_tag" --existing-releases "$dir/releases" --changed-by "terminal-uid:$actor" --output "$policy")
     [[ $kind == github ]] || command+=(--public-key "$public_key")
     "${command[@]}" >/dev/null || fail 'the release trust was not accepted' 'check the repository, workflow, minimum tag and public key, then retry' TRUST_INVALID
@@ -821,7 +879,8 @@ verify_provenance() {
     local values trust_kind repository repository_id workflow release_trust
     release_trust=$(release_policy "$instance")
     local -a trust_values
-    [[ -f $release_trust ]] || fail 'this instance has no release trust anchor' "pin the instance policy with: $0 trust $instance --github|--operator-key ..." TRUST_NOT_SET
+    [[ -f $release_trust && ! -L $release_trust ]] || fail 'this instance has no release trust anchor' "pin the instance policy with: $0 trust $instance --github|--operator-key ..." TRUST_NOT_SET
+    ensure_trust_directory "$instance"
     python3 "$release_proof" check-tag --trust "$release_trust" --tag "$tag" >/dev/null ||
         fail "release $tag is outside this server's trusted tag range" 'use a newer signed release' SIGNATURE_REPLAY
     values=$(python3 "$release_proof" trust-values --trust "$release_trust") || fail 'the server release trust record is invalid' 'have the installation owner replace it on Software with a fresh 2FA code' TRUST_INVALID
@@ -838,25 +897,15 @@ verify_provenance() {
     fi
     [[ -z $proof ]] || fail 'this server trusts GitHub attestations, not an operator proof' 'remove --proof or have the installation owner replace the release trust policy with fresh 2FA' PROOF_METHOD_WRONG
     command -v gh >/dev/null || fail 'GitHub CLI is not installed, so release provenance cannot be checked' 'rerun create to install the server packages, then retry'
-    local ids id found=0
-    local check=(gh attestation verify "$artifact" --repo "$repository"
-        --signer-workflow "$workflow"
-        --source-ref "refs/tags/$tag"
-        --format json --jq '.[].verificationResult.signature.certificate.sourceRepositoryIdentifier')
+    local check=(python3 "$release_proof" verify-github --artifact "$artifact" --repository "$repository"
+        --repository-id "$repository_id" --workflow "$workflow" --tag "$tag")
     if [[ -f $github_app ]]; then
-        ids=$(python3 "$here/lib/github-app.py" run "$github_app" --repo "$repository" --log "$log" -- "${check[@]}") ||
-            fail "GitHub build provenance did not verify for $repository tag $tag with the server's GitHub App; nothing was installed" "check the App with: $0 github-app --check, then download the asset from the trusted release workflow and retry" SIGNATURE_INVALID
+        python3 "$here/lib/github-app.py" run "$github_app" --repo "$repository" -- "${check[@]}" --app ||
+            fail "GitHub build provenance did not verify for $repository tag $tag with the server's GitHub App; nothing was installed" "check the App with: $0 github-app --check, then retry" SIGNATURE_INVALID
     else
-        install -d -m 0700 -o root -g root "$staging/gh-config"
-        ids=$(env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_CONFIG_DIR="$staging/gh-config" "${check[@]}" 2>>"$log") ||
-            fail "GitHub build provenance did not verify anonymously for public repository $repository tag $tag; nothing was installed" "for a private repository set up the server GitHub App, then retry" SIGNATURE_INVALID
+        "${check[@]}" ||
+            fail "GitHub build provenance did not verify for public repository $repository tag $tag; nothing was installed" "for a private repository set up the server GitHub App, then retry" SIGNATURE_INVALID
     fi
-    while IFS= read -r id; do
-        [[ -n $id ]] || continue
-        found=1
-        [[ $id == "$repository_id" ]] || fail "the release was signed by a different GitHub repository number than $repository_id; nothing was installed" 'use the asset from the trusted repository, or have the installation owner replace release trust with fresh 2FA' SIGNATURE_WRONG_REPOSITORY
-    done <<<"$ids"
-    ((found)) || fail "GitHub returned no verified provenance for $repository tag $tag; nothing was installed" 'download the asset from the trusted release workflow and retry' SIGNATURE_INVALID
 }
 
 # unpack_release <archive> <folder>: accept only the release archive's plain
@@ -921,9 +970,8 @@ PY
 }
 
 # ================================================================ installer
-# The installer program, shared by every instance on this machine, and one
-# service per instance. Rerun with a newer program to update it: the services
-# restart, and a job one of them was running is settled by the rules in
+# Rerun with a newer program to update the instance installer. A job it was
+# running is settled by the rules in
 # apps/installer/README.md ("If the server restarts mid-way").
 installer() {
     local instance=${1:-} source=${2:-} tag='' proof=''
@@ -941,20 +989,25 @@ installer() {
     # installed with its own mode below.
     [[ -f $source ]] || fail "$source is not a file" "download bilibi-installer-x86_64-unknown-linux-gnu from the release and give its path" INVALID_INPUT
     stage_source "$source"
-    (lock_release_policy "$instance"; verify_provenance "$instance" "$staged" "$tag" installer "$(artifact_target installer "$source")" "$proof")
-    [[ -d $root/build ]] || fail "no instance exists yet" "create one first: $0 create <instance> --role ... --site ..."
+    lock_release_policy "$instance"
+    verify_provenance "$instance" "$staged" "$tag" installer "$(artifact_target installer "$source")" "$proof"
+    local bin web_active=
+    bin=$(installer_bin "$instance")
+    systemctl is-active --quiet "$unit_name$instance" && web_active=1
+    systemctl stop "$installer_unit$instance"
     install_unit
+    ensure_instance_access "$instance"
+    install_release_proof
     retire_worker
-    install -d -m 0755 -o root -g root "$root/build/bin"
-    install -m 0755 -o root -g root "$staged" "$installer_bin.new" && mv -T "$installer_bin.new" "$installer_bin"
-    say "installer: $installer_bin updated"
-    for instance in $(instances); do
-        ensure_current_link "$instance"
-        ensure_incoming "$instance"
-        systemctl enable "$installer_unit$instance" >/dev/null 2>&1
-        systemctl restart "$installer_unit$instance" || say "Warning: $installer_unit$instance did not start; see: systemctl status $installer_unit$instance"
-        say "$instance: $installer_unit$instance $(installer_state "$instance")"
-    done
+    ensure_current_link "$instance"
+    install -m 0755 -o root -g root "$staged" "$bin.new" && mv -T "$bin.new" "$bin"
+    exec {release_lock_fd}<&-
+    systemctl enable "$installer_unit$instance" >/dev/null 2>&1
+    systemctl start "$installer_unit$instance"
+    if [[ -n $web_active ]]; then
+        systemctl restart "$unit_name$instance"
+    fi
+    say "$instance: $bin updated"
 }
 
 # ================================================================ GitHub App
@@ -1012,8 +1065,9 @@ verify_command() {
 }
 
 # ================================================================ release
-with_env() { # <instance> <user> <command...>
-    local instance=$1 user=$2; shift 2
+with_env() { # <instance> <command...>
+    local instance=$1 user; shift
+    user=$(instance_account a "$instance")
     local dir; dir=$(instance_dir "$instance")
     # shellcheck disable=SC2016 # the inner shell expands $1 and $2
     runuser -u "$user" -- bash -c 'set -a; . "$1"; set +a; shift; export HOME="$2"; shift; exec "$@"' -- "$dir/env" "$dir/data" "$@"
@@ -1046,7 +1100,7 @@ admit_release() {
     local instance=$1 n=$2 dir
     dir=$(instance_dir "$instance")
     read_installation_mode || return 1
-    with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" status | python3 -c '
+    with_env "$instance" "$dir/releases/$n/bilibi-web" status | python3 -c '
 import sys
 mode = sys.argv[1]
 status = sys.stdin.read()
@@ -1143,19 +1197,19 @@ release() {
     [[ -n $tag ]] || usage
     need_root release "$@"
     lock_release_policy "$instance"
-    retire_worker
     [[ -f $source ]] || fail "$source is not a setup release archive"
     stage_source "$source"
     verify_provenance "$instance" "$staged" "$tag" setup "$(artifact_target setup "$source")" "$proof"
-    local unpacked binary dir n previous source_digest
+    local unpacked dir n previous source_digest worker
+    worker=$(instance_account w "$instance")
     source_digest=$(sha256sum "$staged" | cut -d' ' -f1)
     dir=$(instance_dir "$instance")
     previous=$(current_release "$instance")
-    if [[ -n $previous && -f $dir/releases/$previous/source.sha256 ]] &&
-        [[ $(cat "$dir/releases/$previous/source.sha256") == "$source_digest" ]]; then
+    if [[ -n $previous ]] &&
+        [[ $(runuser -u "$worker" -- cat "$dir/releases/$previous/source.sha256" 2>/dev/null) == "$source_digest" ]]; then
         python3 "$release_proof" check-replay --state "$(release_state "$instance")" --tag "$tag" --digest "$source_digest" --resume >/dev/null ||
             fail "release $tag conflicts with this instance's highest admitted release" 'use a newly tagged release; use Software Undo for a deliberate rollback' SIGNATURE_REPLAY
-        (cd "$dir/releases/$previous" && sha256sum -c --quiet SHA256SUMS) ||
+        runuser -u "$worker" -- bash -c 'cd -- "$1" && sha256sum -c --quiet SHA256SUMS' -- "$dir/releases/$previous" ||
             fail "current release $previous does not match its checksum" "restore the release before retrying"
         [[ $(service_state "$instance") == active ]] && wait_healthy "$instance" ||
             fail "current release $previous is not healthy" "check systemctl status $unit_name$instance and retry" UNHEALTHY
@@ -1166,29 +1220,27 @@ release() {
     fi
     python3 "$release_proof" check-replay --state "$(release_state "$instance")" --tag "$tag" --digest "$source_digest" >/dev/null ||
         fail "release $tag conflicts with this instance's highest admitted release" 'use a newly tagged release; use Software Undo for a deliberate rollback' SIGNATURE_REPLAY
+    install_unit
+    ensure_instance_access "$instance"
+    install_release_proof
+    retire_worker
     unpacked=$staging/unpacked
     if ! unpack_release "$staged" "$unpacked"; then
         fail 'the setup release archive or its checksum is invalid; nothing was installed' 'download the asset again and retry' ARCHIVE_INVALID
     fi
-    binary=$unpacked/bilibi-web
     python3 "$release_proof" record-replay --state "$(release_state "$instance")" --tag "$tag" --digest "$source_digest" ||
         fail 'the release replay record could not be saved' 'check the instance trust directory and retry' TRUST_STATE_FAILED
     n=$(( $(release_numbers "$instance" | tail -n1) + 1 ))
-    install -d -m 0755 -o bilibi-build -g bilibi "$dir/releases/$n"
-    install -m 0755 -o bilibi-build -g bilibi "$binary" "$dir/releases/$n/bilibi-web"
-    # The release's recipe, when the build wrote one (scripts/discover-modules.py --pin).
-    local extra
-    for extra in manifest.txt Cargo.lock release.json bundle.json; do
-        [[ -f $unpacked/$extra ]] && install -m 0644 -o bilibi-build -g bilibi "$unpacked/$extra" "$dir/releases/$n/$extra"
-    done
-    install -m 0644 -o bilibi-build -g bilibi "$unpacked/SHA256SUMS" "$dir/releases/$n/SHA256SUMS"
-    if [[ -d $unpacked/plugins ]]; then
-        cp -R -- "$unpacked/plugins" "$dir/releases/$n/plugins"
-        chown -R bilibi-build:bilibi "$dir/releases/$n/plugins"
+    printf '%s\n' "$source_digest" >"$unpacked/source.sha256"
+    chmod 0755 "$unpacked"
+    if ! (tar -C "$unpacked" -cf - . | runuser -u "$worker" -- bash -c '
+        set -e
+        umask 022
+        mkdir -- "$1"
+        tar --no-same-owner -C "$1" -xf -
+    ' -- "$dir/releases/$n"); then
+        fail "release $n could not be copied" 'fix the copy failure and publish a new setup tag'
     fi
-    printf '%s\n' "$source_digest" >"$dir/releases/$n/source.sha256"
-    chown bilibi-build:bilibi "$dir/releases/$n/source.sha256"
-    chmod 0644 "$dir/releases/$n/source.sha256"
     rm -rf -- "$unpacked"
     say "$instance: release $n copied to $dir/releases/$n"
     (
@@ -1201,13 +1253,13 @@ release() {
             fi
             fail "release $n does not satisfy this instance's installation policy" "use an isolated installation, or prepare a code-free release; a first release must be code-free"
         fi
-        if ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" migrate ||
-            ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" seed-production; then
+        if ! with_env "$instance" "$dir/releases/$n/bilibi-web" migrate ||
+            ! with_env "$instance" "$dir/releases/$n/bilibi-web" seed-production; then
             if [[ -n $previous ]]; then
                 admit_release "$instance" "$previous" || exit 1
                 systemctl start "$unit_name$instance"
             fi
-            fail "release $n could not update the database" "see the output above; the previous release is back in service" MIGRATION_FAILED
+            fail "release $n could not update the database" "see the output above, fix the migration and publish a new setup tag" MIGRATION_FAILED
         fi
         put_in_service "$instance" "$n" "$previous" ||
             fail "release $n did not start" "read journalctl -u $unit_name$instance; any previous release is back in service. Fix the cause and publish a new setup tag" UNHEALTHY
@@ -1259,7 +1311,7 @@ mail() {
     # Single quotes: read the same way by bash and systemd's EnvironmentFile.
     printf "MAIL_HOST='%s'\nMAIL_PORT='%s'\nMAIL_USERNAME='%s'\nMAIL_PASSWORD='%s'\nMAIL_TLS_MODE='%s'\nMAIL_FROM_NAME='%s'\nMAIL_FROM_ADDRESS='%s'\n" \
         "$host" "$port" "$username" "$password" "$tls" "$from_name" "$from_address" >>"$env_new"
-    chown root:bilibi "$env_new"; chmod 0640 "$env_new"
+    chown "root:$(instance_account a "$instance")" "$env_new"; chmod 0640 "$env_new"
     mv -T "$env_new" "$env"
     umask 022
     if [[ $(service_state "$instance") == active ]]; then
@@ -1281,7 +1333,7 @@ create_owner() {
     instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
     local dir; dir=$(instance_dir "$instance")
     [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --tag <setup-vX.Y.Z> [--proof <proof.json>]" NO_RELEASE
-    with_env "$instance" bilibi "$dir/current/bilibi-web" create-owner "$@"
+    with_env "$instance" "$dir/current/bilibi-web" create-owner "$@"
 }
 # =========================================================== tenant-provision
 # A customer tenant, primary company and first-owner invitation.
@@ -1306,7 +1358,7 @@ tenant_provision() {
     instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
     local dir; dir=$(instance_dir "$instance")
     [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --tag <setup-vX.Y.Z> [--proof <proof.json>]" NO_RELEASE
-    with_env "$instance" bilibi "$dir/current/bilibi-web" tenant-provision "${args[@]}"
+    with_env "$instance" "$dir/current/bilibi-web" tenant-provision "${args[@]}"
 }
 # ========================================================= two-factor-reset
 # Turns off one account's authenticator, for a person nobody else can reset
@@ -1320,7 +1372,7 @@ two_factor_reset() {
     instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
     local dir; dir=$(instance_dir "$instance")
     [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --tag <setup-vX.Y.Z> [--proof <proof.json>]" NO_RELEASE
-    with_env "$instance" bilibi "$dir/current/bilibi-web" two-factor-reset "$@"
+    with_env "$instance" "$dir/current/bilibi-web" two-factor-reset "$@"
 }
 # ========================================================= identity lifecycle
 identity_lifecycle() {
@@ -1331,7 +1383,7 @@ identity_lifecycle() {
     instance_exists "$instance" || fail "no instance named $instance"
     local dir; dir=$(instance_dir "$instance")
     [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --tag <setup-vX.Y.Z> [--proof <proof.json>]"
-    with_env "$instance" bilibi-build "$dir/current/bilibi-web" "$command" "$@"
+    with_env "$instance" "$dir/current/bilibi-web" "$command" "$@"
 }
 switch() {
     local instance=${1:-} n=${2:-}
@@ -1340,7 +1392,8 @@ switch() {
     instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host>" NO_INSTANCE
     local dir; dir=$(instance_dir "$instance")
     [[ -x $dir/releases/$n/bilibi-web ]] || fail "$instance has no release $n" "list them: $0 status $instance"
-    (cd "$dir/releases/$n" && sha256sum -c --quiet SHA256SUMS) || fail "release $n does not match its checksum"
+    runuser -u "$(instance_account w "$instance")" -- bash -c 'cd -- "$1" && sha256sum -c --quiet SHA256SUMS' -- "$dir/releases/$n" ||
+        fail "release $n does not match its checksum"
     # An older release may lack migrations the newer one applied; the database
     # keeps them (migrations are forward-only). Going back is the Software page's
     # Undo, which also restores a backup when tables changed.

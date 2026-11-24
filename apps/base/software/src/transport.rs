@@ -366,72 +366,40 @@ pub fn sha256_of(path: &Path) -> io::Result<String> {
 /// reuse gap; the pinned signer and source ref bind the artifact to its
 /// trusted workflow and reviewed setup tag.
 pub fn verify_attestation(
+    helper: &Path,
     artifact: &Path,
     policy: &crate::release_proof::Policy,
     tag: &str,
     token: Option<&str>,
 ) -> Result<(), String> {
-    let source_ref = format!("refs/tags/{tag}");
-    let mut command = Command::new("gh");
-    command.args([
-        "attestation",
-        "verify",
-        artifact
-            .to_str()
-            .ok_or("The release file path cannot be verified.")?,
-        "--repo",
-        &policy.repository,
-        "--signer-workflow",
-        &policy.workflow,
-        "--source-ref",
-        &source_ref,
-        "--format",
-        "json",
-        "--jq",
-        ".[].verificationResult.signature.certificate.sourceRepositoryIdentifier",
-    ]);
-    let config = artifact.with_extension("gh-config");
-    fs::create_dir(&config)
-        .map_err(|error| format!("Could not isolate GitHub CLI configuration: {error}."))?;
+    let mut command = Command::new("python3");
     command
-        .env("GH_CONFIG_DIR", &config)
-        .env("GH_HOST", "github.com")
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .env_remove("GITHUB_TOKEN")
-        .env_remove("GH_ENTERPRISE_TOKEN")
-        .env_remove("GITHUB_ENTERPRISE_TOKEN");
+        .arg(helper)
+        .args(["verify-github", "--artifact"])
+        .arg(artifact)
+        .args([
+            "--repository",
+            &policy.repository,
+            "--repository-id",
+            &policy.repository_id.to_string(),
+            "--workflow",
+            &policy.workflow,
+            "--tag",
+            tag,
+        ])
+        .env_remove("GH_TOKEN");
     if let Some(token) = token {
-        command.env("GH_TOKEN", token);
-    } else {
-        command.env_remove("GH_TOKEN");
+        command.arg("--app").env("GH_TOKEN", token);
     }
-    let output = command.output();
-    let _ = fs::remove_dir_all(config);
-    let output = output.map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            "GitHub CLI is not installed, so the release provenance cannot be checked. Run scripts/install-server.sh create again, then retry.".to_owned()
-        } else {
-            format!("The release provenance check could not start: {error}.")
-        }
-    })?;
+    let output = command
+        .output()
+        .map_err(|error| format!("The release provenance check could not start: {error}."))?;
     if !output.status.success() {
         return Err(format!(
-            "GitHub artifact attestation did not verify for {} tag {tag}. Nothing was unpacked; download the asset from the pinned release workflow and retry.",
-            policy.repository
+            "GitHub artifact attestation did not verify for {} tag {tag}. Nothing was unpacked. {}",
+            policy.repository,
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
-    }
-    let ids = String::from_utf8_lossy(&output.stdout);
-    let expected_id = policy.repository_id.to_string();
-    let mut found = false;
-    for id in ids.lines().map(str::trim).filter(|id| !id.is_empty()) {
-        found = true;
-        if id != expected_id {
-            return Err("The release provenance belongs to a different GitHub repository number. Nothing was unpacked; the installation owner must review release trust before retrying.".into());
-        }
-    }
-    if !found {
-        return Err("GitHub returned no verified build provenance for this release. Nothing was unpacked; inspect the Release setup workflow and retry.".into());
     }
     Ok(())
 }

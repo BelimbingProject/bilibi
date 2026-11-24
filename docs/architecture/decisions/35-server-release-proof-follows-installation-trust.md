@@ -56,7 +56,7 @@ After bootstrap, only the installation owner may replace the policy, repository,
 
 Software shows the current proof policy read-only: proof kind, repository, workflow, public-key fingerprint when applicable, minimum tag, highest admitted tag, and when and by whom the policy was last changed. The private key and repository access credential are never accepted or shown there.
 
-Trust state and its high-water mark live outside release folders and database backups, so installing a release, switching back or restoring a backup cannot replace or rewind them. Release code may read the current record but may change it only through the owner-authorized, fresh-2FA operation.
+Trust state and its high-water mark live outside release folders and database backups, so installing a release, switching back or restoring a backup cannot replace or rewind them. Both records are root-owned. An instance’s installer may invoke only that instance’s privileged trust writer. Candidate releases run under the instance’s unprivileged application account. Each installer binary is verified against the pin for the instance it serves.
 
 ### Replay and rollback
 

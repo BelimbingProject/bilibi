@@ -1,6 +1,6 @@
 # Bilibi installer
 
-`bilibi-installer` is the small program beside every Bilibi instance that puts a release into service when a server owner asks for it on the Software page, and takes it back when they press Undo. It runs as its own service under the `bilibi-build` user, so the program people use never rewrites itself.
+`bilibi-installer` is the small program beside every Bilibi instance that puts a release into service when a server owner asks for it on the Software page, and takes it back when they press Undo. It runs as its own service under a dedicated installer account for its instance, so the program people use never rewrites itself.
 ## One example
 
 The owner opens Software on Production, reviews the exact GitHub asset already checked on Staging, types a fresh 2FA code, and confirms. Over the next two minutes the page shows:
@@ -137,16 +137,15 @@ Build `bilibi-installer` on your build machine, which may be a separate account 
 sudo scripts/install-server.sh installer production /path/to/bilibi-installer-x86_64-unknown-linux-gnu --tag setup-v1.0.0
 ```
 
-The server's setup-time trust record already pins the proof method, repository name and immutable number, workflow and minimum tag. For operator trust, add `--proof /path/to/bilibi-installer-x86_64-unknown-linux-gnu.proof.json`. The command checks that one policy, copies the program to `/opt/bilibi/build/bin/bilibi-installer` and starts `bilibi-installer@<instance>` for every instance. Nothing is replaced when verification fails. A later `create` starts one for the new instance too. Rerun `installer` with a newer verified program to update it; the services restart and a job in progress is settled as in "If the server restarts mid-way".
+The instance’s pin supplies the proof method, repository name and immutable number, workflow and minimum tag. For operator trust, add `--proof /path/to/bilibi-installer-x86_64-unknown-linux-gnu.proof.json`. The command verifies the installer against that instance’s policy, writes its root-owned binary to `/opt/bilibi/<instance>/installer`, and starts its service. Repeat for each instance. The installer runs candidate programs under the instance’s application account. Root alone writes trust and replay files through the terminal or the instance’s privileged installer path.
 
 By hand, for one instance, with its `env` file loaded:
 
 ```sh
-set -a; . /opt/bilibi/production/env; set +a
-bilibi-installer /opt/bilibi/production          # serve until stopped
+sudo systemctl start bilibi-installer@production
 ```
 
-It needs `DATABASE_URL` and `BIND_ADDR` from that file, the sudo rule from `scripts/server/sudoers` to start and stop `bilibi@*`, and PostgreSQL's `pg_dump` and `pg_restore` on the path. Progress lines go to the journal: `journalctl -u bilibi-installer@production`.
+The service reads its instance’s `DATABASE_URL` and `BIND_ADDR` and uses PostgreSQL’s `pg_dump` and `pg_restore` on the path. Read progress with `journalctl -u bilibi-installer@production`.
 
 ## Caveats
 

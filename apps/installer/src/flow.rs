@@ -17,7 +17,7 @@ use crate::{
     service::Service,
 };
 use serde_json::{Value, json};
-use std::{fs, path::PathBuf, process::Command, time::Duration};
+use std::{fs, path::PathBuf, time::Duration};
 use tokio_postgres::Client;
 
 /// How long a release gets to answer after a start.
@@ -181,9 +181,18 @@ impl<'a> Run<'a> {
     async fn finish_with_plugins(
         &mut self,
         state: &str,
-        result: Value,
+        mut result: Value,
         plugins: Option<&[Value]>,
     ) -> Db<()> {
+        if matches!(state, "failed" | "cancelled" | "interrupted")
+            && self.job.kind == "install"
+            && self.layout.consumed_tag(&self.job.request["source"])
+        {
+            result["message"] = json!(format!(
+                "{} Publish a new setup tag before trying again.",
+                result["message"].as_str().unwrap_or("")
+            ));
+        }
         self.forget_history();
         jobs::finish_with_plugins(&mut *self.client, &self.job, state, &result, plugins).await?;
         self.log(&format!(
@@ -267,18 +276,6 @@ impl<'a> Run<'a> {
         }
     }
 
-    pub async fn check_release(&mut self) -> Db<bool> {
-        if let Err(reason) = self
-            .layout
-            .check_release(&self.job.request["source"], self.resumed)
-        {
-            self.drop_download();
-            self.nothing_changed("fetch", &reason).await?;
-            return Ok(false);
-        }
-        Ok(true)
-    }
-
     // ------------------------------------------------------------- resume
     /// What a restart means for a job found running. True when the restart
     /// ended the job; false when the flow carries on from the first step not
@@ -307,10 +304,8 @@ impl<'a> Run<'a> {
             // A release downloaded for this job is downloaded again when the
             // owner starts again; an uploaded file stays for it.
             self.drop_download();
-            self.interrupted(
-                "The installer was interrupted before the pause. Nothing changed. Start again.",
-            )
-            .await?;
+            self.interrupted("The installer was interrupted before the pause. Nothing changed.")
+                .await?;
             return Ok(true);
         }
         if self.update_committed().await? {
@@ -339,7 +334,7 @@ impl<'a> Run<'a> {
             ),
         };
         self.interrupted(&format!(
-            "The installer was interrupted during the pause, before the database was changed. {back} Nothing changed. Start again."
+            "The installer was interrupted during the pause, before the database was changed. {back} Nothing changed."
         ))
         .await?;
         Ok(true)
@@ -391,11 +386,10 @@ impl<'a> Run<'a> {
     pub async fn trust(&mut self) -> Db<()> {
         self.start("trust", "Replacing the server's release trust record")
             .await?;
-        match self.layout.replace_release_trust(
-            self.job.id,
-            self.job.requested_by,
-            &self.job.request,
-        ) {
+        match self
+            .layout
+            .replace_release_trust(self.job.requested_by, &self.job.request)
+        {
             Ok(facts) => {
                 self.done(
                     "trust",
@@ -421,6 +415,11 @@ impl<'a> Run<'a> {
 
     // ------------------------------------------------------------ install
     pub async fn install(&mut self) -> Db<()> {
+        if self.job.paused && !self.is_done("fetch") {
+            self.fail("fetch", "the paused install has no completed release copy")
+                .await?;
+            return self.after_failure().await;
+        }
         let fetched = if self.is_done("fetch") {
             self.detail("fetch")
         } else {
@@ -588,7 +587,10 @@ impl<'a> Run<'a> {
     /// (a new try downloads again under a new job), so its folder goes
     /// whatever the outcome.
     async fn fetch(&mut self) -> Result<Value, String> {
-        let fetched = self.fetch_release().await;
+        let fetched = match self.layout.check_release(&self.job.request["source"]) {
+            Ok(()) => self.fetch_release().await,
+            Err(reason) => Err(reason),
+        };
         self.drop_download();
         fetched
     }
@@ -1401,8 +1403,7 @@ fn with_pause(message: &str, seconds: Option<i64>) -> String {
 /// Runs one command of a release's program with the instance's environment
 /// (this process has it from the env file), cut off after `limit` seconds.
 fn run_program(program: &std::path::Path, command: &str, limit: &str) -> Result<(), String> {
-    let out = Command::new("timeout")
-        .arg(limit)
+    let out = layout::release_command(limit)?
         .arg(program)
         .arg(command)
         .output()

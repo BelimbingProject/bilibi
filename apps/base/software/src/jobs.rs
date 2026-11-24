@@ -314,12 +314,22 @@ fn scrub_backup_paths(value: &mut Value, paths: &[String]) {
     }
 }
 
-/// Whether a running job has reached its pause: a cancel is then too late.
-pub async fn past_pause(client: &impl GenericClient, tenant: i64, job: i64) -> Result<bool> {
+/// Whether a running job has passed its cancellation cutoff.
+pub async fn cancellation_closed(
+    client: &impl GenericClient,
+    tenant: i64,
+    job: &Job,
+) -> Result<bool> {
+    if job.state != "running" {
+        return Ok(false);
+    }
+    if job.kind == "trust" {
+        return Ok(true);
+    }
     Ok(client
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM base_software_steps WHERE tenant_id=$1 AND job_id=$2 AND pauses AND state<>'pending')",
-            &[&tenant, &job],
+            &[&tenant, &job.id],
         )
         .await?
         .get(0))
@@ -484,7 +494,7 @@ pub async fn end_silent(
     minutes: i32,
 ) -> Result<bool> {
     let result = json!({
-        "message": format!("The installer stopped answering for {minutes} minutes before it paused the service. Nothing changed. Start again."),
+        "message": format!("The installer stopped answering for {minutes} minutes before it paused the service. Check the highest admitted tag in Release trust before trying again. An admitted setup tag requires a new tag."),
         "migrated": false,
         "reason": "installer_silent",
     });
@@ -642,7 +652,7 @@ pub async fn cancel(
                 }
                 "running"
                     if before.cancel_requested_at.is_none()
-                        && !past_pause(sql, tenant, id).await? =>
+                        && !cancellation_closed(sql, tenant, &before).await? =>
                 {
                     sql.query_one(
                         &format!("UPDATE base_software_jobs SET cancel_requested_at=now(), cancel_requested_by=$3 WHERE tenant_id=$1 AND id=$2 RETURNING {JOB_COLUMNS}"),
