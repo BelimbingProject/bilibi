@@ -8,6 +8,8 @@ mod backup;
 mod composition;
 #[path = "../src/jobs.rs"]
 mod jobs;
+#[path = "../src/layout.rs"]
+mod layout;
 
 use serde_json::json;
 use std::{error::Error, os::unix::fs::PermissionsExt, path::PathBuf};
