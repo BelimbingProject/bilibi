@@ -44,6 +44,9 @@ const PRUNE_BATCH: i64 = 100;
 pub const SUBJECT_MAX: usize = 100;
 /// Posted fields one action reads at most; more are refused.
 const FIELDS_MAX: usize = 100;
+/// The audit kinds of a receipt and of an hour of abuse counts.
+const RECEIPT_KIND: &str = "public.receipt";
+const ABUSE_KIND: &str = "public.abuse";
 /// Who audit names for a receipt or a count: this module, for a visitor.
 const PRINCIPAL: &str = "public-site";
 
@@ -343,24 +346,46 @@ impl Public {
             .await?;
         tx.mutate(move |sql| {
             Box::pin(async move {
-                sql.execute(
-                    "INSERT INTO public_abuse_counts(tenant_id,action,subject,hour,trap,too_fast,busy,expired) VALUES($1,$2,$3,to_timestamp($4::float8*3600),$5,$6,$7,$8) ON CONFLICT (tenant_id,action,subject,hour) DO UPDATE SET trap=public_abuse_counts.trap+excluded.trap,too_fast=public_abuse_counts.too_fast+excluded.too_fast,busy=public_abuse_counts.busy+excluded.busy,expired=public_abuse_counts.expired+excluded.expired",
-                    &[&tenant, &action, &subject, &(hour as f64), &tally.trap, &tally.too_fast, &tally.busy, &tally.expired],
-                )
-                .await?;
-                // Old hours go, a batch at a time.
-                sql.execute(
-                    "DELETE FROM public_abuse_counts WHERE (tenant_id,action,subject,hour) IN (SELECT tenant_id,action,subject,hour FROM public_abuse_counts WHERE tenant_id=$1 AND hour<now()-make_interval(days => $2) LIMIT $3)",
-                    &[&tenant, &COUNT_DAYS, &PRUNE_BATCH],
-                )
-                .await?;
-                let change = Change {
-                    kind: "public.abuse".into(),
-                    id: tenant,
-                    old: json!({}),
-                    new: json!({"action": action, "subject": subject, "trap": tally.trap, "too_fast": tally.too_fast, "busy": tally.busy, "expired": tally.expired}),
+                let row = sql
+                    .query_one(
+                        "INSERT INTO public_abuse_counts(tenant_id,action,subject,hour,trap,too_fast,busy,expired) VALUES($1,$2,$3,to_timestamp($4::float8*3600),$5,$6,$7,$8) ON CONFLICT (tenant_id,action,subject,hour) DO UPDATE SET trap=public_abuse_counts.trap+excluded.trap,too_fast=public_abuse_counts.too_fast+excluded.too_fast,busy=public_abuse_counts.busy+excluded.busy,expired=public_abuse_counts.expired+excluded.expired RETURNING id,trap,too_fast,busy,expired,to_char(hour AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:00Z')",
+                        &[&tenant, &action, &subject, &(hour as f64), &tally.trap, &tally.too_fast, &tally.busy, &tally.expired],
+                    )
+                    .await?;
+                let at: String = row.get(5);
+                let counts = |trap: i32, too_fast: i32, busy: i32, expired: i32| {
+                    json!({"action": action, "subject": subject, "hour": at, "trap": trap, "too_fast": too_fast, "busy": busy, "expired": expired})
                 };
-                Ok(((), vec![change]))
+                let (trap, too_fast, busy, expired): (i32, i32, i32, i32) =
+                    (row.get(1), row.get(2), row.get(3), row.get(4));
+                let mut changes = vec![Change {
+                    kind: ABUSE_KIND.into(),
+                    id: row.get(0),
+                    old: if (trap, too_fast, busy, expired)
+                        == (tally.trap, tally.too_fast, tally.busy, tally.expired)
+                    {
+                        json!({})
+                    } else {
+                        counts(trap - tally.trap, too_fast - tally.too_fast, busy - tally.busy, expired - tally.expired)
+                    },
+                    new: counts(trap, too_fast, busy, expired),
+                }];
+                // Old hours go, a batch at a time.
+                for row in sql
+                    .query(
+                        "DELETE FROM public_abuse_counts WHERE id IN (SELECT id FROM public_abuse_counts WHERE tenant_id=$1 AND hour<now()-make_interval(days => $2) ORDER BY hour LIMIT $3) RETURNING id,action,subject,to_char(hour AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:00Z')",
+                        &[&tenant, &COUNT_DAYS, &PRUNE_BATCH],
+                    )
+                    .await?
+                {
+                    changes.push(Change {
+                        kind: ABUSE_KIND.into(),
+                        id: row.get(0),
+                        old: json!({"action": row.get::<_, String>(1), "subject": row.get::<_, String>(2), "hour": row.get::<_, String>(3)}),
+                        new: json!({}),
+                    });
+                }
+                Ok(((), changes))
             })
         })
         .await?;
@@ -403,7 +428,7 @@ impl Public {
             let taken: i64 = tx
                 .sql()
                 .query_one(
-                    "SELECT count(*) FROM public_receipts WHERE tenant_id=$1 AND action=$2 AND subject=$3 AND outcome<>'spam' AND created_at>=date_trunc('hour',now())",
+                    "SELECT count(*) FROM public_receipts WHERE tenant_id=$1 AND action=$2 AND subject=$3 AND outcome<>'spam' AND created_at>=date_trunc('hour',now(),'UTC')",
                     &[&tenant, &action, &subject],
                 )
                 .await?
@@ -422,11 +447,20 @@ impl Public {
             .mutate(move |sql| {
                 Box::pin(async move {
                     // Old receipts go, a batch at a time.
-                    sql.execute(
-                        "DELETE FROM public_receipts WHERE id IN (SELECT id FROM public_receipts WHERE tenant_id=$1 AND created_at<now()-make_interval(days => $2) LIMIT $3)",
-                        &[&tenant, &KEEP_DAYS, &PRUNE_BATCH],
-                    )
-                    .await?;
+                    let mut changes: Vec<Change> = sql
+                        .query(
+                            "DELETE FROM public_receipts WHERE id IN (SELECT id FROM public_receipts WHERE tenant_id=$1 AND created_at<now()-make_interval(days => $2) ORDER BY created_at LIMIT $3) RETURNING id,action,subject,outcome",
+                            &[&tenant, &KEEP_DAYS, &PRUNE_BATCH],
+                        )
+                        .await?
+                        .iter()
+                        .map(|row| Change {
+                            kind: RECEIPT_KIND.into(),
+                            id: row.get(0),
+                            old: json!({"action": row.get::<_, String>(1), "subject": row.get::<_, String>(2), "outcome": row.get::<_, String>(3)}),
+                            new: json!({}),
+                        })
+                        .collect();
                     let row = sql
                         .query_opt(
                             "INSERT INTO public_receipts(tenant_id,action,subject,ticket_hash,receipt_hash,outcome,reason,settled_at) VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $6='pending' THEN NULL ELSE now() END) ON CONFLICT (tenant_id,action,ticket_hash) DO NOTHING RETURNING id",
@@ -434,15 +468,12 @@ impl Public {
                         )
                         .await?;
                     let id: Option<i64> = row.map(|row| row.get(0));
-                    let changes = id
-                        .map(|id| Change {
-                            kind: "public.receipt".into(),
-                            id,
-                            old: json!({}),
-                            new: json!({"action": action, "subject": subject, "outcome": outcome, "reason": reason}),
-                        })
-                        .into_iter()
-                        .collect();
+                    changes.extend(id.map(|id| Change {
+                        kind: RECEIPT_KIND.into(),
+                        id,
+                        old: json!({}),
+                        new: json!({"action": action, "subject": subject, "outcome": outcome, "reason": reason}),
+                    }));
                     Ok((id, changes))
                 })
             })
@@ -476,7 +507,7 @@ impl Public {
                 )
                 .await?;
                 let change = Change {
-                    kind: "public.receipt".into(),
+                    kind: RECEIPT_KIND.into(),
                     id,
                     old: json!({"outcome": "pending"}),
                     new: json!({"outcome": outcome}),

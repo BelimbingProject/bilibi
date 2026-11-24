@@ -456,9 +456,16 @@ async fn main() -> Result<std::process::ExitCode> {
         )
         .await?
         .get(0);
+    let removal: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_audit_mutations WHERE auditable_type='public.abuse' AND event='deleted'",
+            &[],
+        )
+        .await?
+        .get(0);
     check(
-        "an hour of counts over 30 days old was removed by the next write",
-        old == 0,
+        "an hour of counts over 30 days old was removed by the next write, and its removal audited",
+        old == 0 && removal == 1,
     )?;
     let receipts: i64 = client
         .query_one(

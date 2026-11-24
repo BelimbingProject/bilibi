@@ -24,6 +24,7 @@ CREATE INDEX public_receipts_places_idx ON public_receipts(tenant_id, action, su
 CREATE INDEX public_receipts_age_idx ON public_receipts(tenant_id, created_at);
 
 CREATE TABLE public_abuse_counts (
+ id bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
  tenant_id bigint NOT NULL REFERENCES tenants(id),
  action text NOT NULL,
  subject text NOT NULL,
@@ -34,3 +35,4 @@ CREATE TABLE public_abuse_counts (
  expired integer NOT NULL DEFAULT 0 CHECK (expired >= 0),
  PRIMARY KEY (tenant_id, action, subject, hour)
 );
+CREATE INDEX public_abuse_counts_age_idx ON public_abuse_counts(tenant_id, hour);
