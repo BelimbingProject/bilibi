@@ -7,7 +7,7 @@ pub use admin::{
     platform_operator, provision_platform_operator, provision_tenant, tenant_name_lock,
     CreateOutcome, CreatedTenant, Move, MovePlan, MoveRefusal, NewTenant, Suspension, TenantErrors,
     TenantIdentity, TenantPage, TenantStatus, Tenants, CREATE, LIST, NAME_MAX, PRINCIPAL_PAGE_MAX,
-    REACTIVATE, REASON_MAX, SUSPEND,
+    REACTIVATE, REASON_MAX, RENAME, SUSPEND, VIEW,
 };
 use bilibi_database::{Context, Error, Result};
 use bilibi_party_ids::{AffiliationId, OrganisationId, PersonId};
@@ -1392,6 +1392,7 @@ inventory::submit! {
             ("009-tenancy-hierarchy", include_str!("../migrations/009-hierarchy.sql")),
             ("base-tenancy-010-oversight", include_str!("../migrations/010-oversight.sql")),
             ("base-tenancy-011-status", include_str!("../migrations/011-status.sql")),
+            ("base-tenancy-012-name-version", include_str!("../migrations/012-name-version.sql")),
         ],
         services: &[
             bilibi_module_registry::Service { id: "base/tenancy.authentication", factory: |_| Ok(Arc::new(Authentication::default())) },

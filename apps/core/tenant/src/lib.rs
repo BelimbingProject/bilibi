@@ -1,5 +1,6 @@
 //! Tenant provisioning and its page, composing Base Tenancy and
 //! `Core.Company.PrimaryCompanyManager` above the operation registry.
+mod detail;
 mod operations;
 mod oversight;
 mod oversight_web;
@@ -16,6 +17,8 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const SERVICE: &str = "core/tenant.tenants";
+pub const RENAME: &str = "core.tenant.tenant.rename";
+pub const DETAIL: &str = "core.tenant.tenant.detail";
 pub const CREATE: &str = "core.tenant.tenant.create";
 pub const LIST: &str = "core.tenant.tenant.list";
 pub const GET: &str = "core.tenant.tenant.get";
@@ -63,7 +66,7 @@ fn draft(input: &Value) -> Result<(NewTenant, Vec<String>)> {
     ))
 }
 fn tenant_json(tenant: &bilibi_tenancy::TenantIdentity) -> Value {
-    json!({"id":tenant.id,"parent_id":tenant.parent_id,"name":tenant.name,"status":tenant.status.as_str(),"is_platform_operator":tenant.is_platform_operator,
+    json!({"id":tenant.id,"parent_id":tenant.parent_id,"name":tenant.name,"name_version":tenant.name_version,"status":tenant.status.as_str(),"is_platform_operator":tenant.is_platform_operator,
         "suspension":tenant.suspension.as_ref().map(|suspension| json!({"at":suspension.at,"reason":suspension.reason}))})
 }
 /// The move named by a suspend or reactivate operation key.
@@ -261,12 +264,15 @@ inventory::submit! {
     }
 }
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::ROUTES, "core/tenant.tenants", bilibi_module_registry::Provenance { module:"core/tenant", source:file!(), line:line!() }, &bilibi_module_registry::contributions::Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
-    method:bilibi_module_registry::contributions::Method::Get, path:"/tenancy/tenants", service:PAGES, operation:"tenants", access:bilibi_module_registry::contributions::Access::OperatorCapability(bilibi_tenancy::LIST), framed:true,
+    method:bilibi_module_registry::contributions::Method::Get, path:"/tenancy/tenants", service:PAGES, operation:"tenants", access:bilibi_module_registry::contributions::Access::AnyOf(&[bilibi_tenancy::LIST,bilibi_tenancy::VIEW]), framed:true,
 }) }
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, PAGES, bilibi_module_registry::Provenance { module:"core/tenant", source:file!(), line:line!() }, &bilibi_module_registry::contributions::PageWrites {
-    service:PAGES, contracts:&[("create",CREATE),("confirm_suspend",SUSPEND),("confirm_reactivate",REACTIVATE)], pending:bilibi_module_registry::contributions::Pending::None,
+    service:PAGES, contracts:&[("save_field",RENAME),("create",CREATE),("confirm_suspend",SUSPEND),("confirm_reactivate",REACTIVATE)], pending:bilibi_module_registry::contributions::Pending::None,
 }) }
 
+inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::ROUTES, "core/tenant.detail", bilibi_module_registry::Provenance { module:"core/tenant", source:file!(), line:line!() }, &bilibi_module_registry::contributions::Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+    method:bilibi_module_registry::contributions::Method::Get, path:"/tenancy/tenants/{id}", service:PAGES, operation:"detail", access:bilibi_module_registry::contributions::Access::SignedIn, framed:true,
+}) }
 bilibi_menu::contribute!(
     "core/tenant",
     bilibi_menu::MenuItem::container("admin.tenancy", "Tenancy")
@@ -278,6 +284,9 @@ bilibi_menu::contribute!(
     "core/tenant",
     bilibi_menu::MenuItem::page("admin.tenancy.tenant", "Tenants", "/tenancy/tenants")
         .under("admin.tenancy")
-        .requires(bilibi_menu::Requirement::Capability(bilibi_tenancy::LIST))
+        .requires(bilibi_menu::Requirement::AnyOf(&[
+            bilibi_tenancy::LIST,
+            bilibi_tenancy::VIEW
+        ]))
         .order(10)
 );

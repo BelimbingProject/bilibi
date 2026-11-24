@@ -28,7 +28,7 @@ use bilibi_ui::page::{
 use bilibi_ui::{
     params, Badge, BadgeKind, BuiltinColumn, Choice, ColumnType, ColumnsOutcome, CreateButton,
     Field, FlashMap, FlexRow, FlexTable, Form, Html, IconButton, InputKind, ListColumns, ListSpec,
-    ListState, SortDir, StatusKind, TableEmpty, NO_FLASH,
+    ListState, RecordLink, SortDir, StatusKind, TableEmpty, NO_FLASH,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -344,17 +344,19 @@ struct TenantsPage {
     columns: ListColumns,
     create: Option<Draft>,
     moving: Option<MoveDraft>,
+    framed: bool,
     flash: Option<(StatusKind, String)>,
 }
 
 impl TenantsPage {
-    fn new(pages: &Pages, query: &HashMap<String, String>) -> Result<Self> {
+    fn new(pages: &Pages, query: &HashMap<String, String>, framed: bool) -> Result<Self> {
         Ok(Self {
             pages: pages.clone(),
             list: ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?,
             columns: ListColumns::mount("tenants", builtins()).map_err(|_| Error::Internal)?,
             create: None,
             moving: None,
+            framed,
             flash: None,
         })
     }
@@ -417,7 +419,7 @@ impl TenantsPage {
         &self,
         rows: &[TenantRow],
         display: &DisplayContext,
-        may: (bool, bool),
+        may: (bool, bool, bool),
     ) -> Result<Html> {
         let mut flex_rows = Vec::with_capacity(rows.len());
         for row in rows {
@@ -427,10 +429,24 @@ impl TenantsPage {
                 .slot("id", render(NumberCell { value: row.id })?)
                 .slot(
                     "name",
-                    render(NameCell {
-                        name: &row.name,
-                        operator: row.is_platform_operator,
-                    })?,
+                    if may.2 {
+                        render(RecordLink {
+                            workspace: self.framed,
+                            kind: "core/tenant",
+                            record_id: &row.id.to_string(),
+                            href: &format!("/tenancy/tenants/{}", row.id),
+                            class: "font-medium text-ink-strong hover:underline",
+                            body: render(NameCell {
+                                name: &row.name,
+                                operator: row.is_platform_operator,
+                            })?,
+                        })?
+                    } else {
+                        render(NameCell {
+                            name: &row.name,
+                            operator: row.is_platform_operator,
+                        })?
+                    },
                 )
                 .slot(
                     "parent",
@@ -591,24 +607,39 @@ impl TenantsPage {
         // Preserve the complete directory/parent picker while reading
         // through the bounded search contract in pages of at most 100.
         let mut identities = Vec::new();
+        let can_list = self.may(scope, bilibi_tenancy::LIST).await?;
         let mut page = 1;
         loop {
-            let result = self
-                .pages
-                .contracts
-                .read(
-                    scope,
-                    LIST,
-                    &serde_json::json!({"page":page,"page_size":100}),
-                )
-                .await
-                .map_err(contract_error)?;
+            let result = if can_list {
+                self.pages
+                    .contracts
+                    .read(
+                        scope,
+                        LIST,
+                        &serde_json::json!({"page":page,"page_size":100}),
+                    )
+                    .await
+                    .map_err(contract_error)?
+            } else {
+                let own = self
+                    .pages
+                    .contracts
+                    .read(
+                        scope,
+                        crate::DETAIL,
+                        &serde_json::json!({"tenant_id":scope.tenant()}),
+                    )
+                    .await
+                    .map_err(contract_error)?;
+                serde_json::json!({"result":[own["result"].clone()], "meta":{"page":{"total":1}}})
+            };
             let rows = result["result"].as_array().ok_or(Error::Internal)?;
             for row in rows {
                 identities.push(TenantIdentity {
                     id: row["id"].as_i64().ok_or(Error::Internal)?,
                     parent_id: row["parent_id"].as_i64(),
                     name: row["name"].as_str().ok_or(Error::Internal)?.into(),
+                    name_version: row["name_version"].as_i64().ok_or(Error::Internal)?,
                     status: row["status"]
                         .as_str()
                         .and_then(TenantStatus::parse)
@@ -639,6 +670,19 @@ impl TenantsPage {
         let may = (
             self.may(scope, Move::Suspend.capability()).await?,
             self.may(scope, Move::Reactivate.capability()).await?,
+            {
+                let client = self.pages.db.get().await?;
+                match self
+                    .pages
+                    .authorization
+                    .authorize_scope(&**client, scope, bilibi_tenancy::VIEW)
+                    .await
+                {
+                    Ok(()) => true,
+                    Err(Error::Forbidden) => false,
+                    Err(error) => return Err(error),
+                }
+            },
         );
         let display = self.display(scope).await?;
         let rows = present(
@@ -923,11 +967,27 @@ impl Page<Scope, Error> for Pages {
     }
     fn render<'a>(&'a self, request: PageRequest<'a, Scope>) -> PageFuture<'a, Error> {
         Box::pin(async move {
+            let scope = request.scope.ok_or(Error::Unauthorized)?;
+            if request.operation == "detail" {
+                let mut detail =
+                    crate::detail::Detail::new(self.clone(), detail_id(&request, scope)?);
+                let body = detail
+                    .update(LiveRequest {
+                        scope,
+                        credential: "",
+                        input: LiveInput::Refresh,
+                    })
+                    .await?;
+                return Ok(PageBody {
+                    html: body.html,
+                    live: true,
+                    title: None,
+                });
+            }
             if request.operation != "tenants" {
                 return Err(Error::NotFound);
             }
-            let scope = request.scope.ok_or(Error::Unauthorized)?;
-            let html = TenantsPage::new(self, request.query)?
+            let html = TenantsPage::new(self, request.query, request.framed)?
                 .body(scope, true)
                 .await?;
             Ok(PageBody {
@@ -939,11 +999,18 @@ impl Page<Scope, Error> for Pages {
     }
     fn mount<'a>(&'a self, request: PageRequest<'a, Scope>) -> MountFuture<'a, Scope, Error> {
         Box::pin(async move {
+            let scope = request.scope.ok_or(Error::Unauthorized)?;
+            if request.operation == "detail" {
+                return Ok(Some(Box::new(crate::detail::Detail::new(
+                    self.clone(),
+                    detail_id(&request, scope)?,
+                )) as Box<dyn LiveState<Scope, Error>>));
+            }
             if request.operation != "tenants" {
                 return Err(Error::NotFound);
             }
             let state: Box<dyn LiveState<Scope, Error>> =
-                Box::new(TenantsPage::new(self, request.query)?);
+                Box::new(TenantsPage::new(self, request.query, request.framed)?);
             Ok(Some(state))
         })
     }
@@ -971,6 +1038,10 @@ impl LiveState<Scope, Error> for TenantsPage {
             })
         })
     }
+}
+
+fn detail_id(request: &PageRequest<'_, Scope>, _scope: &Scope) -> Result<i64> {
+    params::positive_id(request.path.get("id").map(String::as_str)).ok_or(Error::Invalid)
 }
 
 fn contract_error(error: ContractError) -> Error {
