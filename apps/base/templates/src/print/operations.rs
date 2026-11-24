@@ -94,7 +94,10 @@ struct Revision<'a> {
 impl Write {
     fn revision<'a>(&self, input: &'a Value) -> bilibi_agent_api::Result<Revision<'a>> {
         let selection = selection(input)?;
-        let expected = input["review"].as_str().ok_or(Error::Invalid)?;
+        let expected = input["review"]
+            .as_str()
+            .filter(|token| token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or(Error::Invalid)?;
         let layout = match self {
             Self::Publish => Some(input["layout"].as_str().ok_or(Error::Invalid)?),
             Self::Restore => None,
@@ -240,7 +243,7 @@ fn preview_schema() -> Value {
 fn restore() -> Value {
     let mut schema = get();
     schema["required"] = json!(["key", "language", "review"]);
-    schema["properties"]["review"] = json!({"type":"string","minLength":64,"maxLength":64});
+    schema["properties"]["review"] = json!({"type":"string","maxLength":64});
     schema
 }
 fn publish() -> Value {
