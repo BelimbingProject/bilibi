@@ -188,6 +188,7 @@ WALKTHROUGHS=(
   'core|person-custom-fields|apps/core/person|person-custom-fields|migrate|BILIBI_PERSON_DEMO=disposable|-|serve'
   'core|person-portal|apps/core/person|person-portal|migrate|BILIBI_PERSON_DEMO=disposable|-'
   'core|product|apps/core/product|product-walkthrough|seed|BILIBI_PRODUCT_WALKTHROUGH=disposable|-'
+  'core|tenant-rename|apps/core/tenant|tenant-rename-walkthrough|none|BILIBI_TENANT_DEMO=disposable|-'
   'core|tenant-suspension|apps/core/tenant|tenant-suspension-walkthrough|none|BILIBI_TENANT_DEMO=disposable|-'
   'core|user-company-accounts|apps/core/user|company-accounts-walkthrough|migrate|BILIBI_COMPANY_ACCOUNTS_DEMO=disposable|-'
   'core|user-company-pickers|apps/core/user|company-picker-bounds-proof|migrate|BILIBI_USER_DEMO=disposable|-'
