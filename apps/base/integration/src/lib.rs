@@ -62,7 +62,7 @@ impl Origin<'_> {
     }
     fn user(self) -> Option<i64> {
         match self {
-            Self::User(scope) => scope.principal().is_none().then(|| scope.user()),
+            Self::User(scope) => Some(scope.user()),
             _ => None,
         }
     }

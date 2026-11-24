@@ -23,6 +23,9 @@ use tokio_postgres::GenericClient;
 pub const REPOSITORY: &str = "software.github_repository";
 pub const REPOSITORY_ID: &str = "software.github_repository_id";
 pub const REPOSITORY_BOUND: &str = "software.github_repository_bound";
+const OFFICIAL_RELEASE_REPOSITORY: &str = "BelimbingProject/bilibi-try";
+const OFFICIAL_RELEASE_REPOSITORY_ID: i64 = 1462459642;
+
 /// The saved read token. Read it only through `Software::github_token`, which
 /// prefers a fresh token from the server's GitHub App (`app.rs`).
 pub const TOKEN: &str = "software.github_token";
@@ -135,7 +138,7 @@ impl Software {
     async fn github_saved(
         &self,
         client: &(impl GenericClient + Sync),
-        scope: &Scope,
+        scope: Option<&Scope>,
     ) -> Result<Saved> {
         let repository = bilibi_ui::params::blank_to_none(
             self.settings.get_global(client, REPOSITORY).await?.as_str(),
@@ -159,21 +162,23 @@ impl Software {
             .as_i64()
             .filter(|minutes| (1..=1440).contains(minutes))
             .unwrap_or(DEFAULT_REFRESH_MINUTES);
-        let token_set = self
-            .settings
-            .resolve_masked(client, scope, Target::Global, &[TOKEN])
-            .await?
-            .get(TOKEN)
-            .is_some_and(|resolved| resolved.source.is_some());
+        let token_set = if let Some(scope) = scope {
+            self.settings
+                .resolve_masked(client, scope, Target::Global, &[TOKEN])
+                .await?
+                .get(TOKEN)
+                .is_some_and(|resolved| resolved.source.is_some())
+        } else {
+            false
+        };
         Ok(Saved {
             repository,
             repository_id,
             bound,
             refresh_minutes,
             token_set,
-            app: app::load(self.paths.as_ref())
-                .ok()
-                .flatten()
+            app: scope
+                .and_then(|_| app::load(self.paths.as_ref()).ok().flatten())
                 .map(|app| app.client_id),
         })
     }
@@ -186,7 +191,7 @@ impl Software {
         scope: &Scope,
     ) -> Result<std::result::Result<Verification, String>> {
         let client = self.db.get().await?;
-        let saved = self.github_saved(&**client, scope).await?;
+        let saved = self.github_saved(&**client, Some(scope)).await?;
         drop(client);
         let Some(repository) = saved.repository else {
             return Ok(Err("Set and accept the application repository on Software › Releases before uploading a release.".into()));
@@ -217,9 +222,26 @@ impl Software {
         force: bool,
         prerelease: bool,
     ) -> Result<Value> {
+        self.release_listing(Some(scope), force, prerelease).await
+    }
+
+    pub(super) async fn release_listing(
+        &self,
+        scope: Option<&Scope>,
+        force: bool,
+        prerelease: bool,
+    ) -> Result<Value> {
         let client = self.db.get().await?;
         let saved = self.github_saved(&**client, scope).await?;
         drop(client);
+        if scope.is_none()
+            && !saved
+                .repository
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(OFFICIAL_RELEASE_REPOSITORY))
+        {
+            return Ok(Value::Null);
+        }
         let Some(repository) = saved.repository.clone() else {
             return Ok(json!({
                 "available": false,
@@ -243,22 +265,28 @@ impl Software {
             .paths
             .as_ref()
             .map(|paths| paths.dir.join("data").join("github-listing.json"));
-        if !force {
-            if let Some(cached) = read_cache(cache_path.as_deref(), &repository) {
-                if fresh(&cached, saved.refresh_minutes) || limited(&cached) {
-                    return Ok(present(&cached, &saved, target, prerelease, false));
-                }
-            }
-        } else if let Some(cached) = read_cache(cache_path.as_deref(), &repository) {
-            if limited(&cached) {
-                return Ok(present(&cached, &saved, target, prerelease, false));
+        let cached = || {
+            read_cache(cache_path.as_deref(), &repository).filter(|cache| {
+                scope.is_some()
+                    || (cache["private"] == false
+                        && cache["repository_id"] == OFFICIAL_RELEASE_REPOSITORY_ID)
+            })
+        };
+        if let Some(cached) = cached() {
+            let fresh = fresh(&cached, saved.refresh_minutes);
+            if (!force && fresh) || limited(&cached) {
+                return Ok(present(&cached, &saved, target, prerelease, !fresh));
             }
         }
-        let fetched = match self.github_token(scope, &repository).await {
+        let token = match scope {
+            Some(scope) => self.github_token(scope, &repository).await,
+            None => Ok(None),
+        };
+        let fetched = match token {
             Ok(token) => {
                 fetch_listing(
                     &self.integration,
-                    scope,
+                    scope.map_or(Origin::System, Origin::User),
                     &repository,
                     token.as_deref(),
                     target,
@@ -324,7 +352,7 @@ impl Software {
     ) -> SoftwareResult<Review> {
         let client = self.db.get().await?;
         authorize_operator(&**client, scope, crate::MANAGE).await?;
-        let saved = self.github_saved(&**client, scope).await?;
+        let saved = self.github_saved(&**client, Some(scope)).await?;
         drop(client);
         github_review(self, scope, input, &saved).await
     }
@@ -336,7 +364,7 @@ impl Software {
         input: &Value,
     ) -> SoftwareResult<Value> {
         authorize_operator(tx.sql(), scope, crate::MANAGE).await?;
-        let saved = self.github_saved(tx.sql(), scope).await?;
+        let saved = self.github_saved(tx.sql(), Some(scope)).await?;
         let review = github_review(self, scope, input, &saved).await?;
         self.step_up.require(scope, STEP_UP, &review.target).await?;
         if (input.get("token").and_then(Value::as_str).is_some()
@@ -417,9 +445,14 @@ async fn github_review(
                 .await
                 .map_err(|message| SoftwareError::field("repository", &message))?
         };
-        let repo = fetch_repo(&software.integration, scope, &repository, token.as_deref())
-            .await
-            .map_err(|message| SoftwareError::field("repository", &message))?;
+        let repo = fetch_repo(
+            &software.integration,
+            Origin::User(scope),
+            &repository,
+            token.as_deref(),
+        )
+        .await
+        .map_err(|message| SoftwareError::field("repository", &message))?;
         if let Some(expected) = input.get("repository_id").and_then(Value::as_i64) {
             if expected != repo.0 {
                 return Err(SoftwareError::field(
@@ -633,9 +666,14 @@ pub(crate) async fn recheck(
     pin: &Pin,
     token: Option<&str>,
 ) -> std::result::Result<(), String> {
-    let repo = fetch_repo(&software.integration, scope, &pin.repository, token)
-        .await
-        .map_err(|message| format!("Could not check the GitHub repository: {message}"))?;
+    let repo = fetch_repo(
+        &software.integration,
+        Origin::User(scope),
+        &pin.repository,
+        token,
+    )
+    .await
+    .map_err(|message| format!("Could not check the GitHub repository: {message}"))?;
     if repo.0 != pin.repository_id {
         return Err(format!(
             "GitHub repository {} is number {} now, not {}. Nothing was downloaded. Accept the repository again, then review the release.",
@@ -749,7 +787,13 @@ fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: 
         };
     }
     json!({
-        "latest": cache["latest"],
+        "latest": if accepted && !identity_changed && !stale
+            && cache["attempt_at"].is_null() && cache["stale"] != true
+            && cache["available"] == true && cache["complete"] == true {
+            cache["latest"].clone()
+        } else {
+            Value::Null
+        },
         "complete": cache["complete"],
         "available": cache["available"].as_bool().unwrap_or(false),
         "repository": repository,
@@ -823,23 +867,28 @@ fn write_cache(path: Option<&Path>, value: &Value) {
 
 async fn fetch_listing(
     integration: &bilibi_integration::Integration,
-    scope: &Scope,
+    origin: Origin<'_>,
     repository: &str,
     token: Option<&str>,
     target: &str,
     cache_path: Option<&Path>,
 ) -> std::result::Result<Value, String> {
-    let (id, private) = fetch_repo(integration, scope, repository, token).await?;
+    let (id, private) = fetch_repo(integration, origin, repository, token).await?;
+    if matches!(origin, Origin::System) && (private || id != OFFICIAL_RELEASE_REPOSITORY_ID) {
+        return Err("The official public GitHub repository could not be verified.".into());
+    }
     let previous = read_cache(cache_path, repository);
     let etag = previous
         .as_ref()
-        .filter(|cache| cache["complete"] == true && cache["repository_id"] == id)
+        .filter(|cache| {
+            cache["complete"] == true && cache["repository_id"] == id && cache["private"] == private
+        })
         .and_then(|cache| cache["etag"].as_str())
         .map(str::to_owned);
     let url = format!("{API}/repos/{repository}/releases?per_page=30");
     let first = get_raw(
         integration,
-        scope,
+        origin,
         &url,
         token,
         etag.as_deref(),
@@ -875,6 +924,7 @@ async fn fetch_listing(
     let single_page = next.is_none();
     let mut last = None;
     let mut pages = 1;
+    let mut page_error = None;
     // Keep the same rate-limit reserve. A partial listing is useful in Details,
     // but cannot establish which version to announce.
     while let Some(url) = next.as_deref() {
@@ -886,20 +936,29 @@ async fn fetch_listing(
         if pages >= 10 || rate_headers_remaining(last.as_ref().unwrap_or(&first)) <= 10 {
             break;
         }
-        let page = get_raw(integration, scope, url, token, None, "releases.list").await?;
+        let page = match get_raw(integration, origin, url, token, None, "releases.list").await {
+            Ok(page) => page,
+            Err(error) => {
+                page_error = Some(error);
+                break;
+            }
+        };
         if page.status != 200 {
-            return Err(github_status(
+            page_error = Some(github_status(
                 repository,
                 page.status,
                 token.is_some(),
                 &page,
             ));
+            last = Some(page);
+            break;
         }
-        let mut more = json_body(&page.body)?;
-        releases.append(
-            more.as_array_mut()
-                .ok_or_else(|| "GitHub returned an unreadable release list.".to_owned())?,
-        );
+        let Ok(Value::Array(mut more)) = json_body(&page.body) else {
+            page_error = Some("GitHub returned an unreadable release list.".to_owned());
+            last = Some(page);
+            break;
+        };
+        releases.append(&mut more);
         let following = next_link(&header_text(&page, "link").unwrap_or_default());
         if following == next {
             break;
@@ -925,6 +984,7 @@ async fn fetch_listing(
         "private": private,
         "etag": if single_page {header_text(&first, "etag")} else {None},
         "complete":next.is_none(),
+        "message":page_error,
         "latest":latest,
         "fetched_at": jiff::Timestamp::now().to_string(),
         "releases": releases,
@@ -981,13 +1041,13 @@ fn asset_row(
 
 async fn fetch_repo(
     integration: &bilibi_integration::Integration,
-    scope: &Scope,
+    origin: Origin<'_>,
     repository: &str,
     token: Option<&str>,
 ) -> std::result::Result<(i64, bool), String> {
     let reply = get_raw(
         integration,
-        scope,
+        origin,
         &format!("{API}/repos/{repository}"),
         token,
         None,
@@ -1006,7 +1066,10 @@ async fn fetch_repo(
     let id = body["id"].as_i64().ok_or_else(|| {
         format!("GitHub answered for {repository}, but not with a repository number.")
     })?;
-    Ok((id, body["private"].as_bool().unwrap_or(false)))
+    let private = body["private"]
+        .as_bool()
+        .ok_or_else(|| format!("GitHub did not confirm whether {repository} is public."))?;
+    Ok((id, private))
 }
 
 async fn get_json(
@@ -1016,7 +1079,15 @@ async fn get_json(
     token: Option<&str>,
     operation: &str,
 ) -> std::result::Result<Value, String> {
-    let reply = get_raw(integration, scope, url, token, None, operation).await?;
+    let reply = get_raw(
+        integration,
+        Origin::User(scope),
+        url,
+        token,
+        None,
+        operation,
+    )
+    .await?;
     if reply.status != 200 {
         return Err(github_status(
             "GitHub",
@@ -1030,7 +1101,7 @@ async fn get_json(
 
 async fn get_raw(
     integration: &bilibi_integration::Integration,
-    scope: &Scope,
+    origin: Origin<'_>,
     url: &str,
     token: Option<&str>,
     etag: Option<&str>,
@@ -1051,7 +1122,7 @@ async fn get_raw(
     }
     integration
         .send(
-            Origin::User(scope),
+            origin,
             &Call {
                 system: SYSTEM.into(),
                 operation: operation.into(),

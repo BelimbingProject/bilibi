@@ -133,9 +133,9 @@ A gzip-compressed tar carries `bilibi-web`, `SHA256SUMS` and optionally `manifes
 
 ### Update notices
 
-The installation schedule **Check for software updates** sends the active installation owner one bell notice per newly discovered stable setup tag in the accepted repository. The notice opens Software › Releases. Publisher-written change notes appear as plain text. When the release body contains only App Maker’s standard packaging instructions, the notice reads “No change notes were supplied.”
+The automatic check sends the active installation owner one bell notice per newly discovered stable setup tag in the accepted repository. The notice opens Software › Releases. Publisher-written change notes appear as plain text. When the release body contains only App Maker’s standard packaging instructions, the notice reads “No change notes were supplied.”
 
-Enable the reviewed installation schedule during setup. Schedule checks every 15 minutes and respects the listing cache and GitHub rate limits. The notice receipt and the bell notification commit together, so retries cannot announce the same release twice.
+Bilibi checks the official public repository every 15 minutes without credentials. Opening Releases checks the configured source using the listing cache and the signed-in operator’s access. The tab shows the installed and latest stable versions, a release notes link and a copyable AI prompt. Source and manual installation controls are under Details. The receipt and bell notice commit together, so retries cannot announce the same release twice.
 
 The `update` field of `base.software.releases` reports the running setup version and one of the following states.
 
