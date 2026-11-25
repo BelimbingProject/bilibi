@@ -552,6 +552,7 @@ impl View {
             width: ModalWidth::Compact,
             description: "",
             role: "",
+            close_icon: false,
             flash: None,
             body: form,
         })

@@ -29,7 +29,7 @@ pub fn device_page(instance: &Instance) -> String {
 /// Dev copy) is not repeated.
 pub fn identity(instance: &Instance) -> String {
     let role = instance.role;
-    if instance.label.eq_ignore_ascii_case(role.label()) {
+    let text = if instance.label.eq_ignore_ascii_case(role.label()) {
         format!("This installation is {}. {}", role.kind(), role.effect())
     } else {
         format!(
@@ -38,7 +38,8 @@ pub fn identity(instance: &Instance) -> String {
             role.kind(),
             role.effect()
         )
-    }
+    };
+    text.trim_end().to_owned()
 }
 
 pub fn prompt(instance: &Instance) -> String {
