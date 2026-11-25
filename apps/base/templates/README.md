@@ -50,14 +50,30 @@ Contribute `Output::PortalNotice`, then render with `Templates::wording` after a
 
 Contribute one `PrintContract` per document type through `bilibi_templates::PRINT_CATALOGUE`, using the same owner-prefixed key convention as wording. Give the contract a version, printable lifecycle states, typed fields with synthetic samples, and a versioned packaged layout per supported language. Mark mandatory output with `required_output`, independently of whether the fact may be absent. Layouts must show required fields and tables outside presence conditions and include every required column in each use of its table. The registry compiles each default and renders its samples at boot.
 
-- Resolve the packaged layout by exact locale, base language, optional business fallback, then the contract's packaged base. The result includes the language and packaged version. Company and workspace print overrides will use the same per-language order as wording when print revisions are enabled.
+- Resolve the packaged layout by exact locale, base language, optional business fallback, then the contract's packaged base. The result includes the language and packaged version. Print resolution uses the same per-language scope order as wording. The company override wins, then the workspace override, then the packaged layout.
 - The owning module authorizes the source, chooses the versioned business snapshot and passes the state and typed facts to the compiled layout. Text, calendar dates, integers, exact decimals, currency amounts, booleans and multiline addresses are supported. A repeat field has a named row schema. Required facts and row fields are checked even if a layout omits them.
 - Layouts are JSON with a `blocks` array, compiled into HTML by Templates. Blocks are `heading` and `paragraph` with `text`, `field` with `field` and `label`, `section` with `heading` and `blocks`, `if_present` with an optional `field` and `blocks`, and `table` with `rows` and `columns` (each with a row `field` and `heading`). Required scalar fields and required table columns take their wording from the owner’s field labels for the selected layout language. Omit their layout `label` or `heading`. Pass the resolved language when compiling a packaged layout. Layout wording and record text are escaped. Templates supplies the markup.
 - A layout is bounded to 48 KiB, 160 blocks, eight levels and 16 columns per table. A table holds up to 2,000 rows. A fact string holds up to 16 KiB, and there is a 4 MiB budget each for facts and rendered HTML.
 
+### Print through Artifacts
+
+A layout may set `"paper":"letter"`. The default is A4. The compiler rejects other sizes and keeps required output in the document flow exactly once. Required labels and headings come from the contract's selected language.
+
+Use `CompiledPrint::document` for authorised owner facts or `preview_document` for declared samples. It produces a complete HTML document with the contract label as its metadata title, embedded Instrument Sans, the installation accent from `Branding::accent`, and print styles for wrapping and repeating table headings. The layout holds no CSS, executable fragments or resource URLs.
+
+For a checked business logo, supply PNG, JPEG or WebP bytes as a `Raster` field. A `QrCode` field takes a trusted HTTPS validation URL from the document's owner and generates the print mark locally. Images are inline, and only scalar fields can contain them. A field may be optional as data and required in the layout. Its block stays in the layout, and renders whenever the owner supplies the fact.
+
+Pass the document to `Artifacts::for_owner(...).render_inline_document(...)` with the source reference and provenance versions. Artifacts uses its offline Chromium renderer and private storage. The owner supplies its actual record number, issue state and values without changing the record during rendering.
+
 Run `cargo run --locked -p bilibi-templates --example print-contract-walkthrough` to exercise registry validation, packaged English and Malay selection, optional fields, escaping and repeated rows.
 
 The first tenant owner's invitation (`bilibi tenant-owner`) keeps fixed text: it is sent before the workspace exists.
+
+## Review and restore a print layout
+
+Read `base.templates.print.list` and `base.templates.print.get` for the contract, sample facts, current and inherited layout, and the exact revision. Use `base.templates.print.preview` to open a private sample PDF for either the effective layout or a proposed draft. It expires within a day. The owner can resolve a published layout for an authorised record with `Templates::resolve_print`.
+
+Use the reviewed `base.templates.print.publish` and `base.templates.print.restore` operations. Pass the `review` token from the print read when publishing or restoring. Each change appends an audited revision, and approval is refused if the current or inherited layout has changed. **Administration › Customisations** shows current overrides, their inheritance source, a **Preview PDF** action and **Restore inherited layout**.
 
 ## Which wording is used?
 

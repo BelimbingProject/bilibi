@@ -167,9 +167,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(contract.packaged("de-DE", Some("ms"))?.language, "ms");
     assert_eq!(contract.packaged("de-DE", None)?.language, "en");
 
-    let malay_preview = contract.compile(&malay.language, malay.layout)?.preview()?;
+    let malay_preview = contract
+        .compile(&malay.language, &malay.layout)?
+        .preview()?;
     assert!(malay_preview.contains("<dt>Rujukan</dt>"));
-    assert!(malay_preview.contains("<th>Perihal</th><th>Kuantiti</th>"));
+    assert!(malay_preview.contains(">Perihal</th>") && malay_preview.contains(">Kuantiti</th>"));
     assert!(contract.compile("de", EN).is_err());
     for (key, replacement) in [
         (

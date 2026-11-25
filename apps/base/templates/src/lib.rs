@@ -39,8 +39,11 @@ use provenance;
 inventory::submit! {
     Module {
         id: MODULE, layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/agent_api","base/authz","base/database","base/datetime","base/labels","base/module_registry","base/party_ids","base/settings","base/tenancy"],
-        migrations: &[("base-templates-001-revisions", include_str!("../migrations/001-revisions.sql"))],
+        dependencies: &["base/agent_api","base/artifacts","base/authz","base/branding","base/database","base/datetime","base/labels","base/module_registry","base/party_ids","base/queue","base/schedule","base/settings","base/tenancy","base/ui"],
+        migrations: &[
+            ("base-templates-001-revisions", include_str!("../migrations/001-revisions.sql")),
+            ("base-templates-002-print-revisions", include_str!("../migrations/002-print-revisions.sql")),
+        ],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let catalogue = Catalog::discover(&bilibi_module_registry::discover()?)?;
@@ -51,6 +54,26 @@ inventory::submit! {
                 operations::bind(templates.clone())?;
                 Ok(templates)
             }},
+            Service { id: print::preview::DOWNLOADS, factory: |services| {
+                let preview = Arc::new(print::preview::Previews {
+                    templates: services.get(SERVICE)?,
+                    artifacts: services.get("base/artifacts.store")?,
+                    branding: services.get(bilibi_branding::SERVICE)?,
+                    db: services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
+                });
+                print::preview::bind(preview.clone())?;
+                Ok(Arc::new(bilibi_ui::download::DownloadService(preview)))
+            }},
+            Service { id: print::sweep::SERVICE, factory: |services| {
+                let handler = print::sweep::Sweep {
+                    schedule: services.get("base/schedule.store")?,
+                    artifacts: services.get("base/artifacts.store")?,
+                    db: services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
+                };
+                Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(handler))))
+            }},
+
+
         ],
     }
 }

@@ -15,6 +15,7 @@ use base64::Engine as _;
 use bilibi_party_ids::OrganisationId;
 use bilibi_tenancy::Scope;
 use hmac::{Hmac, KeyInit, Mac};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
 use std::{
@@ -43,6 +44,44 @@ pub const RENDER_HEADERS: [(&str, &str); 6] = [
         "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
     ),
 ];
+
+/// Physical sizes available to a business print layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfPaper {
+    #[default]
+    A4,
+    Letter,
+}
+
+impl PdfPaper {
+    fn format(self) -> &'static str {
+        match self {
+            Self::A4 => "A4",
+            Self::Letter => "Letter",
+        }
+    }
+}
+
+/// Complete HTML and its physical paper size, prepared by a trusted server-side renderer.
+pub struct InlineDocument {
+    html: String,
+    paper: PdfPaper,
+}
+
+impl InlineDocument {
+    pub fn new(html: String, paper: PdfPaper) -> Self {
+        Self { html, paper }
+    }
+
+    pub fn paper(&self) -> PdfPaper {
+        self.paper
+    }
+
+    pub fn html(&self) -> &str {
+        &self.html
+    }
+}
 
 pub type HtmlFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 /// Implement on an owner that prints HTML. Base authorizes `Create` before
@@ -186,14 +225,21 @@ impl Artifacts {
             _ => Served::NotFound,
         }
     }
-    async fn pdf_config(&self, client: &Client) -> Result<engine::Config> {
+    async fn pdf_config(&self, client: &Client, paper: Option<PdfPaper>) -> Result<engine::Config> {
         let get = |key: &'static str| async move {
             self.settings
                 .get_global(client, key)
                 .await
                 .map_err(Error::from)
         };
-        let format = get("pdf.paper.format").await?;
+        let format = match paper {
+            Some(paper) => paper.format().to_owned(),
+            None => get("pdf.paper.format")
+                .await?
+                .as_str()
+                .ok_or(Error::Policy)?
+                .to_owned(),
+        };
         let seconds = get("pdf.render_timeout_seconds").await?.as_u64();
         let launch = get("pdf.launch_timeout_seconds").await?.as_u64();
         let max = get("artifacts.max_bytes").await?.as_u64();
@@ -203,7 +249,7 @@ impl Artifacts {
                 .as_str()
                 .ok_or(Error::PdfEngineUnavailable)?
                 .to_owned(),
-            format: format.as_str().ok_or(Error::Policy)?.to_owned(),
+            format,
             background: get("pdf.paper.print_background")
                 .await?
                 .as_bool()
@@ -221,6 +267,41 @@ impl Artifacts {
             max_bytes: max.filter(|max| *max > 0).ok_or(Error::Policy)? as usize,
         })
     }
+    /// Render an authorized inline document to PDF bytes without storing it.
+    pub async fn print_document(
+        &self,
+        client: &Client,
+        document: InlineDocument,
+    ) -> Result<Vec<u8>> {
+        let config = self.pdf_config(client, Some(document.paper)).await?;
+        print_html(&config, document.html).await
+    }
+}
+
+impl<O: Owner> Owned<'_, O> {
+    /// Print a complete business layout through the same offline renderer as
+    /// `render_inline`. The owner authorizes its source before building the
+    /// document. Artifacts rechecks create authority before Chromium and publication.
+    pub async fn render_inline_document(
+        &self,
+        client: &mut Client,
+        reference: Reference,
+        document: InlineDocument,
+        options: &PdfOptions,
+    ) -> Result<PdfArtifact> {
+        options.validate()?;
+        self.authorize(&*client, Operation::Create, Some(&reference))
+            .await?;
+        let bytes = self.store.print_document(client, document).await?;
+        self.persist_pdf(client, reference, &bytes, options).await
+    }
+}
+
+async fn print_html(config: &engine::Config, html: String) -> Result<Vec<u8>> {
+    if html.is_empty() || html.len() > config.max_bytes {
+        return Err(Error::Invalid);
+    }
+    engine::print(config, engine::Source::Html(html)).await
 }
 
 impl<O: HtmlOwner> Owned<'_, O> {
@@ -262,9 +343,12 @@ impl<O: HtmlOwner> Owned<'_, O> {
         }
         self.authorize(&*client, Operation::Create, Some(&reference))
             .await?;
-        let config = self.store.pdf_config(&*client).await?;
-        let html = self.html(&reference, data, config.max_bytes).await?;
-        let bytes = engine::print(&config, engine::Source::Html(html)).await?;
+        let config = self.store.pdf_config(&*client, None).await?;
+        let html = self
+            .owner
+            .render_html(self.scope, self.company, &reference, data)
+            .await?;
+        let bytes = print_html(&config, html).await?;
         self.persist_pdf(client, reference, &bytes, options).await
     }
     /// Like `render_inline`, but the browser fetches the page from this app's
@@ -297,7 +381,7 @@ impl<O: HtmlOwner> Owned<'_, O> {
         }
         self.authorize(&*client, Operation::Create, Some(&reference))
             .await?;
-        let config = self.store.pdf_config(&*client).await?;
+        let config = self.store.pdf_config(&*client, None).await?;
         let setting = |key: &'static str| {
             let settings = &self.store.settings;
             let client = &*client;

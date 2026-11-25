@@ -50,3 +50,5 @@ Set the name and logo independently. A name alone draws a text wordmark. An avai
 `Branding::current()` returns a `bilibi_ui::Brand` for one render and never fails a page: a failed read is logged and the page carries Bilibi's brand. The Web host passes it to the shell (`ShellContext::brand`), the credential layout (`AuthLayout::brand`), the standalone review, the error document and `Document`. A page never reads the brand or draws a logo itself; it calls `ui::wordmark`.
 
 A logo link on a web page is a short-lived signed Media link for the operator workspace's asset (`Media::tenant_stream_url`). For workspace email, Branding opens the same checked asset through Media and passes its raster bytes to the mailer for inline delivery. A logo that cannot be served is left out. [Media's signed stream contract](../media/README.md#signed-streams) governs public image delivery.
+
+For offline print, `Branding::accent` resolves the installation accent from the same setting as the staff shell.

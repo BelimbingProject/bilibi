@@ -1,8 +1,8 @@
 //! Read-only inventory of customisations contributed by their owners.
 use crate::receipt_display::{preview_text, receipt_columns, receipt_value, receipt_where};
 use crate::{
-    CustomisationRow, CustomisationSection, ReceiptCorrection, ReceiptSource, UndoAction,
-    CUSTOMISATIONS,
+    CustomisationRow, CustomisationSection, PreviewLink, ReceiptCorrection, ReceiptSource,
+    UndoAction, CUSTOMISATIONS,
 };
 use askama::Template;
 use bilibi_agent_api::{
@@ -60,6 +60,7 @@ pub(crate) struct Pages {
     pub settings: Arc<bilibi_settings::Settings>,
     pub contracts: Arc<PageContracts>,
     pub sections: Vec<&'static CustomisationSection>,
+    pub previews: HashMap<&'static str, &'static PreviewLink>,
     pub receipt_sources: Vec<&'static ReceiptSource>,
     pub display: Arc<bilibi_datetime::DisplayPolicy>,
     pub locales: Arc<bilibi_locale::Locales>,
@@ -693,13 +694,31 @@ impl Index {
                 .slot("change", change)
                 .slot("actor", Html::text(&actor))
                 .cell("when", when);
+            if let Some(link) = item
+                .section
+                .undo
+                .as_ref()
+                .and_then(|undo| self.pages.previews.get(undo.read))
+            {
+                if let Some(path) = (link.path)(&item.row).filter(|path| {
+                    path.starts_with('/')
+                        && !path.starts_with("//")
+                        && !path.contains('\\')
+                        && !path.chars().any(char::is_control)
+                }) {
+                    row.actions.push(&render(IconButton {
+                        href: &path,
+                        ..IconButton::new("eye", link.label)
+                    })?);
+                }
+            }
             if let Some(action) = item.action {
-                row.actions = render(IconButton {
+                row.actions.push(&render(IconButton {
                     event: "request_undo",
                     name: "key",
                     value: &item.action_key(),
                     ..IconButton::new("unarchive", action.label)
-                })?;
+                })?);
             }
             rows.push(row);
         }
