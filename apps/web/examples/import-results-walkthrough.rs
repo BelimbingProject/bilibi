@@ -332,14 +332,54 @@ async fn company_scope_proof(
             && !file.contains("Company B seed"),
         "an export reads only the selected company",
     )?;
-    require(
-        b.write(
-            "base.bulk_data.export.start",
-            json!({"record_type":owner::TYPE,"filter":"{}","columns":["code"]}),
+    {
+        let sql = db.get().await?;
+        let role: i64 = sql
+            .query_one(
+                "INSERT INTO roles(tenant_id,name,code,description,company_id) VALUES(1,'Company B readers','company_b_readers','Walkthrough company read grant',2) RETURNING id",
+                &[],
+            )
+            .await?
+            .get(0);
+        sql.execute(
+            "INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(1,$1,'reference.import-results.view')",
+            &[&role],
         )
-        .await
-        .is_err(),
-        "Bulk Data export is refused in company B without its company grant",
+        .await?;
+        sql.execute(
+            "INSERT INTO principal_roles(tenant_id,user_id,role_id,company_id) VALUES(1,3,$1,2)",
+            &[&role],
+        )
+        .await?;
+        let catalog = bilibi_grid::Catalog::for_scope(&**sql, &b.scope).await?;
+        require(
+            catalog.table("reference_import_records").is_some(),
+            "company B can read the Grid table",
+        )?;
+    }
+    let b_rows = b
+        .read(
+            "reference.import_results.list",
+            json!({"page":1,"page_size":100}),
+        )
+        .await?;
+    require(
+        b_rows.to_string().contains("Company B seed"),
+        "company B can read the export's owner list",
+    )?;
+    let denied = plans
+        .preview(
+            &b.browser,
+            &[PlannedOperation {
+                key: "base.bulk_data.export.start".into(),
+                input: json!({"record_type":owner::TYPE,"filter":"{}","columns":["code"]}),
+            }],
+        )
+        .await?;
+    require(
+        denied["valid"] == json!(false)
+            && denied["results"][0]["error"]["code"] == json!("missing_capability"),
+        "Bulk Data requires the company B export grant even with list and Grid access",
     )?;
 
     let selected = a

@@ -866,9 +866,9 @@ fn link_into(
             joined.push((decl.to, to_field));
         }
         Join::Edge(source) => {
-            if !source_valid(&source) || !source.tenant_scoped {
+            if !source_valid(&source) || !source.tenant_scoped || source.company_scoped {
                 return Err(bad(
-                    "an edge must be one tenant-scoped SELECT/WITH statement".into(),
+                    "an edge must be one tenant-wide SELECT/WITH statement".into()
                 ));
             }
         }

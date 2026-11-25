@@ -49,7 +49,7 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
   contributes a personal-data store (`apps/base/personal_data/README.md`).
 - `LinkDecl`s: `One` (a foreign key to the target's **key**, or an edge yielding at
   most one row per parent) or `Many` (the reverse, or an attachment table), joined
-  `on` two declared fields or through an edge `Source` selecting `from_key` and
+  `on` two declared fields or through a tenant-wide edge `Source` selecting `from_key` and
   `to_key`. A link may start at another module's table, because the module that
   owns the edge knows it; it must own one end.
 
@@ -189,8 +189,7 @@ Call `bilibi_grid::project(&db, &scope, "reference_items", &ids, &specs)` after
 paging through the owner's list API. IDs are JSON number/string values; specs
 are paths such as `group.name` or `movements.delta:sum`. Do not build SQL or pass
 previously resolved `Column`s: `project` builds a fresh catalog and resolves specs
-in its own read-only, repeatable-read transaction. Owner sources on the root,
-every link target and every edge receive the same tenant/user/selected-company bindings. The host
+in its own read-only, repeatable-read transaction. Owner sources on the root and every link target share the tenant, user and selected company bindings. Edge sources use the tenant and optional user bindings. The host
 still validates the live session/actor before calling the module API.
 
 The result has resolved typed `columns`, page-ordered `rows` (`key` plus `cells`
