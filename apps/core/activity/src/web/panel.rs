@@ -349,7 +349,7 @@ impl Panel {
         if page.total > ROWS {
             let state = if self.history { "closed" } else { "open" };
             let href = format!(
-                "/activities?related={}:{}&state={state}",
+                "/activities?display=list&related={}:{}&state={state}",
                 self.record.kind, self.record.id
             );
             content.push(&render(ActionLink {

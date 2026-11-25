@@ -133,8 +133,9 @@
 </table>
 </div>
 {%- else -%}
-<div class="overflow-x-auto rounded-md border border-line bg-surface max-md:hidden">
+<div class="overflow-x-auto rounded-md border border-line bg-surface max-md:hidden{% if focus_hour.is_some() %} max-h-[60dvh] overflow-y-auto{% endif %}"{% if let Some(hour) = focus_hour %} data-hook="CalendarHours" data-hour="{{ hour }}" data-range="{{ range_key }}" tabindex="0" role="region" aria-label="Calendar hours"{% endif %}>
 <div class="min-w-min">
+<div{% if focus_hour.is_some() %} class="sticky top-0 z-10 bg-surface"{% endif %}>
 <div class="flex border-b border-line">
 <div class="w-12 shrink-0"></div>
 {%- for col in columns -%}
@@ -151,8 +152,9 @@
 </div>
 {%- endfor -%}
 </div>
+</div>
 <div class="flex">
-<div class="w-12 shrink-0" aria-hidden="true">
+<div data-cal-hours class="w-12 shrink-0" aria-hidden="true">
 {%- for hour in 0..24 -%}
 <div class="h-12 pr-1 text-right text-[11px] text-ink-muted"><span class="relative -top-1.5 bg-surface px-0.5">{% if hour > 0 %}{{ "{:02}:00"|format(hour) }}{% endif %}</span></div>
 {%- endfor -%}

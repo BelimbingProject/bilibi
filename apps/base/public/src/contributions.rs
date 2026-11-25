@@ -14,6 +14,8 @@ use std::collections::BTreeSet;
 pub const PUBLIC_PAGES: &str = "base/public.pages";
 /// Token links: `Contribution::new(PUBLIC_LINKS, id, provenance, &PublicLink { .. })`.
 pub const PUBLIC_LINKS: &str = "base/public.links";
+/// Actions: `Contribution::new(PUBLIC_ACTIONS, id, provenance, &PublicAction { .. })`.
+pub const PUBLIC_ACTIONS: &str = "base/public.actions";
 
 /// A GET page anyone may open on the public site: a form, a survey, a
 /// preference page. The service resolves to [`crate::PageService`]; the
@@ -45,6 +47,42 @@ pub struct PublicLink {
     /// and image proxies fetch for many readers from few addresses: size it
     /// for them.
     pub budget: SenderBudget,
+}
+
+/// What `base/public` proves before an action reaches its owner, beyond the
+/// signed one-time ticket every action carries (`crate::actions`).
+#[derive(Clone, Copy, Debug)]
+pub struct Checks {
+    /// The page carries a field a person never fills; a filled one is spam.
+    pub trap_field: bool,
+    /// A ticket sent back sooner than this after its page was shown is spam.
+    /// At most 3,600.
+    pub min_fill_seconds: u32,
+    /// A tenant setting (an integer, read with `Settings::get_tenant`): the
+    /// actions one subject takes in an hour, counted in PostgreSQL so every
+    /// server shares the count. `None` counts nothing.
+    pub places_per_hour: Option<&'static str>,
+}
+
+/// A POST from the public site's own pages that makes a record with no
+/// session behind it: a lead, a contact request. The page shows a ticket
+/// (`Public::ticket`) and posts here; the service resolves to
+/// [`crate::ActionService`], whose owner receives only a checked request.
+/// The answer is always a 303 back to the request's own path with
+/// `?receipt=…`, `?busy=1` or `?expired=1`, and the page reads the receipt
+/// (`Public::receipt`).
+#[derive(Clone, Copy, Debug)]
+pub struct PublicAction {
+    pub path: &'static str,
+    pub service: &'static str,
+    pub operation: &'static str,
+    /// What one sender may ask of this action on one server.
+    pub budget: SenderBudget,
+    pub checks: Checks,
+    /// Posted fields carried back, at most 255 characters each, when the
+    /// answer shows the form again (`busy`, `expired`): a visit's UTM
+    /// parameters.
+    pub carry: &'static [&'static str],
 }
 
 fn invalid(message: String) -> RegistryError {
@@ -118,7 +156,34 @@ fn validate_links(entries: &[Entry]) -> Result<()> {
     }
     Ok(())
 }
+fn validate_actions(entries: &[Entry]) -> Result<()> {
+    let mut paths = BTreeSet::new();
+    for entry in entries {
+        let action = entry.get::<PublicAction>()?;
+        shaped(entry, action.path, action.operation, action.budget)?;
+        let checks = action.checks;
+        if checks.min_fill_seconds > 3_600
+            || checks
+                .places_per_hour
+                .is_some_and(|key| key.trim().is_empty())
+            || action
+                .carry
+                .iter()
+                .any(|name| name.is_empty() || name.starts_with("public[") || name.len() > 100)
+        {
+            return Err(invalid(format!(
+                "public action {} has a fill time over an hour, an empty places setting or an unusable carried field",
+                at(entry)
+            )));
+        }
+        if !paths.insert(normalized(action.path)) {
+            return Err(invalid(format!("duplicate public action {}", action.path)));
+        }
+    }
+    Ok(())
+}
 inventory::submit! { Consumer::new::<PublicPage>(PUBLIC_PAGES, "base/public", validate_pages) }
+inventory::submit! { Consumer::new::<PublicAction>(PUBLIC_ACTIONS, "base/public", validate_actions) }
 inventory::submit! { Consumer::new::<PublicLink>(PUBLIC_LINKS, "base/public", validate_links) }
 
 /// The listener budget: requests one sender may make of the whole public

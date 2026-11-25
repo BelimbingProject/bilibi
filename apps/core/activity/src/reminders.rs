@@ -476,7 +476,7 @@ impl TodoSource for Todos {
                 items,
                 count: count.min(TODO_COUNT) as usize,
                 more: count > TODO_COUNT,
-                see_all: Some("/activities?mine=todo".into()),
+                see_all: Some("/activities?display=list&mine=todo".into()),
             })
         })
     }

@@ -541,10 +541,11 @@ impl Records {
         };
         let page = tx
             .query(
-                &format!("SELECT k::text FROM ({sql}) AS s(k) ORDER BY k LIMIT $4 OFFSET $5"),
+                &format!("SELECT k::text FROM ({sql}) AS s(k) ORDER BY k LIMIT $5 OFFSET $6"),
                 &[
                     &scope.tenant(),
                     &scope.user(),
+                    &scope.current_company().map(|company| company.get()),
                     &needle,
                     &SEARCH_PAGE,
                     &offset,

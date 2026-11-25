@@ -6,12 +6,8 @@
 //! "whose" filters apply to all, and dragging on the calendar or a tile
 //! calls the same change contract.
 use super::{
-    event,
-    form::Dialog,
-    icon, refusal,
-    reminder_defaults::{self, DefaultsDialog},
-    render, sentences, series_delete, status_badge, urgency, BrowserZone, Clock, Pages, Refusal,
-    Region,
+    event, form::Dialog, icon, refusal, render, sentences, series_delete, status_badge, urgency,
+    BrowserZone, Clock, Pages, Refusal, Region,
 };
 use crate::{Activity, Filter, Kind, Mine, Reference, Sort, State};
 use bilibi_database::{Error, Result};
@@ -178,8 +174,6 @@ pub(crate) struct Index {
     framed: bool,
     zone: BrowserZone,
     dialog: Option<Dialog>,
-    /// The Reminder defaults dialog, when open.
-    defaults: Option<DefaultsDialog>,
     /// The activity Close asks about: its id, title and version.
     confirm: Option<(i64, String, i64)>,
     flash: Option<(StatusKind, String)>,
@@ -206,7 +200,6 @@ impl Index {
             framed,
             zone: BrowserZone::new(),
             dialog: None,
-            defaults: None,
             confirm: None,
             flash: None,
         })
@@ -432,51 +425,6 @@ impl Index {
                 }
             }
             "close_modal" => self.dialog = None,
-            "request_defaults" => {
-                if self.pages.activities.may_create(scope).await? {
-                    let current = self.pages.activities.reminder_defaults(scope).await?;
-                    self.defaults = Some(DefaultsDialog::new(&current));
-                }
-            }
-            "cancel_defaults" => self.defaults = None,
-            "save_reminder_defaults" => {
-                let form = params::form_values_checked(value, "defaults", params::FIELD_LIMIT)
-                    .map_err(Error::refused)?;
-                let Some(dialog) = &mut self.defaults else {
-                    return Ok(None);
-                };
-                if !dialog.read(&form) {
-                    return Err(Error::Invalid);
-                }
-                let input = dialog.input();
-                let call = self.pages.call(
-                    scope,
-                    credential,
-                    "save_reminder_defaults",
-                    "core.activity.set_reminder_defaults",
-                );
-                match self.pages.contracts.submit(&call, input).await {
-                    Ok(_) => {
-                        self.defaults = None;
-                        self.flash = Some((
-                            StatusKind::Success,
-                            "Reminder defaults saved. They apply to activities you create from now on."
-                                .into(),
-                        ));
-                    }
-                    Err(error) => {
-                        let message = match refusal(
-                            error,
-                            "You do not have permission to change reminder defaults.",
-                            "The defaults were not saved. Try again.",
-                        )? {
-                            Refusal::Message(message) => message,
-                            Refusal::Fields(fields) => sentences(&fields),
-                        };
-                        dialog.errors = vec![message];
-                    }
-                }
-            }
             "create_task" | "log_call" | "create_meeting" | "create_note" => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
@@ -705,9 +653,9 @@ impl Index {
         clock: &Clock,
         mut query: HashMap<String, String>,
     ) -> Result<(Html, HashMap<String, String>, usize)> {
-        let today = jiff::Timestamp::now()
-            .to_zoned(jiff::tz::TimeZone::get(&clock.zone).unwrap_or(jiff::tz::TimeZone::UTC))
-            .date();
+        let now = jiff::Timestamp::now();
+        let local_now = now.to_zoned(clock.tz());
+        let today = local_now.date();
         // The view and date decide the range; the lanes come from what it holds.
         let probe = CalendarState::parse(&self.calendar_query, today, &[]);
         let (from, to) = probe.range(&clock.zone).ok_or(Error::Internal)?;
@@ -748,7 +696,6 @@ impl Index {
             .collect();
         let may_create = self.pages.activities.may_create(scope).await?;
         let edit_all = may_create && self.pages.activities.may_edit_all(scope).await?;
-        let now = jiff::Timestamp::now();
         let soon = self.pages.activities.imminent_window(scope).await?;
         let mut items = Vec::new();
         for a in &page.entries {
@@ -797,6 +744,21 @@ impl Index {
         );
         drawn.query = query.clone();
         drawn.lanes = lanes;
+        // Anchor this week on the viewer's current hour. For another range,
+        // show the first appointment, with the same local-hour fallback if empty.
+        let focus_hour = if from <= now && now < to {
+            local_now.hour()
+        } else {
+            items
+                .iter()
+                .filter_map(|item| match item.when {
+                    CalendarWhen::Timed { start, .. } => Some(start.max(from)),
+                    CalendarWhen::AllDay { .. } => None,
+                })
+                .min()
+                .map_or(local_now.hour(), |start| start.to_zoned(clock.tz()).hour())
+        };
+        drawn.focus_hour = Some(focus_hour as u8);
         drawn.items = items;
         drawn.day_marks = marks;
         drawn.follows_browser_zone = clock.display.mode == bilibi_datetime::Mode::Local;
@@ -851,15 +813,6 @@ impl Index {
                 })?);
             }
         }
-        if may_create {
-            actions.push(&render(Button {
-                id: "activities-reminder-defaults",
-                button_type: "button",
-                event: "request_defaults",
-                body: Html::text("Reminder defaults"),
-                ..Button::default()
-            })?);
-        }
         let mut flash = NO_FLASH;
         if let Some((kind, message)) = &self.flash {
             match kind {
@@ -879,7 +832,7 @@ impl Index {
             (None, None) => "",
         };
         body.push(&render(Header {
-            title: Html::text("Activities"),
+            title: Html::text("Calendar"),
             subtitle,
             actions,
             ..Header::default()
@@ -890,10 +843,6 @@ impl Index {
             class: "mb-4",
             tabs: vec![
                 Tab {
-                    id: "activities-display-list",
-                    ..Tab::button("display", "list", "List", self.display == Display::Table)
-                },
-                Tab {
                     id: "activities-display-calendar",
                     ..Tab::button(
                         "display",
@@ -901,6 +850,10 @@ impl Index {
                         "Calendar",
                         self.display == Display::Calendar,
                     )
+                },
+                Tab {
+                    id: "activities-display-list",
+                    ..Tab::button("display", "list", "List", self.display == Display::Table)
                 },
                 Tab {
                     id: "activities-display-board",
@@ -1005,9 +958,6 @@ impl Index {
                 cancel_event: "cancel_close",
             })?);
         }
-        if let Some(dialog) = &self.defaults {
-            body.push(&reminder_defaults::dialog(dialog)?);
-        }
         if let Some(dialog) = &self.dialog {
             body.push(&dialog.render(
                 &self.pages,
@@ -1033,6 +983,7 @@ impl Index {
         .to_string();
         if self.display == Display::Table {
             query = self.address();
+            query.insert("display".into(), "list".into());
         }
         Ok(LiveBody {
             html,

@@ -535,6 +535,7 @@ fn active_item(tree: &[menu::Node], path: &str) -> Option<&'static str> {
         for node in nodes {
             let item = node.item.item;
             if let Some(route) = item.route {
+                let route = route.split('?').next().unwrap_or(route);
                 let under = route == path
                     || route == "/"
                     || path
