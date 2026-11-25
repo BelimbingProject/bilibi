@@ -21,9 +21,9 @@ use std::{path::Path, time::Duration};
 use tokio::sync::mpsc;
 use tokio_postgres::{AsyncMessage, Client, NoTls};
 
-/// The installer scans for jobs at least this often, in case a wake-up was
-/// sent while it was down or the connection was lost.
-const SCAN_EVERY: Duration = Duration::from_secs(30);
+/// Leave enough time for a queue commit and its systemd activation marker to
+/// become visible, then stop consuming resources when no job is ready.
+const IDLE_AFTER: Duration = Duration::from_secs(10);
 /// After a lost database connection or a failed scan, before trying again.
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 /// How often a job being worked on is marked alive (`heartbeat_at`), well
@@ -55,11 +55,12 @@ impl Installer {
             database_url,
         })
     }
-    /// Serves the instance until stopped: settles a job cut off by a restart,
-    /// then claims each install or undo as it is queued.
+    /// Settles work cut off by a restart, carries every ready job in order,
+    /// then exits after a short idle window. systemd starts it at boot and
+    /// whenever the application writes a ready marker.
     pub async fn run(&self) -> Result<(), String> {
         println!(
-            "bilibi-installer: serving {} ({}) as {}",
+            "bilibi-installer: checking {} ({}) as {}",
             self.layout.name,
             self.layout.dir.display(),
             self.worker
@@ -77,10 +78,12 @@ impl Installer {
                     continue;
                 }
             };
+            let mut idle_markers = self.layout.activation_markers();
             loop {
                 match self.scan(&mut client).await {
                     Ok(true) => {
                         reported.clear();
+                        idle_markers = self.layout.activation_markers();
                         continue;
                     }
                     Ok(false) => reported.clear(),
@@ -100,8 +103,29 @@ impl Installer {
                             eprintln!("bilibi-installer: the listening connection closed; reconnecting");
                             break;
                         }
+                        idle_markers = self.layout.activation_markers();
                     }
-                    _ = tokio::time::sleep(SCAN_EVERY) => {}
+                    _ = tokio::time::sleep(IDLE_AFTER) => {
+                        match self.scan(&mut client).await {
+                            Ok(true) => {
+                                idle_markers = self.layout.activation_markers();
+                            }
+                            Ok(false) => {
+                                self.layout.remove_activation_markers(&idle_markers);
+                                println!("bilibi-installer: no work ready; exiting");
+                                return Ok(());
+                            }
+                            Err(error) => {
+                                let text = jobs::short(&error);
+                                if text != reported {
+                                    eprintln!("bilibi-installer: database error: {text}; reconnecting");
+                                    reported = text;
+                                }
+                                tokio::time::sleep(RETRY_AFTER).await;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }

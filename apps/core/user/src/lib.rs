@@ -66,8 +66,8 @@ use bilibi_database::{Db, Error, MutationBoundary, Result};
 use bilibi_security::{guard, Sessions};
 pub use bootstrap::{
     validate_first_administrator, BootstrapAffiliation, FirstAdministrator,
-    FirstAdministratorCreated, FirstAdministratorError, OperatorAccounts, OperatorCompany,
-    OwnerClaim, OwnerClaimError,
+    FirstAdministratorCreated, FirstAdministratorError, InstallationOwner, OperatorAccounts,
+    OperatorCompany, OwnerClaim, OwnerClaimError,
 };
 pub use identity::{standing, Account, AccountLinks, AccountVerifier, Freeze, LinkError, Standing};
 pub use identity_lifecycle::{

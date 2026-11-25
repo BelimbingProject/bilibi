@@ -21,6 +21,7 @@
 #   install-server.sh verify <instance> <file> --kind server-tools|installer|setup --tag <setup-vX.Y.Z> [--proof <proof.json>]
 #   install-server.sh switch <instance> <release number>
 #   install-server.sh status [<instance>]
+#   bilibi update <instance> [--to <version> | --undo]
 #   install-server.sh --json <command> ...   one JSON line per step, for an AI agent or script
 #
 # Only the layout, the first release and the installer service live here.
@@ -37,6 +38,7 @@ source "$here/lib/versions.sh"
 root=/opt/bilibi
 unit_name='bilibi@'
 installer_unit='bilibi-installer@'
+installer_path='bilibi-installer@'
 release_proof=$here/lib/release-proof.py
 # The GitHub App that reads a private application repository: one per server,
 # shared by its instances (they serve the same application). root:bilibi 0640
@@ -132,7 +134,15 @@ ensure_current_link() {
     ln -sfn releases/current "$dir/current.new" && mv -T "$dir/current.new" "$dir/current"
 }
 service_state() { systemctl is-active "$unit_name$1" 2>/dev/null || true; }
-installer_state() { systemctl is-active "$installer_unit$1" 2>/dev/null || true; }
+installer_state() {
+    local state
+    state=$(systemctl is-active "$installer_unit$1" 2>/dev/null || true)
+    if [[ $state == inactive ]] && systemctl is-active --quiet "$installer_path$1.path"; then
+        printf 'idle\n'
+    else
+        printf '%s\n' "$state"
+    fi
+}
 
 # check_dns <site>: a public site gets its certificate from Let's Encrypt,
 # which needs the name to reach this server. Refuse before installing
@@ -318,6 +328,7 @@ ensure_instance_access() {
 releases $worker $app 2755
 backups $worker $app 0750
 incoming $app $app 2770
+incoming/installer-jobs $app $app 2770
 data $app $app 0700
 EOF
     if [[ -f $dir/env ]]; then
@@ -544,20 +555,28 @@ configure_firewall() {
     [[ -z $changed ]] || firewall-cmd --reload >/dev/null
 }
 install_unit() {
-    local name reload=
-    for name in "$unit_name" "$installer_unit"; do
-        if ! cmp -s "$here/server/$name.service" "/etc/systemd/system/$name.service"; then
-            install -m 0644 "$here/server/$name.service" "/etc/systemd/system/$name.service"
+    local file reload=
+    for file in "$unit_name.service" "$installer_unit.service" "$installer_path.path"; do
+        if ! cmp -s "$here/server/$file" "/etc/systemd/system/$file"; then
+            install -m 0644 "$here/server/$file" "/etc/systemd/system/$file"
             reload=1
         fi
     done
     [[ -z $reload ]] || systemctl daemon-reload
 }
+install_bilibi_command() {
+    install -d -m 0755 -o root -g root "$root/lib" /usr/local/bin
+    install -m 0755 -o root -g root "$here/install-server.sh" "$root/install-server.sh"
+    install -m 0644 -o root -g root "$here/lib/versions.sh" "$root/lib/versions.sh"
+    install -m 0755 -o root -g root "$here/server/bilibi" /usr/local/bin/bilibi
+}
 # start_installer <instance>: the installer service for an instance, once the
 # program is in place (`installer` puts it there).
 start_installer() {
     [[ -x $(installer_bin "$1") ]] || return 0
-    systemctl enable --now "$installer_unit$1" >/dev/null 2>&1 || say "Warning: could not start $installer_unit$1; see: systemctl status $installer_unit$1"
+    systemctl enable --now "$installer_path$1.path" >/dev/null 2>&1 || say "Warning: could not start $installer_path$1.path; see: systemctl status $installer_path$1.path"
+    systemctl enable "$installer_unit$1" >/dev/null 2>&1
+    systemctl start "$installer_unit$1" >/dev/null 2>&1 || say "Warning: could not start $installer_unit$1; see: systemctl status $installer_unit$1"
 }
 # ================================================================ create
 create() {
@@ -764,6 +783,7 @@ EOF
         fi
     fi
     configure_firewall
+    install_bilibi_command
     systemctl enable "$unit_name$instance" >/dev/null 2>&1
     start_installer "$instance"
 
@@ -997,17 +1017,35 @@ installer() {
     systemctl stop "$installer_unit$instance"
     install_unit
     ensure_instance_access "$instance"
+    install_bilibi_command
     install_release_proof
     retire_worker
     ensure_current_link "$instance"
     install -m 0755 -o root -g root "$staged" "$bin.new" && mv -T "$bin.new" "$bin"
     exec {release_lock_fd}<&-
+    systemctl enable --now "$installer_path$instance.path" >/dev/null 2>&1
     systemctl enable "$installer_unit$instance" >/dev/null 2>&1
     systemctl start "$installer_unit$instance"
     if [[ -n $web_active ]]; then
         systemctl restart "$unit_name$instance"
     fi
     say "$instance: $bin updated"
+}
+
+# ================================================================ update
+# Root's technical-user door into the same reviewed software operations as
+# Software > Releases. The instance program owns the review, 2FA and queue;
+# this script only validates the server instance and loads its environment.
+update() {
+    local instance=${1:-}
+    [[ -n $instance ]] || usage
+    need_root update "$@"
+    valid_name "$instance" || fail "invalid instance name: $instance" '' INVALID_INPUT
+    instance_exists "$instance" || fail "no instance named $instance" "list them with: $0 status" NO_INSTANCE
+    shift
+    local dir; dir=$(instance_dir "$instance")
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put the first release in with install-server.sh release" NO_RELEASE
+    with_env "$instance" "$dir/current/bilibi-web" software-update "$@"
 }
 
 # ================================================================ GitHub App
@@ -1505,6 +1543,7 @@ case ${1:-} in
     two-factor-reset) shift; two_factor_reset "$@" ;;
     identity-recover|identity-delete|identity-retention) command=$1; shift; identity_lifecycle "$command" "$@" ;;
     installer) shift; installer "$@" ;;
+    update) shift; update "$@" ;;
     github-app) shift; github_app_command "$@" ;;
     verify) shift; verify_command "$@" ;;
     switch) shift; switch "$@" ;;

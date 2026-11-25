@@ -242,6 +242,15 @@ pub struct OperatorAccounts {
     pub first: String,
 }
 
+/// The account named by the one-time bootstrap receipt: the installation
+/// owner whose fresh factor may authorize a root-invoked software command.
+#[derive(Clone, Debug)]
+pub struct InstallationOwner {
+    pub tenant: i64,
+    pub user: i64,
+    pub email: String,
+}
+
 async fn operator_accounts(
     client: &(impl GenericClient + Sync),
     tenant: i64,
@@ -317,6 +326,23 @@ impl From<tokio_postgres::Error> for OwnerClaimError {
 }
 
 impl UserService {
+    /// The installation owner, if bootstrap has completed. Authentication
+    /// still re-proves the account live before a caller may use it.
+    pub async fn installation_owner(&self) -> Result<Option<InstallationOwner>> {
+        let client = self.db.get().await?;
+        Ok(client
+            .query_opt(
+                "SELECT tenant_id, user_id, admin_email FROM user_bootstrap WHERE id=1",
+                &[],
+            )
+            .await?
+            .map(|row| InstallationOwner {
+                tenant: row.get(0),
+                user: row.get(1),
+                email: row.get(2),
+            }))
+    }
+
     /// The accounts the operator tenant already holds, `None` while it is
     /// empty: whether an owner exists, decided before any question is asked.
     pub async fn operator_accounts(&self, tenant: i64) -> Result<Option<OperatorAccounts>> {

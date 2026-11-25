@@ -34,6 +34,9 @@ pub const MAX_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
 /// Prefixes of the folders under `incoming/`.
 pub const JOB_PREFIX: &str = "job-";
 pub const UPLOAD_PREFIX: &str = "upload-";
+/// Job-specific markers watched by `bilibi-installer@.path`. The application
+/// writes one only after the database job is ready for the privileged worker.
+const INSTALLER_JOBS_DIR: &str = "installer-jobs";
 
 /// The instance folder this program serves (`BILIBI_INSTANCE_DIR`, from the
 /// instance's `env` file): where its releases are kept, and where a release
@@ -80,6 +83,42 @@ impl Paths {
     }
     pub fn incoming_folder(&self, name: &str) -> PathBuf {
         self.incoming().join(name)
+    }
+    /// The directory prepared by `install-server.sh` for systemd path
+    /// activation. It is deliberately below `incoming/`, the one filesystem
+    /// boundary shared by the application and its installer.
+    pub fn installer_jobs(&self) -> PathBuf {
+        self.incoming().join(INSTALLER_JOBS_DIR)
+    }
+    /// Refuse a queue write when server setup has not prepared the activation
+    /// directory. Creating it here would give it the application's private
+    /// ownership instead of the shared instance group.
+    pub fn require_installer_activation(&self) -> Result<(), String> {
+        let dir = self.installer_jobs();
+        if dir.is_dir() {
+            return Ok(());
+        }
+        Err(format!(
+            "This server has no installer activation folder ({}). Run `sudo scripts/install-server.sh installer {} <bilibi-installer> --tag <setup-tag>` with the verified installer asset, then ask again.",
+            dir.display(),
+            self.name
+        ))
+    }
+    /// Notify systemd that database job `job` is ready. A distinct marker per
+    /// job makes a queue/idle race harmless: the installer removes only the
+    /// markers it observed before its final idle scan.
+    pub fn wake_installer(&self, job: i64) -> Result<(), String> {
+        if job <= 0 {
+            return Err("The installer job number is invalid.".into());
+        }
+        self.require_installer_activation()?;
+        let marker = self.installer_jobs().join(format!("job-{job}.ready"));
+        fs::write(&marker, format!("{job}\n")).map_err(|error| {
+            format!(
+                "The installer could not be activated ({}: {error}).",
+                marker.display()
+            )
+        })
     }
     /// The release in service: `current` resolves to `releases/<n>`.
     pub fn current(&self) -> Option<u64> {
