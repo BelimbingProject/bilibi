@@ -287,6 +287,7 @@ async fn serve() -> Result<()> {
                 app.services.get(bilibi_base::software::SERVICE)?;
             let (stop, stopped) = tokio::sync::watch::channel(false);
             let settling = tokio::spawn(software.clone().run_settling(stopped.clone()));
+            let updates = tokio::spawn(software.clone().run_update_checks(stopped.clone()));
             // This program downloads a GitHub release, then hands the checked
             // folder to the installer.
             let downloading = tokio::spawn(software.run_downloads(stopped.clone()));
@@ -340,6 +341,7 @@ async fn serve() -> Result<()> {
                 staff_server.await.map_err(|_| Error::Internal)
             };
             let _ = stop.send(true);
+            updates.await.map_err(|_| Error::Internal)?;
             settling.await.map_err(|_| Error::Internal)??;
             downloading.await.map_err(|_| Error::Internal)??;
             worker.await.map_err(|_| Error::Internal)??;

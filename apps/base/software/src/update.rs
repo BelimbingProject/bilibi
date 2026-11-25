@@ -48,9 +48,11 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
     let setup = &record.as_ref().unwrap_or(&Value::Null)["setup"];
     let current = setup["tag"].as_str().and_then(version);
     let mut result = json!({"state":"unavailable","current":current.map(|v|v.to_string()),"checked_at":listing["fetched_at"]});
-    let reason = if listing["repository"].as_str().is_none() {
-        "source_not_set"
-    } else if listing["stale"] == true || listing["available"] != true {
+    let Some(repository) = listing["repository"].as_str() else {
+        result["reason"] = json!("source_not_set");
+        return result;
+    };
+    let reason = if listing["stale"] == true || listing["available"] != true {
         "check_failed"
     } else if listing["accepted"] != true || listing["identity_changed"] == true {
         "source_not_accepted"
@@ -66,7 +68,11 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
             return result;
         };
         result["release"] = latest.clone();
-        let Some(current) = current.filter(|_| setup["repository"] == listing["repository"]) else {
+        let Some(current) = current.filter(|_| {
+            setup["repository"]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(repository))
+        }) else {
             result["reason"] = json!("unknown_installed_release");
             return result;
         };
