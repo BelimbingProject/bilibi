@@ -8,6 +8,8 @@
 
 `OversightQueries` (`base/grid.oversight`) accepts Tenancy's sealed `OversightScope`, never a supplied child ID or invented child actor. `catalog(proof, grant, rows)` intersects one child's consent with the parent's live catalog; `builder_catalog(scope, rows)` intersects fields across children granting each table. `read(proof, root, OversightSpec)` re-proves consent, runs bounded read-only child queries, then audits before returning each answer. `OversightResult` has explicit per-child outcomes and grant versions and composable totals; no child record links are returned. `RowsSummary` computes totals only for row-level grants; `Rows.pages` supplies each child’s `(offset, limit)` for a globally bounded page; children absent from the map return only counts, without reading or projecting row keys. The map never widens the proven directory. `latest` and `list` values stay per child, with null combined cells.
 
+Both the consent editor and oversight reads admit only table sources that take the tenant alone. This keeps company-scoped sources and sources requiring a child user out of parent oversight.
+
 **Unknown classification denies the whole source.** Every field in the complete original `TableDecl` must be explicitly marked `.personal(kind)` or `.non_personal()` by its owner before the table can enter either the consent or oversight catalog. Hidden/derived fields and fields removed by parent restrictions or child withholding still count. Absence of a personal mark is unknown, never evidence of non-personal data. `.personal` still requires the owning module's personal-data store contract; do not label unknown production fields non-personal to bypass it. Core Contacts, accounts, affiliations, addresses and companies remain unavailable to oversight until their owners complete classification and the required privacy/store contracts. Existing grants and explicit personal selections cannot enable an unclassified source. This does not remove ordinary same-tenant access. Only Grid's non-business reference sources are fully classified here.
 
 Global operator settings `tenancy.oversight.max_children` (50), `concurrency` (4), `child_timeout_ms` (2,000), `total_timeout_ms` (10,000) and `cache_seconds` (60; 0 disables) have settings-editor controls. Cache entries are bounded, in memory and keyed by reader, query, grant version and live catalog; every hit requires fresh authorization and audit. A revoked, withheld, masked, expired or unauditable answer cannot survive through the cache.
@@ -35,8 +37,9 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
   audit views; one table claims a type).
 - a `Source`: static SQL for **the rows a scope may read**, with the owner's own
   tenant, soft-delete and company filters applied. A tenant source takes bigint
-  `$1` (tenant) and may take `$2` (user); a `Source::company` also takes `$3`
-  (the selected company from the sealed scope); a `Source::global` takes none. Grid
+  `$1` (tenant) and may take bigint `$2` (user). A `Source::company` requires all
+  three bigint parameters: `$1` (tenant), `$2` (user) and `$3` (the selected company
+  from the sealed scope). A `Source::global` takes none. Grid
   wraps it in a subquery, so every hop of a path carries its owner's boundary and
   Grid never adds a tenant predicate. It must be one `SELECT`/`WITH` statement
   that references every parameter its scope requires. A request never supplies
@@ -56,7 +59,7 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
 Contributions are validated at discovery (duplicate ids, unknown link ends, bad
 joins, a link id that shadows a field, wrong source shape, claimed record types)
 and the Ready check refuses a table naming a capability Authz does not declare
-or whose tenant/company scope differs from the source.
+or whose company-scoped capability flag differs from the source.
 Nothing executes a source at boot.
 
 ## Record reach
@@ -150,9 +153,9 @@ at most).
 
 ### Owner scalar sorting
 
-`scalar_expression(&catalog, root, path)` resolves a scalar path under a fresh scoped catalog and returns its expression, using Grid's existing owner sources and one-link cardinality rules. The caller aliases its root row `r`, binds the same tenant/user/company to `$1`/`$2`/`$3`, and executes immediately in that scope's bounded transaction. Rollups and many-links are refused; SQL identifiers come only from validated catalog declarations. Use it where a per-root scalar lookup is appropriate; Company uses `scalar_join` for list sort and filter queries across many companies.
+`scalar_expression(&catalog, root, path)` resolves a scalar path under a fresh scoped catalog and returns its expression, using Grid's existing owner sources and one-link cardinality rules. The caller aliases its root row `r`, binds the same tenant, user and optional company to `$1`, `$2` and `$3`, and executes immediately in that scope's bounded transaction. Rollups and many-links are refused; SQL identifiers come only from validated catalog declarations. Use it where a per-root scalar lookup is appropriate; Company uses `scalar_join` for list sort and filter queries across many companies.
 
-`scalar_join(&catalog, root, path)` is for an owner list that reads many root rows by a field on one direct `One` link. It returns a catalog-derived alias, the field expression and one `LEFT JOIN` against the target owner's scoped source. Deduplicate clauses by alias when several fields use the same link. It accepts only a direct `On` join and a scalar target field; other paths use `scalar_expression` or a bounded Grid projection. The owner's `One` declaration guarantees no root row multiplication.
+`scalar_join(&catalog, root, path)` is for an owner list that reads many root rows by a field on one direct `One` link. It returns a catalog-derived alias, the field expression and one `LEFT JOIN` against the target owner's scoped source. Use the same scope bindings as for `scalar_expression`. Deduplicate clauses by alias when several fields use the same link. It accepts only a direct `On` join and a scalar target field; other paths use `scalar_expression` or a bounded Grid projection. The owner's `One` declaration guarantees no root row multiplication.
 
 `PageColumns::with_scalar_sorts` opts in a map from supported Grid paths to the owner's list sort keys. Eligible headings carry those keys and sort events recheck the scoped path; owners must also revalidate before querying. Other projected columns remain display-only.
 
@@ -189,8 +192,7 @@ Call `bilibi_grid::project(&db, &scope, "reference_items", &ids, &specs)` after
 paging through the owner's list API. IDs are JSON number/string values; specs
 are paths such as `group.name` or `movements.delta:sum`. Do not build SQL or pass
 previously resolved `Column`s: `project` builds a fresh catalog and resolves specs
-in its own read-only, repeatable-read transaction. Owner sources on the root and every link target share the tenant, user and selected company bindings. Edge sources use the tenant and optional user bindings. The host
-still validates the live session/actor before calling the module API.
+in its own read-only, repeatable-read transaction. The query uses the [scoped catalog](#the-scoped-catalog) for the root and every link. The host still validates the live session/actor before calling the module API.
 
 The result has resolved typed `columns`, page-ordered `rows` (`key` plus `cells`
 keyed by column DOM id), and PostgreSQL's `estimated_cost`. Duplicate IDs/specs
@@ -248,7 +250,7 @@ The probe requires a second pool connection, even for a standalone check. It ref
 
 ## Grouped summaries and row pages (G5)
 
-The report builder's reads, in `src/summary.rs`, with `project`'s rules: a fresh scoped catalog, a read-only repeatable-read transaction, owner sources with tenant, user and selected-company bindings, the `EXPLAIN` bound of 100,000 and the 2 s and 500 ms timeouts.
+The report builder's reads in `src/summary.rs` use the same rules as `project`, including a fresh scoped catalog, a read-only repeatable-read transaction, the `EXPLAIN` bound of 100,000 and the 2 s and 500 ms timeouts.
 
 | Call | Returns |
 | --- | --- |
@@ -418,8 +420,8 @@ Declare the canonical list address on `TableDecl::list_address` for the tables w
 
 The `g6-shared-views` walkthrough (`scripts/run-walkthroughs.sh grid-shared-views`) proves role visibility when switching companies, tenant-wide and owner visibility, Grid and Labels operation writes with a one-connection pool, concurrent saves at the view limit, owner deletion without sharing permission, saving filters after queued changes, and refusal of an employee email search saved on the Users page when a reader lacks the page grant.
 
-`scripts/run-walkthroughs.sh grid-company-bulk` proves that one selected company can read, import and export its company source while another selected company is refused, and that a tenant source still works in both companies.
+`scripts/run-walkthroughs.sh grid-company-bulk` runs the [company-scoped Grid and Bulk Data walkthrough](../bulk_data/README.md#walkthrough).
 
 ## Scalar access predicates
 
-`scalar_access(catalog, root, path)` returns a predicate for the root row aliased `r`, using the same tenant/user/company binds as `scalar_expression`. It permits absent optional links and refuses a linked record excluded by the scoped catalog’s record reach at any hop. Combine it with the scoped root source when historical evidence or automation must distinguish absence from denied access.
+`scalar_access(catalog, root, path)` returns a predicate for the root row aliased `r`, using the same scope bindings as `scalar_expression`. It permits absent optional links and refuses a linked record excluded by the scoped catalog’s record reach at any hop. Combine it with the scoped root source when historical evidence or automation must distinguish absence from denied access.
