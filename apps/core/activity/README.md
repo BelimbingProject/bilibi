@@ -6,7 +6,7 @@
 
 - Activities and their guests (`core_activities`, `core_activity_guests`).
 - Repeating series: the rule (`core_activity_series`) and one activity per occurrence.
-- One Activities list (`/activities`), shown as a table, a calendar or as the tasks in tiles by status, one record page (`/activities/{id}`) and the Activities panel on record pages.
+- One Calendar page (`/activities`), opening on the week, with a list and task status tiles, one record page (`/activities/{id}`) and the Activities panel on record pages.
 - Reminders: a per-tenant scheduled sweep, each activity's own reminder offsets (else the creator's default, else the tenant's), the bell's To do rows and the optional reminder email to the assignee and to guests without an account. The Activities list's “My to-do activities” filter shows the same open, reminded work as the bell.
 - Invitations: Send invites, the bell notice to colleagues, the invitation email worker, and the `core/activity.invitation_gates` registry a Domain contributes its contact rules to.
 - The calendar feed: one read-only iCalendar link per person, and its key ([Calendar feed](#calendar-feed)).
@@ -109,7 +109,7 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 
 ## Calendar
 
-**The Activities list shows as a calendar too** (`/activities?display=calendar`, the List, Calendar and Status tiles tabs): day, week, month, year and shared views of the activities the reader may see, through base/ui `Calendar`. It is the same list: search, kind, open or closed and "whose" filter both.
+**Calendar opens on the current week** (`/activities`, with Calendar, List and Status tiles tabs). The visible hours start near the current time in the reader’s zone, or the first appointment when browsing another week. All 24 hours remain available. The calendar offers day, week, month, year and shared views of the activities the reader may see, through base/ui `Calendar`. It is the same list: search, kind, open or closed and "whose" filter both.
 
 - Calls and meetings are drawn from start to end; a task at its due time, 30 minutes long. Notes and tasks without a due date are not on it. Colour is the kind (call, meeting, task), never a status.
 - **Year.** Twelve small months; each day shows how many items it holds (`!` and red when one is overdue) and links to its day view. The numbers come from one count per day (`day_counts`), not from the items, so they are right however busy the year is.
@@ -129,7 +129,7 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 **A person can publish their own calendar as a read-only iCalendar link** and subscribe to it from Google Calendar, Outlook or Apple Calendar. The feed is one more key to the same door, not a second set of rules.
 
 - **Address.** `GET /feeds/activities/{key}` on the public site (a [`base/public`](../../base/public/README.md) `PUBLIC_LINKS` contribution, so the host redacts the key from logs, sends no referrer and budgets each sender: 600 a minute and 10,000 an hour per address, since calendar services fetch every subscriber's feed from a few addresses). The key is the only credential, and it answers only on its own tenant's public site.
-- **Key.** The public listener must be configured for the workspace. The settings page and the agent operation return its absolute feed URL. The key contains 256 random bits as 64 hex characters, one per person and tenant. Only its SHA-256 is stored (`core_activity_feed_keys`); the key is shown once, when it is made, on **My settings › Calendar feed** (`/settings/calendar-feed`) and in the result of `core.activity.create_feed_key`.
+- **Key.** The public listener must be configured for the workspace. The settings page and the agent operation return its absolute feed URL. The key contains 256 random bits as 64 hex characters, one per person and tenant. Only its SHA-256 is stored (`core_activity_feed_keys`); the key is shown once, when it is made, on **My settings › Calendar** (`/settings/calendar-feed`) and in the result of `core.activity.create_feed_key`.
 - **Same rule as the page and the agent API.** Each read acts as the key's owner: it proves the account live, then reads `Activities::list` for calls and meetings between 30 days ago and a year ahead, and tasks due in that range, the activities the owner takes part in (creator, assignee, or an account guest who has not declined; [Who sees an activity](#who-sees-an-activity)): theirs, never another person's, whoever holds the link. A holder of `core.activity.all.view` gets their own calendar too, not the tenant's. If the owner loses `core.activity.view` or is deactivated, the feed answers as for an unknown key.
 - **What it shows.** Subject (tasks start with "Task: "), start and end, location, and the join link of a meeting. Never the description, internal notes, guests, related record, status or reminders.
 - **At most 2,000 events** (`FEED_LIMIT`). The feed pages through the list 500 at a time, nearest to the moment of the read first, whether behind or ahead. Past 2,000 it leaves out the ones furthest away and says so in the calendar's description (`X-WR-CALDESC`: how many it shows and how many more it left out), which calendar apps show beside the calendar's name. Events are written earliest first.
@@ -143,7 +143,7 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 **Which offsets an activity reminds at**, first that is set:
 
 1. The activity's own `reminder_minutes` (up to five offsets of 0–10,080 minutes before it starts or is due; `[]` is no reminder). Each occurrence of a series has its own; Change series copies one to the later occurrences.
-2. The creator's default (`core.activity.default_reminder_minutes`, a personal setting), copied onto the activity when they create it. A person sets it with **Reminder defaults** on the Activities list; it changes no activity they already made.
+2. The creator's default (`core.activity.default_reminder_minutes`, a personal setting), copied onto the activity when they create it. A person sets it with **Reminder defaults** in **My settings › Calendar**; it changes no activity they already made.
 3. The tenant setting `core.activity.reminder_minutes` (default 15), one reminder, read at each sweep.
 
 **Whether it also emails** follows the same order: the activity's `reminder_email`, the creator's default (`core.activity.default_reminder_email`), then the tenant setting `core.activity.reminder_email` (default off). A note has no reminders.
@@ -207,13 +207,13 @@ The subject is `core.activity.activity:<id>` and the key `<id>:<version>`. The p
 
 - Step-up: `core.activity.feed_key.create`.
 - Capabilities: `core.activity.view`, `core.activity.manage`, `core.activity.all.view`, `core.activity.all.manage`, `core.activity.feed.manage` (revoke anyone's feed key). The `tenant_owner` role gets `view` and `manage` only.
-- Settings (Settings › Activities, tenant): `core.activity.reminder_minutes`, `core.activity.reminder_email`, `core.activity.imminent_hours`. Personal (user scope, set with Reminder defaults on the Activities list): `core.activity.default_reminder_minutes`, `core.activity.default_reminder_email`.
+- Settings (Settings › Activities, tenant): `core.activity.reminder_minutes`, `core.activity.reminder_email`, `core.activity.imminent_hours`. Personal (user scope, set in My settings › Calendar): `core.activity.default_reminder_minutes`, `core.activity.default_reminder_email`.
 - Schedule `core/activity.reminders` and its Queue worker `core/activity-reminders`; Queue workers `core/activity-invites` and `core/activity-guest-reminders`.
 - Registry `core/activity.invitation_gates` (declared here; Domains contribute).
 - Public link and credential path `/feeds/activities/{token}` (service `core/activity.feed`); page `/settings/calendar-feed`, a tab of My settings.
 - Uses `core/work_calendar` (default calendar and resolved days) for "working days only" and the calendar's day marks.
 - Record kind `core.activity.activity` (page `/activities/{id}`); holder table `activities`.
-- Menu item Activities under Core.
+- Menu item Calendar under Core.
 - Panels:
 
 | Embed | Context | Path the host passes |
@@ -235,12 +235,12 @@ Reads `core.activity.list` (with `from` and `to` a calendar range of up to 500, 
 ## How to try it
 
 1. `./bilibi start`, sign in as `ai@agent.my`.
-2. Open **Core › Activities** and choose **New task**: pick a related record, set a due time a few minutes ahead.
+2. Open **Core › Calendar** and choose **New task**: pick a related record, set a due time a few minutes ahead.
 3. Allow the scheduler on Administration › Authorization › Automation access, and enable **Activity reminders** on System › Schedule.
 4. When the reminder comes due, the bell's **To do** tab lists it; the row opens the related record.
-5. Choose **New meeting**, set **Repeats** to Weekly on two days, **Ends** after 6 times, and save: the record page says how it repeats, **See all** lists the six, and **Change series** moves the later ones to another hour. The **Calendar** tab shows them on the week, and dragging one moves only it.
+5. Choose **New meeting**, set **Repeats** to Weekly on two days, **Ends** after 6 times, and save: the record page says how it repeats, **See all** lists the six, and **Change series** moves the later ones to another hour. The **Calendar** view shows them on the week, and dragging one moves only it.
 6. For a meeting, choose **New meeting**, set a time a few minutes ahead and save. On its page add a person or an email address as a guest, then **Send invites**: the email lands in the development mailbox (`.local/mailbox`) and a colleague guest gets the invitation in the bell, answers it on the page, and sees the reminder in To do.
-7. Choose **Reminder defaults** on the Activities list, pick "1 hour and 10 minutes before" and email on, and save. A meeting you create now starts with them; on its page, **Reminders** and **Email reminders** change them in place. Add an email-address guest, **Send invites**, then **Create person** on that guest to turn the address into a person. Enable the schedule (the scheduler needs the two grants on Automation access, including the tenant directory one in the operator tenant): the next sweep reminds the assignee and emails the guest.
+7. In **My settings › Calendar**, under **Reminders for new activities**, pick "1 hour and 10 minutes before" and email on, and save. A meeting you create now starts with them; on its page, **Reminders** and **Email reminders** change them in place. Add an email-address guest, **Send invites**, then **Create person** on that guest to turn the address into a person. Enable the schedule (the scheduler needs the two grants on Automation access, including the tenant directory one in the operator tenant): the next sweep reminds the assignee and emails the guest.
 
 ## Follow-up operations offered by record owners
 

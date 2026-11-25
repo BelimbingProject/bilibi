@@ -58,7 +58,7 @@ const PAGES: [(SettingsTab, &str, &str, &str); 8] = [
     (
         SettingsTab::CalendarFeed,
         "settings-nav-calendar-feed",
-        "Calendar feed",
+        "Calendar",
         "/settings/calendar-feed",
     ),
     (

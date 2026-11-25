@@ -419,6 +419,9 @@ pub struct Calendar {
     pub day_totals: Option<Vec<DayTotal>>,
     /// What a drag snaps to, in minutes: 5, 10, 15, 30 or 60 (15 default).
     pub snap_minutes: u32,
+    /// Initial local hour to bring into view in a scrollable time grid.
+    /// None leaves the full-height grid in the document.
+    pub focus_hour: Option<u8>,
     pub day_marks: Vec<DayMark>,
     /// The result of the last move, announced politely; a refusal is an error.
     pub notice: Option<(StatusKind, String)>,
@@ -455,6 +458,7 @@ impl Calendar {
             items: Vec::new(),
             day_totals: None,
             snap_minutes: 15,
+            focus_hour: None,
             day_marks: Vec::new(),
             notice: None,
             moving: None,
@@ -804,6 +808,8 @@ struct View {
     view: &'static str,
     title: String,
     zone_note: String,
+    focus_hour: Option<u8>,
+    range_key: String,
     snap: u32,
     views: Vec<ViewLink>,
     previous: NavLink,
@@ -1253,6 +1259,8 @@ impl View {
             id: calendar.id.clone(),
             view: state.view.name(),
             title,
+            focus_hour: calendar.focus_hour.map(|hour| hour.min(23)),
+            range_key: format!("{}-{}-{zone_name}", state.view.name(), state.date),
             zone_note: format!("Times are shown in {zone_name}."),
             snap,
             views,

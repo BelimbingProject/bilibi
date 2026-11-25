@@ -188,7 +188,7 @@ inventory::submit! { Contribution::new(ROUTES, "core/activity.feed_settings", pr
 
 bilibi_menu::contribute!(
     "core/activity",
-    bilibi_menu::MenuItem::page("core.activity", "Activities", LIST_PATH)
+    bilibi_menu::MenuItem::page("core.activity", "Calendar", LIST_PATH)
         .under("core")
         .icon("calendar")
         .requires(bilibi_menu::Requirement::Capability(VIEW))

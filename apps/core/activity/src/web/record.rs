@@ -1640,7 +1640,7 @@ impl Detail {
         actions.push(&render(BackLink {
             href: "/activities",
             id: "activity-back",
-            title: "Back to activities",
+            title: "Back to calendar",
             ..BackLink::default()
         })?);
         let mut flash = NO_FLASH;

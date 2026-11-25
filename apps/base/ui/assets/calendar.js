@@ -294,5 +294,21 @@
 
   const registry = window.BilibiUI
   if (!registry) throw new Error("calendar.js needs ui.js loaded first")
+  registry.registerHook("CalendarHours", {
+    mounted() {
+      this.position = () => {
+        const range = this.el.dataset.range
+        const scale = this.el.querySelector("[data-cal-hours]")
+        if (this.range === range || !scale?.offsetHeight) return
+        this.el.scrollTop = Math.max(0, Number(this.el.dataset.hour) - 1) * scale.offsetHeight / 24
+        this.range = range
+      }
+      this.observer = new ResizeObserver(this.position)
+      this.observer.observe(this.el)
+      this.position()
+    },
+    updated() { this.position() },
+    destroyed() { this.observer.disconnect() },
+  })
   registry.registerHook("Calendar", Calendar)
 })()
