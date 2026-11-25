@@ -93,7 +93,6 @@ pub struct TwoFactorPage {
     success: &'static str,
     /// Drawn for a customer's portal page, not inside the settings shell.
     portal: bool,
-    owner_command: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -139,16 +138,6 @@ struct TwoFactorView<'a> {
     account: &'a str,
     code: Html,
     move_code: Html,
-    owner_recovery: Html,
-}
-
-#[derive(Template)]
-#[template(
-    source = r#"{% import "components.html" as ui %}{% call ui::fold(id="owner-two-factor-recovery", title="If you cannot sign in", summary="Server terminal recovery", open=false) %}<div data-hook="ClipboardCopy">{% call ui::copy_box(id="owner-two-factor-reset-command", label="Run on the installation server", text=command, copy_label="Copy command") %}{% endcall %}</div>{% endcall %}"#,
-    ext = "html"
-)]
-struct OwnerRecovery<'a> {
-    command: &'a str,
 }
 
 impl TwoFactorPage {
@@ -158,14 +147,6 @@ impl TwoFactorPage {
         query: &HashMap<String, String>,
     ) -> Result<Self, Error> {
         let status = users.two_factor_status(scope).await?;
-        let client = users.db.get().await?;
-        let owner_email: Option<String> = client
-            .query_opt(
-                "SELECT owner_identity.email FROM users actor JOIN users owner ON owner.identity_id=actor.identity_id JOIN user_bootstrap b ON b.tenant_id=owner.tenant_id AND b.user_id=owner.id JOIN user_identities owner_identity ON owner_identity.id=owner.identity_id WHERE actor.tenant_id=$1 AND actor.id=$2 AND actor.kind='staff' AND actor.status='active' AND actor.deleted_at IS NULL",
-                &[&scope.tenant(), &scope.user()],
-            )
-            .await?
-            .map(|row| row.get(0));
         Ok(Self {
             users,
             stage: if status.enabled {
@@ -184,8 +165,6 @@ impl TwoFactorPage {
             recovery_hint: "2FA stays on once set up. Lost your phone? Your company administrator or the server owner can reset it.".to_owned(),
             success: "",
             portal: false,
-            owner_command: owner_email
-                .map(|email| format!("bilibi-web two-factor-reset --email {email}")),
         })
     }
 
@@ -380,12 +359,6 @@ impl TwoFactorPage {
                     Vec::new()
                 },
             )?,
-            owner_recovery: match self.owner_command.as_deref() {
-                Some(command) if !self.portal => {
-                    fragment(Html::render(&OwnerRecovery { command }))?
-                }
-                _ => Html::EMPTY,
-            },
         };
         view.render().map_err(|_| Error::Internal)
     }

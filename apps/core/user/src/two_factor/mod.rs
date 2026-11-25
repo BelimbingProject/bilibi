@@ -26,7 +26,7 @@ pub(crate) fn bind(users: std::sync::Arc<UserService>) -> bilibi_module_registry
 }
 pub use agent::{TwoFactorEmailError, TwoFactorEmailReset};
 pub use provider::{Authenticator, METHOD};
-pub use recovery::RequestOutcome;
+pub use recovery::{customer_reset_requests, RequestOutcome, RESET as RESET_OPERATION};
 
 use crate::{credential_attempts, password, UserService};
 use bilibi_audit::{record_action, Attribution};

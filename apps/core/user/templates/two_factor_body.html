@@ -17,5 +17,4 @@
 {% call ui::card(id="two-factor-on") %}<div class="flex items-center gap-2"><span class="text-sm font-medium text-ink">Status</span>{% call ui::badge(kind=bilibi_ui::BadgeKind::Success, dot=true) %}On{% endcall %}</div>{% call forms::hint(id="two-factor-status", text=recovery_hint) %}{% endcall %}{% endcall %}
 <form id="two-factor-move-form" data-event="move" class="space-y-4 rounded-xl border border-line bg-surface p-6"><h3 class="text-sm font-semibold text-ink">Move to a new phone</h3><p class="text-sm text-muted">{% if portal %}Enter the code from your current phone. Then you scan a new QR code with your new phone, and the old phone stops working.{% else %}Enter the code from your current phone. Then scan a new QR code with your new phone and confirm the first code from that app. After confirmation, you can no longer use the old phone.{% endif %}</p>{{ move_code }}<div class="flex justify-end">{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="two-factor-move", button_type="submit", working="Checking…") %}Move to a new phone{% endcall %}</div></form>
 {%- endif %}
-{{ owner_recovery }}
 </div>

@@ -43,7 +43,6 @@ pub(super) struct Account {
     pub(super) active: bool,
 }
 
-/// Staff accounts only: a customer's factor is not a staff reset (ADR 16).
 const TARGET_SQL: &str =
     "SELECT DISTINCT ON (i.id) u.id,u.tenant_id,u.name,i.email,u.status='active' FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.kind='staff'";
 
@@ -87,6 +86,28 @@ pub(super) fn reset_mail(service: &UserService, account: &Account, slot: &str) -
     ))
 }
 
+pub(super) async fn lock_reset_target(
+    tx: &MutationTransaction<'_>,
+    user: i64,
+) -> Result<(), Error> {
+    // Serialize resets and membership removal through the owning account row.
+    tx.sql()
+        .query_opt(
+            "SELECT id FROM users WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE",
+            &[&tx.context().tenant, &user],
+        )
+        .await?
+        .ok_or(Error::NotFound)?;
+    let identity = crate::sign_in_identity::id(tx.sql(), tx.context().tenant, user).await?;
+    tx.sql()
+        .query_one(
+            "SELECT id FROM user_identities WHERE id=$1 FOR UPDATE",
+            &[&identity],
+        )
+        .await?;
+    Ok(())
+}
+
 /// Deletes the confirmed authenticator, ends every session of the portable
 /// identity across its memberships and records who did it. Returns the ended
 /// session ids for announce after commit. Session ids are not written into
@@ -96,15 +117,9 @@ pub(super) async fn clear_confirmed(
     tx: &mut MutationTransaction<'_>,
     account: &Account,
     by: Value,
-) -> Result<Vec<String>, Error> {
-    // Serialize resets and membership removal through the owning account row.
-    tx.sql()
-        .query_opt(
-            "SELECT id FROM users WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE",
-            &[&tx.context().tenant, &account.id],
-        )
-        .await?
-        .ok_or(Error::NotFound)?;
+    actor: Option<i64>,
+) -> Result<(Vec<String>, usize), Error> {
+    let identity = crate::sign_in_identity::id(tx.sql(), account.tenant, account.id).await?;
     if !service.step_up.account_enrolled(tx, account.id).await? {
         return Err(Error::Conflict);
     }
@@ -125,8 +140,11 @@ pub(super) async fn clear_confirmed(
         new: after,
     })
     .await?;
-    let identity = crate::sign_in_identity::id(tx.sql(), account.tenant, account.id).await?;
-    crate::sign_in_identity::end_everywhere(&service.sessions, tx, identity, account.id, None).await
+    let closed = super::recovery::close_requests(tx, identity, actor).await?;
+    let ended =
+        crate::sign_in_identity::end_everywhere(&service.sessions, tx, identity, account.id, None)
+            .await?;
+    Ok((ended, closed))
 }
 
 pub(super) fn wake(
@@ -150,7 +168,7 @@ pub(super) fn wake(
 }
 
 impl UserService {
-    /// Turns off the confirmed authenticator for the one non-deleted staff account
+    /// Turns off the confirmed authenticator for the one non-deleted staff identity
     /// with this email. Already off is success and writes nothing. The audit
     /// actor is the system principal `two-factor-reset`.
     pub async fn reset_two_factor_by_email(
@@ -180,23 +198,23 @@ impl UserService {
                 Context::system(account.tenant, "two-factor-reset", "user.two_factor.reset"),
             )
             .await?;
+        lock_reset_target(&tx, account.id).await?;
         let ended = match clear_confirmed(
             self,
             &mut tx,
             &account,
             json!({"reset_by":"system", "reset_by_name":"two-factor-reset"}),
+            None,
         )
         .await
         {
-            Ok(ended) => ended,
+            Ok((ended, _)) => ended,
             Err(Error::Conflict) => {
                 tx.rollback().await?;
                 return Ok(TwoFactorEmailReset::AlreadyOff);
             }
             Err(error) => return Err(error.into()),
         };
-        let identity = crate::sign_in_identity::id(tx.sql(), account.tenant, account.id).await?;
-        super::recovery::close_requests(&mut tx, account.tenant, identity, None).await?;
         if account.active {
             let notice = reset_notice(crate::wording::TWO_FACTOR_SYSTEM_BODY)?;
             notifications::record_in_tenant(&mut tx, account.tenant, &[account.id], &notice)

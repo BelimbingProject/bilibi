@@ -78,7 +78,7 @@ bilibi_menu::contribute!(
 static GRID: bilibi_grid::GridContribution = bilibi_grid::GridContribution {
     record_fields: &[bilibi_grid::RecordFields { table: "users", fields: crate::record_fields::ALL }],
     tables: &[bilibi_grid::TableDecl::new("users", "Users", LIST,
-        bilibi_grid::Source::tenant("SELECT u.id,u.name,i.email,i.email_verified_at,u.created_at,u.updated_at,u.person_id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.deleted_at IS NULL AND (u.kind='staff' OR (u.kind='customer' AND EXISTS(SELECT 1 FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id AND r.closed_at IS NULL)) )"), "id", &[
+        bilibi_grid::Source::tenant("SELECT u.id,u.name,i.email,i.email_verified_at,u.created_at,u.updated_at,u.person_id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.deleted_at IS NULL AND u.kind='staff'"), "id", &[
             bilibi_grid::Field::new("id", "ID", bilibi_grid::FieldType::Integer),
             bilibi_grid::Field::record(crate::record_fields::NAME),
             bilibi_grid::Field::record(crate::record_fields::EMAIL),

@@ -103,10 +103,7 @@ pub struct Entry {
     pub invitation: Option<i64>,
     pub reset_requested_at: Option<SystemTime>,
     pub two_factor_enabled: bool,
-    pub installation_owner: bool,
-    /// A portal customer included only because its open reset request is work
-    /// for this page. It is not a second customer-account list.
-    pub reset_request_only: bool,
+    pub can_reset: bool,
 }
 
 pub struct Page {
@@ -121,7 +118,7 @@ pub struct Page {
 /// system roles and the custom roles those companies own, as
 /// `bilibi_authz::roles::list` does.
 pub async fn list_users(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     companies: &[i64],
     options: &Options,

@@ -87,7 +87,7 @@ pub async fn standing(client: &dyn ProofClient, tenant: i64, user: i64) -> Resul
     }
     let Some(row) = client
         .query_opt(
-            "SELECT u.name,i.email,u.person_id,u.affiliation_id,u.organisation_id,EXISTS(SELECT 1 FROM users owner JOIN user_bootstrap b ON b.tenant_id=owner.tenant_id AND b.user_id=owner.id WHERE owner.identity_id=u.identity_id),u.kind FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active' AND NOT EXISTS(SELECT 1 FROM user_scim_users s WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id AND NOT s.active)",
+            "SELECT u.name,i.email,u.person_id,u.affiliation_id,u.organisation_id,EXISTS(SELECT 1 FROM user_bootstrap b WHERE b.tenant_id=u.tenant_id AND b.user_id=u.id),u.kind FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active' AND NOT EXISTS(SELECT 1 FROM user_scim_users s WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id AND NOT s.active)",
             &[&tenant, &user],
         )
         .await?

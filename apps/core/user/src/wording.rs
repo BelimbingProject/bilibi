@@ -262,7 +262,6 @@ template!(
             Variable::text("account", "Account", "Aisha Rahman <aisha@example.test>", RESET_REQUEST_MAIL),
             Variable::text("company", "Company", "Example Trading", RESET_REQUEST_MAIL),
             Variable::text("time", "Request time", "2026-11-25 09:15 UTC", RESET_REQUEST_MAIL),
-            Variable::text("ip_address", "IP address", "203.0.113.7", RESET_REQUEST_MAIL),
         ],
         base_language: "en",
         defaults: &[DefaultText {
@@ -270,7 +269,7 @@ template!(
             version: "1",
             slots: &[
                 ("subject", "2FA reset requested for {{account}}"),
-                ("details", "Account: {{account}}\nCompany: {{company}}\nTime: {{time}}\nIP address: {{ip_address}}"),
+                ("details", "Account: {{account}}\nCompany: {{company}}\nTime: {{time}}"),
                 ("closing", "Open the account and review the request. A reset signs the person out everywhere; the request itself changes no access."),
             ],
         }],

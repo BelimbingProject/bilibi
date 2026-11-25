@@ -309,6 +309,7 @@ pub struct SignInChallengePage {
     pub verify_fields: Html,
     pub cancel_fields: Html,
     pub request_reset_fields: Html,
+    pub password_origin: bool,
     pub has_methods: bool,
     pub multiple: bool,
     pub message: String,
@@ -330,6 +331,7 @@ impl SignInChallengePage {
         selected: &str,
         message: &str,
         error: &str,
+        password_origin: bool,
     ) -> askama::Result<Self> {
         let method = methods
             .iter()
@@ -385,6 +387,7 @@ impl SignInChallengePage {
             verify_fields: hidden("sign-in-verify")?,
             cancel_fields: hidden("sign-in-cancel")?,
             request_reset_fields: hidden("sign-in-request-reset")?,
+            password_origin,
             has_methods: !methods.is_empty(),
             multiple: methods.len() > 1,
             message: message.to_owned(),

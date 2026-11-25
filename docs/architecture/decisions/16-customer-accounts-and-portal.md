@@ -33,7 +33,7 @@ We rejected a separate customer account store because every credential rule (has
 
 ## Consequences
 
-- Every staff read of accounts filters `kind = 'staff'`: sign-in, password reset, user lists, the `users` Grid table, the Principal Directory, company and person account panels, landing pages and impersonation. The one exception is an open 2FA reset request: while it is open, the customer appears as a request-only row on Users so the tenant administrator can complete that recovery from the notification; it has no customer-account link or staff actions and disappears when the request closes. A new staff read must otherwise keep the staff filter.
+- Every staff read of accounts filters `kind = 'staff'`: sign-in, password reset, user lists, the `users` Grid table, the Principal Directory, company and person account panels, landing pages and impersonation. Customer recovery requests appear in Customer Portal administration for the installation owner.
 - A Domain that adds portal pages declares portal capabilities, contributes `Access::Portal` routes and takes `&PortalScope` in its portal facade. Code must handle `organisation() == None`.
 - A customer stays signed in only while its Person is live and, for a business customer, while its affiliation is current by its dates and its company is not archived; standing is proved on every request.
 - Single sign-on for customers, staff viewing the portal as a customer, and agent access for customers are out of scope.

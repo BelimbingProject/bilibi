@@ -84,9 +84,10 @@ pub use preferences::{
 };
 pub use tenant_owner::FirstTenantOwnerError;
 pub use two_factor::{
-    safe_return, Enrollment, RequestOutcome as TwoFactorResetRequest, TwoFactorEmailError,
-    TwoFactorEmailReset, TwoFactorError, TwoFactorStatus, CONFIRM_PATH, PORTAL_CONFIRM_PATH,
-    PORTAL_SETTINGS_PATH as PORTAL_TWO_FACTOR_PATH, SETTINGS_PATH as TWO_FACTOR_PATH,
+    customer_reset_requests, safe_return, Enrollment, RequestOutcome as TwoFactorResetRequest,
+    TwoFactorEmailError, TwoFactorEmailReset, TwoFactorError, TwoFactorStatus, CONFIRM_PATH,
+    PORTAL_CONFIRM_PATH, PORTAL_SETTINGS_PATH as PORTAL_TWO_FACTOR_PATH,
+    RESET_OPERATION as RESET_TWO_FACTOR_OPERATION, SETTINGS_PATH as TWO_FACTOR_PATH,
 };
 pub use verification::{Signer, Verification};
 

@@ -4,11 +4,7 @@ use bilibi_database::{pool, Error};
 use bilibi_user::UserService;
 use hmac::{Hmac, KeyInit, Mac};
 use serde_json::json;
-use std::{
-    net::IpAddr,
-    str::FromStr,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
@@ -80,21 +76,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pending = users.login("viewer@example.test", password).await?;
     assert!(pending.pending && app.security.guard(&pending.token).await.is_err());
-    let ip = IpAddr::from_str("203.0.113.42")?;
     let first = users
-        .request_sign_in_two_factor_reset(&pending.token, &pending.csrf, Some(ip))
+        .request_sign_in_two_factor_reset(&pending.token, &pending.csrf)
         .await?;
     let repeat = users
-        .request_sign_in_two_factor_reset(&pending.token, &pending.csrf, Some(ip))
+        .request_sign_in_two_factor_reset(&pending.token, &pending.csrf)
         .await?;
     assert!(first.created && !repeat.created && first.requested_at == repeat.requested_at);
     assert_eq!(first.recipient, "your administrators");
     let client = db.get().await?;
-    let request: (String, String, bool) = client.query_one("SELECT host(request_ip),recipient_kind,closed_at IS NULL FROM user_two_factor_reset_requests WHERE tenant_id=1 AND user_id=$1", &[&viewer.user()]).await.map(|row|(row.get(0),row.get(1),row.get(2)))?;
-    assert_eq!(
-        request,
-        (ip.to_string(), "tenant_administrators".into(), true)
-    );
+    let request: (String, bool) = client.query_one("SELECT recipient_kind,closed_at IS NULL FROM user_two_factor_reset_requests WHERE tenant_id=1 AND user_id=$1", &[&viewer.user()]).await.map(|row|(row.get(0),row.get(1)))?;
+    assert_eq!(request, ("tenant_administrators".into(), true));
     assert!(client.query_one("SELECT EXISTS(SELECT 1 FROM notifications WHERE tenant_id=1 AND type='two_factor_reset_request')", &[]).await?.get::<_,bool>(0));
     assert!(client.query_one("SELECT EXISTS(SELECT 1 FROM base_audit_actions WHERE tenant_id=1 AND event='user.two_factor.reset_requested')", &[]).await?.get::<_,bool>(0));
     println!("PASS: a password-proved sign-in filed one audited request in 24 hours and notified tenant administrators without admission");
@@ -124,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(state, (true, true));
     assert!(app.security.guard(&viewer_login.token).await.is_err());
     assert!(users
-        .request_sign_in_two_factor_reset(&pending.token, &pending.csrf, Some(ip))
+        .request_sign_in_two_factor_reset(&pending.token, &pending.csrf)
         .await
         .is_err());
     println!("PASS: the reviewed administrator operation spent fresh 2FA, reset the factor, closed the request and ended every session and pending sign-in");

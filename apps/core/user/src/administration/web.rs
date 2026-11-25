@@ -312,15 +312,6 @@ struct Body {
 }
 #[derive(Template)]
 #[template(
-    source = r#"{% import "dialog.html" as dialog %}{% call dialog::confirm_dialog(id="reset-two-factor-confirm", consequence=consequence, detail="They will be signed out everywhere and emailed. They must set up 2FA again after signing in.", confirm="Reset 2FA", working="Resetting…", confirm_event="reset_two_factor", cancel_event="cancel_reset_two_factor", body=body) %}{% endcall %}"#,
-    ext = "html"
-)]
-struct ResetDialog<'a> {
-    consequence: &'a str,
-    body: Html,
-}
-#[derive(Template)]
-#[template(
     source = r#"<h2 id="users-table-title" class="sr-only">Workspace users</h2>{{ table }}{{ pagination }}"#,
     ext = "html"
 )]
@@ -475,13 +466,8 @@ impl Index {
         grants: &Grants,
         user: &Entry,
         add_to: &[bilibi_records::AddTo],
-        protected: bool,
-        owner: bool,
     ) -> Result<Html> {
-        let add_to = if user.reset_request_only
-            || add_to.is_empty()
-            || user.membership == Membership::Invited
-        {
+        let add_to = if add_to.is_empty() || user.membership == Membership::Invited {
             Html::EMPTY
         } else {
             let key = user.id.to_string();
@@ -500,13 +486,7 @@ impl Index {
         };
         let own = user.id == scope.user();
         let pending = user.membership == Membership::Invited;
-        let reset = if grants.reset
-            && !pending
-            && user.two_factor_enabled
-            && !own
-            && (owner || !protected)
-            && scope.impersonator().is_none()
-        {
+        let reset = if user.can_reset && user.two_factor_enabled {
             let label = format!("Reset 2FA for {}", user.name);
             render(&IconButton {
                 id: &format!("user-{}-reset-2fa", user.id),
@@ -519,7 +499,7 @@ impl Index {
         } else {
             Html::EMPTY
         };
-        let impersonate = if grants.impersonate && !pending && !user.reset_request_only {
+        let impersonate = if grants.impersonate && !pending {
             let label = format!("Impersonate {}", user.name);
             let id = format!("user-{}-impersonate", user.id);
             let href = format!("/admin/impersonate/{}", user.id);
@@ -547,7 +527,7 @@ impl Index {
         } else {
             Html::EMPTY
         };
-        let revoke = if grants.invite && pending && !user.reset_request_only {
+        let revoke = if grants.invite && pending {
             let label = format!("Revoke {}'s invitation", user.name);
             let id = format!("user-{}-revoke", user.id);
             render(&IconButton {
@@ -562,7 +542,7 @@ impl Index {
         } else {
             Html::EMPTY
         };
-        let delete = if grants.delete && !pending && !user.reset_request_only {
+        let delete = if grants.delete && !pending {
             let label = format!("Remove {}", user.name);
             let id = format!("user-{}-delete", user.id);
             let value = user.id.to_string();
@@ -610,16 +590,6 @@ impl Index {
             page = list_users(&**client, scope, &companies, &self.options()).await?;
         }
         let display = self.pages.display(scope).await?;
-        let client = self.pages.db.get().await?;
-        let protected =
-            bilibi_authz::holders(&**client, scope.tenant(), crate::RESET_TWO_FACTOR, 500).await?;
-        let owner = crate::two_factor::recovery::installation_owner(
-            &**client,
-            scope.tenant(),
-            scope.user(),
-        )
-        .await?;
-        drop(client);
         let keys: Vec<Value> = page.entries.iter().map(|e| json!(e.id)).collect();
         // Grid bounds each projection to 100
         // ids, so a large page is composed from bounded batches.
@@ -643,10 +613,7 @@ impl Index {
                 continue;
             };
             row.dom_id = Some(format!("user-{}", user.id));
-            let name = if grants.view
-                && user.membership != Membership::Invited
-                && !user.reset_request_only
-            {
+            let name = if grants.view && user.membership != Membership::Invited {
                 render(&RecordLink {
                     workspace: self.framed,
                     kind: "core/user",
@@ -730,20 +697,10 @@ impl Index {
                     i: Self::instant(&display, user.created_at)?,
                 })?,
             );
-            if !user.reset_request_only
-                && !add_to.is_empty()
-                && user.membership != Membership::Invited
-            {
+            if !add_to.is_empty() && user.membership != Membership::Invited {
                 row.record = Some(("user".into(), row.key.clone()));
             }
-            row.actions = self.actions(
-                scope,
-                &grants,
-                user,
-                &add_to,
-                protected.contains(&user.id) || user.installation_owner,
-                owner,
-            )?;
+            row.actions = self.actions(scope, &grants, user, &add_to)?;
         }
         let mut actions = Html::EMPTY;
         if grants.invite {
@@ -762,56 +719,56 @@ impl Index {
         })?;
         let form = self.list.filters_form();
         let roles = self.role_options(scope, &companies).await?;
-        let toolbar = render(&FilterToolbar::new(
-            "users-filters",
-            vec![
-                ToolbarControl::search(
-                    "users-search",
-                    "search",
-                    "Search users",
-                    &form["search"],
-                    "Search by name or email...",
-                ),
-                ToolbarControl::select(
-                    "users-membership-filter",
-                    MEMBERSHIP,
-                    "Membership",
-                    self.membership
-                        .map(Membership::database_value)
-                        .unwrap_or(""),
-                    vec![
-                        bilibi_ui::Choice::new("All memberships", ""),
-                        bilibi_ui::Choice::new("Active", "active"),
-                        bilibi_ui::Choice::new("Disabled", "disabled"),
-                        bilibi_ui::Choice::new("Invited", "invited"),
-                    ],
-                ),
-                ToolbarControl::select(
-                    "users-reset-requested-filter",
-                    RESET_REQUESTED,
-                    "Reset requested",
-                    if self.reset_requested { "open" } else { "" },
-                    vec![
-                        bilibi_ui::Choice::new("All requests", ""),
-                        bilibi_ui::Choice::new("Reset requested", "open"),
-                    ],
-                ),
-                ToolbarControl::multi_select(
-                    MultiSelect::in_form(FILTERS_FORM, ROLE_IDS)
-                        .id("users-role-filter")
-                        .label("Roles")
-                        .placeholder("All roles")
-                        .selection_label(":count role selected|:count roles selected")
-                        .options(
-                            roles
-                                .iter()
-                                .map(|role| bilibi_ui::Choice::new(&role.name, role.id.to_string()))
-                                .collect(),
-                        )
-                        .values(self.role_ids.iter().map(ToString::to_string).collect()),
-                ),
-            ],
-        ))?;
+        let mut controls = vec![
+            ToolbarControl::search(
+                "users-search",
+                "search",
+                "Search users",
+                &form["search"],
+                "Search by name or email...",
+            ),
+            ToolbarControl::select(
+                "users-membership-filter",
+                MEMBERSHIP,
+                "Membership",
+                self.membership
+                    .map(Membership::database_value)
+                    .unwrap_or(""),
+                vec![
+                    bilibi_ui::Choice::new("All memberships", ""),
+                    bilibi_ui::Choice::new("Active", "active"),
+                    bilibi_ui::Choice::new("Disabled", "disabled"),
+                    bilibi_ui::Choice::new("Invited", "invited"),
+                ],
+            ),
+            ToolbarControl::multi_select(
+                MultiSelect::in_form(FILTERS_FORM, ROLE_IDS)
+                    .id("users-role-filter")
+                    .label("Roles")
+                    .placeholder("All roles")
+                    .selection_label(":count role selected|:count roles selected")
+                    .options(
+                        roles
+                            .iter()
+                            .map(|role| bilibi_ui::Choice::new(&role.name, role.id.to_string()))
+                            .collect(),
+                    )
+                    .values(self.role_ids.iter().map(ToString::to_string).collect()),
+            ),
+        ];
+        if grants.reset && scope.impersonator().is_none() {
+            controls.push(ToolbarControl::select(
+                "users-reset-requested-filter",
+                RESET_REQUESTED,
+                "Reset requested",
+                if self.reset_requested { "open" } else { "" },
+                vec![
+                    bilibi_ui::Choice::new("All requests", ""),
+                    bilibi_ui::Choice::new("Reset requested", "open"),
+                ],
+            ));
+        }
+        let toolbar = render(&FilterToolbar::new("users-filters", controls))?;
         let mut table = self
             .columns
             .flex_table("users", rows)
@@ -858,30 +815,7 @@ impl Index {
                 confirm_event: "revoke",
                 cancel_event: "cancel_revoke",
             })?,
-            (_, _, Some(entry)) => {
-                let methods = self.pages.users.step_up.enrolled_methods(scope).await?
-                    .into_iter()
-                    .map(|method| bilibi_ui::ProofMethod::new(method.id, method.label, method.code_length, method.numeric))
-                    .collect();
-                let mut body = match &self.reset_error {
-                    Some(message) => render(&bilibi_ui::Alert {
-                        kind: StatusKind::Error,
-                        id: "reset-two-factor-error",
-                        class: "mb-3",
-                        body: Html::text(message),
-                    })?,
-                    None => Html::EMPTY,
-                };
-                body.push(&render(&bilibi_ui::ProofInput::new(
-                    "reset-two-factor-code",
-                    "proof",
-                    methods,
-                ))?);
-                render(&ResetDialog {
-                    consequence: &format!("{}'s 2FA methods will be turned off.", entry.name),
-                    body,
-                })?
-            }
+            (_, _, Some(entry)) => self.pages.users.two_factor_reset_dialog(scope, &entry.name, self.reset_error.as_deref()).await?,
             (None, None, None) => Html::EMPTY,
         };
         let rows = page.entries.len();
@@ -994,11 +928,7 @@ impl Index {
                     == Some(scope.user())
                 {
                     self.flash.error("You cannot remove your own membership.");
-                } else if let Some(entry) = self
-                    .listed(value)
-                    .filter(|entry| !entry.reset_request_only)
-                    .cloned()
-                {
+                } else if let Some(entry) = self.listed(value).cloned() {
                     self.pending_delete = Some(entry);
                     self.pending_revoke = None;
                     self.pending_reset = None;
@@ -1033,7 +963,7 @@ impl Index {
                     self.flash.error("You do not have permission to reset 2FA.");
                 } else if let Some(entry) = self
                     .listed(value)
-                    .filter(|entry| entry.membership != Membership::Invited)
+                    .filter(|entry| entry.can_reset && entry.two_factor_enabled)
                     .cloned()
                 {
                     self.pending_reset = Some(entry);

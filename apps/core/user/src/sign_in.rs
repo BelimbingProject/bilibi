@@ -13,7 +13,6 @@ use bilibi_step_up::{Availability, Challenge, Method, Purpose, Spent};
 use bilibi_tenancy::{AccountKind, Channel, Scope};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::net::IpAddr;
 use tokio_postgres::GenericClient;
 
 pub const SIGN_IN: &str = "core.user.sign_in";
@@ -44,11 +43,13 @@ inventory::submit! { Contribution::new(DEFINITIONS, LIFETIME, Provenance { modul
 pub struct PendingSignIn {
     pub csrf: String,
     pub methods: Vec<Method>,
+    pub password_origin: bool,
 }
 struct Pending {
     id: i64,
     scope: Scope,
     hash: Vec<u8>,
+    password_origin: bool,
     /// The step-up operation of the form the password came through.
     operation: &'static str,
 }
@@ -271,7 +272,7 @@ impl UserService {
         }
         let hash = fingerprint(token);
         let mut client = self.db.get().await?;
-        let row = client.query_opt("SELECT p.id,p.tenant_id,p.user_id,p.csrf,p.credential_hash,c.company_id FROM user_sign_ins p LEFT JOIN user_identity_providers c ON c.tenant_id=p.tenant_id AND c.id=p.identity_provider_id WHERE p.token_hash=$1 AND p.state='pending' AND p.audience=$2", &[&hash,&kind.as_str()]).await?.ok_or(Error::Unauthorized)?;
+        let row = client.query_opt("SELECT p.id,p.tenant_id,p.user_id,p.csrf,p.credential_hash,c.company_id,p.identity_provider_id IS NULL FROM user_sign_ins p LEFT JOIN user_identity_providers c ON c.tenant_id=p.tenant_id AND c.id=p.identity_provider_id WHERE p.token_hash=$1 AND p.state='pending' AND p.audience=$2", &[&hash,&kind.as_str()]).await?.ok_or(Error::Unauthorized)?;
         let (id, tenant, user, csrf, stored, company): (
             i64,
             i64,
@@ -334,6 +335,7 @@ impl UserService {
             id,
             scope,
             hash,
+            password_origin: row.get(6),
             operation,
         })
     }
@@ -352,6 +354,7 @@ impl UserService {
         let pending = self.pending(token, kind).await?;
         Ok(PendingSignIn {
             csrf: pending.scope.csrf.clone(),
+            password_origin: pending.password_origin,
             methods: self.step_up.enrolled_methods(&pending.scope).await?,
         })
     }
@@ -362,9 +365,8 @@ impl UserService {
         &self,
         token: &str,
         csrf: &str,
-        ip: Option<IpAddr>,
     ) -> Result<crate::two_factor::recovery::RequestOutcome> {
-        self.request_sign_in_two_factor_reset_of(token, csrf, ip, AccountKind::Staff)
+        self.request_sign_in_two_factor_reset_of(token, csrf, AccountKind::Staff)
             .await
     }
 
@@ -373,9 +375,8 @@ impl UserService {
         &self,
         token: &str,
         csrf: &str,
-        ip: Option<IpAddr>,
     ) -> Result<crate::two_factor::recovery::RequestOutcome> {
-        self.request_sign_in_two_factor_reset_of(token, csrf, ip, AccountKind::Customer)
+        self.request_sign_in_two_factor_reset_of(token, csrf, AccountKind::Customer)
             .await
     }
 
@@ -383,7 +384,6 @@ impl UserService {
         &self,
         token: &str,
         csrf: &str,
-        ip: Option<IpAddr>,
         kind: AccountKind,
     ) -> Result<crate::two_factor::recovery::RequestOutcome> {
         let pending = self.pending(token, kind).await?;
@@ -397,9 +397,20 @@ impl UserService {
                     .mutation_context("user.two_factor.reset_requested"),
             )
             .await?;
+        let identity =
+            crate::sign_in_identity::id(tx.sql(), pending.scope.tenant(), pending.scope.user())
+                .await?;
+        tx.sql()
+            .query_one(
+                "SELECT id FROM user_identities WHERE id=$1 FOR UPDATE",
+                &[&identity],
+            )
+            .await?;
         let held = self.hold_pending(&tx, &pending, csrf).await?;
-        let outcome =
-            crate::two_factor::recovery::request_in(self, &mut tx, &held.scope, ip).await?;
+        if !held.password_origin {
+            return Err(Error::Forbidden);
+        }
+        let outcome = crate::two_factor::recovery::request_in(self, &mut tx, &held.scope).await?;
         tx.commit().await?;
         Ok(outcome)
     }

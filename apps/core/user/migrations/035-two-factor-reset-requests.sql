@@ -5,7 +5,6 @@ CREATE TABLE user_two_factor_reset_requests (
  identity_id bigint NOT NULL REFERENCES user_identities(id) ON DELETE CASCADE,
  company_id bigint,
  company_name text NOT NULL,
- request_ip inet,
  recipient_kind text NOT NULL CHECK (recipient_kind IN ('tenant_administrators','installation_owner')),
  requested_at timestamptz NOT NULL DEFAULT now(),
  closed_at timestamptz,
