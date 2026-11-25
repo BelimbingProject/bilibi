@@ -2263,7 +2263,7 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         let access = bilibi_base::grid::scalar_access(&catalog, "watcher_cases", path)
             .map_err(|_| Error::Invalid)?;
         for (id, expected) in [(child, false), (unlinked, true)] {
-            let allowed: bool = client.query_one(&format!("SELECT {access} FROM {source} r WHERE r.id=$3 AND $1::bigint IS NOT NULL AND $2::bigint IS NOT NULL"), &[&viewer.tenant(), &viewer.user(), &id]).await?.get(0);
+            let allowed: bool = client.query_one(&format!("SELECT {access} FROM {source} r WHERE r.id=$4 AND $1::bigint IS NOT NULL AND $2::bigint IS NOT NULL AND $3::bigint IS NOT DISTINCT FROM $3::bigint"), &[&viewer.tenant(), &viewer.user(), &viewer.current_company().map(|company| company.get()), &id]).await?.get(0);
             check(
                 allowed == expected,
                 "each direct, edge and chained access predicate distinguishes absence from denied reach",
