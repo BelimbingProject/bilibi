@@ -419,6 +419,9 @@ pub struct Calendar {
     pub day_totals: Option<Vec<DayTotal>>,
     /// What a drag snaps to, in minutes: 5, 10, 15, 30 or 60 (15 default).
     pub snap_minutes: u32,
+    /// Initial local hour to bring into view in a scrollable time grid.
+    /// None leaves the full-height grid in the document.
+    pub focus_hour: Option<u8>,
     pub day_marks: Vec<DayMark>,
     /// The result of the last move, announced politely; a refusal is an error.
     pub notice: Option<(StatusKind, String)>,
@@ -455,6 +458,7 @@ impl Calendar {
             items: Vec::new(),
             day_totals: None,
             snap_minutes: 15,
+            focus_hour: None,
             day_marks: Vec::new(),
             notice: None,
             moving: None,
@@ -804,6 +808,8 @@ struct View {
     view: &'static str,
     title: String,
     zone_note: String,
+    focus_hour: Option<u8>,
+    range_key: String,
     snap: u32,
     views: Vec<ViewLink>,
     previous: NavLink,
@@ -889,6 +895,7 @@ impl View {
         let (zone, zone_name) = tz(&calendar.zone);
         let state = &calendar.state;
         let dates = state.dates();
+        let (first, last) = (dates[0], dates[dates.len() - 1]);
         let snap = match calendar.snap_minutes {
             5 | 10 | 15 | 30 | 60 => calendar.snap_minutes,
             _ => 15,
@@ -1217,7 +1224,6 @@ impl View {
             CalendarView::Month => state.date.strftime("%B %Y").to_string(),
             CalendarView::Year => state.date.strftime("%Y").to_string(),
             CalendarView::Week => {
-                let (first, last) = (dates[0], dates[dates.len() - 1]);
                 if first.month() == last.month() {
                     format!("{} – {}", first.strftime("%-d"), last.strftime("%-d %B %Y"))
                 } else if first.year() == last.year() {
@@ -1253,6 +1259,8 @@ impl View {
             id: calendar.id.clone(),
             view: state.view.name(),
             title,
+            focus_hour: calendar.focus_hour.map(|hour| hour.min(23)),
+            range_key: format!("{}-{first}-{last}-{zone_name}", state.view.name()),
             zone_note: format!("Times are shown in {zone_name}."),
             snap,
             views,

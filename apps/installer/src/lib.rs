@@ -163,7 +163,7 @@ impl Installer {
         result
     }
     async fn scan_job(&self, client: &mut Client) -> Result<bool, tokio_postgres::Error> {
-        if self.finish_cut_off_restores(&*client).await? {
+        if self.finish_cut_off_restores(client).await? {
             return Ok(true);
         }
         let running = jobs::mine_running(&*client, &self.worker).await?;
@@ -236,36 +236,60 @@ impl Installer {
             }
         })
     }
-    /// A restore cut off by a restart may have left the job tables empty,
-    /// holding only the backup's rows, or gone, so the job cannot be found
-    /// by looking for it. The history saved beside its backup says a restore
-    /// was begun and not finished: for each such file whose job is not
-    /// recorded as finished, the service is stopped and the restore is
-    /// finished from the dump. The job is then found again and settled like
-    /// any other. A file whose job is recorded as finished is stale and is
-    /// removed. True when a restore was finished.
     async fn finish_cut_off_restores(
         &self,
-        client: &Client,
+        client: &mut Client,
     ) -> Result<bool, tokio_postgres::Error> {
         let mut finished = false;
         for (id, history, dump) in backup::unfinished_restores(&self.layout.backups()) {
-            if jobs::is_finished(client, id).await? {
+            let key = match history.file_name().and_then(|name| name.to_str()) {
+                Some("history-restore.json") => "restore",
+                Some("history-switch_back.json") => "switch_back",
+                _ => continue,
+            };
+            let recorded = jobs::restore_job(client, id).await?;
+            if recorded
+                .as_ref()
+                .is_some_and(|(_, state)| !matches!(state.as_str(), "queued" | "running"))
+            {
                 let _ = std::fs::remove_file(&history);
                 continue;
             }
-            println!(
-                "job {id}: a restore was cut off by a restart; finishing it from {}",
-                dump.display()
-            );
             jobs::lock_installation(client).await?;
             if let Err(why) = self.service.stop() {
                 eprintln!("bilibi-installer: job {id}: {why}");
                 return Ok(true);
             }
+            if let Some((job, _)) = recorded {
+                match flow::Run::new(client, &self.layout, &self.service, &self.pg, job, true).await
+                {
+                    Ok(mut run) => {
+                        if run.settle_failed_restore(key).await? {
+                            finished = true;
+                            continue;
+                        }
+                    }
+                    Err(error) if jobs::table_missing(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            println!(
+                "job {id}: a restore was cut off by a restart; finishing it from {}",
+                dump.display()
+            );
             if let Err(why) = backup::restore(client, &self.pg, &dump, "", &history, None).await {
-                eprintln!("bilibi-installer: job {id}: the cut-off restore failed: {why}");
-                backup::set_aside(&history);
+                if let Some((job, _)) = jobs::restore_job(client, id).await? {
+                    let mut run =
+                        flow::Run::new(client, &self.layout, &self.service, &self.pg, job, true)
+                            .await?;
+                    run.fail_restore(key, &dump, &why).await?;
+                } else {
+                    eprintln!(
+                        "bilibi-installer: job {id}: the cut-off restore from {} failed: {why}; the service remains stopped",
+                        dump.display()
+                    );
+                    backup::set_aside(&history);
+                }
             }
             finished = true;
         }

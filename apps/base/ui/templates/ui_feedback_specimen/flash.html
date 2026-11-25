@@ -2,7 +2,7 @@
 {%- import "feedback.html" as fb -%}
 {% call ui::card(id="component-flash", title="Flash", inner_class="space-y-3 p-4") %}
 <p class="text-xs text-ink-muted">One message per severity. Info, warning and error stay until dismissed; only a success times out, after eight seconds. Success and info are announced as a status; warning and error interrupt as an alert.</p>
-<div class="flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-2">
+<div class="flex w-full max-w-sm flex-col gap-2">
 {% call fb::flash(kind=bilibi_ui::StatusKind::Error, id="design-library-flash-error", title="Save failed", message="The changes could not be saved.") %}{% endcall %}
 {% call fb::flash(kind=bilibi_ui::StatusKind::Warning, id="design-library-flash-warning", title="Review before continuing", message="Two employees still report to the archived department.") %}{% endcall %}
 {% call fb::flash(kind=bilibi_ui::StatusKind::Success, id="design-library-flash-success", title="Saved", message="Your changes were saved.") %}{% endcall %}

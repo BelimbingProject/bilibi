@@ -767,8 +767,8 @@ inventory::submit! { bilibi_module_registry::Module {
 // because the vocabulary type is Authz's and Tenancy sits below it; the keys
 // themselves are `bilibi_tenancy::{LIST, CREATE, SUSPEND, REACTIVATE}`.
 inventory::submit! { bilibi_module_registry::Contribution::new(VOCABULARY,"authz.tenancy",bilibi_module_registry::Provenance {module:"base/authz",source:file!(),line:line!()}, &VocabularyContribution {
-    domains:&["admin","tenancy"], verbs:&["list","create","suspend","reactivate","manage","read"],
-    capabilities:&[CapabilityDefinition::platform(bilibi_tenancy::LIST), CapabilityDefinition::platform(bilibi_tenancy::CREATE), CapabilityDefinition::platform(bilibi_tenancy::SUSPEND), CapabilityDefinition::platform(bilibi_tenancy::REACTIVATE), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_MANAGE), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_VIEW), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_READ)],
+    domains:&["admin","tenancy"], verbs:&["list","create","suspend","reactivate","manage","read","rename"],
+    capabilities:&[CapabilityDefinition::platform(bilibi_tenancy::LIST), CapabilityDefinition::platform(bilibi_tenancy::CREATE), CapabilityDefinition::platform(bilibi_tenancy::SUSPEND), CapabilityDefinition::platform(bilibi_tenancy::REACTIVATE), CapabilityDefinition::tenant(bilibi_tenancy::VIEW), CapabilityDefinition::tenant(bilibi_tenancy::RENAME), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_MANAGE), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_VIEW), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_READ)],
     roles:&[], system_principals:&[],
 }) }
 bilibi_step_up::declare!(

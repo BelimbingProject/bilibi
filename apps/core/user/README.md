@@ -292,7 +292,7 @@ calls `settle_bootstrap_affiliation` for the Person, business affiliation and fi
 
 ### Customer tenant owner
 
-`provision_tenant_owner` backs [server first-owner setup and reissue](../../../docs/server-install.md#the-first-owner-of-a-customer-tenant). It validates the Person name and origin, checks mail readiness and renders the invitation before writing. The initial tenant, primary company, pending account, invitation, Authz role assignment and bootstrap receipt commit together before delivery. The invitation uses the default of `user.invitation_days` and stores no inviter account.
+`provision_tenant_owner` backs [server first-owner setup and reissue](../../../docs/server-install.md#the-first-owner-of-a-customer-tenant). It validates the Person name and origin, checks mail readiness before writing and renders the invitation before committing. Reissue takes the recorded tenant ID and uses the current tenant name in the invitation. The initial tenant, primary company, pending account, invitation, Authz role assignment and bootstrap receipt commit together before delivery. The invitation uses the default of `user.invitation_days` and stores no inviter account.
 
 The `user_tenant_owner_bootstraps` receipt identifies the exact invitation that requires a new portable identity. An attempt to reuse an existing identity returns `InvitationError::DedicatedSignIn`. Acceptance consumes the invitation and settles the membership, Person, affiliation and desk in the same transaction.
 

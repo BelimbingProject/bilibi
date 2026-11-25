@@ -20,6 +20,8 @@ pub const SUSPEND: &str = "admin.tenancy.tenant.suspend";
 /// (`admin.tenancy.tenant.reactivate`).
 pub const REACTIVATE: &str = "admin.tenancy.tenant.reactivate";
 /// The longest name a tenant takes, as the source validates.
+pub const VIEW: &str = "tenancy.tenant.view";
+pub const RENAME: &str = "tenancy.tenant.rename";
 pub const NAME_MAX: usize = 255;
 /// The longest reason a suspension or reactivation takes.
 pub const REASON_MAX: usize = 500;
@@ -104,6 +106,7 @@ pub struct TenantIdentity {
     pub id: i64,
     pub parent_id: Option<i64>,
     pub name: String,
+    pub name_version: i64,
     pub status: TenantStatus,
     pub is_platform_operator: bool,
     /// Set exactly while `status` is `Suspended`.
@@ -117,6 +120,7 @@ impl TenantIdentity {
             id: row.get(0),
             parent_id: row.get(1),
             name: row.get(2),
+            name_version: row.get(7),
             // The CHECK on `tenants.status` admits only known values; one
             // that is not known reads as suspended, never as active.
             status: TenantStatus::parse(row.get(3)).unwrap_or(TenantStatus::Suspended),
@@ -179,7 +183,7 @@ pub struct MovePlan {
 }
 
 const SELECT: &str = "SELECT t.id, t.parent_id, t.name, t.status, (o.tenant_id IS NOT NULL), \
- to_jsonb(t.suspended_at)#>>'{}', t.suspension_reason \
+ to_jsonb(t.suspended_at)#>>'{}', t.suspension_reason, t.name_version \
  FROM tenants t LEFT JOIN platform_operator o ON o.singleton AND o.tenant_id = t.id \
  WHERE t.deleted_at IS NULL";
 
@@ -264,6 +268,7 @@ pub async fn provision_tenant(client: &impl GenericClient, name: &str) -> Result
         id: insert_tenant(client, &new).await?,
         parent_id: None,
         name: new.name,
+        name_version: 1,
         status: TenantStatus::Active,
         is_platform_operator: false,
         suspension: None,
@@ -451,7 +456,7 @@ impl Tenants {
         };
         let created = tx.mutate(move |sql| Box::pin(async move {
             let id = insert_tenant(sql, &new).await?;
-            let identity = TenantIdentity { id, parent_id:new.parent_id, name:new.name.clone(), status:TenantStatus::Active, is_platform_operator:false, suspension:None };
+            let identity = TenantIdentity { id, parent_id:new.parent_id, name:new.name.clone(), name_version:1, status:TenantStatus::Active, is_platform_operator:false, suspension:None };
             Ok((identity, vec![Change { kind:"tenancy.tenant".into(), id, old:serde_json::Value::Null,
                 new:json!({"name":new.name,"parent_id":new.parent_id,"status":TenantStatus::Active.as_str()}) }]))
         })).await?;
@@ -466,6 +471,99 @@ impl Tenants {
             tenant: scope.tenant(),
             actor: scope.user(),
         }))
+    }
+    /// Authorize a rename in this tenant or, with operator standing, another tenant.
+    async fn authorize_target(
+        &self,
+        client: &dyn crate::ProofClient,
+        scope: &Scope,
+        id: i64,
+        capability: &str,
+    ) -> Result<()> {
+        self.authorization
+            .authorize_scope(client, scope, capability)
+            .await?;
+        if id != scope.tenant() {
+            prove_operator(client, scope).await?;
+        }
+        Ok(())
+    }
+
+    /// Read an authorized target without granting access to its business data.
+    pub async fn read_for_rename(
+        &self,
+        client: &dyn crate::ProofClient,
+        scope: &Scope,
+        id: i64,
+    ) -> Result<TenantIdentity> {
+        self.authorize_target(client, scope, id, VIEW).await?;
+        client
+            .query_opt(&format!("{SELECT} AND t.id = $1"), &[&id])
+            .await?
+            .as_ref()
+            .map(TenantIdentity::from_row)
+            .ok_or(bilibi_database::Error::NotFound)
+    }
+
+    /// Read the target and validate a proposed name on the caller's connection.
+    pub async fn preview_rename(
+        &self,
+        client: &dyn crate::ProofClient,
+        scope: &Scope,
+        id: i64,
+        name: &str,
+    ) -> Result<std::result::Result<(TenantIdentity, String), TenantErrors>> {
+        self.authorize_target(client, scope, id, RENAME).await?;
+        let tenant = client
+            .query_opt(&format!("{SELECT} AND t.id = $1"), &[&id])
+            .await?
+            .as_ref()
+            .map(TenantIdentity::from_row)
+            .ok_or(bilibi_database::Error::NotFound)?;
+        let (draft, errors) = validate(&NewTenant {
+            name: name.to_owned(),
+            parent_id: None,
+        });
+        Ok(if errors.is_empty() {
+            Ok((tenant, draft.name))
+        } else {
+            Err(errors)
+        })
+    }
+
+    /// Recheck authorization, validation and the name version on the audited transaction.
+    pub async fn rename_in(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        name: &str,
+        version: i64,
+    ) -> Result<std::result::Result<TenantIdentity, TenantErrors>> {
+        self.authorize_target(tx.sql(), scope, id, RENAME).await?;
+        let tenant = tx
+            .sql()
+            .query_opt(&format!("{SELECT} AND t.id = $1 FOR UPDATE OF t"), &[&id])
+            .await?
+            .as_ref()
+            .map(TenantIdentity::from_row)
+            .ok_or(bilibi_database::Error::NotFound)?;
+        if tenant.name_version != version {
+            return Err(bilibi_database::Error::Conflict);
+        }
+        let (draft, errors) = validate(&NewTenant {
+            name: name.to_owned(),
+            parent_id: None,
+        });
+        if !errors.is_empty() {
+            return Ok(Err(errors));
+        }
+        let renamed = tx.mutate(move |sql| Box::pin(async move {
+            sql.execute("UPDATE tenants SET name=$2, name_version=name_version+1, updated_at=now() WHERE id=$1", &[&id, &draft.name]).await?;
+            let renamed = TenantIdentity::from_row(&sql.query_one(&format!("{SELECT} AND t.id = $1"), &[&id]).await?);
+            Ok((renamed, vec![Change { kind:"tenancy.tenant".into(), id, old:json!({"name":tenant.name}), new:json!({"name":draft.name}) }]))
+        })).await?;
+        Ok(Ok(renamed))
     }
     /// Checks a suspend or reactivate against the tenant as it stands, with no
     /// write: what the review shows before the person confirms.
