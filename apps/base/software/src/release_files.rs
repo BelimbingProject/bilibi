@@ -15,6 +15,15 @@ use bilibi_ui::{
 };
 use serde_json::{json, Value};
 
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}<div data-hook="ClipboardCopy">{% call ui::copy_box(id="software-terminal-update", label="From a terminal on the server:", text=command, copy_label="Copy command") %}{% endcall %}</div>"#,
+    ext = "html"
+)]
+struct TerminalCommand<'a> {
+    command: &'a str,
+}
+
 pub const PATH: &str = "/system/software/releases";
 /// The file input's name: the key the owner consumes by.
 const UPLOAD: &str = "release_file";
@@ -305,6 +314,16 @@ impl ReleaseFiles {
             body: upload,
             ..Fold::default()
         })?);
+        if let Some(paths) = &self.pages.software.paths {
+            body.push(&render(Fold {
+                id: "software-release-details",
+                title: "Details",
+                body: render(TerminalCommand {
+                    command: &format!("sudo bilibi update {}", paths.name),
+                })?,
+                ..Fold::default()
+            })?);
+        }
         Ok(body)
     }
     /// The file input for a release file, for a server owner.

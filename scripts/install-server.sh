@@ -39,6 +39,7 @@ root=/opt/bilibi
 unit_name='bilibi@'
 installer_unit='bilibi-installer@'
 installer_path='bilibi-installer@'
+installer_timer='bilibi-installer@'
 release_proof=$here/lib/release-proof.py
 # The GitHub App that reads a private application repository: one per server,
 # shared by its instances (they serve the same application). root:bilibi 0640
@@ -137,7 +138,7 @@ service_state() { systemctl is-active "$unit_name$1" 2>/dev/null || true; }
 installer_state() {
     local state
     state=$(systemctl is-active "$installer_unit$1" 2>/dev/null || true)
-    if [[ $state == inactive ]] && systemctl is-active --quiet "$installer_path$1.path"; then
+    if [[ $state == inactive ]] && systemctl is-active --quiet "$installer_path$1.path" && systemctl is-active --quiet "$installer_timer$1.timer"; then
         printf 'idle\n'
     else
         printf '%s\n' "$state"
@@ -556,7 +557,7 @@ configure_firewall() {
 }
 install_unit() {
     local file reload=
-    for file in "$unit_name.service" "$installer_unit.service" "$installer_path.path"; do
+    for file in "$unit_name.service" "$installer_unit.service" "$installer_path.path" "$installer_timer.timer"; do
         if ! cmp -s "$here/server/$file" "/etc/systemd/system/$file"; then
             install -m 0644 "$here/server/$file" "/etc/systemd/system/$file"
             reload=1
@@ -575,6 +576,7 @@ install_bilibi_command() {
 start_installer() {
     [[ -x $(installer_bin "$1") ]] || return 0
     systemctl enable --now "$installer_path$1.path" >/dev/null 2>&1 || say "Warning: could not start $installer_path$1.path; see: systemctl status $installer_path$1.path"
+    systemctl enable --now "$installer_timer$1.timer" >/dev/null 2>&1 || say "Warning: could not start $installer_timer$1.timer; see: systemctl status $installer_timer$1.timer"
     systemctl enable "$installer_unit$1" >/dev/null 2>&1
     systemctl start "$installer_unit$1" >/dev/null 2>&1 || say "Warning: could not start $installer_unit$1; see: systemctl status $installer_unit$1"
 }
@@ -1017,6 +1019,9 @@ installer() {
     if systemctl is-active --quiet "$installer_path$instance.path"; then
         systemctl stop "$installer_path$instance.path"
     fi
+    if systemctl is-active --quiet "$installer_timer$instance.timer"; then
+        systemctl stop "$installer_timer$instance.timer"
+    fi
     systemctl stop "$installer_unit$instance"
     install_unit
     ensure_instance_access "$instance"
@@ -1027,6 +1032,7 @@ installer() {
     install -m 0755 -o root -g root "$staged" "$bin.new" && mv -T "$bin.new" "$bin"
     exec {release_lock_fd}<&-
     systemctl enable --now "$installer_path$instance.path" >/dev/null 2>&1
+    systemctl enable --now "$installer_timer$instance.timer" >/dev/null 2>&1
     systemctl enable "$installer_unit$instance" >/dev/null 2>&1
     systemctl start "$installer_unit$instance"
     if [[ -n $web_active ]]; then

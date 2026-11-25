@@ -99,7 +99,7 @@ What makes a restore safe to repeat:
 - **A failed restore.** If `pg_restore` fails, the job tables are made again from the file, so the job can record that it failed. The service stays stopped, and the message names the dump to restore by hand.
 - **One report.** The same database error is written to the journal once, not every five seconds.
 
-After a reboot, systemd starts the enabled `bilibi-installer@<instance>` recovery service before `bilibi@<instance>` (`Before=` in the installer's unit and `After=` in the instance's). The installer stops the instance again as its first act, but the old program may have answered for a moment before that. So a message after a restart does not claim that nothing entered is lost. A clean recovery scan exits after its idle window; the enabled `bilibi-installer@<instance>.path` then waits for later ready markers without running the installer process.
+After a reboot, systemd starts the enabled `bilibi-installer@<instance>` recovery service before `bilibi@<instance>` (`Before=` in the installer's unit and `After=` in the instance's). The installer stops the instance again as its first act, but the old program may have answered for a moment before that. So a message after a restart does not claim that nothing entered is lost. A clean recovery scan exits after its idle window; the enabled `bilibi-installer@<instance>.path` waits for later ready markers, and `bilibi-installer@<instance>.timer` starts a fallback scan every five minutes in case a committed job lost its marker.
 
 A step that was running when the restart came says so in its detail: "(the installer restarted during this step and continued)".
 
@@ -139,7 +139,7 @@ To run a recovery scan by hand:
 sudo systemctl start bilibi-installer@production
 ```
 
-The service reads its instance’s `DATABASE_URL` and `BIND_ADDR`, uses PostgreSQL’s `pg_dump` and `pg_restore` on the path, and exits when no work remains. A normally idle service is `inactive`; its path unit remains `active (waiting)`. Read progress with `journalctl -u bilibi-installer@production`.
+The service reads its instance’s `DATABASE_URL` and `BIND_ADDR`, uses PostgreSQL’s `pg_dump` and `pg_restore` on the path, and exits when no work remains. A normally idle service is `inactive`; its path and five-minute fallback timer remain `active (waiting)`. Read progress with `journalctl -u bilibi-installer@production`.
 
 ## Caveats
 

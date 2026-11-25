@@ -1,0 +1,16 @@
+# Reconciles committed jobs whose ready marker could not be written. Normal
+# jobs start immediately through bilibi-installer@.path; this is the durable
+# fallback when the application stopped between its database commit and marker.
+[Unit]
+Description=Bilibi installer reconciliation for instance %i
+Documentation=https://github.com/BelimbingProject/bilibi/blob/main/apps/installer/README.md
+ConditionFileIsExecutable=/opt/bilibi/%i/installer
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+AccuracySec=30s
+Unit=bilibi-installer@%i.service
+
+[Install]
+WantedBy=timers.target
