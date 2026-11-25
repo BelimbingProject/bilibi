@@ -226,7 +226,7 @@ pub async fn maintenance(db: &Db, engine: &Engine, scope: &Scope) -> Result<()> 
 }
 
 /// One bell render reads one bounded page of approvals: with twelve waiting
-/// for this reader it counts ten, says there are more and lists five.
+/// for this reader it counts twelve and lists five.
 pub async fn bell(db: &Db, services: &Services, engine: &Engine, scope: &Scope) -> Result<()> {
     let indexes = count(db, "SELECT count(*) FROM pg_indexes WHERE indexname IN ('base_workflow_approval_requests_run','base_workflow_approval_events_request','base_workflow_approval_delegations_delegate','base_workflow_process_runs_running')").await?;
     check(indexes == 4, &format!("{indexes} of 4 indexes exist"))?;
@@ -280,7 +280,7 @@ pub async fn bell(db: &Db, services: &Services, engine: &Engine, scope: &Scope) 
         .find(|list| list.see_all.as_deref() == Some("/workflow/approvals"))
         .ok_or(Error::NotFound)?;
     check(
-        list.count == 10 && list.more && list.items.len() == 5,
+        list.count == 12 && !list.more && list.items.len() == 5,
         &format!(
             "the bell counts {}{} and lists {}",
             list.count,

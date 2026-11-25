@@ -27,7 +27,12 @@ impl Software {
         let Some(paths) = self.paths.as_ref() else {
             return Ok(());
         };
-        let listing = self.release_listing(None, false, false).await?;
+        let policy = super::release_proof::Policy::load(paths).map_err(Error::refused)?;
+        let listing = {
+            let client = self.db.get().await?;
+            self.github_listing(&**client, None, false, false, &policy)
+                .await?
+        };
         if listing.is_null() {
             return Ok(());
         }

@@ -225,7 +225,15 @@ impl PageContracts {
     pub async fn submit(&self, call: &Call<'_>, input: Value) -> Result<Value> {
         let op = self.declared(call, input)?;
         let session = self.session(call);
-        page_write::contract(call.contract, self.plans.submit(call.scope, &session, &op)).await
+        let result =
+            page_write::contract(call.contract, self.plans.submit(call.scope, &session, &op)).await;
+        if matches!(
+            result,
+            Err(crate::Error::Backend(bilibi_database::Error::Conflict))
+        ) {
+            bilibi_ui::inline::InlineRead::mark_stale();
+        }
+        result
     }
 
     /// The review half of a confirmation: the owner's dry-run preview. The

@@ -66,7 +66,6 @@ for asset in bilibi-setup-*.tar.gz bilibi-installer-x86_64-unknown-linux-gnu bil
     --jq '.[].verificationResult.signature.certificate.sourceRepositoryIdentifier' |
     awk 'NF { found=1; if ($0 != "1462459642") exit 1 } END { if (!found) exit 1 }' || { echo "REFUSED: $asset"; exit 1; }
 done
-gh attestation trusted-root > trusted-root.jsonl
 ```
 
 Stop if any asset is refused. Copy the folder to the server so it ends up as `/root/bilibi-release`. As root:
@@ -90,12 +89,11 @@ Run these as root. Over ssh as a sudo user, send each batch of commands as a scr
 tag=setup-vX.Y.Z   # the tag you verified in step 4
 cd /root/bilibi-release
 apt-get update && apt-get install -y python3-snappy   # Rocky/RHEL: dnf install -y python3-snappy
-install -D -m 0644 trusted-root.jsonl /etc/bilibi/attestation-trusted-root.jsonl
 rm -rf tools && mkdir tools && tar --no-same-owner -xzf bilibi-server-tools.tar.gz -C tools
 i=tools/scripts/install-server.sh
 ```
 
-`release` and `installer` check their asset again on the server against that trusted root, so the server needs no GitHub account. The tools archive is checked only on your computer in step 4: it holds the checking program itself. `create` installs PostgreSQL, Caddy and the GitHub CLI from their official package repositories, so the server needs outgoing internet access. Run each step with `--json`. It prints a `started` line, then one result line:
+The tools archive is checked only on your computer in step 4: it holds the root-owned script and checking program. After `create`, `trust` pins GitHub attestations from the official repository, workflow and oldest acceptable tag. `release` and `installer` then apply that record on the server. The repository is public. The server retrieves attestation bundles without GitHub credentials and verifies them locally. `create` installs PostgreSQL, Caddy and the GitHub CLI from their official package repositories. Run each step with `--json`. It prints a `started` line, then one result line:
 
 ```json
 {"step": "create", "state": "completed", "code": "OK", "next": "...", "detail": "..."}
@@ -106,10 +104,11 @@ Go on only after `"state": "completed"`. On `failed`, do what `code` and `next` 
 | Step | Command | Done when |
 | --- | --- | --- |
 | Create | `$i --json create production --role production --site erp.example.com` | `completed` |
-| First release | `$i --json release production bilibi-setup-*.tar.gz --repo BelimbingProject/bilibi-try --repo-id 1462459642 --tag "$tag"` | `completed` |
-| Installer service | `$i --json installer bilibi-installer-x86_64-unknown-linux-gnu --repo BelimbingProject/bilibi-try --repo-id 1462459642 --tag "$tag"` | `completed` |
+| Release trust | `$i --json trust production --github --repo BelimbingProject/bilibi-try --repo-id 1462459642 --minimum-tag "$tag"` | `completed` |
+| First release | `$i --json release production bilibi-setup-*.tar.gz --tag "$tag"` | `completed` |
+| Installer service | `$i --json installer production bilibi-installer-x86_64-unknown-linux-gnu --tag "$tag"` | `completed` |
 
-`release` is safe to repeat: the same verified release already in service completes without changes. Its `detail` may warn about integration settings that are unset; those are for later and do not block the install.
+`release` reports success when the same verified release is already in service. If a failed install already recorded the tag in Release trust, publish a new tag before retrying. Its `detail` may warn about integration settings that are unset; those are for later and do not block the install.
 
 ## 6. Outgoing mail
 
@@ -172,7 +171,8 @@ Rerunning a finished step is harmless. A `next` line names the plain command; ru
 | `PORT_IN_USE` | The chosen backend port is taken | Rerun with another `--port` or without it |
 | `NO_INSTANCE` | `create` has not run | Run `create` |
 | `NO_RELEASE` | No release in service | Run `release` |
-| `SIGNATURE_INVALID`, `SIGNATURE_WRONG_REPOSITORY` | The asset is not the official signed release | Download again from the official release (step 4); never bypass |
+| `TRUST_NOT_SET`, `TRUST_INVALID`, `PROOF_METHOD_WRONG` | The server has no valid pinned release policy, or the command gave the other proof kind | Pin each instance once through the terminal. For an existing instance, choose a minimum tag newer than its previously installed releases. Later changes use Software with fresh 2FA |
+| `SIGNATURE_INVALID`, `SIGNATURE_WRONG_REPOSITORY`, `SIGNATURE_REPLAY` | The asset is not the official signed release, or its setup tag is not newer than the highest admitted one | Download the correct newer release from step 4; use Software Undo for a deliberate rollback; never bypass |
 | `ARCHIVE_INVALID` | The archive or its checksum is damaged | Download again, rerun |
 | `MAIL_NOT_READY`, `MAIL_NOT_DELIVERED` | `create-owner` cannot email the claim link: mail is not set up, or the relay refused | Step 6 (or the cause in `detail`), rerun |
 | `MIGRATION_FAILED` | The database update failed; the previous release, if any, is back | Read `detail`; report it to the owner |

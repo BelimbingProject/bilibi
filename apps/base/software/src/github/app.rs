@@ -44,8 +44,8 @@ fn file(paths: Option<&Paths>) -> Option<PathBuf> {
     Some(paths?.dir.parent()?.join(FILE))
 }
 
-/// This server's App, `None` when there is none (a developer run, or a
-/// server that reads a public repository or uses a saved read token).
+/// This server's App, `None` when there is none (for example a developer run
+/// or a server reading a public repository anonymously).
 pub(crate) fn load(paths: Option<&Paths>) -> Result<Option<App>, String> {
     let Some(path) = file(paths) else {
         return Ok(None);

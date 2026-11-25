@@ -8,6 +8,17 @@ mod backup;
 mod composition;
 #[path = "../src/jobs.rs"]
 mod jobs;
+mod layout {
+    use std::process::Command;
+
+    // The status programs below are local fixtures owned by the walkthrough user.
+    // Only the deployed worker needs to switch to a separate release account.
+    pub fn release_command(limit: &str) -> Result<Command, String> {
+        let mut command = Command::new("timeout");
+        command.arg(limit);
+        Ok(command)
+    }
+}
 
 use serde_json::json;
 use std::{error::Error, os::unix::fs::PermissionsExt, path::PathBuf};

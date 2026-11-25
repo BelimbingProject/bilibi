@@ -7,7 +7,6 @@
       this.active = false;
       this.draft = null;
       this.pending = new Set();
-      this.sequence = 0;
       this.long = this.el.dataset.hook === 'InlineLongText';
       this.choice = this.el.dataset.hook === 'InlineChoice';
       this.editorSource = this.editor()?.dataset.editor;
@@ -134,7 +133,7 @@
       this.editor()?.classList.toggle('hidden', !this.active);
       const input = this.control();
       if (input) {
-        input.setAttribute('aria-invalid', String(this.el.dataset.status === 'error'));
+        input.setAttribute('aria-invalid', String(['error', 'conflict'].includes(this.el.dataset.status)));
         if (describedBy) input.setAttribute('aria-describedby', describedBy);
         else input.removeAttribute('aria-describedby');
       }
@@ -159,10 +158,10 @@
     start(value, atEnd = false, autofocus = true) {
       if (this.el.dataset.editable !== 'true' || this.active) return;
       this.active = true;
-      // An unsuccessful draft keeps its original version until explicit Escape.
-      const draft = this.draft || {value: this.el.dataset.value, version: this.el.dataset.version};
-      this.original = this.el.dataset.value;
-      this.version = draft.version;
+      const current = this.el.dataset.value;
+      const draft = this.draft || {value: current, original: current};
+      this.original = draft.original;
+      this.openedPendingValue = this.pending.has(draft) ? draft.value : undefined;
       const input = this.control();
       if (!input) { this.active = false; return; }
       input.value = value === undefined ? draft.value : value;
@@ -192,28 +191,39 @@
       if (!this.active) return;
       const input = this.control();
       const value = this.long || this.choice ? input.value : input.value.trim();
-      const unchanged = value === this.original;
+      const unchanged = value === this.openedPendingValue
+        || (value === this.original && !this.pending.size);
       if (unchanged || (!value.trim() && !this.el.hasAttribute('data-allow-empty'))) {
         this.cancel(returnFocus);
         return;
       }
-      const draft = {value, version: this.version, sequence: ++this.sequence};
+      const draft = {value, original: this.original};
       this.draft = draft;
       this.active = false;
       this.pending.add(draft);
       this.message('');
       this.updated();
       if (returnFocus) this.trigger()?.focus();
-      // onReply is local metadata, never serialized onto the wire. It runs
-      // after the matching server reply has patched the committed value/status.
       this.emit(this.el.dataset.saveEvent, {
-        id: this.el.dataset.id, field: this.el.dataset.field,
-        value, version: draft.version,
+        id: this.el.dataset.id, field: this.el.dataset.field, value,
+        fact: this.el.id, original: draft.original,
+        prepareOriginal: () => draft.original,
         onReply: (reply) => {
           this.pending.delete(draft);
           if (!this.el.isConnected) return;
-          if (reply.type === 'error') this.message(reply.message || 'The change was not confirmed. Open the field to retry, or press Escape to discard the draft.');
-          if (this.draft === draft && reply.type !== 'error' && this.el.dataset.status === 'saved') this.draft = null;
+          if (reply.type === 'error') {
+            if (this.draft === draft) this.message(reply.message || 'The change was not confirmed. Open the field to retry, or press Escape to discard the draft.');
+          } else if (this.el.dataset.status === 'saved') {
+            if (this.el.dataset.value === draft.value) {
+              if (this.active && this.original === draft.original) this.original = draft.value;
+              for (const pending of this.pending) {
+                if (pending.original === draft.original) pending.original = draft.value;
+              }
+            }
+            if (this.draft === draft) this.draft = null;
+          } else if (this.draft === draft && this.el.dataset.status === 'conflict') {
+            this.draft = null;
+          }
           this.updated();
         },
       });

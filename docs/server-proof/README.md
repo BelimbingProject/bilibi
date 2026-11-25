@@ -43,9 +43,10 @@ Run the product installer inside the lab:
 
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create production --role production --site prod.10.77.61.2.sslip.io --tls internal'
-docs/server-proof/lab.sh run "/src/scripts/install-server.sh release production /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh trust production --github --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --minimum-tag $PROOF_TAG"
+docs/server-proof/lab.sh run "env GH_TOKEN=unusable GITHUB_TOKEN=unusable /src/scripts/install-server.sh release production /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --tag $PROOF_TAG"
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner production --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner"'
-docs/server-proof/lab.sh run "/src/scripts/install-server.sh installer /data/assets/bilibi-installer-x86_64-unknown-linux-gnu --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh installer production /data/assets/bilibi-installer-x86_64-unknown-linux-gnu --tag $PROOF_TAG"
 docs/server-proof/lab.sh run 'if command -v cargo || command -v rustc; then exit 1; fi'
 docs/server-proof/drive.py login
 docs/server-proof/drive.py enrol
@@ -71,13 +72,22 @@ Add Finance to the disposable application's saved composition before you publish
 
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create dev --role dev --site dev.10.77.61.2.sslip.io --tls internal'
-docs/server-proof/lab.sh run "/src/scripts/install-server.sh release dev /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh trust dev --github --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --minimum-tag $PROOF_TAG"
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh release dev /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --tag $PROOF_TAG"
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner dev --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner"'
 LAB_ORIGIN=https://dev.10.77.61.2.sslip.io docs/server-proof/drive.py login
 chrome-devtools-axi open https://dev.10.77.61.2.sslip.io/finance/payroll
 ```
 
 Open Finance and use its Payroll page before packaging the release. An empty payroll list states that People is not mounted; it is not fixture data.
+
+## Instance trust and replay
+
+After both instances are running, install the verified Dev installer explicitly with `install-server.sh installer dev <binary> --tag <tag>`. Run `docs/server-proof/lab.sh run 'bash /src/docs/server-proof/trust-check.sh'` to check file permissions and the privilege boundary. A first Production release with the unusable token environment above proves the public bundle path completes without personal credentials.
+
+Use a disposable instance with a numbered release and no trust record to exercise enrollment. Give `trust` a minimum tag no newer than the retained release and confirm it refuses. Use a newer floor and confirm the root-owned policy records the terminal UID and UTC timestamp. Repeat the pin and confirm it refuses replacement. Review a new policy through Software with fresh 2FA and wait for the worker to rotate it. Compare both instances’ policy and replay records before and after. Only the target policy should change.
+
+For an operator-signed release, create the key and sign the setup archive as described in [Build releases](../server-install.md#build-releases). Pin an operator key on a disposable instance, omit GitHub credentials, then install via terminal and Software with the detached proof. Use a valid previously signed archive to try an older tag through upload, GitHub download and the terminal. Check that the archive is refused before an incoming folder or numbered release appears and that the root-owned replay record stays at the newer tag and digest. During an interrupted install, inspect the replay record before the worker’s copy and verify that a paused job recovers the service even if its admitted tag is no longer the highest. Attempt to cancel a queued trust job and then a claimed trust job. The queued job should cancel and the claimed job should report that cancellation is too late.
 
 ## Upload and install
 

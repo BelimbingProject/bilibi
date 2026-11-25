@@ -49,9 +49,8 @@ infrastructure: the database pool (`bootstrap.database`) and the program's
 `Composition` (`bootstrap.composition`, for Base Software). Base cannot depend upward on Core.
 Base-owned provider boundaries can use `Ready` to reject unbound adapters after
 all factories finish; `apps/base/notifications/src/lib.rs` demonstrates this.
-Company records through that sink inside the company transaction. User binds
-its adapter at boot, audits the notification inside the transaction, and emits
-the bell after commit. Do not import User from Company or import Core from Base.
+User binds its adapter at boot, audits notifications inside the transaction, and emits
+the bell after commit. Do not import Core from Base.
 
 Company contributes its HTTP page routes, and User contributes the shell bell.
 Web binds route services through `bilibi_ui::page::PageService` and enforces

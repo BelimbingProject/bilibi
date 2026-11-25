@@ -2,6 +2,7 @@
 mod catalogue;
 mod language;
 mod operations;
+mod print;
 mod store;
 
 pub use catalogue::{
@@ -9,6 +10,10 @@ pub use catalogue::{
     Text, Value, Variable, CATALOGUE, PLATFORM_CATALOGUE,
 };
 pub use language::LANGUAGE;
+pub use print::{
+    CompiledPrint, PrintContract, PrintDefault, PrintFacts, PrintField, PrintKind, PrintValue,
+    ResolvedPrint, PRINT_CATALOGUE,
+};
 pub use store::Templates;
 
 use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};

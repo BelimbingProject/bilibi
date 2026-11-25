@@ -8,8 +8,7 @@ Wants=network-online.target bilibi-installer@%i.service
 
 [Service]
 Type=simple
-User=bilibi
-Group=bilibi
+User=nobody
 # BILIBI_ENV (the role), APP_ORIGIN, BIND_ADDR, DATABASE_URL and the keys.
 EnvironmentFile=/opt/bilibi/%i/env
 WorkingDirectory=/opt/bilibi/%i/data

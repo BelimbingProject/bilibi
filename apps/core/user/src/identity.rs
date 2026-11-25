@@ -440,36 +440,7 @@ impl UserService {
         user: i64,
         person: PersonId,
     ) -> std::result::Result<AccountLinks, LinkError> {
-        let mut client = self.db.get().await.map_err(Error::from)?;
-        let mut tx = self
-            .mutations
-            .begin(&mut client, scope.mutation_context("user.link_person"))
-            .await?;
-        let scope = self.fresh(tx.sql(), scope).await?;
-        bilibi_authz::authorize_key(tx.sql(), &scope, UPDATE).await?;
-
-        // The proof borrows the transaction; take its identity before the
-        // account write borrows it mutably. The database locks stay held.
-        let person = bilibi_person::lock_for_account_binding(&tx, &scope, person)
-            .await
-            .map_err(|error| match error {
-                Error::NotFound => LinkError::NotFound,
-                other => LinkError::Access(other),
-            })?
-            .id();
-        let account = read_account(tx.sql(), &scope, user, true)
-            .await?
-            .ok_or(LinkError::NotFound)?;
-        if account.links.person == Some(person) {
-            tx.rollback().await?;
-            return Ok(account.links);
-        }
-        let links = AccountLinks {
-            person: Some(person),
-        };
-        let links = save_links(self, &mut tx, account.id, account.links, links).await?;
-        tx.commit().await?;
-        Ok(links)
+        self.set_person_link(scope, user, Some(person), None).await
     }
     /// Initializes a new staff account's person and desk in the creator's transaction.
     pub(crate) async fn initialize_desk_in(
@@ -504,29 +475,49 @@ impl UserService {
         scope: &Scope,
         user: i64,
     ) -> std::result::Result<AccountLinks, LinkError> {
+        self.set_person_link(scope, user, None, None).await
+    }
+
+    pub(crate) async fn set_person_link(
+        &self,
+        scope: &Scope,
+        user: i64,
+        person: Option<PersonId>,
+        expected: Option<Option<PersonId>>,
+    ) -> std::result::Result<AccountLinks, LinkError> {
+        let action = if person.is_some() {
+            "user.link_person"
+        } else {
+            "user.unlink"
+        };
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
-            .begin(&mut client, scope.mutation_context("user.unlink"))
+            .begin(&mut client, scope.mutation_context(action))
             .await?;
         let scope = self.fresh(tx.sql(), scope).await?;
         bilibi_authz::authorize_key(tx.sql(), &scope, UPDATE).await?;
 
+        if let Some(person) = person {
+            bilibi_person::lock_for_account_binding(&tx, &scope, person)
+                .await
+                .map_err(|error| match error {
+                    Error::NotFound => LinkError::NotFound,
+                    other => LinkError::Access(other),
+                })?;
+        }
         let account = read_account(tx.sql(), &scope, user, true)
             .await?
             .ok_or(LinkError::NotFound)?;
-        if account.links == AccountLinks::default() {
+        if expected.is_some_and(|expected| account.links.person != expected) {
+            return Err(Error::Conflict.into());
+        }
+        if account.links.person == person {
             tx.rollback().await?;
             return Ok(account.links);
         }
-        let links = save_links(
-            self,
-            &mut tx,
-            account.id,
-            account.links,
-            AccountLinks::default(),
-        )
-        .await?;
+        let links = AccountLinks { person };
+        let links = save_links(self, &mut tx, account.id, account.links, links).await?;
         tx.commit().await?;
         Ok(links)
     }

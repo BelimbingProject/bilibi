@@ -193,7 +193,7 @@ impl std::error::Error for Problem {}
 
 type Checked<T> = Result<T, Problem>;
 
-fn identifier(id: &str) -> bool {
+pub(crate) fn identifier(id: &str) -> bool {
     id.starts_with(|c: char| c.is_ascii_lowercase())
         && id
             .bytes()

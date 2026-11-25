@@ -226,8 +226,7 @@ fn older(a: &Value, b: &Value) -> bool {
 /// `bilibi-web status` on a release folder: it proves the program runs on
 /// this machine, and its text names what the release holds.
 pub fn status(dir: &std::path::Path) -> Result<String, String> {
-    let out = std::process::Command::new("timeout")
-        .arg("30")
+    let out = crate::layout::release_command("30")?
         .arg(dir.join("bilibi-web"))
         .arg("status")
         .output()

@@ -731,9 +731,9 @@ impl CompanyPage {
                 self.notice = "You no longer have permission to change this company, or the company is archived.".into();
                 CommitStatus::Error(self.notice.clone())
             }
-            Err(bilibi_agent_api::Error::Backend(Error::Conflict)) => CommitStatus::Error(
-                "The record changed. Your draft is kept; reload before saving.".into(),
-            ),
+            Err(bilibi_agent_api::Error::Backend(Error::Conflict)) => {
+                CommitStatus::stale("The record changed. Your draft is kept; reload before saving.")
+            }
             Err(bilibi_agent_api::Error::InvalidInput(errors)) => {
                 CommitStatus::Error(errors.into_values().flatten().collect::<Vec<_>>().join(" "))
             }
@@ -1208,8 +1208,8 @@ impl CompanyPage {
                         self.notice = "You no longer have permission to change this company, or the company is archived.".into();
                         CommitStatus::Error(self.notice.clone())
                     }
-                    Err(bilibi_agent_api::Error::Backend(Error::Conflict)) => CommitStatus::Error(
-                        "The record changed. Your draft is kept; reload before saving.".into(),
+                    Err(bilibi_agent_api::Error::Backend(Error::Conflict)) => CommitStatus::stale(
+                        "The record changed. Your draft is kept; reload before saving.",
                     ),
                     Err(bilibi_agent_api::Error::InvalidInput(errors)) => CommitStatus::Error(
                         errors.into_values().flatten().collect::<Vec<_>>().join(" "),
@@ -1303,8 +1303,8 @@ impl CompanyPage {
                         self.notice="You no longer have permission to change this company, or the company is archived.".into();
                         CommitStatus::Error(self.notice.clone())
                     }
-                    Err(crate::WriteError::Access(Error::Conflict)) => CommitStatus::Error(
-                        "The record changed. Your draft is kept; reload before saving.".into(),
+                    Err(crate::WriteError::Access(Error::Conflict)) => CommitStatus::stale(
+                        "The record changed. Your draft is kept; reload before saving.",
                     ),
                     Err(crate::WriteError::Access(Error::Invalid)) => CommitStatus::Error(
                         "The value was not saved. Check its format, length and references.".into(),
@@ -1375,8 +1375,8 @@ impl CompanyPage {
                         Err(crate::WriteError::Access(Error::Unauthorized)) => {
                             return Err(Error::Unauthorized);
                         }
-                        Err(crate::WriteError::Access(Error::Conflict)) => CommitStatus::Error(
-                            "The record changed. Reload before changing its activities.".into(),
+                        Err(crate::WriteError::Access(Error::Conflict)) => CommitStatus::stale(
+                            "The record changed. Reload before changing its activities.",
                         ),
                         Err(crate::WriteError::Access(Error::Forbidden)) => CommitStatus::Error(
                             "The activity was not saved: this company is read-only.".into(),

@@ -125,6 +125,7 @@ pub struct TodoItem {
 /// One owner's bounded, live-authorized worklist.
 #[derive(Default)]
 pub struct TodoList {
+    pub label: String,
     pub items: Vec<TodoItem>,
     pub count: usize,
     pub more: bool,
