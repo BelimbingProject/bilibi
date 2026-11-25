@@ -1,9 +1,12 @@
-//! Observable proof that the socket selects the staff or public site, and
-//! that on the public socket the hostname names the tenant's site.
+//! Observable proof of staff portal setup and the staff/public socket boundary.
+//! On the public socket, the hostname names the tenant's site.
 use bilibi_base::session::session_id;
 use bilibi_database::{pool, Db, Error, Result};
-use std::future::IntoFuture;
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{json, Value};
+use std::{future::IntoFuture, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
@@ -64,7 +67,7 @@ async fn sessions(db: &Db) -> Result<(String, String)> {
         .get(0);
     let staff_token = uuid::Uuid::new_v4().simple().to_string();
     let customer_token = uuid::Uuid::new_v4().simple().to_string();
-    for (user, token) in [(1_i64, &staff_token), (customer, &customer_token)] {
+    for (user, token) in [(4_i64, &staff_token), (customer, &customer_token)] {
         tx.execute(
             "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority)
              VALUES($1,1,$2,$3,now()+interval '1 hour','portable')",
@@ -78,6 +81,77 @@ async fn sessions(db: &Db) -> Result<(String, String)> {
     }
     tx.commit().await?;
     Ok((staff_token, customer_token))
+}
+
+async fn check_staff_form(
+    port: u16,
+    host: &str,
+    token: &str,
+    path: &str,
+    steps: [(&str, Value, &str); 4],
+) -> Result<()> {
+    assert_eq!(
+        status(port, host, "GET", path, Some((STAFF_COOKIE, token))).await?,
+        200,
+        "staff page {path}"
+    );
+    let mut request = format!("ws://127.0.0.1:{port}/live")
+        .into_client_request()
+        .map_err(|_| Error::Internal)?;
+    request
+        .headers_mut()
+        .insert("Host", host.parse().map_err(|_| Error::Internal)?);
+    request.headers_mut().insert(
+        "Origin",
+        format!("http://{host}")
+            .parse()
+            .map_err(|_| Error::Internal)?,
+    );
+    request.headers_mut().insert(
+        "Cookie",
+        format!("{STAFF_COOKIE}={token}")
+            .parse()
+            .map_err(|_| Error::Internal)?,
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(|_| Error::Internal)?;
+
+    for (index, (label, mut request, expected)) in steps.into_iter().enumerate() {
+        let id = index + 1;
+        request["request_id"] = json!(id);
+        socket
+            .send(Message::text(request.to_string()))
+            .await
+            .map_err(|_| Error::Internal)?;
+        let reply = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(message) = socket.next().await {
+                let message = message.map_err(|_| Error::Internal)?;
+                if let Message::Text(text) = message {
+                    let reply: Value = serde_json::from_str(&text).map_err(|_| Error::Internal)?;
+                    if reply["request_id"] == id {
+                        return Ok(reply);
+                    }
+                }
+            }
+            Err(Error::Internal)
+        })
+        .await
+        .map_err(|_| {
+            eprintln!("walkthrough timed out: {label}");
+            Error::Internal
+        })??;
+        assert_eq!(reply["type"], "page", "{label}");
+        assert!(
+            reply["html"]
+                .as_str()
+                .is_some_and(|html| html.contains(expected)),
+            "{label}: expected {expected}"
+        );
+        println!("ok    {label}");
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -130,6 +204,69 @@ async fn main() -> Result<()> {
         )
         .into_future(),
     );
+
+    let event = |payload| json!({"type": "event", "target": "page", "payload": payload});
+    let path = "/public-site";
+    let public_site_steps = [
+        (
+            "mount public site",
+            json!({"type": "mount", "path": path, "params": {}}),
+            "id=\"public-site-page\"",
+        ),
+        (
+            "open site form",
+            event(json!({"type": "edit_site"})),
+            "id=\"public-site-address\"",
+        ),
+        (
+            "save site",
+            event(json!({
+                "type": "save_site",
+                "site[address]": "boundary",
+                "site[title]": "Boundary <Portal> & Co.",
+                "site[enabled]": "true"
+            })),
+            "Public site saved.",
+        ),
+        (
+            "reopen site form",
+            event(json!({"type": "edit_site"})),
+            "value=\"Boundary &#60;Portal&#62; &#38; Co.\"",
+        ),
+    ];
+    check_staff_form(
+        staff_port,
+        &staff_host,
+        &staff_token,
+        path,
+        public_site_steps,
+    )
+    .await?;
+
+    let path = "/customer-portal";
+    let portal_steps = [
+        (
+            "mount customer portal",
+            json!({"type": "mount", "path": path, "params": {}}),
+            "id=\"customer-portal-page\"",
+        ),
+        (
+            "open portal options",
+            event(json!({"type": "edit_options"})),
+            "id=\"customer-options-registration\"",
+        ),
+        (
+            "enable account requests",
+            event(json!({"type": "save_options", "options[registration]": "true"})),
+            "Taken; each waits for approval",
+        ),
+        (
+            "reopen portal options",
+            event(json!({"type": "edit_options"})),
+            "name=\"options[registration]\" value=\"true\"",
+        ),
+    ];
+    check_staff_form(staff_port, &staff_host, &staff_token, path, portal_steps).await?;
 
     for (method, path, staff, public) in [
         ("GET", "/login", 200, 404),

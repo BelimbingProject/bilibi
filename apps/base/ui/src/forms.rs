@@ -518,7 +518,7 @@ impl Reveal {
 /// `forms::input` macro renders it, as does `Html::render(&field)`.
 #[derive(Template, Clone, Debug, Default)]
 #[template(
-    source = r#"{% import "forms.html" as forms %}{% call forms::input(field=self) %}{% endcall %}"#,
+    source = r#"{% import "forms.html" as forms %}{% call forms::field_input(field=self) %}{% endcall %}"#,
     ext = "html"
 )]
 pub struct Field {
@@ -545,6 +545,9 @@ pub struct Field {
     pub label_class: String,
     pub attrs: Attrs,
 }
+
+// Field's template escapes its values and is itself an HTML fragment.
+impl askama::filters::HtmlSafe for Field {}
 
 impl Field {
     pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
