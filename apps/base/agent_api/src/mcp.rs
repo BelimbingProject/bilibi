@@ -479,11 +479,12 @@ fn listed(registry: &Registry, instance: &Instance) -> Vec<Value> {
     for tool in &mut tools {
         if matches!(tool["name"].as_str(), Some("plan" | "commit")) {
             let description = format!(
-                "{} This Bilibi is {}.",
+                "{} This Bilibi is {}. {}",
                 tool["description"].as_str().unwrap_or_default(),
-                instance.label
+                instance.label,
+                instance.role.consequence()
             );
-            tool["description"] = json!(description);
+            tool["description"] = json!(description.trim_end());
         }
     }
     tools.extend(app_tools(registry).into_iter().map(|mut tool| {
@@ -492,7 +493,7 @@ fn listed(registry: &Registry, instance: &Instance) -> Vec<Value> {
             tool["description"].as_str().unwrap_or_default(),
             instance.label
         );
-        tool["description"] = json!(description);
+        tool["description"] = json!(description.trim_end());
         tool
     }));
     tools

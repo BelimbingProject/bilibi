@@ -32,10 +32,15 @@ pub(super) fn application_version(
         .as_str()?
         .parse::<jiff::civil::Date>()
         .ok()?;
-    let version = tag
-        .strip_prefix("nightly-")
-        .and_then(|date| (date.is_ascii() && date.len() == 10).then(|| date[2..].replace('-', "")))
-        .unwrap_or_else(|| tag.to_owned());
+    let version = if let Some(nightly) = tag.strip_prefix("nightly-") {
+        let nightly_date = nightly.parse::<jiff::civil::Date>().ok()?;
+        if nightly != nightly_date.to_string() || nightly.len() != 10 {
+            return None;
+        }
+        nightly_date.strftime("%y%m%d").to_string()
+    } else {
+        tag.strip_prefix("setup-")?.to_owned()
+    };
     Some(VersionBadge {
         text: version,
         title: format!("{tag} · {}", display.render_date(date)),

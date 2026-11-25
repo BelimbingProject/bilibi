@@ -466,8 +466,6 @@ def pin(root, modules, files):
         folder = mounted[name]
         date = git(folder, "show", "-s", "--format=%cs", head).strip()
         branch = subprocess.run(["git", "-C", str(folder), "symbolic-ref", "--quiet", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
-        if not branch and subprocess.run(["git", "-C", str(folder), "rev-parse", "--verify", "refs/remotes/origin/main"], capture_output=True, text=True).stdout.strip() == head:
-            branch = "main"
         package_versions = set()
         for module, _ in modules[name.split("/", 1)[0]]:
             if module.split("/")[0] != name.split("/", 1)[1]:

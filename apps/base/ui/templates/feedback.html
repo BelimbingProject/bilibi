@@ -65,7 +65,7 @@
 {% if banner.role == "production" %}
 <div{% if !banner.id.is_empty() %} id="{{ banner.id }}"{% endif %} role="note" aria-label="Server identity" class="flex flex-wrap items-center gap-2 text-sm{% if !banner.class.is_empty() %} {{ banner.class }}{% endif %}">{% call production_badge(identity=banner) %}{% endcall %}</div>
 {% else %}
-<div{% if !banner.id.is_empty() %} id="{{ banner.id }}"{% endif %} role="note" aria-label="Server identity" data-instance="{{ banner.role }}" class="flex items-start gap-3 rounded-lg border-2 px-3 py-2.5 text-sm {{ banner.tone.surface_class() }}{% if !banner.class.is_empty() %} {{ banner.class }}{% endif %}">{% call c::icon(name=banner.tone.icon(), class="mt-0.5 size-5 shrink-0") %}{% endcall %}<div class="min-w-0"><p class="break-words text-base font-semibold uppercase tracking-wide">{{ banner.label }}</p></div></div>
+<div{% if !banner.id.is_empty() %} id="{{ banner.id }}"{% endif %} role="note" aria-label="Server identity" data-instance="{{ banner.role }}" class="flex items-start gap-3 rounded-lg border-2 px-3 py-2.5 text-sm {{ banner.tone.surface_class() }}{% if !banner.class.is_empty() %} {{ banner.class }}{% endif %}">{% call c::icon(name=banner.tone.icon(), class="mt-0.5 size-5 shrink-0") %}{% endcall %}<div class="min-w-0"><p class="break-words text-base font-semibold uppercase tracking-wide">{{ banner.label }}</p><p>{{ banner.message }}</p></div></div>
 {% endif %}
 {% endmacro %}
 

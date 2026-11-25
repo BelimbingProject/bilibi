@@ -108,7 +108,7 @@ impl FeedbackSpecimen {
                     role: "development",
                     role_label: "Dev",
                     label: "Dev",
-                    title: "You are on Dev.",
+                    title: "You are on Dev. This is a development copy. Changes here do not affect production.",
                     editable: true,
                 },
                 InstanceStatus {
@@ -117,7 +117,7 @@ impl FeedbackSpecimen {
                     role: "staging",
                     role_label: "Staging",
                     label: "Training",
-                    title: "You are on Training (Staging).",
+                    title: "You are on Training (Staging). This is a test copy. Changes here do not affect production.",
                     editable: false,
                 },
                 InstanceStatus {
@@ -135,13 +135,13 @@ impl FeedbackSpecimen {
                     tone: StatusKind::Info,
                     role: "development",
                     label: "Dev",
-                    title: "You are on Dev.",
+                    title: "You are on Dev. This is a development copy. Changes here do not affect production.",
                 },
                 InstanceBadge {
                     tone: StatusKind::Warning,
                     role: "staging",
                     label: "SBG Staging",
-                    title: "You are on SBG Staging.",
+                    title: "You are on SBG Staging. This is a test copy. Changes here do not affect production.",
                 },
             ],
             instance_banners: vec![
@@ -150,6 +150,7 @@ impl FeedbackSpecimen {
                     tone: StatusKind::Info,
                     role: "development",
                     label: "Dev",
+                    message: "This is a development copy. Changes here do not affect production.",
                     class: "",
                 },
                 InstanceBanner {
@@ -157,6 +158,7 @@ impl FeedbackSpecimen {
                     tone: StatusKind::Warning,
                     role: "staging",
                     label: "SBG Staging",
+                    message: "This is a test copy. Changes here do not affect production.",
                     class: "",
                 },
                 InstanceBanner {
@@ -164,6 +166,7 @@ impl FeedbackSpecimen {
                     tone: StatusKind::Error,
                     role: "production",
                     label: "SBG Production",
+                    message: "",
                     class: "",
                 },
             ],

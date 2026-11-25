@@ -112,6 +112,21 @@ impl Role {
             Self::Production => "the live system",
         }
     }
+    /// What a change here does, as one sentence.
+    pub fn effect(self) -> &'static str {
+        match self {
+            Self::Dev | Self::Staging => "Changes here do not affect production.",
+            Self::Production => "",
+        }
+    }
+    /// What a change here does, in one or two short sentences.
+    pub fn consequence(self) -> &'static str {
+        match self {
+            Self::Dev => "This is a development copy. Changes here do not affect production.",
+            Self::Staging => "This is a test copy. Changes here do not affect production.",
+            Self::Production => "",
+        }
+    }
     /// The default colour, one of `DESIGN.md`'s status roles.
     pub fn colour(self) -> Colour {
         match self {
@@ -360,18 +375,25 @@ impl Instance {
             && host.contains('.')
             && !LOCAL_ONLY.iter().any(|suffix| host.ends_with(suffix))
     }
-    /// The sentence a hover shows.
+    /// The sentence an agent or a hover shows: "You are on Staging. This is a
+    /// test copy. Changes here do not affect production."
     pub fn notice(&self) -> String {
-        format!("You are on {}.", self.label)
+        format!("You are on {}. {}", self.label, self.role.consequence())
+            .trim_end()
+            .to_owned()
     }
-    /// Agent connection identity includes the role and canonical address.
+    /// Agent connection identity includes the role even when the operator's
+    /// label is ambiguous, and the canonical address rather than request data.
     pub fn agent_notice(&self) -> String {
         format!(
-            "You are on {} ({}), at {}.",
+            "You are on {} ({}), at {}. {}",
             self.label,
             self.role.label(),
-            self.origin
+            self.origin,
+            self.role.consequence()
         )
+        .trim_end()
+        .to_owned()
     }
     /// What the Agent API and MCP send, so an agent can tell its person
     /// "this will create the order on Staging".
@@ -416,6 +438,7 @@ impl Instance {
             tone: self.colour.status(),
             role: self.role.env_value(),
             label: &self.label,
+            message: self.role.consequence(),
             class,
         })
     }

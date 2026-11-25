@@ -287,6 +287,7 @@ pub struct ShellContext<'a> {
     pub listen_address: Option<&'a str>,
     /// The application or working-build identity supplied by the host.
     pub version: Option<VersionBadge>,
+    pub can_view_software: bool,
     /// The open page's controls in the top bar, left of the bell
     /// (`topbar_actions` slot), from `Page::topbar_actions`.
     pub topbar_actions: Html,

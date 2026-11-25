@@ -24,20 +24,22 @@ pub fn device_page(instance: &Instance) -> String {
     format!("{}{}", instance.origin, crate::DEVICE_PAGE)
 }
 
-/// One sentence naming this Bilibi once. The
+/// One sentence naming this Bilibi once, then what a change here does. The
 /// role is spoken only once: a label that is just the role's name (`Dev` on a
 /// Dev copy) is not repeated.
 pub fn identity(instance: &Instance) -> String {
     let role = instance.role;
-    if instance.label.eq_ignore_ascii_case(role.label()) {
-        format!("This installation is {}.", role.label())
+    let text = if instance.label.eq_ignore_ascii_case(role.label()) {
+        format!("This installation is {}. {}", role.kind(), role.effect())
     } else {
         format!(
-            "This installation is called \"{}\" ({}).",
+            "This installation is called \"{}\" and is {}. {}",
             instance.label,
-            role.label()
+            role.kind(),
+            role.effect()
         )
-    }
+    };
+    text.trim_end().to_owned()
 }
 
 pub fn prompt(instance: &Instance) -> String {

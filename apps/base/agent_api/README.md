@@ -192,7 +192,7 @@ Commit repeats the symbolic review, resolves each placeholder from the actual ea
 Every preview and every successful commit carries `instance` (`bilibi_system::Instance`, `apps/base/system/README.md`), so the agent can tell its person "this will create the order on Staging":
 
 ```json
-"instance": {"environment": "staging", "role": "Staging", "origin": "https://staging.example.com", "label": "Staging", "production": false, "notice": "You are on Staging (Staging), at https://staging.example.com."}
+"instance": {"environment": "staging", "role": "Staging", "origin": "https://staging.example.com", "label": "Staging", "production": false, "notice": "You are on Staging (Staging), at https://staging.example.com. This is a test copy. Changes here do not affect production."}
 ```
 
 - `environment` is `development`, `staging` or `production` (the saved `instance.role` setting); `role` is its display word (Dev, Staging or Production); `origin` is the canonical `APP_ORIGIN`; `label` is the operator's `instance.label` setting, which defaults to the role word.

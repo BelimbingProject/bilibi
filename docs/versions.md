@@ -14,7 +14,7 @@ Domains:
 Extensions: none mounted
 ```
 
-The Platform and Finance are both at release 0.1.0. The command gives the exact commit for each. The status bar release links to Software, which shows the installed Finance version.
+The Platform and Finance are both at release 0.1.0. The command gives the exact commit for each. For viewers with Software access, the status bar version links to Software, which shows the installed Finance version.
 
 You may already have questions: where does a version number come from, how do you make a release, what counts as "tested together", and what happens on a developer's machine without a pin? We cover each below.
 
