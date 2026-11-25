@@ -19,8 +19,8 @@ use axum::{
     Extension, Router,
 };
 use bilibi_base::public::{
-    Counter, LinkRequest, LinkService, PageService, Public, PublicLink, PublicPage, Reached, Reply,
-    PUBLIC_LINKS, PUBLIC_PAGES,
+    ActionService, Counter, LinkRequest, LinkService, PageService, Public, PublicAction,
+    PublicLink, PublicPage, Reached, Reply, Submission, PUBLIC_ACTIONS, PUBLIC_LINKS, PUBLIC_PAGES,
 };
 use bilibi_database::{Error, Result};
 use bilibi_module_registry::{contributions::Method, Services};
@@ -40,10 +40,19 @@ struct BoundLink {
     counter: Arc<Counter>,
 }
 
-/// Every public page and link of the composition, with its counters.
+#[derive(Clone)]
+struct BoundAction {
+    id: &'static str,
+    action: &'static PublicAction,
+    service: Arc<ActionService<Error>>,
+    counter: Arc<Counter>,
+}
+
+/// Every public page, link and action of the composition, with its counters.
 pub struct PublicRoutes {
     pages: Vec<BoundPage>,
     links: Vec<BoundLink>,
+    actions: Vec<BoundAction>,
 }
 impl PublicRoutes {
     pub(crate) fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
@@ -55,9 +64,14 @@ impl PublicRoutes {
                     .iter()
                     .map(|bound| (bound.link.method, bound.link.path)),
             )
+            .chain(
+                self.actions
+                    .iter()
+                    .map(|bound| (Method::Post, bound.action.path)),
+            )
     }
     /// What serves `pattern` for `method`, for the debug report: the kind
-    /// (`page` or `link`), the operation and the service.
+    /// (`page`, `link` or `action`), the operation and the service.
     pub(crate) fn describe(
         &self,
         pattern: &str,
@@ -77,6 +91,12 @@ impl PublicRoutes {
                 })
                 .map(|bound| ("link", bound.link.operation, bound.link.service))
         })
+        .or_else(|| {
+            self.actions
+                .iter()
+                .find(|bound| bound.action.path == pattern && method.eq_ignore_ascii_case("POST"))
+                .map(|bound| ("action", bound.action.operation, bound.action.service))
+        })
     }
     /// Whether a GET page of the public site has exactly this pattern.
     pub(crate) fn serves(&self, path: &str) -> bool {
@@ -90,10 +110,14 @@ impl PublicRoutes {
 pub fn bind(services: &Services, pages: &Pages, downloads: &Downloads) -> Result<PublicRoutes> {
     let catalog = services.catalog()?;
     // The credential rule first: a `{token}` path its module did not declare.
-    Public::declared(catalog)?;
+    let declared = Public::declared(catalog)?;
+    services
+        .get::<Public>(bilibi_base::public::SERVICE)?
+        .adopt(&declared);
     let mut bound = PublicRoutes {
         pages: Vec::new(),
         links: Vec::new(),
+        actions: Vec::new(),
     };
     let portal = || {
         pages
@@ -131,6 +155,19 @@ pub fn bind(services: &Services, pages: &Pages, downloads: &Downloads) -> Result
             counter: Arc::new(Counter::route()),
         });
     }
+    for entry in catalog.entries::<PublicAction>(PUBLIC_ACTIONS)? {
+        let action = entry.get::<PublicAction>()?;
+        validate_host_free(entry, action.path)?;
+        for previous in portal().chain(bound.patterns()) {
+            validate_pair(previous, (Method::Post, action.path))?;
+        }
+        bound.actions.push(BoundAction {
+            id: entry.id,
+            action,
+            service: services.get(action.service)?,
+            counter: Arc::new(Counter::route()),
+        });
+    }
     Ok(bound)
 }
 
@@ -161,6 +198,22 @@ pub fn install(mut router: Router<App>, routes: &PublicRoutes) -> Router<App> {
                       peer: Option<Extension<ConnectInfo<SocketAddr>>>,
                       Path(path): Path<HashMap<String, String>>,
                       body: Bytes| { link(app, bound, headers, peer, path, body) },
+            ),
+        );
+    }
+    for bound in &routes.actions {
+        let bound = bound.clone();
+        router = router.route(
+            bound.action.path,
+            axum::routing::post(
+                move |State(app): State<App>,
+                      uri: axum::http::Uri,
+                      headers: HeaderMap,
+                      peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+                      Path(path): Path<HashMap<String, String>>,
+                      body: Bytes| {
+                    act(app, bound, uri, headers, peer, path, body)
+                },
             ),
         );
     }
@@ -364,4 +417,45 @@ async fn link(
             .insert(HeaderName::from_static(name), value);
     }
     Ok(response)
+}
+
+/// An action: the budgets, then the request must come from this site's own
+/// page (its `Origin`), then `base/public` checks the ticket, trap field,
+/// fill time and places and calls the owner. The answer is a 303 back to the
+/// request's own path.
+async fn act(
+    app: App,
+    bound: BoundAction,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    path: HashMap<String, String>,
+    body: Bytes,
+) -> std::result::Result<Response, HttpError> {
+    let peer = peer.map(|Extension(ConnectInfo(peer))| peer);
+    if !bound
+        .counter
+        .allow(&sender(peer, &headers), bound.action.budget)
+    {
+        return Ok(too_many());
+    }
+    crate::origin(&app, &headers)?;
+    if framed(&headers) {
+        return Err(Error::Forbidden.into());
+    }
+    let scope = app.public_scope()?;
+    let posted: Vec<(String, String)> = url::form_urlencoded::parse(&body).into_owned().collect();
+    let back = app
+        .public
+        .submit(Submission {
+            scope: &scope,
+            id: bound.id,
+            action: bound.action,
+            owner: &bound.service,
+            page: uri.path(),
+            path: &path,
+            posted,
+        })
+        .await?;
+    Ok(axum::response::Redirect::to(back.as_str()).into_response())
 }

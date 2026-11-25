@@ -212,6 +212,7 @@ WALKTHROUGHS=(
   'web|portal-refusals|apps/web|portal-reference|none||--refusals'
   'web|public-site-refusals|apps/web|public-site-reference|none||--refusals'
   'web|public-sender-admission|apps/web|public-site-reference|migrate||--sender-admission'
+  'web|public-actions|apps/web|public-actions-walkthrough|migrate||-'
   'web|scheduled-owner-catalog|apps/web|scheduled-owner-reference|none||catalog'
   'web|optional-capabilities-catalogs|apps/web|optional-capabilities|none||--catalogs'
   'web|optional-capabilities|apps/web|optional-capabilities|seed|BILIBI_OPTIONAL_PROOF=disposable|-'

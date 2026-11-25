@@ -1675,8 +1675,11 @@ dependencies = [
  "bilibi-settings",
  "bilibi-tenancy",
  "bilibi-ui",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
  "inventory",
  "serde_json",
+ "sha2 0.11.1",
  "tokio-postgres",
  "url",
 ]

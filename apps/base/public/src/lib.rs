@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod actions;
 mod budget;
 mod contributions;
 pub mod link;
@@ -23,10 +24,14 @@ mod resolve;
 mod sites;
 mod web;
 
+pub use actions::{
+    Acted, Action, ActionFuture, ActionRequest, ActionService, Receipt, Submission, Tally, Ticket,
+    SUBJECT_MAX, TICKET_SECONDS,
+};
 pub use budget::{Counter, SenderBudget};
 pub use contributions::{
-    PublicLink, PublicPage, LOOKUPS_PER_HOUR, LOOKUPS_PER_MINUTE, PUBLIC_LINKS, PUBLIC_PAGES,
-    SENDER_PER_HOUR, SENDER_PER_MINUTE,
+    Checks, PublicAction, PublicLink, PublicPage, LOOKUPS_PER_HOUR, LOOKUPS_PER_MINUTE,
+    PUBLIC_ACTIONS, PUBLIC_LINKS, PUBLIC_PAGES, SENDER_PER_HOUR, SENDER_PER_MINUTE,
 };
 pub use link::{Cache, Link, LinkFuture, LinkRequest, LinkService, Local, Reply, Target, PIXEL};
 pub use resolve::Reached;
@@ -75,6 +80,8 @@ impl PublicScope {
 pub struct Declared {
     pub pages: Vec<&'static PublicPage>,
     pub links: Vec<&'static PublicLink>,
+    /// By contribution ID, which an action's tickets are signed for.
+    pub actions: Vec<(&'static str, &'static PublicAction)>,
 }
 
 /// The facade: the listener's budget, the tenants' sites and the hostnames
@@ -83,6 +90,12 @@ pub struct Public {
     db: Db,
     settings: Arc<Settings>,
     media: Arc<bilibi_media::Media>,
+    mutations: Arc<bilibi_database::MutationBoundary>,
+    /// Each declared action's checks by contribution ID, which the host
+    /// hands over when it binds them (`Public::adopt`).
+    actions: std::sync::RwLock<HashMap<String, Checks>>,
+    /// Abuse counts waiting to be written (`actions.rs`).
+    tallies: Mutex<actions::Tallies>,
     listener: Counter,
     policy: Mutex<Option<(Instant, SenderBudget)>>,
     /// Database lookups of a hostname per sender, before any other count.
@@ -98,7 +111,12 @@ pub struct Public {
     public_port: Option<u16>,
 }
 impl Public {
-    fn new(db: Db, settings: Arc<Settings>, media: Arc<bilibi_media::Media>) -> Self {
+    fn new(
+        db: Db,
+        settings: Arc<Settings>,
+        media: Arc<bilibi_media::Media>,
+        mutations: Arc<bilibi_database::MutationBoundary>,
+    ) -> Self {
         let origin = |name: &str| {
             std::env::var(name)
                 .ok()
@@ -109,6 +127,9 @@ impl Public {
             db,
             settings,
             media,
+            mutations,
+            actions: Default::default(),
+            tallies: Mutex::default(),
             listener: Counter::with_capacity(LISTENER_SENDERS),
             policy: Mutex::default(),
             lookups: Counter::with_capacity(LISTENER_SENDERS),
@@ -147,6 +168,7 @@ impl Public {
         let mut declared = Declared {
             pages: Vec::new(),
             links: Vec::new(),
+            actions: Vec::new(),
         };
         for entry in catalog.entries::<PublicPage>(PUBLIC_PAGES)? {
             let page = entry.get::<PublicPage>()?;
@@ -158,7 +180,23 @@ impl Public {
             check(entry, link.path)?;
             declared.links.push(link);
         }
+        for entry in catalog.entries::<PublicAction>(PUBLIC_ACTIONS)? {
+            let action = entry.get::<PublicAction>()?;
+            check(entry, action.path)?;
+            declared.actions.push((entry.id, action));
+        }
         Ok(declared)
+    }
+
+    /// The host hands over the actions it bound, so a page's ticket knows
+    /// its action's checks.
+    pub fn adopt(&self, declared: &Declared) {
+        let mut actions = self.actions.write().unwrap_or_else(|p| p.into_inner());
+        *actions = declared
+            .actions
+            .iter()
+            .map(|(id, action)| ((*id).to_owned(), action.checks))
+            .collect();
     }
 
     /// Whether `sender` may make one more request of the public listener on
@@ -212,13 +250,17 @@ inventory::submit! {
     Module {
         id: "base/public", layer: bilibi_module_registry::Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/settings", "base/ui", "base/authz", "base/media", "base/tenancy", "base/agent_api", "base/menu"],
-        migrations: &[("base-public-001-sites", include_str!("../migrations/001-sites.sql"))],
+        migrations: &[
+            ("base-public-001-sites", include_str!("../migrations/001-sites.sql")),
+            ("base-public-002-actions", include_str!("../migrations/002-actions.sql")),
+        ],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let public = Arc::new(Public::new(
                     services.get::<Db>("base/database.pool")?.as_ref().clone(),
                     services.get("base/settings.store")?,
                     services.get(bilibi_media::SERVICE)?,
+                    services.get("base/database.mutations")?,
                 ));
                 operations::bind(public.clone())?;
                 Ok(public)
