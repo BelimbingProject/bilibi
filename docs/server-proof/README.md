@@ -68,13 +68,18 @@ The script installs a lab-only legacy worker unit and old sudoers contents, then
 
 ## Check a release with Finance
 
-Add Finance to the disposable application's saved composition before you publish the proof release. Check the release on its Dev instance:
+Add Finance to the disposable application's saved composition before you publish the proof release. Set up the Dev instance:
 
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create dev --role dev --site dev.10.77.61.2.sslip.io --tls internal'
 docs/server-proof/lab.sh run "/src/scripts/install-server.sh trust dev --github --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --minimum-tag $PROOF_TAG"
 docs/server-proof/lab.sh run "/src/scripts/install-server.sh release dev /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --tag $PROOF_TAG"
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner dev --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner"'
+```
+
+Claim the Dev proof owner with the password in `$BILIBI_PROOF_DATA/private/password`, then check the release:
+
+```sh
 LAB_ORIGIN=https://dev.10.77.61.2.sslip.io docs/server-proof/drive.py login
 chrome-devtools-axi open https://dev.10.77.61.2.sslip.io/finance/payroll
 ```
@@ -128,6 +133,41 @@ docs/server-proof/drive.py wait <job>
 ```
 
 To make the download last long enough to cancel or interrupt, slow the lab's veth on the host for the run: `sudo -n tc qdisc add dev ve-fsproof root tbf rate 3mbit burst 64kb latency 500ms`, and `tc qdisc del` it afterwards. Restart `bilibi@production` inside the lab during the download to see an interrupted job. `fail-check.sh <in-service-release> <failing-release>` arms the failed check for the release the GitHub install will create.
+
+## Prove on-demand and terminal updates
+
+Download a second, newer protected release into the same task assets, then prove the installer is normally absent and the path unit is waiting:
+
+```sh
+export PROOF_UPDATE_TAG=setup-v1.0.1
+gh-axi release download "$PROOF_UPDATE_TAG" --repo "$PROOF_REPOSITORY" --dir "$BILIBI_PROOF_DATA/assets"
+docs/server-proof/lab.sh run 'systemctl is-active --quiet bilibi-installer@production.path; [[ $(systemctl is-active bilibi-installer@production.service) == inactive ]]; ! compgen -G "/opt/bilibi/production/incoming/installer-jobs/job-*.ready"'
+```
+
+In a second terminal, start watching for a ready marker in the lab before queueing the update. This must print the new marker path.
+
+```sh
+docs/server-proof/lab.sh run "timeout 120 bash -c 'until compgen -G \"/opt/bilibi/production/incoming/installer-jobs/job-*.ready\"; do sleep 1; done'"
+```
+
+The driver writes one fresh code to the private proof folder. The PTY helper waits until the command has disabled echo before supplying it, redacts an unexpected echo and deletes the file. Run the installed command while the marker watch is active. The waiting path unit starts the installer when the marker appears. Check the service journal for the scan and clean idle exit:
+
+```sh
+docs/server-proof/drive.py terminal-code production-terminal-code
+docs/server-proof/lab.sh run "since=\$(date --iso-8601=seconds); python3 /src/docs/server-proof/terminal.py /data/private/production-terminal-code bilibi update production --to ${PROOF_UPDATE_TAG#setup-v} | tee /data/proof/terminal-update.log; timeout 30 bash -c 'until [[ \$(systemctl is-active bilibi-installer@production.service) == inactive ]]; do sleep 1; done'; journalctl -u bilibi-installer@production.service --since \"\$since\" --grep='checking production' --quiet; journalctl -u bilibi-installer@production.service --since \"\$since\" --grep='no work ready; exiting' --quiet; systemctl is-active --quiet bilibi-installer@production.path; test -z \"\$(find /opt/bilibi/production/incoming/installer-jobs -name 'job-*.ready' -print -quit)\""
+```
+
+The transcript must show the pinned available releases, From, To, composition, migrations, backup, every installer step and `Done`, without the authenticator code. The service journal must contain both its start scan and idle exit after the job. Queue a reviewed `switch: ask` install through `drive.py plan`, confirm the job is running before its pause, run `docs/server-proof/lab.sh reboot`, then confirm the enabled boot service marks that job interrupted and returns to inactive while its path unit remains waiting; this is the boot-recovery case in [Installer recovery](../../apps/installer/README.md#if-the-server-restarts-mid-way).
+
+Finally prove the same command door performs Undo through the same job contract:
+
+```sh
+docs/server-proof/drive.py terminal-code production-terminal-code
+docs/server-proof/lab.sh run "python3 /src/docs/server-proof/terminal.py /data/private/production-terminal-code bilibi update production --undo | tee /data/proof/terminal-undo.log; timeout 30 bash -c 'until [[ \$(systemctl is-active bilibi-installer@production.service) == inactive ]]; do sleep 1; done'; systemctl is-active --quiet bilibi-installer@production.path"
+docs/server-proof/lab.sh run '/src/docs/server-proof/rows.sh'
+```
+
+The Undo transcript must show the restore-loss review before the fresh code, follow backup, restore, switch and verify to `Done`, and `rows.sh` must show the prior release in service. Run `bilibi update` as a non-root account and with redirected input as separate negative checks; both must fail before queueing a job.
 
 ## Promote the same asset
 

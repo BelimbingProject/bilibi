@@ -164,6 +164,38 @@ pub(crate) async fn record_in_tenant(
     if tx.context().tenant != tenant {
         return Err(Error::Forbidden);
     }
+    record_rows(tx, tenant, recipients, notice).await
+}
+
+impl Notifications {
+    pub(crate) async fn notify_bootstrap_owner(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        notice: &Notice,
+    ) -> DbResult<()> {
+        notice.validate()?;
+        let row = tx
+            .sql()
+            .query_one(
+                "SELECT tenant_id,user_id FROM user_bootstrap WHERE id=1 FOR SHARE",
+                &[],
+            )
+            .await?;
+        let tenant = row.get(0);
+        let user = row.get(1);
+        record_rows(tx, tenant, &[user], notice).await?;
+        let notifications = self.clone();
+        tx.after_commit(move || notifications.changed(tenant, &[user]));
+        Ok(())
+    }
+}
+
+async fn record_rows(
+    tx: &mut MutationTransaction<'_>,
+    tenant: i64,
+    recipients: &[i64],
+    notice: &Notice,
+) -> DbResult<()> {
     let recipients = recipients.to_vec();
     let notice = notice.clone();
     tx.mutate(move |sql| {
@@ -190,7 +222,7 @@ pub(crate) async fn record_in_tenant(
                     kind: "notification".into(),
                     id: row.get(0),
                     old: json!({}),
-                    new: json!({"recipient": row.get::<_, i64>(1), "type": notice.kind, "title": notice.title}),
+                    new: json!({"recipient": row.get::<_, i64>(1), "tenant_id": tenant, "type": notice.kind, "title": notice.title}),
                 })
                 .collect();
             Ok(((), changes))

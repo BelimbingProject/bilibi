@@ -26,6 +26,7 @@ pub(super) async fn catalog(
     for table in catalog.tables() {
         if !table.oversight_classified()
             || !table.source().tenant_scoped
+            || table.source().company_scoped
             || client.prepare(table.source().sql).await?.params().len() != 1
         {
             continue;

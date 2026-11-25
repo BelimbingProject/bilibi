@@ -138,7 +138,7 @@ A subscription's `Change` wakes only the sockets of its tenant (and of its recip
 
 # Public pages and links (`src/public.rs`)
 
-**Anything anonymous on the public site is a [`base/public`](../base/public/README.md) contribution: a `PUBLIC_PAGES` page or a `PUBLIC_LINKS` token link.** The host binds them on the public router only, in the same pattern space as the portal's routes and the host paths, and refuses an overlap at boot.
+**Anything anonymous on the public site is a [`base/public`](../base/public/README.md) contribution: a `PUBLIC_PAGES` page, a `PUBLIC_ACTIONS` action or a `PUBLIC_LINKS` token link.** The host binds them on the public router only, in the same pattern space as the portal's routes and the host paths, and refuses an overlap at boot.
 
 - **Order on every request.** The lookup budget (`Public::resolve_from`, a database lookup of the hostname), then the listener budget (`Public::admit`, every request of one sender to the public site except a POST to a registered signed webhook), then the route's own budget, then a framed request is refused, then the owner is called with `PublicScope` for the listener's tenant. Over either budget the answer is `429 Too many requests`; the owner never sees the sender.
 - **Pages** render the owner's HTML in the shared document, without shell or live socket. **Links** answer with the owner's `Reply` and the headers `Reply::headers` decides; every refusal of a link, and a framed request, is one bare `404 Not found`. A server fault is a 500, logged with the token redacted.

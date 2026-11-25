@@ -461,6 +461,7 @@ impl Search {
         }
         let prefix = terms.prefix.as_deref();
         let (tenant, user) = (scope.tenant(), scope.user());
+        let company = scope.current_company().map(|company| company.get());
         let pattern = prefix.unwrap_or_default();
         let plain = terms.plain.as_deref().unwrap_or_default();
         let (sql, filter, limit, offset) = match mode {
@@ -484,6 +485,7 @@ impl Search {
         let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![
             &tenant,
             &user,
+            &company,
             &words,
             &pattern,
             &plain,

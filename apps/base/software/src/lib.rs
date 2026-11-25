@@ -384,6 +384,17 @@ impl Software {
         }
         tx.commit().await
     }
+    async fn reconcile_installer_activation(&self) -> Result<()> {
+        let Some(paths) = &self.paths else {
+            return Ok(());
+        };
+        let client = self.db.get().await?;
+        for job in jobs::ready_for_installer(&**client).await? {
+            paths.wake_installer(job).map_err(Error::refused)?;
+        }
+        Ok(())
+    }
+
     /// Runs beside the server for as long as it serves (`bilibi-web run`
     /// starts it like the queue executor): settles outcomes every few
     /// seconds, so a job the installer finished while this program was
@@ -395,6 +406,9 @@ impl Software {
         loop {
             if *stop.borrow() {
                 return Ok(());
+            }
+            if let Err(error) = self.reconcile_installer_activation().await {
+                eprintln!("warning: ready installer jobs could not be signalled: {error:?}");
             }
             if let Err(error) = self.end_silent().await {
                 eprintln!("warning: silent software jobs were not ended this round: {error:?}");
@@ -691,7 +705,25 @@ impl Software {
         review: &Review,
     ) -> SoftwareResult<Value> {
         let kind = new.kind;
+        let waits_for_download = new.steps.iter().any(|step| step.key == "download");
+        let paths = self.paths.clone().ok_or_else(|| {
+            SoftwareError::field(
+                "installer",
+                "This program is not running from an installed instance.",
+            )
+        })?;
+        paths
+            .require_installer_activation()
+            .map_err(|message| SoftwareError::field("installer", &message))?;
         let job = jobs::queue(tx, scope.tenant(), scope.user(), new).await?;
+        if !waits_for_download {
+            let job_id = job.id;
+            tx.after_commit(move || {
+                if let Err(message) = paths.wake_installer(job_id) {
+                    eprintln!("software job {job_id}: {message}");
+                }
+            });
+        }
         let title = match kind {
             "install" => format!("Software install queued as job {}", job.id),
             "trust" => format!("Release trust change queued as job {}", job.id),

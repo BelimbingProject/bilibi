@@ -109,6 +109,10 @@ async fn serve() -> Result<()> {
             let args: Vec<String> = std::env::args().skip(2).collect();
             bilibi_web::two_factor_reset(&db, &args).await?;
         }
+        Some("software-update") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            bilibi_web::software_update(&db, &args).await?;
+        }
         Some("identity-recover") => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             bilibi_web::recover_identity(&db, &args).await?;

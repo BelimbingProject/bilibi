@@ -211,11 +211,11 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool, trigrams: bool) -> St
     let decl = kind.decl;
     let key = column(table, table.key()).expect("grid keeps the key field");
     let vector = column(table, decl.vector).expect("checked hidden vector field");
-    // A plain lookup also matches the text as PostgreSQL parses it ($5).
+    // A plain lookup also matches the text as PostgreSQL parses it ($6).
     let query = if prefix {
-        "(to_tsquery('simple', $3::text) || plainto_tsquery('simple', $5::text))"
+        "(to_tsquery('simple', $4::text) || plainto_tsquery('simple', $6::text))"
     } else {
-        "to_tsquery('simple', $3::text)"
+        "to_tsquery('simple', $4::text)"
     };
     let (state, inactive) = match decl
         .state
@@ -247,11 +247,11 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool, trigrams: bool) -> St
             "to_tsvector('simple', array_to_string(ARRAY[{}]::text[], ' '))",
             texts.join(", ")
         );
-        let candidate = "to_tsquery('simple', $6::text)";
+        let candidate = "to_tsquery('simple', $7::text)";
         ranked = format!("({vector} || setweight({active}, 'D'))");
         let mut candidates = format!("{vector} @@ {candidate} OR {custom} @@ {candidate}");
         if prefix {
-            let plain = "replace(plainto_tsquery('simple', $5::text)::text, '&', '|')::tsquery";
+            let plain = "replace(plainto_tsquery('simple', $6::text)::text, '&', '|')::tsquery";
             candidates.push_str(&format!(" OR {vector} @@ {plain} OR {custom} @@ {plain}"));
         }
         matched = format!("(({candidates}) AND {ranked} @@ {query})");
@@ -263,29 +263,29 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool, trigrams: bool) -> St
             .filter(|id| !planned.masked(id))
             .filter_map(|id| column(table, id))
         {
-            matched.push_str(&format!(" OR lower(({c})::text) LIKE $4::text"));
+            matched.push_str(&format!(" OR lower(({c})::text) LIKE $5::text"));
         }
     }
     let title = text_of(table, Some(decl.title));
     let mut quality = if prefix {
-        format!("CASE WHEN lower({title}) = lower($5::text) THEN 0 ELSE 1 END")
+        format!("CASE WHEN lower({title}) = lower($6::text) THEN 0 ELSE 1 END")
     } else {
         "1".to_owned()
     };
     let mut rank = format!("ts_rank_cd({ranked}, {query})");
     if decl.title_trigrams && trigrams {
         let name = format!("lower({title})");
-        let part = format!("{name} LIKE ('%' || $4::text)");
+        let part = format!("{name} LIKE ('%' || $5::text)");
         // The indexed phrase comparison picks candidates. Each query word
         // must still be present or close, so one good word cannot match alone.
         let close = format!(
-            "(lower($5::text) <% {name} AND NOT EXISTS (SELECT 1 FROM unnest($7::text[]) AS term(word) WHERE strpos({name}, word) = 0 AND NOT (word <% {name})))"
+            "(lower($6::text) <% {name} AND NOT EXISTS (SELECT 1 FROM unnest($8::text[]) AS term(word) WHERE strpos({name}, word) = 0 AND NOT (word <% {name})))"
         );
         quality = format!(
-            "CASE WHEN {name} = lower($5::text) THEN 0 WHEN {matched} THEN 1 WHEN {part} THEN 2 ELSE 3 END"
+            "CASE WHEN {name} = lower($6::text) THEN 0 WHEN {matched} THEN 1 WHEN {part} THEN 2 ELSE 3 END"
         );
         rank = format!(
-            "CASE WHEN {matched} THEN {rank} ELSE word_similarity(lower($5::text), {name}) END"
+            "CASE WHEN {matched} THEN {rank} ELSE word_similarity(lower($6::text), {name}) END"
         );
         matched = format!("{matched} OR {part} OR {close}");
     }
@@ -301,9 +301,9 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool, trigrams: bool) -> St
     )
 }
 
-// Binds the reader as each owner's source expects ($1 tenant, $2 user), the
-// tsquery ($3), the prefix pattern ($4) and the plain text ($5), which every
-// statement references.
+// Binds the reader as each owner's source expects ($1 tenant, $2 user, $3
+// company), the tsquery ($4), the prefix pattern ($5) and the plain text ($6),
+// which every statement references.
 fn hits(planned: &[Planned<'_>], limit: i64, prefix: bool, trigrams: bool) -> String {
     let branches = planned
         .iter()
@@ -311,7 +311,7 @@ fn hits(planned: &[Planned<'_>], limit: i64, prefix: bool, trigrams: bool) -> St
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
     format!(
-        "WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS words, $4::text AS prefix, $5::text AS plain, $6::text AS candidates, $7::text[] AS title_words), hits AS ({branches})"
+        "WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company, $4::text AS words, $5::text AS prefix, $6::text AS plain, $7::text AS candidates, $8::text[] AS title_words), hits AS ({branches})"
     )
 }
 
@@ -338,15 +338,15 @@ pub fn suggestions(planned: &[Planned<'_>], per_kind: i64, prefix: bool, trigram
 }
 
 /// A results page: how many records each kind matched (up to
-/// [`MAX_KIND_HITS`]) and one page of the hits of the kind `$8` names or of
-/// every kind when it is empty, `$9` rows from `$10`, grouped as the search box
+/// [`MAX_KIND_HITS`]) and one page of the hits of the kind `$9` names or of
+/// every kind when it is empty, `$10` rows from `$11`, grouped as the search box
 /// groups them, so a kind's group continues on the next page. One row carries
 /// the counts even when the page is empty.
 pub fn page(planned: &[Planned<'_>], prefix: bool, trigrams: bool) -> String {
     format!(
-        "{}, counted AS (SELECT kind, count(*) AS n FROM hits GROUP BY kind), {} SELECT (SELECT COALESCE(jsonb_object_agg(kind, n), '{{}}'::jsonb) FROM counted) AS counts, {} FROM (SELECT 1) one LEFT JOIN LATERAL (SELECT * FROM grouped ORDER BY lead, pos LIMIT $9::bigint OFFSET $10::bigint) page ON true",
+        "{}, counted AS (SELECT kind, count(*) AS n FROM hits GROUP BY kind), {} SELECT (SELECT COALESCE(jsonb_object_agg(kind, n), '{{}}'::jsonb) FROM counted) AS counts, {} FROM (SELECT 1) one LEFT JOIN LATERAL (SELECT * FROM grouped ORDER BY lead, pos LIMIT $10::bigint OFFSET $11::bigint) page ON true",
         hits(planned, MAX_KIND_HITS, prefix, trigrams),
-        grouped(" WHERE ($8::text = '' OR kind = $8::text)"),
+        grouped(" WHERE ($9::text = '' OR kind = $9::text)"),
         COLUMNS
             .split(", ")
             .map(|name| format!("page.{name}"))

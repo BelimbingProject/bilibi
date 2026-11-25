@@ -15,13 +15,21 @@
 //! (`Settings::seal_owned`) and never leaves the server except inside the
 //! enrollment page, once, after the password was re-entered.
 mod agent;
+pub(crate) use agent::lock_reset_target;
 mod provider;
 mod qr;
+pub(crate) mod recovery;
 mod totp;
 
-pub(crate) use agent::bind;
+pub(crate) fn bind(users: std::sync::Arc<UserService>) -> bilibi_module_registry::Result<()> {
+    agent::bind(users.clone())?;
+    recovery::bind(users)
+}
 pub use agent::{TwoFactorEmailError, TwoFactorEmailReset};
 pub use provider::{Authenticator, METHOD};
+pub use recovery::{
+    customer_reset_requests, recovery_customer_account, RequestOutcome, RESET as RESET_OPERATION,
+};
 
 use crate::{credential_attempts, password, UserService};
 use bilibi_audit::{record_action, Attribution};

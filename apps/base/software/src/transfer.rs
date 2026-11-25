@@ -571,7 +571,17 @@ impl Software {
             .await
             .map_err(db)?;
         staged.keep_folder = handed;
-        Ok(handed)
+        drop(client);
+        if !handed {
+            return Ok(false);
+        }
+        if let Err(error) = self.reconcile_installer_activation().await {
+            eprintln!(
+                "software job {}: ready installer jobs could not be signalled: {error:?}",
+                job.id
+            );
+        }
+        Ok(true)
     }
 
     async fn download_proof_asset(

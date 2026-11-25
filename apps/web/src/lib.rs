@@ -25,6 +25,7 @@ mod public;
 mod routes;
 mod scim;
 mod shell;
+mod software_update;
 mod two_factor_reset;
 mod visitor;
 mod webhooks;
@@ -47,6 +48,7 @@ pub use identity_lifecycle::{
     delete as delete_identity, recover as recover_identity, retention as retain_identities,
 };
 pub use provision::provision;
+pub use software_update::software_update;
 pub use two_factor_reset::two_factor_reset;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

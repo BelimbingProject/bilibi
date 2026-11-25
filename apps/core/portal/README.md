@@ -23,6 +23,8 @@ The [capability rename migration](migrations/009-capability-rename.sql) updates 
 - **Off until staff turn the public site on.** While off, its anonymous pages answer 404 (the public listener does not resolve its hostname), its signed-in customers' pages, downloads and live socket answer 404, and no invitation is sent or redeemed.
 - The portal's own option is whether it **takes requests for an account** (`customer_portal_options.registration`, off by default), set on this module's staff page or with `core.portal.options.set`.
 
+The walkthrough opens the staff page, saves and reopens the setup form, and verifies that public sign-in remains reachable on the configured hostname. [Site-boundary walkthrough](../../web/examples/site-boundary-walkthrough.rs)
+
 ## Welcome notice
 
 The signed-in home page renders `core.portal.welcome_notice` through [Base Templates](../../base/templates/README.md#word-a-portal-notice). The customer's own company or tenant can choose the language and publish wording through the template operations. The text can name the portal and the customer's sign-in address. Administrators inspect, preview and restore published wording on **Administration → Customisations**.
@@ -81,7 +83,7 @@ The signed-in home page renders `core.portal.welcome_notice` through [Base Templ
 
 ## Customer accounts
 
-- The staff page lists the tenant's customer accounts (`bilibi_user::customer_accounts`, the one read of `users` that lists customers; staff reads never do).
+- The staff page lists the tenant's customer accounts (`bilibi_user::customer_accounts`, the canonical read of customer accounts). The installation owner can review and reset eligible customer accounts with an open 2FA reset request from **Customer accounts**.
 - **Revoke access** suspends the account through Core User (`set_customer_active_in`): it cannot sign in, fails its standing, and every session it holds ends at once. **Restore** lets it sign in again; no session comes back.
 
 ## Events

@@ -624,10 +624,8 @@ impl BulkData {
     /// What the person may see of an export's columns, as text: `None` when
     /// they no longer hold the Imports pages, the type's export capability
     /// or its list contract's capability; else which columns Grid lets them
-    /// read and which of the type's fields are restricted for them. Taken
-    /// when the file is made and compared on every read of the export, so a
-    /// revoked grant or a newly restricted field refuses a file made before
-    /// it (Reports' prepared exports do the same).
+    /// read, which fields are restricted and how far their row grants reach.
+    /// Taken when the file is made and compared on every read of the export.
     fn access(&self, seeing: &Seeing, run: &ExportRun) -> Option<String> {
         let (registered, export) = self.exportable(&run.record_type).ok()?;
         let list = self.jobs.readable(export.list).ok()?.definition.capability;
@@ -641,10 +639,27 @@ impl BulkData {
             .iter()
             .map(|(_, visible)| if *visible { '1' } else { '0' })
             .collect();
-        Some(format!(
-            "{seen}:{}",
-            seeing.restricted.get(table).map_or("", String::as_str)
-        ))
+        let root = seeing.catalog.table(table)?;
+        let mut reach = std::collections::BTreeMap::new();
+        let mut include_reach = |source: &bilibi_grid::Table| {
+            if let Some(effective) = source.reach() {
+                reach.insert(source.id(), effective.code());
+            }
+        };
+        include_reach(root);
+        for spec in &run.columns {
+            if let Ok(column) = seeing.catalog.resolve(root, spec) {
+                for link in column.hops.iter().chain(&column.many).chain(&column.tail) {
+                    include_reach(seeing.catalog.table(link.to())?);
+                }
+            }
+        }
+        let restricted = seeing.restricted.get(table).map_or("", String::as_str);
+        if reach.is_empty() {
+            Some(format!("{seen}:{restricted}"))
+        } else {
+            Some(format!("{seen}:{restricted}:{}", json!(reach)))
+        }
     }
 
     /// The file of a finished export, read through Artifacts (audited), as
