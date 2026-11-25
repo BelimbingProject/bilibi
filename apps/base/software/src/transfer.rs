@@ -566,6 +566,9 @@ impl Software {
             .await
             .map_err(db)?;
         staged.keep_folder = handed;
+        if handed {
+            paths.wake_installer(job.id)?;
+        }
         Ok(handed)
     }
 
