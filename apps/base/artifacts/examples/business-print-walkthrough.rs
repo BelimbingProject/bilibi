@@ -207,26 +207,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("operations", PrintValue::Rows(&rows)),
     ];
     let branding = app.services.get::<Branding>(bilibi_branding::SERVICE)?;
-    let brand = branding.for_print(&**client, true).await?;
+    let accent = branding.accent(&**client).await?;
     let store = app.services.get::<Artifacts>("base/artifacts.store")?;
     let owner = WorkSheet;
     let documents = store.for_owner(&actor, company, &owner);
-    let preview_brand = branding.for_print(&**client, false).await?;
-    let preview = CONTRACT
+    let document = CONTRACT
         .compile("en", EN)?
-        .preview_document(&preview_brand)?;
-    assert!(!preview.html().contains("<footer>"));
+        .document("issued", &facts, accent)?;
     let peer = authentication
         .authenticate(&**client, 1, 2, "walkthrough".into())
         .await?;
     let reference = Reference {
         subject: REFERENCE.to_owned(),
-        kind: "preview".into(),
+        kind: "en".into(),
     };
     assert!(matches!(
         store
             .for_owner(&peer, company, &owner)
-            .render_inline_document(&mut client, reference, preview, &PdfOptions::default())
+            .render_inline_document(&mut client, reference, document, &PdfOptions::default())
             .await,
         Err(bilibi_artifacts::Error::Database(Error::Forbidden)),
     ));
@@ -236,11 +234,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ] {
         let layout = CONTRACT.packaged(locale, None)?;
         let compiled = CONTRACT.compile(&layout.language, layout.layout)?;
-        let document = compiled.document("issued", &facts, &brand)?;
+        let document = compiled.document("issued", &facts, accent)?;
         let html = document.html();
         assert_eq!(document.paper(), paper);
         assert!(html.contains("data:font/woff2;base64,"));
-        assert!(html.contains("data:image/svg+xml;base64,"));
+        assert!(!html.contains("<footer>"));
+        assert!(html.contains("<title>Production work sheet</title>"));
         assert!(html.contains("&lt;guard&gt; &amp; gauges"));
         assert!(!html.contains("http:") && !html.contains("https:") && !html.contains("file:"));
         let reference = Reference {

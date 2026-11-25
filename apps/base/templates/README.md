@@ -59,7 +59,7 @@ Contribute one `PrintContract` per document type through `bilibi_templates::PRIN
 
 A layout may set `"paper":"letter"`. The default is A4. The compiler rejects other sizes and keeps required output in the document flow exactly once. Required labels and headings come from the contract's selected language.
 
-Use `CompiledPrint::document` for authorised owner facts or `preview_document` for the declared samples. Both produce a complete HTML document with embedded Instrument Sans, a Belimbing Project accent and print styles for wrapping and repeating table headings. The optional installation mark follows the issuer content and comes from `Branding::for_print`. The layout holds no CSS, executable fragments or resource URLs.
+Use `CompiledPrint::document` for authorised owner facts. It produces a complete HTML document with the contract label as its metadata title, embedded Instrument Sans, the installation accent from `Branding::accent`, and print styles for wrapping and repeating table headings. The layout holds no CSS, executable fragments or resource URLs.
 
 Pass the document to `Artifacts::for_owner(...).render_inline_document(...)` with the source reference and provenance versions. Artifacts uses its offline Chromium renderer and private storage. The owner supplies its actual record number, issue state and values without changing the record during rendering.
 

@@ -5,8 +5,7 @@ use super::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use bilibi_artifacts::{InlineDocument, PdfPaper};
-use bilibi_branding::PrintBrand;
-use bilibi_ui::Assets;
+use bilibi_ui::{Accent, Assets};
 use std::{
     fmt::{self, Write},
     sync::OnceLock,
@@ -26,23 +25,12 @@ pub(super) fn document(
     language: &str,
     title: &str,
     paper: PdfPaper,
-    brand: &PrintBrand,
+    accent: Accent,
 ) -> Checked<InlineDocument> {
     let mut html = Html(String::new());
-    html.document(&fragment, language, title, brand)
+    html.document(&fragment, language, title, accent)
         .map_err(|_| Problem::new("layout", "The rendered print layout exceeds 4 MiB."))?;
     Ok(InlineDocument::new(html.0, paper))
-}
-
-fn packaged_data_url(path: &str, cache: &'static OnceLock<String>) -> &'static str {
-    cache.get_or_init(|| {
-        let asset = Assets::get(path).expect("registered print asset");
-        format!(
-            "data:{};base64,{}",
-            asset.content_type,
-            STANDARD.encode(asset.bytes.as_ref())
-        )
-    })
 }
 
 struct Html(String);
@@ -63,20 +51,28 @@ impl Html {
         fragment: &str,
         language: &str,
         title: &str,
-        brand: &PrintBrand,
+        accent: Accent,
     ) -> fmt::Result {
         static FONT: OnceLock<String> = OnceLock::new();
-        let font = packaged_data_url("/fonts/instrument-sans-variable.woff2", &FONT);
+        let font = FONT.get_or_init(|| {
+            let asset = Assets::get("/fonts/instrument-sans-variable.woff2")
+                .expect("registered print font");
+            format!(
+                "data:{};base64,{}",
+                asset.content_type,
+                STANDARD.encode(asset.bytes.as_ref())
+            )
+        });
         self.write_str("<!doctype html><html lang=\"")?;
         self.escaped(language)?;
         write!(
             self,
             "\" data-accent=\"{}\"><head><meta charset=\"utf-8\">",
-            brand.accent().as_str()
+            accent.as_str()
         )?;
         self.write_str(concat!(
             "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; ",
-            "style-src 'unsafe-inline'; font-src data:; img-src data:; ",
+            "style-src 'unsafe-inline'; font-src data:; ",
             "base-uri 'none'; form-action 'none'\">"
         ))?;
         self.element("title", title)?;
@@ -86,35 +82,7 @@ impl Html {
             include_str!("document.css"),
         )?;
         self.write_str(fragment)?;
-        self.write_str("</main>")?;
-        if brand.include_mark() {
-            self.mark(brand, language)?;
-        }
-        self.write_str("</body></html>")
-    }
-
-    fn mark(&mut self, brand: &PrintBrand, language: &str) -> fmt::Result {
-        static MARK: OnceLock<String> = OnceLock::new();
-        self.write_str("<footer>")?;
-        if let Some(logo) = brand.logo() {
-            write!(
-                self,
-                "<img alt=\"\" src=\"data:{};base64,{}\">",
-                logo.mime(),
-                STANDARD.encode(logo.bytes())
-            )?;
-        } else if brand.use_product_mark() {
-            let logo = packaged_data_url("/assets/logo.svg", &MARK);
-            write!(self, "<img alt=\"\" src=\"{logo}\">")?;
-        }
-        let attribution = match language.split('-').next() {
-            Some("ms") => "Dikuasakan oleh ",
-            _ => "Powered by ",
-        };
-        self.write_str("<span>")?;
-        self.escaped(attribution)?;
-        self.escaped(brand.name())?;
-        self.write_str("</span></footer>")
+        self.write_str("</main></body></html>")
     }
 
     fn escaped(&mut self, text: &str) -> fmt::Result {

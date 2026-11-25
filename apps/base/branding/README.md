@@ -51,4 +51,4 @@ Set the name and logo independently. A name alone draws a text wordmark. An avai
 
 A logo link on a web page is a short-lived signed Media link for the operator workspace's asset (`Media::tenant_stream_url`). For workspace email, Branding opens the same checked asset through Media and passes its raster bytes to the mailer for inline delivery. A logo that cannot be served is left out. [Media's signed stream contract](../media/README.md#signed-streams) governs public image delivery.
 
-For offline print, `Branding::for_print` resolves the installation accent and can load the approved public raster through Media. The caller elects whether to include the installation mark. The signed link stays inside Branding, and the print document receives bounded bytes.
+For offline print, `Branding::accent` resolves the installation accent from the same setting as the staff shell.
