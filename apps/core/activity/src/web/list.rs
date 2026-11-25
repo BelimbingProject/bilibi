@@ -295,6 +295,10 @@ impl Index {
                                 start,
                                 end,
                                 assignee,
+                                title: String::new(),
+                                kind: Kind::Meeting,
+                                errors: BTreeMap::new(),
+                                notice: String::new(),
                             });
                             self.notice = None;
                         }
@@ -303,23 +307,87 @@ impl Index {
                 }
             }
             "cancel_slot" => self.slot = None,
-            "slot_continue" => {
+            "slot_more" => {
+                // More options: the same typed values in the full form.
                 let form = params::form_values_checked(value, "slot", params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
-                let kind = match form.get("kind").map(String::as_str) {
-                    Some("call") => Kind::Call,
-                    Some("task") => Kind::Task,
-                    _ => Kind::Meeting,
-                };
-                if let Some(slot) = self.slot.take() {
+                if let Some(mut slot) = self.slot.take() {
+                    slot.read(&form, &self.zone)?;
                     if self.pages.activities.may_create(scope).await? {
                         let clock =
                             Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                         self.dialog = Some(
-                            Dialog::new(kind, None)
+                            Dialog::new(slot.kind, None)
                                 .at(slot.start, slot.end, &clock)
+                                .titled(&slot.title)
                                 .assigned(slot.assignee),
                         );
+                    }
+                }
+            }
+            "slot_save" => {
+                let form = params::form_values_checked(value, "slot", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
+                let Some(mut slot) = self.slot.take() else {
+                    return Ok(None);
+                };
+                slot.read(&form, &self.zone)?;
+                if !self.pages.activities.may_create(scope).await? {
+                    self.notice = Some((
+                        StatusKind::Error,
+                        "You do not have permission to create activities.".into(),
+                    ));
+                    return Ok(None);
+                }
+                if !slot.errors.is_empty() {
+                    self.slot = Some(slot);
+                    return Ok(None);
+                }
+                // More options is the same submission with its marker: the
+                // typed values open the full form instead of being saved.
+                if form.contains_key("more") {
+                    let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                    self.dialog = Some(
+                        Dialog::new(slot.kind, None)
+                            .at(slot.start, slot.end, &clock)
+                            .titled(&slot.title)
+                            .assigned(slot.assignee),
+                    );
+                    return Ok(None);
+                }
+                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                let mut dialog = Dialog::new(slot.kind, None)
+                    .at(slot.start, slot.end, &clock)
+                    .titled(&slot.title)
+                    .assigned(slot.assignee.clone());
+                let pages = self.pages.shared();
+                // The compact draft already read its fields into the dialog;
+                // the submit reads only what the full form posts.
+                let saved = dialog
+                    .submit(&pages, scope, credential, &clock, &serde_json::json!({}))
+                    .await?;
+                match saved {
+                    Some(id) => {
+                        let message = dialog.created_message();
+                        return Ok(Some(LiveBody {
+                            redirect: Some(format!("/activities/{id}")),
+                            flash: Some((StatusKind::Success, message)),
+                            ..LiveBody::default()
+                        }));
+                    }
+                    None => {
+                        // The compact draft names the interval start and end;
+                        // the full form names each kind's own fields.
+                        for (field, messages) in dialog.take_errors() {
+                            let key = match field.as_str() {
+                                "starts_at" | "due_at" => "start".to_owned(),
+                                "ends_at" => "end".to_owned(),
+                                _ => field,
+                            };
+                            slot.errors.entry(key).or_default().extend(messages);
+                        }
+                        slot.notice = dialog.take_notice();
+                        self.slot = Some(slot);
                     }
                 }
             }

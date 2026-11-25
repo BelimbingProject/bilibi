@@ -11,7 +11,8 @@ use bilibi_tenancy::Scope;
 use bilibi_ui::{
     board::{Board, BoardCard, BoardColumn, BoardMove},
     calendar::{CalendarSlot, CalendarWhen},
-    choices, Button, ButtonVariant, Field, Form, Html, InputKind, Modal, ModalWidth, StatusKind,
+    choices, Alert, Button, ButtonVariant, Field, Form, Html, InputKind, Modal, ModalWidth,
+    StatusKind,
 };
 use std::collections::HashMap;
 
@@ -32,6 +33,65 @@ pub(super) struct Slot {
     pub start: jiff::Timestamp,
     pub end: jiff::Timestamp,
     pub assignee: Option<(i64, String)>,
+    /// The title typed in the slot's compact draft, kept when the reader asks
+    /// for More options so the full form opens with it.
+    pub title: String,
+    /// The kind the draft was last saved or expanded as.
+    pub kind: Kind,
+    /// The field errors of a refused save, by field key.
+    pub errors: std::collections::BTreeMap<String, Vec<String>>,
+    /// The owner's message for a refusal that names no field.
+    pub notice: String,
+}
+
+impl Slot {
+    /// Reads the compact draft's fields: its title, kind, all-day box and its
+    /// start and end (a date in a zone, or the date the all-day box keeps).
+    pub(super) fn read(
+        &mut self,
+        form: &std::collections::HashMap<String, String>,
+        zone: &super::BrowserZone,
+    ) -> Result<()> {
+        self.errors.clear();
+        self.notice.clear();
+        if let Some(title) = form.get("title") {
+            self.title = title.chars().take(160).collect();
+        }
+        if let Some(kind) = form.get("kind").and_then(|kind| Kind::parse(kind)) {
+            self.kind = kind;
+        }
+        // Only the zone is read here, to parse a typed time.
+        let clock = Clock {
+            display: bilibi_datetime::DisplayContext::anonymous(),
+            zone: zone.zone.clone().unwrap_or_else(|| "UTC".to_owned()),
+        };
+        let mut time = |key: &str| -> Result<Option<jiff::Timestamp>> {
+            match clock.parse(form.get(key).map(String::as_str).unwrap_or_default()) {
+                Ok(at) => Ok(at),
+                Err(()) => {
+                    self.errors
+                        .entry(key.to_owned())
+                        .or_default()
+                        .push("is not a date and time".to_owned());
+                    Ok(None)
+                }
+            }
+        };
+        if let Some(start) = time("start")? {
+            self.start = start;
+        }
+        match time("end")? {
+            Some(end) if end > self.start => self.end = end,
+            Some(_) => {
+                self.errors
+                    .entry("end".to_owned())
+                    .or_default()
+                    .push("must be after the start".to_owned());
+            }
+            None => {}
+        }
+        Ok(())
+    }
 }
 
 /// The tiles' columns: a task's statuses, each with how many of `tasks` hold it.
@@ -232,25 +292,64 @@ impl Index {
         Ok((html, query, entries.len()))
     }
 
-    /// The Add dialog a free calendar slot opens: which kind to add there.
+    /// The compact draft a free calendar slot opens: a title, what it is
+    /// (a meeting, a call or a task) and whether it is all day or an
+    /// interval, saved straight through the kind's own create contract.
+    /// More options carries every typed value into the full form instead.
     pub(super) fn slot_dialog(&self, clock: &Clock, slot: &Slot) -> Result<Html> {
-        let when = format!("{} to {}", clock.text(slot.start), clock.text(slot.end));
+        let start = clock.text(slot.start);
+        let end = clock.text(slot.end);
         let description = match &slot.assignee {
-            Some((_, name)) => format!("{when}, assigned to {name}."),
-            None => format!("{when}."),
+            Some((_, name)) => format!("{start} to {end}, assigned to {name}."),
+            None => format!("{start} to {end}."),
         };
-        let body = render(
+        let mut body = Html::EMPTY;
+        if !slot.notice.is_empty() {
+            body.push(&render(Alert {
+                kind: StatusKind::Error,
+                id: "activities-slot-notice",
+                body: Html::text(&slot.notice),
+                ..Alert::default()
+            })?);
+        }
+        body.push(&render(
+            Field::in_form("slot", "title")
+                .id("activities-slot-title")
+                .label("Title")
+                .value(&slot.title)
+                .required()
+                .attr("maxlength", "160")
+                .errors(slot.errors.get("title").cloned().unwrap_or_default())
+                .attr("autofocus", "autofocus"),
+        )?);
+        body.push(&render(
             Field::in_form("slot", "kind")
                 .id("activities-slot-kind")
-                .label("Add")
+                .label("What")
                 .kind(InputKind::Select)
-                .value("meeting")
+                .value(slot.kind.code())
                 .options(choices(&[
                     ("A meeting", "meeting"),
                     ("A call", "call"),
                     ("A task", "task"),
                 ])),
-        )?;
+        )?);
+        body.push(&render(
+            Field::in_form("slot", "start")
+                .id("activities-slot-start")
+                .label("Starts")
+                .kind(InputKind::DatetimeLocal)
+                .value(clock.local(Some(slot.start)))
+                .hint(clock.hint()),
+        )?);
+        body.push(&render(
+            Field::in_form("slot", "end")
+                .id("activities-slot-end")
+                .label("Ends")
+                .kind(InputKind::DatetimeLocal)
+                .value(clock.local(Some(slot.end)))
+                .errors(slot.errors.get("end").cloned().unwrap_or_default()),
+        )?);
         let mut actions = render(Button {
             id: "activities-slot-cancel",
             button_type: "button",
@@ -259,15 +358,24 @@ impl Index {
             ..Button::default()
         })?;
         actions.push(&render(Button {
-            id: "activities-slot-continue",
+            id: "activities-slot-more",
+            button_type: "submit",
+            name: "slot[more]",
+            value: "true",
+            body: Html::text("More options"),
+            ..Button::default()
+        })?);
+        actions.push(&render(Button {
+            id: "activities-slot-save",
             button_type: "submit",
             variant: ButtonVariant::Primary,
-            body: Html::text("Continue"),
+            working: "Saving…",
+            body: Html::text("Save"),
             ..Button::default()
         })?);
         let form = render(Form {
             id: "activities-slot-form",
-            event: "slot_continue",
+            event: "slot_save",
             change: false,
             body,
             actions,

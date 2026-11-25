@@ -154,6 +154,20 @@ impl Dialog {
         self.assignee = assignee;
         self
     }
+    /// Starts the dialog with `title` already typed (a compact draft's
+    /// title, carried by More options).
+    pub fn titled(mut self, title: &str) -> Self {
+        self.values.insert("title".into(), title.to_owned());
+        self
+    }
+    /// The field errors of the last refused save, by field key, taken out.
+    pub fn take_errors(&mut self) -> BTreeMap<String, Vec<String>> {
+        std::mem::take(&mut self.errors)
+    }
+    /// The last refusal's message when it named no field, taken out.
+    pub fn take_notice(&mut self) -> String {
+        std::mem::take(&mut self.notice)
+    }
     /// What the page says after a save.
     pub fn created_message(&self) -> String {
         let noun = self.kind.label();

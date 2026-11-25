@@ -225,6 +225,11 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/activity.pages", prove
         ("log_call", "core.activity.log_call"),
         ("create_meeting", "core.activity.create_meeting"),
         ("create_note", "core.activity.create_note"),
+        // The calendar's compact draft saves as whichever kind it holds, so it
+        // lists every create contract one entry can begin.
+        ("slot_save", "core.activity.create_meeting"),
+        ("slot_save", "core.activity.log_call"),
+        ("slot_save", "core.activity.create_task"),
         ("make_link", "core.activity.create_feed_key"),
         ("replace_link", "core.activity.create_feed_key"),
         ("revoke_link", "core.activity.revoke_feed_key"),
