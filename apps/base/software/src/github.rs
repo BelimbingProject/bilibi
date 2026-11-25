@@ -616,7 +616,6 @@ fn present(
         "prerelease": prerelease,
         "fetched_at": cache["fetched_at"],
         "stale": stale || cache["attempt_at"].is_string() || cache["stale"].as_bool().unwrap_or(false),
-        "token_set": saved.token_set,
         "app": saved.app,
         "refresh_minutes": saved.refresh_minutes,
         "limited_until": cache["limited_until"],

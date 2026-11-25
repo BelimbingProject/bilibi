@@ -1,6 +1,6 @@
 # Bilibi installer
 
-`bilibi-installer` is the small program beside every Bilibi instance that puts a release into service when a server owner asks for it on the Software page, and takes it back when they press Undo. It runs as its own service under a dedicated installer account for its instance, so the program people use never rewrites itself.
+`bilibi-installer` is the small program beside every Bilibi instance that puts a release into service when a server owner asks for it on the Software page or with the root-only server command, and takes it back on Undo. systemd starts its dedicated service at boot for recovery and whenever the app marks a queued job ready; it exits after ten idle seconds, so the program people use never rewrites itself or holds a privileged worker open.
 ## One example
 
 The owner opens Software on Production, reviews the exact GitHub asset already checked on Staging, types a fresh 2FA code, and confirms. Over the next two minutes the page shows:
@@ -99,7 +99,7 @@ What makes a restore safe to repeat:
 - **A failed restore.** If `pg_restore` fails, the job tables are made again from the file, so the job can record that it failed. The service stays stopped, and the message names the dump to restore by hand.
 - **One report.** The same database error is written to the journal once, not every five seconds.
 
-After a reboot, systemd starts `bilibi-installer@<instance>` before `bilibi@<instance>` (`Before=` in the installer's unit, `After=` and `Wants=` in the instance's). The installer stops the instance again as its first act, but the old program may have answered for a moment before that. So a message after a restart does not claim that nothing entered is lost.
+After a reboot, systemd starts the enabled `bilibi-installer@<instance>` recovery service before `bilibi@<instance>` (`Before=` in the installer's unit and `After=` in the instance's). The installer stops the instance again as its first act, but the old program may have answered for a moment before that. So a message after a restart does not claim that nothing entered is lost. A clean recovery scan exits after its idle window; the enabled `bilibi-installer@<instance>.path` then waits for later ready markers without running the installer process.
 
 A step that was running when the restart came says so in its detail: "(the installer restarted during this step and continued)".
 
@@ -107,7 +107,7 @@ A step that was running when the restart came says so in its detail: "(the insta
 
 ## How it talks to the page
 
-The installer never goes through the app. It follows the worker contract in `apps/base/software/README.md` ("How a worker plugs in"): it `LISTEN`s on the `bilibi_software_jobs` channel, claims the oldest waiting `install` or `undo` job, marks each step `running`, `done`, `failed` or `skipped` with a plain `detail`, and writes the job's final `state` and `result`. The page and the `base.software.status` contract read those rows.
+The installer never goes through the app. It follows the worker contract in `apps/base/software/README.md` ("How a worker plugs in"): the app commits a job, then writes `incoming/installer-jobs/job-<id>.ready`; systemd path activation starts the worker without granting the app service-control privileges. The worker claims the oldest ready `install`, `undo` or trust job, marks each step `running`, `done`, `failed` or `skipped` with a plain `detail`, and writes the job's final `state` and `result`. It still listens for database notifications while active, preserves one-job ordering and removes only ready markers observed before its final idle scan, so a job queued during shutdown activates it again. The page, terminal command and `base.software.status` contract read the same rows.
 
 The result carries what Undo and the page need:
 
@@ -133,13 +133,13 @@ The audit trail is the app's job, not the installer's: `base/software` records e
 
 Build `bilibi-installer` on your build machine and follow the [installer service setup](../../docs/server-install.md#the-installer-service) to verify and deploy it for each instance.
 
-By hand, for one instance, with its `env` file loaded:
+To run a recovery scan by hand:
 
 ```sh
 sudo systemctl start bilibi-installer@production
 ```
 
-The service reads its instance’s `DATABASE_URL` and `BIND_ADDR` and uses PostgreSQL’s `pg_dump` and `pg_restore` on the path. Read progress with `journalctl -u bilibi-installer@production`.
+The service reads its instance’s `DATABASE_URL` and `BIND_ADDR`, uses PostgreSQL’s `pg_dump` and `pg_restore` on the path, and exits when no work remains. A normally idle service is `inactive`; its path unit remains `active (waiting)`. Read progress with `journalctl -u bilibi-installer@production`.
 
 ## Caveats
 

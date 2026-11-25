@@ -26,6 +26,15 @@ pub(super) struct UpdatePrompt<'a> {
     pub prompt: &'a str,
 }
 
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}<div data-hook="ClipboardCopy">{% call ui::copy_box(id="software-terminal-update", label="From a terminal on the server:", text=command, copy_label="Copy command") %}{% endcall %}</div>"#,
+    ext = "html"
+)]
+struct TerminalCommand<'a> {
+    command: &'a str,
+}
+
 pub const PATH: &str = "/system/software/releases";
 /// The file input's name: the key the owner consumes by.
 const UPLOAD: &str = "release_file";
@@ -351,7 +360,15 @@ impl ReleaseFiles {
             })?);
         }
         body.push(&job);
-        let mut details = self.trust_section(&facts)?;
+        let command = self
+            .pages
+            .software
+            .paths
+            .as_ref()
+            .map(|paths| format!("sudo bilibi update {}", paths.name))
+            .unwrap_or_else(|| "sudo bilibi update <instance>".into());
+        let mut details = render(TerminalCommand { command: &command })?;
+        details.push(&self.trust_section(&facts)?);
         details.push(&self.github_section(&facts, manages, enrolled)?);
         if manages {
             details.push(&self.upload_section(&instance)?);
