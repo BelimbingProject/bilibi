@@ -8,8 +8,7 @@ Documentation=https://github.com/BelimbingProject/bilibi/blob/main/apps/installe
 After=network-online.target postgresql.service postgresql-18.service
 Wants=network-online.target
 # Enabled at boot for interrupted-job recovery; the path unit starts it for
-# later work and the timer reconciles a missing marker. Skip it quietly until
-# the installer program is in place.
+# later work. Skip it quietly until the installer program is in place.
 ConditionFileIsExecutable=/opt/bilibi/%i/installer
 # After a reboot in the middle of a job this starts first, so it can stop the
 # instance again before the old program takes any entry.
@@ -23,7 +22,7 @@ EnvironmentFile=/opt/bilibi/%i/env
 WorkingDirectory=/opt/bilibi/%i
 ExecStart=/opt/bilibi/%i/installer /opt/bilibi/%i
 # A job cut off here is settled when the service is back: see "If the server restarts mid-way".
-# A clean idle exit stays stopped until path activation or the fallback timer.
+# A clean idle exit stays stopped until path activation.
 Restart=on-failure
 RestartSec=3
 PrivateTmp=yes
