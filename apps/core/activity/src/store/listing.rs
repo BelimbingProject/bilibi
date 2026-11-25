@@ -1,7 +1,7 @@
 //! The list read of `core_activities` and the per-day count a year calendar
 //! draws. Both bind the same conditions, so a count can never see an
 //! activity the list would hide.
-use super::{from_row, reader, Reader, COLUMNS, MINE};
+use super::{from_row, reader, tags, Reader, COLUMNS, MINE};
 use crate::model::Kind;
 use crate::{DayCount, Filter, Mine, Page, Sort, State, TASK_MINUTES};
 use bilibi_database::{Error, Result};
@@ -13,7 +13,7 @@ use tokio_postgres::types::ToSql;
 /// The most days one count read answers for: a leap year.
 pub(crate) const MAX_COUNT_DAYS: usize = 366;
 
-/// What a list read binds as `$1` to `$15`: the reader and the filter.
+/// What a list read binds as `$1` to `$16`: the reader and the filter.
 struct Listing {
     reader: Reader,
     shared: bool,
@@ -28,6 +28,7 @@ struct Listing {
     from: Option<SystemTime>,
     to: Option<SystemTime>,
     series: Option<i64>,
+    tag: Option<String>,
 }
 impl Listing {
     /// `related_readable`: the reader may view `filter.related` (the caller
@@ -76,6 +77,7 @@ impl Listing {
             from: filter.between.map(|(from, _)| SystemTime::from(from)),
             to: filter.between.map(|(_, to)| SystemTime::from(to)),
             series: filter.series,
+            tag: filter.tag.clone().filter(|tag| !tag.is_empty()),
         })
     }
 
@@ -99,12 +101,13 @@ impl Listing {
          AND ($13::timestamptz IS NULL
               OR (a.kind IN ('call','meeting') AND a.starts_at < $14 AND a.ends_at > $13)
               OR (a.kind = 'task' AND a.due_at >= $13 AND a.due_at < $14))
-         AND ($15::bigint IS NULL OR a.series_id = $15)",
+         AND ($15::bigint IS NULL OR a.series_id = $15)
+         AND ($16::text IS NULL OR EXISTS (SELECT 1 FROM core_activity_tags t WHERE t.tenant_id=a.tenant_id AND t.activity_id=a.id AND t.code=$16))",
             oversees = self.reader.oversees()
         )
     }
 
-    fn params(&self) -> [&(dyn ToSql + Sync); 15] {
+    fn params(&self) -> [&(dyn ToSql + Sync); 16] {
         [
             &self.reader.tenant,
             &self.reader.user,
@@ -121,6 +124,7 @@ impl Listing {
             &self.from,
             &self.to,
             &self.series,
+            &self.tag,
         ]
     }
 }
@@ -162,7 +166,7 @@ pub(crate) async fn list(
     let order = match filter.sort {
         Sort::When if filter.series.is_some() => "a.series_index".to_owned(),
         Sort::When => WHEN.to_owned(),
-        Sort::Nearest(_) => format!("abs(extract(epoch FROM ({WHEN} - $16::timestamptz)))"),
+        Sort::Nearest(_) => format!("abs(extract(epoch FROM ({WHEN} - $17::timestamptz)))"),
         Sort::Title => "lower(a.subject)".to_owned(),
         Sort::Status => "a.status".to_owned(),
         Sort::Created => "a.created_at".to_owned(),
@@ -175,12 +179,18 @@ pub(crate) async fn list(
     if nearest.is_some() {
         bound.push(&nearest);
     }
-    let entries = client
+    let mut entries = client
         .query(&sql, &bound)
         .await?
         .iter()
         .map(from_row)
         .collect::<Result<Vec<_>>>()?;
+    // The page's tags in one more statement, keyed by the activities it read.
+    let ids: Vec<i64> = entries.iter().map(|a| a.id).collect();
+    let mut tags = tags(client, scope.tenant(), &ids).await?;
+    for entry in &mut entries {
+        entry.tags = tags.remove(&entry.id).unwrap_or_default();
+    }
     Ok(Page { entries, total })
 }
 
@@ -220,8 +230,8 @@ pub(crate) async fn day_counts(
                 count(*) FILTER (WHERE a.closed_at IS NULL AND COALESCE(a.starts_at, a.due_at) < now())
            FROM core_activities a
           CROSS JOIN LATERAL generate_series(
-                GREATEST(width_bucket(COALESCE(a.starts_at, a.due_at), $16::timestamptz[]), 1),
-                width_bucket(COALESCE(a.ends_at, a.due_at + interval '{TASK_MINUTES} minutes') - interval '1 microsecond', $16::timestamptz[])
+                GREATEST(width_bucket(COALESCE(a.starts_at, a.due_at), $17::timestamptz[]), 1),
+                width_bucket(COALESCE(a.ends_at, a.due_at + interval '{TASK_MINUTES} minutes') - interval '1 microsecond', $17::timestamptz[])
           ) AS d(day)
           WHERE {conditions}
           GROUP BY d.day"

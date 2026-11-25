@@ -22,6 +22,7 @@ bilibi-module-registry.workspace = true
 bilibi-notifications.workspace = true
 bilibi-party-ids.workspace = true
 bilibi-person.workspace = true
+bilibi-picklists.workspace = true
 bilibi-principal-directory.workspace = true
 bilibi-public.workspace = true
 bilibi-queue.workspace = true

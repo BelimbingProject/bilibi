@@ -171,6 +171,8 @@ pub struct Common {
     /// Whether each reminder is also emailed; `None` follows the creator's
     /// default, then the tenant's.
     pub reminder_email: Option<bool>,
+    /// The tag codes it carries (`core.activity.tags`).
+    pub tags: Vec<String>,
 }
 
 /// `create_task`.
@@ -239,6 +241,8 @@ pub struct Patch {
     /// `Some(None)` goes back to the default.
     pub reminder_minutes: Option<Option<Vec<i32>>>,
     pub reminder_email: Option<Option<bool>>,
+    /// The whole tag set when given: an empty list clears every tag.
+    pub tags: Option<Vec<String>>,
 }
 impl Patch {
     pub fn is_empty(&self) -> bool {
@@ -261,6 +265,7 @@ impl Patch {
             && self.assignee.is_none()
             && self.reminder_minutes.is_none()
             && self.reminder_email.is_none()
+            && self.tags.is_none()
     }
 }
 
@@ -281,6 +286,8 @@ impl FieldError {
 
 /// At most this many guests per activity.
 pub const MAX_GUESTS: usize = 50;
+/// At most this many tags per activity.
+pub const MAX_TAGS: usize = 20;
 /// At most this many reminders per activity, and how far ahead the earliest
 /// may be (one week).
 pub const MAX_REMINDERS: usize = 5;
@@ -321,6 +328,8 @@ pub struct Draft {
     /// See [`Common::reminder_minutes`].
     pub reminder_minutes: Option<Vec<i32>>,
     pub reminder_email: Option<bool>,
+    /// The tag codes it carries (`core.activity.tags`).
+    pub tags: Vec<String>,
 }
 impl Draft {
     /// An empty draft of `kind` in its opening status (medium priority for
@@ -348,6 +357,7 @@ impl Draft {
             guests: Vec::new(),
             reminder_minutes: None,
             reminder_email: None,
+            tags: Vec::new(),
         }
     }
     fn common(kind: Kind, common: &Common) -> Self {
@@ -361,6 +371,7 @@ impl Draft {
             guests: common.guests.clone(),
             reminder_minutes: common.reminder_minutes.clone().map(offsets),
             reminder_email: common.reminder_email,
+            tags: common.tags.clone(),
             ..Self::new(kind)
         }
     }
@@ -554,6 +565,12 @@ pub(crate) fn check(values: &Draft) -> Vec<FieldError> {
             "is not for notes, which nobody is reminded of",
         ));
     }
+    if values.tags.len() > MAX_TAGS {
+        errors.push(FieldError::new(
+            "tags",
+            format!("must name at most {MAX_TAGS} tags"),
+        ));
+    }
     if values.guests.len() > MAX_GUESTS {
         errors.push(FieldError::new(
             "guests",
@@ -681,6 +698,9 @@ pub(crate) fn patched(before: &Draft, patch: &Patch) -> Draft {
     }
     if let Some(email) = patch.reminder_email {
         after.reminder_email = email;
+    }
+    if let Some(tags) = &patch.tags {
+        after.tags = tags.clone();
     }
     after
 }
