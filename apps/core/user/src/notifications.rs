@@ -381,7 +381,13 @@ impl bilibi_notifications::NotificationSink for Notifications {
                 return Ok(None);
             };
             let user: i64 = row.get(0);
-            Ok(matches!(crate::identity::standing(tx.sql(),tenant,user).await?, crate::identity::Standing::Live(account) if account.installation_owner).then_some(user))
+            // The receipt names the owner; it is only a recipient while that
+            // account is live and eligible.
+            Ok(matches!(
+                crate::identity::standing(tx.sql(), tenant, user).await?,
+                crate::identity::Standing::Live(_)
+            )
+            .then_some(user))
         })
     }
     fn committed(&self, tenant: i64, recipients: &[i64]) {

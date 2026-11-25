@@ -112,7 +112,7 @@ pub async fn restore(
     let Some((_, saved)) = read_saved(history_file) else {
         return outcome;
     };
-    match rebuild(client, &saved).await {
+    match rebuild(client, &saved, false).await {
         Ok(()) => outcome,
         Err(more) => Err(format!("{why} {more}")),
     }
@@ -151,13 +151,22 @@ async fn replace(
         }
     };
     validate_restore(&saved)?;
+    let kept = match keep_owner(client).await {
+        Ok(kept) => kept,
+        Err(why) => {
+            return Err(match rebuild(client, &saved, false).await {
+                Ok(()) => why,
+                Err(more) => format!("{why} {more}"),
+            });
+        }
+    };
     if let Err(why) = clear(client).await {
         return Err(match rebuild(client, &saved, true).await {
             Ok(()) => why,
             Err(more) => format!("{why} {more}"),
         });
     }
-    if let Err(why) = restore_with_owner(pg, dump) {
+    if let Err(why) = restore_with_owner(pg, dump, &kept) {
         return Err(match rebuild(client, &saved, true).await {
             Ok(()) => why,
             Err(more) => format!("{why} {more}"),
@@ -286,6 +295,49 @@ async fn rebuild(client: &Client, saved: &Value, wipe: bool) -> Result<(), Strin
     Ok(())
 }
 
+/// Reads the live owner's standing aside for the restore that replaces the
+/// database: the receipt, the account's creation time, its sign-in row, its
+/// authenticator and its sessions, as one JSON object (SQL `null` when there
+/// is no owner yet). Call it before the database is cleared, and give the
+/// result to [`restore_with_owner`].
+pub(crate) async fn keep_owner(client: &Client) -> Result<Value, String> {
+    // A restore can resume with the schema already cleared, and then there is
+    // no live owner to keep.
+    let present = client
+        .query_one(
+            "SELECT to_regclass('public.user_bootstrap') IS NOT NULL
+                AND to_regclass('public.users') IS NOT NULL",
+            &[],
+        )
+        .await
+        .map_err(|error| format!("could not read the current owner: {}", jobs::short(&error)))?;
+    if !present.get::<_, bool>(0) {
+        return Ok(Value::Null);
+    }
+    client
+        .query_one(
+            "SELECT to_jsonb(o) FROM (
+                 SELECT to_jsonb(b) AS receipt, u.created_at,
+                     to_jsonb(i) AS identity,
+                     (SELECT coalesce(jsonb_agg(to_jsonb(f)), '[]'::jsonb)
+                        FROM public.user_two_factor f
+                       WHERE to_regclass('public.user_two_factor') IS NOT NULL
+                         AND (f.tenant_id, f.user_id) = (b.tenant_id, b.user_id)) AS two_factor,
+                     (SELECT coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb)
+                        FROM public.sessions s
+                       WHERE (s.tenant_id, s.user_id) = (b.tenant_id, b.user_id)) AS sessions
+                 FROM (VALUES (1)) AS singleton(id)
+                 LEFT JOIN public.user_bootstrap b ON b.id=singleton.id
+                 LEFT JOIN public.users u ON u.tenant_id=b.tenant_id AND u.id=b.user_id
+                 LEFT JOIN public.user_identities i ON i.id=u.identity_id
+             ) o",
+            &[],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|error| format!("could not read the current owner: {}", jobs::short(&error)))
+}
+
 /// The owner standing the restore keeps: the live owner keeps being able to
 /// sign in after the database is replaced. The receipt row itself is carried
 /// forward, and so are the parts of that account the restored dump may have
@@ -293,9 +345,11 @@ async fn rebuild(client: &Client, saved: &Value, wipe: bool) -> Result<(), Strin
 /// lost password or authenticator stays as it is now, never as the dump had
 /// it. Every pending ownership offer is cancelled, because a restored one
 /// could be accepted on an old deadline. A restore that cannot keep the owner
-/// usable is refused before the database is cleared, with the terminal
-/// recovery named.
-fn restore_with_owner(pg: &PgEnv, dump: &Path) -> Result<(), String> {
+/// usable is refused, with the terminal recovery named.
+///
+/// `owner` is what [`keep_owner`] read before the database was cleared: the
+/// restore brings back the dump, but the owner kept here is who signs in after.
+fn restore_with_owner(pg: &PgEnv, dump: &Path, owner: &Value) -> Result<(), String> {
     let mut restore = pg
         .command("pg_restore")
         .args(["--no-owner", "--no-privileges", "--file=-"])
@@ -325,40 +379,21 @@ fn restore_with_owner(pg: &PgEnv, dump: &Path) -> Result<(), String> {
         }
     };
     let mut input = destination.stdin.take().expect("piped psql input");
-    // A restore can resume with the live schema already empty. Record a
-    // snapshot row only when the live schema has an ownership table.
     let copied = input
         .write_all(
-            b"
+            format!(
+                "\
         BEGIN;
-        CREATE TEMP TABLE current_owner (
-            receipt jsonb, created_at timestamptz,
-            user_status text, user_deleted boolean,
-            identity jsonb,
-            two_factor jsonb, sessions jsonb) ON COMMIT DROP;
-        DO $capture_owner$
-        BEGIN
-            IF to_regclass('public.user_bootstrap') IS NOT NULL THEN
-                LOCK TABLE public.user_bootstrap IN ACCESS EXCLUSIVE MODE;
-                INSERT INTO pg_temp.current_owner
-                    SELECT to_jsonb(b), u.created_at, u.status, u.deleted_at IS NOT NULL,
-                        to_jsonb(i),
-                        (SELECT coalesce(jsonb_agg(to_jsonb(f)), '[]'::jsonb)
-                           FROM public.user_two_factor f
-                          WHERE to_regclass('public.user_two_factor') IS NOT NULL
-                            AND (f.tenant_id, f.user_id) = (b.tenant_id, b.user_id)),
-                        (SELECT coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb)
-                           FROM public.sessions s
-                          WHERE (s.tenant_id, s.user_id) = (b.tenant_id, b.user_id))
-                    FROM (VALUES (1)) AS singleton(id)
-                    LEFT JOIN public.user_bootstrap b ON b.id=singleton.id
-                    LEFT JOIN public.users u ON u.tenant_id=b.tenant_id AND u.id=b.user_id
-                    LEFT JOIN public.user_identities i ON i.id=u.identity_id;
-            END IF;
-        END $capture_owner$;
-        DROP SCHEMA public CASCADE;
-        CREATE SCHEMA public;
+        CREATE TEMP TABLE current_owner (receipt jsonb, created_at timestamptz,
+            identity jsonb, two_factor jsonb, sessions jsonb) ON COMMIT DROP;
+        INSERT INTO pg_temp.current_owner
+            SELECT * FROM jsonb_to_record({}) AS x(
+                receipt jsonb, created_at timestamptz, identity jsonb,
+                two_factor jsonb, sessions jsonb);
     ",
+                literal(owner)
+            )
+            .as_bytes(),
         )
         .and_then(|()| io::copy(&mut sql, &mut input).map(|_| ()));
     drop(sql);
@@ -368,22 +403,22 @@ fn restore_with_owner(pg: &PgEnv, dump: &Path) -> Result<(), String> {
             b"
             DO $owner$
             DECLARE
-                o pg_temp.current_owner;
+                o jsonb;
                 tenant bigint;
                 owner bigint;
                 recovery constant text := 'The backup does not contain the current owner account. Restore it by hand, or recover ownership from the server terminal with install-server.sh create-owner --recover.';
             BEGIN
-                SELECT * INTO o FROM pg_temp.current_owner;
-                IF o.receipt IS NOT NULL THEN
-                    tenant := (o.receipt->>'tenant_id')::bigint;
-                    owner := (o.receipt->>'user_id')::bigint;
+                SELECT to_jsonb(k) INTO o FROM pg_temp.current_owner k;
+                IF o->'receipt' IS NOT NULL AND o->'receipt' <> 'null'::jsonb THEN
+                    tenant := (o->'receipt'->>'tenant_id')::bigint;
+                    owner := (o->'receipt'->>'user_id')::bigint;
                     IF to_regclass('public.user_bootstrap') IS NULL
                         OR to_regclass('public.users') IS NULL THEN
                         RAISE EXCEPTION '%', RECOVERY;
                     END IF;
                     IF NOT EXISTS (
                         SELECT 1 FROM public.users u
-                        WHERE u.tenant_id=tenant AND u.id=owner AND u.created_at=o.created_at
+                        WHERE u.tenant_id=tenant AND u.id=owner AND u.created_at=(o->>'created_at')::timestamptz
                     ) THEN
                         RAISE EXCEPTION '%', RECOVERY;
                     END IF;
@@ -396,12 +431,12 @@ fn restore_with_owner(pg: &PgEnv, dump: &Path) -> Result<(), String> {
                         UPDATE public.user_identities SET status='active', deleted_at=NULL
                          WHERE id=(SELECT identity_id FROM public.users WHERE tenant_id=tenant AND id=owner)
                            AND (status<>'active' OR deleted_at IS NOT NULL);
-                        IF o.identity IS NOT NULL THEN
+                        IF o->'identity' IS NOT NULL AND o->'identity' <> 'null'::jsonb THEN
                             UPDATE public.user_identities i
-                               SET password_hash=(o.identity->>'password_hash'),
-                                   password_version=(o.identity->>'password_version')::bigint,
-                                   email_verified_at=(o.identity->>'email_verified_at')::timestamptz
-                             WHERE i.id=(o.identity->>'id')::bigint
+                               SET password_hash=(o->'identity'->>'password_hash'),
+                                   password_version=(o->'identity'->>'password_version')::bigint,
+                                   email_verified_at=(o->'identity'->>'email_verified_at')::timestamptz
+                             WHERE i.id=(o->'identity'->>'id')::bigint
                                AND EXISTS (SELECT 1 FROM public.users u WHERE u.identity_id=i.id
                                             AND u.tenant_id=tenant AND u.id=owner);
                         END IF;
@@ -409,11 +444,11 @@ fn restore_with_owner(pg: &PgEnv, dump: &Path) -> Result<(), String> {
                     IF to_regclass('public.user_two_factor') IS NOT NULL THEN
                         DELETE FROM public.user_two_factor WHERE tenant_id=tenant AND user_id=owner;
                         INSERT INTO public.user_two_factor
-                            SELECT * FROM jsonb_populate_recordset(NULL::public.user_two_factor, o.two_factor);
+                            SELECT * FROM jsonb_populate_recordset(NULL::public.user_two_factor, o->'two_factor');
                     END IF;
                     DELETE FROM public.sessions WHERE tenant_id=tenant AND user_id=owner;
                     INSERT INTO public.sessions
-                        SELECT * FROM jsonb_populate_recordset(NULL::public.sessions, o.sessions);
+                        SELECT * FROM jsonb_populate_recordset(NULL::public.sessions, o->'sessions');
                     -- A restored pending offer could be accepted on an old
                     -- deadline, so every one is cancelled: a handover is
                     -- simply offered again when it is still wanted.
@@ -423,11 +458,11 @@ fn restore_with_owner(pg: &PgEnv, dump: &Path) -> Result<(), String> {
                          WHERE status='pending';
                     END IF;
                 END IF;
-                IF o.receipt IS NOT NULL
+                IF o->'receipt' IS NOT NULL AND o->'receipt' <> 'null'::jsonb
                     AND to_regclass('public.user_bootstrap') IS NOT NULL THEN
                     DELETE FROM public.user_bootstrap;
                     INSERT INTO public.user_bootstrap
-                        SELECT (jsonb_populate_record(NULL::public.user_bootstrap, o.receipt)).*;
+                        SELECT (jsonb_populate_record(NULL::public.user_bootstrap, o->'receipt')).*;
                 END IF;
             END $owner$;
             COMMIT;
@@ -476,6 +511,17 @@ pub fn unfinished_restores(backups: &Path) -> Vec<(i64, PathBuf, PathBuf)> {
     }
     found.sort_by_key(|(id, _, _)| std::cmp::Reverse(*id));
     found
+}
+/// A JSON value as one SQL literal (a quoted string: PostgreSQL reads it as
+/// JSON wherever a json or jsonb column is expected). A JSON null becomes an
+/// empty object.
+fn literal(value: &Value) -> String {
+    let json = match value {
+        // `jsonb_to_record` takes a JSON object, never the scalar null.
+        Value::Null => "{}".to_owned(),
+        other => other.to_string(),
+    };
+    format!("'{}'", json.replace('\'', "''"))
 }
 fn restored_name(history_file: &Path) -> PathBuf {
     history_file.with_extension("restored")
