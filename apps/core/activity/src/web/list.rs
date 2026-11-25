@@ -65,6 +65,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
                 "mine".into(),
                 ListFilter::one_of(&["any", "assignee", "guest", "todo"], "any"),
             ),
+            ("tag".into(), ListFilter::string("")),
         ]),
         omit_blank: vec!["search".into()],
         ..ListSpec::default()
@@ -129,6 +130,15 @@ fn calendar_query(query: &HashMap<String, String>) -> HashMap<String, String> {
 }
 
 /// A kind's colour on the calendar (a `cat-*` data role, never a status).
+/// A tag's `cat-*` data role: its code's place in the eight, so one tag keeps
+/// one colour on every event.
+fn tag_tone(code: &str) -> u8 {
+    let hash = code.bytes().fold(0u32, |hash, byte| {
+        hash.wrapping_mul(31).wrapping_add(u32::from(byte))
+    });
+    (hash % 8) as u8 + 1
+}
+
 fn tone(kind: Kind) -> u8 {
     match kind {
         Kind::Call => 1,
@@ -219,6 +229,7 @@ impl Index {
                 "todo" => Mine::Todo,
                 _ => Mine::Any,
             },
+            tag: Some(self.list.filters["tag"].clone()).filter(|tag| !tag.is_empty()),
             related: self.related.clone(),
             between: None,
             series: self.series,
@@ -242,7 +253,10 @@ impl Index {
     ) -> Result<Option<LiveBody>> {
         let name = event(value)?;
         if let Some(dialog) = &mut self.dialog {
-            if dialog.event(&self.pages, scope, name, value).await? {
+            if dialog
+                .event(&self.pages, scope, credential, name, value)
+                .await?
+            {
                 return Ok(None);
             }
         }
@@ -783,7 +797,12 @@ impl Index {
                 ),
                 _ => continue,
             }
-            .kind(a.kind.label(), tone(a.kind))
+            // The first tag colours it, so a tag reads the same on every
+            // event; without one the kind's own colour stands.
+            .kind(
+                a.kind.label(),
+                a.tags.first().map_or(tone(a.kind), |code| tag_tone(code)),
+            )
             .href(format!("/activities/{}", a.id))
             .urgency(urgency(a, now, soon))
             .lane(lane);
@@ -935,6 +954,19 @@ impl Index {
             ],
         })?);
         let form = self.list.filters_form();
+        // The tag filter offers the tenant's own list, so a tag is chosen by
+        // its label and matched by its code.
+        let connection = self.pages.db.get().await?;
+        let mut tag_options = vec![("Any tag".to_owned(), String::new())];
+        tag_options.extend(
+            self.pages
+                .picklists
+                .choices(&**connection, scope, crate::TAGS, None)
+                .await?
+                .into_iter()
+                .map(|choice| (choice.label, choice.value)),
+        );
+        drop(connection);
         let mut controls = vec![
             ToolbarControl::search(
                 "activities-search",
@@ -979,6 +1011,13 @@ impl Index {
                     ("I am a guest", "guest"),
                     ("My to-do activities", "todo"),
                 ]),
+            ),
+            ToolbarControl::select(
+                "activities-tag",
+                "tag",
+                "Tag",
+                &form["tag"],
+                choices(&tag_options),
             ),
         ];
         if self.display == Display::Board {

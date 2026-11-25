@@ -36,6 +36,7 @@ pub struct Pages {
     pub display: Arc<bilibi_datetime::DisplayPolicy>,
     pub locales: Arc<bilibi_locale::Locales>,
     pub step_up: Arc<bilibi_step_up::StepUp>,
+    pub picklists: Arc<bilibi_picklists::PickLists>,
     pub db: Db,
 }
 impl Pages {
@@ -48,6 +49,7 @@ impl Pages {
             display: self.display.clone(),
             locales: self.locales.clone(),
             step_up: self.step_up.clone(),
+            picklists: self.picklists.clone(),
             db: self.db.clone(),
         }
     }

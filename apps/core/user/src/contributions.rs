@@ -137,6 +137,11 @@ inventory::submit! {
         method: Method::Get, path: "/settings/profile", service: crate::account_ui::PROFILE_SERVICE, operation: "profile", access: Access::SignedIn, framed: true,
     })
 }
+inventory::submit! {
+    Contribution::new(ROUTES, "core/user.settings.ownership", Provenance { module: "core/user", source: file!(), line: line!() }, &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+        method: Method::Get, path: "/settings/ownership", service: "core/user.pages", operation: "ownership", access: Access::SignedIn, framed: true,
+    })
+}
 // `ui.landing_menu_id`: the menu page a sign-in opens, at the
 // account's own scope; the profile page validates it against the menu the
 // account can reach, since the definition can only bound its shape.

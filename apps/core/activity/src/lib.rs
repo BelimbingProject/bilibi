@@ -24,7 +24,10 @@ mod wording;
 
 use bilibi_database::{Db, Error, MutationTransaction, Result};
 use bilibi_events::Events;
-use bilibi_module_registry::{Layer, Module, Service};
+use bilibi_module_registry::{
+    contributions::{Seed, SeedAction, SeedMode, SEEDS},
+    Contribution, Layer, Module, Service,
+};
 use bilibi_principal_directory::PrincipalDirectory;
 use bilibi_records::Records;
 use bilibi_tenancy::{Authentication, ReadClient, Scope};
@@ -42,7 +45,7 @@ pub use lists::DayCount;
 pub use model::{
     CallInput, CallStatus, Common, Direction, Draft, FieldError, Guest, Kind, MeetingInput,
     NoteInput, Patch, Priority, Response, Status, TaskInput, MAX_GUESTS, MAX_REMINDERS,
-    MAX_REMINDER_MINUTES,
+    MAX_REMINDER_MINUTES, MAX_TAGS,
 };
 pub use reminder_defaults::{ReminderDefaults, DEFAULT_EMAIL, DEFAULT_MINUTES};
 pub use series::{
@@ -55,6 +58,8 @@ pub const SERVICE: &str = "core/activity.activities";
 pub const RECORD: &str = "core.activity.activity";
 /// The audit kind of a guest row.
 pub const GUEST_RECORD: &str = "core.activity.guest";
+/// The audit kind of one tag membership on an activity.
+pub const TAG_RECORD: &str = "core.activity.tag";
 /// The audit kind of a repeating series' rule.
 pub const SERIES_RECORD: &str = "core.activity.series";
 /// Activities one calendar read returns at most: the calendar draws 500 and
@@ -126,6 +131,9 @@ pub struct Activity {
     /// Whether each reminder is also emailed; `None` follows the tenant
     /// setting.
     pub reminder_email: Option<bool>,
+    /// The tags it carries, in the order they were added: Base Picklists
+    /// stable codes (`core.activity.tags`).
+    pub tags: Vec<String>,
     pub version: i64,
 }
 impl Activity {
@@ -161,6 +169,7 @@ impl Activity {
             guests: Vec::new(),
             reminder_minutes: self.reminder_minutes.clone(),
             reminder_email: self.reminder_email,
+            tags: self.tags.clone(),
         }
     }
 }
@@ -219,6 +228,8 @@ pub struct Filter {
     pub between: Option<(jiff::Timestamp, jiff::Timestamp)>,
     /// The occurrences of one repeating series.
     pub series: Option<i64>,
+    /// Only activities carrying this tag code.
+    pub tag: Option<String>,
     pub sort: Sort,
     pub descending: bool,
     pub page: i64,
@@ -234,6 +245,7 @@ impl Default for Filter {
             related: None,
             between: None,
             series: None,
+            tag: None,
             sort: Sort::When,
             descending: false,
             page: 1,
@@ -322,6 +334,8 @@ pub struct Activities {
     people: Arc<bilibi_person::PersonService>,
     /// The public site, whose primary hostname a feed link names.
     public: Arc<bilibi_public::Public>,
+    /// The tenant's tag vocabulary (`TAGS`).
+    picklists: Arc<bilibi_picklists::PickLists>,
 }
 impl Activities {
     async fn fresh(
@@ -344,6 +358,7 @@ impl Activities {
             calendars: &self.calendars,
             settings: &self.settings,
             people: &self.people,
+            picklists: &self.picklists,
         }
     }
 
@@ -914,9 +929,17 @@ impl Activities {
     }
 }
 
+pub(crate) mod tags;
+pub use tags::TAGS;
+
+inventory::submit! { Contribution::new(SEEDS, "core/activity.picklists", contributions::provenance!(), &Seed {
+    version: "core-activity-picklists-v1", mode: SeedMode::Production,
+    action: SeedAction::Service { service: bilibi_picklists::SEEDS_SERVICE, operation: "reconcile" },
+}) }
+
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/templates", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/public", "base/queue", "base/records", "base/watchers", "base/schedule", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
+    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/templates", "base/menu", "base/notifications", "base/party_ids", "base/picklists", "base/principal_directory", "base/public", "base/queue", "base/records", "base/watchers", "base/schedule", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
     migrations: &[
         ("core-activity-001-activities", include_str!("../migrations/001-activities.sql")),
         ("core-activity-002-invitations", include_str!("../migrations/002-invitations.sql")),
@@ -927,6 +950,7 @@ inventory::submit! { Module {
         ("core-activity-007-rule-followups", include_str!("../migrations/007-rule-followups.sql")),
         ("core-activity-008-logical-followups", include_str!("../migrations/008-logical-followups.sql")),
         ("core-activity-009-watcher-followups", include_str!("../migrations/009-watcher-followups.sql")),
+        ("core-activity-010-tags", include_str!("../migrations/010-tags.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         let records: Arc<Records> = s.get(bilibi_records::SERVICE)?;
@@ -945,6 +969,7 @@ inventory::submit! { Module {
             step_up: s.get(bilibi_step_up::SERVICE)?,
             people: s.get(bilibi_person::SERVICE)?,
             public: s.get(bilibi_public::SERVICE)?,
+            picklists: s.get(bilibi_picklists::SERVICE)?,
         });
         agent_operations::bind(activities.clone())?;
         follow_up::bind(activities.clone())?;
@@ -1000,6 +1025,7 @@ inventory::submit! { Module {
             display: s.get("base/datetime.display")?,
             locales: s.get("base/locale.locales")?,
             step_up: s.get(bilibi_step_up::SERVICE)?,
+            picklists: s.get(bilibi_picklists::SERVICE)?,
             db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
         }))))
     }}],

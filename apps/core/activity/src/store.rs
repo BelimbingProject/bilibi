@@ -6,7 +6,8 @@ use crate::model::{self, Draft, FieldError, Guest, Kind, Response, Status};
 use crate::series::{self, Apply, Frequency, Repeat, Series};
 use crate::{
     Activity, Conflict, Direction, GuestRow, Invites, Patch, Priority, Reference, WriteError,
-    WriteResult, GUEST_RECORD, MANAGE, MANAGE_ALL, RECORD, SERIES_RECORD, VIEW, VIEW_ALL,
+    WriteResult, GUEST_RECORD, MANAGE, MANAGE_ALL, RECORD, SERIES_RECORD, TAG_RECORD, VIEW,
+    VIEW_ALL,
 };
 use bilibi_authz::{authorize_proof, holds_proof, reach_admits, reach_proof, Reach};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
@@ -87,6 +88,8 @@ fn from_row(row: &Row) -> Result<Activity> {
         series_index: row.get("series_index"),
         reminder_minutes: row.get("reminder_minutes"),
         reminder_email: row.get("reminder_email"),
+        // Filled by `tags` once the rows are read: a row read is one statement.
+        tags: Vec::new(),
         version: row.get("version"),
     })
 }
@@ -236,6 +239,85 @@ pub(crate) async fn guests(
         .map(guest_row)
         .collect()
 }
+/// The tags of `ids`, each activity's in the order they were added. One
+/// statement, so a list reads its whole page's tags at once.
+pub(crate) async fn tags(
+    client: &dyn ReadClient,
+    tenant: i64,
+    ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<String>>> {
+    let mut by_activity: std::collections::HashMap<i64, Vec<String>> =
+        std::collections::HashMap::new();
+    if ids.is_empty() {
+        return Ok(by_activity);
+    }
+    for row in client
+        .query(
+            "SELECT activity_id,code FROM core_activity_tags WHERE tenant_id=$1 AND activity_id=ANY($2) ORDER BY activity_id,created_at,code",
+            &[&tenant, &ids],
+        )
+        .await?
+    {
+        by_activity
+            .entry(row.get(0))
+            .or_default()
+            .push(row.get(1));
+    }
+    Ok(by_activity)
+}
+
+/// Replaces `activity`'s tags with `codes`, one `Change` per added or removed
+/// membership. The caller checked each new code and authorized the write.
+pub(crate) async fn set_tags(
+    sql: &tokio_postgres::Transaction<'_>,
+    tenant: i64,
+    activity: i64,
+    codes: &[String],
+) -> Result<Vec<Change>> {
+    let current: Vec<String> = sql
+        .query(
+            "SELECT code FROM core_activity_tags WHERE tenant_id=$1 AND activity_id=$2 ORDER BY created_at,code",
+            &[&tenant, &activity],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    let mut changes = Vec::new();
+    for code in &current {
+        if !codes.contains(code) {
+            sql.execute(
+                "DELETE FROM core_activity_tags WHERE tenant_id=$1 AND activity_id=$2 AND code=$3",
+                &[&tenant, &activity, code],
+            )
+            .await?;
+            changes.push(Change {
+                kind: TAG_RECORD.into(),
+                id: activity,
+                old: json!({"tag": code}),
+                new: json!({}),
+            });
+        }
+    }
+    for code in codes {
+        if current.contains(code) {
+            continue;
+        }
+        sql.execute(
+            "INSERT INTO core_activity_tags(tenant_id,activity_id,code) VALUES ($1,$2,$3)",
+            &[&tenant, &activity, code],
+        )
+        .await?;
+        changes.push(Change {
+            kind: TAG_RECORD.into(),
+            id: activity,
+            old: json!({}),
+            new: json!({"tag": code}),
+        });
+    }
+    Ok(changes)
+}
+
 pub(crate) fn guest_row(row: &Row) -> Result<GuestRow> {
     Ok(GuestRow {
         id: row.get("id"),
@@ -433,6 +515,7 @@ pub(crate) struct Store<'s> {
     pub calendars: &'s bilibi_work_calendar::WorkCalendars,
     pub settings: &'s bilibi_settings::Settings,
     pub people: &'s bilibi_person::PersonService,
+    pub picklists: &'s bilibi_picklists::PickLists,
 }
 /// Which references a change touches, so unchanged ones are not rechecked
 /// (a record the actor can no longer view does not block other edits).
@@ -562,6 +645,38 @@ impl Store<'_> {
         }
     }
 
+    /// Each new tag code is one the tenant's list holds and has not retired;
+    /// a code the activity already carried stays, as Picklists keeps it.
+    async fn check_tags(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        before: &[String],
+        after: &[String],
+    ) -> WriteResult<()> {
+        let mut errors = Vec::new();
+        for code in after {
+            if before.contains(code) {
+                continue;
+            }
+            if !self
+                .picklists
+                .contains_choice(client, scope, crate::TAGS, code, None)
+                .await?
+            {
+                errors.push(FieldError::new(
+                    "tags",
+                    format!("“{code}” is not an active tag; choose one from the list"),
+                ));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(WriteError::Invalid(errors))
+        }
+    }
+
     pub(crate) async fn prepare_create(
         &self,
         client: &dyn ReadClient,
@@ -591,11 +706,15 @@ impl Store<'_> {
             )]));
         }
         let mut errors = Vec::new();
+        let tag_check = self.check_tags(client, scope, &[], &draft.tags).await;
         let touched = Touched {
             related: true,
             assignee: true,
             guests: true,
         };
+        if let Err(WriteError::Invalid(mut more)) = tag_check {
+            errors.append(&mut more);
+        }
         match self.validate(client, scope, &draft, touched).await {
             Ok(draft) if errors.is_empty() => Ok(draft),
             Ok(_) => Err(WriteError::Invalid(errors)),
@@ -692,6 +811,7 @@ impl Store<'_> {
         let assignee = draft.assignee.ok_or(Error::Internal)?;
         let (series_id, series_index) = series.unzip();
         let closed = draft.status.is_some_and(Status::closed);
+        let tags = draft.tags.clone();
         // The people taking part: the creator, the assignee, a related
         // person and the invited guests, one row each.
         let mut guests: Vec<GuestInsert> = Vec::new();
@@ -781,6 +901,7 @@ impl Store<'_> {
                                 .await?,
                         );
                     }
+                    changes.extend(set_tags(sql, tenant, activity.id, &tags).await?);
                     Ok((activity, changes))
                 })
             })
@@ -821,6 +942,8 @@ impl Store<'_> {
             assignee: after.assignee != Some(before.assignee_user_id),
             guests: false,
         };
+        self.check_tags(client, scope, &before.tags, &after.tags)
+            .await?;
         let after = self.validate(client, scope, &after, touched).await?;
         Ok((before, after))
     }
@@ -844,6 +967,7 @@ impl Store<'_> {
             .flatten()
             .and_then(|r| r.id.parse::<i64>().ok());
         let closed_now = after.status.is_some_and(Status::closed);
+        let tags = patch.tags.clone();
         // A new time it is due asks for a new reminder.
         let due_moved = after.starts_at != before.starts_at || after.due_at != before.due_at;
         let earlier = before.clone();
@@ -912,6 +1036,9 @@ impl Store<'_> {
                         if let Some(change) = add_guest(sql, tenant, activity.id, None, Some(person), "related").await? {
                             changes.push(change);
                         }
+                    }
+                    if let Some(tags) = &tags {
+                        changes.extend(set_tags(sql, tenant, activity.id, tags).await?);
                     }
                     Ok((activity, changes))
                 })

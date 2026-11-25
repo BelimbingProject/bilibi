@@ -270,25 +270,21 @@ company, Person or tenant target.
 
 The development seed's one-time `user_bootstrap` receipt names the administrator and the operator company. `settle_bootstrap_affiliation` composes the initial agent Person, its business contact affiliation and an explicit desk in one audited transaction. The staff account stores only its Person. The settled receipt is never replayed after a later unlink or retirement. A refused first desk leaves the receipt unsettled.
 
-`create_first_administrator(grants, operator, input)` is the production
-counterpart of the seed's bootstrap (with the
-operator's own name and email, and a random password nobody knows), behind `bilibi-web create-owner`
-(`apps/web/src/create_owner.rs`, documented for operators in
-`docs/server-install.md`). On one `MutationBoundary` transaction as the
-`create-owner` system principal (`Context::system`, since no account exists
-yet to act as) it locks `users`, proves the given tenant and
-company are the marked platform operator and its primary company, refuses
-with `FirstAdministratorError::AccountsExist` while that tenant holds any
-undeleted account (so it never promotes or replaces one), validates with the
-administrator form's rules, inserts the account, takes the grant-all role
-through Authz's `Grants::grant_first_administrator_in`, and writes the
-receipt (replacing one whose account was deleted, the only way one can
-remain). The transaction's changes are `user`, `authz.principal_role` and
-`user.bootstrap`; it also records the retained `user.bootstrap.completed`
-action with the account, email and role, as the seed does. The host then
-calls `settle_bootstrap_affiliation` for the Person, business affiliation and first desk. `operator_accounts(tenant)` reads the same account count and first email without writing, so the host decides whether an owner exists before it asks any question; where one does, `create-owner` only settles an unfinished bootstrap and reports that owner's claim. Use this service to bootstrap the platform operator's first account.
+`create_first_administrator(grants, operator, input, recover)` backs [server owner setup](../../../docs/server-install.md#the-first-account) and [recovery](../../../docs/server-install.md#transfer-or-recover-installation-ownership). Both paths run as the `create-owner` system principal in a `MutationBoundary` transaction, lock `users` and prove the tenant and company are the marked platform operator and its primary company.
 
-`claim_owner()` is how the owner takes the account. It reads the receipt's account, never a typed address. While the owner has not chosen a password (`password_version` 1) it checks mail readiness and mails a one-time password-reset link, waiting for delivery (`OwnerClaim::Sent`, or `RecentlySent` inside the one-minute reset throttle; a failed delivery withdraws the token and returns `OwnerClaimError::Delivery`). After that it only reports `PasswordChosen` or, once any step-up method is enrolled, `Claimed`. No path creates or claims the owner without the email; root on the server is trusted, so this guards against mistakes and shortcuts, not a malicious administrator.
+Initial setup refuses while the operator tenant has any undeleted account. It inserts the account with a random password, assigns Core Administrator through Authz and writes the receipt. The transaction records `user`, `authz.principal_role` and `user.bootstrap` changes and the retained `user.bootstrap.completed` action. The host then calls `settle_bootstrap_affiliation` for the Person, business affiliation and first desk. On an existing installation, a normal `create-owner` invocation reports the recorded owner's claim state.
+
+Recovery requires an existing receipt. It updates that receipt, expires pending offers from any other sender and records the changes in the same transaction. It grants no role and leaves first-account affiliation setup marked settled.
+
+`claim_owner()` is how the owner takes the account. It reads the receipt's account, never a typed address. While the owner has not chosen a password (`password_version` 1) it checks mail readiness and mails a one-time password-reset link, waiting for delivery (`OwnerClaim::Sent`, or `RecentlySent` inside the one-minute reset throttle; a failed delivery withdraws the token and returns `OwnerClaimError::Delivery`). The password-reset request is audited as `user.reset_requested`. After the password is chosen it only reports `PasswordChosen` or, once any step-up method is enrolled, `Claimed`.
+
+### Ownership transfer (`src/ownership.rs`)
+
+The owner reviews the recipient by name, sign-in address and account number. The account privacy store retains offers as ownership evidence and exports each subject’s participation, dates and recorded status. The exported transfer record omits the other participant’s identity.
+
+For a planned handover, open **Account → My settings → Ownership** (`/settings/ownership`). The current owner selects another active staff account in the platform operator tenant and confirms the offer with a fresh 2FA code. The named recipient receives an inbox notice and has 15 minutes to accept with their own fresh code before the offer expires. Both confirmations require direct browser sessions.
+
+The acceptance review binds to the specific offer shown. Acceptance locks the live `user_bootstrap` receipt, rechecks the offer's participants, status and deadline, and updates the receipt and offer in one `MutationBoundary`. Both changes share that audit boundary, and both accounts keep their roles and ordinary membership data. See [Software access](../../base/software/README.md#access) for the permissions that follow the receipt.
 
 ### Customer tenant owner
 

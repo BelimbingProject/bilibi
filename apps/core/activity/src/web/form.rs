@@ -8,8 +8,9 @@ use bilibi_database::{Error, Result};
 use bilibi_records::{Hit, Resolved};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    choices, error_sentence, params, Alert, Button, ButtonVariant, ErrorSummary, Field, Html,
-    InputKind, Modal, ModalWidth, RecordPicker, StatusKind,
+    choices, error_sentence, params, Alert, Button, ButtonVariant, Choice, ErrorSummary, Field,
+    Html, InputKind, Modal, ModalWidth, RecordPicker, SearchMultiOption, SearchMultiSelect,
+    StatusKind,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -43,6 +44,13 @@ pub(crate) struct Dialog {
     guests: Vec<Guest>,
     /// Weekly: the days chosen, by code.
     days: Vec<String>,
+    /// The tags chosen, by Base Picklists code.
+    tags: Vec<String>,
+    /// The tag search's query and its hits (`(code, label)`).
+    tag_query: String,
+    tag_hits: Vec<(String, String)>,
+    /// Every tag the tenant offers, for the selected chips' labels.
+    tag_choices: Vec<Choice>,
     errors: BTreeMap<String, Vec<String>>,
     notice: String,
     submitted: bool,
@@ -109,6 +117,10 @@ impl Dialog {
             shared: false,
             guests: Vec::new(),
             days: Vec::new(),
+            tags: Vec::new(),
+            tag_query: String::new(),
+            tag_hits: Vec::new(),
+            tag_choices: Vec::new(),
             errors: BTreeMap::new(),
             notice: String::new(),
             submitted: false,
@@ -221,6 +233,7 @@ impl Dialog {
         }
         dialog.shared = draft.shared;
         dialog.guests = draft.guests.clone();
+        dialog.tags = draft.tags.clone();
         Ok(dialog)
     }
     pub fn submit_event(&self) -> &'static str {
@@ -248,11 +261,127 @@ impl Dialog {
         &mut self,
         pages: &Pages,
         scope: &Scope,
+        credential: &str,
         name: &str,
         value: &Value,
     ) -> Result<bool> {
         match name {
             "activity_change" => self.read(pages, scope, value).await?,
+            "tag_search" => {
+                let query: String = value["query"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .chars()
+                    .take(100)
+                    .collect();
+                let connection = pages.db.get().await?;
+                let client = &**connection;
+                self.tag_hits = pages
+                    .picklists
+                    .choices(client, scope, crate::TAGS, None)
+                    .await?
+                    .into_iter()
+                    .filter(|choice| {
+                        query.is_empty()
+                            || choice.label.to_lowercase().contains(&query.to_lowercase())
+                            || choice.value.to_lowercase().contains(&query.to_lowercase())
+                    })
+                    .take(20)
+                    .map(|choice| (choice.value, choice.label))
+                    .collect();
+                self.tag_query = query;
+            }
+            "tag_pick" | "tag_remove" => {
+                let code: String = value["value"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(64)
+                    .collect();
+                if let Some(at) = self.tags.iter().position(|tag| *tag == code) {
+                    self.tags.remove(at);
+                } else if name == "tag_pick" && self.tags.len() < crate::model::MAX_TAGS {
+                    self.tags.push(code);
+                }
+            }
+            "tag_create" => {
+                // One value in the tenant's list, through the Picklists
+                // contract: the code is the lower-cased label, made safe.
+                // The multi-select sends what was typed as `query`.
+                let label: String = value["query"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .chars()
+                    .take(60)
+                    .collect();
+                let code: String = label
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                    .collect::<String>()
+                    .trim_matches('-')
+                    .split('-')
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("-");
+                if label.is_empty() || code.is_empty() {
+                    return Ok(true);
+                }
+                let call = pages.call(
+                    scope,
+                    credential,
+                    "tag_create",
+                    "base.picklists.value.create",
+                );
+                match pages
+                    .contracts
+                    .submit(
+                        &call,
+                        serde_json::json!({"list": crate::TAGS, "code": code, "label": label}),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        if !self.tags.contains(&code) && self.tags.len() < crate::model::MAX_TAGS {
+                            self.tags.push(code.clone());
+                        }
+                        let connection = pages.db.get().await?;
+                        self.tag_choices = pages
+                            .picklists
+                            .choices(&**connection, scope, crate::TAGS, None)
+                            .await?;
+                        self.errors.remove("tags");
+                    }
+                    Err(error) => {
+                        let message = match refusal(
+                            error,
+                            "You do not have permission to add a tag.",
+                            "The tag was not added. Try again.",
+                        )? {
+                            Refusal::Message(message) => message,
+                            Refusal::Fields(fields) => fields
+                                .iter()
+                                .map(|(field, messages)| {
+                                    let label = if field == "code" {
+                                        format!("The tag “{label}”")
+                                    } else {
+                                        "The tag".to_owned()
+                                    };
+                                    messages
+                                        .iter()
+                                        .map(|message| error_sentence(&label, message))
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        };
+                        self.errors.entry("tags".into()).or_default().push(message);
+                    }
+                }
+            }
             "pick_related" => {
                 let (kind, id) = value["record"]
                     .as_str()
@@ -306,6 +435,15 @@ impl Dialog {
             if let Some(v) = form.get(key) {
                 self.values.insert(key.into(), v.clone());
             }
+        }
+        // The tags post as an array of codes, like the weekly days.
+        if let Some(codes) = value.get("tags").and_then(Value::as_array) {
+            self.tags = codes
+                .iter()
+                .filter_map(Value::as_str)
+                .take(20)
+                .map(str::to_owned)
+                .collect();
         }
         // The weekly days come as an array; absent is none chosen.
         if form.contains_key("repeat") && self.value("repeat") == "weekly" {
@@ -426,6 +564,9 @@ impl Dialog {
         }
         if self.shared {
             input["shared"] = json!(true);
+        }
+        if !self.tags.is_empty() {
+            input["tags"] = json!(self.tags);
         }
         if self.repeats() {
             let mut repeat = json!({
@@ -675,6 +816,9 @@ impl Dialog {
         cancel_event: &str,
         framed: bool,
     ) -> Result<Html> {
+        // The tag vocabulary for the chips already chosen; a caller that did
+        // not pass it still shows the codes.
+        let tag_choices = &self.tag_choices;
         let mut fields = vec![self
             .field(words, prefix, "title", "Subject")
             .required()
@@ -863,6 +1007,61 @@ impl Dialog {
             ("pick_related", "clear_related"),
             self.sentences(words, "related"),
         ))?);
+        // Tags: the tenant's own vocabulary, searched and chosen from it, or
+        // added to it in place by someone who may change the list.
+        let selected: Vec<SearchMultiOption> = self
+            .tags
+            .iter()
+            .map(|code| {
+                let label = tag_choices
+                    .iter()
+                    .find(|choice| choice.value == *code)
+                    .map(|choice| choice.label.clone())
+                    .unwrap_or_else(|| code.clone());
+                SearchMultiOption::new(code.clone(), label)
+            })
+            .collect();
+        let results: Vec<SearchMultiOption> = self
+            .tag_hits
+            .iter()
+            .filter(|(code, _)| !self.tags.contains(code))
+            .map(|(code, label)| SearchMultiOption::new(code.clone(), label.clone()))
+            .collect();
+        let mut tags = SearchMultiSelect::new(
+            format!("{prefix}-tags"),
+            "tags",
+            "Tags",
+            "tag_search",
+            "tag_pick",
+            "tag_remove",
+        )
+        .query(&self.tag_query)
+        .selected(selected)
+        .results(results)
+        .wrap_chips();
+        if !self.tag_query.is_empty() {
+            tags = tags.create(format!("Add “{}”", self.tag_query.trim()), "tag_create");
+        }
+        body.push(&render(tags)?);
+        if let Some(messages) = self.errors.get("tags") {
+            let mut listed = Html::EMPTY;
+            for message in messages {
+                if !listed.is_empty() {
+                    listed.push(&Html::text(" "));
+                }
+                listed.push(&Html::text(&error_sentence("Tags", message)));
+            }
+            body.push(
+                &Html::render(&Alert {
+                    kind: StatusKind::Error,
+                    id: &format!("{prefix}-tags-error"),
+                    body: listed,
+                    ..Alert::default()
+                })
+                .map_err(|_| Error::Internal)?,
+            );
+        }
+
         body.push(&render(
             Field::in_form(FORM, "shared")
                 .id(format!("{prefix}-shared"))

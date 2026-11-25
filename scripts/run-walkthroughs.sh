@@ -199,6 +199,7 @@ WALKTHROUGHS=(
   'core|user-impersonation-capabilities|apps/core/user|impersonation-capabilities-walkthrough|migrate|BILIBI_IMPERSONATION_CAPABILITIES_DEMO=disposable|-'
   'core|user-memberships|apps/core/user|memberships-walkthrough|migrate|BILIBI_MEMBERSHIPS_DEMO=disposable|-'
   'core|user-tenant-owner-bootstrap|apps/core/user|tenant-owner-bootstrap-walkthrough|migrate|BILIBI_TENANT_OWNER_DEMO=disposable DATABASE_POOL_SIZE=1 BILIBI_MAIL_DIR=@/mailbox -MAIL_HOST|-'
+  'core|user-ownership-transfer|apps/core/user|ownership-transfer-walkthrough|migrate|BILIBI_OWNERSHIP_DEMO=disposable DATABASE_POOL_SIZE=1|-'
   'core|user-notifications|apps/core/user|notifications-walkthrough|migrate|BILIBI_DISPOSABLE_NOTIFICATIONS_DEMO=yes|-'
   'core|user-two-factor-reset-request|apps/core/user|two-factor-reset-request-walkthrough|migrate|BILIBI_TWO_FACTOR_RESET_REQUEST_DEMO=disposable|-'
   # Installs the fixture and two disabled connections; the protocol itself needs

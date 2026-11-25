@@ -4,7 +4,7 @@
 use crate::{
     Activities, Activity, Apply, CallStatus, Common, Direction, Draft, Filter, Frequency, Guest,
     GuestRow, Kind, Mine, Patch, Priority, Reference, Repeat, Response, State, Status, WriteError,
-    MANAGE, MAX_OCCURRENCES, MAX_REMINDERS, MAX_REMINDER_MINUTES, VIEW,
+    MANAGE, MAX_OCCURRENCES, MAX_REMINDERS, MAX_REMINDER_MINUTES, MAX_TAGS, VIEW,
 };
 use bilibi_agent_api::{
     Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
@@ -169,7 +169,20 @@ impl<'a> Reader<'a> {
             internal_notes: self.text("internal_notes"),
             reminder_minutes: self.minutes("reminder_minutes").flatten(),
             reminder_email: self.optional_flag("reminder_email").flatten(),
+            tags: self.tags(),
         }
+    }
+    /// The tag codes, each checked against the tenant's list when it is written.
+    fn tags(&mut self) -> Vec<String> {
+        self.at()
+            .get("tags")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .take(MAX_TAGS)
+            .map(str::to_owned)
+            .collect()
     }
     fn done<T>(self, value: T) -> bilibi_agent_api::Result<T> {
         if self.fields.is_empty() {
@@ -361,6 +374,7 @@ fn patch(input: &Value) -> bilibi_agent_api::Result<Patch> {
         assignee: reader.at()["assignee_user_id"].as_i64(),
         reminder_minutes: reader.minutes("reminder_minutes"),
         reminder_email: reader.optional_flag("reminder_email"),
+        tags: reader.at().get("tags").map(|_| reader.tags()),
     };
     let mut patch = patch;
     if reader.flag("reminder_minutes_default") == Some(true) {
@@ -1147,10 +1161,14 @@ fn common_properties() -> serde_json::Map<String, Value> {
         "internal_notes".into(),
         json!({"type":"string","maxLength":10000,"description":"Never sent to guests."}),
     );
+    properties.insert("tags".into(), tags_schema());
     // Notes have no reminders; the rule refuses them there.
     properties.insert("reminder_minutes".into(), reminder_minutes_schema());
     properties.insert("reminder_email".into(), reminder_email_schema());
     properties
+}
+fn tags_schema() -> Value {
+    json!({"type":"array","items":{"type":"string","maxLength":64},"description":"Tag codes from the tenant's Activity tag list (core.activity.tags), at most 20. In a change, the whole set: an empty list clears every tag."})
 }
 fn reminder_minutes_schema() -> Value {
     json!({"type":"array","items":{"type":"integer","minimum":0,"maximum":MAX_REMINDER_MINUTES},"description":format!("Minutes before it starts or is due to remind at, up to {MAX_REMINDERS} (0 reminds at the time). An empty list asks for no reminder; omitted follows your default, then the organisation's.")})
