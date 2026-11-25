@@ -48,10 +48,8 @@ pub struct Container {
     pub commit: Option<&'static str>,
     /// The release the container is at, `0.1.0`; `None` when unpinned or built from an untagged commit.
     pub version: Option<&'static str>,
-    /// Commit date and source branch captured at build time, when known.
-    pub date: Option<&'static str>,
+    /// Source branch captured at build time, when known.
     pub branch: Option<&'static str>,
-    pub package_version: Option<&'static str>,
     /// Extensions declare reviewed or customer code; Domains have no value.
     pub extension_code: Option<ExtensionCode>,
 }
@@ -103,26 +101,11 @@ impl Container {
             return format!("v{version}");
         }
         let Some(commit) = self.commit else {
-            return self
-                .package_version
-                .unwrap_or("Version unavailable")
-                .to_owned();
+            return "Version unavailable".to_owned();
         };
-        let mut parts = Vec::new();
-        if let Some(version) = self.package_version {
-            parts.push(version.to_owned());
-        }
         let short = commit.get(..7).unwrap_or(commit);
-        parts.push(
-            self.branch
-                .map_or_else(|| short.to_owned(), |branch| format!("{branch} {short}")),
-        );
-        if let Some(date) = self.date {
-            if let Some(short) = date.get(2..) {
-                parts.push(short.replace('-', ""));
-            }
-        }
-        parts.join(" · ")
+        self.branch
+            .map_or_else(|| short.to_owned(), |branch| format!("{branch} {short}"))
     }
     pub fn short_commit(&self) -> Option<&'static str> {
         self.commit.map(short)

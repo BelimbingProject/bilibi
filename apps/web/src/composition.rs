@@ -10,9 +10,7 @@ struct PinnedContainer {
     commit: &'static str,
     /// The `vX.Y.Z` tag at that commit, without the `v`; `None` when untagged.
     version: Option<&'static str>,
-    date: Option<&'static str>,
     branch: Option<&'static str>,
-    package_version: Option<&'static str>,
 }
 /// The pin as `build.rs` read it.
 #[derive(Clone, Copy, Debug)]
@@ -61,9 +59,7 @@ pub(super) fn composition() -> Composition {
                         modules: Vec::new(),
                         commit: None,
                         version: None,
-                        date: None,
                         branch: None,
-                        package_version: None,
                         extension_code: (layer == Layer::Extensions).then(|| {
                             bilibi_extensions::CODE
                                 .iter()
@@ -94,9 +90,7 @@ pub(super) fn composition() -> Composition {
             if let Some(built) = generated::BUILT_CONTAINERS.iter().find(|c| c.name == name) {
                 container.commit = Some(built.commit);
                 container.version = built.version;
-                container.date = built.date;
                 container.branch = built.branch;
-                container.package_version = built.package_version;
             }
         }
         return Composition {
@@ -145,9 +139,7 @@ pub(super) fn composition() -> Composition {
         if let Some(pinned) = pin.containers.iter().find(|c| c.name == name) {
             container.commit = Some(pinned.commit);
             container.version = pinned.version;
-            container.date = pinned.date;
             container.branch = pinned.branch;
-            container.package_version = pinned.package_version;
         }
     }
     Composition {

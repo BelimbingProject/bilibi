@@ -408,6 +408,7 @@ fn render(
         customize: if editing {
             Html::render(&IconButton {
                 id: "close-customize",
+                class: "icon-only",
                 event: "toggle_layout_edit",
                 ..IconButton::new("close", "Close")
             })

@@ -834,20 +834,20 @@ impl View {
             "stale" => "The saved version list does not match this build. Rebuild with an up-to-date version list.".to_owned(),
             _ => "This build has no exact version list. Record module versions when building the next update.".to_owned(),
         };
-        let domains: Vec<String> = installed["domains"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|d| match d["version"].as_str() {
-                Some(version) => format!("{} {version}", text(&d["id"])),
-                None => format!("{} (version unknown)", text(&d["id"])),
-            })
-            .collect();
-        let domains = if domains.is_empty() {
-            "None".to_owned()
-        } else {
-            domains.join(", ")
+        let installed_components = |kind: &str| {
+            let components: Vec<_> = installed[kind]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|item| format!("{} {}", text(&item["name"]), text(&item["build_label"])))
+                .collect();
+            if components.is_empty() {
+                "None".to_owned()
+            } else {
+                components.join(", ")
+            }
         };
+        let domains = installed_components("domains");
         let plugins: Vec<String> = status["plugins"]
             .as_array()
             .into_iter()
@@ -860,23 +860,7 @@ impl View {
         } else {
             plugins.join(", ")
         };
-        let extensions: Vec<String> = installed["extensions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|extension| {
-                format!(
-                    "{} {}",
-                    text(&extension["id"]),
-                    extension["version"].as_str().unwrap_or("(version unknown)")
-                )
-            })
-            .collect();
-        let extensions = if extensions.is_empty() {
-            "None".to_owned()
-        } else {
-            extensions.join(", ")
-        };
+        let extensions = installed_components("extensions");
         let mut facts = render(Facts {
             id: "software-instance-facts",
             items: vec![

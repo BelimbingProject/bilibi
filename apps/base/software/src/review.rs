@@ -35,7 +35,7 @@ pub fn installed_json(made: &Composition) -> Value {
         made.containers
             .iter()
             .filter(|c| c.layer == layer)
-            .map(|c| json!({"id": c.id, "name": c.display_name(), "version": c.version, "build_label": c.build_label(), "branch": c.branch, "commit": c.commit, "modules": c.modules, "extension_code": c.extension_code.map(|code| code.as_str())}))
+            .map(|c| json!({"id": c.id, "name": c.display_name(), "version": c.version, "build_label": c.build_label(), "commit": c.commit, "modules": c.modules, "extension_code": c.extension_code.map(|code| code.as_str())}))
             .collect()
     };
     let (pin, reason) = match &made.pin {

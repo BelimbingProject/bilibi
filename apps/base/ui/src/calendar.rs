@@ -1474,6 +1474,7 @@ impl View {
             width: ModalWidth::Narrow,
             description: "Times are in the zone the calendar shows.",
             role: "",
+            close_icon: false,
             flash: None,
             body: form,
         })

@@ -381,7 +381,7 @@ function discoveryView() {
       const installed = ((state.data.installed || {})[kind] || []).find((d) => d.id === item.id);
       const requested = ((state.data.proposal || {})[kind] || []).includes(item.id);
       cards.push(el('div', { class: 'card stack', id: kind + '-' + item.id }, [
-        el('h3', { text: (installed?.name || item.name || item.id) + (requested ? ' · requested' : '') }),
+        el('h3', { text: (item.name || item.id) + (requested ? ' · requested' : '') }),
         el('p', { class: 'small', text: item.description || '' }),
         el('p', { class: 'small muted', text: 'Source: ' + (item.repository || '') }),
         installed ? el('p', { class: 'small', text: 'Installed build: ' + installed.build_label }) : null,

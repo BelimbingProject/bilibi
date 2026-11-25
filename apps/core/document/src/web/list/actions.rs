@@ -283,6 +283,7 @@ impl Index {
             id: "documents-preview-modal",
             title: &preview.name,
             cancel_event: "close_preview",
+            close_icon: true,
             width: ModalWidth::Wide,
             body,
             ..Modal::default()
@@ -338,6 +339,7 @@ impl Index {
             id: "documents-result-modal",
             title: "Delete result",
             cancel_event: "close_result",
+            close_icon: true,
             width: ModalWidth::Narrow,
             body,
             ..Modal::default()
