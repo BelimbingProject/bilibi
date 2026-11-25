@@ -42,9 +42,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "use an empty disposable database"
     );
     client
-        .batch_execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-        .await?;
-    client
         .batch_execute(include_str!(
             "../../base/settings/migrations/001-settings.sql"
         ))
@@ -62,12 +59,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await?;
     create_scale_tables(&client, "restore_scale", BASELINE_TABLES).await?;
-    client
-        .execute(
-            "INSERT INTO restore_scale_1 (id, payload) VALUES (1, 'before update')",
-            &[],
-        )
-        .await?;
     client
         .execute(
             "INSERT INTO restore_scale_220 (id, payload) VALUES (1, 'before update')",
