@@ -28,18 +28,22 @@ pub(super) fn application_version(
     let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let setup = &record["setup"];
     let tag = setup["tag"].as_str()?;
-    let version = if tag.starts_with("nightly-") {
-        tag
-    } else {
-        tag.strip_prefix("setup-")?
-    };
     let date = setup["released"]
         .as_str()?
         .parse::<jiff::civil::Date>()
         .ok()?;
+    let version = if let Some(nightly) = tag.strip_prefix("nightly-") {
+        let nightly_date = nightly.parse::<jiff::civil::Date>().ok()?;
+        if nightly != nightly_date.to_string() || nightly.len() != 10 {
+            return None;
+        }
+        nightly_date.strftime("%y%m%d").to_string()
+    } else {
+        tag.strip_prefix("setup-")?.to_owned()
+    };
     Some(VersionBadge {
-        text: version.to_owned(),
-        title: format!("Application release · {}", display.render_date(date)),
+        text: version,
+        title: format!("{tag} · {}", display.render_date(date)),
     })
 }
 

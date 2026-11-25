@@ -436,7 +436,7 @@ async fn context<'a>(
             composition.version,
             &display,
         ),
-        components: composition.containers,
+        can_view_software: platform_operator && capabilities.contains(bilibi_base::software::VIEW),
         topbar_actions,
         page_search: bilibi_ui::page_search(&pages, records).map_err(|_| Error::Internal)?,
     })

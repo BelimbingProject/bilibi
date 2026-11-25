@@ -463,7 +463,11 @@ def pin(root, modules, files):
                 + f'cargo_lock_sha256 = "{sha256(lock)}"\n'
                 + '\n[containers]\n')
     for name, head in heads.items():
+        folder = mounted[name]
+        branch = subprocess.run(["git", "-C", str(folder), "symbolic-ref", "--quiet", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
         manifest += f'\n[containers."{name}"]\nhead = "{head}"\n'
+        if branch and re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
+            manifest += f'branch = "{branch}"\n'
         if versions[name]:
             manifest += f'version = "{versions[name]}"\n'
         layer, container = name.split('/', 1)

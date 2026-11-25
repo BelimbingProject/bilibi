@@ -126,6 +126,11 @@ inventory::submit! { Consumer::new::<PublicLink>(PUBLIC_LINKS, "base/public", va
 /// server. The coarse guard before any route's own budget.
 pub const SENDER_PER_MINUTE: &str = "public.sender_per_minute";
 pub const SENDER_PER_HOUR: &str = "public.sender_per_hour";
+/// The lookup budget: hostnames one sender may make a server look up in the
+/// database, before any other count. A hostname's answer is reused for a few
+/// seconds, so a visitor of a real site rarely spends any.
+pub const LOOKUPS_PER_MINUTE: &str = "public.lookups_per_minute";
+pub const LOOKUPS_PER_HOUR: &str = "public.lookups_per_hour";
 
 macro_rules! provenance {
     () => {
@@ -148,5 +153,19 @@ inventory::submit! { Contribution::new(DEFINITIONS, SENDER_PER_HOUR, provenance!
     minimum: Some(1.0), maximum: Some(100_000_000.0), validator: None,
     editor: Some(Editor { group: "Public site", label: "Public site requests per sender an hour",
         help: "Most requests one address may make of the whole public site in an hour, on each server. A limit a minute above this one never takes effect.",
+        capability: None, reveal_duration_ms: 5_000 }),
+})) }
+inventory::submit! { Contribution::new(DEFINITIONS, LOOKUPS_PER_MINUTE, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(120), nullable: false, encrypted: false,
+    minimum: Some(1.0), maximum: Some(1_000_000.0), validator: None,
+    editor: Some(Editor { group: "Public site", label: "Public site hostname lookups per sender a minute",
+        help: "Most hostnames one address may make a server look up in a minute, counted before anything else, signed webhooks included. Each answer is reused for five seconds, so visitors of a real site rarely spend any; past it the site answers 429 without looking.",
+        capability: None, reveal_duration_ms: 5_000 }),
+})) }
+inventory::submit! { Contribution::new(DEFINITIONS, LOOKUPS_PER_HOUR, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(2_000), nullable: false, encrypted: false,
+    minimum: Some(1.0), maximum: Some(100_000_000.0), validator: None,
+    editor: Some(Editor { group: "Public site", label: "Public site hostname lookups per sender an hour",
+        help: "Most hostnames one address may make a server look up in an hour. A limit a minute above this one never takes effect.",
         capability: None, reveal_duration_ms: 5_000 }),
 })) }

@@ -1,12 +1,12 @@
 //! The portal operations agents may call
 //! (`core.portal.*`): thin adapters over the `PortalService` facade
-//! with the sealed scope the registry proved. Reads return the portal site and
-//! the invitations; every write is a reviewed safe write whose preview shares
+//! with the sealed scope the registry proved. Reads return the portal's
+//! options and the invitations; every write is a reviewed safe write whose preview shares
 //! the facade's checks without writing and whose commit writes through the
 //! plan's audited transaction. The staff page calls the same contracts. Same
 //! shape as `core/currency`.
 use crate::{
-    facade::{Checked, FieldError, InvitationInput, LogoChange, PortalService, SiteInput},
+    facade::{Checked, FieldError, InvitationInput, OptionsInput, PortalService},
     MANAGE, VIEW,
 };
 use bilibi_agent_api::{
@@ -24,8 +24,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-pub const SITE_GET: &str = "core.portal.site.get";
-pub const SITE_SET: &str = "core.portal.site.set";
+pub const OPTIONS_GET: &str = "core.portal.options.get";
+pub const OPTIONS_SET: &str = "core.portal.options.set";
 pub const LIST: &str = "core.portal.invitation.list";
 pub const INVITE: &str = "core.portal.invitation.create";
 pub const REVOKE: &str = "core.portal.invitation.revoke";
@@ -63,20 +63,9 @@ fn found(error: Error) -> bilibi_agent_api::Error {
         other => other.into(),
     }
 }
-fn site_input(input: &Value) -> SiteInput {
-    SiteInput {
-        address: bilibi_agent_api::text_field(input, "address"),
-        title: bilibi_agent_api::text_field(input, "title"),
-        enabled: input["enabled"].as_bool(),
-        registration: input["registration"].as_bool(),
-        logo: match (
-            input["remove_logo"].as_bool(),
-            input["logo_asset_id"].as_i64(),
-        ) {
-            (Some(true), _) => LogoChange::Remove,
-            (_, Some(id)) => LogoChange::Set(id),
-            _ => LogoChange::Keep,
-        },
+fn options_input(input: &Value) -> OptionsInput {
+    OptionsInput {
+        registration: input["registration"].as_bool().unwrap_or(false),
         version: input["version"].as_i64(),
     }
 }
@@ -218,12 +207,16 @@ impl Write {
             Self::Site => {
                 let (before, after) = checked(
                     access
-                        .preview_site(client, scope, &site_input(input))
+                        .preview_options(client, scope, &options_input(input))
                         .await
                         .map_err(found)?,
                 )?;
                 json!({
-                    "summary": format!("Set the customer portal to {} at /portal/sign-in/{}", after.title, after.address),
+                    "summary": if after.registration {
+                        format!("Let people ask for an account on the {} portal; each request waits for approval", after.title)
+                    } else {
+                        format!("Stop taking requests for an account on the {} portal", after.title)
+                    },
                     "before": before.map(|site| site.to_json()),
                     "after": after.to_json(),
                 })
@@ -320,7 +313,7 @@ impl WriteHandler for Write {
             let value = match self {
                 Self::Site => checked(
                     access
-                        .set_site_in(tx, scope, &site_input(input))
+                        .set_options_in(tx, scope, &options_input(input))
                         .await
                         .map_err(found)?,
                 )?
@@ -374,15 +367,10 @@ fn empty_schema() -> Value {
 fn list_schema() -> Value {
     json!({"type":"object","properties":{"page":{"type":"integer","minimum":1,"maximum":1000000},"page_size":{"type":"integer","minimum":1,"maximum":100}}})
 }
-fn site_schema() -> Value {
-    json!({"type":"object","required":["address","title"],"properties":{
-        "address":crate::web::fields::ADDRESS.input(json!({"maxLength":63,"description":"The portal address segment, such as acme: lowercase letters, digits and inner hyphens. Customers sign in at /portal/sign-in/{address}."})),
-        "title":crate::web::fields::TITLE.input(json!({"maxLength":120,"description":"The name customers see on the portal and in its emails."})),
-        "enabled":crate::web::fields::ENABLED.input(json!({"description":"Turn the portal on or off. Leave it out to keep it as it is; a new site starts off. While off, its pages answer 404 and no invitation is sent or redeemed."})),
-        "registration":crate::web::fields::REGISTRATION.input(json!({"description":"Let people ask for an account at /portal/register/{address}; staff approve each request. Leave it out to keep it as it is; off by default."})),
-        "logo_asset_id":{"type":"integer","minimum":1,"description":"A PNG, JPEG, GIF or WebP image already stored in Media as this workspace's own, shown on the portal's pages. Leave it out to keep the logo."},
-        "remove_logo":{"type":"boolean","description":"Remove the logo."},
-        "version":{"type":"integer","minimum":1,"description":"The version you read; a site changed since is refused."},
+fn options_schema() -> Value {
+    json!({"type":"object","required":["registration"],"properties":{
+        "registration":crate::web::fields::REGISTRATION.input(json!({"description":"Let people ask for an account at /portal/register on the public site; staff approve each request. Off by default."})),
+        "version":{"type":"integer","minimum":0,"description":"The version you read; options changed since are refused."},
     }})
 }
 fn invite_schema() -> Value {
@@ -419,7 +407,7 @@ fn accounts_output() -> Value {
     json!({"type":"array","items":{"type":"object","description":"id, name, email, person_id, company_id (null for a private customer) and active (false once access is revoked)."}})
 }
 fn site_output() -> Value {
-    json!({"type":"object","description":"site: address, title, enabled, version and sign_in (the portal sign-in path), or null when no site is set."})
+    json!({"type":"object","description":"site: title and enabled (the public site's, set with base.public.site.set), registration, version and sign_in (the portal sign-in path), or null when the workspace has no public site."})
 }
 fn list_output() -> Value {
     json!({"type":"array","items":{"type":"object","description":"id, email, name, person_id, affiliation_id, company_id, status (pending, accepted, revoked or expired) and user_id once accepted."}})
@@ -431,8 +419,8 @@ fn record_output() -> Value {
 const MODULE: &str = "core/portal";
 inventory::submit! { Contribution::new(DEFINITIONS, "core/portal.agent", Provenance { module: MODULE, source: file!(), line: line!() }, &Definitions {
     operations: &[
-        Operation { key: SITE_GET, title: "Read the customer portal site", summary: "The portal address and title of this tenant's customer portal, or null when none is set.", keywords: &["portal", "customer", "site", "address"], capability: VIEW, input: empty_schema, output: site_output, handler: Handler::Read(&Read::Site), channels: Channels::Every, step_up: &[] },
-        Operation { key: SITE_SET, title: "Set the customer portal site", summary: "Set the address customers sign in at (/portal/sign-in/{address}), the title they see, and whether the portal is on. A new site starts off. Changing the address breaks links already emailed.", keywords: &["portal", "customer", "site", "address", "title"], capability: MANAGE, input: site_schema, output: record_output, handler: Handler::SafeWrite(&Write::Site), channels: Channels::Every, step_up: &[] },
+        Operation { key: OPTIONS_GET, title: "Read the customer portal options", summary: "The customer portal of this tenant's public site: its title, whether it is on, and whether people may ask for an account. Null when the workspace has no public site.", keywords: &["portal", "customer", "site", "registration"], capability: VIEW, input: empty_schema, output: site_output, handler: Handler::Read(&Read::Site), channels: Channels::Every, step_up: &[] },
+        Operation { key: OPTIONS_SET, title: "Set the customer portal options", summary: "Let people ask for a customer account at /portal/register, or stop it. The site itself (title, logo, on or off, hostnames) is set with base.public.site.set.", keywords: &["portal", "customer", "registration", "request", "signup"], capability: MANAGE, input: options_schema, output: record_output, handler: Handler::SafeWrite(&Write::Site), channels: Channels::Every, step_up: &[] },
         Operation { key: LIST, title: "List customer invitations", summary: "This tenant's customer portal invitations, newest first, with their status.", keywords: &["portal", "customer", "invitation", "invite"], capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
         Operation { key: INVITE, title: "Invite a customer to the portal", summary: "Email a Person a link to set a password and use the customer portal, as a private individual or through one of the Person's affiliations. Inviting the same address again replaces the earlier link.", keywords: &["portal", "customer", "invitation", "invite", "account"], capability: MANAGE, input: invite_schema, output: record_output, handler: Handler::SafeWrite(&Write::Invite), channels: Channels::Every, step_up: &[] },
         Operation { key: REGISTRATIONS, title: "List requests for a customer account", summary: "Requests people made on this tenant's portal, newest first. A request is confirmed by email before it waits for a decision.", keywords: &["portal", "customer", "registration", "request", "signup"], capability: VIEW, input: list_schema, output: registrations_output, handler: Handler::Read(&Read::Registrations), channels: Channels::Every, step_up: &[] },
@@ -444,5 +432,5 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/portal.agent", Provena
         Operation { key: REVOKE, title: "Revoke a customer invitation", summary: "Stop a pending invitation's link from working. An account already made from an accepted invitation is not touched.", keywords: &["portal", "customer", "invitation", "revoke", "cancel"], capability: MANAGE, input: revoke_schema, output: record_output, handler: Handler::SafeWrite(&Write::Revoke), channels: Channels::Every, step_up: &[] },
     ],
     guides: &[Guide { key: "core.portal", title: "Customer portal access", summary: "How a tenant's customers get into its portal: the portal site, invitations and what a customer can reach.", keywords: &["portal", "customer", "invitation", "site"], capability: VIEW,
-        body: "A tenant's customers sign in to its portal, never to the staff application. First set the portal site with core.portal.site.set: an address such as acme (customers sign in at /portal/sign-in/acme), the title they see, and enabled true to turn it on; a portal is off until then, and while off its pages answer 404 and invitations are refused. Read it with core.portal.site.get.\n\nA customer account always belongs to a Person. Invite one with core.portal.invitation.create: the person_id, the name and email, and for a business customer the affiliation_id of the company it signs in through. The person gets an email with a one-time link to choose a password; the link expires after the tenant's invitation lifetime (7 days by default). Inviting the same address again replaces the earlier link. List invitations and their status with core.portal.invitation.list and stop a pending one with core.portal.invitation.revoke. List the accounts customers made with core.portal.account.list; core.portal.account.revoke ends a customer's access and sessions at once, and core.portal.account.restore gives it back.\n\nWhen the site has registration on, people may ask for an account at /portal/register/{address}. A request is confirmed by an emailed link, then waits for staff: list them with core.portal.registration.list, approve one with core.portal.registration.approve (choose the Person, matching or creating it first, and for a business customer its affiliation; this sends the invitation) or reject it with core.portal.registration.reject. The company name on a request is only what the person typed; nothing is created from it.\n\nA customer sees only portal pages and only its own records; it cannot open staff pages or connect an agent. For each write, run the dry-run check, show the complete preview, wait for explicit approval, then commit the unchanged operations." }],
+        body: "A tenant's customers sign in to its portal, never to the staff application. The portal lives on the workspace's public site: set it up with base.public.site.set (its title, and enabled true to turn it on) and give it a hostname with base.public.hostname.add; customers sign in at /portal/sign-in on that hostname. While the site is off its pages answer 404 and invitations are refused. Read the portal's state with core.portal.options.get.\n\nA customer account always belongs to a Person. Invite one with core.portal.invitation.create: the person_id, the name and email, and for a business customer the affiliation_id of the company it signs in through. The person gets an email with a one-time link to choose a password; the link expires after the tenant's invitation lifetime (7 days by default). Inviting the same address again replaces the earlier link. List invitations and their status with core.portal.invitation.list and stop a pending one with core.portal.invitation.revoke. List the accounts customers made with core.portal.account.list; core.portal.account.revoke ends a customer's access and sessions at once, and core.portal.account.restore gives it back.\n\nWhen core.portal.options.set has registration on, people may ask for an account at /portal/register. A request is confirmed by an emailed link, then waits for staff: list them with core.portal.registration.list, approve one with core.portal.registration.approve (choose the Person, matching or creating it first, and for a business customer its affiliation; this sends the invitation) or reject it with core.portal.registration.reject. The company name on a request is only what the person typed; nothing is created from it.\n\nA customer sees only portal pages and only its own records; it cannot open staff pages or connect an agent. For each write, run the dry-run check, show the complete preview, wait for explicit approval, then commit the unchanged operations." }],
 }) }

@@ -484,7 +484,7 @@ fn listed(registry: &Registry, instance: &Instance) -> Vec<Value> {
                 instance.label,
                 instance.role.consequence()
             );
-            tool["description"] = json!(description);
+            tool["description"] = json!(description.trim_end());
         }
     }
     tools.extend(app_tools(registry).into_iter().map(|mut tool| {
@@ -493,7 +493,7 @@ fn listed(registry: &Registry, instance: &Instance) -> Vec<Value> {
             tool["description"].as_str().unwrap_or_default(),
             instance.label
         );
-        tool["description"] = json!(description);
+        tool["description"] = json!(description.trim_end());
         tool
     }));
     tools

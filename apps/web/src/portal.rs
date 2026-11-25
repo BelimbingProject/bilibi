@@ -60,7 +60,8 @@ enum Admission {
 
 pub(crate) async fn session(app: &App, credential: &str) -> Result<PortalScope> {
     let portal = app.security.guard_portal(credential).await?;
-    if app.public_tenant != Some(portal.scope().tenant()) {
+    // A customer of one tenant is nobody on another tenant's site.
+    if app.public_scope()?.tenant() != portal.scope().tenant() {
         return Err(Error::Unauthorized);
     }
     Ok(portal)
@@ -256,6 +257,7 @@ pub async fn upgrade(
     if !portal_on(&app, &portal).await? {
         return Err(Error::NotFound.into());
     }
+    let site = app.public_scope()?;
     let policy = live::Policy::read(&app).await?;
     let Some(slot) = app.live.admit(&token, portal.scope(), &policy) else {
         return Ok((StatusCode::TOO_MANY_REQUESTS, live::TOO_MANY_SOCKETS).into_response());
@@ -265,7 +267,10 @@ pub async fn upgrade(
         .max_message_size(live::FRAME_LIMIT)
         .max_frame_size(live::FRAME_LIMIT)
         .on_upgrade(move |socket| {
-            live::run::<Portal>(app, token, identity, socket, false, slot, policy)
+            // The socket runs in its own task: it keeps the site it opened on.
+            crate::public::PUBLIC_SITE.scope(site, async move {
+                live::run::<Portal>(app, token, identity, socket, false, slot, policy).await
+            })
         }))
 }
 

@@ -11,11 +11,14 @@
 //! real staff router on a stock `#[tokio::main]` runtime, and each step is
 //! one an operator takes.
 //!
-//! - GET `/customer-portal` as a signed-in admin: the page, with "Set up";
+//! - GET `/customer-portal` as a signed-in admin: the page, pointing to the
+//!   Public site page while the tenant has no public site;
 //! - a live socket mounts it as a browser tab does, with the shell;
-//! - "Set up" opens the site form in place;
-//! - saving it blank is refused field by field;
-//! - saving an address and title stores the site and shows its facts;
+//! - the portal's setup flow on the Public site page (`/public-site`), mounted
+//!   the same way: "Set up" opens the site form in place, saving it blank is
+//!   refused field by field, and saving an address and title stores the site;
+//! - back on `/customer-portal`, the site's facts; "Change" opens the portal's
+//!   own options form in place, and saving it stores account requests on;
 //! - GET `/customer-portal` again shows the saved site.
 //!
 //! Each line says what was checked; a line starting `FAIL` makes the run exit
@@ -37,6 +40,8 @@ bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 const PATH: &str = "/customer-portal";
+/// Where the portal's site is set up (`base/public`).
+const SETUP: &str = "/public-site";
 /// `admin@example.test` in tenant 1: the fixture's grant-all role.
 const ADMIN: i64 = 4;
 
@@ -123,6 +128,37 @@ async fn event(socket: &mut Socket, id: u64, payload: Value) -> Result<Option<Va
     Ok(page(socket).await)
 }
 
+/// A live socket with `path` mounted, as a browser tab opens it, and the
+/// first page it answers with.
+async fn mount(
+    addr: &str,
+    origin: &str,
+    token: &str,
+    path: &str,
+) -> Result<(Socket, Option<Value>)> {
+    let mut request = format!("ws://{addr}/live")
+        .into_client_request()
+        .map_err(internal)?;
+    let headers = request.headers_mut();
+    headers.insert("Origin", origin.parse().map_err(internal)?);
+    headers.insert(
+        "Cookie",
+        format!("__Host-bilibi_session={token}")
+            .parse()
+            .map_err(internal)?,
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(internal)?;
+    let mount = json!({"type": "mount", "path": path, "params": {}, "request_id": 1});
+    socket
+        .send(Message::text(mount.to_string()))
+        .await
+        .map_err(internal)?;
+    let mounted = page(&mut socket).await;
+    Ok((socket, mounted))
+}
+
 fn html(frame: &Option<Value>) -> &str {
     frame
         .as_ref()
@@ -172,67 +208,54 @@ async fn main() -> Result<std::process::ExitCode> {
         format!("status {status}"),
     );
     run.expect(
-        "a tenant with no portal site is offered Set up",
-        body.contains("id=\"customer-site-edit\""),
-        "the Set up button is on the page",
+        "a tenant with no public site is sent to the Public site page",
+        body.contains("No public site yet"),
+        "the site card says where to set it up",
     );
 
     println!("== the page in a browser tab: its live socket");
-    let mut request = format!("ws://{addr}/live")
-        .into_client_request()
-        .map_err(internal)?;
-    let headers = request.headers_mut();
-    headers.insert("Origin", origin.parse().map_err(internal)?);
-    headers.insert(
-        "Cookie",
-        format!("__Host-bilibi_session={token}")
-            .parse()
-            .map_err(internal)?,
-    );
-    let (mut socket, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .map_err(internal)?;
-    let mount = json!({"type": "mount", "path": PATH, "params": {}, "request_id": 1});
-    socket
-        .send(Message::text(mount.to_string()))
-        .await
-        .map_err(internal)?;
-    let mounted = page(&mut socket).await;
+    let (mut socket, mounted) = mount(&addr, &origin, &token, PATH).await?;
     run.expect(
         "the socket mounts the page, shell and all",
         html(&mounted).contains("id=\"customer-portal-page\""),
         format!("{} bytes of page", html(&mounted).len()),
     );
 
-    println!("== setting up the portal site");
-    let opened = event(&mut socket, 2, json!({"type": "edit_site"})).await?;
+    println!("== setting up the portal's site on the Public site page");
+    let (mut setup, mounted) = mount(&addr, &origin, &token, SETUP).await?;
+    run.expect(
+        "the socket mounts the Public site page, offering Set up",
+        html(&mounted).contains("id=\"public-site-page\"")
+            && html(&mounted).contains("id=\"public-site-edit\""),
+        format!("{} bytes of page", html(&mounted).len()),
+    );
+    let opened = event(&mut setup, 2, json!({"type": "edit_site"})).await?;
     run.expect(
         "Set up opens the site form in place",
-        html(&opened).contains("id=\"customer-site-form\"")
-            && html(&opened).contains("id=\"customer-site-address\""),
+        html(&opened).contains("id=\"public-site-form\"")
+            && html(&opened).contains("id=\"public-site-address\""),
         "the form with its address field",
     );
     let refused = event(
-        &mut socket,
+        &mut setup,
         3,
         json!({"type": "save_site", "site[address]": "", "site[title]": ""}),
     )
     .await?;
     run.expect(
         "saving it blank is refused field by field",
-        html(&refused).contains("id=\"customer-site-errors\"")
-            && html(&refused).contains("be blank"),
+        html(&refused).contains("id=\"public-site-errors\"") && html(&refused).contains("be blank"),
         "the error summary names the blank fields",
     );
     let saved = event(
-        &mut socket,
+        &mut setup,
         4,
         json!({"type": "save_site", "site[address]": "walkthrough", "site[title]": "Walkthrough portal", "site[enabled]": "true"}),
     )
     .await?;
     run.expect(
         "saving an address and title shows the site's facts",
-        html(&saved).contains("id=\"customer-site-facts\"")
+        html(&saved).contains("id=\"public-site-facts\"")
             && html(&saved).contains("Walkthrough portal"),
         "the facts card with the title",
     );
@@ -240,7 +263,7 @@ async fn main() -> Result<std::process::ExitCode> {
         .get()
         .await?
         .query_one(
-            "SELECT count(*) FROM customer_portal_sites WHERE tenant_id=1 AND address='walkthrough' AND title='Walkthrough portal' AND enabled",
+            "SELECT count(*) FROM public_sites WHERE tenant_id=1 AND address='walkthrough' AND title='Walkthrough portal' AND enabled",
             &[],
         )
         .await?
@@ -249,6 +272,34 @@ async fn main() -> Result<std::process::ExitCode> {
         "the site is stored, on",
         stored == 1,
         format!("{stored} row"),
+    );
+
+    println!("== the portal's own options");
+    let refreshed = event(&mut socket, 2, json!({"type": "clear-flash"})).await?;
+    run.expect(
+        "the portal page shows the site's facts",
+        html(&refreshed).contains("id=\"customer-site-facts\"")
+            && html(&refreshed).contains("id=\"customer-options-edit\""),
+        "the facts card with Change",
+    );
+    let opened = event(&mut socket, 3, json!({"type": "edit_options"})).await?;
+    run.expect(
+        "Change opens the options form in place",
+        html(&opened).contains("id=\"customer-options-form\"")
+            && html(&opened).contains("id=\"customer-options-registration\""),
+        "the form with its account requests switch",
+    );
+    let saved = event(
+        &mut socket,
+        4,
+        json!({"type": "save_options", "options[registration]": "true"}),
+    )
+    .await?;
+    run.expect(
+        "saving the options shows account requests taken",
+        html(&saved).contains("id=\"customer-site-facts\"")
+            && html(&saved).contains("Taken; each waits for approval"),
+        "the facts card says requests are taken",
     );
 
     println!("== the page as a GET again");

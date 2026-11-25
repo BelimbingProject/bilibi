@@ -1454,7 +1454,7 @@ body:has(dialog:modal) #flash-group > #connection-server-error {
     white-space: normal;
     text-align: start;
   }
-  [data-page-header-actions] [data-icon-label] {
+  [data-page-header-actions] :not(.icon-only) > [data-icon-label] {
     display: inline;
   }
   .flex-table [data-viewport] > table > tbody > tr > td :is(a[href], [data-record-select]) {

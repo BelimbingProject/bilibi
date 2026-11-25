@@ -64,9 +64,17 @@ fi
 # a new schema may be incompatible with the old code. The seed stays launch-only.
 python3 scripts/dev-process.py stop
 step migrate 'the database migration' "$root/target/debug/bilibi-web" migrate
+# The public hostname names tenant 1's public site; the first setup also
+# turns the site on, and later starts leave on or off as staff set it.
+public_on=()
 if [[ -e "$root/.local/dev/seed-needed" ]]; then
     step seed 'the development account setup' "$root/target/debug/bilibi-web" seed --at-startup
+    public_on=(--on)
     rm -f "$root/.local/dev/seed-needed"
+fi
+if [[ -n ${BILIBI_DEV_PUBLIC_HOST:-} ]]; then
+    step public 'the public site hostname' "$root/target/debug/bilibi-web" public-hostname \
+        --tenant 1 --hostname "$BILIBI_DEV_PUBLIC_HOST" "${public_on[@]}"
 fi
 python3 scripts/dev-status.py start
 # A stop by name (pkill -f "target/debug/bilibi-web run", pkill bilibi-web,

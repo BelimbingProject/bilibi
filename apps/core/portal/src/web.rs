@@ -1,6 +1,7 @@
 //! [`crate::STAFF_PATH`] (`core/portal.pages`, operation
-//! `portal`): the tenant's customer portal site (and whether it is
-//! on), its invitations and the customer accounts they made.
+//! `portal`): the tenant's customer portal on its public site (whether it
+//! is on and takes requests for an account), its invitations and the
+//! customer accounts they made. The site itself is the Public site page's.
 //! The page follows the tenants list of
 //! `core/tenant` (a FlexTable on ListState and an add dialog)
 //! and the account create form of `core/user` (a Person, then one of its
@@ -12,7 +13,7 @@
 //! refused alike. A refusal is a flash or a field error, never a cleared page.
 use crate::{
     facade::{Invitation, PortalService, Site, Status},
-    operations::{ACCOUNT_RESTORE, ACCOUNT_REVOKE, APPROVE, INVITE, REJECT, REVOKE, SITE_SET},
+    operations::{ACCOUNT_RESTORE, ACCOUNT_REVOKE, APPROVE, INVITE, OPTIONS_SET, REJECT, REVOKE},
     registration::RegistrationStatus,
     MANAGE, PAGES,
 };
@@ -48,8 +49,6 @@ const PERSON_KIND: &str = "person";
 pub(crate) const INVITE_TARGET: &str = "portal.invite";
 const DENIED: &str = "You do not have permission to manage the customer portal.";
 const PAGE_SIZES: [u64; 3] = [25, 50, 100];
-/// The largest portal logo. Media's own limit still applies.
-const LOGO_MAX_BYTES: u64 = 1_048_576;
 
 /// Newest first, paged; no sort or search.
 static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
@@ -98,9 +97,6 @@ bilibi_ui::record_fields! { "core/portal", pub(crate) mod fields {
     EXPIRES: bilibi_ui::RecordField::new("expires", "Link expires", bilibi_ui::RecordFieldType::DateTime),
     PERSON: bilibi_ui::RecordField::new("person_id", "Person", bilibi_ui::RecordFieldType::Integer).excluded("Chosen in the invite dialog; the list names the invitation"),
     AFFILIATION: bilibi_ui::RecordField::new("affiliation_id", "Signs in under", bilibi_ui::RecordFieldType::Integer).excluded("Shown as the company column"),
-    ADDRESS: bilibi_ui::RecordField::new("address", "Portal address", bilibi_ui::RecordFieldType::String).excluded("A fact of the portal site, not of an invitation"),
-    TITLE: bilibi_ui::RecordField::new("title", "Portal title", bilibi_ui::RecordFieldType::String).excluded("A fact of the portal site, not of an invitation"),
-    ENABLED: bilibi_ui::RecordField::new("enabled", "Portal is on", bilibi_ui::RecordFieldType::Boolean).excluded("A fact of the portal site, not of an invitation"),
     ACCESS: bilibi_ui::RecordField::new("access", "Portal access", bilibi_ui::RecordFieldType::String),
     REGISTRATION: bilibi_ui::RecordField::new("registration", "Customers may request an account", bilibi_ui::RecordFieldType::Boolean).excluded("A fact of the portal site, not of an invitation"),
     COMPANY_NAME: bilibi_ui::RecordField::new("company_name", "Company (as typed)", bilibi_ui::RecordFieldType::String),
@@ -158,17 +154,8 @@ fn render(fragment: impl Template) -> Result<Html> {
 }
 
 #[derive(Clone, Debug, Default)]
-struct SiteDraft {
-    address: String,
-    title: String,
-    enabled: bool,
+struct OptionsDraft {
     registration: bool,
-    /// The site has a logo now; the form offers to remove it.
-    has_logo: bool,
-    remove_logo: bool,
-    /// An image stored in Media by `store_logo`, used by the next save.
-    staged_logo: Option<i64>,
-    staged_name: String,
     version: Option<i64>,
     errors: BTreeMap<String, Vec<String>>,
 }
@@ -193,18 +180,9 @@ struct InviteDraft {
 // function, and the page's dozen form inputs and dialogs inline made that
 // function's stack frame about 880 KiB in a debug build, more than a live
 // socket's worker thread had left (issue 903).
-struct SiteForm {
+struct OptionsForm {
     summary: ErrorSummary,
-    address: Html,
-    title: Html,
-    enabled: Html,
     registration: Html,
-    /// The logo's file input, rendered.
-    logo: Html,
-    logo_note: Option<String>,
-    logo_errors: Vec<String>,
-    remove_logo: Option<Html>,
-    cancel: bool,
 }
 struct InviteForm {
     summary: ErrorSummary,
@@ -219,7 +197,7 @@ struct InviteForm {
 struct View<'a> {
     flash: FlashMap<'a>,
     actions: Html,
-    site_form: Option<SiteForm>,
+    options_form: Option<OptionsForm>,
     site_facts: Html,
     table: Html,
     accounts: Html,
@@ -241,9 +219,7 @@ struct PortalPage {
     request_columns: ListColumns,
     /// The request a rejection waits to confirm.
     reject: Option<i64>,
-    site: Option<SiteDraft>,
-    /// The portal logo's file input (issue 137, behaviour 10).
-    uploads: bilibi_ui::Uploads,
+    options: Option<OptionsDraft>,
     invite: Option<InviteDraft>,
     revoke: Option<i64>,
     /// The customer account a revoke of access waits to confirm.
@@ -310,10 +286,7 @@ impl PortalPage {
             request_columns: ListColumns::mount("customer-requests", request_builtins())
                 .map_err(|_| Error::Internal)?,
             reject: None,
-            site: None,
-            uploads: bilibi_ui::Uploads::new([bilibi_ui::UploadSpec::new("logo", LOGO_MAX_BYTES)
-                .accept(["image/png", "image/jpeg", "image/gif", "image/webp"])
-                .max_entries(1)]),
+            options: None,
             invite: None,
             revoke: None,
             revoke_access: None,
@@ -659,116 +632,53 @@ impl PortalPage {
         Ok(html)
     }
 
-    fn site_form(&self) -> Result<Option<SiteForm>> {
-        let Some(draft) = self.site.as_ref() else {
+    fn options_form(&self) -> Result<Option<OptionsForm>> {
+        let Some(draft) = self.options.as_ref() else {
             return Ok(None);
         };
-        let errors = |key: &str| draft.errors.get(key).cloned().unwrap_or_default();
-        Ok(Some(SiteForm {
+        Ok(Some(OptionsForm {
             summary: summary(
-                "customer-site-errors",
+                "customer-options-errors",
                 &draft.errors,
                 &[
-                    ("address", "customer-site-address", fields::ADDRESS.label),
-                    ("title", "customer-site-title", fields::TITLE.label),
-                    ("logo", "customer-site-logo", "Logo"),
-                    ("version", "customer-site-address", "Portal site"),
+                    ("registration", "customer-options-registration", fields::REGISTRATION.label),
+                    ("site", "customer-options-registration", "Public site"),
+                    ("version", "customer-options-registration", "Portal"),
                 ],
             ),
-            address: render(Field::in_form("site", "address")
-                .id("customer-site-address")
-                .label(fields::ADDRESS.label)
-                .placeholder("e.g. acme")
-                .hint("Customers sign in at /portal/sign-in/ followed by this address. Changing it breaks links already sent.")
-                .required()
-                .attr("maxlength", "63")
-                .value(draft.address.clone())
-                .errors(errors("address")))?,
-            title: render(Field::in_form("site", "title")
-                .id("customer-site-title")
-                .label(fields::TITLE.label)
-                .placeholder("e.g. Acme customer portal")
-                .hint("The name customers see on the portal and in its emails.")
-                .required()
-                .attr("maxlength", "120")
-                .value(draft.title.clone())
-                .errors(errors("title")))?,
-            enabled: render(Field::in_form("site", "enabled")
-                .id("customer-site-enabled")
-                .kind(InputKind::Checkbox)
-                .label(fields::ENABLED.label)
-                .value("true")
-                .checked(draft.enabled)
-                .hint("While off, the portal's pages answer \"not found\" and no invitation is sent or accepted."))?,
-            registration: render(Field::in_form("site", "registration")
-                .id("customer-site-registration")
-                .kind(InputKind::Checkbox)
+            registration: render(Field::in_form("options", "registration")
+                .id("customer-options-registration")
+                .kind(InputKind::Switch)
                 .label(fields::REGISTRATION.label)
-                .value("true")
-                .checked(draft.registration)
+                .value(if draft.registration { "true" } else { "false" })
                 .hint("People may ask for an account from the sign-in page. Each request is confirmed by email and waits for your approval."))?,
-            logo_note: (!draft.staged_name.is_empty()).then(|| {
-                format!(
-                    "{} is ready. Save the portal site to use it.",
-                    draft.staged_name
-                )
-            }),
-            logo_errors: errors("logo"),
-            logo: Html::render(
-                &self
-                    .uploads
-                    .input("logo", "customer-site-logo")
-                    .label("Logo")
-                    .hint("A PNG, JPEG, GIF or WebP image shown on the portal's pages. Choose one, then use it; Save applies it. Leave empty to keep the current one."),
-            )
-            .unwrap_or(Html::EMPTY),
-            remove_logo: draft
-                .has_logo
-                .then(|| {
-                    render(
-                        Field::in_form("site", "remove_logo")
-                            .id("customer-site-remove-logo")
-                            .kind(InputKind::Checkbox)
-                            .label("Remove the logo")
-                            .value("true")
-                            .checked(draft.remove_logo),
-                    )
-                })
-                .transpose()?,
-            cancel: true,
         }))
     }
-    fn site_facts(&self, site: Option<&Site>, can_manage: bool) -> Result<Html> {
+    async fn site_facts(
+        &self,
+        scope: &Scope,
+        site: Option<&Site>,
+        can_manage: bool,
+    ) -> Result<Html> {
         let Some(site) = site else {
-            if !can_manage {
-                return Ok(Html::text(
-                    "No portal site yet. Someone who manages the customer portal can set one.",
-                ));
-            }
-            let mut html = Html::text(
-                "No portal site yet. Set its address and title before inviting customers.",
-            );
-            html.push(&render(Button {
-                id: "customer-site-edit",
-                event: "edit_site",
-                button_type: "button",
-                class: "mt-3",
-                body: Html::text("Set up"),
-                ..Button::default()
-            })?);
-            return Ok(html);
+            return Ok(Html::text(
+                "No public site yet. The portal lives on the workspace's public site: set it up under Administration, Public site, before inviting customers.",
+            ));
         };
-        let address = self
-            .pages
-            .access
-            .public_origin_for(site.tenant)
-            .map_or_else(
-                || {
-                    "Configure the public listener for this workspace to get a sign-in address."
-                        .to_owned()
-                },
-                |origin| format!("{origin}/portal/sign-in/{}", site.address),
-            );
+        let origin = {
+            let client = self.pages.db.get().await?;
+            self.pages
+                .access
+                .public_origin(&**client, scope.tenant())
+                .await?
+        };
+        let address = origin.map_or_else(
+            || {
+                "Turn the public site on and give it a hostname (Administration, Public site) to get a sign-in address."
+                    .to_owned()
+            },
+            |origin| format!("{origin}/portal/sign-in"),
+        );
         let mut html = render(Facts {
             id: "customer-site-facts",
             items: vec![
@@ -778,21 +688,7 @@ impl PortalPage {
                     value: Html::text(&address),
                 },
                 Fact {
-                    title: fields::TITLE.label,
-                    id: "customer-site-title-value",
-                    value: Html::text(&site.title),
-                },
-                Fact {
-                    title: "Account requests",
-                    id: "customer-site-registration-value",
-                    value: Html::text(if site.registration {
-                        "Taken; each waits for approval"
-                    } else {
-                        "Not taken"
-                    }),
-                },
-                Fact {
-                    title: "Portal",
+                    title: "Public site",
                     id: "customer-site-enabled-value",
                     value: render(Badge {
                         kind: if site.enabled {
@@ -805,12 +701,21 @@ impl PortalPage {
                         body: Html::text(if site.enabled { "On" } else { "Off" }),
                     })?,
                 },
+                Fact {
+                    title: "Account requests",
+                    id: "customer-site-registration-value",
+                    value: Html::text(if site.registration {
+                        "Taken; each waits for approval"
+                    } else {
+                        "Not taken"
+                    }),
+                },
             ],
         })?;
         if can_manage {
             html.push(&render(Button {
-                id: "customer-site-edit",
-                event: "edit_site",
+                id: "customer-options-edit",
+                event: "edit_options",
                 button_type: "button",
                 class: "mt-3",
                 body: Html::text("Change"),
@@ -1026,8 +931,8 @@ impl PortalPage {
         let html = render(View {
             flash,
             actions,
-            site_form: self.site_form()?,
-            site_facts: self.site_facts(site.as_ref(), can_manage)?,
+            options_form: self.options_form()?,
+            site_facts: self.site_facts(scope, site.as_ref(), can_manage).await?,
             table,
             accounts,
             requests,
@@ -1215,151 +1120,51 @@ impl PortalPage {
                     .collect();
                 self.columns.handle(&params);
             }
-            "edit_site" => {
+            "edit_options" => {
                 if !self.can_manage(scope).await? {
                     self.flash(StatusKind::Error, DENIED);
                     return Ok(());
                 }
                 let site = self.site(scope).await?;
-                self.site = Some(SiteDraft {
-                    address: site
-                        .as_ref()
-                        .map(|site| site.address.clone())
-                        .unwrap_or_default(),
-                    title: site
-                        .as_ref()
-                        .map(|site| site.title.clone())
-                        .unwrap_or_default(),
-                    enabled: site.as_ref().is_some_and(|site| site.enabled),
+                self.options = Some(OptionsDraft {
                     registration: site.as_ref().is_some_and(|site| site.registration),
-                    has_logo: site
-                        .as_ref()
-                        .is_some_and(|site| site.logo_asset_id.is_some()),
-                    remove_logo: false,
-                    staged_logo: None,
-                    staged_name: String::new(),
                     version: site.map(|site| site.version),
                     errors: BTreeMap::new(),
                 });
             }
-            "cancel_site" => {
-                self.site = None;
-                self.uploads.clear("logo");
-            }
-            // The form keeps what was typed while the logo is chosen and stored.
-            "refresh_site" | "store_logo" => {
-                let Some(mut draft) = self.site.clone() else {
-                    return Ok(());
-                };
-                let posted = params::form_values_checked(value, "site", params::FIELD_LIMIT)
+            "cancel_options" => self.options = None,
+            // The form keeps what was chosen until it is saved.
+            "refresh_options" => {
+                let posted = params::form_values_checked(value, "options", params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
-                if !posted.is_empty() {
-                    let field = |key: &str| posted.get(key).cloned().unwrap_or_default();
-                    draft.address = field("address");
-                    draft.title = field("title");
-                    draft.enabled = field("enabled") == "true";
-                    draft.registration = field("registration") == "true";
-                    draft.remove_logo = field("remove_logo") == "true";
+                if let Some(draft) = self.options.as_mut() {
+                    draft.registration = posted.get("registration").is_some_and(|v| v == "true");
                 }
-                draft.errors.remove("logo");
-                if get("type") == Some("store_logo") {
-                    if !self.can_manage(scope).await? {
-                        self.flash(StatusKind::Error, DENIED);
-                        return Ok(());
-                    }
-                    if self.uploads.in_progress("logo") {
-                        draft
-                            .errors
-                            .insert("logo".into(), vec!["is still uploading".into()]);
-                    } else if let Some(file) = self.uploads.consume("logo").into_iter().next() {
-                        let name = file.name.clone();
-                        let stored = {
-                            let mut client = self.pages.db.get().await?;
-                            self.pages
-                                .access
-                                .media
-                                .put_public_image(
-                                    &mut client,
-                                    scope,
-                                    "portal",
-                                    bilibi_media::Upload {
-                                        filename: file.name,
-                                        bytes: file.bytes,
-                                    },
-                                    LOGO_MAX_BYTES,
-                                )
-                                .await
-                        };
-                        match stored {
-                            Ok(asset) => {
-                                draft.staged_logo = Some(asset.id);
-                                draft.staged_name = name;
-                                draft.remove_logo = false;
-                            }
-                            Err(bilibi_media::Error::Database(error)) => return Err(error),
-                            Err(
-                                error @ (bilibi_media::Error::InvalidSize
-                                | bilibi_media::Error::DisallowedType
-                                | bilibi_media::Error::InvalidUpload),
-                            ) => {
-                                draft.errors.insert("logo".into(), vec![error.to_string()]);
-                            }
-                            Err(_) => {
-                                draft.errors.insert(
-                                    "logo".into(),
-                                    vec!["could not be stored; ask an administrator to check the media settings".into()],
-                                );
-                            }
-                        }
-                    } else {
-                        draft
-                            .errors
-                            .insert("logo".into(), vec!["choose an image first".into()]);
-                    }
-                }
-                self.site = Some(draft);
             }
-            "save_site" => {
-                let posted = params::form_values_checked(value, "site", params::FIELD_LIMIT)
+            "save_options" => {
+                let posted = params::form_values_checked(value, "options", params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
-                let field = |key: &str| posted.get(key).cloned().unwrap_or_default();
-                let version = self.site.as_ref().and_then(|draft| draft.version);
-                let mut draft = SiteDraft {
-                    address: field("address"),
-                    title: field("title"),
-                    enabled: field("enabled") == "true",
-                    registration: field("registration") == "true",
-                    has_logo: self.site.as_ref().is_some_and(|draft| draft.has_logo),
-                    remove_logo: field("remove_logo") == "true",
-                    staged_logo: self.site.as_ref().and_then(|draft| draft.staged_logo),
-                    staged_name: self
-                        .site
-                        .as_ref()
-                        .map(|draft| draft.staged_name.clone())
-                        .unwrap_or_default(),
+                let version = self.options.as_ref().and_then(|draft| draft.version);
+                let mut draft = OptionsDraft {
+                    registration: posted.get("registration").is_some_and(|v| v == "true"),
                     version,
                     errors: BTreeMap::new(),
                 };
-                let mut input = json!({"address": draft.address, "title": draft.title, "enabled": draft.enabled, "registration": draft.registration});
+                let mut input = json!({"registration": draft.registration});
                 if let Some(version) = version {
                     input["version"] = json!(version);
                 }
-                if draft.remove_logo {
-                    input["remove_logo"] = json!(true);
-                } else if let Some(asset) = draft.staged_logo {
-                    input["logo_asset_id"] = json!(asset);
-                }
                 match self
-                    .submit(scope, credential, "save_site", SITE_SET, input)
+                    .submit(scope, credential, "save_options", OPTIONS_SET, input)
                     .await?
                 {
                     Some(Ok(())) => {
-                        self.site = None;
-                        self.flash(StatusKind::Success, "Portal site saved.");
+                        self.options = None;
+                        self.flash(StatusKind::Success, "Portal saved.");
                     }
                     Some(Err(errors)) => {
                         draft.errors = errors;
-                        self.site = Some(draft);
+                        self.options = Some(draft);
                     }
                     None => {}
                 }
@@ -1684,9 +1489,6 @@ impl Page<Scope, Error> for Pages {
 }
 
 impl LiveState<Scope, Error> for PortalPage {
-    fn uploads(&mut self) -> Option<&mut bilibi_ui::Uploads> {
-        Some(&mut self.uploads)
-    }
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
             match request.input {

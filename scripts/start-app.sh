@@ -174,7 +174,8 @@ export APP_ORIGIN="https://${instance[0]}"
 export PUBLIC_ORIGIN="https://${public_instance[0]}"
 [[ ${public_instance[2]} == 443 ]] || PUBLIC_ORIGIN+=":${public_instance[2]}"
 export BIND_ADDR="127.0.0.1:${instance[1]}"
-export PUBLIC_TENANT_ID="${PUBLIC_TENANT_ID:-1}"
+# The public hostname names tenant 1's public site (dev-run.sh binds it).
+export BILIBI_DEV_PUBLIC_HOST="$public_host"
 export PUBLIC_BIND_ADDR="127.0.0.1:${public_instance[1]}"
 if [[ -n $(ss -H -ltn "sport = :${instance[1]}") || -n $(ss -H -ltn "sport = :${public_instance[1]}") ]]; then
     echo "This checkout already has a listener at $APP_ORIGIN. Stop its dev command before starting another." >&2

@@ -20,14 +20,14 @@ import time
 
 STATUS = Path('.local/dev-run.status.json')
 LIMIT = 32 * 1024
-PHASES = {'prepare', 'discovery', 'css', 'build', 'migrate', 'seed', 'start', 'serve'}
+PHASES = {'prepare', 'discovery', 'css', 'build', 'migrate', 'seed', 'public', 'start', 'serve'}
 FRESH_DATABASE_HINT = (
     'Hint: this local database was made before a change that needs an empty one. '
     'To start fresh, stop Bilibi, then delete .local/postgres18 (the launcher\'s private database) '
     'or, if you set DATABASE_URL, empty that database, and run ./bilibi start. '
     'Everything in it is lost: back it up with pg_dump first if you need it.\n'
 )
-CAPTURE = {'discovery', 'css', 'build', 'migrate', 'seed'}
+CAPTURE = {'discovery', 'css', 'build', 'migrate', 'seed', 'public'}
 
 
 def redact(raw):

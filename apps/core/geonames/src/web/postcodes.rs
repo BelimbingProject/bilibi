@@ -1158,6 +1158,7 @@ impl Postcodes {
                 width: ModalWidth::Wide,
                 description: "Your changes are kept when postcodes are next updated from GeoNames.",
                 role: "",
+                close_icon: false,
                 flash: Some(self.flash.map()),
                 body: self.form(draft, &shown.countries)?,
             })?,

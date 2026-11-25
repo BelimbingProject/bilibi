@@ -9,9 +9,9 @@
     does, so a scrollbar never squares off the rounded corners. owns_flash marks
     a dialog that renders the page's flash itself (the layout copy is hidden by
     app.css while it is open). role is "alertdialog" for a confirmation. -#}
-{% macro modal(id, title, cancel_event, width=bilibi_ui::ModalWidth::Narrow, description="", role="", owns_flash=false, messages=bilibi_ui::NO_FLASH) %}
+{% macro modal(id, title, cancel_event, width=bilibi_ui::ModalWidth::Narrow, description="", role="", owns_flash=false, messages=bilibi_ui::NO_FLASH, close_icon=false) %}
 <dialog id="{{ id }}" open data-hook="Modal" data-cancel="{{ cancel_event }}"{% if owns_flash %} data-owns-flash="true"{% endif %} aria-modal="true" aria-labelledby="{{ id }}-title"{% if !description.is_empty() %} aria-describedby="{{ id }}-description"{% endif %} tabindex="-1"{% if !role.is_empty() %} role="{{ role }}"{% endif %} class="{{ width.dialog_class() }}">
-<div id="{{ id }}-body" class="min-h-0 overflow-y-auto px-panel py-2"><h2 id="{{ id }}-title" class="text-base font-semibold tracking-tight text-ink-strong">{{ title }}</h2>
+<div id="{{ id }}-body" class="min-h-0 overflow-y-auto px-panel py-2"><div class="flex items-center justify-between gap-2"><h2 id="{{ id }}-title" class="text-base font-semibold tracking-tight text-ink-strong">{{ title }}</h2>{% if close_icon %}{% call c::icon_button(icon="close", label="Close", id="{}-close"|format(id), event=cancel_event) %}{% endcall %}{% endif %}</div>
 {%- if owns_flash -%}
 {% call f::flash(kind=bilibi_ui::StatusKind::Error, id="{}-flash-error"|format(id), message=messages.error) %}{% endcall %}
 {% call f::flash(kind=bilibi_ui::StatusKind::Info, id="{}-flash-info"|format(id), message=messages.info) %}{% endcall %}

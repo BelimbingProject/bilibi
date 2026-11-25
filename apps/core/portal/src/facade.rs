@@ -20,9 +20,6 @@ use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::SystemTime};
 use tokio_postgres::{GenericClient, Row};
 
-/// The longest portal title; it heads every portal page and email.
-pub const TITLE_MAX: usize = 120;
-
 /// One field a write refused, worded for that field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldError {
@@ -38,22 +35,23 @@ pub(crate) fn field(field: &'static str, message: impl Into<String>) -> FieldErr
 /// A write's answer: done, or the fields it refused.
 pub type Checked<T> = std::result::Result<T, Vec<FieldError>>;
 
-/// A tenant's portal site: the address its customers' links carry, the
-/// title its portal pages and emails show, and whether it is on (issue 137,
-/// behaviour 1: off until staff turn it on).
+/// A tenant's portal as its pages see it: the public site it lives on
+/// (`base/public`: its title, logo and whether it is on; off until staff turn
+/// it on) and whether people may ask for an account there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Site {
     pub tenant: i64,
     pub address: String,
     pub title: String,
     pub enabled: bool,
-    /// People may ask for an account (`/portal/register/{address}`).
+    /// People may ask for an account (`/portal/register`).
     pub registration: bool,
     /// The logo, a public image in Media (`None` until one is set).
     pub logo_asset_id: Option<i64>,
     /// A signed Media link to the logo, filled by the reads a page uses
     /// (`portal_site`, `registration_site`, `site_of`); `None` elsewhere.
     pub logo_url: Option<String>,
+    /// The version of the portal's own options (0 before the first save).
     pub version: i64,
 }
 impl Site {
@@ -70,33 +68,17 @@ impl Site {
         }
     }
     pub fn to_json(&self) -> Value {
-        json!({"address": self.address, "title": self.title, "enabled": self.enabled, "registration": self.registration, "has_logo": self.logo_asset_id.is_some(), "version": self.version, "sign_in": format!("/portal/sign-in/{}", self.address)})
+        json!({"title": self.title, "enabled": self.enabled, "registration": self.registration, "version": self.version, "sign_in": "/portal/sign-in"})
     }
 }
-pub(crate) const SITE_COLUMNS: &str =
-    "tenant_id,address,title,enabled,registration,logo_asset_id,version";
+/// The public site joined with the portal's own options.
+pub(crate) const SITE_SELECT: &str = "SELECT s.tenant_id,s.address,s.title,s.enabled,COALESCE(o.registration,false) AS registration,s.logo_asset_id,COALESCE(o.version,0) AS version FROM public_sites s LEFT JOIN customer_portal_options o ON o.tenant_id=s.tenant_id";
 
-/// What a site save does to the logo.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum LogoChange {
-    /// Leave the logo as it is.
-    #[default]
-    Keep,
-    /// Use this image, already stored through Media as the tenant's own.
-    Set(i64),
-    Remove,
-}
-
-/// A site as staff set it. `None` keeps a flag as it is (a new site starts
-/// with both off); `version` is the one read, and a site changed since is
-/// refused.
+/// The portal's own options as staff set them; `version` is the one read,
+/// and options changed since are refused.
 #[derive(Clone, Debug, Default)]
-pub struct SiteInput {
-    pub address: String,
-    pub title: String,
-    pub enabled: Option<bool>,
-    pub registration: Option<bool>,
-    pub logo: LogoChange,
+pub struct OptionsInput {
+    pub registration: bool,
     pub version: Option<i64>,
 }
 
@@ -237,9 +219,9 @@ pub struct PortalService {
     pub(crate) media: Arc<bilibi_media::Media>,
     pub(crate) settings: Arc<Settings>,
     pub(crate) events: Arc<bilibi_events::Events>,
-    /// Public listener origin and tenant for customer links.
-    pub(crate) public_origin: Option<String>,
-    pub(crate) public_tenant: Option<i64>,
+    /// The public site (`base/public`): where customers sign in, and the
+    /// address customer links use.
+    pub(crate) public: Arc<bilibi_public::Public>,
 }
 
 pub(crate) fn digest(token: &str) -> Vec<u8> {
@@ -249,16 +231,6 @@ pub(crate) fn new_token() -> Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| Error::Internal)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-/// A portal address: lowercase letters, digits and inner hyphens, 1 to 63.
-pub fn address_shaped(address: &str) -> bool {
-    let bytes = address.as_bytes();
-    (1..=63).contains(&bytes.len())
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
-        && bytes.first() != Some(&b'-')
-        && bytes.last() != Some(&b'-')
 }
 /// A token as `new_token` makes it, so nothing else reaches a query.
 pub(crate) fn token_shaped(token: &str) -> bool {
@@ -293,167 +265,86 @@ impl PortalService {
         authorize_key(client, scope, VIEW).await?;
         site_of_tenant(client, scope.tenant()).await
     }
-    fn check_site(address: &str, title: &str) -> Checked<(String, String)> {
-        let address = address.trim().to_lowercase();
-        let title = title.trim().to_owned();
-        let mut errors = Vec::new();
-        if address.is_empty() {
-            errors.push(field("address", "can't be blank"));
-        } else if !address_shaped(&address) {
-            errors.push(field(
-                "address",
-                "use 1 to 63 lowercase letters, digits and hyphens, not starting or ending with a hyphen",
-            ));
-        }
-        if title.is_empty() {
-            errors.push(field("title", "can't be blank"));
-        } else if title.chars().count() > TITLE_MAX || title.contains('\0') {
-            errors.push(field(
-                "title",
-                format!("should be at most {TITLE_MAX} character(s)"),
-            ));
-        }
-        if errors.is_empty() {
-            Ok((address, title))
-        } else {
-            Err(errors)
-        }
-    }
-    async fn address_taken(
-        client: &(impl GenericClient + Sync),
-        tenant: i64,
-        address: &str,
-    ) -> Result<bool> {
-        Ok(client
-            .query_opt(
-                "SELECT 1 FROM customer_portal_sites WHERE address=$1 AND tenant_id<>$2",
-                &[&address, &tenant],
-            )
-            .await?
-            .is_some())
-    }
-    /// The site as it would be saved: `MANAGE`, the same checks, no write.
-    pub async fn preview_site(
+    /// The options as they would be saved: `MANAGE`, no write.
+    pub async fn preview_options(
         &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
-        input: &SiteInput,
+        input: &OptionsInput,
     ) -> Result<Checked<(Option<Site>, Site)>> {
         authorize_key(client, scope, MANAGE).await?;
-        let (enabled, registration) = (input.enabled, input.registration);
-        let (address, title) = match Self::check_site(&input.address, &input.title) {
-            Ok(checked) => checked,
-            Err(errors) => return Ok(Err(errors)),
+        let Some(before) = site_of_tenant(client, scope.tenant()).await? else {
+            return Ok(Err(vec![field(
+                "site",
+                "set up the public site first (Administration, Public site)",
+            )]));
         };
-        if Self::address_taken(client, scope.tenant(), &address).await? {
-            return Ok(Err(vec![field("address", "is used by another portal")]));
-        }
-        let before = site_of_tenant(client, scope.tenant()).await?;
-        let version = before.as_ref().map_or(1, |site| site.version + 1);
-        let enabled = enabled.unwrap_or(before.as_ref().is_some_and(|site| site.enabled));
-        let registration =
-            registration.unwrap_or(before.as_ref().is_some_and(|site| site.registration));
-        let logo = match self
-            .checked_logo(client, scope, input.logo, before.as_ref())
-            .await?
-        {
-            Ok(logo) => logo,
-            Err(errors) => return Ok(Err(errors)),
+        let after = Site {
+            registration: input.registration,
+            version: before.version + 1,
+            ..before.clone()
         };
-        Ok(Ok((
-            before,
-            Site {
-                tenant: scope.tenant(),
-                address,
-                title,
-                enabled,
-                registration,
-                logo_asset_id: logo,
-                logo_url: None,
-                version,
-            },
-        )))
+        Ok(Ok((Some(before), after)))
     }
-    /// Sets the tenant's portal address and title, and turns it on or off
-    /// (`None` keeps it as it is; a new site starts off): `MANAGE`. `version`
-    /// is the one read; a site changed since is refused. Links already
-    /// emailed name the old address and stop working when it changes; while
-    /// the site is off they do not work either.
-    pub async fn set_site_in(
+    /// Sets whether people may ask for an account on the portal: `MANAGE`.
+    /// The site itself (title, logo, on or off) is the public site's.
+    pub async fn set_options_in(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
-        input: &SiteInput,
+        input: &OptionsInput,
     ) -> Result<Checked<Site>> {
         authorize_key(tx.sql(), scope, MANAGE).await?;
-        let (enabled, registration, version) = (input.enabled, input.registration, input.version);
-        let (address, title) = match Self::check_site(&input.address, &input.title) {
-            Ok(checked) => checked,
-            Err(errors) => return Ok(Err(errors)),
-        };
         let tenant = scope.tenant();
-        let before = tx
+        let Some(before) = site_of_tenant(tx.sql(), tenant).await? else {
+            return Ok(Err(vec![field(
+                "site",
+                "set up the public site first (Administration, Public site)",
+            )]));
+        };
+        let current: Option<i64> = tx
             .sql()
             .query_opt(
-                &format!("SELECT {SITE_COLUMNS} FROM customer_portal_sites WHERE tenant_id=$1 FOR UPDATE"),
+                "SELECT version FROM customer_portal_options WHERE tenant_id=$1 FOR UPDATE",
                 &[&tenant],
             )
             .await?
-            .map(|row| Site::from_row(&row));
-        if let (Some(before), Some(version)) = (&before, version) {
-            if before.version != version {
-                return Ok(Err(vec![field(
-                    "version",
-                    "has changed since this edit began",
-                )]));
-            }
-        }
-        if Self::address_taken(tx.sql(), tenant, &address).await? {
-            return Ok(Err(vec![field("address", "is used by another portal")]));
-        }
-        let enabled = enabled.unwrap_or(before.as_ref().is_some_and(|site| site.enabled));
-        let registration =
-            registration.unwrap_or(before.as_ref().is_some_and(|site| site.registration));
-        let logo = match self
-            .checked_logo(tx.sql(), scope, input.logo, before.as_ref())
-            .await?
+            .map(|row| row.get(0));
+        if input
+            .version
+            .is_some_and(|version| version != current.unwrap_or(0))
         {
-            Ok(logo) => logo,
-            Err(errors) => return Ok(Err(errors)),
-        };
-        let old = before.as_ref().map_or(
-            Value::Null,
-            |site| json!({"address": site.address, "title": site.title, "enabled": site.enabled, "registration": site.registration, "logo_asset_id": site.logo_asset_id}),
-        );
-        let saved = tx
+            return Ok(Err(vec![field(
+                "version",
+                "has changed since this edit began",
+            )]));
+        }
+        let registration = input.registration;
+        let old = json!({"registration": before.registration});
+        let version = tx
             .mutate(move |sql| {
                 Box::pin(async move {
                     let row = sql
                         .query_one(
-                            &format!("INSERT INTO customer_portal_sites(tenant_id,address,title,enabled,registration,logo_asset_id) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id) DO UPDATE SET address=excluded.address,title=excluded.title,enabled=excluded.enabled,registration=excluded.registration,logo_asset_id=excluded.logo_asset_id,version=customer_portal_sites.version+1,updated_at=now() RETURNING {SITE_COLUMNS}"),
-                            &[&tenant, &address, &title, &enabled, &registration, &logo],
+                            "INSERT INTO customer_portal_options(tenant_id,registration) VALUES($1,$2) ON CONFLICT (tenant_id) DO UPDATE SET registration=excluded.registration,version=customer_portal_options.version+1,updated_at=now() RETURNING version",
+                            &[&tenant, &registration],
                         )
-                        .await
-                        .map_err(|error| match error.code() {
-                            Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) => Error::Conflict,
-                            _ => Error::from(error),
-                        })?;
-                    let site = Site::from_row(&row);
+                        .await?;
                     let change = Change {
-                        kind: "portal.site".into(),
+                        kind: "portal.options".into(),
                         id: tenant,
                         old,
-                        new: json!({"address": site.address, "title": site.title, "enabled": site.enabled, "registration": site.registration, "logo_asset_id": site.logo_asset_id}),
+                        new: json!({"registration": registration}),
                     };
-                    Ok((site, vec![change]))
+                    Ok((row.get::<_, i64>(0), vec![change]))
                 })
             })
-            .await;
-        match saved {
-            Ok(site) => Ok(Ok(site)),
-            Err(Error::Conflict) => Ok(Err(vec![field("address", "is used by another portal")])),
-            Err(error) => Err(error),
-        }
+            .await?;
+        Ok(Ok(Site {
+            registration,
+            version,
+            ..before
+        }))
     }
 
     /// The logo to put in the portal's pages: a signed Media link to the
@@ -468,74 +359,17 @@ impl PortalService {
             .await
             .ok()
     }
-    /// The logo a save leaves the site with, after checking a new image is the
-    /// tenant's own raster image (an agent may name any asset id).
-    async fn checked_logo(
-        &self,
-        client: &(impl GenericClient + Sync),
-        scope: &Scope,
-        change: LogoChange,
-        before: Option<&Site>,
-    ) -> Result<Checked<Option<i64>>> {
-        let current = before.and_then(|site| site.logo_asset_id);
-        match change {
-            LogoChange::Keep => Ok(Ok(current)),
-            LogoChange::Remove => Ok(Ok(None)),
-            LogoChange::Set(id) => {
-                let refused = || {
-                    vec![field(
-                        "logo",
-                        "must be a PNG, JPEG, GIF or WebP image of this workspace",
-                    )]
-                };
-                let asset = match self.media.get_asset(client, scope, id).await {
-                    Ok(asset) => asset,
-                    Err(bilibi_media::Error::NotFound) => return Ok(Err(refused())),
-                    Err(bilibi_media::Error::Database(error)) => return Err(error),
-                    Err(_) => return Ok(Err(refused())),
-                };
-                let image = asset.mime_type.as_deref().is_some_and(|mime| {
-                    ["image/png", "image/jpeg", "image/gif", "image/webp"].contains(&mime)
-                });
-                // A private attachment is refused by the stream check, as is
-                // a file that is not readable (quarantined or still scanned).
-                let servable = self
-                    .media
-                    .tenant_stream_url(client, scope.tenant(), id)
-                    .await
-                    .is_ok();
-                if image && servable {
-                    Ok(Ok(Some(id)))
-                } else {
-                    Ok(Err(refused()))
-                }
-            }
-        }
-    }
 
-    /// The portal a customer opened, by its address, while it is on and its
-    /// tenant is active. Public: anyone holding a link reads the title it
-    /// brands. A site that is off is `None`, so its pages answer 404.
-    pub async fn portal_site(&self, tenant: i64, address: &str) -> Result<Option<Site>> {
-        if !address_shaped(address) {
-            return Ok(None);
-        }
+    /// The portal of the public site a request reached, while it is on.
+    /// Public: anyone on the site reads the title it brands. A site that is
+    /// off is `None`, so its pages answer 404.
+    pub async fn portal_site(&self, site: &bilibi_public::PublicScope) -> Result<Option<Site>> {
         let client = self.db.get().await?;
-        let site = client
-            .query_opt(
-                "SELECT s.tenant_id,s.address,s.title,s.enabled,s.registration,s.logo_asset_id,s.version FROM customer_portal_sites s JOIN tenants t ON t.id=s.tenant_id WHERE s.address=$1 AND s.tenant_id=$2 AND s.enabled AND t.deleted_at IS NULL AND t.status='active'",
-                &[&address, &tenant],
-            )
+        let found = site_of_tenant(&**client, site.tenant())
             .await?
-            .map(|row| Site::from_row(&row));
-        Ok(self.with_logo(site).await)
-    }
-    pub async fn public_logo_matches(&self, tenant: i64, asset: i64) -> Result<bool> {
-        let client = self.db.get().await?;
-        Ok(client.query_opt(
-            "SELECT 1 FROM customer_portal_sites s JOIN tenants t ON t.id=s.tenant_id WHERE s.tenant_id=$1 AND s.logo_asset_id=$2 AND s.enabled AND t.deleted_at IS NULL AND t.status='active'",
-            &[&tenant, &asset],
-        ).await?.is_some())
+            .filter(|site| site.enabled);
+        drop(client);
+        Ok(self.with_logo(found).await)
     }
 
     /// The signed-in customer's own portal site, for its layout and links;
@@ -611,10 +445,14 @@ impl PortalService {
     /// The checks an invitation passes before it is written, on the caller's
     /// connection or transaction: the portal site is set, the Person stands,
     /// the affiliation is the Person's, the address is free.
-    pub(crate) fn public_origin_for(&self, tenant: i64) -> Option<&str> {
-        self.public_origin
-            .as_deref()
-            .filter(|_| self.public_tenant == Some(tenant))
+    /// The address customer links use: the tenant's public site, while it
+    /// is on and has a primary hostname.
+    pub(crate) async fn public_origin(
+        &self,
+        client: &(impl GenericClient + Sync),
+        tenant: i64,
+    ) -> Result<Option<String>> {
+        self.public.origin(client, tenant).await
     }
 
     async fn check_invitation(
@@ -634,24 +472,24 @@ impl PortalService {
             .map_err(|error| errors.push(error))
             .ok();
         let tenant = scope.tenant();
-        if self.public_origin_for(tenant).is_none() {
-            errors.push(field(
-                "site",
-                "configure the public listener for this workspace before inviting customers",
-            ));
-            return Ok(Err(errors));
-        }
         let Some(site) = site_of_tenant(client, tenant).await? else {
             errors.push(field(
                 "site",
-                "set the portal address before inviting customers",
+                "set up the public site before inviting customers",
             ));
             return Ok(Err(errors));
         };
         if !site.enabled {
             errors.push(field(
                 "site",
-                "turn the portal on before inviting customers",
+                "turn the public site on before inviting customers",
+            ));
+            return Ok(Err(errors));
+        }
+        if self.public_origin(client, tenant).await?.is_none() {
+            errors.push(field(
+                "site",
+                "give the public site a hostname before inviting customers",
             ));
             return Ok(Err(errors));
         }
@@ -803,9 +641,10 @@ impl PortalService {
             ],
         )?;
         let link = format!(
-            "{}/portal/accept/{}/{token}",
-            self.public_origin_for(site.tenant).ok_or(Error::Invalid)?,
-            site.address,
+            "{}/portal/accept/{token}",
+            self.public_origin(tx.sql(), site.tenant)
+                .await?
+                .ok_or(Error::Invalid)?,
         );
         let mut message = Message::text(
             Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
@@ -975,23 +814,22 @@ impl PortalService {
 
     // ---- redemption --------------------------------------------------------
 
-    /// The open invitation a link names on the portal at `address`, for its
-    /// accept page. Unknown, used, revoked, expired and another portal's
-    /// links are all `None`.
+    /// The open invitation a link names on the public site a request
+    /// reached, for its accept page. Unknown, used, revoked, expired and
+    /// another site's links are all `None`.
     pub async fn open_invitation(
         &self,
-        listener_tenant: i64,
-        address: &str,
+        site: &bilibi_public::PublicScope,
         token: &str,
     ) -> Result<Option<OpenInvitation>> {
-        if !address_shaped(address) || !token_shaped(token) {
+        if !token_shaped(token) {
             return Ok(None);
         }
         let client = self.db.get().await?;
         Ok(client
             .query_opt(
-                "SELECT i.name,i.email FROM customer_invitations i JOIN customer_portal_sites s ON s.tenant_id=i.tenant_id JOIN tenants t ON t.id=i.tenant_id WHERE s.address=$1 AND s.enabled AND i.token_hash=$2 AND s.tenant_id=$3 AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at>now() AND t.deleted_at IS NULL AND t.status='active'",
-                &[&address, &digest(token), &listener_tenant],
+                "SELECT i.name,i.email FROM customer_invitations i JOIN public_sites s ON s.tenant_id=i.tenant_id JOIN tenants t ON t.id=i.tenant_id WHERE s.enabled AND i.token_hash=$1 AND s.tenant_id=$2 AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at>now() AND t.deleted_at IS NULL AND t.status='active'",
+                &[&digest(token), &site.tenant()],
             )
             .await?
             .map(|row| OpenInvitation {
@@ -1006,13 +844,12 @@ impl PortalService {
     /// customer then signs in at the portal; no session is made here.
     pub async fn accept(
         &self,
-        listener_tenant: i64,
-        address: &str,
+        site: &bilibi_public::PublicScope,
         token: &str,
         name: &str,
         password: &str,
     ) -> std::result::Result<(), AcceptError> {
-        if !address_shaped(address) || !token_shaped(token) {
+        if !token_shaped(token) {
             return Err(AcceptError::Link);
         }
         let errors = bilibi_user::validate_customer(name, password);
@@ -1028,8 +865,8 @@ impl PortalService {
         let hash = digest(token);
         let row = client
             .query_opt(
-                "SELECT i.id,i.tenant_id FROM customer_invitations i JOIN customer_portal_sites s ON s.tenant_id=i.tenant_id WHERE s.address=$1 AND s.enabled AND i.token_hash=$2 AND s.tenant_id=$3",
-                &[&address, &hash, &listener_tenant],
+                "SELECT i.id,i.tenant_id FROM customer_invitations i JOIN public_sites s ON s.tenant_id=i.tenant_id WHERE s.enabled AND i.token_hash=$1 AND s.tenant_id=$2",
+                &[&hash, &site.tenant()],
             )
             .await
             .map_err(Error::from)?
@@ -1134,10 +971,7 @@ pub(crate) async fn site_of_tenant(
     tenant: i64,
 ) -> Result<Option<Site>> {
     Ok(client
-        .query_opt(
-            &format!("SELECT {SITE_COLUMNS} FROM customer_portal_sites WHERE tenant_id=$1"),
-            &[&tenant],
-        )
+        .query_opt(&format!("{SITE_SELECT} WHERE s.tenant_id=$1"), &[&tenant])
         .await?
         .map(|row| Site::from_row(&row)))
 }

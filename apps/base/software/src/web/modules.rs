@@ -6,9 +6,9 @@ use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_ui::{
     choices, flex_table::Cell, list_state::FILTERS_FORM, params, Alert, Badge, BadgeKind,
-    BuiltinColumn, Button, ButtonVariant, Card, ColumnsOutcome, Filter, FilterToolbar, FlexRow,
-    FlexTable, Html, IconButton, ListColumns, ListSpec, ListState, Modal, ModalWidth, Pagination,
-    StatusKind, TableEmpty, ToolbarControl,
+    BuiltinColumn, Card, ColumnsOutcome, Filter, FilterToolbar, FlexRow, FlexTable, Html,
+    IconButton, ListColumns, ListSpec, ListState, Modal, ModalWidth, Pagination, StatusKind,
+    TableEmpty, ToolbarControl,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -33,6 +33,7 @@ struct Entry {
     description: String,
     /// The version in service; `None` when the module is not installed.
     installed: Option<String>,
+    commit: Option<String>,
     latest: String,
     update: bool,
     compatibility: String,
@@ -77,7 +78,15 @@ fn entries(status: &Value, catalogue: &Value, requested: &[String]) -> Vec<Entry
                 id: id.to_owned(),
                 name: item["name"].as_str().unwrap_or(id).to_owned(),
                 description: text(&item["description"]).to_owned(),
-                installed: installed.map(|m| m["version"].as_str().unwrap_or("Unknown").to_owned()),
+                installed: installed.map(|m| {
+                    m["build_label"]
+                        .as_str()
+                        .unwrap_or("Version unavailable")
+                        .to_owned()
+                }),
+                commit: installed
+                    .and_then(|m| m["commit"].as_str())
+                    .map(str::to_owned),
                 latest: item["latest_version"]
                     .as_str()
                     .or_else(|| item["recommended_version"].as_str())
@@ -101,12 +110,18 @@ fn entries(status: &Value, catalogue: &Value, requested: &[String]) -> Vec<Entry
                 kind,
                 kind_word,
                 id: id.to_owned(),
-                name: id.to_owned(),
+                name: item["name"].as_str().unwrap_or(id).to_owned(),
                 description: item["extension_code"]
                     .as_str()
                     .map(|code| format!("Code review: {code}"))
                     .unwrap_or_default(),
-                installed: Some(item["version"].as_str().unwrap_or("Unknown").to_owned()),
+                installed: Some(
+                    item["build_label"]
+                        .as_str()
+                        .unwrap_or("Version unavailable")
+                        .to_owned(),
+                ),
+                commit: item["commit"].as_str().map(str::to_owned),
                 latest: "—".into(),
                 update: false,
                 compatibility: "Not in the catalogue".into(),
@@ -306,9 +321,12 @@ fn row(entry: &Entry) -> Result<FlexRow> {
     let mut row = FlexRow::new(key.clone())
         .slot("name", name)
         .cell("kind", Cell::text(entry.kind_word))
-        .cell(
+        .slot(
             "installed",
-            Cell::text(entry.installed.as_deref().unwrap_or("Not installed")),
+            render(BuildLabel {
+                text: entry.installed.as_deref().unwrap_or("Not installed"),
+                commit: entry.commit.as_deref(),
+            })?,
         )
         .slot("latest", latest)
         .cell("compatibility", Cell::text(&entry.compatibility))
@@ -362,18 +380,9 @@ pub(super) fn commands_dialog(catalogue: &Value, kind: &str, id: &str) -> Result
         item["name"].as_str().unwrap_or(id),
         text(&item["recommended_version"])
     );
-    let mut body = render(CommandsBox {
+    let body = render(CommandsBox {
         commands: &commands,
     })?;
-    body.push(&render(Button {
-        id: "software-commands-close",
-        button_type: "button",
-        event: "cancel_dialog",
-        variant: ButtonVariant::Primary,
-        class: "mt-3",
-        body: Html::text("Close"),
-        ..Button::default()
-    })?);
     render(Modal {
         id: "software-commands",
         title: "Installation commands",
@@ -381,6 +390,7 @@ pub(super) fn commands_dialog(catalogue: &Value, kind: &str, id: &str) -> Result
         width: ModalWidth::Wide,
         description: subject.trim(),
         role: "",
+        close_icon: true,
         flash: None,
         body,
     })
@@ -393,4 +403,14 @@ pub(super) fn commands_dialog(catalogue: &Value, kind: &str, id: &str) -> Result
 )]
 struct CommandsBox<'a> {
     commands: &'a str,
+}
+
+#[derive(Template)]
+#[template(
+    source = r#"<span{% if let Some(commit) = commit %} title="{{ commit }}" tabindex="0"{% endif %}>{{ text }}</span>"#,
+    ext = "html"
+)]
+struct BuildLabel<'a> {
+    text: &'a str,
+    commit: Option<&'a str>,
 }
