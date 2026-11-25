@@ -90,11 +90,15 @@
 {%- endif -%}
 {% endmacro %}
 
+{#- Render the typed Field separately. Expanding its full control tree at
+    every call site makes form-heavy pages exhaust the debug worker stack. -#}
+{% macro input(field) %}{{ field|safe }}{% endmacro %}
+
 {#- An input with label, hint and error lines; field is a bilibi_ui::Field.
     An inset field (Field::placement) puts the label after the control inside
     one relative box, so the label can follow the control as a CSS peer; any
     other field keeps its label above. -#}
-{% macro input(field) %}
+{% macro field_input(field) %}
 {%- if field.kind.is_hidden() -%}
 <input type="hidden" id="{{ field.id }}" name="{{ field.name }}" value="{{ field.value }}"{{ field.attrs.html() }} />
 {%- elif field.kind.is_switch() -%}
