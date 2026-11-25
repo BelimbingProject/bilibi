@@ -69,7 +69,7 @@ struct SourceDescription {
     parameters: usize,
 }
 type Description = Arc<SourceDescription>;
-type Descriptions = HashMap<(&'static str, bool), Description>;
+type Descriptions = HashMap<(&'static str, bool, bool), Description>;
 fn descriptions() -> &'static Mutex<Descriptions> {
     static CACHE: OnceLock<Mutex<Descriptions>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
@@ -82,7 +82,7 @@ async fn describe_source(
     what: &str,
     source: &Source,
 ) -> Result<Description, CatalogError> {
-    let cache_key = (source.sql, source.tenant_scoped);
+    let cache_key = (source.sql, source.tenant_scoped, source.company_scoped);
     if let Some(keys) = descriptions()
         .lock()
         .ok()
@@ -93,12 +93,18 @@ async fn describe_source(
     let statement = client.prepare(source.sql).await.map_err(|error| {
         CatalogError::Misdeclared(format!("{what}: the server refused the source: {error}"))
     })?;
-    let expected = if source.tenant_scoped { 1..=2 } else { 0..=0 };
+    let expected = if source.company_scoped {
+        3..=3
+    } else if source.tenant_scoped {
+        1..=2
+    } else {
+        0..=0
+    };
     if !expected.contains(&statement.params().len())
         || statement.params().iter().any(|ty| *ty != Type::INT8)
     {
         return Err(CatalogError::Misdeclared(format!(
-            "{what}: a tenant-scoped source takes bigint $1 (tenant) and optionally $2 (user); a global one none"
+            "{what}: a tenant source takes bigint $1 (tenant) and optionally $2 (user), a company source takes $1 (tenant), $2 (user) and $3 (company), and a global source takes none"
         )));
     }
     let keys = Arc::new(SourceDescription {
@@ -121,6 +127,7 @@ pub struct Catalog {
     pub(crate) subject_scope: Option<Scope>,
     tenant: i64,
     user: i64,
+    company: Option<i64>,
     tables: BTreeMap<&'static str, Table>,
     /// Fields this account sees masked (ADR 05), by table, with their kinds.
     masks: BTreeMap<&'static str, BTreeMap<String, &'static str>>,
@@ -239,6 +246,9 @@ impl Catalog {
         let mut tables = BTreeMap::new();
         let mut masks = BTreeMap::new();
         for (id, table) in installed.map() {
+            if table.source().company_scoped && scope.current_company().is_none() {
+                continue;
+            }
             let Some(reach) = grants.reach_of(table.capability()) else {
                 continue;
             };
@@ -299,6 +309,7 @@ impl Catalog {
             subject_scope: None,
             tenant: scope.tenant(),
             user: scope.user(),
+            company: scope.current_company().map(|company| company.get()),
             tables,
             masks,
             names: Arc::new(bilibi_labels::field_labels(client, scope).await?),
@@ -332,6 +343,7 @@ impl Catalog {
                 continue;
             }
             if !table.source().tenant_scoped
+                || table.source().company_scoped
                 || describe_source(client, table.id(), &table.source())
                     .await?
                     .parameters
@@ -379,6 +391,7 @@ impl Catalog {
                     } => table.field(from_field).is_some() && target.field(to_field).is_some(),
                     Join::Edge(source) => {
                         source.tenant_scoped
+                            && !source.company_scoped
                             && describe_source(client, link.id(), &source)
                                 .await?
                                 .parameters
@@ -393,6 +406,7 @@ impl Catalog {
         }
         catalog.tenant = grant.tenant();
         catalog.user = 0;
+        catalog.company = None;
         catalog.tables = tables;
         Ok(catalog)
     }
@@ -473,6 +487,11 @@ impl Catalog {
     }
     pub fn user(&self) -> i64 {
         self.user
+    }
+    /// The selected company carried by the sealed scope, for `$3` of every
+    /// Grid statement. `None` keeps tenant-wide and global sources unchanged.
+    pub fn company(&self) -> Option<i64> {
+        self.company
     }
     /// The personal kind a column's values are masked by, when it reads a
     /// masked field's value (a value, list, minimum or maximum). A count shows

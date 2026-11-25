@@ -16,26 +16,40 @@ use crate::{Field, FieldType};
 /// The owner's statement for the rows a scope may read. It is static SQL that the
 /// grid wraps in a subquery, so every hop carries its owner's boundary and the
 /// grid adds no tenant predicate of its own. A tenant-scoped source takes the
-/// tenant id as `$1` (bigint) and may take the actor's user id as `$2`; a global
-/// source (reference data with no tenant) takes none. It must expose every
-/// declared field under its `column` key, and the keys it selects must not
-/// depend on the scope.
+/// tenant id as `$1` (bigint) and may take the actor's user id as `$2`. A
+/// company-scoped source also takes the selected company as `$3` (bigint); it
+/// must reference all three parameters, even when it needs `$2` only as a
+/// proof that an actor was supplied. A global source (reference data with no
+/// tenant) takes none. It must expose every declared field under its `column`
+/// key, and the keys it selects must not depend on the scope.
 #[derive(Clone, Copy, Debug)]
 pub struct Source {
     pub sql: &'static str,
     pub tenant_scoped: bool,
+    pub company_scoped: bool,
 }
 impl Source {
     pub const fn tenant(sql: &'static str) -> Self {
         Self {
             sql,
             tenant_scoped: true,
+            company_scoped: false,
+        }
+    }
+    /// Rows of the selected company. `$1`, `$2` and `$3` are the tenant,
+    /// actor and sealed current company respectively.
+    pub const fn company(sql: &'static str) -> Self {
+        Self {
+            sql,
+            tenant_scoped: true,
+            company_scoped: true,
         }
     }
     pub const fn global(sql: &'static str) -> Self {
         Self {
             sql,
             tenant_scoped: false,
+            company_scoped: false,
         }
     }
 }
@@ -511,6 +525,8 @@ fn source_valid(source: &Source) -> bool {
         && (head == "select" || head == "with")
         && !sql.contains(';')
         && source.sql.contains("$1") == source.tenant_scoped
+        && source.sql.contains("$3") == source.company_scoped
+        && (!source.company_scoped || source.sql.contains("$2"))
 }
 
 /// Every installed table, validated into one catalog.
@@ -686,7 +702,7 @@ impl Table {
         }
         if !source_valid(&decl.source) {
             return Err(bad(
-                "source must be one SELECT/WITH statement that takes $1 exactly when tenant-scoped"
+                "source must be one SELECT/WITH statement that takes $1 exactly when tenant-scoped and all of $1/$2/$3 when company-scoped"
                     .into(),
             ));
         }

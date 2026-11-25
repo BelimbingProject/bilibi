@@ -6,10 +6,13 @@ use bilibi_agent_api::{
     plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
     Registry,
 };
-use bilibi_base::bulk_data::{BulkData, Run, SERVICE};
+use bilibi_base::{
+    bulk_data::{BulkData, ExportState, Run, SERVICE},
+    party_ids::OrganisationId,
+};
 use bilibi_database::{pool, Db};
 use bilibi_queue::{Config, Executor};
-use bilibi_tenancy::{ProofFuture, Scope};
+use bilibi_tenancy::{Authentication, ProofFuture, Scope};
 use serde_json::{json, Value};
 use std::{os::unix::fs::DirBuilderExt, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
@@ -22,12 +25,16 @@ type Failure = Box<dyn std::error::Error>;
 struct Browser<'a> {
     app: &'a bilibi_web::App,
     token: &'a str,
+    scope: Option<Scope>,
 }
 impl PlanAuthority for Browser<'_> {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.hold(tx, self.token).await?,
+                scope: match &self.scope {
+                    Some(scope) => scope.clone(),
+                    None => self.app.security.sessions.hold(tx, self.token).await?,
+                },
                 credential_binding: format!("browser:{}", self.token),
             })
         })
@@ -143,6 +150,222 @@ fn require(ok: bool, label: &str) -> Result<(), Failure> {
     Ok(())
 }
 
+async fn settle_export(db: &Db, bulk: &BulkData, scope: &Scope, id: i64) -> Result<(), Failure> {
+    for _ in 0..600 {
+        let client = db.get().await?;
+        let export = bulk.export(&**client, scope, id).await?;
+        if export.state != ExportState::Running {
+            return require(
+                export.state == ExportState::Completed,
+                "the export completed",
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err("export did not settle".into())
+}
+
+async fn company_scope_proof(
+    app: &bilibi_web::App,
+    db: &Db,
+    bulk: &BulkData,
+    plans: &Plans,
+    registry: &Registry,
+) -> Result<(), Failure> {
+    {
+        let sql = db.get().await?;
+        sql.batch_execute(
+            "INSERT INTO persons(tenant_id,code,name,kind) VALUES(1,'grid_company_staff','Grid company staff','human') ON CONFLICT (tenant_id,code) DO NOTHING;
+         UPDATE users SET person_id=(SELECT id FROM persons WHERE tenant_id=1 AND code='grid_company_staff') WHERE tenant_id=1 AND id=3;
+         INSERT INTO user_desks(tenant_id,person_id,company_id) SELECT 1,person_id,company FROM users CROSS JOIN (VALUES(1),(2)) c(company) WHERE tenant_id=1 AND id=3 ON CONFLICT DO NOTHING;
+         INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES
+           (1,3,'admin.import.view'),(1,3,'admin.import.create'),
+           (1,3,'admin.person.import'),(1,3,'admin.person.export') ON CONFLICT DO NOTHING;
+         INSERT INTO reference_import_records(tenant_id,company_id,code) VALUES
+           (1,1,'Company A seed'),(1,2,'Company B seed') ON CONFLICT DO NOTHING;",
+        )
+        .await?;
+        let role: i64 = sql
+            .query_one(
+                "INSERT INTO roles(tenant_id,name,code,description,company_id) VALUES(1,'Company A records','company_a_records','Walkthrough company grant',1) RETURNING id",
+                &[],
+            )
+            .await?
+            .get(0);
+        sql.execute(
+            "INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(1,$1,'reference.import-results.import'),(1,$1,'reference.import-results.view') ON CONFLICT DO NOTHING",
+            &[&role],
+        )
+        .await?;
+        sql.execute(
+            "INSERT INTO principal_roles(tenant_id,user_id,role_id,company_id) VALUES(1,3,$1,1) ON CONFLICT DO NOTHING",
+            &[&role],
+        )
+        .await?;
+    }
+
+    let login = app
+        .user
+        .login("staff@example.test", bilibi_walkthrough_fixture::PASSWORD)
+        .await?;
+    let company_a = app.security.guard(&login.token).await?;
+    let auth = app
+        .services
+        .get::<Authentication>("base/tenancy.authentication")?;
+    let company_b = {
+        let sql = db.get().await?;
+        auth.reprove_work_company(&**sql, &company_a, OrganisationId::new(2)?)
+            .await?
+    };
+    let person = |scope: Scope| Person {
+        plans,
+        registry,
+        bulk,
+        browser: Browser {
+            app,
+            token: &login.token,
+            scope: Some(scope.clone()),
+        },
+        scope,
+        db,
+    };
+    let a = person(company_a);
+    let b = person(company_b);
+
+    let a_rows = a
+        .read(
+            "reference.import_results.list",
+            json!({"page":1,"page_size":100}),
+        )
+        .await?;
+    require(
+        a_rows.to_string().contains("Company A seed")
+            && !a_rows.to_string().contains("Company B seed"),
+        "the company Grid read receives company A and excludes company B",
+    )?;
+    require(
+        b.read(
+            "reference.import_results.list",
+            json!({"page":1,"page_size":100}),
+        )
+        .await
+        .is_err(),
+        "the same agent read is refused in company B without its company grant",
+    )?;
+    let b_catalog = {
+        let sql = db.get().await?;
+        bilibi_grid::Catalog::for_scope(&**sql, &b.scope).await?
+    };
+    require(
+        b_catalog.table("reference_import_records").is_none(),
+        "the company B Grid catalog omits a table granted only in company A",
+    )?;
+
+    let run = a
+        .upload(
+            owner::TYPE,
+            "company-a.csv",
+            b"Code,company_id\r\nImported through A,2\r\n",
+        )
+        .await?;
+    let imported = a
+        .pass(
+            "base.bulk_data.import.start",
+            run,
+            &json!({"fields":[{"field":"code","column":"Code"}]}),
+        )
+        .await?;
+    let imported_into_a: bool = {
+        let sql = db.get().await?;
+        sql.query_one(
+            "SELECT company_id=1 FROM reference_import_records WHERE tenant_id=1 AND code='Imported through A'",
+            &[],
+        )
+        .await?
+        .get(0)
+    };
+    require(
+        imported.run.create == 1 && imported_into_a,
+        "an import payload cannot replace the selected company",
+    )?;
+    require(
+        b.upload(owner::TYPE, "company-b.csv", b"Code\r\nForbidden B\r\n")
+            .await
+            .is_err(),
+        "Bulk Data import is refused in company B without its company grant",
+    )?;
+
+    require(
+        a.write(
+            "base.bulk_data.export.start",
+            json!({"record_type":owner::TYPE,"filter":"{}","columns":["code"],"company_id":2}),
+        )
+        .await
+        .is_err(),
+        "an export input cannot select another company",
+    )?;
+    let export = a
+        .write(
+            "base.bulk_data.export.start",
+            json!({"record_type":owner::TYPE,"filter":"{}","columns":["code"]}),
+        )
+        .await?;
+    let export_id = export["id"].as_i64().ok_or("missing export id")?;
+    settle_export(db, bulk, &a.scope, export_id).await?;
+    let (_, file) = bulk.export_file(&a.scope, export_id).await?;
+    let file = String::from_utf8(file)?;
+    require(
+        file.contains("Company A seed")
+            && file.contains("Imported through A")
+            && !file.contains("Company B seed"),
+        "an export reads only the selected company",
+    )?;
+    require(
+        b.write(
+            "base.bulk_data.export.start",
+            json!({"record_type":owner::TYPE,"filter":"{}","columns":["code"]}),
+        )
+        .await
+        .is_err(),
+        "Bulk Data export is refused in company B without its company grant",
+    )?;
+
+    let tenant_run = b
+        .upload(
+            "core/person.contacts",
+            "tenant-wide.csv",
+            b"Name,Kind,company_id\r\nTenant wide still works,human,1\r\n",
+        )
+        .await?;
+    let tenant_import = b
+        .pass(
+            "base.bulk_data.import.start",
+            tenant_run,
+            &json!({"fields":[{"field":"name","column":"Name"},{"field":"kind","column":"Kind"}]}),
+        )
+        .await?;
+    require(
+        tenant_import.run.create == 1,
+        "a tenant-wide Bulk Data import still works unchanged",
+    )?;
+    let tenant_export = b
+        .write(
+            "base.bulk_data.export.start",
+            json!({"record_type":"core/person.contacts","filter":"{\"search\":\"Tenant wide still works\"}","columns":["name"]}),
+        )
+        .await?;
+    let tenant_export_id = tenant_export["id"]
+        .as_i64()
+        .ok_or("missing tenant export id")?;
+    settle_export(db, bulk, &b.scope, tenant_export_id).await?;
+    let (_, file) = bulk.export_file(&b.scope, tenant_export_id).await?;
+    require(
+        String::from_utf8(file)?.contains("Tenant wide still works"),
+        "a tenant-wide Grid source and export still work unchanged",
+    )?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Failure> {
     if std::env::var("BILIBI_BULK_DATA_DEMO").as_deref() != Ok("disposable") {
@@ -184,6 +407,13 @@ async fn main() -> Result<(), Failure> {
         worker.await?;
         return Ok(());
     }
+    if std::env::args().any(|arg| arg == "--company-scope") {
+        drop(sql);
+        company_scope_proof(&app, &db, &bulk, &plans, &registry).await?;
+        stop.send(true)?;
+        worker.await?;
+        return Ok(());
+    }
     // Case inputs stay outside source and publication evidence. The oracle
     // below fixes each scenario's expected business effects, not its data.
     let cases: Value = serde_json::from_slice(&std::fs::read(std::env::var(
@@ -214,6 +444,7 @@ async fn main() -> Result<(), Failure> {
         browser: Browser {
             app: &app,
             token: &login.token,
+            scope: None,
         },
         scope,
         db: &db,

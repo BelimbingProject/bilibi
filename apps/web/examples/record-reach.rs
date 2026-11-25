@@ -131,7 +131,12 @@ impl Proof {
         let found = client
             .query(
                 &format!("SELECT count(*) FROM ({search}) s"),
-                &[&scope.tenant(), &scope.user(), &"task"],
+                &[
+                    &scope.tenant(),
+                    &scope.user(),
+                    &scope.current_company().map(|company| company.get()),
+                    &"task",
+                ],
             )
             .await?[0]
             .get::<_, i64>(0);

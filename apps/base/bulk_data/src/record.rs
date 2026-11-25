@@ -323,11 +323,22 @@ pub(crate) fn register(
 ) -> bilibi_module_registry::Result<BTreeMap<&'static str, Registered>> {
     let vocabulary = bilibi_authz::vocabulary::Vocabulary::from_catalog(catalog)?;
     let entries = catalog.entries::<RecordType>(RECORD_TYPES)?;
+    let grid = bilibi_grid::installed()?;
     let mut types = BTreeMap::new();
     for entry in entries {
         shape(entry)?;
         let record = entry.get::<RecordType>()?;
         let module = entry.provenance.module;
+        let table = grid
+            .table(record.table)
+            .ok_or_else(|| invalid(entry, format!("names unknown Grid table {}", record.table)))?;
+        if table.owner != module {
+            return Err(invalid(
+                entry,
+                format!("names Grid table {} of another module", record.table),
+            ));
+        }
+        let company_scoped = table.source().company_scoped;
         let own = |operation: &RegisteredOperation, what: &str| {
             if operation.provenance.module == module {
                 Ok(())
@@ -360,13 +371,18 @@ pub(crate) fn register(
             match vocabulary.capabilities.get(key) {
             Some(owned)
                 if owned.provenance.module == module
-                    && owned.definition.audience == bilibi_authz::Audience::Tenant =>
+                    && owned.definition.audience == bilibi_authz::Audience::Tenant
+                    && owned.definition.company_scoped == company_scoped =>
             {
                 Ok(())
             }
             _ => Err(invalid(
                 entry,
-                format!("names capability {key}, which {module} does not declare as a tenant capability"),
+                format!(
+                    "names capability {key}, which {module} does not declare as a {} capability matching Grid table {}",
+                    if company_scoped { "company-scoped" } else { "tenant-wide" },
+                    record.table
+                ),
             )),
         }
         };

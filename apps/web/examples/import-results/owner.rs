@@ -1,14 +1,16 @@
 //! Reference owner for the import-results walkthrough; linked only by this example.
 use bilibi_agent_api::{
-    json::Output, Channels, Definitions, Handler, Operation, OperationClient, OperationFuture,
+    json::{Data, Output, Page},
+    Channels, Definitions, Handler, Operation, OperationClient, OperationFuture, ReadHandler,
     WriteHandler, DEFINITIONS,
 };
 use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_base::bulk_data::{
-    Import, ImportOutcome, ImportResult, ImportResults, RecordType, ResultLink, IMPORT_RESULTS,
-    RECORD_TYPES,
+    Export, Import, ImportOutcome, ImportResult, ImportResults, RecordType, ResultLink,
+    IMPORT_RESULTS, RECORD_TYPES,
 };
 use bilibi_database::{Change, Error, MutationTransaction};
+use bilibi_grid::{Field, FieldType, GridContribution, Source, TableDecl};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
@@ -17,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const MODULE: &str = "reference/import_results";
 pub const TYPE: &str = "reference/import_results.records";
 const CAPABILITY: &str = "reference.import-results.import";
+const VIEW_CAPABILITY: &str = "reference.import-results.view";
 pub static RETRY: AtomicBool = AtomicBool::new(false);
 macro_rules! provenance {
     () => {
@@ -30,17 +33,41 @@ macro_rules! provenance {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Extensions,
-    dependencies: &["base/agent_api", "base/authz", "base/bulk_data", "base/database", "base/module_registry", "base/tenancy", "base/ui"],
+    dependencies: &["base/agent_api", "base/authz", "base/bulk_data", "base/database", "base/grid", "base/module_registry", "base/tenancy", "base/ui"],
     migrations: &[("reference-import-results-001-records", "CREATE TABLE reference_import_records(id bigserial PRIMARY KEY, tenant_id bigint NOT NULL, company_id bigint NOT NULL, code text NOT NULL, UNIQUE(tenant_id,company_id,code)); CREATE TABLE reference_import_tasks(id bigserial PRIMARY KEY,tenant_id bigint NOT NULL,record_id bigint NOT NULL REFERENCES reference_import_records(id));")], services: &[bilibi_module_registry::Service { id: "reference/import_results.pages", factory: |services| Ok(std::sync::Arc::new(bilibi_ui::page::PageService::<Scope, Error>(std::sync::Arc::new(Pages(services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone()))))) }],
 } }
 inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &VocabularyContribution {
-    domains: &["reference"], verbs: &[], capabilities: &[C::tenant(CAPABILITY)],
-    roles: &[RoleDefinition { code: "manager", name: "manager", description: "Import result walkthrough", grant_all: false, capabilities: &[CAPABILITY] }], system_principals: &[],
+    domains: &["reference"], verbs: &[], capabilities: &[C::company(CAPABILITY), C::company(VIEW_CAPABILITY)],
+    roles: &[RoleDefinition { code: "manager", name: "manager", description: "Import result walkthrough", grant_all: false, capabilities: &[CAPABILITY, VIEW_CAPABILITY] }], system_principals: &[],
 }) }
+static GRID: GridContribution = GridContribution {
+    record_fields: &[],
+    tables: &[TableDecl::new(
+        "reference_import_records",
+        "Result reference records",
+        VIEW_CAPABILITY,
+        Source::company("SELECT id,company_id,code FROM reference_import_records WHERE tenant_id=$1 AND company_id=$3 AND $2::bigint IS NOT NULL"),
+        "id",
+        &[
+            Field::new("id", "ID", FieldType::Integer).non_personal(),
+            Field::new("company_id", "Company", FieldType::Integer)
+                .hidden()
+                .non_personal(),
+            Field::new("code", "Code", FieldType::String).non_personal(),
+        ],
+    )
+    .label_field("code")],
+    links: &[],
+};
+bilibi_grid::contribute!(
+    "reference/import_results",
+    "reference.import_results.grid",
+    &GRID
+);
 inventory::submit! { Contribution::new(RECORD_TYPES, TYPE, provenance!(), &RecordType {
     label: "Result reference records", table: "reference_import_records", path: Some("/reference/import-records/{id}"),
     import: Import { capability: CAPABILITY, create: "reference.import_results.create", id: "id", duplicates: None, references: &[] },
-    export: None, bulk_update: None,
+    export: Some(Export { capability: CAPABILITY, list: "reference.import_results.list" }), bulk_update: None,
 }) }
 
 fn interpret(value: &Value) -> bilibi_database::Result<ImportResult> {
@@ -84,6 +111,49 @@ fn input() -> Value {
 }
 fn output() -> Value {
     json!({"type":"object"})
+}
+fn list_input() -> Value {
+    json!({"type":"object","properties":{"page":{"type":"integer"},"page_size":{"type":"integer"}}})
+}
+fn list_output() -> Value {
+    json!({"type":"array"})
+}
+struct List;
+impl ReadHandler for List {
+    fn owner(&self) -> &'static str {
+        MODULE
+    }
+    fn call<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            bilibi_authz::authorize_proof(client, scope, VIEW_CAPABILITY).await?;
+            let company = scope.current_company().ok_or(Error::Forbidden)?.get();
+            let page = input["page"].as_i64().unwrap_or(1).max(1);
+            let page_size = input["page_size"].as_i64().unwrap_or(100).clamp(1, 100);
+            let offset = (page - 1) * page_size;
+            let rows = client
+                .query(
+                    "SELECT id,code,count(*) OVER() AS total FROM reference_import_records WHERE tenant_id=$1 AND company_id=$2 ORDER BY id LIMIT $3 OFFSET $4",
+                    &[&scope.tenant(), &company, &page_size, &offset],
+                )
+                .await?;
+            let total = rows.first().map_or(0, |row| row.get::<_, i64>(2));
+            Ok(Output::Page(Page {
+                entries: Data::Json(Value::Array(
+                    rows.iter()
+                        .map(|row| json!({"id": row.get::<_, i64>(0), "code": row.get::<_, String>(1)}))
+                        .collect(),
+                )),
+                page: page as u64,
+                page_size: page_size as u64,
+                total: total as u64,
+            }))
+        })
+    }
 }
 struct Owner;
 impl WriteHandler for Owner {
@@ -152,18 +222,32 @@ impl WriteHandler for Owner {
         })
     }
 }
-const OPERATIONS: &[Operation] = &[Operation {
-    key: "reference.import_results.create",
-    title: "Capture reference enquiry",
-    summary: "Create a record or record another enquiry.",
-    keywords: &["import"],
-    capability: CAPABILITY,
-    input,
-    output,
-    handler: Handler::SafeWrite(&Owner),
-    channels: Channels::Every,
-    step_up: &[],
-}];
+const OPERATIONS: &[Operation] = &[
+    Operation {
+        key: "reference.import_results.list",
+        title: "List reference records",
+        summary: "List records in the selected company.",
+        keywords: &["list"],
+        capability: VIEW_CAPABILITY,
+        input: list_input,
+        output: list_output,
+        handler: Handler::Read(&List),
+        channels: Channels::Every,
+        step_up: &[],
+    },
+    Operation {
+        key: "reference.import_results.create",
+        title: "Capture reference enquiry",
+        summary: "Create a record or record another enquiry.",
+        keywords: &["import"],
+        capability: CAPABILITY,
+        input,
+        output,
+        handler: Handler::SafeWrite(&Owner),
+        channels: Channels::Every,
+        step_up: &[],
+    },
+];
 inventory::submit! { Contribution::new(DEFINITIONS, MODULE, provenance!(), &Definitions { operations: OPERATIONS, guides: &[] }) }
 
 struct Pages(bilibi_database::Db);

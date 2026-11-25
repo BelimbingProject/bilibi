@@ -35,10 +35,12 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
   audit views; one table claims a type).
 - a `Source`: static SQL for **the rows a scope may read**, with the owner's own
   tenant, soft-delete and company filters applied. A tenant source takes bigint
-  `$1` (tenant) and may take `$2` (user); a `Source::global` takes none. The grid
+  `$1` (tenant) and may take `$2` (user); a `Source::company` also takes `$3`
+  (the selected company from the sealed scope); a `Source::global` takes none. Grid
   wraps it in a subquery, so every hop of a path carries its owner's boundary and
   Grid never adds a tenant predicate. It must be one `SELECT`/`WITH` statement
-  that references `$1` exactly when it is tenant-scoped.
+  that references every parameter its scope requires. A request never supplies
+  the company parameter.
 - `Field`s: `Field::new`/`choice`; `column` names the source key when it differs
   from the id; `hidden` fields exist only for joins; `protected` keeps a field
   out of operator restriction (the key, label, time, hidden and join fields are
@@ -53,7 +55,8 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
 
 Contributions are validated at discovery (duplicate ids, unknown link ends, bad
 joins, a link id that shadows a field, wrong source shape, claimed record types)
-and the Ready check refuses a table naming a capability Authz does not declare.
+and the Ready check refuses a table naming a capability Authz does not declare
+or whose tenant/company scope differs from the source.
 Nothing executes a source at boot.
 
 ## Record reach
@@ -123,7 +126,9 @@ unknown one. Platform capabilities need the operator identity. A system identity
 has no `Scope` and reads nothing. Build the catalog again wherever the page
 refreshes its own capabilities; there is no cache of grants.
 
-The first catalog for a source asks PostgreSQL to describe (not run) its statement and keeps the selected keys and parameter count for the process, keyed by static SQL and tenant-scoped status. Ordinary and oversight catalogs reuse these descriptions across calls and children. A declared field its source does not select, a placeholder that is not bigint, or an edge without `from_key`/`to_key` fails with `CatalogError::Misdeclared` naming the table and field (the owner must fix it; callers' `?` maps it to an internal error and logs the cause).
+Company sources enter the catalog only when the sealed scope has a selected company and the actor holds the table's company-scoped capability there. Every projection, count, summary, search and agent read binds that same selected company; URL and operation input cannot choose another one. Tenant sources keep their tenant-wide behavior.
+
+The first catalog for a source asks PostgreSQL to describe (not run) its statement and keeps the selected keys and parameter count for the process, keyed by static SQL and tenant/company scope. Ordinary and oversight catalogs reuse these descriptions across calls and children. A declared field its source does not select, a placeholder that is not bigint, or an edge without `from_key`/`to_key` fails with `CatalogError::Misdeclared` naming the table and field (the owner must fix it; callers' `?` maps it to an internal error and logs the cause).
 
 `restriction_catalog` and `restrictable` give the Authz screens the protected-field
 catalog as **data**: Authz does not depend on Grid. Each field carries its personal kind, so only personal fields can be masked.
@@ -145,7 +150,7 @@ at most).
 
 ### Owner scalar sorting
 
-`scalar_expression(&catalog, root, path)` resolves a scalar path under a fresh scoped catalog and returns its expression, using Grid's existing owner sources and one-link cardinality rules. The caller aliases its root row `r`, binds the same tenant/user to `$1`/`$2`, and executes immediately in that scope's bounded transaction. Rollups and many-links are refused; SQL identifiers come only from validated catalog declarations. Use it where a per-root scalar lookup is appropriate; Company uses `scalar_join` for list sort and filter queries across many companies.
+`scalar_expression(&catalog, root, path)` resolves a scalar path under a fresh scoped catalog and returns its expression, using Grid's existing owner sources and one-link cardinality rules. The caller aliases its root row `r`, binds the same tenant/user/company to `$1`/`$2`/`$3`, and executes immediately in that scope's bounded transaction. Rollups and many-links are refused; SQL identifiers come only from validated catalog declarations. Use it where a per-root scalar lookup is appropriate; Company uses `scalar_join` for list sort and filter queries across many companies.
 
 `scalar_join(&catalog, root, path)` is for an owner list that reads many root rows by a field on one direct `One` link. It returns a catalog-derived alias, the field expression and one `LEFT JOIN` against the target owner's scoped source. Deduplicate clauses by alias when several fields use the same link. It accepts only a direct `On` join and a scalar target field; other paths use `scalar_expression` or a bounded Grid projection. The owner's `One` declaration guarantees no root row multiplication.
 
@@ -185,7 +190,7 @@ paging through the owner's list API. IDs are JSON number/string values; specs
 are paths such as `group.name` or `movements.delta:sum`. Do not build SQL or pass
 previously resolved `Column`s: `project` builds a fresh catalog and resolves specs
 in its own read-only, repeatable-read transaction. Owner sources on the root,
-every link target and every edge receive the same tenant/user bindings. The host
+every link target and every edge receive the same tenant/user/selected-company bindings. The host
 still validates the live session/actor before calling the module API.
 
 The result has resolved typed `columns`, page-ordered `rows` (`key` plus `cells`
@@ -244,7 +249,7 @@ The probe requires a second pool connection, even for a standalone check. It ref
 
 ## Grouped summaries and row pages (G5)
 
-The report builder's reads, in `src/summary.rs`, with `project`'s rules: a fresh scoped catalog, a read-only repeatable-read transaction, owner sources with tenant and user bindings, the `EXPLAIN` bound of 100,000 and the 2 s and 500 ms timeouts.
+The report builder's reads, in `src/summary.rs`, with `project`'s rules: a fresh scoped catalog, a read-only repeatable-read transaction, owner sources with tenant, user and selected-company bindings, the `EXPLAIN` bound of 100,000 and the 2 s and 500 ms timeouts.
 
 | Call | Returns |
 | --- | --- |
@@ -274,7 +279,7 @@ A table that claims an audit kind in `record_types` and names a `label_field` ca
 
 ## Searching related text
 
-`query::text_search_sql(client, scope, root, paths)` builds a membership subquery for an owner's paginated search and count. Execute it immediately under the same scope, binding tenant, user and normalized search text to `$1`, `$2` and `$3`. The owner retains its pagination and statement timeout. Paths resolve against a fresh catalog; unavailable tables and restricted fields contribute no matches. Many-links search every text value before cell truncation, so a value beyond the displayed rollup still matches. Each path matches from its end, uncorrelated: the rows whose field contains the term (`lower(field) LIKE '%term%'`, with `%`, `_` and `\` taken literally), then back through each link to the root keys they reach. A search therefore reads the rows that match, through a trigram index when the field's owner declares one ([ADR 29](../../../docs/architecture/decisions/29-pg-trgm-is-allowed.md)), never every root row. Index a searched text field with `gin (lower(field) gin_trgm_ops)`.
+`query::text_search_sql(client, scope, root, paths)` builds a membership subquery for an owner's paginated search and count. Execute it immediately under the same scope, binding tenant, user, selected company and normalized search text to `$1`, `$2`, `$3` and `$4`. The owner retains its pagination and statement timeout. Paths resolve against a fresh catalog; unavailable tables and restricted fields contribute no matches. Many-links search every text value before cell truncation, so a value beyond the displayed rollup still matches. Each path matches from its end, uncorrelated: the rows whose field contains the term (`lower(field) LIKE '%term%'`, with `%`, `_` and `\` taken literally), then back through each link to the root keys they reach. A search therefore reads the rows that match, through a trigram index when the field's owner declares one ([ADR 29](../../../docs/architecture/decisions/29-pg-trgm-is-allowed.md)), never every root row. Index a searched text field with `gin (lower(field) gin_trgm_ops)`.
 
 ## Lenses (G3)
 
@@ -414,6 +419,8 @@ Declare the canonical list address on `TableDecl::list_address` for the tables w
 
 The `g6-shared-views` walkthrough (`scripts/run-walkthroughs.sh grid-shared-views`) proves role visibility when switching companies, tenant-wide and owner visibility, Grid and Labels operation writes with a one-connection pool, concurrent saves at the view limit, owner deletion without sharing permission, saving filters after queued changes, and refusal of an employee email search saved on the Users page when a reader lacks the page grant.
 
+`scripts/run-walkthroughs.sh grid-company-bulk` proves that one selected company can read, import and export its company source while another selected company is refused, and that a tenant source still works in both companies.
+
 ## Scalar access predicates
 
-`scalar_access(catalog, root, path)` returns a predicate for the root row aliased `r`, using the same tenant/user binds as `scalar_expression`. It permits absent optional links and refuses a linked record excluded by the scoped catalog’s record reach at any hop. Combine it with the scoped root source when historical evidence or automation must distinguish absence from denied access.
+`scalar_access(catalog, root, path)` returns a predicate for the root row aliased `r`, using the same tenant/user/company binds as `scalar_expression`. It permits absent optional links and refuses a linked record excluded by the scoped catalog’s record reach at any hop. Combine it with the scoped root source when historical evidence or automation must distinguish absence from denied access.

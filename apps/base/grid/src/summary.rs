@@ -6,8 +6,8 @@
 //! [`crate::project`] to fill.
 //!
 //! The rules are [`crate::project`]'s: a fresh scoped catalog, a read-only
-//! repeatable-read transaction, the owner's source with its tenant and user
-//! bindings on the root and every link, an `EXPLAIN` admission bound and the
+//! repeatable-read transaction, the owner's source with its tenant, user and
+//! selected-company bindings on the root and every link, an `EXPLAIN` admission bound and the
 //! same statement and lock timeouts. Filters, groupings, measures and sorts
 //! are column specs resolved against that catalog, so a column the reader
 //! cannot see is refused like an unknown one and cannot be used to infer a
@@ -466,7 +466,7 @@ pub(crate) async fn summarize_catalog(
     .await?;
     let subjects = binds.push(subjects);
     let sql = format!(
-        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone, {subjects}::jsonb AS subjects), base AS (SELECT {inner} FROM {} r CROSS JOIN actor WHERE {predicate}) SELECT {} FROM base GROUP BY GROUPING SETS ({sets}){order} LIMIT {fetch}",
+        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company, $4::text AS zone, {subjects}::jsonb AS subjects), base AS (SELECT {inner} FROM {} r CROSS JOIN actor WHERE {predicate}) SELECT {} FROM base GROUP BY GROUPING SETS ({sets}){order} LIMIT {fetch}",
         source(root),
         columns.join(", ")
     );
@@ -685,7 +685,7 @@ pub(crate) async fn page_keys_catalog(
     .await?;
     let subjects = binds.push(subjects);
     let head = format!(
-        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone, {subjects}::jsonb AS subjects)"
+        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company, $4::text AS zone, {subjects}::jsonb AS subjects)"
     );
     let tail = format!("FROM {} r CROSS JOIN actor WHERE {predicate}", source(root));
     let page = format!(
@@ -712,14 +712,15 @@ pub(crate) async fn page_keys_catalog(
     })
 }
 
-/// Bound parameters: `$1` tenant and `$2` user (owner sources use both), `$3`
-/// the reader's zone, then one per filter value.
+/// Bound parameters: `$1` tenant, `$2` user and `$3` selected company (owner
+/// sources use them), `$4` the reader's zone, then one per filter value.
 struct Binds(Vec<Box<dyn ToSql + Sync + Send>>);
 impl Binds {
     fn new(catalog: &Catalog, timezone: &str) -> Self {
         Self(vec![
             Box::new(catalog.tenant()),
             Box::new(catalog.user()),
+            Box::new(catalog.company()),
             Box::new(timezone.to_owned()),
         ])
     }
@@ -880,7 +881,7 @@ async fn filtered_proofs<'a>(
         &mut 0,
         false,
     )?;
-    let head = "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS zone)";
+    let head = "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company, $4::text AS zone)";
     let rows = format!("FROM {} r CROSS JOIN actor WHERE {predicate}", source(root));
     crate::subject::proofs(
         tx,
