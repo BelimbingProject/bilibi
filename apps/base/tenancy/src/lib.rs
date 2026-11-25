@@ -73,10 +73,6 @@ pub struct AccountIdentity {
     pub affiliation: Option<AffiliationId>,
     /// Staff or a customer of the tenant (`users.kind`, ADR 16).
     pub kind: AccountKind,
-    /// Whether this account is the installation owner: the one account the
-    /// installation's bootstrap receipt names (Core User `user_bootstrap`).
-    /// Owner standing; never a grant, and read afresh on every proof.
-    pub installation_owner: bool,
 }
 pub trait ActorVerifier: Send + Sync {
     fn verify<'a>(
@@ -85,6 +81,14 @@ pub trait ActorVerifier: Send + Sync {
         tenant: i64,
         user: i64,
     ) -> ProofFuture<'a, AccountIdentity>;
+    fn lock_owner<'a>(
+        &'a self,
+        _client: &'a dyn ProofClient,
+        _tenant: i64,
+        _user: i64,
+    ) -> ProofFuture<'a, ()> {
+        Box::pin(async { Err(Error::Forbidden) })
+    }
     /// The account's remembered desk, else its first live desk, an unarchived
     /// desk before an archived one. Accounts belong to tenants; no affiliation
     /// grants a staff workplace.
@@ -1157,10 +1161,7 @@ impl OwnerProof {
 /// including an agent acting for that person. Impersonation never holds it.
 /// Reproof checks account eligibility and agent revocation on this connection;
 /// no cached flag, role or capability confers ownership.
-pub async fn prove_owner(
-    client: &(impl GenericClient + Sync),
-    scope: &Scope,
-) -> Result<OwnerProof> {
+pub async fn prove_owner(client: &dyn ProofClient, scope: &Scope) -> Result<OwnerProof> {
     // Owner standing belongs to a person; neither an operator behind an
     // impersonated session nor a system principal holds it, and a customer
     // is never the owner (ADR 16).
@@ -1171,20 +1172,19 @@ pub async fn prove_owner(
         return Err(Error::Forbidden);
     }
     require_operator_marker(client, scope.tenant()).await?;
-    let fresh = &scope.authentication.reprove(client, scope).await?;
-    let identity = fresh
+    let verifier = scope
         .authentication
         .verifier
         .get()
-        .ok_or(Error::Unauthorized)?
-        .verify(client, fresh.tenant(), fresh.user())
+        .ok_or(Error::Unauthorized)?;
+    verifier
+        .lock_owner(client, scope.tenant(), scope.user())
         .await?;
-    if !identity.installation_owner {
+    let fresh = scope.authentication.reprove(client, scope).await?;
+    if fresh.actor().kind() != AccountKind::Staff {
         return Err(Error::Forbidden);
     }
-    Ok(OwnerProof {
-        scope: fresh.clone(),
-    })
+    Ok(OwnerProof { scope: fresh })
 }
 
 /// Core providers prove live, eligible targets in this exact actor scope. They

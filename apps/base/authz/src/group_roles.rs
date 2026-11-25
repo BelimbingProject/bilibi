@@ -154,7 +154,7 @@ impl Grants {
             {
                 let reach = crate::Reach::parse(key.get(1)).unwrap_or(crate::Reach::All);
                 let key: &str = key.get(0);
-                self.staff_key(key)?;
+                self.staff_key(key, false)?;
                 if company.is_some()
                     && !self
                         .vocabulary
@@ -213,8 +213,10 @@ impl Grants {
                     && grants.iter().all(|grant| {
                         let (reach, key) = grant.split_once(':').unwrap_or(("all", grant));
                         self.vocabulary.capabilities.get(key).is_some_and(|c| {
-                            c.definition.audience != crate::Audience::Portal
-                                && (company.is_none() || c.definition.company_scoped)
+                            !matches!(
+                                c.definition.audience,
+                                crate::Audience::Portal | crate::Audience::Owner
+                            ) && (company.is_none() || c.definition.company_scoped)
                         }) && actor
                             .reaches(key, crate::Reach::parse(reach).unwrap_or(crate::Reach::All))
                     })

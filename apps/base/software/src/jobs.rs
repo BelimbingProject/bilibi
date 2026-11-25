@@ -684,6 +684,16 @@ pub async fn cancel(
     .await
 }
 
+pub(super) async fn ready_for_installer(client: &impl GenericClient) -> Result<Vec<i64>> {
+    let rows = client
+        .query(
+            "SELECT id FROM base_software_jobs WHERE state='queued' AND kind IN ('install','undo','trust') AND NOT EXISTS (SELECT 1 FROM base_software_steps s WHERE s.tenant_id=base_software_jobs.tenant_id AND s.job_id=base_software_jobs.id AND s.key='download' AND s.state<>'done') ORDER BY id",
+            &[],
+        )
+        .await?;
+    Ok(rows.iter().map(|row| row.get(0)).collect())
+}
+
 /// Install jobs waiting for this program to download their release: queued,
 /// with a `download` step still pending, as (tenant, job) pairs, oldest
 /// first. The installer leaves such a job alone until the step is done.

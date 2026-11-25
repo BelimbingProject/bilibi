@@ -84,7 +84,7 @@ pub async fn search(
     if !needle.is_empty() {
         // Work data follows owner-contributed Grid paths so Person never
         // reads affiliation/company tables or bypasses their masking. Its
-        // statement binds $1 tenant, $2 actor and $3 the term.
+        // statement binds $1 tenant, $2 actor, $3 selected company and $4 the term.
         let work = bilibi_grid::query::text_search_sql(
             client,
             scope,
@@ -105,11 +105,14 @@ pub async fn search(
                 .replace('_', "\\_")
         );
         args.push(Box::new(scope.user()));
+        args.push(Box::new(
+            scope.current_company().map(|company| company.get()),
+        ));
         args.push(Box::new(needle.clone()));
         args.push(Box::new(email));
         args.push(Box::new(phone));
         args.push(Box::new(pattern));
-        predicate.push_str(&format!(" AND id IN (SELECT id FROM persons WHERE tenant_id=$1 AND (lower(name) LIKE $6 OR lower(code) LIKE $6 OR ($4 AND lower(email) LIKE $6) OR ($5 AND lower(phone) LIKE $6)) UNION ALL {work})"));
+        predicate.push_str(&format!(" AND id IN (SELECT id FROM persons WHERE tenant_id=$1 AND (lower(name) LIKE $7 OR lower(code) LIKE $7 OR ($5 AND lower(email) LIKE $7) OR ($6 AND lower(phone) LIKE $7)) UNION ALL {work})"));
     }
     args.push(Box::new(query.include_retired));
     let retired = args.len();
@@ -802,14 +805,25 @@ pub async fn hold_account_standing(
     scope: &Scope,
 ) -> Result<()> {
     if let Some(person) = scope.actor().person() {
-        tx.query_opt(
-            &format!("{LIVE_ACCOUNT_PERSON} FOR SHARE"),
-            &[&scope.tenant(), &person.get()],
-        )
-        .await?
-        .ok_or(Error::Unauthorized)?;
+        if !hold_account_person(tx, scope.tenant(), person).await? {
+            return Err(Error::Unauthorized);
+        }
     }
     Ok(())
+}
+
+pub async fn hold_account_person(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant: i64,
+    person: PersonId,
+) -> Result<bool> {
+    Ok(tx
+        .query_opt(
+            &format!("{LIVE_ACCOUNT_PERSON} FOR SHARE"),
+            &[&tenant, &person.get()],
+        )
+        .await?
+        .is_some())
 }
 
 /// Base's sealed proof service calls the owner on its current connection.

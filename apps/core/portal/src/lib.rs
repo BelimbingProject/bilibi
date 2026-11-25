@@ -166,6 +166,7 @@ inventory::submit! {
             Service { id: PAGES, factory: |services| Ok(Arc::new(bilibi_ui::page::PageService::<Scope, bilibi_database::Error>(Arc::new(web::Pages {
                 db: services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
                 access: services.get(SERVICE)?,
+                users: services.get("core/user.accounts")?,
                 persons: services.get(bilibi_person::SERVICE)?,
                 records: services.get(bilibi_records::SERVICE)?,
                 affiliations: services.get(bilibi_affiliation::SERVICE)?,
@@ -272,6 +273,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageW
         ("restore_access", operations::ACCOUNT_RESTORE),
         ("invite", operations::APPROVE),
         ("confirm_reject", operations::REJECT),
+        ("reset_two_factor", bilibi_user::RESET_TWO_FACTOR_OPERATION),
     ],
     pending: Pending::None,
 }) }

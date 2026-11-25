@@ -1,16 +1,6 @@
-//! `bilibi-web create-owner`: the first owner account of an install, for a
-//! production database the development seed never touches. The account takes
-//! the operator's own attributes instead of the seed's. Everything is written
-//! by the owners: Company provisions the operator tenant and its company, User
-//! creates the account and the bootstrap receipt on the audited mutation
-//! boundary, Authz grants the role, and User then gives the account its
-//! Person, business affiliation and first desk. The host only reads flags.
-//!
-//! No password passes through this command. The owner claims the account
-//! from an emailed link (choose a password), then sets up 2FA; rerunning the
-//! command resends the link until the password is chosen and reports the
-//! claim afterwards, so whoever runs the install never holds the owner's
-//! sign-in. The last line is always `Owner claim: <state>`.
+//! Terminal entry point for installation owner setup and recovery. See
+//! `docs/server-install.md` for usage and `apps/core/user/README.md` for the
+//! bootstrap and ownership contracts.
 use bilibi_company::{self as primary, NewCompany, ProvisionOutcome};
 use bilibi_database::{Db, Error, Result};
 use bilibi_user::{
@@ -18,17 +8,19 @@ use bilibi_user::{
     FirstAdministratorError, OperatorCompany, OwnerClaim, OwnerClaimError,
 };
 
-const USAGE: &str = "usage: bilibi-web create-owner --email ADDRESS [--name NAME]
+const USAGE: &str = "usage: bilibi-web create-owner --email ADDRESS [--name NAME] [--recover]
                                [--company-name NAME [--company-code CODE] [--tenant-name NAME]]
 Creates the first owner account of this install (the platform operator's administrator) and
 emails the owner a link to claim it: they choose their password there, then set up 2FA.
 Safe to repeat: once an owner exists it creates no other, finishes that owner's unfinished
 Person, business affiliation and first desk, resends the claim link while no password has
 been chosen, and reports the claim. --company-name is needed only while no
-platform-operator company exists yet.";
+platform-operator company exists yet. Pass --recover with the replacement owner’s email to
+recover an existing installation.";
 
 #[derive(Default)]
 struct Options {
+    recover: bool,
     email: Option<String>,
     name: Option<String>,
     company_name: Option<String>,
@@ -40,6 +32,10 @@ fn parse(args: &[String]) -> Option<Options> {
     let mut options = Options::default();
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
+        if flag == "--recover" && !options.recover {
+            options.recover = true;
+            continue;
+        }
         let slot = match flag.as_str() {
             "--email" => &mut options.email,
             "--name" => &mut options.name,
@@ -69,24 +65,17 @@ pub async fn create_owner(db: &Db, args: &[String]) -> Result<()> {
         .services
         .get::<bilibi_authz::grants::Grants>("base/authz.grants")?;
 
-    // Whether an owner exists is settled first: then no account is created,
-    // and the claim of the real owner is reported, never one typed here.
     let existing = existing_operator(db).await?;
     if let Some(operator) = &existing {
-        if let Some(accounts) = app.user.operator_accounts(operator.tenant).await? {
-            if options
-                .email
-                .as_deref()
-                .is_some_and(|email| !email.eq_ignore_ascii_case(&accounts.first))
-            {
-                println!(
-                    "This install already has an owner, {}; no second owner was created.",
-                    accounts.first
-                );
+        if !options.recover {
+            if let Some(email) = app.user.recorded_owner_email(operator.tenant).await? {
+                println!("Recorded installation owner: {email}.");
+                settle(&app).await?;
+                return claim(&app, &origin).await;
             }
-            settle(&app).await?;
-            return claim(&app, &origin).await;
         }
+    } else if options.recover {
+        return Err(usage());
     }
     let input = FirstAdministrator {
         email: options.email.clone().ok_or_else(usage)?,
@@ -129,24 +118,21 @@ pub async fn create_owner(db: &Db, args: &[String]) -> Result<()> {
     };
     match app
         .user
-        .create_first_administrator(&grants, operator, &input)
+        .create_first_administrator(&grants, operator, &input, options.recover)
         .await
     {
         Ok(created) => {
             println!(
-                "Owner created: {} (account {}), Core Administrator of the platform operator{}.",
-                created.email,
-                created.user,
-                if created.receipt_replaced {
-                    "; the earlier owner's bootstrap receipt now names this account"
-                } else {
-                    ""
-                }
+                "Recorded installation owner: {} (account {}).",
+                created.email, created.user
             );
         }
-        // Another run created the owner meanwhile: report that one.
-        Err(FirstAdministratorError::AccountsExist { first, .. }) => {
-            println!("This install already has an owner, {first}; no second owner was created.");
+        Err(FirstAdministratorError::AccountsExist) => {
+            let Some(email) = app.user.recorded_owner_email(operator.tenant).await? else {
+                eprintln!("The operator tenant already has accounts and has no recorded owner.");
+                return Err(Error::Invalid);
+            };
+            println!("Recorded installation owner: {email}.");
         }
         Err(FirstAdministratorError::Validation(errors)) => return Err(report(&errors)),
         Err(FirstAdministratorError::NotOperator) => {

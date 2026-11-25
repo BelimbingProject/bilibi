@@ -518,7 +518,7 @@ impl Reveal {
 /// `forms::input` macro renders it, as does `Html::render(&field)`.
 #[derive(Template, Clone, Debug, Default)]
 #[template(
-    source = r#"{% import "forms.html" as forms %}{% call forms::input(field=self) %}{% endcall %}"#,
+    source = r#"{% import "forms.html" as forms %}{% call forms::field_input(field=self) %}{% endcall %}"#,
     ext = "html"
 )]
 pub struct Field {

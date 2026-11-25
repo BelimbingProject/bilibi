@@ -22,8 +22,6 @@ use serde_json::{json, Value};
 use std::{fs, path::Path, sync::Mutex, time::Duration};
 use tokio_postgres::GenericClient;
 
-const OFFICIAL_RELEASE_REPOSITORY: &str = "BelimbingProject/bilibi-try";
-const OFFICIAL_RELEASE_REPOSITORY_ID: i64 = 1462459642;
 pub const REFRESH_MINUTES: &str = "software.github_refresh_minutes";
 pub const DEFAULT_REFRESH_MINUTES: i64 = 15;
 
@@ -43,7 +41,6 @@ const DOWNLOAD_HOSTS: &[&str] = &[
     "github-releases.githubusercontent.com",
 ];
 
-static LISTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static MEMORY: Mutex<Option<Value>> = Mutex::new(None);
 
 /// `owner/name`, the shape GitHub uses in a repository address.
@@ -140,15 +137,6 @@ impl Software {
         prerelease: bool,
         policy: &release_proof::Policy,
     ) -> Result<Value> {
-        if scope.is_none()
-            && (!policy
-                .repository
-                .eq_ignore_ascii_case(OFFICIAL_RELEASE_REPOSITORY)
-                || policy.repository_id != OFFICIAL_RELEASE_REPOSITORY_ID)
-        {
-            return Ok(Value::Null);
-        }
-        let _listing = LISTING.lock().await;
         let saved = self.github_saved(client, scope, Some(policy)).await?;
         let repository = &policy.repository;
         let proof_required = policy.requires_operator_proof();
@@ -165,22 +153,27 @@ impl Software {
             .paths
             .as_ref()
             .map(|paths| paths.dir.join("data").join("github-listing.json"));
-        let cached = || {
-            read_cache(cache_path.as_deref(), repository).filter(|cache| {
-                scope.is_some()
-                    || (cache["private"] == false
-                        && cache["repository_id"] == OFFICIAL_RELEASE_REPOSITORY_ID)
-            })
-        };
-        if let Some(cached) = cached() {
-            let fresh = fresh(&cached, saved.refresh_minutes);
-            if (!force && fresh) || limited(&cached) {
+        if !force {
+            if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
+                if fresh(&cached, saved.refresh_minutes) || limited(&cached) {
+                    return Ok(present(
+                        &cached,
+                        &saved,
+                        target,
+                        prerelease,
+                        false,
+                        proof_required,
+                    ));
+                }
+            }
+        } else if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
+            if limited(&cached) {
                 return Ok(present(
                     &cached,
                     &saved,
                     target,
                     prerelease,
-                    !fresh,
+                    false,
                     proof_required,
                 ));
             }
@@ -430,7 +423,7 @@ pub(crate) async fn setup_commit(software: &Software, scope: &Scope, pin: &Pin) 
         .push(&format!("refs/tags/{}", pin.tag));
     let commit = get_json(
         &software.integration,
-        scope,
+        Origin::User(scope),
         url.as_str(),
         token.as_deref(),
         "commits.get",
@@ -466,7 +459,7 @@ pub(crate) async fn recheck(
     }
     let release = get_json(
         &software.integration,
-        scope,
+        Origin::User(scope),
         &format!("{API}/repos/{}/releases/{}", pin.repository, pin.release_id),
         token,
         "releases.get",
@@ -552,16 +545,12 @@ fn present(
 ) -> Value {
     let repository = cache["repository"].as_str().unwrap_or("");
     let live_id = cache["repository_id"].as_i64();
-    let configured = saved
-        .repository
-        .as_deref()
-        .is_some_and(|name| name.eq_ignore_ascii_case(repository));
-    let accepted = configured
+    let accepted = saved.repository.as_deref() == Some(repository)
         && saved.repository_id.is_some()
         && (live_id.is_none() || saved.repository_id == live_id);
     let identity_changed = saved.repository_id.is_some()
         && live_id.is_some()
-        && configured
+        && saved.repository.as_deref() == Some(repository)
         && saved.repository_id != live_id;
     let mut releases: Vec<Value> = cache["releases"]
         .as_array()
@@ -619,13 +608,7 @@ fn present(
         };
     }
     json!({
-        "latest": if accepted && !identity_changed && !stale
-            && cache["attempt_at"].is_null() && cache["stale"] != true
-            && cache["available"] == true && cache["complete"] == true {
-            cache["latest"].clone()
-        } else {
-            Value::Null
-        },
+        "latest": cache["latest"],
         "complete": cache["complete"],
         "available": cache["available"].as_bool().unwrap_or(false),
         "repository": repository,
@@ -675,10 +658,7 @@ fn read_cache(path: Option<&Path>, repository: &str) -> Option<Value> {
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
     });
     let value = from_file.or_else(|| MEMORY.lock().ok().and_then(|guard| guard.clone()))?;
-    value["repository"]
-        .as_str()
-        .is_some_and(|name| name.eq_ignore_ascii_case(repository))
-        .then_some(value)
+    (value["repository"].as_str() == Some(repository)).then_some(value)
 }
 fn write_cache(path: Option<&Path>, value: &Value) {
     if let Ok(mut guard) = MEMORY.lock() {
@@ -709,15 +689,10 @@ async fn fetch_listing(
     cache_path: Option<&Path>,
 ) -> std::result::Result<Value, String> {
     let (id, private) = fetch_repo(integration, origin, repository, token).await?;
-    if matches!(origin, Origin::System) && (private || id != OFFICIAL_RELEASE_REPOSITORY_ID) {
-        return Err("The official public GitHub repository could not be verified.".into());
-    }
     let previous = read_cache(cache_path, repository);
     let etag = previous
         .as_ref()
-        .filter(|cache| {
-            cache["complete"] == true && cache["repository_id"] == id && cache["private"] == private
-        })
+        .filter(|cache| cache["complete"] == true && cache["repository_id"] == id)
         .and_then(|cache| cache["etag"].as_str())
         .map(str::to_owned);
     let url = format!("{API}/repos/{repository}/releases?per_page=30");
@@ -930,28 +905,17 @@ async fn fetch_repo(
     let id = body["id"].as_i64().ok_or_else(|| {
         format!("GitHub answered for {repository}, but not with a repository number.")
     })?;
-    let private = body["private"]
-        .as_bool()
-        .ok_or_else(|| format!("GitHub did not confirm whether {repository} is public."))?;
-    Ok((id, private))
+    Ok((id, body["private"].as_bool().unwrap_or(false)))
 }
 
 async fn get_json(
     integration: &bilibi_integration::Integration,
-    scope: &Scope,
+    origin: Origin<'_>,
     url: &str,
     token: Option<&str>,
     operation: &str,
 ) -> std::result::Result<Value, String> {
-    let reply = get_raw(
-        integration,
-        Origin::User(scope),
-        url,
-        token,
-        None,
-        operation,
-    )
-    .await?;
+    let reply = get_raw(integration, origin, url, token, None, operation).await?;
     if reply.status != 200 {
         return Err(github_status(
             "GitHub",

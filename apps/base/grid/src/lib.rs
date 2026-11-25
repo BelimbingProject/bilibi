@@ -121,6 +121,26 @@ pub fn validate_capabilities(
                 table.capability()
             )));
         };
+        if capability.definition.company_scoped != table.source().company_scoped {
+            return Err(RegistryError::Contribution(format!(
+                "grid table {} from {} ({}:{}): {} is {} but its source is {}",
+                table.id(),
+                table.owner,
+                table.provenance.source,
+                table.provenance.line,
+                table.capability(),
+                if capability.definition.company_scoped {
+                    "company-scoped"
+                } else {
+                    "tenant-wide"
+                },
+                if table.source().company_scoped {
+                    "company-scoped"
+                } else {
+                    "not company-scoped"
+                },
+            )));
+        }
         // Reach is applied through the owner field: a table read under a key
         // that supports reach without one would show every row (#683).
         if capability.definition.reach != table.decl.owner.is_some() {

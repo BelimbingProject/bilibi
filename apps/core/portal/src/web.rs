@@ -140,6 +140,7 @@ fn builtins() -> Vec<BuiltinColumn> {
 pub struct Pages {
     pub db: Db,
     pub access: Arc<PortalService>,
+    pub users: Arc<bilibi_user::UserService>,
     pub persons: Arc<bilibi_person::PersonService>,
     pub records: Arc<bilibi_records::Records>,
     pub affiliations: Arc<bilibi_affiliation::AffiliationService>,
@@ -195,6 +196,7 @@ struct View<'a> {
     site_facts: Html,
     table: Html,
     accounts: Html,
+    reset_dialog: Html,
     requests: Html,
     invite: Option<InviteForm>,
     invite_title: &'a str,
@@ -210,6 +212,9 @@ struct PortalPage {
     columns: ListColumns,
     accounts: ListState,
     account_columns: ListColumns,
+    linked_recovery: Option<(i64, i64)>,
+    reset_account: Option<(i64, i64, String)>,
+    reset_error: Option<String>,
     requests: ListState,
     request_columns: ListColumns,
     /// The request a rejection waits to confirm.
@@ -276,6 +281,16 @@ impl PortalPage {
                 .map_err(|_| Error::Internal)?,
             account_columns: ListColumns::mount("customer-accounts", account_builtins())
                 .map_err(|_| Error::Internal)?,
+            linked_recovery: query
+                .get("recoveryTenant")
+                .and_then(|tenant| params::positive_id(Some(tenant)))
+                .zip(
+                    query
+                        .get("recoveryAccount")
+                        .and_then(|user| params::positive_id(Some(user))),
+                ),
+            reset_account: None,
+            reset_error: None,
             requests: ListState::parse(query, REQUESTS_SPEC.clone())
                 .map_err(|_| Error::Internal)?,
             request_columns: ListColumns::mount("customer-requests", request_builtins())
@@ -437,7 +452,7 @@ impl PortalPage {
 
     /// The customer accounts invitations made, with revoke and restore.
     async fn accounts_table(&mut self, scope: &Scope, can_manage: bool) -> Result<Html> {
-        let (rows, total) = {
+        let (mut rows, mut total) = {
             let client = self.pages.db.get().await?;
             self.pages
                 .access
@@ -449,10 +464,52 @@ impl PortalPage {
                 )
                 .await?
         };
+        let reset_requests = {
+            let client = self.pages.db.get().await?;
+            if let Some((tenant, id)) = self
+                .linked_recovery
+                .filter(|(tenant, _)| *tenant != scope.tenant())
+            {
+                let requests =
+                    bilibi_user::customer_reset_requests(&**client, scope, tenant, &[id]).await?;
+                rows = bilibi_user::recovery_customer_account(&**client, scope, tenant, id)
+                    .await?
+                    .into_iter()
+                    .collect();
+                total = rows.len() as i64;
+                requests
+            } else {
+                let mut ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+                let linked = self.linked_recovery.map(|(_, id)| id);
+                if let Some(id) = linked {
+                    ids.push(id);
+                }
+                let requests =
+                    bilibi_user::customer_reset_requests(&**client, scope, scope.tenant(), &ids)
+                        .await?;
+                if let Some(id) = linked
+                    .filter(|id| requests.contains_key(id) && !rows.iter().any(|row| row.id == *id))
+                {
+                    if let Some(account) =
+                        bilibi_user::customer_account(&**client, scope, id, false).await?
+                    {
+                        rows.insert(0, account);
+                    }
+                }
+                requests
+            }
+        };
+        let display = self.display(scope).await?;
         let companies = {
             let client = self.pages.db.get().await?;
             let mut names = HashMap::new();
-            for id in rows.iter().filter_map(|row| row.organisation) {
+            let cross_tenant = self
+                .linked_recovery
+                .is_some_and(|(tenant, _)| tenant != scope.tenant());
+            for id in rows
+                .iter()
+                .filter_map(|row| (!cross_tenant).then_some(row.organisation).flatten())
+            {
                 if let std::collections::hash_map::Entry::Vacant(entry) = names.entry(id) {
                     if let Some(identity) = bilibi_company::identity(&**client, scope, id).await? {
                         entry.insert(identity.display_name);
@@ -508,6 +565,26 @@ impl PortalPage {
                     }
                 })?;
             }
+            if let Some(at) = reset_requests.get(&row.id) {
+                let at = jiff::Timestamp::try_from(*at).map_err(|_| Error::Internal)?;
+                let time = display.render(at, Format::DateTime, Precision::Minute);
+                let label = format!("2FA reset requested · {}", time.text);
+                let mut access = flex.slots.remove("access").unwrap_or_default();
+                access.push(&render(Badge {
+                    kind: BadgeKind::Warning,
+                    dot: false,
+                    class: "",
+                    body: Html::text(&label),
+                })?);
+                flex.slots.insert("access".into(), access);
+                flex.actions.push(&render(IconButton {
+                    id: &format!("customer-account-reset-{}", row.id),
+                    event: "request_reset_two_factor",
+                    name: "id",
+                    value: &row.id.to_string(),
+                    ..IconButton::new("shield-check", "Reset 2FA")
+                })?);
+            }
             flex_rows.push(flex);
         }
         let mut table = FlexTable::new(
@@ -519,7 +596,7 @@ impl PortalPage {
         table.suggestions = self.account_columns.flex_suggestions();
         table.add_query = &self.account_columns.add_query;
         table.framed = false;
-        table.actions = can_manage;
+        table.actions = can_manage || !reset_requests.is_empty();
         table.caption = "Customer accounts";
         if rows.is_empty() {
             table.empty = Some(TableEmpty::Content(Html::text(
@@ -882,6 +959,15 @@ impl PortalPage {
                 StatusKind::Info => flash.info = message,
             }
         }
+        let reset_dialog = match &self.reset_account {
+            Some((_, _, name)) => {
+                self.pages
+                    .users
+                    .two_factor_reset_dialog(scope, name, self.reset_error.as_deref())
+                    .await?
+            }
+            None => Html::EMPTY,
+        };
         let html = render(View {
             flash,
             actions,
@@ -889,6 +975,7 @@ impl PortalPage {
             site_facts: self.site_facts(scope, site.as_ref(), can_manage).await?,
             table,
             accounts,
+            reset_dialog,
             requests,
             invite,
             invite_title: if approving {
@@ -1032,6 +1119,79 @@ impl PortalPage {
     async fn event(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         let get = |key: &str| value.get(key).and_then(Value::as_str);
         match get("type").ok_or(Error::Invalid)? {
+            "request_reset_two_factor" => {
+                let id = params::positive_id(get("id")).ok_or(Error::Invalid)?;
+                let tenant = self
+                    .linked_recovery
+                    .filter(|(_, linked)| *linked == id)
+                    .map(|(tenant, _)| tenant)
+                    .unwrap_or_else(|| scope.tenant());
+                let client = self.pages.db.get().await?;
+                if bilibi_user::customer_reset_requests(&**client, scope, tenant, &[id])
+                    .await?
+                    .contains_key(&id)
+                {
+                    let account =
+                        bilibi_user::recovery_customer_account(&**client, scope, tenant, id)
+                            .await?
+                            .ok_or(Error::NotFound)?;
+                    self.reset_account = Some((tenant, id, account.name));
+                    self.reset_error = None;
+                } else {
+                    self.flash(StatusKind::Error, "This account cannot be reset by you.");
+                }
+            }
+            "cancel_reset_two_factor" => {
+                self.reset_account = None;
+                self.reset_error = None;
+            }
+            "reset_two_factor" => {
+                let Some((tenant, id, name)) = self.reset_account.clone() else {
+                    return Ok(());
+                };
+                let Some(proof) = get("proof")
+                    .map(str::trim)
+                    .filter(|proof| !proof.is_empty())
+                else {
+                    self.reset_error =
+                        Some("Enter the current code from your authenticator app.".into());
+                    return Ok(());
+                };
+                let presented = scope.clone().presenting_step_up(proof);
+                let call = Call {
+                    scope: &presented,
+                    credential,
+                    service: PAGES,
+                    event: "reset_two_factor",
+                    contract: bilibi_user::RESET_TWO_FACTOR_OPERATION,
+                };
+                match self
+                    .pages
+                    .contracts
+                    .submit(&call, json!({"tenant_id":tenant,"user_id": id}))
+                    .await
+                {
+                    Ok(_) => {
+                        self.reset_account = None;
+                        self.reset_error = None;
+                        self.flash(StatusKind::Success, format!("{name}'s 2FA was reset."));
+                    }
+                    Err(ContractError::Backend(Error::StepUpRequired { reason, .. }))
+                        if reason != "not_enrolled" =>
+                    {
+                        self.reset_error = Some(if reason == "locked" {
+                            "Too many wrong codes. Wait a while, then try again with a fresh code."
+                        } else {
+                            "Enter a fresh code from your authenticator app."
+                        }.into());
+                    }
+                    Err(ContractError::Forbidden | ContractError::Backend(Error::Forbidden)) => {
+                        self.reset_account = None;
+                        self.flash(StatusKind::Error, "This account cannot be reset by you.");
+                    }
+                    Err(error) => return Err(contract_error(error)),
+                }
+            }
             "clear-flash" => self.flash = None,
             "page" => self.list.put_page(get("page")),
             "accounts_page" => self.accounts.put_page(get("page")),
@@ -1456,6 +1616,14 @@ impl LiveState<Scope, Error> for PortalPage {
                         .map_err(|_| Error::Internal)?;
                     self.requests = ListState::parse(values, REQUESTS_SPEC.clone())
                         .map_err(|_| Error::Internal)?;
+                    self.linked_recovery = values
+                        .get("recoveryTenant")
+                        .and_then(|tenant| params::positive_id(Some(tenant)))
+                        .zip(
+                            values
+                                .get("recoveryAccount")
+                                .and_then(|user| params::positive_id(Some(user))),
+                        );
                 }
                 LiveInput::Event(value) => {
                     self.event(request.scope, request.credential, value).await?
@@ -1465,6 +1633,10 @@ impl LiveState<Scope, Error> for PortalPage {
             let mut query = self.list.to_params();
             query.extend(self.accounts.to_params());
             query.extend(self.requests.to_params());
+            if let Some((tenant, user)) = self.linked_recovery {
+                query.insert("recoveryTenant".into(), tenant.to_string());
+                query.insert("recoveryAccount".into(), user.to_string());
+            }
             Ok(LiveBody {
                 html,
                 query,

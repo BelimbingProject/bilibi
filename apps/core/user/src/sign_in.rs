@@ -43,11 +43,13 @@ inventory::submit! { Contribution::new(DEFINITIONS, LIFETIME, Provenance { modul
 pub struct PendingSignIn {
     pub csrf: String,
     pub methods: Vec<Method>,
+    pub password_origin: bool,
 }
 struct Pending {
     id: i64,
     scope: Scope,
     hash: Vec<u8>,
+    password_origin: bool,
     /// The step-up operation of the form the password came through.
     operation: &'static str,
 }
@@ -270,7 +272,7 @@ impl UserService {
         }
         let hash = fingerprint(token);
         let mut client = self.db.get().await?;
-        let row = client.query_opt("SELECT p.id,p.tenant_id,p.user_id,p.csrf,p.credential_hash,c.company_id FROM user_sign_ins p LEFT JOIN user_identity_providers c ON c.tenant_id=p.tenant_id AND c.id=p.identity_provider_id WHERE p.token_hash=$1 AND p.state='pending' AND p.audience=$2", &[&hash,&kind.as_str()]).await?.ok_or(Error::Unauthorized)?;
+        let row = client.query_opt("SELECT p.id,p.tenant_id,p.user_id,p.csrf,p.credential_hash,c.company_id,p.identity_provider_id IS NULL FROM user_sign_ins p LEFT JOIN user_identity_providers c ON c.tenant_id=p.tenant_id AND c.id=p.identity_provider_id WHERE p.token_hash=$1 AND p.state='pending' AND p.audience=$2", &[&hash,&kind.as_str()]).await?.ok_or(Error::Unauthorized)?;
         let (id, tenant, user, csrf, stored, company): (
             i64,
             i64,
@@ -333,6 +335,7 @@ impl UserService {
             id,
             scope,
             hash,
+            password_origin: row.get(6),
             operation,
         })
     }
@@ -351,8 +354,58 @@ impl UserService {
         let pending = self.pending(token, kind).await?;
         Ok(PendingSignIn {
             csrf: pending.scope.csrf.clone(),
+            password_origin: pending.password_origin,
             methods: self.step_up.enrolled_methods(&pending.scope).await?,
         })
+    }
+
+    /// File a reset request only while this staff pending sign-in still holds
+    /// the password proof and its own CSRF value.
+    pub async fn request_sign_in_two_factor_reset(
+        &self,
+        token: &str,
+        csrf: &str,
+    ) -> Result<crate::two_factor::recovery::RequestOutcome> {
+        self.request_sign_in_two_factor_reset_of(token, csrf, AccountKind::Staff)
+            .await
+    }
+
+    /// The same request from a customer portal pending sign-in.
+    pub async fn portal_request_sign_in_two_factor_reset(
+        &self,
+        token: &str,
+        csrf: &str,
+    ) -> Result<crate::two_factor::recovery::RequestOutcome> {
+        self.request_sign_in_two_factor_reset_of(token, csrf, AccountKind::Customer)
+            .await
+    }
+
+    async fn request_sign_in_two_factor_reset_of(
+        &self,
+        token: &str,
+        csrf: &str,
+        kind: AccountKind,
+    ) -> Result<crate::two_factor::recovery::RequestOutcome> {
+        let pending = self.pending(token, kind).await?;
+        let mut client = self.db.get().await?;
+        let mut tx = self
+            .mutations
+            .begin(
+                &mut client,
+                pending
+                    .scope
+                    .mutation_context("user.two_factor.reset_requested"),
+            )
+            .await?;
+        crate::two_factor::lock_reset_target(&tx, pending.scope.tenant(), pending.scope.user())
+            .await?;
+        let held = self.hold_pending(&tx, &pending, csrf).await?;
+        if !held.password_origin {
+            return Err(Error::Forbidden);
+        }
+        let outcome = crate::two_factor::recovery::request_in(self, &mut tx, &held.scope).await?;
+        tx.commit().await?;
+        Ok(outcome)
     }
 
     async fn hold_pending(
@@ -539,6 +592,8 @@ impl UserService {
                 &mut client,
                 pending.scope.mutation_context("user.sign_in.admitted"),
             )
+            .await?;
+        crate::two_factor::lock_reset_target(&tx, pending.scope.tenant(), pending.scope.user())
             .await?;
         let held = match self.hold_pending(&tx, &pending, csrf).await {
             Ok(held) => held,

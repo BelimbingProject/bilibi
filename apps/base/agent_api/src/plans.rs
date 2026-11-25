@@ -1,7 +1,7 @@
 //! Dry-run reviews and writes, with same-request record references.
 //! Owners validate/lock reference facts and write through the outer audit transaction.
 use crate::{Error, Handler, Registry, Result, WriteHandler, CONTENT_NOTICE};
-use bilibi_database::{Connection, Db, MutationBoundary};
+use bilibi_database::{Connection, Context, Db, MutationBoundary};
 use bilibi_party_ids::OrganisationId;
 use bilibi_settings::Settings;
 use bilibi_system::Instance;
@@ -73,6 +73,51 @@ impl Plans {
             settings,
             authentication,
         }
+    }
+    fn transaction_context(
+        &self,
+        scope: &Scope,
+        operations: &[PlannedOperation],
+        action: impl Into<String>,
+    ) -> Result<Context> {
+        let mut selected = None;
+        let mut selects_tenant = false;
+        let mut uses_default = false;
+        for operation in operations {
+            let registered = self
+                .registry
+                .operations
+                .get(operation.key.as_str())
+                .ok_or(Error::UnknownOperation)?;
+            let Handler::SafeWrite(owner) = registered.definition.handler else {
+                return Err(Error::WritesNotEnabled);
+            };
+            match owner.transaction_tenant(scope, &operation.input)? {
+                Some(tenant) if tenant > 0 => {
+                    selects_tenant = true;
+                    if selected.is_some_and(|current| current != tenant) {
+                        return Err(Error::InvalidInput(std::collections::BTreeMap::from([(
+                            "operations".into(),
+                            vec!["must use one transaction tenant per plan".into()],
+                        )])));
+                    }
+                    selected = Some(tenant);
+                }
+                Some(_) => return Err(bilibi_database::Error::Invalid.into()),
+                None => uses_default = true,
+            }
+        }
+        if selects_tenant && uses_default {
+            return Err(Error::InvalidInput(std::collections::BTreeMap::from([(
+                "operations".into(),
+                vec!["cannot mix tenant-selected and ordinary writes".into()],
+            )])));
+        }
+        let mut context = scope.mutation_context(action);
+        if let Some(tenant) = selected {
+            context.tenant = tenant;
+        }
+        Ok(context)
     }
     async fn plan_scope(
         &self,
@@ -367,10 +412,8 @@ impl Plans {
         operations: &[PlannedOperation],
         prepared: &[Option<Value>],
     ) -> Result<Value> {
-        let mut tx = self
-            .boundary
-            .begin(client, scope.mutation_context("base.agent_api.write"))
-            .await?;
+        let context = self.transaction_context(scope, operations, "base.agent_api.write")?;
+        let mut tx = self.boundary.begin(client, context).await?;
         let identity = self
             .workplace_proof(tx.sql(), async {
                 authority.verify(tx.sql()).await.map_err(Error::from)
@@ -464,10 +507,8 @@ impl Plans {
         op: &PlannedOperation,
         prepared: Option<&Value>,
     ) -> Result<Value> {
-        let mut tx = self
-            .boundary
-            .begin(client, scope.mutation_context(op.key.clone()))
-            .await?;
+        let context = self.transaction_context(scope, std::slice::from_ref(op), op.key.clone())?;
+        let mut tx = self.boundary.begin(client, context).await?;
         let identity = self
             .workplace_proof(tx.sql(), async {
                 authority.verify(tx.sql()).await.map_err(Error::from)

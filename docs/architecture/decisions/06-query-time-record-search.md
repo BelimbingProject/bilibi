@@ -29,7 +29,7 @@ What a search must not do:
 | Query | `base/search` | A fresh Grid catalog for the scope; one read-only statement whose branches match and rank inside each kind's source, merged by rank and grouped by kind, under Grid's timeouts and cost check |
 | Callers | Top bar, `/search`, agents | One contract, `base.search.records`, over one facade; one capability, `base.search.records.list` |
 
-- **Trimming by construction.** The catalog keeps only the tables the reader may read and drops restricted fields; each branch binds the scope's tenant and user into the owner's source, so its tenant predicate, soft delete and company filters apply in the same statement as the match. A kind is also offered only when its record page admits the reader.
+- **Trimming by construction.** The catalog keeps only the tables the reader may read and drops restricted fields; each branch applies the owner's [scoped Grid source](../../../apps/base/search/README.md#what-a-search-does) in the same statement as the match. A kind is also offered only when its record page admits the reader.
 - **No oracle.** The vector holds only fields no operator can restrict. A restrictable field (a personal email) may be a prefix field, matched only for a reader no held role restricts.
 - **Zero lag.** The vector is a generated column of the owner's row, so it changes in the same transaction as the record. There is no indexing pipeline, queue or reindex job.
 - **Bound input.** Words are letters and digits, bound as parameters; user text never becomes `tsquery` syntax. 200 characters and 8 words count.

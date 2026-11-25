@@ -270,25 +270,21 @@ company, Person or tenant target.
 
 The development seed's one-time `user_bootstrap` receipt names the administrator and the operator company. `settle_bootstrap_affiliation` composes the initial agent Person, its business contact affiliation and an explicit desk in one audited transaction. The staff account stores only its Person. The settled receipt is never replayed after a later unlink or retirement. A refused first desk leaves the receipt unsettled.
 
-`create_first_administrator(grants, operator, input)` is the production
-counterpart of the seed's bootstrap (with the
-operator's own name and email, and a random password nobody knows), behind `bilibi-web create-owner`
-(`apps/web/src/create_owner.rs`, documented for operators in
-`docs/server-install.md`). On one `MutationBoundary` transaction as the
-`create-owner` system principal (`Context::system`, since no account exists
-yet to act as) it locks `users`, proves the given tenant and
-company are the marked platform operator and its primary company, refuses
-with `FirstAdministratorError::AccountsExist` while that tenant holds any
-undeleted account (so it never promotes or replaces one), validates with the
-administrator form's rules, inserts the account, takes the grant-all role
-through Authz's `Grants::grant_first_administrator_in`, and writes the
-receipt (replacing one whose account was deleted, the only way one can
-remain). The transaction's changes are `user`, `authz.principal_role` and
-`user.bootstrap`; it also records the retained `user.bootstrap.completed`
-action with the account, email and role, as the seed does. The host then
-calls `settle_bootstrap_affiliation` for the Person, business affiliation and first desk. `operator_accounts(tenant)` reads the same account count and first email without writing, so the host decides whether an owner exists before it asks any question; where one does, `create-owner` only settles an unfinished bootstrap and reports that owner's claim. Use this service to bootstrap the platform operator's first account.
+`create_first_administrator(grants, operator, input, recover)` backs [server owner setup](../../../docs/server-install.md#the-first-account) and [recovery](../../../docs/server-install.md#transfer-or-recover-installation-ownership). Both paths run as the `create-owner` system principal in a `MutationBoundary` transaction, lock `users` and prove the tenant and company are the marked platform operator and its primary company.
 
-`claim_owner()` is how the owner takes the account. It reads the receipt's account, never a typed address. While the owner has not chosen a password (`password_version` 1) it checks mail readiness and mails a one-time password-reset link, waiting for delivery (`OwnerClaim::Sent`, or `RecentlySent` inside the one-minute reset throttle; a failed delivery withdraws the token and returns `OwnerClaimError::Delivery`). After that it only reports `PasswordChosen` or, once any step-up method is enrolled, `Claimed`. No path creates or claims the owner without the email; root on the server is trusted, so this guards against mistakes and shortcuts, not a malicious administrator.
+Initial setup refuses while the operator tenant has any undeleted account. It inserts the account with a random password, assigns Core Administrator through Authz and writes the receipt. The transaction records `user`, `authz.principal_role` and `user.bootstrap` changes and the retained `user.bootstrap.completed` action. The host then calls `settle_bootstrap_affiliation` for the Person, business affiliation and first desk. On an existing installation, a normal `create-owner` invocation reports the recorded owner's claim state.
+
+Recovery requires an existing receipt. It updates that receipt, expires pending offers from any other sender and records the changes in the same transaction. It grants no role and leaves first-account affiliation setup marked settled.
+
+`claim_owner()` is how the owner takes the account. It reads the receipt's account, never a typed address. While the owner has not chosen a password (`password_version` 1) it checks mail readiness and mails a one-time password-reset link, waiting for delivery (`OwnerClaim::Sent`, or `RecentlySent` inside the one-minute reset throttle; a failed delivery withdraws the token and returns `OwnerClaimError::Delivery`). The password-reset request is audited as `user.reset_requested`. After the password is chosen it only reports `PasswordChosen` or, once any step-up method is enrolled, `Claimed`.
+
+### Ownership transfer (`src/ownership.rs`)
+
+The owner reviews the recipient by name, sign-in address and account number. The account privacy store retains offers as ownership evidence and exports each subject’s participation, dates and recorded status. The exported transfer record omits the other participant’s identity.
+
+For a planned handover, open **Account → My settings → Ownership** (`/settings/ownership`). The current owner selects another active staff account in the platform operator tenant and confirms the offer with a fresh 2FA code. The named recipient receives an inbox notice and has 15 minutes to accept with their own fresh code before the offer expires. Both confirmations require direct browser sessions.
+
+The acceptance review binds to the specific offer shown. Acceptance locks the live `user_bootstrap` receipt, rechecks the offer's participants, status and deadline, and updates the receipt and offer in one `MutationBoundary`. Both changes share that audit boundary, and both accounts keep their roles and ordinary membership data. See [Software access](../../base/software/README.md#access) for the permissions that follow the receipt.
 
 ### Customer tenant owner
 
@@ -300,7 +296,7 @@ The `user_tenant_owner_bootstraps` receipt identifies the exact invitation that 
 
 Authenticator-app codes (TOTP, RFC 6238: HMAC-SHA-1, 6 digits, 30 s) for the signed-in account. It is the second factor behind Base Step-up (`apps/base/step_up/README.md`).
 - **Boundary:** this module checks the account holder and nothing else. It never names what step-up protects, and those owners never name it. They declare operations and call `StepUp::require`; tenant policy decides.
-- **Code:** `src/two_factor/` (facade on `UserService`, provider in `provider.rs`), pages in `src/two_factor_ui.rs`, reset doors in `src/two_factor/agent.rs`, migrations `012-two-factor.sql` and `013-drop-two-factor-recovery.sql`.
+- **Code:** `src/two_factor/` (facade on `UserService`, provider in `provider.rs`), pages in `src/two_factor_ui.rs`, server reset in `agent.rs`, request and administrator reset in `recovery.rs`, and request storage in migration `035-two-factor-reset-requests.sql`.
 
 | Method | Purpose |
 |---|---|
@@ -310,11 +306,12 @@ Authenticator-app codes (TOTP, RFC 6238: HMAC-SHA-1, 6 digits, 30 s) for the sig
 | `step_up(scope, code)` | A current code opens the session's step-up window (the confirm page) |
 | `begin_move(scope, code)` / `confirm_move(scope, to, code)` | Move to a new phone: a current code from the old phone is spent and a new secret is made (kept only in the page's state). The new phone's first code replaces the old secret, so the old phone stops working |
 | `reset_two_factor_by_email(email)` | The server command's door (see below): turns off every registered method for one account, audited as the system principal `two-factor-reset` |
+| `core.user.two_factor.reset` | The reviewed administrator operation: applies the tenant and protected-account guards, requires the administrator's fresh 2FA, turns methods off, signs the identity out, emails the person and closes the request |
 | `two_factor::Authenticator` | The registered `core.user.authenticator` provider and shared `SessionProvider`; contract: `apps/base/step_up/README.md` |
 
 Pages (signed in only, live, `Cache-Control: no-store` like every page):
 
-- `/settings/two-factor?method=core.user.authenticator`: set up (password, QR code, setup key, first code), or move to a new phone (a code from the old phone, a new QR code, the new phone's first code). There is no turn-off: Bilibi asks everyone for 2FA. A lost phone is recovered by the installation server owner, never a customer administrator.
+- `/settings/two-factor?method=core.user.authenticator`: set up (password, QR code, setup key, first code), or move to a new phone (a code from the old phone, a new QR code, the new phone's first code). There is no self-service turn-off.
 - `/settings/two-factor/confirm?method=core.user.authenticator&return=<path>`: the authenticator step-up prompt. Success returns to `return`, which must be a local path (`safe_return`).
 - A customer has the same two pages on the portal, mounted by Core Portal: `/portal/account/two-factor` (`PortalTwoFactor`) and `/portal/account/two-factor/confirm` (`PortalConfirm`). The authenticator's `prompt` and `setup` answer these paths for a customer account (`PORTAL_CONFIRM_PATH`, `PORTAL_TWO_FACTOR_PATH`), so Base Step-up sends a customer who owes a check to the portal, never to a staff page. Both keep `return` only when it is a portal address.
 
@@ -326,14 +323,18 @@ Security rules:
 - **QR code.** The `otpauth://totp/<entry name>:<email>?secret=…&issuer=<entry name>&algorithm=SHA1&digits=6&period=30` URI is drawn on the server as one inline SVG path (`qrcode` crate, encoder only). It is sent only over the page's socket. No QR service, image URL or Bilibi URL carries it, and nothing logs it.
 - **Pending until proved.** A secret is unconfirmed until a current code arrives. Leaving setup keeps the pending row; the next setup replaces it.
 - **Verification.** Steps −1, 0 and +1 are each computed and compared in constant time (`subtle`). `last_step` only moves forward, by compare-and-set in the spending transaction, so a code is never accepted twice, even by two racing requests.
-- **No recovery codes.** People lose where they saved them, so there are none (migration `013-drop-two-factor-recovery.sql` drops the table). After a lost phone, the installation server owner runs the command below.
+- **No recovery codes.** People lose where they saved them, so there are none (migration `013-drop-two-factor-recovery.sql` drops the table). After a correct password, the 2FA sign-in step can file one open reset request per identity in 24 hours; it never admits or resets the sign-in.
 - **Throttle.** Applies per sign-in identity to every failed check: password, code, and an agent's code too. The fifth failure within 15 minutes locks every check for 15 minutes (`user_credential_attempts`, kind `step_up`; the shared rule is `src/credential_attempts.rs`). A success resets the count.
 - **Impersonation.** An impersonated session cannot enroll, change or check two-factor.
-- **Audit.** Each write is a `MutationBoundary` transaction: `user.two_factor.enrollment_started`, `.enabled`, `.verified`, `.moved`, `.failed` and `.locked`. A recovery is `user.two_factor.reset` by the installation system principal `two-factor-reset`. A code spent for an agent records the purpose's operation key and channel (`for`, `channel`). A check refused while locked is the action `user.two_factor.refused`. No code, secret or recovery code is ever in a change, payload or log.
+- **Audit.** Each write is a `MutationBoundary` transaction: enrollment and checks use `user.two_factor.*`; requests use `user.two_factor.reset_requested`; administrator and terminal recovery use `user.two_factor.reset`. Requests record the account, company, time and routing. A code spent for an agent records the purpose's operation key and channel (`for`, `channel`). No code or secret is ever in a change, payload or log.
 
 **Authenticator entry name.** Each server lists itself differently, so several Bilibi servers stay apart in one app: `Bilibi <instance name> (<role>)` with the account's email, or `Bilibi <role>` when the instance still has its role's own name. Both come from Base System's instance identity (`Instance::resolve`); there is no separate setting or input box, and the app lets a person rename the entry.
 
-**Reset 2FA.** The installation server owner runs `bilibi-web two-factor-reset --email <address>` (or `scripts/install-server.sh two-factor-reset <instance> --email <address>`) on the server. It is audited as **System · two-factor-reset**, signs every membership session out and notifies the person. Customer administrators have no factor-reset page or agent operation. See `docs/server-install.md`.
+**Reset 2FA.** After the password is verified, **Lost your phone? Ask for a reset** files a ticket and keeps the sign-in pending. Ordinary staff with memberships in one tenant notify eligible user administrators by bell and email. Requests for administrator, owner, multi-tenant and customer identities go to the installation owner. The owner also receives requests when a tenant has no eligible administrator. SSO sign-ins recover through their identity provider. A repeat within 24 hours reports the first request time.
+
+The existing **Users** grid is the staff worklist: **Reset requested** filters open tickets, a row shows the request time, and eligible rows offer **Reset 2FA**. Capability `admin.user.two-factor-reset` is on User Editor and Tenant Owner. A tenant administrator may reset a staff identity with memberships only in that tenant, except for their own identity, administrators and the installation owner. The installation owner may reset eligible staff and portal accounts in their current tenant. Customer requests appear under **Customer accounts** on the **Customer portal** administration page. Every web or agent reset requires the acting administrator's own fresh 2FA, signs the identity out everywhere, emails the person and closes all open requests for the identity.
+
+If the installation owner cannot sign in, they run `bilibi-web two-factor-reset --email <address>` (or `scripts/install-server.sh two-factor-reset <instance> --email <address>`) on the server. It is audited as **System · two-factor-reset** and remains the last resort. See `docs/server-install.md`.
 
 The person then signs in with their password and sets the app up again.
 
@@ -392,7 +393,7 @@ Two limits, both operator settings (Settings › Session), with these defaults:
 - Every tenant erasure or closed-membership retention anonymises only that tenant's membership and provider links. It never clears the shared identity, email, password, factor, reset token or credential history; the certificate lists the identity as kept because it is shared installation data.
 - The account's SCIM document keeps only its schemas, resource ID and a placeholder `userName`; a first-administrator receipt keeps a placeholder email.
 - Access and portability include every linked account's non-secret SCIM documents, including inactive documents; credentials, sessions, provider secrets and challenges are never exported. The SCIM writer normalizes this document to supported identity attributes, not passwords.
-- Installation-owner 2FA recovery uses the fixed `two-factor-reset` system principal and never gives a customer administrator a factor-reset operation.
+- 2FA reset requests are included in access and portability. Tenant administrators have the bounded `admin.user.two-factor-reset` operation described above; installation-owner terminal recovery uses the fixed `two-factor-reset` system principal.
 - Removing the last live membership starts the installation-owned identity's configurable **Unused sign-in retention** clock. Accepting a later invitation cancels it. The server owner runs `identity-retention` to anonymise due identities or `identity-delete --email <address> --confirm <address>` to dispose of one unused identity immediately; neither command can touch an identity with a live membership.
 - Lost-mailbox recovery is `identity-recover --email <old> --new-email <new>` on the server. It treats the new address as operator-verified, revokes pending reset links, signs every membership out and notifies the new mailbox. Customer tenants have no route, capability or agent operation for it.
 - **Audit actions are included in access and portability.** The account store resolves every linked account, including inactive accounts, then reads its actions through Audit: direct use, person-backed agents and impersonation, once per action. Where another account impersonated the subject, the row says an administrator acted and withholds that operator's ID, address, URL, browser and payload. Identifier-only matches and actors from another tenant are excluded. Erasure reports each account’s action evidence as kept (`audit.account_actions`, reason `evidence`); it does not clear it immediately and owes no cleanup, so no resumption is scheduled for it. The existing company action-retention policy clears request and payload values, and the operator’s partition policy removes old evidence. Bookmarks still exempt retained actions. No end date is promised: either policy can be disabled and a bookmark can keep evidence indefinitely.

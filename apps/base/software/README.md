@@ -39,20 +39,20 @@ The catalogue recommends the newest compatible release tested with this exact Pl
 | Installed Platform, Domains and Extensions | Host-supplied `bilibi_module_registry::Composition`, compiled into the program |
 | Available software and CI evidence | Published `catalogue.json` ([versions contract](../../../docs/versions.md)) |
 | Jobs, steps and enabled add-ons | `base_software_jobs`, `base_software_steps`, `base_software_plugins` |
-| What a backup restore loses | Server-wide `base_audit_mutations` since the backup |
+| What Undo counts in its restore review | Server-wide `base_audit_mutations` since the backup |
 | Trusted release proof | `/opt/bilibi/<instance>/trust/release.json`, pinned at setup and replaceable only by the installer from an owner-reviewed fresh-2FA job |
 | Highest admitted release | `/opt/bilibi/<instance>/trust/release-state.json`, outside the database and release backups |
 
 ## Access
 
-Only a server owner with the appropriate platform capability can manage software, because installation affects every company.
+Software actions require the live installation owner receipt. The receipt also grants read access, which operator staff can hold through ordinary grants. Direct denies take precedence. These permissions apply across every company.
 
 | Capability | Allows |
 | --- | --- |
 | `admin.system.software.view` | Status, catalogue, release listings, Software page and card |
 | `admin.system.software.manage` | Install, undo, go-ahead, cancel, release upload, GitHub read access and release-trust replacement |
 
-Install, undo, go-ahead, GitHub settings and release-trust replacement require the owner’s own fresh 2FA code on every commit, including Dev. The existing step-up key `base.software.change` remains `.always()` to preserve its policy and audit identity; it is **not a build operation**. Cancel requires no code. The facade rechecks authorization inside the mutation transaction. Other organisations fail closed with `denied_platform_scope`; a missing grant is `denied_missing_capability`.
+Install, undo, go-ahead, GitHub settings and release-trust replacement require the owner’s own fresh 2FA code on every commit, including Dev. The existing step-up key `base.software.change` remains `.always()` to preserve its policy and audit identity; it is **not a build operation**. Cancel requires no code. The facade rechecks authorization inside the mutation transaction. See [Authz](../authz/README.md) for owner capability decisions.
 
 ## Agent contracts
 
@@ -109,22 +109,23 @@ Migration `base-software-003-local-builds` cancels legacy queued or running `cha
 
 - The installer writes a PostgreSQL dump under the instance folder at `backups/job-<n>/<database>.dump` before changing anything.
 - After a successful install or undo, it keeps the newest `KEEP_BACKUPS` backup folders (`apps/installer/src/flow.rs`, `prune`) and removes older ones. There is no fixed age in days. The backup step records the number as `keep_backups`; `status` carries the sentence once as `backup_rule`, and only the Backups section states it.
-- Undo restores the pre-install backup only when the install changed the database structure. It then loses data entered since that backup. Otherwise, Undo switches the program back and leaves data alone. Undo takes a new safety backup first.
+- Undo takes a safety backup before switching the program back. See the [installer's Undo procedure](../../installer/README.md#undo) for when it restores the database and what survives the restore.
 - If restoration fails, the service stays stopped and the job message names the file to restore by hand.
 
 ## How a worker plugs in
 
 The separate installer (`apps/installer`) reads and writes the durable job tables with its own connection. It never creates audit or notification rows itself.
 
-1. Listen on `bilibi_software_jobs` and poll on startup. Claim the oldest queued install, undo or trust change with a conditional update; ignore installs whose download step has not finished. A trust job validates the reviewed request again and atomically replaces the instance’s record without pausing the instance.
+1. The app preflights `incoming/installer-jobs/` before it commits a job. After commit it writes one `job-<id>.ready` marker; a GitHub install writes it only after the download and proof check finish. `bilibi-installer@<instance>.path` lets systemd start the worker without giving the app permission to control a unit. The web process reconciles missing ready markers at startup and on its regular settlement interval. The service also starts at boot for recovery. On startup, scan for interrupted and ready work. Listen for database notifications while active. Claim the oldest queued install, undo or trust change with a conditional update; ignore installs whose download step has not finished. A trust job validates the reviewed request again and atomically replaces the instance’s record without pausing the instance.
 2. Mark each step running, then done, failed or skipped, with timestamps and a plain `detail.message`. Send `NOTIFY` after changes. A switch-back step may be appended after failure.
 2a. While it works on a job, write `heartbeat_at = now()` every 30 seconds (its own connection), so the server can tell a silent installer from a slow step.
 3. Lock the job before starting the pausing step. Honour `cancel_requested_at` there, or start the pause under the same lock, so cancel cannot cross it. In the same transaction set `paused_at`: a restart reads it to know the service was stopped, never a step's state.
 4. Finish with state, time and result, and skip the steps not reached in that same transaction, so a job is never found running with its steps already skipped. Result keys include `release`, `previous_release`, `migrated`, `backup`, `backup_at`, composition and `changes`, `pause_seconds`, and a plain `message`. An undo with a restore records `lost: {since, changes, by_kind}`; status adds its loss sentence.
 5. Apply `plugins/enabled.json` from the release in the transaction that finishes the job and record `plugins: {before, after}`. Undo restores `before`. An absent file preserves existing add-ons.
-6. The server settles finished outcomes every 15 seconds and at startup through `MutationBoundary` as a `base/software.job` change under `software.finished`, attributed to the recorded worker. After commit it re-proves the requester’s live account through `Authentication` and sends a `software.job` notice. Missing accounts get no notice; notification failure never prevents settlement. Notice bodies are bounded to 900 characters.
+6. After the queue is empty, retain the markers seen before the idle scan, scan once more after ten seconds, remove only that snapshot when it is still empty, and exit. A new marker written during the final scan stays behind and activates another run.
+7. The server settles finished outcomes every 15 seconds and at startup through `MutationBoundary` as a `base/software.job` change under `software.finished`, attributed to the recorded worker. After commit it re-proves the requester’s live account through `Authentication` and sends a `software.job` notice. Missing accounts get no notice; notification failure never prevents settlement. Notice bodies are bounded to 900 characters.
 
-Before a database update committed, a restarted install ends interrupted and restores the previous running release. After the update committed, or during restore/switch-back, the installer resumes. It carries existing software and step-up evidence unchanged across a restore; every other write since the backup is lost. See [`apps/installer/README.md`](../../installer/README.md).
+Before a database update committed, a restarted install ends interrupted and restores the previous running release. After the update committed, or during restore/switch-back, the installer resumes. See the [installer's restore caveats](../../installer/README.md#caveats).
 
 ## Release archives
 
@@ -181,13 +182,13 @@ An upload is verified before it is kept: its published file name supplies the ex
 
 Each failed check is a plain sentence that says what to do next: "This release was built for Linux ARM 64-bit computers, and this server is Linux x86-64. Build it locally for the same kind of server."
 
-`incoming/` is the one folder the instance’s application and installer both write. `scripts/install-server.sh` creates it with the instance’s own group and mode `2770`, and the service unit allows the program to write there (the path has the `-` prefix, so an instance that has no `incoming/` yet still starts). A program run without `BILIBI_INSTANCE_DIR` cannot receive a release, each time with a sentence that says so.
+`incoming/` is the one folder the instance’s application and installer both write. `scripts/install-server.sh` creates it with the instance’s own group and mode `2770`, including `incoming/installer-jobs/` for ready markers. The service unit allows the program to write there (the path has the `-` prefix, so an instance that has no `incoming/` yet still starts). A program run without `BILIBI_INSTANCE_DIR` cannot receive a release, each time with a sentence that says so.
 
 ### Release controls
 
 The **Releases** tab uses `release_files.rs` within `web.rs`. Each GitHub row names its asset and full archive SHA-256, and marks the installed asset. Installed facts show the local release number separately from repository/release/asset IDs, target, tag, setup commit, archive SHA-256 and program SHA-256. `status.installed_asset` and `releases.installed_asset` return the same evidence, recovered from successful install history and the current release folder. Missing older evidence is null, never inferred from a tag. Undo returns the identity of the restored release.
 
-Upload and queued files live inside **Details**. Uploads require manage permission. The operator proof input appears beside the archive and is required only by operator trust. GitHub release-list settings and release-trust replacement require fresh 2FA. Opening the tab uses the cached list; **Refresh**, expiry or an install review asks GitHub through the App. Job polling does not.
+Upload and queued files live inside **Details**. Uploads require manage permission. The operator proof input appears beside the archive and is required only by operator trust. GitHub release-list settings and release-trust replacement require fresh 2FA. Opening the tab uses the cached list; **Refresh**, expiry or an install review asks GitHub through the App. Job polling does not. The [terminal update command](../../../docs/server-install.md#putting-a-release-into-service) uses the same reviewed install and Undo operations.
 
 ### Staging and Production
 

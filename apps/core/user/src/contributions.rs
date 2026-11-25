@@ -20,6 +20,7 @@ pub const CREATE: &str = "admin.user.create";
 pub const UPDATE: &str = "admin.user.update";
 pub const DELETE: &str = "admin.user.delete";
 pub const INVITE: &str = "admin.user.invite";
+pub use crate::two_factor::recovery::CAPABILITY as RESET_TWO_FACTOR;
 const READ: &[&str] = &[LIST, VIEW];
 const ALL: &[&str] = &[
     LIST,
@@ -28,6 +29,7 @@ const ALL: &[&str] = &[
     UPDATE,
     DELETE,
     INVITE,
+    RESET_TWO_FACTOR,
     crate::sso::config::MANAGE,
 ];
 const fn role(
@@ -46,8 +48,8 @@ const fn role(
 }
 // The two user-management roles, and the tenant owner's share.
 inventory::submit! { Contribution::new(VOCABULARY, "core/user", Provenance { module: "core/user", source: file!(), line: line!() }, &VocabularyContribution {
-    domains: &[], verbs: &["invite"],
-    capabilities: &[C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(DELETE), C::tenant(INVITE), C::platform(crate::reset::MANAGE_LIFETIME), C::tenant(crate::sso::config::MANAGE)],
+    domains: &[], verbs: &["invite", "two-factor-reset"],
+    capabilities: &[C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(DELETE), C::tenant(INVITE), C::tenant(RESET_TWO_FACTOR), C::platform(crate::reset::MANAGE_LIFETIME), C::tenant(crate::sso::config::MANAGE)],
     roles: &[
         role("user_viewer", "User Viewer", "Read-only access to user management.", READ),
         role("user_editor", "User Editor", "Read-write access to user management.", ALL),
@@ -133,6 +135,11 @@ inventory::submit! {
 inventory::submit! {
     Contribution::new(ROUTES, "core/user.settings.profile", Provenance { module: "core/user", source: file!(), line: line!() }, &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
         method: Method::Get, path: "/settings/profile", service: crate::account_ui::PROFILE_SERVICE, operation: "profile", access: Access::SignedIn, framed: true,
+    })
+}
+inventory::submit! {
+    Contribution::new(ROUTES, "core/user.settings.ownership", Provenance { module: "core/user", source: file!(), line: line!() }, &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+        method: Method::Get, path: "/settings/ownership", service: "core/user.pages", operation: "ownership", access: Access::SignedIn, framed: true,
     })
 }
 // `ui.landing_menu_id`: the menu page a sign-in opens, at the

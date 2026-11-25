@@ -26,6 +26,7 @@ pub mod impersonation;
 mod inbox;
 mod memberships;
 pub mod notifications;
+mod ownership;
 mod panels;
 pub mod password;
 mod preference_operations;
@@ -66,8 +67,8 @@ use bilibi_database::{Db, Error, MutationBoundary, Result};
 use bilibi_security::{guard, Sessions};
 pub use bootstrap::{
     validate_first_administrator, BootstrapAffiliation, FirstAdministrator,
-    FirstAdministratorCreated, FirstAdministratorError, OperatorAccounts, OperatorCompany,
-    OwnerClaim, OwnerClaimError,
+    FirstAdministratorCreated, FirstAdministratorError, InstallationOwner, OperatorAccounts,
+    OperatorCompany, OwnerClaim, OwnerClaimError,
 };
 pub use identity::{standing, Account, AccountLinks, AccountVerifier, Freeze, LinkError, Standing};
 pub use identity_lifecycle::{
@@ -77,6 +78,7 @@ pub use memberships::{
     Invitation, InvitationAcceptance, InvitationError, InvitationInput, INVITATION_DAYS_KEY,
 };
 pub use notifications::{unread, Notifications};
+pub use ownership::{OwnershipError, OwnershipOffer, OwnershipState, OFFER_MINUTES};
 pub use password::PolicyViolation;
 pub use preferences::{
     list_pins, normalize_label, normalize_url, pin_route_is_served, presentation, Pin,
@@ -84,9 +86,11 @@ pub use preferences::{
 };
 pub use tenant_owner::{FirstTenantOwnerError, TenantOwnerTarget};
 pub use two_factor::{
-    safe_return, Enrollment, TwoFactorEmailError, TwoFactorEmailReset, TwoFactorError,
-    TwoFactorStatus, CONFIRM_PATH, PORTAL_CONFIRM_PATH,
-    PORTAL_SETTINGS_PATH as PORTAL_TWO_FACTOR_PATH, SETTINGS_PATH as TWO_FACTOR_PATH,
+    customer_reset_requests, recovery_customer_account, safe_return, Enrollment,
+    RequestOutcome as TwoFactorResetRequest, TwoFactorEmailError, TwoFactorEmailReset,
+    TwoFactorError, TwoFactorStatus, CONFIRM_PATH, PORTAL_CONFIRM_PATH,
+    PORTAL_SETTINGS_PATH as PORTAL_TWO_FACTOR_PATH, RESET_OPERATION as RESET_TWO_FACTOR_OPERATION,
+    SETTINGS_PATH as TWO_FACTOR_PATH,
 };
 pub use verification::{Signer, Verification};
 
@@ -106,6 +110,10 @@ pub const NOTIFICATIONS_MIGRATION: (&str, &str) = (
 pub const BOOTSTRAP_MIGRATION: (&str, &str) = (
     "core-user-006-bootstrap",
     include_str!("../migrations/006-bootstrap.sql"),
+);
+pub const OWNERSHIP_TRANSFER_MIGRATION: (&str, &str) = (
+    "core-user-036-ownership-transfer",
+    include_str!("../migrations/036-ownership-transfer.sql"),
 );
 pub const IDENTITY_MIGRATION: (&str, &str) = (
     "core-user-007-identity",
@@ -295,7 +303,7 @@ pub struct UserService {
 inventory::submit! {
     bilibi_module_registry::Module {
         id:"core/user",layer:bilibi_module_registry::Layer::Core,
-        dependencies:&["base/authz_agent","base/integration","base/agent_api","base/labels","base/database","base/security","base/step_up","base/system","base/notifications","base/tenancy","base/session","base/events","base/principal_directory","base/mail","base/templates","base/media","base/settings","base/datetime","base/locale","base/ui","base/audit","base/authz","base/menu","base/grid","base/dashboard","base/party_ids","base/records","base/personal_data","base/privacy","core/company","core/person","core/affiliation"],migrations:&[MIGRATION,CREDENTIALS_MIGRATION,PINS_MIGRATION,NOTIFICATIONS_MIGRATION,database_queries::MIGRATION,database_queries::DROP_PROMPT,BOOTSTRAP_MIGRATION,IDENTITY_MIGRATION,ACCOUNTS_MIGRATION,IMPERSONATION_MIGRATION,BOOTSTRAP_AFFILIATION_MIGRATION,MOVED_PINS_MIGRATION,TWO_FACTOR_MIGRATION,TWO_FACTOR_RECOVERY_DROP,sign_in::MIGRATION,sso::MIGRATION,sso::RUNTIME_MIGRATION,CREDENTIAL_ATTEMPTS_MIGRATION,BARE_ICON_NAMES_MIGRATION,scim::MIGRATION,DATABASE_TABLE_PIN_ICONS_MIGRATION,ACCOUNT_KIND_MIGRATION,PIN_WORKSPACE_ADDRESSES,("core-user-024-desks",include_str!("../migrations/024-desks.sql")),("core-user-025-tenant-accounts",include_str!("../migrations/025-tenant-accounts.sql")),("core-user-026-provider-step-up-proof",include_str!("../migrations/026-provider-step-up-proof.sql")),ANONYMISED_MIGRATION,SIGN_IN_IDENTITIES_MIGRATION,ICON_RENAMES_MIGRATION,MEMBERSHIP_INVITATIONS_MIGRATION,TWO_FACTOR_IDENTITY_SEAL_MIGRATION,TENANT_OWNER_BOOTSTRAP_MIGRATION,("core-user-033-portable-identity-authority",include_str!("../migrations/033-portable-identity-authority.sql")),("core-user-034-identity-lifecycle",include_str!("../migrations/034-identity-lifecycle.sql"))],
+        dependencies:&["base/authz_agent","base/integration","base/agent_api","base/labels","base/database","base/security","base/step_up","base/system","base/notifications","base/tenancy","base/session","base/events","base/principal_directory","base/mail","base/templates","base/media","base/settings","base/datetime","base/locale","base/ui","base/audit","base/authz","base/menu","base/grid","base/dashboard","base/party_ids","base/records","base/personal_data","base/privacy","core/company","core/person","core/affiliation"],migrations:&[MIGRATION,CREDENTIALS_MIGRATION,PINS_MIGRATION,NOTIFICATIONS_MIGRATION,database_queries::MIGRATION,database_queries::DROP_PROMPT,BOOTSTRAP_MIGRATION,IDENTITY_MIGRATION,ACCOUNTS_MIGRATION,IMPERSONATION_MIGRATION,BOOTSTRAP_AFFILIATION_MIGRATION,MOVED_PINS_MIGRATION,TWO_FACTOR_MIGRATION,TWO_FACTOR_RECOVERY_DROP,sign_in::MIGRATION,sso::MIGRATION,sso::RUNTIME_MIGRATION,CREDENTIAL_ATTEMPTS_MIGRATION,BARE_ICON_NAMES_MIGRATION,scim::MIGRATION,DATABASE_TABLE_PIN_ICONS_MIGRATION,ACCOUNT_KIND_MIGRATION,PIN_WORKSPACE_ADDRESSES,("core-user-024-desks",include_str!("../migrations/024-desks.sql")),("core-user-025-tenant-accounts",include_str!("../migrations/025-tenant-accounts.sql")),("core-user-026-provider-step-up-proof",include_str!("../migrations/026-provider-step-up-proof.sql")),ANONYMISED_MIGRATION,SIGN_IN_IDENTITIES_MIGRATION,ICON_RENAMES_MIGRATION,MEMBERSHIP_INVITATIONS_MIGRATION,TWO_FACTOR_IDENTITY_SEAL_MIGRATION,TENANT_OWNER_BOOTSTRAP_MIGRATION,("core-user-033-portable-identity-authority",include_str!("../migrations/033-portable-identity-authority.sql")),("core-user-034-identity-lifecycle",include_str!("../migrations/034-identity-lifecycle.sql")),("core-user-035-two-factor-reset-requests",include_str!("../migrations/035-two-factor-reset-requests.sql")),OWNERSHIP_TRANSFER_MIGRATION],
         services:&[bilibi_module_registry::Service {id:"core/user.database_queries",factory:|services| {
             Ok(std::sync::Arc::new(database_queries::QueryService::new(services.get::<Db>("base/database.pool")?.as_ref().clone(), services.get("base/database.mutations")?, services.get("base/tenancy.authentication")?)))
         }},bilibi_module_registry::Service {id:"core/user.query-pages",factory:|services| {
@@ -472,7 +480,7 @@ bilibi_ui::record_fields! { "core/user", pub(crate) mod record_fields {
 pub use accounts::{LANDING_KEY, NAME_MAX};
 pub use bootstrap::{BOOTSTRAP_ACTION, BOOTSTRAP_COMPLETED, CREATE_OWNER_PRINCIPAL};
 pub use company_accounts::CompanyAccount;
-pub use contributions::{CREATE, DELETE, INVITE, LIST, UPDATE, VIEW};
+pub use contributions::{CREATE, DELETE, INVITE, LIST, RESET_TWO_FACTOR, UPDATE, VIEW};
 pub use staff_choices::{
     StaffAssignment, StaffChoice, ASSIGNMENTS, STAFF_CHOICE_MAX, STAFF_SEARCH_MAX,
 };
