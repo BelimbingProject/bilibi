@@ -239,8 +239,41 @@
       this.onPointerCancel = event => { this.finishSlot(event, false); this.finishResize(event, false) }
 
       // The month grid: arrow keys move between days (a grid with one tab stop).
+      // When the calendar itself has focus and no text field or dialog does,
+      // single keys jump views and ranges: D/W/M/A the view, T today, arrows
+      // the previous and next range, and ? the shortcuts legend.
+      this.shortcut = key => {
+        const views = {d: "day", w: "week", m: "month", a: "agenda"}
+        const view = views[key]
+        if (view) {
+          const link = this.el.querySelector(`#${CSS.escape(this.el.id)}-views a[href*="view=${view}"]`)
+          if (link) { link.click(); return true }
+        }
+        const target = key === "t" ? "-today"
+          : key === "arrowleft" ? "-previous"
+          : key === "arrowright" ? "-next"
+          : key === "?" ? "-shortcuts"
+          : null
+        const link = target && this.el.querySelector(`#${CSS.escape(this.el.id)}${target}`)
+        if (!link) return false
+        link.click()
+        return true
+      }
+      this.shortcutsEnabled = event =>
+        !event.altKey && !event.ctrlKey && !event.metaKey
+        && !(event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable], [role=textbox]"))
+        && !document.querySelector("dialog[open]")
+
       this.onKeyDown = event => {
         const cell = event.target instanceof Element && event.target.matches("[role=gridcell]") ? event.target : null
+        // The grid keeps its own keys (arrows, Home, End, Enter, space); every
+        // other single key is a shortcut, unless a text field or dialog holds
+        // the focus.
+        const gridKey = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Enter", " "].includes(event.key)
+        if (!(cell && gridKey) && this.shortcutsEnabled(event) && this.shortcut(event.key === "?" ? "?" : event.key.toLowerCase())) {
+          event.preventDefault()
+          return
+        }
         if (!cell || event.altKey || event.ctrlKey || event.metaKey) return
         if ((event.key === "Enter" || event.key === " ") && cell.matches("[data-cal-cell]") && this.creatable()) {
           event.preventDefault()
@@ -309,6 +342,22 @@
     },
     updated() { this.position() },
     destroyed() { this.observer.disconnect() },
+  })
+  // The shortcuts button toggles the legend the calendar prints under its
+  // toolbar; the legend is a plain hidden block, so it needs no state on the
+  // server and survives a live patch of the calendar.
+  registry.registerHook("ShortcutsHelp", {
+    mounted() {
+      this.toggle = event => {
+        const help = document.getElementById(this.el.dataset.help)
+        if (!help) return
+        event.preventDefault()
+        help.hidden = !help.hidden
+        this.el.setAttribute("aria-expanded", String(!help.hidden))
+      }
+      this.el.addEventListener("click", this.toggle)
+    },
+    destroyed() { this.el.removeEventListener("click", this.toggle) },
   })
   registry.registerHook("Calendar", Calendar)
 })()

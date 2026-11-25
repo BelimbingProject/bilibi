@@ -72,6 +72,9 @@ pub enum CalendarView {
     #[default]
     Week,
     Month,
+    /// The month as a chronological list of days, the phone's reading of the
+    /// grid at every width.
+    Agenda,
     /// Twelve small months; a day links to its own day view.
     Year,
     /// One day, a column for each lane.
@@ -79,14 +82,21 @@ pub enum CalendarView {
 }
 
 impl CalendarView {
-    pub const ALL: [CalendarView; 5] =
-        [Self::Day, Self::Week, Self::Month, Self::Year, Self::Shared];
+    pub const ALL: [CalendarView; 6] = [
+        Self::Day,
+        Self::Week,
+        Self::Month,
+        Self::Agenda,
+        Self::Year,
+        Self::Shared,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Day => "day",
             Self::Week => "week",
             Self::Month => "month",
+            Self::Agenda => "agenda",
             Self::Year => "year",
             Self::Shared => "shared",
         }
@@ -97,6 +107,7 @@ impl CalendarView {
             Self::Day => "Day",
             Self::Week => "Week",
             Self::Month => "Month",
+            Self::Agenda => "Agenda",
             Self::Year => "Year",
             Self::Shared => "Shared",
         }
@@ -194,6 +205,10 @@ impl CalendarState {
             ),
             CalendarView::Day | CalendarView::Shared => (self.date, 1),
             CalendarView::Week => (monday(self.date), 7),
+            CalendarView::Agenda => (
+                self.date.first_of_month(),
+                i32::from(self.date.days_in_month()),
+            ),
             CalendarView::Month => {
                 let first = monday(self.date.first_of_month());
                 let last = self.date.last_of_month();
@@ -223,7 +238,7 @@ impl CalendarState {
         let moved = match self.view {
             CalendarView::Day | CalendarView::Shared => self.date.checked_add((sign).days()),
             CalendarView::Week => self.date.checked_add((7 * sign).days()),
-            CalendarView::Month => self.date.checked_add((sign).months()),
+            CalendarView::Month | CalendarView::Agenda => self.date.checked_add((sign).months()),
             CalendarView::Year => self.date.checked_add((sign).years()),
         };
         moved
@@ -787,7 +802,27 @@ struct CellView {
 
 struct AgendaGroup {
     heading: String,
+    today: bool,
     items: Vec<ItemView>,
+}
+
+/// One small month beside the calendar: every day links to its date in the
+/// current view, so the reader jumps without losing the view they chose.
+struct MiniMonthView {
+    dom_id: String,
+    title: String,
+    previous: String,
+    next: String,
+    weeks: Vec<Vec<MiniDayView>>,
+}
+
+struct MiniDayView {
+    day: String,
+    href: String,
+    today: bool,
+    outside: bool,
+    busy: bool,
+    label: String,
 }
 
 struct NavLink {
@@ -824,6 +859,7 @@ struct View {
     months: Vec<YearMonthView>,
     creatable: bool,
     agenda: Vec<AgendaGroup>,
+    mini: Option<MiniMonthView>,
     empty: bool,
     shared_empty: bool,
     dialog: Option<Html>,
@@ -938,7 +974,7 @@ impl View {
             label: match state.view {
                 CalendarView::Day | CalendarView::Shared => "Previous day",
                 CalendarView::Week => "Previous week",
-                CalendarView::Month => "Previous month",
+                CalendarView::Month | CalendarView::Agenda => "Previous month",
                 CalendarView::Year => "Previous year",
             },
         };
@@ -947,7 +983,7 @@ impl View {
             label: match state.view {
                 CalendarView::Day | CalendarView::Shared => "Next day",
                 CalendarView::Week => "Next week",
-                CalendarView::Month => "Next month",
+                CalendarView::Month | CalendarView::Agenda => "Next month",
                 CalendarView::Year => "Next year",
             },
         };
@@ -969,6 +1005,75 @@ impl View {
                     (mark.kind.class(), word)
                 })
                 .unwrap_or(("bg-surface", String::new()))
+        };
+        let mini = {
+            let month_first = state.date.first_of_month();
+            let lead = month_first.weekday().to_monday_zero_offset() as usize;
+            let grid_first = month_first
+                .checked_sub(i64::try_from(lead).unwrap_or(0).days())
+                .unwrap_or(month_first);
+            let busy = |date: Date| match &calendar.day_totals {
+                Some(totals) => totals
+                    .iter()
+                    .any(|total| total.date == date && total.count > 0),
+                None => items.iter().any(|(_, civil)| civil.on(date)),
+            };
+            let mut weeks = Vec::new();
+            let mut week = Vec::with_capacity(7);
+            for offset in 0..42 {
+                let date = match grid_first.checked_add(offset.days()) {
+                    Ok(date) => date,
+                    Err(_) => break,
+                };
+                let (_, mark_text) = mark(date);
+                let mut label = date.strftime("%A %-d %B %Y").to_string();
+                if date == calendar.today {
+                    label.push_str(", today");
+                }
+                if !mark_text.is_empty() {
+                    label.push_str(&format!(", {mark_text}"));
+                }
+                if busy(date) {
+                    label.push_str(", has items");
+                }
+                week.push(MiniDayView {
+                    day: date.strftime("%-d").to_string(),
+                    href: address(state.view, date),
+                    today: date == calendar.today,
+                    outside: date.month() != state.date.month(),
+                    busy: busy(date),
+                    label,
+                });
+                if week.len() == 7 {
+                    weeks.push(std::mem::take(&mut week));
+                }
+            }
+            if !week.is_empty() {
+                while week.len() < 7 {
+                    week.push(MiniDayView {
+                        day: String::new(),
+                        href: String::new(),
+                        today: false,
+                        outside: true,
+                        busy: false,
+                        label: String::new(),
+                    });
+                }
+                weeks.push(week);
+            }
+            MiniMonthView {
+                dom_id: format!("{}-mini", calendar.id),
+                title: state.date.strftime("%B %Y").to_string(),
+                previous: address(
+                    state.view,
+                    state.date.checked_sub(1.month()).unwrap_or(state.date),
+                ),
+                next: address(
+                    state.view,
+                    state.date.checked_add(1.month()).unwrap_or(state.date),
+                ),
+                weeks,
+            }
         };
         let item_view = |item: &CalendarItem, civil: &Civil, date: Date, suffix: &str| {
             Self::item(calendar, item, civil, date, suffix)
@@ -1182,6 +1287,8 @@ impl View {
                     });
                 }
             }
+            // The agenda is the list below the grid, drawn at every width.
+            CalendarView::Agenda => {}
         }
         // The agenda a phone shows in place of the grid: the same items, by
         // day (by lane when shared), each with its Move action.
@@ -1199,6 +1306,7 @@ impl View {
                     .collect();
                 agenda.push(AgendaGroup {
                     heading: lane.label.clone(),
+                    today: false,
                     items: listed,
                 });
             }
@@ -1209,9 +1317,12 @@ impl View {
                     .filter(|(_, civil)| civil.on(*date))
                     .map(|(item, civil)| item_view(item, civil, *date, "-agenda"))
                     .collect();
-                if !listed.is_empty() || state.view != CalendarView::Month {
+                if !listed.is_empty()
+                    || !matches!(state.view, CalendarView::Month | CalendarView::Agenda)
+                {
                     agenda.push(AgendaGroup {
                         heading: date.strftime("%A %-d %B").to_string(),
+                        today: *date == calendar.today,
                         items: listed,
                     });
                 }
@@ -1221,7 +1332,7 @@ impl View {
             CalendarView::Day | CalendarView::Shared => {
                 state.date.strftime("%A %-d %B %Y").to_string()
             }
-            CalendarView::Month => state.date.strftime("%B %Y").to_string(),
+            CalendarView::Month | CalendarView::Agenda => state.date.strftime("%B %Y").to_string(),
             CalendarView::Year => state.date.strftime("%Y").to_string(),
             CalendarView::Week => {
                 if first.month() == last.month() {
@@ -1276,6 +1387,7 @@ impl View {
             months,
             creatable: calendar.creatable,
             agenda,
+            mini: Some(mini),
             empty,
             shared_empty,
             dialog,
