@@ -248,7 +248,7 @@ async fn main() -> Result<()> {
         (
             "mount customer portal",
             json!({"type": "mount", "path": path, "params": {}}),
-            "id=\"customer-portal-page\"",
+            "id=\"customer-site-facts\"",
         ),
         (
             "open portal options",
@@ -258,7 +258,7 @@ async fn main() -> Result<()> {
         (
             "enable account requests",
             event(json!({"type": "save_options", "options[registration]": "true"})),
-            "Taken; each waits for approval",
+            "Portal saved.",
         ),
         (
             "reopen portal options",
