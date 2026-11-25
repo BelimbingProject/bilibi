@@ -188,6 +188,7 @@ WALKTHROUGHS=(
   'core|person-custom-fields|apps/core/person|person-custom-fields|migrate|BILIBI_PERSON_DEMO=disposable|-|serve'
   'core|person-portal|apps/core/person|person-portal|migrate|BILIBI_PERSON_DEMO=disposable|-'
   'core|product|apps/core/product|product-walkthrough|seed|BILIBI_PRODUCT_WALKTHROUGH=disposable|-'
+  'core|tenant-rename|apps/core/tenant|tenant-rename-walkthrough|none|BILIBI_TENANT_DEMO=disposable|-'
   'core|tenant-suspension|apps/core/tenant|tenant-suspension-walkthrough|none|BILIBI_TENANT_DEMO=disposable|-'
   'core|user-company-accounts|apps/core/user|company-accounts-walkthrough|migrate|BILIBI_COMPANY_ACCOUNTS_DEMO=disposable|-'
   'core|user-company-pickers|apps/core/user|company-picker-bounds-proof|migrate|BILIBI_USER_DEMO=disposable|-'
@@ -222,6 +223,7 @@ WALKTHROUGHS=(
   'web|watchers-unmounted|apps/web|watchers-walkthrough|seed||-'
   'web|ports-unmounted|apps/web|ports-reference|none||-'
   'web|grid-catalog|apps/web|g1-grid|seed|BILIBI_GRID_DEMO=disposable|-'
+  'web|grid-company-bulk|apps/web|import-results-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|--company-scope'
   'web|grid-projection|apps/web|g2-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-summary|apps/web|g5-grid-summary|migrate|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-shared-views|apps/web|g6-shared-views|none|BILIBI_GRID_DEMO=disposable DATABASE_POOL_SIZE=1|-'
@@ -287,7 +289,6 @@ NOT_RUN=(
   # They need something a person or another run supplies.
   'apps/core/user|sso-walkthrough|needs a local Keycloak and the browser steps of apps/core/user/sso.md'
   'apps/web|delivery-walkthrough|needs an open customer invitation made in a running instance'
-  'apps/web|import-results-walkthrough|its case file is private and not in the repository'
   'apps/web|owner-agent-standing|needs OAuth tokens a person obtains from the running /api/v1 edge'
   'apps/web|step-up-reference|needs the cookie of a signed-in browser session'
 )

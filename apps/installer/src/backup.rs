@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use tokio_postgres::GenericClient;
+use tokio_postgres::Client;
 
 /// The instance's database connection as libpq environment variables.
 pub struct PgEnv(Vec<(&'static str, String)>);
@@ -83,8 +83,9 @@ pub struct Restored {
 /// Replaces the database's contents with a dump: the software history, and
 /// the audit rows of the software changes made after `since` (the instant
 /// the dump was taken), are saved to `history_file` first, the `public` schema is dropped and made
-/// again, the dump is restored into it, and the history is put back so the
-/// job doing this does not erase itself or the record of who confirmed it. The service must be stopped first.
+/// again in bounded transactions, the dump is restored into it, and the
+/// history is put back so the job doing this does not erase itself or the
+/// record of who confirmed it. The service must be stopped first.
 ///
 /// The file is what makes this safe to run again after a restart: when it
 /// exists it is read instead of the database, which a cut-off restore left
@@ -94,7 +95,7 @@ pub struct Restored {
 /// the restore fails and the job tables are gone, they are made again from
 /// the file, so the failure can still be recorded.
 pub async fn restore(
-    client: &impl GenericClient,
+    client: &Client,
     pg: &PgEnv,
     dump: &Path,
     since: &str,
@@ -117,7 +118,7 @@ pub async fn restore(
     }
 }
 async fn replace(
-    client: &impl GenericClient,
+    client: &Client,
     pg: &PgEnv,
     dump: &Path,
     since: &str,
@@ -150,7 +151,12 @@ async fn replace(
         }
     };
     validate_restore(&saved)?;
-    clear(client).await?;
+    if let Err(why) = clear(client).await {
+        return Err(match rebuild(client, &saved, true).await {
+            Ok(()) => why,
+            Err(more) => format!("{why} {more}"),
+        });
+    }
     let out = pg
         .command("pg_restore")
         .args([
@@ -204,16 +210,85 @@ fn validate_restore(saved: &Value) -> Result<(), String> {
         .map(|_| ())
         .map_err(|why| format!("Restore refused: {why}"))
 }
-async fn clear(client: &impl GenericClient) -> Result<(), String> {
+/// Clears `public` without asking PostgreSQL to lock every relation in one
+/// transaction. Each generated statement runs in its own implicit
+/// transaction on a plain [`Client`], so a large installation cannot exhaust
+/// the shared lock table while it is being replaced. The durable history file
+/// and dump already exist before this starts, so an interruption can safely
+/// repeat the bounded clear and restore.
+pub(crate) async fn clear(client: &Client) -> Result<(), String> {
+    drop_each(
+        client,
+        "foreign keys",
+        "SELECT format(
+             'ALTER TABLE IF EXISTS %I.%I DROP CONSTRAINT IF EXISTS %I CASCADE',
+             nsp.nspname, rel.relname, cst.conname
+         )
+         FROM pg_constraint AS cst
+         JOIN pg_class AS rel ON rel.oid = cst.conrelid
+         JOIN pg_namespace AS nsp ON nsp.oid = rel.relnamespace
+         WHERE nsp.nspname = 'public' AND cst.conislocal AND cst.contype = 'f'
+         ORDER BY cst.oid",
+    )
+    .await?;
+    drop_each(
+        client,
+        "relations",
+        "SELECT format(
+             'DROP %s IF EXISTS %I.%I CASCADE',
+             CASE rel.relkind
+                 WHEN 'v' THEN 'VIEW'
+                 WHEN 'm' THEN 'MATERIALIZED VIEW'
+                 WHEN 'S' THEN 'SEQUENCE'
+                 WHEN 'f' THEN 'FOREIGN TABLE'
+                 ELSE 'TABLE'
+             END,
+             nsp.nspname,
+             rel.relname
+         )
+         FROM pg_class AS rel
+         JOIN pg_namespace AS nsp ON nsp.oid = rel.relnamespace
+         WHERE nsp.nspname = 'public'
+           AND rel.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+         ORDER BY
+             rel.relispartition DESC,
+             CASE rel.relkind WHEN 'v' THEN 0 WHEN 'm' THEN 1 WHEN 'S' THEN 3 ELSE 2 END,
+             rel.oid",
+    )
+    .await?;
     client
-        .batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+        .batch_execute("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
         .await
-        .map_err(|error| format!("could not clear the database: {}", jobs::short(&error)))
+        .map_err(|error| {
+            format!(
+                "could not replace the cleared schema: {}",
+                jobs::short(&error)
+            )
+        })
+}
+
+async fn drop_each(client: &Client, kind: &str, query: &str) -> Result<(), String> {
+    let statements = client.query(query, &[]).await.map_err(|error| {
+        format!(
+            "could not list {kind} while clearing the database: {}",
+            jobs::short(&error)
+        )
+    })?;
+    for row in statements {
+        let statement: String = row.get(0);
+        client.execute(&statement, &[]).await.map_err(|error| {
+            format!(
+                "could not drop a {kind} object while clearing the database: {}",
+                jobs::short(&error)
+            )
+        })?;
+    }
+    Ok(())
 }
 /// After a restore that failed, gives the database back its job tables and
 /// the history, so the job can record that it failed. `wipe` first clears
 /// what the cut-off restore left behind.
-async fn rebuild(client: &impl GenericClient, saved: &Value, wipe: bool) -> Result<(), String> {
+async fn rebuild(client: &Client, saved: &Value, wipe: bool) -> Result<(), String> {
     let again = |error: tokio_postgres::Error| {
         format!(
             "The job record could not be made again: {}",

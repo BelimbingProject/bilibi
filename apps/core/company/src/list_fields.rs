@@ -340,26 +340,27 @@ async fn read(
     let mut args: Vec<Box<dyn ToSql + Sync + Send>> = vec![
         Box::new(scope.tenant()),
         Box::new(scope.user()),
+        Box::new(scope.current_company().map(|company| company.get())),
         Box::new(params.status.clone()),
         Box::new(format!("%{}%", crate::organisation::escape_like(&params.q))),
     ];
     let searchable = ["name", "code", "legal_name", "email", "jurisdiction"]
         .into_iter()
         .filter(|name| !masked.contains(*name))
-        .map(|name| format!("r.{name} ILIKE $4"))
+        .map(|name| format!("r.{name} ILIKE $5"))
         .collect::<Vec<_>>()
         .join(" OR ");
     let search = if searchable.is_empty() {
         // Empty search stays unrestricted; when every searchable field is
         // masked, a nonempty search must match nothing without invalid SQL.
-        "$4='%%'".to_owned()
+        "$5='%%'".to_owned()
     } else {
         searchable
     };
     let mut predicates = vec![
         "r.tenant_id=$1".into(),
         "r.deleted_at IS NULL".into(),
-        "($3='' OR r.status=$3)".into(),
+        "($4='' OR r.status=$4)".into(),
         format!("({search})"),
     ];
     for filter in &params.field_filters {
@@ -433,8 +434,9 @@ async fn read(
         joins.values().cloned().collect::<Vec<_>>().join(" ")
     );
     let tail = format!("FROM {from} WHERE {}", predicates.join(" AND "));
-    // Reserve $2 even when no contributed path uses a user-scoped source.
-    let head = "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr)";
+    // Reserve every scope parameter even when contributed paths use only tenant.
+    let head =
+        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company)";
     let count = format!("{head} SELECT count(*) {tail}");
     let binds = refs(&args);
     if !admit(tx, &count, &binds).await? {

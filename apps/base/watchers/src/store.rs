@@ -582,11 +582,12 @@ impl Watchers {
                 key_type.schema().replace('"', "\"\""),
                 key_type.name().replace('"', "\"\"")
             );
-            let statement = format!("SELECT {values} FROM {} r WHERE {key}=$3::text::{cast} AND $1::bigint IS NOT NULL AND $2::bigint IS NOT NULL AND ({reachable}) LIMIT 1", root.scoped_source());
+            let statement = format!("SELECT {values} FROM {} r WHERE {key}=$4::text::{cast} AND $1::bigint IS NOT NULL AND $2::bigint IS NOT NULL AND $3::bigint IS NOT DISTINCT FROM $3::bigint AND ({reachable}) LIMIT 1", root.scoped_source());
+            let company = scope.current_company().map(|company| company.get());
             let explain: Value = client
                 .query_one(
                     &format!("EXPLAIN (FORMAT JSON) {statement}"),
-                    &[&scope.tenant(), &scope.user(), &subject],
+                    &[&scope.tenant(), &scope.user(), &company, &subject],
                 )
                 .await?
                 .get(0);
@@ -599,7 +600,10 @@ impl Watchers {
                 ));
             }
             let Some(row) = client
-                .query_opt(&statement, &[&scope.tenant(), &scope.user(), &subject])
+                .query_opt(
+                    &statement,
+                    &[&scope.tenant(), &scope.user(), &company, &subject],
+                )
                 .await?
             else {
                 return Ok(Err("subject_unavailable"));

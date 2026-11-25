@@ -82,7 +82,7 @@ pub use preferences::{
     list_pins, normalize_label, normalize_url, pin_route_is_served, presentation, Pin,
     PreferenceError, Presentation, MAX_PINS, THEMES, THEME_KEY,
 };
-pub use tenant_owner::FirstTenantOwnerError;
+pub use tenant_owner::{FirstTenantOwnerError, TenantOwnerTarget};
 pub use two_factor::{
     safe_return, Enrollment, TwoFactorEmailError, TwoFactorEmailReset, TwoFactorError,
     TwoFactorStatus, CONFIRM_PATH, PORTAL_CONFIRM_PATH,

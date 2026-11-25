@@ -1132,7 +1132,7 @@ impl Detail {
             repeats.push(&render(ActionLink {
                 id: "activity-series-all",
                 title: "See every occurrence of this series",
-                href: &format!("/activities?series={}&state=all", series.id),
+                href: &format!("/activities?display=list&series={}&state=all", series.id),
                 body: Html::text("See all"),
                 ..ActionLink::default()
             })?);
@@ -1638,9 +1638,9 @@ impl Detail {
             })?);
         }
         actions.push(&render(BackLink {
-            href: "/activities",
+            href: crate::contributions::CALENDAR_ADDRESS,
             id: "activity-back",
-            title: "Back to activities",
+            title: "Back to calendar",
             ..BackLink::default()
         })?);
         let mut flash = NO_FLASH;

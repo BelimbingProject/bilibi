@@ -376,7 +376,14 @@ Use a separate email address for each first owner. The address must be unused by
 
 The audit log records `user.tenant_owner.invited` as **System · tenant-provision**. The part of the email address before `@` supplies the initial Person name.
 
-The command exits unsuccessfully if delivery fails after commit. To recover from failed delivery or an expired link, rerun it with the same tenant name, company name and code. Use the same owner email to resend, or supply a different unused address in `--owner-email` to change the recipient. Reissue invalidates the previous link and records `user.tenant_owner.reissued` before sending. It requires a unique matching bootstrap receipt and an invitation that has yet to be accepted or revoked. For a fresh bootstrap, choose a tenant name that is unused on the installation.
+Record the tenant ID reported by the command. If delivery fails after commit, the command exits unsuccessfully and reports the same ID. To recover from failed delivery or an expired link, reissue using that ID.
+
+```sh
+sudo scripts/install-server.sh tenant-provision production \
+    --tenant-id 42 --owner-email owner@acme.example
+```
+
+Replace `42` with the ID reported for your tenant. Use the same owner email to resend, or supply a different unused address in `--owner-email` to change the recipient. Reissue invalidates the previous link and records `user.tenant_owner.reissued` before sending. It requires the tenant’s bootstrap receipt and an invitation that has yet to be accepted or revoked. For a fresh bootstrap, choose a tenant name that is unused on the installation.
 
 Use the signed-in Users page to invite later administrators.
 
