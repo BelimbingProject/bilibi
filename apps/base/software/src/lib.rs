@@ -403,8 +403,6 @@ impl Software {
         self: Arc<Self>,
         mut stop: tokio::sync::watch::Receiver<bool>,
     ) -> Result<()> {
-        let mut update_checks = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
-        update_checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             if *stop.borrow() {
                 return Ok(());
@@ -417,11 +415,6 @@ impl Software {
             }
             tokio::select! {
                 _ = stop.changed() => {}
-                _ = update_checks.tick() => {
-                    if let Err(error) = self.check_for_update().await {
-                        eprintln!("warning: software update check failed: {error:?}");
-                    }
-                }
                 _ = tokio::time::sleep(SETTLE_EVERY) => {}
             }
         }

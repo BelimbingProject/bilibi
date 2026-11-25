@@ -49,6 +49,7 @@ const DOWNLOAD_HOSTS: &[&str] = &[
     "github-releases.githubusercontent.com",
 ];
 
+static LISTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static MEMORY: Mutex<Option<Value>> = Mutex::new(None);
 
 /// `owner/name`, the shape GitHub uses in a repository address.
@@ -231,6 +232,7 @@ impl Software {
         force: bool,
         prerelease: bool,
     ) -> Result<Value> {
+        let _listing = LISTING.lock().await;
         let client = self.db.get().await?;
         let saved = self.github_saved(&**client, scope).await?;
         drop(client);
@@ -745,13 +747,20 @@ pub(crate) fn asset_request(repository: &str, asset_id: i64, token: Option<&str>
 fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: bool) -> Value {
     let repository = cache["repository"].as_str().unwrap_or("");
     let live_id = cache["repository_id"].as_i64();
-    let accepted = saved.repository.as_deref() == Some(repository)
-        && saved.bound.as_deref() == Some(repository)
+    let configured = saved
+        .repository
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case(repository));
+    let accepted = configured
+        && saved
+            .bound
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(repository))
         && saved.repository_id.is_some()
         && (live_id.is_none() || saved.repository_id == live_id);
     let identity_changed = saved.repository_id.is_some()
         && live_id.is_some()
-        && saved.repository.as_deref() == Some(repository)
+        && configured
         && saved.repository_id != live_id;
     let mut releases: Vec<Value> = cache["releases"]
         .as_array()
@@ -843,7 +852,10 @@ fn read_cache(path: Option<&Path>, repository: &str) -> Option<Value> {
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
     });
     let value = from_file.or_else(|| MEMORY.lock().ok().and_then(|guard| guard.clone()))?;
-    (value["repository"].as_str() == Some(repository)).then_some(value)
+    value["repository"]
+        .as_str()
+        .is_some_and(|name| name.eq_ignore_ascii_case(repository))
+        .then_some(value)
 }
 fn write_cache(path: Option<&Path>, value: &Value) {
     if let Ok(mut guard) = MEMORY.lock() {
@@ -927,9 +939,13 @@ async fn fetch_listing(
     let mut page_error = None;
     // Keep the same rate-limit reserve. A partial listing is useful in Details,
     // but cannot establish which version to announce.
+    let named_pages = format!("{API}/repos/{repository}/releases?");
+    let numbered_pages = format!("{API}/repositories/{id}/releases?");
     while let Some(url) = next.as_deref() {
-        if !url.starts_with(&format!("{API}/repos/{repository}/releases?"))
-            && !url.starts_with(&format!("{API}/repositories/{id}/releases?"))
+        if !url
+            .get(..named_pages.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&named_pages))
+            && !url.starts_with(&numbered_pages)
         {
             break;
         }

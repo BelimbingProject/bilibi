@@ -17,10 +17,14 @@ use serde_json::{json, Value};
 
 #[derive(Template)]
 #[template(
-    source = r#"{% import "components.html" as ui %}<div data-hook="ClipboardCopy">{% call ui::copy_box(id="software-update-prompt", label="AI prompt", text="Check this Bilibi server for a stable update and show me the install review.", copy_label="Copy AI prompt") %}{% endcall %}</div>"#,
+    source = r#"{% import "components.html" as ui %}<div data-hook="ClipboardCopy">{{ label }} {% call ui::copy_button(id=id, text=prompt, label=label) %}{% endcall %}</div>"#,
     ext = "html"
 )]
-struct UpdatePrompt;
+pub(super) struct UpdatePrompt<'a> {
+    pub id: &'a str,
+    pub label: &'a str,
+    pub prompt: &'a str,
+}
 
 pub const PATH: &str = "/system/software/releases";
 /// The file input's name: the key the owner consumes by.
@@ -277,7 +281,13 @@ impl ReleaseFiles {
         Ok(())
     }
 
-    pub(super) async fn body(&mut self, scope: &Scope, extra_details: Html) -> Result<Html> {
+    pub(super) async fn body(
+        &mut self,
+        scope: &Scope,
+        active: bool,
+        job: Html,
+        extra_details: Html,
+    ) -> Result<Html> {
         let client = self.pages.db.get().await?;
         authorize_operator(&**client, scope, VIEW).await?;
         let manages = authorize_operator(&**client, scope, MANAGE).await.is_ok();
@@ -321,7 +331,27 @@ impl ReleaseFiles {
                 },
             ],
         })?;
-        body.push(&render(UpdatePrompt)?);
+        if manages {
+            if !active && update["state"] == "ready" {
+                let asset = &update["asset"];
+                body.push(&Self::github_review_form(
+                    asset,
+                    asset["repository_id"].as_i64().ok_or(Error::Internal)?,
+                    asset["asset"].as_i64().ok_or(Error::Internal)?,
+                    "software-update",
+                    &format!(
+                        "Update to {}",
+                        release["version"].as_str().ok_or(Error::Internal)?
+                    ),
+                )?);
+            }
+            body.push(&render(UpdatePrompt {
+                id: "software-update-prompt",
+                label: "Copy AI update prompt",
+                prompt: &format!("Check the Bilibi server at {} for a stable update and show me the install review.", instance.origin),
+            })?);
+        }
+        body.push(&job);
         let mut details = self.github_section(&facts, manages, enrolled)?;
         if manages {
             details.push(&self.upload_section(&instance)?);
@@ -748,7 +778,13 @@ impl ReleaseFiles {
                 .slot("published", Html::text(&published));
             row.dom_id = Some(format!("release-files-github-row-{asset}"));
             if can_review && release["installed"] != true {
-                row.actions = self.github_review_form(release, repository_id)?;
+                row.actions = Self::github_review_form(
+                    release,
+                    repository_id,
+                    asset,
+                    &format!("release-files-github-{asset}"),
+                    "Review",
+                )?;
             }
             rows.push(row);
         }
@@ -780,8 +816,13 @@ impl ReleaseFiles {
         }
         render(table)
     }
-    fn github_review_form(&self, release: &Value, repository_id: i64) -> Result<Html> {
-        let asset = release["asset_id"].as_i64().unwrap_or(0);
+    fn github_review_form(
+        release: &Value,
+        repository_id: i64,
+        asset: i64,
+        id: &str,
+        label: &str,
+    ) -> Result<Html> {
         let pairs = [
             ("asset", asset.to_string()),
             ("repository_id", repository_id.to_string()),
@@ -803,13 +844,13 @@ impl ReleaseFiles {
         for (name, value) in pairs {
             body.push(&render(
                 Field::named(name)
-                    .id(format!("release-files-github-{asset}-{name}"))
+                    .id(format!("{id}-{name}"))
                     .kind(InputKind::Hidden)
                     .value(value),
             )?);
         }
-        let form_id = format!("release-files-github-review-form-{asset}");
-        let button_id = format!("release-files-github-review-{asset}");
+        let form_id = format!("{id}-form");
+        let button_id = format!("{id}-review");
         render(Form {
             id: &form_id,
             event: "request_install",
@@ -819,7 +860,7 @@ impl ReleaseFiles {
                 button_type: "submit",
                 variant: ButtonVariant::Primary,
                 working: "Reviewing…",
-                body: Html::text("Review"),
+                body: Html::text(label),
                 ..Button::default()
             })?,
             ..Form::default()

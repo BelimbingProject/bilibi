@@ -80,7 +80,7 @@ Installed Domains and Extensions missing from the selected catalogue also have a
 
 The page, ChatGPT card and agents read the same installed facts from the compiled composition. The `uncatalogued` field in `base.software.catalogue` (and so in `base.software.open`) lists installed modules missing from the catalogue; `base.software.status` stays free of catalogue reads.
 
-**Releases** (`?tab=releases`) shows the installed version, the current or last install (its **Install steps** stay open while the job is active, failed or interrupted, and fold when it completes), a short backup table with folded backup details, and **Get an update**. Backup file locations are folded and only available to accounts that can manage software. GitHub releases and their identities appear above a folded **Upload a release file** section, with queued files and their review on the same mounted page; switching tabs preserves pending uploads and reviews. The old `/system/software/releases` page redirects to the Releases tab.
+**Releases** (`?tab=releases`) shows the installed and latest stable versions and links to the release notes. Choose **Update to** for a compatible newer release, or copy the AI prompt. Both paths use the same install review, fresh 2FA and installer job. Active progress appears inline, and a failed or interrupted job shows its reason, a diagnosis prompt and **Undo** when available. Source settings, manual file selection, uploads, backups and history are under **Details**. The old `/system/software/releases` page redirects to the Releases tab.
 
 The MCP App (`ui://bilibi/software-v1.html`, `card/software-v1.html`) is titled **Manage domains and extensions** and uses the same software contracts. Its catalogue cards show the repository under **Source** and the generated **Installation commands** when available.
 
@@ -135,7 +135,7 @@ A gzip-compressed tar carries `bilibi-web`, `SHA256SUMS` and optionally `manifes
 
 The automatic check sends the active installation owner one bell notice per newly discovered stable setup tag in the accepted repository. The notice opens Software › Releases. Publisher-written change notes appear as plain text. When the release body contains only App Maker’s standard packaging instructions, the notice reads “No change notes were supplied.”
 
-Bilibi checks the official public repository every 15 minutes without credentials. Opening Releases checks the configured source using the listing cache and the signed-in operator’s access. The tab shows the installed and latest stable versions, a release notes link and a copyable AI prompt. Source and manual installation controls are under Details. The receipt and bell notice commit together, so retries cannot announce the same release twice.
+Bilibi checks the official public repository every 15 minutes without credentials. Opening Releases checks the configured source using the listing cache and the signed-in operator’s access. The receipt and bell notice commit together, so retries cannot announce the same release twice.
 
 The `update` field of `base.software.releases` reports the running setup version and one of the following states.
 
@@ -176,7 +176,7 @@ Each failed check is a plain sentence that says what to do next: "This release w
 
 The **Releases** tab uses `release_files.rs` within `web.rs`. Each GitHub row names its asset and full archive SHA-256, and marks the installed asset. Installed facts show the local release number separately from repository/release/asset IDs, target, tag, setup commit, archive SHA-256 and program SHA-256. `status.installed_asset` and `releases.installed_asset` return the same evidence, recovered from successful install history and the current release folder. Missing older evidence is null, never inferred from a tag. Undo returns the identity of the restored release.
 
-Upload and queued files live inside **Upload a release file**. Uploads require manage permission. Saving or accepting GitHub settings requires a fresh 2FA code. The repository number comes from GitHub, never from a typed guess. Opening the tab uses the cached list; **Refresh**, expiry or an install review asks GitHub. Job polling does not.
+Upload and queued files live inside **Details**. Uploads require manage permission. Saving or accepting GitHub settings requires a fresh 2FA code. The repository number comes from GitHub, never from a typed guess. Opening the tab uses the cached list; **Refresh**, expiry or an install review asks GitHub. Job polling does not.
 
 ### Staging and Production
 
