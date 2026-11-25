@@ -20,7 +20,13 @@ from datetime import datetime, timezone
 
 PAYLOAD_TYPE = "application/vnd.bilibi.release.v1+json"
 PURPOSE = "https://bilibi.my/provenance/release/v1"
+# A release tag names one channel: a stable setup-vX.Y.Z or a nightly-YYYY-MM-DD.
+# A policy is pinned to one channel and never mixes the two.
 TAG = re.compile(r"setup-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+NIGHTLY = re.compile(r"nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})\Z")
+# The order of one policy's tags: a setup version or a nightly date. A tag of
+# the other channel has no order here, so it can never be compared or admitted.
+Order = tuple[int, int, int, int]
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 TOKEN = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
 KINDS = ("setup", "installer", "server-tools")
@@ -128,11 +134,40 @@ def valid_workflow(value: str) -> str:
     return value
 
 
-def version(value: str) -> tuple[int, int, int]:
-    match = TAG.fullmatch(value)
-    if not match:
-        refuse("the release tag must be canonical setup-vX.Y.Z")
-    return tuple(int(part) for part in match.groups())
+def channel(value: str) -> str:
+    """`setup` or `nightly`: which channel a canonical tag belongs to."""
+    if TAG.fullmatch(value):
+        return "setup"
+    if NIGHTLY.fullmatch(value):
+        return "nightly"
+    refuse("the release tag must be setup-vX.Y.Z or nightly-YYYY-MM-DD")
+
+
+def order(value: str) -> Order:
+    """A tag's place in its channel: setup versions by number, nightlies by date."""
+    if match := TAG.fullmatch(value):
+        return (0, *(int(part) for part in match.groups()))
+    if match := NIGHTLY.fullmatch(value):
+        try:
+            datetime(int(match[1]), int(match[2]), int(match[3]))
+        except ValueError:
+            refuse(f"{value} is not a real date")
+        return (1, *(int(part) for part in match.groups()))
+    refuse("the release tag must be setup-vX.Y.Z or nightly-YYYY-MM-DD")
+
+
+def policy_order(minimum: str, tag: str) -> Order:
+    """A tag's place under one policy: both tags must be of the policy's channel.
+
+    A policy accepts one channel only: no nightly under a setup policy, no
+    setup under a nightly one. Comparing across channels would let a nightly
+    pass a setup floor or a setup pass a nightly one.
+    """
+    if channel(tag) != channel(minimum):
+        refuse(
+            f"release {tag} is a {channel(tag)} tag but this installation accepts only {channel(minimum)} tags from {minimum}"
+        )
+    return order(tag)
 
 
 def valid_token(value: str, what: str) -> str:
@@ -198,7 +233,7 @@ def load_trust(path: Path) -> dict[str, object]:
     if not isinstance(trust.get("repository_id"), int) or int(trust["repository_id"]) <= 0:
         refuse("the trusted repository ID must be a positive number")
     valid_workflow(str(trust.get("workflow", "")))
-    version(str(trust.get("minimum_tag", "")))
+    order(str(trust.get("minimum_tag", "")))
     changed_at = trust.get("changed_at")
     if not isinstance(changed_at, str) or not re.fullmatch(
         r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", changed_at
@@ -223,7 +258,7 @@ def make_trust(args: argparse.Namespace) -> None:
         "changed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "changed_by": valid_workflow(args.changed_by),
     }
-    minimum = version(args.minimum_tag)
+    minimum = order(args.minimum_tag)
     if args.repository_id <= 0:
         refuse("the trusted repository ID must be a positive number")
     if args.existing_releases is not None:
@@ -231,7 +266,9 @@ def make_trust(args: argparse.Namespace) -> None:
             if not recipe.parent.name.isdecimal() or recipe.parent.is_symlink() or recipe.is_symlink():
                 continue
             setup = read_json(recipe).get("setup")
-            if isinstance(setup, dict) and setup.get("tag") and version(setup["tag"]) >= minimum:
+            if not isinstance(setup, dict) or not setup.get("tag"):
+                continue
+            if channel(str(setup["tag"])) == channel(args.minimum_tag) and order(str(setup["tag"])) >= minimum:
                 refuse(f"the initial minimum tag must be newer than the existing release {setup['tag']}")
     if args.kind == "operator":
         if args.public_key is None:
@@ -248,7 +285,7 @@ def make_trust(args: argparse.Namespace) -> None:
 def sign(args: argparse.Namespace) -> None:
     repository = valid_repository(args.repository)
     workflow = valid_workflow(args.workflow)
-    version(args.tag)
+    channel(args.tag)
     valid_token(args.target, "target")
     der = public_key_from_private(args.private_key, der=True)
     key_id = fingerprint(der)
@@ -290,8 +327,9 @@ def verify_operator(args: argparse.Namespace) -> None:
     trust = load_trust(args.trust)
     if trust["kind"] != "operator":
         refuse("this installation does not trust operator-signed release proofs")
-    if version(args.tag) < version(str(trust["minimum_tag"])):
-        refuse(f"release {args.tag} is below this installation's minimum trusted tag")
+    minimum = str(trust["minimum_tag"])
+    if policy_order(minimum, args.tag) < order(minimum):
+        refuse(f"release {args.tag} is below this installation's minimum trusted tag {minimum}")
     envelope = read_json(args.proof)
     exact_fields(envelope, {"payloadType", "payload", "signatures"}, "release proof")
     if envelope["payloadType"] != PAYLOAD_TYPE:
@@ -384,8 +422,9 @@ def check_tag(args: argparse.Namespace) -> None:
 
 
 def check_policy_tag(trust: dict[str, object], tag: str) -> None:
-    if version(tag) < version(str(trust["minimum_tag"])):
-        refuse(f"release {tag} is below this installation's minimum trusted tag {trust['minimum_tag']}")
+    minimum = str(trust["minimum_tag"])
+    if policy_order(minimum, tag) < order(minimum):
+        refuse(f"release {tag} is below this installation's minimum trusted tag {minimum}")
 
 
 def check_admission(args: argparse.Namespace) -> None:
@@ -401,22 +440,45 @@ def check_admission(args: argparse.Namespace) -> None:
     check_policy_tag(trust, source.get("tag") or "")
 
 
+def load_replay(path: Path) -> dict[str, object]:
+    """The replay record, checked: one highest tag and digest per channel."""
+    state = read_json(path)
+    exact_fields(state, {"version", "highest"}, "release replay state")
+    admitted = state["highest"]
+    if state["version"] != 1 or not isinstance(admitted, dict):
+        refuse("the release replay state is not valid")
+    for key, entry in admitted.items():
+        if key not in ("setup", "nightly") or not isinstance(entry, dict):
+            refuse("the release replay state is not valid")
+        exact_fields(entry, {"tag", "digest"}, "release replay entry")
+        if channel(str(entry["tag"])) != key or not re.fullmatch(r"[0-9a-f]{64}", str(entry["digest"])):
+            refuse("the release replay state is not valid")
+    return state
+
+
 def check_replay(args: argparse.Namespace, *, resume: bool = False) -> None:
-    wanted = version(args.tag)
+    """Refuse a tag at or below this channel's highest admitted one.
+
+    The replay record holds one highest tag and digest per channel, keyed by
+    the channel's name, so a nightly and a setup release never raise or lower
+    each other's floor and an update from one channel is not read as a
+    downgrade of the other.
+    """
+    wanted = order(args.tag)
+    name = channel(args.tag)
     if not re.fullmatch(r"[0-9a-f]{64}", args.digest):
         refuse("the admitted release digest is invalid")
     if not args.state.exists():
         return
-    state = read_json(args.state)
-    exact_fields(state, {"version", "highest_tag", "highest_digest"}, "release replay state")
-    if state["version"] != 1 or not re.fullmatch(r"[0-9a-f]{64}", str(state["highest_digest"])):
-        refuse("the release replay state is not valid")
-    highest = str(state["highest_tag"])
-    floor = version(highest)
+    admitted = load_replay(args.state)["highest"]
+    if name not in admitted:
+        return
+    highest = str(admitted[name]["tag"])
+    floor = order(highest)
     if wanted < floor:
         refuse(f"release {args.tag} is older than the highest admitted release {highest}")
     if wanted == floor:
-        if args.digest != state["highest_digest"]:
+        if args.digest != admitted[name]["digest"]:
             refuse(f"release {args.tag} cannot replace the admitted bytes for that tag")
         if not (resume or args.resume):
             refuse(f"release {args.tag} has already been admitted")
@@ -424,13 +486,17 @@ def check_replay(args: argparse.Namespace, *, resume: bool = False) -> None:
 
 def record_replay(args: argparse.Namespace) -> None:
     check_replay(args, resume=True)
-    atomic_json(args.state, {"version": 1, "highest_tag": args.tag, "highest_digest": args.digest})
+    admitted: dict[str, object] = {}
+    if args.state.exists():
+        admitted = load_replay(args.state)["highest"]
+    admitted[channel(args.tag)] = {"tag": args.tag, "digest": args.digest}
+    atomic_json(args.state, {"version": 1, "highest": admitted})
 
 
 def verify_github(args: argparse.Namespace) -> None:
     repository = valid_repository(args.repository)
     workflow = valid_workflow(args.workflow)
-    version(args.tag)
+    channel(args.tag)
     env = {key: value for key, value in os.environ.items() if key not in (
         "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
         "GH_CONFIG_DIR", "GH_HOST",

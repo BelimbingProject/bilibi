@@ -183,7 +183,7 @@ impl Software {
                 format!("The uploaded release proof could not be saved for verification: {error}.")
             })?;
         }
-            let (tag, target) = setup_identity_of(&filename).ok_or_else(|| "The file name does not carry its setup tag and target (bilibi-setup-vX.Y.Z-<target>.tar.gz). Upload it under the name it was published with. Nothing was unpacked.".to_owned())?;
+            let (tag, target) = release_proof::setup_identity_of(&filename).ok_or_else(|| "The file name does not carry its setup tag and target (bilibi-setup-vX.Y.Z-<target>.tar.gz, or bilibi-nightly-YYYY-MM-DD-<target>.tar.gz). Upload it under the name it was published with. Nothing was unpacked.".to_owned())?;
             policy.verify(
                 &paths,
                 &archive,
@@ -639,32 +639,6 @@ fn db<E: Into<Error>>(error: E) -> String {
 }
 /// The checks every way in shares, on an unpacked folder: the checksum and
 /// that the program was built for this server. Returns the checksum.
-/// `setup-v1.2.3` from a published name like `bilibi-setup-v1.2.3-<target>.tar.gz`.
-fn setup_identity_of(filename: &str) -> Option<(String, String)> {
-    let rest = filename.strip_prefix("bilibi-")?;
-    let version = rest.strip_prefix("setup-v")?;
-    let end = version
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(version.len());
-    let numbers: Vec<&str> = version[..end].split('.').collect();
-    if numbers.len() != 3
-        || numbers.iter().any(|number| {
-            number.is_empty()
-                || (number.len() > 1 && number.starts_with('0'))
-                || !number.bytes().all(|byte| byte.is_ascii_digit())
-        })
-    {
-        return None;
-    }
-    let target = version[end..].strip_prefix('-')?.strip_suffix(".tar.gz")?;
-    (!target.is_empty()
-        && target.len() <= 128
-        && target
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')))
-    .then(|| (format!("setup-v{}", &version[..end]), target.to_owned()))
-}
-
 struct StagedRelease<'a> {
     archive: &'a Path,
     proof: &'a Path,

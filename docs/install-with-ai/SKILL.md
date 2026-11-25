@@ -172,7 +172,7 @@ Rerunning a finished step is harmless. A `next` line names the plain command; ru
 | `NO_INSTANCE` | `create` has not run | Run `create` |
 | `NO_RELEASE` | No release in service | Run `release` |
 | `TRUST_NOT_SET`, `TRUST_INVALID`, `PROOF_METHOD_WRONG` | The server has no valid pinned release policy, or the command gave the other proof kind | Pin each instance once through the terminal. For an existing instance, choose a minimum tag newer than its previously installed releases. Later changes use Software with fresh 2FA |
-| `SIGNATURE_INVALID`, `SIGNATURE_WRONG_REPOSITORY`, `SIGNATURE_REPLAY` | The asset is not the official signed release, or its setup tag is not newer than the highest admitted one | Download the correct newer release from step 4; use Software Undo for a deliberate rollback; never bypass |
+| `SIGNATURE_INVALID`, `SIGNATURE_WRONG_REPOSITORY`, `SIGNATURE_REPLAY`, `SIGNATURE_WRONG_CHANNEL` | The asset is not the official signed release, its setup tag is not newer than the highest admitted one of its channel, or it is a nightly where the server trusts setup tags (or the reverse) | Download the correct newer release from step 4; use Software Undo for a deliberate rollback; never bypass |
 | `ARCHIVE_INVALID` | The archive or its checksum is damaged | Download again, rerun |
 | `MAIL_NOT_READY`, `MAIL_NOT_DELIVERED` | `create-owner` cannot email the claim link: mail is not set up, or the relay refused | Step 6 (or the cause in `detail`), rerun |
 | `MIGRATION_FAILED` | The database update failed; the previous release, if any, is back | Read `detail`; report it to the owner |

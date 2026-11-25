@@ -30,7 +30,14 @@ sudo scripts/install-server.sh installer production /path/to/bilibi-installer-x8
   --tag setup-v1.0.0 --proof /path/to/bilibi-installer-x86_64-unknown-linux-gnu.proof.json
 ```
 
-The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and two proxy site blocks, and prints what to do next. The second pins the repository, immutable repository number, workflow and oldest acceptable tag. The third verifies and copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The remaining commands set mail, create the first account and enable the installer for later owner-reviewed Software jobs. Open `https://app.example.com`, sign in with the owner's claimed account and Caddy serves the staff site. `https://shop.example.com` is the public listener's name: it serves a workspace's public site once that workspace gives its site the hostname, on **Administration › Public site** (which also turns the site on), or with `sudo scripts/install-server.sh public-hostname production --tenant 1 --hostname shop.example.com --on`. Until then it answers 404.
+The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and two proxy site blocks, and prints what to do next. The second pins the repository, immutable repository number, workflow and oldest acceptable tag.
+
+**One channel per instance.** A release tag is either a stable `setup-vX.Y.Z` or a `nightly-YYYY-MM-DD`. The minimum tag names the one channel the instance accepts: a `setup-v` minimum keeps refusing nightlies, and a `nightly-` minimum accepts only nightlies, ordered by date. There is no mixing and no fallback between them, because a nightly and a setup version have no common order. The trial site uses the nightly channel:
+
+```sh
+sudo scripts/install-server.sh trust production --github --repo BelimbingProject/bilibi-try --repo-id 1462459642 --minimum-tag nightly-2026-11-01
+sudo scripts/install-server.sh release production /path/to/bilibi-nightly-2026-11-25-x86_64-unknown-linux-gnu.tar.gz --tag nightly-2026-11-25
+``` The third verifies and copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The remaining commands set mail, create the first account and enable the installer for later owner-reviewed Software jobs. Open `https://app.example.com`, sign in with the owner's claimed account and Caddy serves the staff site. `https://shop.example.com` is the public listener's name: it serves a workspace's public site once that workspace gives its site the hostname, on **Administration › Public site** (which also turns the site on), or with `sudo scripts/install-server.sh public-hostname production --tenant 1 --hostname shop.example.com --on`. Until then it answers 404.
 
 Letting an AI assistant do the install? Give it [the Install Bilibi skill](install-with-ai/SKILL.md). Every command takes `--json` for one machine-readable line per step, with a stable error code and what to do next.
 
@@ -107,7 +114,7 @@ Each instance lives in one folder:
     incoming/         a release on its way in, plus installer-jobs/job-<n>.ready activation markers
     installer         the verified installer for this instance (root:root)
     trust/release.json        the instance’s pinned release proof policy (root:bilibi, 0640)
-    trust/release-state.json  highest admitted setup tag and archive digest (root:bilibi, 0640)
+    trust/release-state.json  highest admitted tag and archive digest per channel (root:bilibi, 0640)
     data/             the folder the running program writes: media/ uploads, mailbox/ outgoing mail
     site/waiting.html the page Caddy shows while the service is stopped
   dev/                the same, for Dev
@@ -216,7 +223,7 @@ Staging is optional. When used, install and check the exact GitHub asset there f
 
 The installer records the admitted tag and digest before copying a numbered release. A failure after that write consumes the tag. Fix the cause and publish a new setup tag.
 
-The first release has no program to ask through, so `release` puts a published setup archive in service from the terminal. First run `trust` once, after `create` and before any release. It pins one proof method, repository name and immutable number, workflow identity and minimum setup tag for that instance:
+The first release has no program to ask through, so `release` puts a published setup archive in service from the terminal. First run `trust` once, after `create` and before any release. It pins one proof method, repository name and immutable number, workflow identity and minimum tag for that instance; the minimum tag is `setup-vX.Y.Z` or `nightly-YYYY-MM-DD` and fixes the instance's channel:
 
 ```sh
 sudo scripts/install-server.sh trust production --github --repo your-company/my-bilibi --repo-id 123456789 --minimum-tag setup-v1.0.0
@@ -227,11 +234,11 @@ For an operator key, use `trust <instance> --operator-key <public.pem>` and name
 
 Copy `--repo-id <number>` beforehand from the application repository's GitHub **Settings › General** page or another trusted record. Never look it up from the repository name during the install. For known official `BelimbingProject` repositories, `trust` checks the supplied number against its built-in value. Public GitHub-attested repositories need no GitHub login. A private repository is read only through the server's [GitHub App](#private-application-repositories). If the checksum, key or attestation, repository, workflow, tag, kind or target does not match, the command stops before unpacking, migration or service changes.
 
-On an existing instance with no pin, root can run `trust <instance>` once. Set the minimum tag to the first eligible upgrade, newer than every release previously installed there. The command checks tags recorded in retained release recipes and records the terminal operator’s UID and UTC time. Once a pin exists, the terminal command refuses to change it. Later replacement is `base.software.trust`: the installation owner reviews the complete new policy and key fingerprint, gives a fresh 2FA code, and the separate installer atomically applies the audited job. Software shows the current policy read-only. There is no compatibility fallback.
+On an existing instance with no pin, root can run `trust <instance>` once. Set the minimum tag to the first eligible upgrade, newer than every release previously installed there, in the channel those releases came from. The command checks tags recorded in retained release recipes and records the terminal operator’s UID and UTC time. Once a pin exists, the terminal command refuses to change it. Later replacement is `base.software.trust`: the installation owner reviews the complete new policy and key fingerprint, gives a fresh 2FA code, and the separate installer atomically applies the audited job. Software shows the current policy read-only. There is no compatibility fallback.
 
 Step by step, we:
 
-1. Verify the archive with the one pinned proof policy, unpack only the expected files, and check its SHA-256 list. Record the admitted setup tag and archive digest in the instance’s trust directory before copying into the next numbered folder, `releases/<n>`.
+1. Verify the archive with the one pinned proof policy, unpack only the expected files, and check its SHA-256 list. Record the admitted tag and archive digest in the instance’s trust directory before copying into the next numbered folder, `releases/<n>`. A tag older than the highest admitted one of its channel is refused here, as is a tag from the other channel.
 2. Stop the service. From here Caddy shows the waiting page.
 3. Update the database with the new program's `migrate` and apply its production seeds. Nothing migrates on boot, so this must happen before the new program serves. If it fails, the previous release is started again.
 4. Point `releases/current` at `<n>` and start the service. The instance's `current` is a fixed link to `releases/current`, so the link that moves lives in the folder the instance installer owns, and the installer can move it too; an instance created before this shape is converted the next time you run `create`, `installer`, `release` or `switch`. A job that finds an unconverted instance ends before the pause with "Nothing changed" and says to run `installer` or `create`.
@@ -286,7 +293,7 @@ The App lives in `/opt/bilibi/github-app.json`, one per server, because every in
 | `github-app --client-id <id> --repo <owner/name>` | Check the key on standard input against GitHub, then keep it. Rerun with a new key to replace it |
 | `github-app --check` | Get a token and read the repository, then say whether the App works |
 | `github-app --remove` | Forget the App on this server. Also delete the App, or its key, on GitHub |
-| `verify <instance> <file> --kind server-tools\|installer\|setup --tag <setup-vX.Y.Z> [--proof <proof.json>]` | Check a file with the pinned release proof policy without installing it, such as newer server tools before extraction |
+| `verify <instance> <file> --kind server-tools\|installer\|setup --tag <setup-vX.Y.Z\|nightly-YYYY-MM-DD> [--proof <proof.json>]` | Check a file with the pinned release proof policy without installing it, such as newer server tools before extraction |
 
 Every use refuses, and says what to change on GitHub, when the App can change anything, cannot read Contents and Attestations, is installed on all of the owner's repositories, or its key was deleted. A server only ever needs to read.
 
@@ -489,8 +496,8 @@ Script commands:
 | Command | What it does |
 | --- | --- |
 | `create <instance> --role dev\|staging\|production --site <staff-host> [--public-site <public-host> or --no-public-site] [--staff-bind <address> or --no-staff-bind] [--public-bind <address>] [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy blocks. `--public-site` enables the public listener; `--staff-bind` keeps the staff Caddy block on one private interface. Rerun to change the sites. Omitted public-site and bind settings keep their saved values. Use `--no-public-site` to disable the public listener or `--no-staff-bind` to remove the explicit Caddy binds. Changes to listener configuration restart a running instance and check both active listeners. The saved role and staff port stay fixed |
-| `trust <instance> --github\|--operator-key <public.pem> --repo <owner/name> --repo-id <n> [--workflow <identity>] --minimum-tag <setup-vX.Y.Z>` | Pin an instance’s first release proof policy |
-| `release <instance> <setup archive> --tag <setup-vX.Y.Z> [--proof <proof.json>]` | Verify the pinned proof and checksums, reject replay, copy into `releases/<n>`, migrate, switch, check |
+| `trust <instance> --github\|--operator-key <public.pem> --repo <owner/name> --repo-id <n> [--workflow <identity>] --minimum-tag <setup-vX.Y.Z\|nightly-YYYY-MM-DD>` | Pin an instance’s first release proof policy and its channel |
+| `release <instance> <setup archive> --tag <setup-vX.Y.Z\|nightly-YYYY-MM-DD> [--proof <proof.json>]` | Verify the pinned proof and checksums, reject replay, copy into `releases/<n>`, migrate, switch, check |
 | `mail <instance> --host <relay> --port <n> --username <user> --tls starttls\|implicit_tls --from-address <address> [--from-name <name>] --password-stdin` | [Outgoing mail](#outgoing-mail) relay in `env`; restarts a running service |
 | `create-owner <instance> --email <address> [--name <name>] [--company-name <name> [--company-code <code>] [--tenant-name <name>]]` | [Server owner setup](#the-first-account): creates the owner and emails the claim link; rerun to resend or check the claim |
 | `public-hostname <instance> --tenant <id> --hostname <public-host> [--on]` | Gives workspace `<id>`'s public site that hostname as its primary one (making the site, off, if it has none; `--on` turns it on). The same as adding it on **Administration › Public site**. The command is `bilibi-web public-hostname` in the instance's environment |
@@ -500,9 +507,9 @@ Script commands:
 | `identity-recover <instance> --email <old> --new-email <new>` | Recover an installation-wide staff sign-in address and sign it out everywhere |
 | `identity-delete <instance> --email <address> --confirm <address>` | Immediately anonymise a portable identity after its last membership is gone |
 | `identity-retention <instance>` | Anonymise up to 100 unused portable identities whose configured retention ended |
-| `installer <instance> <bilibi-installer> --tag <setup-vX.Y.Z> [--proof <proof.json>]` | [Install or update the verified installer and enable activation](#the-installer-service) |
+| `installer <instance> <bilibi-installer> --tag <setup-vX.Y.Z\|nightly-YYYY-MM-DD> [--proof <proof.json>]` | [Install or update the verified installer and enable activation](#the-installer-service) |
 | `github-app --client-id <id> --repo <owner/name>` (key on standard input), `github-app --check`, `github-app --remove` | [The server's GitHub App](#private-application-repositories) for a private application repository |
-| `verify <instance> <file> --kind server-tools\|installer\|setup --tag <setup-vX.Y.Z> [--proof <proof.json>]` | Check a file with the pinned proof policy without installing it |
+| `verify <instance> <file> --kind server-tools\|installer\|setup --tag <setup-vX.Y.Z\|nightly-YYYY-MM-DD> [--proof <proof.json>]` | Check a file with the pinned proof policy without installing it |
 | `switch <instance> <n>` | Put a kept release in service |
 | `status [<instance>]` | The GitHub App, then each instance's role, address, service and installer states, releases |
 

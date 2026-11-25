@@ -131,11 +131,19 @@ impl Layout {
     }
 
     pub fn consumed_tag(&self, source: &serde_json::Value) -> bool {
+        // The replay record keeps one highest tag and digest per channel
+        // (setup or nightly), keyed by the tag's own channel.
+        let channel = match source["tag"].as_str() {
+            Some(tag) if tag.starts_with("nightly-") => "nightly",
+            Some(tag) if tag.starts_with("setup-v") => "setup",
+            _ => return false,
+        };
         fs::read(self.dir.join("trust/release-state.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .is_some_and(|state| {
-                state["highest_tag"] == source["tag"] && state["highest_digest"] == source["digest"]
+                state["highest"][channel]["tag"] == source["tag"]
+                    && state["highest"][channel]["digest"] == source["digest"]
             })
     }
 
