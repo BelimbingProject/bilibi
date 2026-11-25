@@ -6,7 +6,7 @@ use bilibi_module_registry::contributions::{
     Access, CompanyScope, CredentialPath, Embed, EmbedContext, Method, PageWrites, Pending, Route,
     CREDENTIAL_PATHS, EMBEDS, PAGE_WRITES, ROUTES,
 };
-use bilibi_module_registry::{Contribution, Provenance};
+use bilibi_module_registry::Contribution;
 use bilibi_records::{Holder, RecordKind, RecordOwner};
 use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
 use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
@@ -35,13 +35,15 @@ pub const REMINDER_EMAIL: &str = "core.activity.reminder_email";
 
 macro_rules! provenance {
     () => {
-        Provenance {
-            module: MODULE,
+        $crate::contributions::Provenance {
+            module: $crate::MODULE,
             source: file!(),
             line: line!(),
         }
     };
 }
+pub(crate) use bilibi_module_registry::Provenance;
+pub(crate) use provenance;
 
 // `view` and `manage` are the Platform's verbs.
 inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &VocabularyContribution {
@@ -234,6 +236,8 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/activity.pages", prove
         ("create_person", "core.activity.create_person_guest"),
         ("save_reminder_defaults", "core.activity.set_reminder_defaults"),
         ("save_field", "core.activity.update"),
+        // Adding a tag to the form's own list goes through Picklists' create.
+        ("tag_create", "base.picklists.value.create"),
         ("pick_related", "core.activity.update"),
         ("clear_related", "core.activity.update"),
         ("close", "core.activity.close"),

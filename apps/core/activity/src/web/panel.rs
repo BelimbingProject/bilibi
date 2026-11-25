@@ -95,7 +95,10 @@ impl Panel {
     async fn handle(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         let name = event(value)?;
         if let Some(dialog) = &mut self.dialog {
-            if dialog.event(&self.pages, scope, name, value).await? {
+            if dialog
+                .event(&self.pages, scope, credential, name, value)
+                .await?
+            {
                 return Ok(());
             }
         }
