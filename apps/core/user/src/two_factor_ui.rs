@@ -89,6 +89,7 @@ pub struct TwoFactorPage {
     return_to: Option<String>,
     errors: Vec<String>,
     notice: String,
+    recovery_hint: String,
     success: &'static str,
     /// Drawn for a customer's portal page, not inside the settings shell.
     portal: bool,
@@ -129,6 +130,7 @@ struct TwoFactorView<'a> {
     description: Html,
     stage: &'static str,
     notice: &'a str,
+    recovery_hint: &'a str,
     password: Html,
     qr: Html,
     key: &'a str,
@@ -160,6 +162,7 @@ impl TwoFactorPage {
             } else {
                 String::new()
             },
+            recovery_hint: "2FA stays on once set up. Lost your phone? Your company administrator or the server owner can reset it.".to_owned(),
             success: "",
             portal: false,
         })
@@ -331,16 +334,10 @@ impl TwoFactorPage {
             current: bilibi_ui::SettingsTab::TwoFactor,
             portal: self.portal,
             heading,
-            description: fragment(Html::render(&Bullets {
-                first,
-                second: if self.portal {
-                    "If you lose your phone, contact your portal administrator for help."
-                } else {
-                    "If you lose your phone, ask the server administrator for recovery, then set it up again."
-                },
-            }))?,
+            description: Html::text(first),
             stage,
             notice: &self.notice,
+            recovery_hint: &self.recovery_hint,
             password,
             qr: enrollment.map(|e| e.qr.clone()).unwrap_or_default(),
             key: enrollment.map_or("", |e| e.key.as_str()),
@@ -365,16 +362,6 @@ impl TwoFactorPage {
         };
         view.render().map_err(|_| Error::Internal)
     }
-}
-
-#[derive(Template)]
-#[template(
-    source = r#"<ul class="mt-1 list-disc space-y-0.5 pl-4"><li>{{ first }}</li><li>{{ second }}</li></ul>"#,
-    ext = "html"
-)]
-struct Bullets<'a> {
-    first: &'a str,
-    second: &'a str,
 }
 
 impl LiveState<Scope, Error> for TwoFactorPage {
@@ -588,6 +575,15 @@ impl PortalTwoFactor {
         let mut page = TwoFactorPage::new(users, portal.scope(), query).await?;
         page.return_to = page.return_to.filter(|path| portal_path(path));
         page.portal = true;
+        let client = page.users.db.get().await?;
+        let company = client.query_opt(
+            "SELECT c.name FROM tenant_primary_companies p JOIN companies c ON c.tenant_id=p.tenant_id AND c.id=p.company_id AND c.deleted_at IS NULL WHERE p.tenant_id=$1",
+            &[&portal.scope().tenant()],
+        ).await?.map(|row| row.get::<_, String>(0));
+        page.recovery_hint = match company.filter(|name| !name.trim().is_empty()) {
+            Some(name) => format!("2FA stays on once set up. Lost your phone? Contact {name}."),
+            None => "2FA stays on once set up. Lost your phone? Contact the company.".to_owned(),
+        };
         Ok(Self(page))
     }
 }
