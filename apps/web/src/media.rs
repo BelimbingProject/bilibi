@@ -35,13 +35,10 @@ pub async fn stream(
         return StatusCode::NOT_FOUND.into_response();
     };
     let result = async {
+        // The public site streams one image: its own logo.
         if app.site == crate::Site::Public {
-            let tenant = app.public_tenant.ok_or(Error::NotFound)?;
-            let portal = app
-                .services
-                .get::<bilibi_portal::PortalService>(bilibi_portal::SERVICE)
-                .map_err(|_| Error::StorageUnavailable)?;
-            if !portal.public_logo_matches(tenant, id).await? {
+            let site = app.public_scope().map_err(|_| Error::NotFound)?;
+            if !app.public.logo_matches(&site, id).await? {
                 return Err(Error::NotFound);
             }
         }

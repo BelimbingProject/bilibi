@@ -5,13 +5,14 @@
 # rerun: it keeps what exists.
 # The layout, and why it is this way, is in docs/server-install.md.
 #
-#   install-server.sh create <instance> --role dev|staging|production --site <staff-host> [--public-site <public-host> | --no-public-site] [--public-tenant <id>] [--staff-bind <address> | --no-staff-bind] [--public-bind <address>] [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
+#   install-server.sh create <instance> --role dev|staging|production --site <staff-host> [--public-site <public-host> | --no-public-site] [--staff-bind <address> | --no-staff-bind] [--public-bind <address>] [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
 #   install-server.sh trust <instance> --github|--operator-key <public.pem> --repo <owner/name> --repo-id <n> [--workflow <identity>] --minimum-tag <setup-vX.Y.Z>
 #   install-server.sh release <instance> <setup archive> --tag <setup-vX.Y.Z> [--proof <proof.json>]
 #   install-server.sh mail <instance> --host <relay> --port <n> --username <user> --tls starttls|implicit_tls --from-address <address> [--from-name <name>] --password-stdin
 #   install-server.sh create-owner <instance> --email <owner address> [--name <name>] [--company-name <name>]
 #   install-server.sh tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>
 #   install-server.sh two-factor-reset <instance> --email <address>
+#   install-server.sh public-hostname <instance> --tenant <id> --hostname <public-host> [--on]
 #   install-server.sh identity-recover <instance> --email <old> --new-email <new>
 #   install-server.sh identity-delete <instance> --email <address> --confirm <address>
 #   install-server.sh identity-retention <instance>
@@ -561,7 +562,7 @@ start_installer() {
 }
 # ================================================================ create
 create() {
-    local instance=${1:-} role='' site='' public_site='' staff_bind='' public_bind='' public_tenant='' remove_site='' remove_staff_bind='' port='' public_port='' tls='' cloudflare_token_stdin='' cloudflare_token=''
+    local instance=${1:-} role='' site='' public_site='' staff_bind='' public_bind='' remove_site='' remove_staff_bind='' port='' public_port='' tls='' cloudflare_token_stdin='' cloudflare_token=''
     [[ -n $instance ]] || usage
     need_root create "$@"
     shift
@@ -571,7 +572,6 @@ create() {
             --site) site=${2:-}; shift 2 ;;
             --public-site) [[ -n ${2:-} ]] || usage; public_site=$2; shift 2 ;;
             --no-public-site) remove_site=1; shift ;;
-            --public-tenant) [[ -n ${2:-} ]] || usage; public_tenant=$2; shift 2 ;;
             --no-staff-bind) remove_staff_bind=1; shift ;;
             --public-bind) [[ -n ${2:-} ]] || usage; public_bind=$2; shift 2 ;;
             --staff-bind) [[ -n ${2:-} ]] || usage; staff_bind=$2; shift 2 ;;
@@ -585,13 +585,12 @@ create() {
     [[ $role =~ ^(dev|staging|production)$ ]] || fail '--role must be dev, staging or production' '' INVALID_INPUT
     [[ $site =~ ^[a-z0-9.-]+$ ]] || fail '--site must be a host name, like erp.example.com' '' INVALID_INPUT
     [[ -z $remove_staff_bind || ( -z $staff_bind && -z $public_bind ) ]] || usage
-    [[ -z $remove_site || ( -z $public_site && -z $public_tenant && -z $public_bind ) ]] || usage
-    local old_origin='' old_public_origin='' old_public_bind='' old_public_tenant=''
+    [[ -z $remove_site || ( -z $public_site && -z $public_bind ) ]] || usage
+    local old_origin='' old_public_origin='' old_public_bind=''
     if [[ -f $(instance_dir "$instance")/env ]]; then
         old_origin=$(env_value "$instance" APP_ORIGIN)
         old_public_origin=$(env_value "$instance" PUBLIC_ORIGIN)
         old_public_bind=$(env_value "$instance" PUBLIC_BIND_ADDR)
-        old_public_tenant=$(env_value "$instance" PUBLIC_TENANT_ID)
         staff_bind=${staff_bind:-$(env_value "$instance" CADDY_STAFF_BIND)}
         public_bind=${public_bind:-$(env_value "$instance" CADDY_PUBLIC_BIND)}
         tls=${tls:-$(env_value "$instance" CADDY_TLS)}
@@ -600,11 +599,7 @@ create() {
         public_bind=''
     else
         public_site=${public_site:-${old_public_origin#https://}}
-        if [[ -n $public_site ]]; then
-            public_tenant=${public_tenant:-${old_public_tenant:-1}}
-        else
-            [[ -z $public_tenant && -z $public_bind ]] || usage
-        fi
+        [[ -n $public_site || -z $public_bind ]] || usage
     fi
     if [[ -n $remove_staff_bind ]]; then
         staff_bind=''
@@ -612,7 +607,6 @@ create() {
     fi
     [[ -z $public_site || $public_site =~ ^[a-z0-9.-]+$ ]] || fail '--public-site must be a host name, like shop.example.com' '' INVALID_INPUT
     [[ -z $public_site || $public_site != "$site" ]] || fail '--public-site must differ from --site' '' INVALID_INPUT
-    [[ -z $public_tenant || $public_tenant =~ ^[1-9][0-9]*$ ]] || fail '--public-tenant must be a positive tenant ID' '' INVALID_INPUT
     [[ -z $port || $port =~ ^[0-9]+$ ]] || fail '--port must be a number' '' INVALID_INPUT
     [[ -z $port || ( $port -ge 1 && $port -le 65535 ) ]] || fail '--port must be between 1 and 65535' '' INVALID_INPUT
     [[ -z $tls || $tls == internal || $tls == cloudflare ]] || fail '--tls takes "internal" or "cloudflare"' '' INVALID_INPUT
@@ -623,11 +617,11 @@ create() {
     [[ -n $tls || -z $public_site ]] || check_dns "$public_site"
 
     install_packages
-    python3 - "$staff_bind" "$public_bind" "$public_site" "$public_tenant" <<'PYTHON'
+    python3 - "$staff_bind" "$public_bind" "$public_site" <<'PYTHON'
 import ipaddress
 import sys
 
-staff, public, site, tenant = sys.argv[1:]
+staff, public, site = sys.argv[1:]
 try:
     staff = ipaddress.ip_address(staff) if staff else None
     public = ipaddress.ip_address(public) if public else None
@@ -638,8 +632,6 @@ if any(ip.is_unspecified or getattr(ip, "ipv4_mapped", None) or getattr(ip, "sco
     sys.exit("Caddy bind addresses must identify specific interfaces")
 if site and ((staff is None) != (public is None) or (staff is not None and staff == public)):
     sys.exit("Use distinct --staff-bind and --public-bind addresses with private staff ingress")
-if tenant and int(tenant) > 2**63 - 1:
-    sys.exit("--public-tenant is outside the supported tenant ID range")
 PYTHON
     ensure_github_cli
     [[ $tls == cloudflare ]] && ensure_cloudflare_module
@@ -728,9 +720,9 @@ EOF
         # Older layouts gain the instance path used by release transport.
         grep -q '^BILIBI_INSTANCE_DIR=' "$env" || printf 'BILIBI_INSTANCE_DIR=%s\n' "$dir" >>"$env"
     fi
-    sed -i '/^PUBLIC_ORIGIN=/d; /^PUBLIC_BIND_ADDR=/d; /^PUBLIC_TENANT_ID=/d; /^CADDY_STAFF_BIND=/d; /^CADDY_PUBLIC_BIND=/d; /^CADDY_TLS=/d' "$env"
+    sed -i '/^PUBLIC_ORIGIN=/d; /^PUBLIC_BIND_ADDR=/d; /^CADDY_STAFF_BIND=/d; /^CADDY_PUBLIC_BIND=/d; /^CADDY_TLS=/d' "$env"
     if [[ -n $public_site ]]; then
-        printf 'PUBLIC_ORIGIN=%s\nPUBLIC_BIND_ADDR=%s\nPUBLIC_TENANT_ID=%s\n' "$public_origin" "$public_backend" "$public_tenant" >>"$env"
+        printf 'PUBLIC_ORIGIN=%s\nPUBLIC_BIND_ADDR=%s\n' "$public_origin" "$public_backend" >>"$env"
     fi
     printf 'CADDY_STAFF_BIND=%s\nCADDY_PUBLIC_BIND=%s\nCADDY_TLS=%s\n' "$staff_bind" "$public_bind" "$tls" >>"$env"
     # Persist the generated credentials before creating the database role. A
@@ -757,7 +749,7 @@ EOF
     configure_selinux "$instance"
     configure_caddy_environment
     write_caddy_site "$instance" "$site" "$port" "$tls" "$caddy_env" "$public_site" "$public_port" "$staff_bind" "$public_bind"
-    if [[ -n $changed_identity || $old_origin != "https://$site" || $old_public_origin != "$public_origin" || $old_public_bind != "$public_backend" || $old_public_tenant != "$public_tenant" ]]; then
+    if [[ -n $changed_identity || $old_origin != "https://$site" || $old_public_origin != "$public_origin" || $old_public_bind != "$public_backend" ]]; then
         if systemctl is-active --quiet "$unit_name$instance"; then
             systemctl restart "$unit_name$instance"
             wait_healthy "$instance" || fail "$instance did not become ready with the new listener configuration"
@@ -768,6 +760,7 @@ EOF
     start_installer "$instance"
 
     say "$instance: $([[ -n $created ]] && echo created || echo updated) as $role at https://$site (backend 127.0.0.1:$port), files under $dir"
+    [[ -z $public_site ]] || say "$instance: the public listener answers for the hostnames of each workspace's public site. Once a workspace exists, add $public_site to it under Administration, Public site (or run: $0 public-hostname $instance --tenant <id> --hostname $public_site)."
     [[ -z $public_site ]] || say "$instance: public site at https://$public_site (backend 127.0.0.1:$public_port)"
     if [[ ! -f $(release_policy "$instance") ]]; then
         say "Next: pin release trust with: $0 trust $instance --github|--operator-key <public.pem> --repo <owner/name> --repo-id <n> --minimum-tag <setup-vX.Y.Z>"
@@ -1374,6 +1367,17 @@ two_factor_reset() {
     [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --tag <setup-vX.Y.Z> [--proof <proof.json>]" NO_RELEASE
     with_env "$instance" "$dir/current/bilibi-web" two-factor-reset "$@"
 }
+# The hostname that names a workspace's public site on the public listener.
+public_hostname() {
+    local instance=${1:-}
+    [[ -n $instance ]] || usage
+    need_root public-hostname "$@"
+    shift
+    instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role production --site <host> --public-site <host>" NO_INSTANCE
+    local dir; dir=$(instance_dir "$instance")
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>" NO_RELEASE
+    with_env "$instance" bilibi "$dir/current/bilibi-web" public-hostname "$@"
+}
 # ========================================================= identity lifecycle
 identity_lifecycle() {
     local command=${1:-} instance=${2:-}
@@ -1503,6 +1507,7 @@ case ${1:-} in
     create-owner) shift; create_owner "$@" ;;
     tenant-provision) shift; tenant_provision "$@" ;;
     two-factor-reset) shift; two_factor_reset "$@" ;;
+    public-hostname) shift; public_hostname "$@" ;;
     identity-recover|identity-delete|identity-retention) command=$1; shift; identity_lifecycle "$command" "$@" ;;
     installer) shift; installer "$@" ;;
     github-app) shift; github_app_command "$@" ;;

@@ -58,16 +58,20 @@ pub async fn prepare(
             "Invitation evidence",
         )
         .await?;
-    use bilibi_core::portal::{InvitationInput, PortalService, SiteInput, Status, SERVICE};
+    use bilibi_core::portal::{InvitationInput, PortalService, Status, SERVICE};
     let portal = app.services.get::<PortalService>(SERVICE)?;
+    // The portal lives on the tenant's public site, named by its hostname.
+    let public = app
+        .services
+        .get::<bilibi_base::public::Public>(bilibi_base::public::SERVICE)?;
     let mut tx = boundary
-        .begin(client, scope.mutation_context("walkthrough.portal.site"))
+        .begin(client, scope.mutation_context("walkthrough.public.site"))
         .await?;
-    portal
+    public
         .set_site_in(
             &mut tx,
             scope,
-            &SiteInput {
+            &bilibi_base::public::SiteInput {
                 address: "invitation-privacy".into(),
                 title: "Synthetic invitation portal".into(),
                 enabled: Some(true),
@@ -75,7 +79,11 @@ pub async fn prepare(
             },
         )
         .await?
-        .map_err(|_| "fixture portal site refused")?;
+        .map_err(|_| "fixture public site refused")?;
+    public
+        .add_hostname_in(&mut tx, scope, "privacy-public.localhost", true)
+        .await?
+        .map_err(|_| "fixture public hostname refused")?;
     tx.commit().await?;
     let input = InvitationInput {
         person: bilibi_party_ids::PersonId::new(2)?,

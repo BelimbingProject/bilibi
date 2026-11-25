@@ -21,7 +21,7 @@
 - Each router also accepts only the authority configured for its listener and answers an unexpected or missing `Host` with a bare 404. The `Host` check prevents DNS rebinding; it does not select a site.
 - There is no combined one-hostname mode. An installation with public pages uses two hostnames, including in development. Without a public origin and listener, no public route is served.
 - One process and two listeners come first so background work starts once and process-local live wake-ups remain immediate. Separate staff and public processes wait until wake-ups cross processes.
-- A tenant has one public site for now, with several hostnames allowed in the design. This slice binds the public listener to one authority and one tenant using `PUBLIC_ORIGIN`, `PUBLIC_BIND_ADDR` and `PUBLIC_TENANT_ID`. Tenant sites are never path partitions on one shared hostname.
+- A tenant has one public site for now, with several hostnames. The public listener (`PUBLIC_ORIGIN`, `PUBLIC_BIND_ADDR`) finds a request's tenant by its hostname in `base/public`'s site records; a hostname is unique across the installation. Tenant sites are never path partitions on one shared hostname.
 - `base/public` is the eventual owner of the public boundary, public-site records, guest identity, checks, limits and caching. An anonymous visitor with a state cookie is a guest. Existing `/portal` paths keep their names.
 - The shared public layout may vary by data tokens only: logo, colours and a font from the supported list. A tenant cannot add scripts. A third-party script is available only through an operator-installed Extension that declares every origin it needs; wildcard and non-HTTPS origins are refused.
 

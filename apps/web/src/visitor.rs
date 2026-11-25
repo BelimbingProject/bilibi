@@ -436,7 +436,10 @@ async fn open_session(
         .0
         .site(&request.site)
         .await?
-        .filter(|site| app.public_tenant == Some(site.tenant()))
+        .filter(|site| {
+            app.public_scope()
+                .is_ok_and(|public| public.tenant() == site.tenant())
+        })
         .ok_or(Error::Forbidden)?;
     // The origin first: only a page the site lists may spend the site's own
     // budget; any other caller is bounded by its address alone.
@@ -481,7 +484,11 @@ async fn authenticate(
         .site(scope.site())
         .await?
         .ok_or(Error::Unauthorized)?;
-    if app.public_tenant != Some(scope.tenant()) || site.tenant() != scope.tenant() {
+    if app
+        .public_scope()
+        .map_or(true, |public| public.tenant() != scope.tenant())
+        || site.tenant() != scope.tenant()
+    {
         return Err(Error::Unauthorized);
     }
     site.admit(origin)?;
@@ -566,11 +573,17 @@ async fn upgrade(
     let Some(slot) = Slot::admit(&app, sender, &policy) else {
         return refused(Refusal::LIMITED);
     };
+    let Ok(site) = app.public_scope() else {
+        return refused(Refusal::from(Error::NotFound));
+    };
     // The socket admits the larger of a text frame and an upload chunk; a
     // text frame is held to `FRAME_LIMIT` where it is read.
     ws.max_message_size(SOCKET_LIMIT)
         .max_frame_size(SOCKET_LIMIT)
-        .on_upgrade(move |socket| run(app, socket, origin, slot))
+        .on_upgrade(move |socket| {
+            // The socket runs in its own task: it keeps the site it opened on.
+            crate::public::PUBLIC_SITE.scope(site, run(app, socket, origin, slot))
+        })
         .into_response()
 }
 

@@ -18,8 +18,8 @@ mod wording;
 
 pub use bilibi_user::CustomerAccount;
 pub use facade::{
-    address_shaped, AcceptError, Checked, FieldError, Invitation, InvitationInput, LogoChange,
-    OpenInvitation, PortalService, Site, SiteInput, Status, TITLE_MAX,
+    AcceptError, Checked, FieldError, Invitation, InvitationInput, OpenInvitation, OptionsInput,
+    PortalService, Site, Status,
 };
 pub use registration::{RegisterError, Registration, RegistrationStatus, COMPANY_MAX};
 
@@ -53,7 +53,7 @@ const PORTAL_PAGES: &str = "core/portal.portal";
 
 /// See the portal site and the invitations.
 pub const VIEW: &str = "admin.portal.view";
-/// Set the portal site, invite customers and revoke invitations.
+/// Turn account requests on or off, invite customers and revoke invitations.
 pub const MANAGE: &str = "admin.portal.manage";
 /// A customer's own portal home and account.
 pub const PORTAL_ACCOUNT: &str = "portal.account.view";
@@ -107,6 +107,10 @@ const CAPABILITY_RENAME_MIGRATION: (&str, &str) = (
     "core-portal-009-capability-rename",
     include_str!("../migrations/009-capability-rename.sql"),
 );
+const PUBLIC_SITE_MIGRATION: (&str, &str) = (
+    "core-portal-010-public-site",
+    include_str!("../migrations/010-public-site.sql"),
+);
 const REGISTRATION_MIGRATION: (&str, &str) = (
     "core-customer_access-003-registration",
     include_str!("../migrations/003-registration.sql"),
@@ -125,14 +129,14 @@ macro_rules! provenance {
 /// Events.
 pub const REGISTRATION_APPROVED: &str = "core/portal.registration_approved";
 inventory::submit! { Contribution::new(bilibi_events::EVENTS, REGISTRATION_APPROVED, provenance!(), &bilibi_events::EventType { version: 1 }) }
-inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/portal.accept-invitation", provenance!(), &CredentialPath { path: "/portal/accept/{site}/{token}" }) }
-inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/portal.verify-registration", provenance!(), &CredentialPath { path: "/portal/verify/{site}/{token}" }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/portal.accept-invitation", provenance!(), &CredentialPath { path: "/portal/accept/{token}" }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/portal.verify-registration", provenance!(), &CredentialPath { path: "/portal/verify/{token}" }) }
 
 inventory::submit! {
     Module {
         id: "core/portal", layer: Layer::Core,
-        dependencies: &["base/module_registry", "base/database", "base/events", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/templates", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "base/personal_data", "base/privacy", "core/company", "core/person", "core/affiliation", "core/user"],
-        migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION, PERSONAL_DATA_MIGRATION, REGISTRATION_LIMITS_MIGRATION, INVITATION_PERSONAL_DATA_MIGRATION, CAPABILITY_RENAME_MIGRATION],
+        dependencies: &["base/module_registry", "base/database", "base/events", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/templates", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "base/personal_data", "base/privacy", "base/public", "core/company", "core/person", "core/affiliation", "core/user"],
+        migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION, PERSONAL_DATA_MIGRATION, REGISTRATION_LIMITS_MIGRATION, INVITATION_PERSONAL_DATA_MIGRATION, CAPABILITY_RENAME_MIGRATION, PUBLIC_SITE_MIGRATION],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let desk = delivery::Desk {
@@ -154,8 +158,7 @@ inventory::submit! {
                     media: services.get(bilibi_media::SERVICE)?,
                     settings: services.get("base/settings.store")?,
                     events: services.get(bilibi_events::SERVICE)?,
-                    public_origin: std::env::var("PUBLIC_ORIGIN").ok().filter(|origin| !origin.is_empty()).map(|origin| origin.trim_end_matches('/').to_owned()),
-                    public_tenant: std::env::var("PUBLIC_TENANT_ID").ok().and_then(|id| id.parse().ok()),
+                    public: services.get(bilibi_public::SERVICE)?,
                 });
                 operations::bind(access.clone())?;
                 Ok(access)
@@ -261,7 +264,7 @@ inventory::submit! { Contribution::new(EMBEDS, "portal.person-portal-access", pr
 inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageWrites {
     service: PAGES,
     contracts: &[
-        ("save_site", operations::SITE_SET),
+        ("save_options", operations::OPTIONS_SET),
         ("invite", operations::INVITE),
         ("confirm_revoke", operations::REVOKE),
         ("resend", operations::INVITE),
@@ -270,7 +273,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageW
         ("invite", operations::APPROVE),
         ("confirm_reject", operations::REJECT),
     ],
-    pending: Pending::Events { events: &["store_logo"], reason: "Storing a logo image puts its bytes into Media outside a contract; the site save that uses it is the site.set contract." },
+    pending: Pending::None,
 }) }
 // The portal pages read, except the authenticator page, which writes through
 // the User facade like the staff authenticator page does.

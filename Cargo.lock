@@ -1545,6 +1545,7 @@ dependencies = [
  "bilibi-person",
  "bilibi-personal-data",
  "bilibi-privacy",
+ "bilibi-public",
  "bilibi-records",
  "bilibi-settings",
  "bilibi-templates",
@@ -1664,12 +1665,19 @@ dependencies = [
 name = "bilibi-public"
 version = "0.2.1"
 dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-authz",
  "bilibi-database",
+ "bilibi-media",
+ "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-settings",
+ "bilibi-tenancy",
  "bilibi-ui",
  "inventory",
  "serde_json",
+ "tokio-postgres",
  "url",
 ]
 
