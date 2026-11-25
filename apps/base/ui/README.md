@@ -213,7 +213,7 @@ A work calendar's resolved day is a `DayTile` (Belimbing's `x-ui.day-tile`): the
 
 ## Calendar
 
-`Calendar` (`src/calendar.rs`, `templates/calendar.html`, hook `Calendar` in `assets/calendar.js`) draws a Domain's records on a day, week, month, year or shared view (one column per person or resource) without the Domain owning any markup, CSS or JavaScript. The component never writes; the owner does. The running owner is `apps/web/examples/schedule-reference.rs`, and the specimens are at `/assets/ui-components.html#specimen-calendars`.
+`Calendar` (`src/calendar.rs`, `templates/calendar.html`, hook `Calendar` in `assets/calendar.js`) draws a Domain's records on a day, week, month, agenda, year or shared view (one column per person or resource) without the Domain owning any markup, CSS or JavaScript. The component never writes; the owner does. The running owner is `apps/web/examples/schedule-reference.rs`, and the specimens are at `/assets/ui-components.html#specimen-calendars`.
 
 The owner's side, in order:
 
@@ -232,6 +232,10 @@ The year view draws twelve small months: each day shows how many items fall on i
 `Calendar::day_marks` puts a `DayKind` tint and word on a week or month cell (the same colours as `DayTile`). Snap is 15 minutes (`snap_minutes` 5, 10, 15, 30 or 60). Positions are classes on a grid of five-minute rows, never a `style` attribute.
 
 Below `md` the grids become an agenda list with the same items and the same Move action. Drag is off on coarse pointers; "Move…" opens the dialog, and is shown when a keyboard reaches it. The month view is a `grid` with arrow keys between days. A timed item that runs past midnight is drawn in each day it touches, and only the part holding its start can be dragged.
+
+**Agenda** (`CalendarView::Agenda`) is that same chronological list at every width: the month's days, each with its items, for a reader who wants the sequence rather than the grid. **The mini month** (`nav aria-label="Mini month"`) sits beside every grid view except Year: one month of days, each linking to its date in the current view, with the previous and next month arrows, a dot on a day that holds something (from `items`, or `day_totals` when the owner gives them), and the today ring. It is hidden below `md`.
+
+**Keyboard shortcuts** are scoped to the calendar: when no text field or open dialog holds the focus, `D`/`W`/`M`/`A` choose the view, `T` goes to today, the left and right arrows step the range and `?` toggles the legend. They activate the same links the toolbar draws, so every shortcut has its visible control. The grid keeps its own keys (arrows between month days, Enter to create), and a text field or dialog keeps every key.
 
 ## Board
 

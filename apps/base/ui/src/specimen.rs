@@ -1408,6 +1408,11 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
             date(2026, 3, 25),
         ),
         make(
+            "specimen-calendar-agenda",
+            CalendarView::Agenda,
+            date(2026, 3, 25),
+        ),
+        make(
             "specimen-calendar-year",
             CalendarView::Year,
             date(2026, 3, 25),

@@ -743,8 +743,15 @@ async fn challenge_card(
     card(
         app,
         "Confirm sign-in",
-        bilibi_ui::SignInChallengePage::new(&pending.csrf, &methods, method, message, error)
-            .map_err(|_| Error::Internal)?,
+        bilibi_ui::SignInChallengePage::new(
+            &pending.csrf,
+            &methods,
+            method,
+            message,
+            error,
+            pending.password_origin,
+        )
+        .map_err(|_| Error::Internal)?,
         None,
         FlashMap::default(),
         StatusCode::OK,
@@ -805,6 +812,16 @@ pub async fn challenge(
                 };
                 if let Some(destination) = challenge.masked_destination { message.push_str(&format!(" Destination: {destination}.")); }
                 if let Some(seconds) = challenge.retry_after_seconds { message.push_str(&format!(" Try again in {seconds} seconds.")); }
+                challenge_card(&app,token,&submission.method,&message,"").await
+            }
+            "request_reset" => {
+                let outcome=app.user.request_sign_in_two_factor_reset(token,&submission.csrf).await?;
+                let message=if outcome.created {
+                    format!("Request sent to {}. You'll get an email when 2FA is reset.",outcome.recipient)
+                } else {
+                    let at=jiff::Timestamp::try_from(outcome.requested_at).map_err(|_|Error::Internal)?;
+                    format!("A request was already sent at {}. You'll get an email when 2FA is reset.",at.strftime("%Y-%m-%d %H:%M UTC"))
+                };
                 challenge_card(&app,token,&submission.method,&message,"").await
             }
             "verify" => match app.user.complete_sign_in(token,&submission.csrf,&submission.method,&submission.code).await? {

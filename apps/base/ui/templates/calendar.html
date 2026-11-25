@@ -63,8 +63,17 @@
 {%- endfor -%}
 </nav>
 </div>
+<a id="{{ id }}-shortcuts" href="#{{ id }}-shortcuts-help" data-hook="ShortcutsHelp" data-help="{{ id }}-shortcuts-help" aria-controls="{{ id }}-shortcuts-help" aria-expanded="false" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" class="ui-icon-button grid size-7 shrink-0 place-items-center rounded-md text-ink-muted hover:bg-surface-sunken hover:text-ink">{% call c::icon(name="question-mark-circle", class="size-4") %}{% endcall %}</a>
 </div>
-<p class="text-xs text-ink-muted">{{ zone_note }}{% if creatable && view != "year" %} Click or drag a free time, or tap one, to add something there.{% endif %}</p>
+<div id="{{ id }}-shortcuts-help" hidden class="rounded-md border border-line bg-surface px-3 py-2 text-xs text-ink-muted">
+<dl class="flex flex-wrap gap-x-4 gap-y-1">
+<div><dt class="inline font-medium text-ink">D / W / M / A</dt> <dd class="inline">Day, Week, Month, Agenda</dd></div>
+<div><dt class="inline font-medium text-ink">T</dt> <dd class="inline">Today</dd></div>
+<div><dt class="inline font-medium text-ink">← / →</dt> <dd class="inline">Previous or next range</dd></div>
+<div><dt class="inline font-medium text-ink">?</dt> <dd class="inline">This help</dd></div>
+</dl>
+</div>
+<p class="text-xs text-ink-muted">{{ zone_note }}{% if creatable && view != "year" && view != "agenda" %} Click or drag a free time, or tap one, to add something there.{% endif %}</p>
 {%- if follows_browser_zone -%}
 <span id="{{ id }}-zone" data-hook="BrowserTimeZone" hidden></span>
 {%- endif -%}
@@ -75,11 +84,45 @@
 {%- when None -%}
 {%- endmatch -%}
 </div>
+<div class="flex items-start gap-3">
+{%- if view != "year" -%}
+{%- match mini -%}
+{%- when Some with (month) -%}
+<nav id="{{ month.dom_id }}" aria-label="Mini month" class="shrink-0 self-start rounded-md border border-line bg-surface p-2 max-md:hidden lg:w-56">
+<div class="flex items-center justify-between gap-1 pb-1">
+<a href="{{ month.previous }}" data-patch aria-label="Previous month" title="Previous month" class="ui-icon-button grid size-6 place-items-center rounded-sm text-ink-muted hover:bg-surface-sunken hover:text-ink">{% call c::icon(name="chevron-left", class="size-3.5") %}{% endcall %}</a>
+<span class="text-xs font-semibold text-ink-strong">{{ month.title }}</span>
+<a href="{{ month.next }}" data-patch aria-label="Next month" title="Next month" class="ui-icon-button grid size-6 place-items-center rounded-sm text-ink-muted hover:bg-surface-sunken hover:text-ink">{% call c::icon(name="chevron-right", class="size-3.5") %}{% endcall %}</a>
+</div>
+<table aria-label="{{ month.title }}" class="w-full table-fixed border-separate border-spacing-0.5">
+<thead><tr>{% for name in weekdays %}<th scope="col" class="text-center text-[10px] font-medium text-ink-muted">{{ name }}</th>{% endfor %}</tr></thead>
+<tbody>
+{%- for week in month.weeks -%}
+<tr>
+{%- for day in week -%}
+<td class="p-0">
+{%- if day.href.is_empty() -%}
+<span aria-hidden="true"></span>
+{%- else -%}
+<a href="{{ day.href }}" data-patch aria-label="{{ day.label }}" title="{{ day.label }}" class="relative grid h-7 place-items-center rounded-sm text-[11px] tabular-nums hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong/40{% if day.outside %} text-ink-faint{% else %} text-ink{% endif %}{% if day.today %} font-semibold ring-1 ring-brand-strong{% endif %}">{{ day.day }}{% if day.busy %}<span aria-hidden="true" class="absolute bottom-0.5 size-1 rounded-full bg-brand-strong"></span>{% endif %}</a>
+{%- endif -%}
+</td>
+{%- endfor -%}
+</tr>
+{%- endfor -%}
+</tbody>
+</table>
+</nav>
+{%- when None -%}
+{%- endmatch -%}
+{%- endif -%}
+<div class="min-w-0 flex-1">
 {%- if too_many -%}
 <div id="{{ id }}-too-many" role="status" class="rounded-md border border-warning-line bg-warning-surface px-3 py-2 text-sm text-warning-ink">Too many to show; narrow the filter.</div>
 {%- else if shared_empty -%}
 <div id="{{ id }}-no-lanes" class="rounded-md border border-line bg-surface px-3 py-6 text-center text-sm text-ink-muted">No people or resources to show side by side.</div>
 {%- else -%}
+
 {%- if view == "year" -%}
 <div id="{{ id }}-year" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
 {%- for month in months -%}
@@ -132,7 +175,7 @@
 </tbody>
 </table>
 </div>
-{%- else -%}
+{%- else if view != "agenda" -%}
 <div class="overflow-x-auto rounded-md border border-line bg-surface max-md:hidden{% if focus_hour.is_some() %} max-h-[60dvh] overflow-y-auto{% endif %}"{% if let Some(hour) = focus_hour %} data-hook="CalendarHours" data-hour="{{ hour }}" data-range="{{ range_key }}" tabindex="0" role="region" aria-label="Calendar hours"{% endif %}>
 <div class="min-w-min">
 <div{% if focus_hour.is_some() %} class="sticky top-0 z-10 bg-surface"{% endif %}>
@@ -173,10 +216,10 @@
 </div>
 </div>
 {%- endif -%}
-<div id="{{ id }}-agenda" class="space-y-3 md:hidden">
+<div id="{{ id }}-agenda" class="space-y-3{% if view != "agenda" %} md:hidden{% endif %}">
 {%- for group in agenda -%}
 <section aria-label="{{ group.heading }}" class="rounded-md border border-line bg-surface">
-<h3 class="border-b border-line px-2 py-1 text-xs font-medium text-ink-muted">{{ group.heading }}</h3>
+<h3 class="border-b border-line px-2 py-1 text-xs font-medium text-ink-muted">{{ group.heading }}{% if group.today %} <span class="ml-1 rounded-full bg-action px-1.5 text-action-ink">Today</span>{% endif %}</h3>
 {%- if group.items.is_empty() -%}
 <p class="px-2 py-1.5 text-xs text-ink-muted">Nothing scheduled.</p>
 {%- else -%}
@@ -193,6 +236,8 @@
 <p id="{{ id }}-empty" class="text-xs text-ink-muted">Nothing is scheduled in this range.</p>
 {%- endif -%}
 {%- endif -%}
+</div>
+</div>
 {%- match dialog -%}
 {%- when Some with (dialog) -%}
 {{ dialog|safe }}

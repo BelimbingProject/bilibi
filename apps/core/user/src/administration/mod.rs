@@ -72,6 +72,7 @@ pub struct Options {
     /// OR semantics; at most [`MAX_ROLE_IDS`] unique positive ids.
     pub role_ids: Vec<i64>,
     pub membership: Option<Membership>,
+    pub reset_requested: bool,
     pub sort: Sort,
     pub descending: bool,
     /// One-based, at most [`MAX_PAGE`].
@@ -100,6 +101,9 @@ pub struct Entry {
     pub roles: Vec<Role>,
     pub membership: Membership,
     pub invitation: Option<i64>,
+    pub reset_requested_at: Option<SystemTime>,
+    pub two_factor_enabled: bool,
+    pub can_reset: bool,
 }
 
 pub struct Page {
@@ -114,7 +118,7 @@ pub struct Page {
 /// system roles and the custom roles those companies own, as
 /// `bilibi_authz::roles::list` does.
 pub async fn list_users(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     companies: &[i64],
     options: &Options,
@@ -172,6 +176,6 @@ inventory::submit! {
 // the facade rather than an operation contract (`base/agent_api` page).
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, SERVICE, bilibi_module_registry::Provenance { module: "core/user", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
     service: SERVICE,
-    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ],
-    pending: bilibi_module_registry::contributions::Pending::Every { reason: "Account administration writes through the User facade; no contract yet." },
+    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ("reset_two_factor", crate::two_factor::recovery::RESET), ],
+    pending: bilibi_module_registry::contributions::Pending::Every { reason: "Invitation and membership administration still write through the User facade." },
 }) }

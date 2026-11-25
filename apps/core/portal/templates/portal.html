@@ -53,3 +53,5 @@
 {% if revoke %}
 {% call dialog::confirm_dialog(id="customer-revoke-dialog", consequence="Revoke invitation?", detail="Its link stops working. You can invite the address again later.", confirm="Revoke", working="Revoking…", confirm_event="confirm_revoke", cancel_event="cancel_revoke") %}{% endcall %}
 {% endif %}
+
+{{ reset_dialog }}

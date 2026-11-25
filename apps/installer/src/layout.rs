@@ -24,6 +24,7 @@ const PLUGINS_DIR: &str = "plugins";
 /// The add-ons a release switches on, included by the local build in the
 /// release's `plugins/` folder.
 const PLUGINS_ENABLED: &str = "enabled.json";
+const INSTALLER_JOBS_DIR: &str = "installer-jobs";
 
 #[derive(Clone, Debug)]
 pub struct Layout {
@@ -66,6 +67,38 @@ impl Layout {
     }
     pub fn backups(&self) -> PathBuf {
         self.dir.join("backups")
+    }
+    fn installer_jobs(&self) -> PathBuf {
+        self.dir.join("incoming").join(INSTALLER_JOBS_DIR)
+    }
+    /// Ready markers present before an idle check. Only these may be removed
+    /// after the final database scan, so a job queued during that check keeps
+    /// its newer marker and systemd activates the service again.
+    pub fn activation_markers(&self) -> Vec<PathBuf> {
+        fs::read_dir(self.installer_jobs())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.path().is_file())
+                    .filter_map(|entry| {
+                        let name = entry.file_name();
+                        let name = name.to_str()?;
+                        let number = name.strip_prefix("job-")?.strip_suffix(".ready")?;
+                        (!number.is_empty()
+                            && number.len() <= 20
+                            && number.bytes().all(|byte| byte.is_ascii_digit()))
+                        .then(|| entry.path())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    pub fn remove_activation_markers(&self, markers: &[PathBuf]) {
+        for marker in markers {
+            if marker.parent() == Some(self.installer_jobs().as_path()) {
+                let _ = fs::remove_file(marker);
+            }
+        }
     }
     fn server_root(&self) -> Result<&Path, String> {
         self.dir

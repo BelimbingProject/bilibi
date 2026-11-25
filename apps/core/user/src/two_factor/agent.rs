@@ -35,15 +35,14 @@ pub enum TwoFactorEmailError {
     Other(#[from] Error),
 }
 
-struct Account {
-    id: i64,
-    tenant: i64,
-    name: String,
-    email: String,
-    active: bool,
+pub(super) struct Account {
+    pub(super) id: i64,
+    pub(super) tenant: i64,
+    pub(super) name: String,
+    pub(super) email: String,
+    pub(super) active: bool,
 }
 
-/// Staff accounts only: a customer's factor is not a staff reset (ADR 16).
 const TARGET_SQL: &str =
     "SELECT DISTINCT ON (i.id) u.id,u.tenant_id,u.name,i.email,u.status='active' FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.kind='staff'";
 
@@ -57,7 +56,7 @@ fn account_from(row: &tokio_postgres::Row) -> Account {
     }
 }
 
-fn reset_notice(body: &str) -> Result<Notice, Error> {
+pub(super) fn reset_notice(body: &str) -> Result<Notice, Error> {
     let notice = Notice::new(crate::wording::TWO_FACTOR_SUBJECT)
         .kind("two_factor_reset")
         .body(body)
@@ -68,7 +67,7 @@ fn reset_notice(body: &str) -> Result<Notice, Error> {
 
 /// The packaged reset email; `slot` says who reset it. The
 /// reset stands without it, so a mail that cannot be built is only logged.
-fn reset_mail(service: &UserService, account: &Account, slot: &str) -> Option<Message> {
+pub(super) fn reset_mail(service: &UserService, account: &Account, slot: &str) -> Option<Message> {
     let to = Address::new(Some(&account.name), &account.email).ok()?;
     let wording = service
         .templates
@@ -87,24 +86,44 @@ fn reset_mail(service: &UserService, account: &Account, slot: &str) -> Option<Me
     ))
 }
 
-/// Deletes the confirmed authenticator, ends every session of the portable
-/// identity across its memberships and records who did it. Returns the ended
-/// session ids for announce after commit. Session ids are not written into
-/// the audit payload.
-async fn clear_confirmed(
-    service: &UserService,
-    tx: &mut MutationTransaction<'_>,
-    account: &Account,
-    by: Value,
-) -> Result<Vec<String>, Error> {
+pub(crate) async fn lock_reset_target(
+    tx: &MutationTransaction<'_>,
+    tenant: i64,
+    user: i64,
+) -> Result<(), Error> {
+    if tx.context().tenant != tenant {
+        return Err(Error::Forbidden);
+    }
     // Serialize resets and membership removal through the owning account row.
     tx.sql()
         .query_opt(
             "SELECT id FROM users WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE",
-            &[&tx.context().tenant, &account.id],
+            &[&tenant, &user],
         )
         .await?
         .ok_or(Error::NotFound)?;
+    let identity = crate::sign_in_identity::id(tx.sql(), tenant, user).await?;
+    tx.sql()
+        .query_one(
+            "SELECT id FROM user_identities WHERE id=$1 FOR UPDATE",
+            &[&identity],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Deletes the confirmed authenticator, ends every session of the portable
+/// identity across its memberships and records who did it. Returns the ended
+/// session ids for announce after commit. Session ids are not written into
+/// the audit payload.
+pub(super) async fn clear_confirmed(
+    service: &UserService,
+    tx: &mut MutationTransaction<'_>,
+    account: &Account,
+    by: Value,
+    actor: Option<i64>,
+) -> Result<(Vec<String>, usize), Error> {
+    let identity = crate::sign_in_identity::id(tx.sql(), account.tenant, account.id).await?;
     if !service.step_up.account_enrolled(tx, account.id).await? {
         return Err(Error::Conflict);
     }
@@ -125,11 +144,14 @@ async fn clear_confirmed(
         new: after,
     })
     .await?;
-    let identity = crate::sign_in_identity::id(tx.sql(), account.tenant, account.id).await?;
-    crate::sign_in_identity::end_everywhere(&service.sessions, tx, identity, account.id, None).await
+    let closed = super::recovery::close_requests(tx, identity, actor).await?;
+    let ended =
+        crate::sign_in_identity::end_everywhere(&service.sessions, tx, identity, account.id, None)
+            .await?;
+    Ok((ended, closed))
 }
 
-fn wake(
+pub(super) fn wake(
     service: &UserService,
     tenant: i64,
     user: i64,
@@ -150,7 +172,7 @@ fn wake(
 }
 
 impl UserService {
-    /// Turns off the confirmed authenticator for the one non-deleted staff account
+    /// Turns off the confirmed authenticator for the one non-deleted staff identity
     /// with this email. Already off is success and writes nothing. The audit
     /// actor is the system principal `two-factor-reset`.
     pub async fn reset_two_factor_by_email(
@@ -180,15 +202,17 @@ impl UserService {
                 Context::system(account.tenant, "two-factor-reset", "user.two_factor.reset"),
             )
             .await?;
+        lock_reset_target(&tx, account.tenant, account.id).await?;
         let ended = match clear_confirmed(
             self,
             &mut tx,
             &account,
             json!({"reset_by":"system", "reset_by_name":"two-factor-reset"}),
+            None,
         )
         .await
         {
-            Ok(ended) => ended,
+            Ok((ended, _)) => ended,
             Err(Error::Conflict) => {
                 tx.rollback().await?;
                 return Ok(TwoFactorEmailReset::AlreadyOff);
