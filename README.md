@@ -187,7 +187,7 @@ Terminate TLS at a reverse proxy, and keep the database on a private network: Bi
 
 ## Run it on a server
 
-`scripts/install-server.sh` sets up Dev, Staging and Production instances under `/opt/bilibi`, each with its own database, service and address, and puts releases into service. The install seed saves the initial `BILIBI_ENV` role in settings. Later changes use the protected Instance settings page. Build software on your own machine, then install the tested release on any of them. Follow the [server installation guide](docs/server-install.md) to set up an instance, its server owner and first owners of customer tenants. To let your own AI assistant install it, give it [the Install Bilibi skill](docs/install-with-ai/SKILL.md) ([guide](docs/install-with-ai/README.md)).
+`scripts/install-server.sh` sets up Dev, Staging and Production instances under `/opt/bilibi`, each with its own database, service and address, and puts releases into service. The install seed saves the initial `BILIBI_ENV` role in settings. Later changes use the protected Instance settings page. Build software on your own machine, then install the tested release on any of them. Follow the [server installation guide](docs/server-install.md) to set up an instance, its server owner and first owners of customer tenants. For a running server, see [reviewed updates and Undo](docs/server-install.md#putting-a-release-into-service). To let your own AI assistant install it, give it [the Install Bilibi skill](docs/install-with-ai/SKILL.md) ([guide](docs/install-with-ai/README.md)).
 
 ## Add a business area
 
