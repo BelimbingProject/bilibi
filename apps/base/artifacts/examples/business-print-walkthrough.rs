@@ -154,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
     let app = bilibi_web::App::new(db.clone(), "https://business-print.localhost")?;
-    let mut client = db.get_detached("business print walkthrough").await?;
+    let mut client = db.get().await?;
     let authentication = app
         .services
         .get::<Authentication>("base/tenancy.authentication")?;
