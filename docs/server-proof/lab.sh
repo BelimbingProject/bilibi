@@ -16,6 +16,10 @@ run() {
     sudo -n systemd-run -M "$NAME" -P --wait --quiet --collect /bin/bash -euo pipefail -c "$*"
 }
 
+network() {
+    run "ip addr replace $NET.2/24 dev host0; ip link set host0 up; ip route replace default via $NET.1; printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf"
+}
+
 case ${1:-} in
 prepare)
     [[ ! -e $ROOT ]] || { echo 'Lab root already exists.' >&2; exit 1; }
@@ -59,11 +63,26 @@ boot)
     printf '%s\n' "$pid" >"$DATA/lab/nspawn.pid"
     awk '{print $22}' "/proc/$pid/stat" >"$DATA/lab/nspawn.start"
     sleep 3
-    run "ip addr add $NET.2/24 dev host0; ip link set host0 up; ip route add default via $NET.1; printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf"
+    network
     ;;
 run)
     shift
     run "$*"
+    ;;
+reboot)
+    actual=$(sudo -n machinectl show "$NAME" -p RootDirectory --value)
+    [[ $actual == "$ROOT" ]] || { echo "Refusing machine outside this task: $actual" >&2; exit 1; }
+    sudo -n machinectl reboot "$NAME"
+    for _ in {1..90}; do
+        if [[ $(sudo -n machinectl show "$NAME" -p State --value 2>/dev/null || true) == running ]] &&
+            sudo -n systemd-run -M "$NAME" -P --wait --quiet --collect /bin/true 2>/dev/null; then
+            network
+            exit 0
+        fi
+        sleep 1
+    done
+    echo 'The owned lab did not finish rebooting.' >&2
+    exit 1
     ;;
 stop)
     pid=$(cat "$DATA/lab/nspawn.pid")
@@ -91,5 +110,5 @@ destroy)
         [[ ! -e $DATA/lab/$record ]] || rm -- "$DATA/lab/$record"
     done
     ;;
-*) echo 'Usage: lab.sh prepare [clean-base] | boot | run <command> | stop | destroy' >&2; exit 2 ;;
+*) echo 'Usage: lab.sh prepare [clean-base] | boot | run <command> | reboot | stop | destroy' >&2; exit 2 ;;
 esac

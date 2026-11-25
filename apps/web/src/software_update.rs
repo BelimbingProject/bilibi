@@ -144,6 +144,8 @@ pub async fn software_update(db: &Db, args: &[String]) -> Result<()> {
         .commit(&presented, &authority, &operations)
         .await
         .map_err(report_contract)?;
+    drop(code);
+    drop(presented);
     let job = committed["results"][0]["result"]["result"]["id"]
         .as_i64()
         .ok_or_else(|| {
@@ -151,7 +153,7 @@ pub async fn software_update(db: &Db, args: &[String]) -> Result<()> {
             Error::Internal
         })?;
     println!("Queued installer job {job}. Following its steps:");
-    follow(&registry, db, &presented, job).await
+    follow(&registry, db, &scope, job).await
 }
 
 async fn release_input(
@@ -248,13 +250,15 @@ fn print_review(instance: &Value, facts: &Value) {
         "Review: {}",
         facts["summary"].as_str().unwrap_or("Software change")
     );
-    if let Some(running) = facts["running"]["platform"]["version"].as_str() {
+    if let Some(running) = facts["running"]["platform"].as_str() {
         println!("From: Bilibi {running}");
     } else if let Some(release) = facts["release"].as_i64() {
         println!("From: release {release}");
     }
     if let Some(target) = facts["release_facts"]["platform"]["version"].as_str() {
         println!("To: Bilibi {target}");
+    } else if let Some(tag) = facts["source"]["tag"].as_str() {
+        println!("To: {tag}");
     } else if let Some(previous) = facts["previous_release"].as_i64() {
         println!("To: release {previous}");
     }

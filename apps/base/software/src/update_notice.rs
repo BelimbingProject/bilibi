@@ -27,10 +27,30 @@ impl Software {
         let Some(paths) = self.paths.as_ref() else {
             return Ok(());
         };
-        let listing = self.release_listing(None, false, false).await?;
-        if listing.is_null() {
+        let mut client = self.db.get().await?;
+        let Some(tenant) = bilibi_schedule::scheduler::operator_tenant(&**client).await? else {
             return Ok(());
-        }
+        };
+        let owner_lookup = self
+            .mutations
+            .begin(
+                &mut client,
+                Context::system(tenant, "software", "software.update.check"),
+            )
+            .await?;
+        let owner = self.notifications.installation_owner(&owner_lookup).await?;
+        owner_lookup.commit().await?;
+        let Some(owner) = owner else {
+            return Ok(());
+        };
+        let reader = self
+            .authentication
+            .authenticate(&**client, tenant, owner, format!("update-notice-{owner}"))
+            .await?;
+        let policy = super::release_proof::Policy::load(paths).map_err(Error::refused)?;
+        let listing = self
+            .github_listing(&**client, &reader, false, false, &policy)
+            .await?;
         let update = super::update::discover(Some(paths), &listing);
         if matches!(
             update["reason"].as_str(),
@@ -43,10 +63,6 @@ impl Software {
         }
         let tag = update["release"]["tag"].as_str().ok_or(Error::Internal)?;
         let repo = listing["repository_id"].as_i64().ok_or(Error::Internal)?;
-        let mut client = self.db.get().await?;
-        let Some(tenant) = bilibi_schedule::scheduler::operator_tenant(&**client).await? else {
-            return Ok(());
-        };
         let mut tx = self
             .mutations
             .begin(
@@ -54,9 +70,6 @@ impl Software {
                 Context::system(tenant, "software", "software.update.available"),
             )
             .await?;
-        let Some(owner) = self.notifications.installation_owner(&tx).await? else {
-            return Ok(());
-        };
         let recipient = self
             .authentication
             .authenticate(tx.sql(), tenant, owner, format!("update-notice-{owner}"))

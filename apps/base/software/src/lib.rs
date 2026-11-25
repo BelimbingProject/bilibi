@@ -984,7 +984,7 @@ inventory::submit! { Contribution::new(ROUTES, "base/software.releases", provena
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/software", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/step_up", "base/system", "base/notifications", "base/queue", "base/schedule", "base/integration", "base/audit", "base/ui", "base/menu", "base/datetime", "base/locale"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/step_up", "base/system", "base/notifications", "base/schedule", "base/integration", "base/audit", "base/ui", "base/menu", "base/datetime", "base/locale"],
         migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql")), ("base-software-005-paused", include_str!("../migrations/005-paused.sql")), ("base-software-006-installer-heartbeat", include_str!("../migrations/006-installer-heartbeat.sql")), ("base-software-007-release-trust", include_str!("../migrations/007-release-trust.sql")), ("base-software-008-update-notices", include_str!("../migrations/008-update-notices.sql"))],
         // Declaration order is build order: the page service reads this one.
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
@@ -1004,7 +1004,7 @@ inventory::submit! {
             });
             BOUND.set(software.clone()).map_err(|_| bilibi_module_registry::RegistryError::Service("duplicate software binding".into()))?;
             Ok(software)
-        } }, bilibi_module_registry::Service {id:update_notice::SERVICE,factory:|s| Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(update_notice::Check {software:s.get(SERVICE)?,schedule:s.get("base/schedule.store")?}))))}, bilibi_module_registry::Service { id: web::PAGES, factory: |services| {
+        } }, bilibi_module_registry::Service { id: web::PAGES, factory: |services| {
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
             Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages {
                 follow: Arc::new(follow::Follow::new(db.clone())),
