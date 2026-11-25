@@ -25,7 +25,9 @@ use bilibi_personal_data::{Disclosure, Erasure};
 use bilibi_queue::Queue;
 use bilibi_settings::Settings;
 use bilibi_tenancy::{Authentication, ProofClient, ProofFuture, Scope};
-pub use render::{HtmlFuture, HtmlOwner, Served, RENDER_HEADERS, RENDER_ROUTE};
+pub use render::{
+    HtmlFuture, HtmlOwner, InlineDocument, PdfPaper, Served, RENDER_HEADERS, RENDER_ROUTE,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{any::type_name, future::Future, pin::Pin, sync::Arc};

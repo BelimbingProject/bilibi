@@ -499,6 +499,7 @@ dependencies = [
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-base",
+ "bilibi-branding",
  "bilibi-core",
  "bilibi-database",
  "bilibi-module-registry",
@@ -506,6 +507,7 @@ dependencies = [
  "bilibi-personal-data",
  "bilibi-queue",
  "bilibi-settings",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-walkthrough-fixture",
  "bilibi-web",
@@ -513,6 +515,7 @@ dependencies = [
  "hmac 0.13.0",
  "inventory",
  "libc",
+ "serde",
  "serde_json",
  "sha2 0.11.1",
  "thiserror",
@@ -2042,8 +2045,11 @@ dependencies = [
 name = "bilibi-templates"
 version = "0.2.1"
 dependencies = [
+ "base64 0.23.1",
  "bilibi-agent-api",
+ "bilibi-artifacts",
  "bilibi-authz",
+ "bilibi-branding",
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-labels",
@@ -2051,6 +2057,7 @@ dependencies = [
  "bilibi-party-ids",
  "bilibi-settings",
  "bilibi-tenancy",
+ "bilibi-ui",
  "icu_locale",
  "inventory",
  "jiff",

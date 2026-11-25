@@ -55,6 +55,14 @@ Contribute one `PrintContract` per document type through `bilibi_templates::PRIN
 - Layouts are JSON with a `blocks` array, compiled into HTML by Templates. Blocks are `heading` and `paragraph` with `text`, `field` with `field` and `label`, `section` with `heading` and `blocks`, `if_present` with an optional `field` and `blocks`, and `table` with `rows` and `columns` (each with a row `field` and `heading`). Required scalar fields and required table columns take their wording from the owner’s field labels for the selected layout language. Omit their layout `label` or `heading`. Pass the resolved language when compiling a packaged layout. Layout wording and record text are escaped. Templates supplies the markup.
 - A layout is bounded to 48 KiB, 160 blocks, eight levels and 16 columns per table. A table holds up to 2,000 rows. A fact string holds up to 16 KiB, and there is a 4 MiB budget each for facts and rendered HTML.
 
+### Print through Artifacts
+
+A layout may set `"paper":"letter"`. The default is A4. The compiler rejects other sizes and keeps required output in the document flow exactly once. Required labels and headings come from the contract's selected language.
+
+Use `CompiledPrint::document` for authorised owner facts or `preview_document` for the declared samples. Both produce a complete HTML document with embedded Instrument Sans, a Belimbing Project accent and print styles for wrapping and repeating table headings. The optional installation mark follows the issuer content and comes from `Branding::for_print`. The layout holds no CSS, executable fragments or resource URLs.
+
+Pass the document to `Artifacts::for_owner(...).render_inline_document(...)` with the source reference and provenance versions. Artifacts uses its offline Chromium renderer and private storage. The owner supplies its actual record number, issue state and values without changing the record during rendering.
+
 Run `cargo run --locked -p bilibi-templates --example print-contract-walkthrough` to exercise registry validation, packaged English and Malay selection, optional fields, escaping and repeated rows.
 
 The first tenant owner's invitation (`bilibi tenant-owner`) keeps fixed text: it is sent before the workspace exists.

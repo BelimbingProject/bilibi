@@ -1,5 +1,7 @@
 use super::{render, Checked, PrintContract, PrintField, PrintKind, Problem, MAX_LAYOUT_BYTES};
 use crate::print::facts::PrintFacts;
+use bilibi_artifacts::{InlineDocument, PdfPaper};
+use bilibi_branding::PrintBrand;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
@@ -10,12 +12,16 @@ const MAX_LITERAL_BYTES: usize = 2_000;
 
 pub struct CompiledPrint<'contract> {
     contract: &'contract PrintContract,
+    language: String,
+    paper: PdfPaper,
     blocks: Vec<Block>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Layout {
+    #[serde(default)]
+    paper: PdfPaper,
     blocks: Vec<Block>,
 }
 
@@ -51,6 +57,8 @@ pub(super) enum Block {
 pub(super) struct Column {
     pub field: String,
     pub heading: Option<String>,
+    #[serde(skip)]
+    pub numeric: bool,
 }
 
 pub(super) fn compile<'a>(
@@ -61,6 +69,8 @@ pub(super) fn compile<'a>(
     if source.len() > MAX_LAYOUT_BYTES {
         return Err(Problem::new("layout", "The print layout exceeds 48 KiB."));
     }
+    let language = crate::catalogue::language(language)
+        .ok_or_else(|| Problem::new("language", "Enter a valid print language tag."))?;
     let mut layout: Layout = serde_json::from_str(source)
         .map_err(|error| Problem::new("layout", format!("Invalid print layout: {error}")))?;
     let mut remaining = MAX_NODES;
@@ -68,15 +78,13 @@ pub(super) fn compile<'a>(
     validate_blocks(
         contract.fields,
         &mut layout.blocks,
-        language,
+        &language,
         1,
         &mut remaining,
         Some(&mut shown),
     )?;
     for field in contract.fields {
-        let required = field.required_output
-            || matches!(field.kind, PrintKind::Rows(columns) if columns.iter().any(|column| column.required_output));
-        if required && !shown.contains(field.id) {
+        if field.requires_output() && !shown.contains(field.id) {
             return Err(Problem::new(
                 field.id,
                 "Required print output must appear outside presence conditions.",
@@ -85,6 +93,8 @@ pub(super) fn compile<'a>(
     }
     Ok(CompiledPrint {
         contract,
+        language,
+        paper: layout.paper,
         blocks: layout.blocks,
     })
 }
@@ -110,6 +120,43 @@ impl CompiledPrint<'_> {
             ));
         }
         self.render_facts(facts)
+    }
+
+    /// Complete offline HTML and its approved physical size for Base Artifacts.
+    pub fn document(
+        &self,
+        state: &str,
+        facts: PrintFacts<'_>,
+        brand: &PrintBrand,
+    ) -> Checked<InlineDocument> {
+        render::document(
+            self.render(state, facts)?,
+            &self.language,
+            self.title(),
+            self.paper,
+            brand,
+        )
+    }
+
+    /// Render the same document from synthetic declaration facts.
+    pub fn preview_document(&self, brand: &PrintBrand) -> Checked<InlineDocument> {
+        render::document(
+            self.preview()?,
+            &self.language,
+            self.title(),
+            self.paper,
+            brand,
+        )
+    }
+
+    fn title(&self) -> &str {
+        self.blocks
+            .iter()
+            .find_map(|block| match block {
+                Block::Heading { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or(self.contract.label)
     }
 
     fn render_facts(&self, facts: PrintFacts<'_>) -> Checked<String> {
@@ -141,9 +188,7 @@ fn validate_blocks(
             Block::Field { field, label } => {
                 let field = scalar(fields, field)?;
                 resolve_label(field, language, label)?;
-                if let Some(shown) = shown.as_deref_mut() {
-                    shown.insert(field.id);
-                }
+                place_required(field, shown.as_deref_mut())?;
             }
             Block::Section { heading, blocks } => {
                 literal("heading", heading)?;
@@ -168,11 +213,28 @@ fn validate_blocks(
             Block::Table { rows, columns } => {
                 let rows = lookup(fields, rows)?;
                 validate_table(rows, language, columns)?;
-                if let Some(shown) = shown.as_deref_mut() {
-                    shown.insert(rows.id);
-                }
+                place_required(rows, shown.as_deref_mut())?;
             }
         }
+    }
+    Ok(())
+}
+
+fn place_required(field: &PrintField, shown: Option<&mut BTreeSet<&'static str>>) -> Checked<()> {
+    if !field.requires_output() {
+        return Ok(());
+    }
+    let shown = shown.ok_or_else(|| {
+        Problem::new(
+            field.id,
+            "Required print output cannot be placed in a presence condition.",
+        )
+    })?;
+    if !shown.insert(field.id) {
+        return Err(Problem::new(
+            field.id,
+            "Required print output must appear exactly once.",
+        ));
     }
     Ok(())
 }
@@ -237,6 +299,10 @@ fn validate_table(table: &PrintField, language: &str, columns: &mut [Column]) ->
     for column in columns {
         let field = scalar(fields, &column.field)?;
         resolve_label(field, language, &mut column.heading)?;
+        column.numeric = matches!(
+            field.kind,
+            PrintKind::Integer | PrintKind::Decimal | PrintKind::Money
+        );
         if !seen.insert(field.id) {
             return Err(Problem::new(
                 &column.field,

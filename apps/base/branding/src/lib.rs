@@ -3,6 +3,9 @@
 //! contract.
 mod email;
 mod operations;
+mod print;
+
+pub use print::{PrintBrand, PrintLogo};
 
 use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_database::Db;

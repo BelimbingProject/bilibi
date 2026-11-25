@@ -6,8 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "0.23.1"
 bilibi-agent-api.workspace = true
+bilibi-artifacts.workspace = true
 bilibi-authz.workspace = true
+bilibi-branding.workspace = true
 bilibi-database.workspace = true
 bilibi-datetime.workspace = true
 bilibi-labels.workspace = true
@@ -15,6 +18,7 @@ bilibi-module-registry.workspace = true
 bilibi-party-ids.workspace = true
 bilibi-settings.workspace = true
 bilibi-tenancy.workspace = true
+bilibi-ui.workspace = true
 icu_locale.workspace = true
 inventory.workspace = true
 jiff.workspace = true
