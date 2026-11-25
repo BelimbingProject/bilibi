@@ -61,6 +61,8 @@ A layout may set `"paper":"letter"`. The default is A4. The compiler rejects oth
 
 Use `CompiledPrint::document` for authorised owner facts. It produces a complete HTML document with the contract label as its metadata title, embedded Instrument Sans, the installation accent from `Branding::accent`, and print styles for wrapping and repeating table headings. The layout holds no CSS, executable fragments or resource URLs.
 
+For a checked business logo, supply PNG, JPEG or WebP bytes as a `Raster` field. A `QrCode` field takes a trusted HTTPS validation URL from the document's owner and generates the print mark locally. Images are inline, and only scalar fields can contain them. A field may be optional as data and required in the layout. Its block stays in the layout, and renders whenever the owner supplies the fact.
+
 Pass the document to `Artifacts::for_owner(...).render_inline_document(...)` with the source reference and provenance versions. Artifacts uses its offline Chromium renderer and private storage. The owner supplies its actual record number, issue state and values without changing the record during rendering.
 
 Run `cargo run --locked -p bilibi-templates --example print-contract-walkthrough` to exercise registry validation, packaged English and Malay selection, optional fields, escaping and repeated rows.

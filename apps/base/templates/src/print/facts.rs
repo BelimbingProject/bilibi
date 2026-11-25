@@ -8,6 +8,8 @@ const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_FACT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ROWS: usize = 2_000;
 const MAX_ADDRESS_LINES: usize = 12;
+const MAX_RASTER_BYTES: usize = 256 * 1024;
+const MAX_QR_URL_BYTES: usize = 512;
 
 /// A runtime record or one row in a document table. Owners supply authorised snapshots.
 pub type PrintFacts<'a> = &'a [(&'a str, PrintValue<'a>)];
@@ -21,6 +23,8 @@ pub enum PrintValue<'a> {
     Date(Date),
     Boolean(bool),
     Address(&'a [&'a str]),
+    Raster { mime: &'a str, bytes: &'a [u8] },
+    QrCode(&'a str),
     Rows(&'a [PrintFacts<'a>]),
 }
 
@@ -33,6 +37,8 @@ pub enum PrintKind {
     Date,
     Boolean,
     Address,
+    Raster,
+    QrCode,
     Rows(&'static [PrintField]),
 }
 
@@ -67,12 +73,6 @@ pub(super) fn validate_fields(fields: &[PrintField], allow_rows: bool) -> Checke
             return Err(Problem::new(
                 field.id,
                 "Print fields need unique identifiers.",
-            ));
-        }
-        if field.optional && field.requires_output() {
-            return Err(Problem::new(
-                field.id,
-                "Required print output needs a required fact.",
             ));
         }
         if let PrintKind::Rows(columns) = field.kind {
@@ -119,7 +119,7 @@ fn read_facts<'a>(
         check_value(field, value, budget, allow_rows)?;
     }
     for field in fields {
-        if (!field.optional || field.requires_output()) && !values.contains_key(field.id) {
+        if !field.optional && !values.contains_key(field.id) {
             return Err(Problem::new(field.id, "Required print fact is missing."));
         }
     }
@@ -134,6 +134,8 @@ fn check_value(
 ) -> Checked<()> {
     let size = match value {
         PrintValue::Text(text) => text.len(),
+        PrintValue::QrCode(url) => url.len(),
+        PrintValue::Raster { bytes, .. } => bytes.len(),
         PrintValue::Address(lines) if lines.len() <= MAX_ADDRESS_LINES => lines
             .iter()
             .map(|line| line.len().min(MAX_TEXT_BYTES + 1))
@@ -158,8 +160,20 @@ fn check_value(
                 && lines.len() <= MAX_ADDRESS_LINES
                 && lines.iter().all(|line| valid_text(line))
         }
+        (PrintKind::Raster, PrintValue::Raster { mime, bytes }) if allow_rows => {
+            check_raster(mime, bytes)
+        }
+        (PrintKind::QrCode, PrintValue::QrCode(url)) if allow_rows => {
+            url.len() <= MAX_QR_URL_BYTES
+                && url::Url::parse(url).is_ok_and(|url| {
+                    url.scheme() == "https"
+                        && url.has_host()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                })
+        }
         (PrintKind::Rows(columns), PrintValue::Rows(rows)) if allow_rows => {
-            if rows.is_empty() && field.requires_output() {
+            if rows.is_empty() && field.requires_output() && !field.optional {
                 return Err(Problem::new(
                     field.id,
                     "Required print output needs at least one row.",
@@ -190,4 +204,14 @@ fn check_value(
         ));
     }
     Ok(())
+}
+
+fn check_raster(mime: &str, bytes: &[u8]) -> bool {
+    bytes.len() <= MAX_RASTER_BYTES
+        && match mime {
+            "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+            "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+            _ => false,
+        }
 }

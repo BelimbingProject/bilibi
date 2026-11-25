@@ -26,6 +26,8 @@ p { margin: 0 0 6pt; orphans: 2; widows: 2; }
 dl { margin: 0 0 4pt; break-inside: avoid; }
 dt { color: #44403c; font-weight: 650; }
 dd { margin: 0; }
+.print-raster { display: block; max-width: 45mm; max-height: 25mm; object-fit: contain; }
+.print-qr { display: block; width: 32mm; height: 32mm; }
 
 table {
   width: 100%;
