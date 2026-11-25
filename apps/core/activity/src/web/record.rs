@@ -276,7 +276,7 @@ impl Detail {
         };
         match outcome {
             Ok(count) => Ok(Some(LiveBody {
-                redirect: Some("/activities".into()),
+                redirect: Some(crate::contributions::CALENDAR_ADDRESS.into()),
                 flash: Some((StatusKind::Success, series_delete::deleted(count))),
                 ..LiveBody::default()
             })),
@@ -746,7 +746,7 @@ impl Detail {
                 {
                     Ok(_) if wanted == Confirm::Delete => {
                         return Ok(Some(LiveBody {
-                            redirect: Some("/activities".into()),
+                            redirect: Some(crate::contributions::CALENDAR_ADDRESS.into()),
                             flash: Some((StatusKind::Success, "Activity deleted.".into())),
                             ..LiveBody::default()
                         }));
@@ -1132,7 +1132,7 @@ impl Detail {
             repeats.push(&render(ActionLink {
                 id: "activity-series-all",
                 title: "See every occurrence of this series",
-                href: &format!("/activities?series={}&state=all", series.id),
+                href: &format!("/activities?display=list&series={}&state=all", series.id),
                 body: Html::text("See all"),
                 ..ActionLink::default()
             })?);
@@ -1638,7 +1638,7 @@ impl Detail {
             })?);
         }
         actions.push(&render(BackLink {
-            href: "/activities",
+            href: crate::contributions::CALENDAR_ADDRESS,
             id: "activity-back",
             title: "Back to calendar",
             ..BackLink::default()

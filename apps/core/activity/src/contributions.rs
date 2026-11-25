@@ -79,6 +79,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, REMINDER_EMAIL, provenance!(
 inventory::submit! { Contribution::new(bilibi_events::EVENTS, crate::HAPPENED, provenance!(), &bilibi_events::EventType { version: 1 }) }
 
 const LIST_PATH: &str = "/activities";
+pub(crate) const CALENDAR_ADDRESS: &str = "/activities?display=calendar";
 
 // Grid reads with the reader's account as `$2` and no other per-row rule, so
 // Reports see only the activities the reader takes part in (`store::MINE`).
@@ -188,7 +189,7 @@ inventory::submit! { Contribution::new(ROUTES, "core/activity.feed_settings", pr
 
 bilibi_menu::contribute!(
     "core/activity",
-    bilibi_menu::MenuItem::page("core.activity", "Calendar", LIST_PATH)
+    bilibi_menu::MenuItem::page("core.activity", "Calendar", CALENDAR_ADDRESS)
         .under("core")
         .icon("calendar")
         .requires(bilibi_menu::Requirement::Capability(VIEW))

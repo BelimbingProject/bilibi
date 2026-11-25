@@ -6,7 +6,7 @@
 
 - Activities and their guests (`core_activities`, `core_activity_guests`).
 - Repeating series: the rule (`core_activity_series`) and one activity per occurrence.
-- One Calendar page (`/activities`), opening on the week, with a list and task status tiles, one record page (`/activities/{id}`) and the Activities panel on record pages.
+- One Calendar page at `/activities`, opening on the week from the Core menu, with a list and task status tiles, one record page (`/activities/{id}`) and the Activities panel on record pages.
 - Reminders: a per-tenant scheduled sweep, each activity's own reminder offsets (else the creator's default, else the tenant's), the bell's To do rows and the optional reminder email to the assignee and to guests without an account. The Activities list's “My to-do activities” filter shows the same open, reminded work as the bell.
 - Invitations: Send invites, the bell notice to colleagues, the invitation email worker, and the `core/activity.invitation_gates` registry a Domain contributes its contact rules to.
 - The calendar feed: one read-only iCalendar link per person, and its key ([Calendar feed](#calendar-feed)).
@@ -109,7 +109,7 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 
 ## Calendar
 
-**Calendar opens on the current week** (`/activities`, with Calendar, List and Status tiles tabs). The visible hours start near the current time in the reader’s zone, or the first appointment when browsing another week. All 24 hours remain available. The calendar offers day, week, month, year and shared views of the activities the reader may see, through base/ui `Calendar`. It is the same list: search, kind, open or closed and "whose" filter both.
+**The Core menu opens Calendar on the current week** (`/activities?display=calendar`, with Calendar, List and Status tiles tabs). The address `/activities` without a display opens List. The visible hours start near the current time in the reader’s zone, or the first appointment when browsing another week. All 24 hours remain available. The calendar offers day, week, month, year and shared views of the activities the reader may see, through base/ui `Calendar`. It is the same list: search, kind, open or closed and "whose" filter both.
 
 - Calls and meetings are drawn from start to end; a task at its due time, 30 minutes long. Notes and tasks without a due date are not on it. Colour is the kind (call, meeting, task), never a status.
 - **Year.** Twelve small months; each day shows how many items it holds (`!` and red when one is overdue) and links to its day view. The numbers come from one count per day (`day_counts`), not from the items, so they are right however busy the year is.
@@ -155,7 +155,7 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 
 **Guest reminders are transactional mail, not marketing.** A guest receives one only about a meeting they were invited to, so Core asks no consent of its own and depends on no Domain. A Domain that keeps contact rules (a suppression, a consent) contributes an invitation gate, which then also decides these emails; with none contributed, every usable address is emailed.
 
-**The bell's To do** lists the reader's reminded open activities, soonest first, up to five rows and a count: those assigned to them, and calls and meetings they are an account guest of and have not declined. A row opens the related record when the reader may view it, otherwise the activity. Closing, deleting or reassigning it removes it from those people's To do and refreshes their bells at once; declining or being removed takes it off that guest's. Moving its due time or reassigning it waits for new reminders. See all opens `/activities`.
+**The bell's To do** lists the reader's reminded open activities, soonest first, up to five rows and a count: those assigned to them, and calls and meetings they are an account guest of and have not declined. A row opens the related record when the reader may view it, otherwise the activity. Closing, deleting or reassigning it removes it from those people's To do and refreshes their bells at once; declining or being removed takes it off that guest's. Moving its due time or reassigning it waits for new reminders. See all opens `/activities?display=list&mine=todo`.
 
 There is no second reminder system for meetings. Each occurrence of a series is reminded on its own.
 

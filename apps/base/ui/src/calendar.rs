@@ -895,6 +895,7 @@ impl View {
         let (zone, zone_name) = tz(&calendar.zone);
         let state = &calendar.state;
         let dates = state.dates();
+        let (first, last) = (dates[0], dates[dates.len() - 1]);
         let snap = match calendar.snap_minutes {
             5 | 10 | 15 | 30 | 60 => calendar.snap_minutes,
             _ => 15,
@@ -1223,7 +1224,6 @@ impl View {
             CalendarView::Month => state.date.strftime("%B %Y").to_string(),
             CalendarView::Year => state.date.strftime("%Y").to_string(),
             CalendarView::Week => {
-                let (first, last) = (dates[0], dates[dates.len() - 1]);
                 if first.month() == last.month() {
                     format!("{} – {}", first.strftime("%-d"), last.strftime("%-d %B %Y"))
                 } else if first.year() == last.year() {
@@ -1260,7 +1260,7 @@ impl View {
             view: state.view.name(),
             title,
             focus_hour: calendar.focus_hour.map(|hour| hour.min(23)),
-            range_key: format!("{}-{}-{zone_name}", state.view.name(), state.date),
+            range_key: format!("{}-{first}-{last}-{zone_name}", state.view.name()),
             zone_note: format!("Times are shown in {zone_name}."),
             snap,
             views,

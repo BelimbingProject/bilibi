@@ -113,19 +113,7 @@ impl Display {
         match query.get("display").map(String::as_str) {
             Some("calendar") => Self::Calendar,
             Some("board") => Self::Board,
-            Some("list") => Self::Table,
-            // Existing deep links from reminders, records, and series cover all dates.
-            None if query.keys().any(|key| {
-                SPEC.filters.contains_key(key)
-                    || matches!(
-                        key.as_str(),
-                        "series" | "related" | "sort_by" | "page" | "per_page"
-                    )
-            }) =>
-            {
-                Self::Table
-            }
-            _ => Self::Calendar,
+            _ => Self::Table,
         }
     }
 }
