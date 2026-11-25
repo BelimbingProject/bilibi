@@ -214,6 +214,7 @@ struct Cdp {
     tx: pipe::Sender,
     rx: pipe::Receiver,
     buffer: Vec<u8>,
+    read_chunk: Vec<u8>,
     cap: usize,
     next: u64,
     policy: Policy,
@@ -246,14 +247,13 @@ impl Cdp {
             if self.buffer.len() > self.cap {
                 return Err(Error::PdfFailed);
             }
-            let mut chunk = [0u8; 65536];
-            let read = timeout_at(self.deadline, self.rx.read(&mut chunk))
+            let read = timeout_at(self.deadline, self.rx.read(&mut self.read_chunk))
                 .await
                 .map_err(|_| Error::PdfTimeout)??;
             if read == 0 {
                 return Err(Error::PdfFailed);
             }
-            self.buffer.extend_from_slice(&chunk[..read]);
+            self.buffer.extend_from_slice(&self.read_chunk[..read]);
         }
     }
     /// Send a command and wait for its reply, answering browser events (above
@@ -341,6 +341,9 @@ async fn run(binary: &Path, config: &Config, source: Source) -> Result<Vec<u8>> 
         tx,
         rx,
         buffer: Vec::new(),
+        // An inline preview runs on a Tokio worker. Keep the pipe's large
+        // scratch space out of the nested async call frames.
+        read_chunk: vec![0; 64 * 1024],
         // Base64 inflates the PDF by a third; add room for protocol framing.
         cap: config.max_bytes.saturating_mul(2).max(1 << 20),
         next: 0,

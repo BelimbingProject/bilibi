@@ -31,7 +31,7 @@ pub(crate) fn bind(owner: Arc<Templates>) -> bilibi_module_registry::Result<()> 
     })
 }
 
-fn owner() -> bilibi_agent_api::Result<&'static Templates> {
+pub(crate) fn owner() -> bilibi_agent_api::Result<&'static Templates> {
     Ok(OWNER.get().ok_or(Error::Internal)?)
 }
 
@@ -53,7 +53,7 @@ fn metadata(entry: &Template, editable: bool) -> Value {
     })
 }
 
-fn selection(input: &Value) -> bilibi_agent_api::Result<Selection<'_>> {
+pub(crate) fn selection(input: &Value) -> bilibi_agent_api::Result<Selection<'_>> {
     let company = input["company_id"]
         .as_i64()
         .map(OrganisationId::try_from)

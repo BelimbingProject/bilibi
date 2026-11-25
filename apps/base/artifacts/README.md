@@ -245,6 +245,10 @@ let metadata = documents.render_inline(&mut client, reference, &json!({})).await
 let metadata = documents.render_view(&mut client, reference, &json!({})).await?;
 ```
 
+For a business document from Base Templates, pass its compiled `InlineDocument` to `Owned::render_inline_document`. The owner authorizes the source snapshot before compilation. Artifacts checks `Create` before Chromium starts and rechecks authority at publication. The document carries a typed A4 or Letter choice into Chromium. The other rendering methods keep the installation's paper setting.
+
+The `business-print-walkthrough` stores and reads back English A4 and Bahasa Melayu Letter PDFs using 230 rows on a migrated disposable database. It uses the same environment as the HTML PDF walkthrough and needs no app listener.
+
 Both authorize `Create` before the template runs, print with an isolated Chromium
 and store through `store_pdf` (validate, reserve, publish, reauthorize, audit). A
 refused or failed render stores nothing. `render_inline` gives the browser the HTML

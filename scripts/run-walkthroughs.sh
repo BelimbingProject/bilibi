@@ -76,12 +76,14 @@ cd "$root"
 #   @absent:TEXT     the previous step did not print TEXT
 WALKTHROUGHS=(
   'base|restore-policy|apps/installer|restore-policy-walkthrough|none|RESTORE_POLICY_ROOT=@/restore-policy|-'
+  'web|print-customisations|apps/web|print-customisations-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts BILIBI_PDF_CHROMIUM=@chromium|-'
   'base|print-contract|apps/base/templates|print-contract-walkthrough|none||-'
   'base|report-periods|apps/base/datetime|report-periods|none||-'
   'web|field-vocabulary|apps/web|field-vocabulary|none||-'
   'base|agent|apps/base/agent_api|agent-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
   'base|agent-write|apps/base/agent_api|write-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
   'base|artifacts|apps/base/artifacts|artifacts-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts|-;recover'
+  'base|business-print|apps/base/artifacts|business-print-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts BILIBI_PDF_DEMO_OUT=@/out BILIBI_PDF_CHROMIUM=@chromium|-'
   'base|artifacts-html-pdf|apps/base/artifacts|html-pdf-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts BILIBI_PDF_DEMO_OUT=@/out BILIBI_PDF_CHROMIUM=@chromium|-'
   'base|artifacts-pdf|apps/base/artifacts|pdf-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts BILIBI_PDF_DEMO_OUT=@/out|fixtures;-'
   'base|artifacts-queued-pdf|apps/base/artifacts|queued-pdf-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts BILIBI_PDF_DEMO_OUT=@/out BILIBI_PDF_CHROMIUM=@chromium BILIBI_PDF_QPDF=@qpdf BILIBI_PDF_DEMO_PORT=@port|-'

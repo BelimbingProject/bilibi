@@ -17,6 +17,7 @@ bilibi-personal-data.workspace = true
 bilibi-queue = { path = "../queue" }
 tokio-postgres.workspace = true
 tokio.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
@@ -28,6 +29,8 @@ getrandom = "0.4.3"
 base64 = "0.23.1"
 
 [dev-dependencies]
+bilibi-branding.workspace = true
+bilibi-templates.workspace = true
 bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-base = { path = ".." }
 bilibi-core = { path = "../../core" }
