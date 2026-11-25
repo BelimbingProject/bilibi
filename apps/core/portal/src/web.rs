@@ -31,9 +31,10 @@ use bilibi_ui::page::{
     PageFuture, PageRequest,
 };
 use bilibi_ui::{
-    flex_table::Cell, params, Badge, BadgeKind, BuiltinColumn, Button, Choice, CreateButton,
-    ErrorSummary, Fact, Facts, Field, FlashMap, FlexRow, FlexTable, Html, IconButton, InputKind,
-    ListColumns, ListSpec, ListState, PageCounts, Pagination, StatusKind, TableEmpty, NO_FLASH,
+    flex_table::Cell, params, Badge, BadgeKind, BuiltinColumn, Button, Choice, ConfirmDialog,
+    CreateButton, ErrorSummary, Fact, Facts, Field, FlashMap, FlexRow, FlexTable, Html, IconButton,
+    InputKind, ListColumns, ListSpec, ListState, PageCounts, Pagination, StatusKind, TableEmpty,
+    NO_FLASH,
 };
 use serde_json::{json, Value};
 use std::{
@@ -187,25 +188,30 @@ struct InviteDraft {
     errors: BTreeMap<String, Vec<String>>,
 }
 
+// The form controls and confirm dialogs arrive rendered, each through its own
+// typed model: askama inlines every macro a template calls into one render
+// function, and the page's dozen form inputs and dialogs inline made that
+// function's stack frame about 880 KiB in a debug build, more than a live
+// socket's worker thread had left (issue 903).
 struct SiteForm {
     summary: ErrorSummary,
-    address: Field,
-    title: Field,
-    enabled: Field,
-    registration: Field,
+    address: Html,
+    title: Html,
+    enabled: Html,
+    registration: Html,
     /// The logo's file input, rendered.
     logo: Html,
     logo_note: Option<String>,
     logo_errors: Vec<String>,
-    remove_logo: Option<Field>,
+    remove_logo: Option<Html>,
     cancel: bool,
 }
 struct InviteForm {
     summary: ErrorSummary,
     person: Html,
-    affiliation: Option<Field>,
-    name: Field,
-    email: Field,
+    affiliation: Option<Html>,
+    name: Html,
+    email: Html,
 }
 
 #[derive(Template)]
@@ -221,9 +227,8 @@ struct View<'a> {
     invite: Option<InviteForm>,
     invite_title: &'a str,
     invite_submit: &'a str,
-    revoke: bool,
-    revoke_access: bool,
-    reject: bool,
+    /// The open confirm dialogs, rendered.
+    dialogs: Html,
 }
 
 struct PortalPage {
@@ -654,10 +659,12 @@ impl PortalPage {
         Ok(html)
     }
 
-    fn site_form(&self) -> Option<SiteForm> {
-        let draft = self.site.as_ref()?;
+    fn site_form(&self) -> Result<Option<SiteForm>> {
+        let Some(draft) = self.site.as_ref() else {
+            return Ok(None);
+        };
         let errors = |key: &str| draft.errors.get(key).cloned().unwrap_or_default();
-        Some(SiteForm {
+        Ok(Some(SiteForm {
             summary: summary(
                 "customer-site-errors",
                 &draft.errors,
@@ -668,7 +675,7 @@ impl PortalPage {
                     ("version", "customer-site-address", "Portal site"),
                 ],
             ),
-            address: Field::in_form("site", "address")
+            address: render(Field::in_form("site", "address")
                 .id("customer-site-address")
                 .label(fields::ADDRESS.label)
                 .placeholder("e.g. acme")
@@ -676,8 +683,8 @@ impl PortalPage {
                 .required()
                 .attr("maxlength", "63")
                 .value(draft.address.clone())
-                .errors(errors("address")),
-            title: Field::in_form("site", "title")
+                .errors(errors("address")))?,
+            title: render(Field::in_form("site", "title")
                 .id("customer-site-title")
                 .label(fields::TITLE.label)
                 .placeholder("e.g. Acme customer portal")
@@ -685,21 +692,21 @@ impl PortalPage {
                 .required()
                 .attr("maxlength", "120")
                 .value(draft.title.clone())
-                .errors(errors("title")),
-            enabled: Field::in_form("site", "enabled")
+                .errors(errors("title")))?,
+            enabled: render(Field::in_form("site", "enabled")
                 .id("customer-site-enabled")
                 .kind(InputKind::Checkbox)
                 .label(fields::ENABLED.label)
                 .value("true")
                 .checked(draft.enabled)
-                .hint("While off, the portal's pages answer \"not found\" and no invitation is sent or accepted."),
-            registration: Field::in_form("site", "registration")
+                .hint("While off, the portal's pages answer \"not found\" and no invitation is sent or accepted."))?,
+            registration: render(Field::in_form("site", "registration")
                 .id("customer-site-registration")
                 .kind(InputKind::Checkbox)
                 .label(fields::REGISTRATION.label)
                 .value("true")
                 .checked(draft.registration)
-                .hint("People may ask for an account from the sign-in page. Each request is confirmed by email and waits for your approval."),
+                .hint("People may ask for an account from the sign-in page. Each request is confirmed by email and waits for your approval."))?,
             logo_note: (!draft.staged_name.is_empty()).then(|| {
                 format!(
                     "{} is ready. Save the portal site to use it.",
@@ -715,16 +722,21 @@ impl PortalPage {
                     .hint("A PNG, JPEG, GIF or WebP image shown on the portal's pages. Choose one, then use it; Save applies it. Leave empty to keep the current one."),
             )
             .unwrap_or(Html::EMPTY),
-            remove_logo: draft.has_logo.then(|| {
-                Field::in_form("site", "remove_logo")
-                    .id("customer-site-remove-logo")
-                    .kind(InputKind::Checkbox)
-                    .label("Remove the logo")
-                    .value("true")
-                    .checked(draft.remove_logo)
-            }),
+            remove_logo: draft
+                .has_logo
+                .then(|| {
+                    render(
+                        Field::in_form("site", "remove_logo")
+                            .id("customer-site-remove-logo")
+                            .kind(InputKind::Checkbox)
+                            .label("Remove the logo")
+                            .value("true")
+                            .checked(draft.remove_logo),
+                    )
+                })
+                .transpose()?,
             cancel: true,
-        })
+        }))
     }
     fn site_facts(&self, site: Option<&Site>, can_manage: bool) -> Result<Html> {
         let Some(site) = site else {
@@ -807,6 +819,45 @@ impl PortalPage {
         }
         Ok(html)
     }
+    /// The confirm dialogs that wait for an answer, in page order.
+    fn dialogs(&self) -> Result<Html> {
+        let mut html = Html::EMPTY;
+        if self.revoke_access.is_some() {
+            html.push(&render(ConfirmDialog {
+                id: "customer-revoke-access-dialog",
+                consequence: "Revoke portal access?",
+                detail:
+                    "The customer is signed out now and cannot sign in until access is restored.",
+                confirm: "Revoke access",
+                working: "Revoking…",
+                confirm_event: "confirm_revoke_access",
+                cancel_event: "cancel_revoke_access",
+            })?);
+        }
+        if self.reject.is_some() {
+            html.push(&render(ConfirmDialog {
+                id: "customer-reject-dialog",
+                consequence: "Reject this request?",
+                detail: "The person is not told and may ask again.",
+                confirm: "Reject",
+                working: "Rejecting…",
+                confirm_event: "confirm_reject",
+                cancel_event: "cancel_reject",
+            })?);
+        }
+        if self.revoke.is_some() {
+            html.push(&render(ConfirmDialog {
+                id: "customer-revoke-dialog",
+                consequence: "Revoke invitation?",
+                detail: "Its link stops working. You can invite the address again later.",
+                confirm: "Revoke",
+                working: "Revoking…",
+                confirm_event: "confirm_revoke",
+                cancel_event: "cancel_revoke",
+            })?);
+        }
+        Ok(html)
+    }
     async fn invite_form(&self, scope: &Scope) -> Result<Option<InviteForm>> {
         let Some(draft) = self.invite.as_ref() else {
             return Ok(None);
@@ -836,7 +887,7 @@ impl PortalPage {
         ))?;
         let affiliation = match draft.person {
             None => None,
-            Some(chosen) => Some(self.affiliation_field(scope, chosen, draft).await?),
+            Some(chosen) => Some(render(self.affiliation_field(scope, chosen, draft).await?)?),
         };
         Ok(Some(InviteForm {
             summary: summary(
@@ -860,7 +911,7 @@ impl PortalPage {
             ),
             person,
             affiliation,
-            name: approval(
+            name: render(approval(
                 Field::in_form("invite", "name")
                     .id("customer-invite-name")
                     .label(fields::NAME.label)
@@ -869,8 +920,8 @@ impl PortalPage {
                     .value(draft.name.clone())
                     .errors(errors("name")),
                 draft,
-            ),
-            email: approval(
+            ))?,
+            email: render(approval(
                 Field::in_form("invite", "email")
                     .id("customer-invite-email")
                     .label(fields::EMAIL.label)
@@ -880,7 +931,7 @@ impl PortalPage {
                     .value(draft.email.clone())
                     .errors(errors("email")),
                 draft,
-            ),
+            ))?,
         }))
     }
     async fn affiliation_field(
@@ -975,7 +1026,7 @@ impl PortalPage {
         let html = render(View {
             flash,
             actions,
-            site_form: self.site_form(),
+            site_form: self.site_form()?,
             site_facts: self.site_facts(site.as_ref(), can_manage)?,
             table,
             accounts,
@@ -991,9 +1042,7 @@ impl PortalPage {
             } else {
                 "Send invitation"
             },
-            revoke: self.revoke.is_some(),
-            revoke_access: self.revoke_access.is_some(),
-            reject: self.reject.is_some(),
+            dialogs: self.dialogs()?,
         })?;
         Ok(match zone {
             Some(zone) => zone.wrap("customer-portal-drop", html),
