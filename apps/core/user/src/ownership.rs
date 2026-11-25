@@ -1,8 +1,8 @@
 //! Reviewed transfer of the installation's one owner receipt.
-use crate::{staff_choices::StaffChoice, UserService};
+use crate::{privacy::OWNERSHIP_TRANSFER_KIND, staff_choices::StaffChoice, UserService};
 use bilibi_database::{Change, Error, Result};
 use bilibi_notifications::Notice;
-use bilibi_security::{ProofClient, Scope};
+use bilibi_security::Scope;
 use bilibi_tenancy::AccountKind;
 use serde_json::json;
 
@@ -64,7 +64,7 @@ fn direct_browser(scope: &Scope) -> std::result::Result<(), OwnershipError> {
 }
 
 pub(crate) async fn active_staff(
-    client: &dyn ProofClient,
+    client: &tokio_postgres::Transaction<'_>,
     tenant: i64,
     user: i64,
 ) -> Result<Option<bilibi_security::AccountIdentity>> {
@@ -79,12 +79,20 @@ pub(crate) async fn active_staff(
     {
         return Ok(None);
     }
-    match crate::identity::standing(client, tenant, user).await? {
-        crate::identity::Standing::Live(identity) if identity.kind == AccountKind::Staff => {
-            Ok(Some(identity))
-        }
-        _ => Ok(None),
+    let crate::identity::Standing::Live(identity) =
+        crate::identity::standing(client, tenant, user).await?
+    else {
+        return Ok(None);
+    };
+    if identity.kind != AccountKind::Staff {
+        return Ok(None);
     }
+    if let Some(person) = identity.person {
+        if !bilibi_person::hold_account_person(client, tenant, person).await? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(identity))
 }
 
 pub(crate) async fn expire_offers(
@@ -103,7 +111,7 @@ pub(crate) async fn expire_offers(
             .await?;
     for row in expired {
         tx.record(Change {
-                kind: "user.ownership_transfer".into(),
+                kind: OWNERSHIP_TRANSFER_KIND.into(),
                 id: row.get(0),
                 old: json!({"tenant_id":row.get::<_,i64>(1),"from_user_id":row.get::<_,i64>(2),"to_user_id":row.get::<_,i64>(3),"status":"pending"}),
                 new: json!({"status":"expired"}),
@@ -130,11 +138,13 @@ impl UserService {
         };
         let offer = client
             .query_opt(
-                "SELECT x.id,f.name,x.to_user_id,t.name
+                "SELECT x.id,f.name,x.to_user_id,
+                        CASE WHEN x.from_user_id=$2 THEN concat(t.name,' (',i.email,', account #',t.id,')') ELSE t.name END
                  FROM user_ownership_transfers x
                  JOIN user_bootstrap b ON b.id=1 AND b.tenant_id=x.tenant_id AND b.user_id=x.from_user_id
                  JOIN users f ON f.tenant_id=x.tenant_id AND f.id=x.from_user_id
                  JOIN users t ON t.tenant_id=x.tenant_id AND t.id=x.to_user_id
+                 LEFT JOIN user_identities i ON i.id=t.identity_id AND x.from_user_id=$2
                  WHERE x.tenant_id=$1 AND x.status='pending' AND x.expires_at>clock_timestamp()
                    AND (x.from_user_id=$2 OR x.to_user_id=$2)
                  ORDER BY x.id DESC LIMIT 1",
@@ -150,7 +160,7 @@ impl UserService {
         Ok(OwnershipState { is_owner, offer })
     }
 
-    pub async fn ownership_candidates(
+    pub(crate) async fn ownership_candidates(
         &self,
         scope: &Scope,
         text: &str,
@@ -229,7 +239,7 @@ impl UserService {
             .await?
             .get(0);
         tx.record(Change {
-            kind: "user.ownership_transfer".into(),
+            kind: OWNERSHIP_TRANSFER_KIND.into(),
             id,
             old: json!(null),
             new: json!({"tenant_id":tenant,"from_user_id":from,"to_user_id":target,"status":"pending","expires_in_minutes":OFFER_MINUTES}),
@@ -321,7 +331,7 @@ impl UserService {
         })
         .await?;
         tx.record(Change {
-            kind: "user.ownership_transfer".into(),
+            kind: OWNERSHIP_TRANSFER_KIND.into(),
             id: offer,
             old: json!({"status":"pending"}),
             new: json!({"status":"accepted"}),

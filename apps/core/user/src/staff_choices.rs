@@ -124,7 +124,7 @@ macro_rules! live_staff_from {
 /// The name test is a word-start match through `position`, so typed `%` and
 /// `_` stay literal and no pattern is built.
 const SEARCH: &str = concat!(
-    "SELECT u.id,u.name ",
+    "SELECT u.id,CASE WHEN $4::bigint IS NULL THEN u.name ELSE concat(u.name,' (',i.email,', account #',u.id,')') END ",
     live_staff_from!(),
     " AND u.id IS DISTINCT FROM $4 AND ($2='' OR starts_with(lower(u.name),$2) OR position(' '||$2 in lower(u.name))>0) ORDER BY lower(u.name),u.id LIMIT $3"
 );

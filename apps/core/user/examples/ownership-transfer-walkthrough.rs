@@ -221,6 +221,16 @@ async fn main() -> Result<()> {
         ),
         "an impersonated session cannot accept a transfer",
     )?;
+    use bilibi_base::software::{MANAGE, VIEW};
+    let client = db.get().await?;
+    client
+        .execute(
+            "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed)
+             VALUES(1,1,$1,true),(1,7,$2,false)",
+            &[&VIEW, &MANAGE],
+        )
+        .await?;
+    drop(client);
     let next_code = next.step_up().await;
     app.user.accept_ownership(&next_code, accepted).await?;
 
@@ -259,14 +269,38 @@ async fn main() -> Result<()> {
         "the owner can open Software without a role grant",
     )?;
     ensure(
-        matches!(
-            software.status(&owner.scope).await,
-            Err(bilibi_database::Error::Forbidden)
-        ),
-        "the former owner's administrator role does not open Software",
+        software.status(&owner.scope).await.is_ok(),
+        "the former owner's ordinary Software read grant still works",
     )?;
 
     let client = db.get().await?;
+    for (account, reason) in [
+        (&next, "denied_explicitly"),
+        (&owner, "denied_owner_standing"),
+    ] {
+        let decision = bilibi_authz::decide(&**client, &account.scope, MANAGE).await?;
+        ensure(
+            !decision.allowed && decision.reason == reason,
+            "Software management requires owner standing with no direct deny",
+        )?;
+        let effective = bilibi_authz::effective_capabilities(&**client, &account.scope).await?;
+        ensure(
+            !effective.contains(MANAGE) && effective.contains(VIEW),
+            "effective Software capabilities agree with the decisions",
+        )?;
+    }
+    client
+        .execute(
+            "DELETE FROM principal_capabilities WHERE tenant_id=1 AND user_id=7 AND capability=$1",
+            &[&MANAGE],
+        )
+        .await?;
+    ensure(
+        bilibi_authz::decide(&**client, &next.scope, MANAGE)
+            .await?
+            .allowed,
+        "clearing the deny restores the new owner's Software management",
+    )?;
     let after_roles: Vec<(i64, i64)> = client
         .query(
             "SELECT user_id,role_id FROM principal_roles WHERE tenant_id=1 AND user_id=ANY($1) ORDER BY user_id,role_id",

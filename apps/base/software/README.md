@@ -45,7 +45,7 @@ The catalogue recommends the newest compatible release tested with this exact Pl
 
 ## Access
 
-Software permissions follow the live installation owner receipt. They apply across every company.
+Software actions require the live installation owner receipt. The receipt also grants read access, which operator staff can hold through ordinary grants. Direct denies take precedence. These permissions apply across every company.
 
 | Capability | Allows |
 | --- | --- |

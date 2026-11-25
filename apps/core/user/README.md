@@ -280,6 +280,8 @@ Recovery requires an existing receipt. It updates that receipt, expires pending 
 
 ### Ownership transfer (`src/ownership.rs`)
 
+The owner reviews the recipient by name, sign-in address and account number. The account privacy store retains offers and outcomes as ownership evidence and exports each subject’s participation, dates and outcome without the other participant’s identity in the transfer record.
+
 `/settings/ownership` is the one reviewed path for changing the installation owner while the current owner is available. The current owner selects another active staff account in the platform operator tenant and confirms the offer with an every-time Base Step-up code. The named recipient receives an inbox notice and has 15 minutes to accept with their own every-time code before the offer expires. Agent, principal and impersonated sessions cannot start or answer an offer.
 
 The acceptance review binds to the specific offer shown. Acceptance locks that pending offer and the live `user_bootstrap` receipt, rechecks that the offer's sender is still the owner and updates the receipt’s owner in one `MutationBoundary`. The transfer and receipt changes share that audit boundary; neither account's roles or ordinary membership data changes. See [Software access](../../base/software/README.md#access) for the permissions that follow the receipt.

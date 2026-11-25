@@ -805,14 +805,25 @@ pub async fn hold_account_standing(
     scope: &Scope,
 ) -> Result<()> {
     if let Some(person) = scope.actor().person() {
-        tx.query_opt(
-            &format!("{LIVE_ACCOUNT_PERSON} FOR SHARE"),
-            &[&scope.tenant(), &person.get()],
-        )
-        .await?
-        .ok_or(Error::Unauthorized)?;
+        if !hold_account_person(tx, scope.tenant(), person).await? {
+            return Err(Error::Unauthorized);
+        }
     }
     Ok(())
+}
+
+pub async fn hold_account_person(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant: i64,
+    person: PersonId,
+) -> Result<bool> {
+    Ok(tx
+        .query_opt(
+            &format!("{LIVE_ACCOUNT_PERSON} FOR SHARE"),
+            &[&tenant, &person.get()],
+        )
+        .await?
+        .is_some())
 }
 
 /// Base's sealed proof service calls the owner on its current connection.

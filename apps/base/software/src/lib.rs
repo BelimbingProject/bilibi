@@ -938,7 +938,7 @@ macro_rules! provenance {
 }
 inventory::submit! { Contribution::new(VOCABULARY, "base/software", provenance!(), &VocabularyContribution {
     domains: &[], verbs: &[],
-    capabilities: &[CapabilityDefinition::owner(VIEW), CapabilityDefinition::owner(MANAGE)],
+    capabilities: &[CapabilityDefinition::platform_or_owner(VIEW), CapabilityDefinition::owner(MANAGE)],
     roles: &[],
     system_principals: &[],
 }) }

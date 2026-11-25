@@ -265,17 +265,6 @@ pub(crate) async fn user_judgement(
     };
     Ok(match vocabulary()?.capabilities.get(key) {
         None => denied("denied_unknown_capability"),
-        Some(cap) if cap.definition.audience == Audience::Owner => {
-            match bilibi_tenancy::prove_owner(client, scope).await {
-                Ok(_) => Judged {
-                    decision: Decision::allow("installation_owner"),
-                    via: None,
-                    reach: Reach::All,
-                },
-                Err(Error::Forbidden | Error::Unauthorized) => denied("denied_owner_standing"),
-                Err(error) => return Err(error),
-            }
-        }
         Some(cap) => {
             let live = client
                 .query_opt(LIVE_TENANT_SQL, &[&scope.tenant()])
@@ -304,6 +293,32 @@ pub(crate) async fn user_judgement(
                     .ok_or(Error::Internal)?;
                 let viewed = judge(&row, portal, cap.definition.reach);
                 match scope.impersonator() {
+                    None if cap.definition.audience == Audience::Owner
+                        || (cap.definition.audience == Audience::PlatformOrOwner
+                            && !viewed.decision.allowed) =>
+                    {
+                        if viewed.decision.reason == "denied_explicitly" {
+                            viewed
+                        } else {
+                            match bilibi_tenancy::prove_owner(client, scope).await {
+                                Ok(_) => Judged {
+                                    decision: Decision::allow("installation_owner"),
+                                    via: None,
+                                    reach: Reach::All,
+                                },
+                                Err(Error::Forbidden | Error::Unauthorized)
+                                    if cap.definition.audience == Audience::Owner =>
+                                {
+                                    denied("denied_owner_standing")
+                                }
+                                Err(Error::Forbidden | Error::Unauthorized) => viewed,
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                    Some(_) if cap.definition.audience == Audience::Owner => {
+                        denied("denied_owner_standing")
+                    }
                     None => viewed,
                     Some(impersonator) => {
                         let row = client
