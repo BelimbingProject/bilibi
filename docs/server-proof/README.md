@@ -68,18 +68,21 @@ The script installs a lab-only legacy worker unit and old sudoers contents, then
 
 ## Check a release with Finance
 
-Add Finance to the disposable application's saved composition before you publish the proof release. Check the release on its Dev instance:
+Add Finance to the disposable application's saved composition before you publish the proof release. Set up the Dev instance:
 
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create dev --role dev --site dev.10.77.61.2.sslip.io --tls internal'
 docs/server-proof/lab.sh run "/src/scripts/install-server.sh trust dev --github --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --minimum-tag $PROOF_TAG"
 docs/server-proof/lab.sh run "/src/scripts/install-server.sh release dev /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --tag $PROOF_TAG"
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner dev --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner"'
+```
+
+Claim the Dev proof owner with the password in `$BILIBI_PROOF_DATA/private/password`, then check the release:
+
+```sh
 LAB_ORIGIN=https://dev.10.77.61.2.sslip.io docs/server-proof/drive.py login
 chrome-devtools-axi open https://dev.10.77.61.2.sslip.io/finance/payroll
 ```
-
-For the seeded Dev owner, put `bilibi-dev` in a private password file and add `LAB_EMAIL=ai@agent.my LAB_PASSWORD_FILE=/absolute/private/path` to the driver commands. The driver defaults to the Production proof owner and `$BILIBI_PROOF_DATA/private/password`.
 
 Open Finance and use its Payroll page before packaging the release. An empty payroll list states that People is not mounted; it is not fixture data.
 

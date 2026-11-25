@@ -150,7 +150,7 @@ A dropped connection or a killed command does not stop the installer on the serv
 | --- | --- |
 | No instance, or "No instances" | Create |
 | `current release` empty | First release |
-| `installer inactive` | Installer service |
+| `installer inactive` | [Installer service](../server-install.md#the-installer-service). See the [status guide](../server-install.md#putting-a-release-into-service) for normal idle operation. |
 | `mail not set up` | Outgoing mail (step 6) |
 | Everything above done | `create-owner` (step 7) |
 

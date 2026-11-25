@@ -1,6 +1,6 @@
 # Bilibi installer
 
-`bilibi-installer` is the small program beside every Bilibi instance that puts a release into service when a server owner asks for it on the Software page or with the root-only server command, and takes it back on Undo. systemd starts its dedicated service at boot for recovery and whenever the app marks a queued job ready; it exits after ten idle seconds, so the program people use never rewrites itself or holds a privileged worker open.
+`bilibi-installer` is the small program beside every Bilibi instance that puts a release into service when a server owner asks for it on the Software page or with the root-only server command, and takes it back on Undo. It runs under a dedicated installer account so the application never overwrites its own release. See the [worker activation contract](../base/software/README.md#how-a-worker-plugs-in).
 ## One example
 
 The owner opens Software on Production, reviews the exact GitHub asset already checked on Staging, types a fresh 2FA code, and confirms. Over the next two minutes the page shows:
@@ -107,7 +107,7 @@ A step that was running when the restart came says so in its detail: "(the insta
 
 ## How it talks to the page
 
-The installer never goes through the app. It follows the worker contract in `apps/base/software/README.md` ("How a worker plugs in"): the app commits a job, then writes `incoming/installer-jobs/job-<id>.ready`; systemd path activation starts the worker without granting the app service-control privileges. The worker claims the oldest ready `install`, `undo` or trust job, marks each step `running`, `done`, `failed` or `skipped` with a plain `detail`, and writes the job's final `state` and `result`. It still listens for database notifications while active, preserves one-job ordering and removes only ready markers observed before its final idle scan, so a job queued during shutdown activates it again. The page, terminal command and `base.software.status` contract read the same rows.
+The installer never goes through the app. It follows the [worker contract](../base/software/README.md#how-a-worker-plugs-in) for activation, claiming work and recording progress. The page, terminal command and `base.software.status` contract read the same rows.
 
 The result carries what Undo and the page need:
 
