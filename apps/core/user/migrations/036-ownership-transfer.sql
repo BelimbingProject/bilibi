@@ -4,7 +4,7 @@ CREATE TABLE user_ownership_transfers (
  tenant_id bigint NOT NULL REFERENCES tenants(id),
  from_user_id bigint NOT NULL,
  to_user_id bigint NOT NULL,
- status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','declined','expired')),
+ status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','expired')),
  created_at timestamptz NOT NULL DEFAULT now(),
  expires_at timestamptz NOT NULL,
  resolved_at timestamptz,

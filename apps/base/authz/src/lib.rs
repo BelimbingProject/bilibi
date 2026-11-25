@@ -144,7 +144,7 @@ pub async fn decide_in_company(
     if let Some(principal) = scope.principal() {
         return system_decision(client, scope.tenant(), Some(principal), key).await;
     }
-    let (decision, via) = user_decision(client, scope, key, company).await?;
+    let (decision, via) = user_decision_proof(client.client(), scope, key, company).await?;
     log(
         client,
         scope.tenant(),
@@ -231,14 +231,6 @@ async fn user_decision_proof(
     key: &str,
     company: Option<i64>,
 ) -> Result<(Decision, Option<String>)> {
-    user_decision(&Proof(client), scope, key, company).await
-}
-async fn user_decision(
-    client: &impl Reader,
-    scope: &Scope,
-    key: &str,
-    company: Option<i64>,
-) -> Result<(Decision, Option<String>)> {
     let judged = user_judgement(client, scope, key, company).await?;
     Ok((judged.decision, judged.via))
 }
@@ -261,7 +253,7 @@ pub(crate) struct Judged {
 /// (`denied_impersonation_reach`): the viewed account's records are not the
 /// operator's own or team's.
 pub(crate) async fn user_judgement(
-    client: &impl Reader,
+    client: &dyn ProofClient,
     scope: &Scope,
     key: &str,
     company: Option<i64>,
@@ -273,14 +265,25 @@ pub(crate) async fn user_judgement(
     };
     Ok(match vocabulary()?.capabilities.get(key) {
         None => denied("denied_unknown_capability"),
+        Some(cap) if cap.definition.audience == Audience::Owner => {
+            match bilibi_tenancy::prove_owner(client, scope).await {
+                Ok(_) => Judged {
+                    decision: Decision::allow("installation_owner"),
+                    via: None,
+                    reach: Reach::All,
+                },
+                Err(Error::Forbidden | Error::Unauthorized) => denied("denied_owner_standing"),
+                Err(error) => return Err(error),
+            }
+        }
         Some(cap) => {
             let live = client
-                .one(LIVE_TENANT_SQL, &[&scope.tenant()])
+                .query_opt(LIVE_TENANT_SQL, &[&scope.tenant()])
                 .await?
                 .is_some();
             let operator = !cap.definition.is_platform()
                 || client
-                    .one(OPERATOR_SQL, &[&scope.tenant()])
+                    .query_opt(OPERATOR_SQL, &[&scope.tenant()])
                     .await?
                     .is_some();
             if !live {
@@ -293,7 +296,7 @@ pub(crate) async fn user_judgement(
                 let company = company.filter(|_| cap.definition.company_scoped);
                 let portal = cap.definition.audience == Audience::Portal;
                 let row = client
-                    .one(
+                    .query_opt(
                         GRANTS_SQL,
                         &[&scope.tenant(), &scope.user(), &key, &company],
                     )
@@ -304,7 +307,7 @@ pub(crate) async fn user_judgement(
                     None => viewed,
                     Some(impersonator) => {
                         let row = client
-                            .one(
+                            .query_opt(
                                 GRANTS_SQL,
                                 &[&scope.tenant(), &impersonator.user(), &key, &company],
                             )
@@ -542,7 +545,7 @@ async fn system_decision(
         Some(name) => {
             let definition = vocab.capabilities[key].definition;
             // A named principal is the tenant's own work: staff, never a customer.
-            if definition.audience == vocabulary::Audience::Portal {
+            if matches!(definition.audience, Audience::Portal | Audience::Owner) {
                 Decision::deny("denied_audience")
             } else if definition.is_platform()
                 && client.one(OPERATOR_SQL, &[&tenant]).await?.is_none()

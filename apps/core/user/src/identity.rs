@@ -87,7 +87,7 @@ pub async fn standing(client: &dyn ProofClient, tenant: i64, user: i64) -> Resul
     }
     let Some(row) = client
         .query_opt(
-            "SELECT u.name,i.email,u.person_id,u.affiliation_id,u.organisation_id,EXISTS(SELECT 1 FROM user_bootstrap b WHERE b.tenant_id=u.tenant_id AND b.user_id=u.id),u.kind FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active' AND NOT EXISTS(SELECT 1 FROM user_scim_users s WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id AND NOT s.active)",
+            "SELECT u.name,i.email,u.person_id,u.affiliation_id,u.organisation_id,u.kind FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active' AND NOT EXISTS(SELECT 1 FROM user_scim_users s WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id AND NOT s.active)",
             &[&tenant, &user],
         )
         .await?
@@ -95,7 +95,7 @@ pub async fn standing(client: &dyn ProofClient, tenant: i64, user: i64) -> Resul
         return Ok(Standing::Unknown);
     };
     let links = AccountLinks::from_row(&row, 2)?;
-    let kind = AccountKind::parse(row.get(6)).ok_or(Error::Internal)?;
+    let kind = AccountKind::parse(row.get(5)).ok_or(Error::Internal)?;
     let organisation = row
         .get::<_, Option<i64>>(4)
         .map(OrganisationId::new)
@@ -141,9 +141,6 @@ pub async fn standing(client: &dyn ProofClient, tenant: i64, user: i64) -> Resul
         organisation: organisation.filter(|_| kind == AccountKind::Customer),
         affiliation: affiliation.filter(|_| kind == AccountKind::Customer),
         kind,
-        // The bootstrap receipt names the installation's owner; Tenancy adds
-        // the operator proof (`bilibi_tenancy::prove_owner`).
-        installation_owner: row.get(5),
     }))
 }
 
@@ -165,6 +162,20 @@ impl ActorVerifier for AccountVerifier {
                 Standing::Live(identity) => Ok(identity),
                 Standing::Unknown | Standing::Frozen(_) => Err(Error::Unauthorized),
             }
+        })
+    }
+    fn lock_owner<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        tenant: i64,
+        user: i64,
+    ) -> ProofFuture<'a, ()> {
+        Box::pin(async move {
+            client.query_opt(
+                "SELECT id FROM user_bootstrap WHERE id=1 AND tenant_id=$1 AND user_id=$2 FOR SHARE",
+                &[&tenant, &user],
+            ).await?.ok_or(Error::Forbidden)?;
+            Ok(())
         })
     }
     /// One read under the same standing rule as the staff search.

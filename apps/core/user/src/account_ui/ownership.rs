@@ -25,10 +25,9 @@ struct View {
     card: Html,
 }
 
-#[derive(Clone, Copy)]
 enum Pending {
-    Offer(i64),
-    Accept(i64),
+    Offer(i64, String),
+    Accept(crate::OwnershipOffer),
 }
 
 pub(crate) struct Ownership {
@@ -38,6 +37,14 @@ pub(crate) struct Ownership {
     pending: Option<Pending>,
     flash: Flash,
     proof_error: Option<String>,
+}
+
+fn review_id(value: &Value) -> Result<i64> {
+    value
+        .get("ownership_id")
+        .and_then(Value::as_str)
+        .and_then(|id| id.parse().ok())
+        .ok_or(Error::Invalid)
 }
 
 impl Ownership {
@@ -52,7 +59,14 @@ impl Ownership {
         }
     }
 
-    async fn gate(&self, scope: &Scope, event: &str, action: &str) -> Result<LiveBody> {
+    async fn gate(
+        &self,
+        scope: &Scope,
+        event: &str,
+        action: &str,
+        subject: &str,
+        id: i64,
+    ) -> Result<LiveBody> {
         let methods = self
             .pages
             .users
@@ -64,7 +78,11 @@ impl Ownership {
                 ProofMethod::new(method.id, method.label, method.code_length, method.numeric)
             })
             .collect::<Vec<_>>();
-        let mut body = Html::EMPTY;
+        let mut body = render(&Alert {
+            kind: StatusKind::Info,
+            body: Html::text(subject),
+            ..Default::default()
+        })?;
         if let Some(error) = &self.proof_error {
             body.push(&render(&Alert {
                 kind: StatusKind::Error,
@@ -79,10 +97,20 @@ impl Ownership {
                 ..Default::default()
             })?);
         } else {
+            let mut fields = render(
+                &bilibi_ui::Field::named("ownership_id")
+                    .kind(bilibi_ui::InputKind::Hidden)
+                    .value(id.to_string()),
+            )?;
+            fields.push(&render(&ProofInput::new(
+                "ownership-proof",
+                "proof",
+                methods,
+            ))?);
             body.push(&render(&Form {
                 id: "ownership-proof-form",
                 event,
-                body: render(&ProofInput::new("ownership-proof", "proof", methods))?,
+                body: fields,
                 actions: render(&Button {
                     id: "ownership-proof-submit",
                     button_type: "submit",
@@ -104,19 +132,7 @@ impl Ownership {
     }
 
     async fn body(&self, scope: &Scope, state: &OwnershipState) -> Result<Html> {
-        let owner_message = if state.owner_user == 0 {
-            "Installation ownership is managed in the platform operator workspace.".to_owned()
-        } else {
-            format!(
-                "{} is the installation owner. Owner-only Software and release trust follow this account.",
-                state.owner_name
-            )
-        };
-        let mut body = render(&Alert {
-            kind: StatusKind::Info,
-            body: Html::text(&owner_message),
-            ..Default::default()
-        })?;
+        let mut body = Html::EMPTY;
         if let Some(offer) = &state.offer {
             if offer.to_user == scope.user() {
                 body.push(&render(&Alert {
@@ -130,24 +146,18 @@ impl Ownership {
                 body.push(&render(&Form {
                     id: "ownership-response-form",
                     event: "request_accept_ownership",
-                    actions: [
-                        render(&Button {
-                            id: "ownership-accept",
-                            button_type: "submit",
-                            variant: ButtonVariant::Primary,
-                            body: Html::text("Accept ownership"),
-                            ..Default::default()
-                        })?,
-                        render(&Button {
-                            id: "ownership-decline",
-                            button_type: "button",
-                            event: "decline_ownership",
-                            body: Html::text("Decline"),
-                            ..Default::default()
-                        })?,
-                    ]
-                    .into_iter()
-                    .collect(),
+                    body: render(
+                        &bilibi_ui::Field::named("ownership_id")
+                            .kind(bilibi_ui::InputKind::Hidden)
+                            .value(offer.id.to_string()),
+                    )?,
+                    actions: render(&Button {
+                        id: "ownership-accept",
+                        button_type: "submit",
+                        variant: ButtonVariant::Primary,
+                        body: Html::text("Accept ownership"),
+                        ..Default::default()
+                    })?,
                     ..Default::default()
                 })?);
             } else {
@@ -160,7 +170,7 @@ impl Ownership {
                     ..Default::default()
                 })?);
             }
-        } else if state.owner_user == scope.user() {
+        } else if state.is_owner {
             let hits = if self.selected.is_none() && !self.query.trim().is_empty() {
                 self.pages
                     .users
@@ -218,6 +228,9 @@ impl Ownership {
     }
 
     fn failure(&mut self, error: OwnershipError) -> Result<()> {
+        if !matches!(error, OwnershipError::Access(Error::StepUpRequired { .. })) {
+            self.pending = None;
+        }
         match error {
             OwnershipError::Access(Error::Unauthorized) => return Err(Error::Unauthorized),
             OwnershipError::Access(Error::StepUpRequired { reason, .. }) => {
@@ -302,24 +315,23 @@ impl LiveState<Scope, Error> for Ownership {
                     }
                     "change_ownership_target" => self.selected = None,
                     "request_offer_ownership" => {
-                        let target = self
-                            .selected
-                            .as_ref()
-                            .map(|(id, _)| *id)
-                            .ok_or(Error::Invalid)?;
-                        self.pending = Some(Pending::Offer(target));
+                        let target = self.selected.as_ref().cloned().ok_or(Error::Invalid)?;
+                        self.pending = Some(Pending::Offer(target.0, target.1));
                         self.proof_error = None;
                     }
                     "confirm_offer_ownership" => {
-                        let Some(Pending::Offer(target)) = self.pending else {
+                        let Some(Pending::Offer(target, _)) = &self.pending else {
                             return Err(Error::Invalid);
                         };
+                        if review_id(value)? != *target {
+                            return Err(Error::Invalid);
+                        }
                         let proof = value
                             .get("proof")
                             .and_then(Value::as_str)
                             .unwrap_or_default();
                         let scope = request.scope.clone().presenting_step_up(proof);
-                        match self.pages.users.offer_ownership(&scope, target).await {
+                        match self.pages.users.offer_ownership(&scope, *target).await {
                             Ok(_) => {
                                 self.pending = None;
                                 self.selected = None;
@@ -331,24 +343,32 @@ impl LiveState<Scope, Error> for Ownership {
                         }
                     }
                     "request_accept_ownership" => {
+                        let id = review_id(value)?;
                         let state = self.pages.users.ownership_state(request.scope).await?;
-                        let offer = state
+                        if let Some(offer) = state
                             .offer
-                            .filter(|offer| offer.to_user == request.scope.user())
-                            .ok_or(Error::Invalid)?;
-                        self.pending = Some(Pending::Accept(offer.id));
-                        self.proof_error = None;
+                            .filter(|offer| offer.id == id && offer.to_user == request.scope.user())
+                        {
+                            self.pending = Some(Pending::Accept(offer));
+                            self.proof_error = None;
+                        } else {
+                            self.pending = None;
+                            self.failure(OwnershipError::Unavailable)?;
+                        }
                     }
                     "confirm_accept_ownership" => {
-                        let Some(Pending::Accept(offer)) = self.pending else {
+                        let Some(Pending::Accept(offer)) = &self.pending else {
                             return Err(Error::Invalid);
                         };
+                        if review_id(value)? != offer.id {
+                            return Err(Error::Invalid);
+                        }
                         let proof = value
                             .get("proof")
                             .and_then(Value::as_str)
                             .unwrap_or_default();
                         let scope = request.scope.clone().presenting_step_up(proof);
-                        match self.pages.users.accept_ownership(&scope, offer).await {
+                        match self.pages.users.accept_ownership(&scope, offer.id).await {
                             Ok(()) => {
                                 self.pending = None;
                                 self.flash.success("You are now the installation owner.");
@@ -356,37 +376,30 @@ impl LiveState<Scope, Error> for Ownership {
                             Err(error) => self.failure(error)?,
                         }
                     }
-                    "decline_ownership" => {
-                        let state = self.pages.users.ownership_state(request.scope).await?;
-                        let offer = state
-                            .offer
-                            .filter(|offer| offer.to_user == request.scope.user())
-                            .ok_or(Error::Invalid)?;
-                        match self
-                            .pages
-                            .users
-                            .decline_ownership(request.scope, offer.id)
-                            .await
-                        {
-                            Ok(()) => self.flash.success(
-                                "Ownership offer declined. The installation owner did not change.",
-                            ),
-                            Err(error) => self.failure(error)?,
-                        }
-                    }
                     _ => return Err(Error::Invalid),
                 }
             }
-            match self.pending {
-                Some(Pending::Offer(_)) => {
-                    self.gate(request.scope, "confirm_offer_ownership", "Confirm offer")
-                        .await
+            match &self.pending {
+                Some(Pending::Offer(id, name)) => {
+                    self.gate(
+                        request.scope,
+                        "confirm_offer_ownership",
+                        "Confirm offer",
+                        &format!("Offer installation ownership to {name}."),
+                        *id,
+                    )
+                    .await
                 }
-                Some(Pending::Accept(_)) => {
+                Some(Pending::Accept(offer)) => {
                     self.gate(
                         request.scope,
                         "confirm_accept_ownership",
                         "Accept ownership",
+                        &format!(
+                            "Accept installation ownership offer #{} from {}.",
+                            offer.id, offer.from_name
+                        ),
+                        offer.id,
                     )
                     .await
                 }

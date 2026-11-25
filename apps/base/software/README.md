@@ -45,14 +45,14 @@ The catalogue recommends the newest compatible release tested with this exact Pl
 
 ## Access
 
-Only a server owner with the appropriate platform capability can manage software, because installation affects every company.
+Software permissions follow the live installation owner receipt. They apply across every company.
 
 | Capability | Allows |
 | --- | --- |
 | `admin.system.software.view` | Status, catalogue, release listings, Software page and card |
 | `admin.system.software.manage` | Install, undo, go-ahead, cancel, release upload, GitHub read access and release-trust replacement |
 
-Install, undo, go-ahead, GitHub settings and release-trust replacement require the owner’s own fresh 2FA code on every commit, including Dev. The existing step-up key `base.software.change` remains `.always()` to preserve its policy and audit identity; it is **not a build operation**. Cancel requires no code. The facade rechecks authorization inside the mutation transaction. Other organisations fail closed with `denied_platform_scope`; a missing grant is `denied_missing_capability`.
+Install, undo, go-ahead, GitHub settings and release-trust replacement require the owner’s own fresh 2FA code on every commit, including Dev. The existing step-up key `base.software.change` remains `.always()` to preserve its policy and audit identity; it is **not a build operation**. Cancel requires no code. The facade rechecks authorization inside the mutation transaction. Other organisations fail closed with `denied_platform_scope`; an account without owner standing receives `denied_owner_standing`.
 
 ## Agent contracts
 

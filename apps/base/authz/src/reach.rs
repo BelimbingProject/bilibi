@@ -109,7 +109,7 @@ pub async fn reach_proof(
         return Ok(None);
     }
     let judged = crate::user_judgement(
-        &crate::Proof(client),
+        client,
         scope,
         key,
         scope.current_company().map(|id| id.get()),

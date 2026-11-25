@@ -2,7 +2,8 @@
 use crate::{staff_choices::StaffChoice, UserService};
 use bilibi_database::{Change, Error, Result};
 use bilibi_notifications::Notice;
-use bilibi_security::Scope;
+use bilibi_security::{ProofClient, Scope};
+use bilibi_tenancy::AccountKind;
 use serde_json::json;
 
 pub const START: &str = "core.user.ownership_transfer.start";
@@ -21,7 +22,6 @@ bilibi_step_up::declare!(
 #[derive(Clone, Debug)]
 pub struct OwnershipOffer {
     pub id: i64,
-    pub from_user: i64,
     pub from_name: String,
     pub to_user: i64,
     pub to_name: String,
@@ -29,8 +29,7 @@ pub struct OwnershipOffer {
 
 #[derive(Clone, Debug)]
 pub struct OwnershipState {
-    pub owner_user: i64,
-    pub owner_name: String,
+    pub is_owner: bool,
     pub offer: Option<OwnershipOffer>,
 }
 
@@ -64,32 +63,76 @@ fn direct_browser(scope: &Scope) -> std::result::Result<(), OwnershipError> {
     }
 }
 
-const ACTIVE_STAFF: &str = "u.kind='staff' AND u.status='active' AND u.deleted_at IS NULL AND i.status='active' AND i.deleted_at IS NULL AND p.retired_at IS NULL AND p.system_key IS NULL";
+pub(crate) async fn active_staff(
+    client: &dyn ProofClient,
+    tenant: i64,
+    user: i64,
+) -> Result<Option<bilibi_security::AccountIdentity>> {
+    if client
+        .query_opt(
+            "SELECT u.id FROM users u JOIN user_identities i ON i.id=u.identity_id
+         WHERE u.tenant_id=$1 AND u.id=$2 FOR SHARE OF u,i",
+            &[&tenant, &user],
+        )
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    match crate::identity::standing(client, tenant, user).await? {
+        crate::identity::Standing::Live(identity) if identity.kind == AccountKind::Staff => {
+            Ok(Some(identity))
+        }
+        _ => Ok(None),
+    }
+}
+
+pub(crate) async fn expire_offers(
+    tx: &mut bilibi_database::MutationTransaction<'_>,
+    tenant: i64,
+    owner: i64,
+) -> Result<()> {
+    let expired = tx
+            .sql()
+            .query(
+                "UPDATE user_ownership_transfers SET status='expired',resolved_at=clock_timestamp()
+                 WHERE tenant_id=$1 AND status='pending' AND (expires_at<=clock_timestamp() OR from_user_id<>$2)
+                 RETURNING id,tenant_id,from_user_id,to_user_id",
+                &[&tenant, &owner],
+            )
+            .await?;
+    for row in expired {
+        tx.record(Change {
+                kind: "user.ownership_transfer".into(),
+                id: row.get(0),
+                old: json!({"tenant_id":row.get::<_,i64>(1),"from_user_id":row.get::<_,i64>(2),"to_user_id":row.get::<_,i64>(3),"status":"pending"}),
+                new: json!({"status":"expired"}),
+            })
+            .await?;
+    }
+    Ok(())
+}
 
 impl UserService {
     pub async fn ownership_state(&self, scope: &Scope) -> Result<OwnershipState> {
         let client = self.db.get().await.map_err(Error::from)?;
         let scope = self.fresh(&**client, scope).await?;
-        let Some(owner) = client
-            .query_opt(
-                "SELECT b.user_id,u.name FROM user_bootstrap b
-                 JOIN platform_operator o ON o.tenant_id=b.tenant_id AND o.singleton
-                 JOIN users u ON u.tenant_id=b.tenant_id AND u.id=b.user_id
-                 WHERE b.id=1 AND b.tenant_id=$1",
-                &[&scope.tenant()],
-            )
-            .await?
-        else {
+        if direct_browser(&scope).is_err() {
             return Ok(OwnershipState {
-                owner_user: 0,
-                owner_name: "The platform operator".into(),
+                is_owner: false,
                 offer: None,
             });
+        }
+        let is_owner = match bilibi_tenancy::prove_owner(&**client, &scope).await {
+            Ok(_) => true,
+            Err(Error::Forbidden) => false,
+            Err(error) => return Err(error),
         };
         let offer = client
             .query_opt(
-                "SELECT x.id,x.from_user_id,f.name,x.to_user_id,t.name
+                "SELECT x.id,f.name,x.to_user_id,t.name
                  FROM user_ownership_transfers x
+                 JOIN user_bootstrap b ON b.id=1 AND b.tenant_id=x.tenant_id AND b.user_id=x.from_user_id
                  JOIN users f ON f.tenant_id=x.tenant_id AND f.id=x.from_user_id
                  JOIN users t ON t.tenant_id=x.tenant_id AND t.id=x.to_user_id
                  WHERE x.tenant_id=$1 AND x.status='pending' AND x.expires_at>clock_timestamp()
@@ -100,16 +143,11 @@ impl UserService {
             .await?
             .map(|row| OwnershipOffer {
                 id: row.get(0),
-                from_user: row.get(1),
-                from_name: row.get(2),
-                to_user: row.get(3),
-                to_name: row.get(4),
+                from_name: row.get(1),
+                to_user: row.get(2),
+                to_name: row.get(3),
             });
-        Ok(OwnershipState {
-            owner_user: owner.get(0),
-            owner_name: owner.get(1),
-            offer,
-        })
+        Ok(OwnershipState { is_owner, offer })
     }
 
     pub async fn ownership_candidates(
@@ -125,32 +163,13 @@ impl UserService {
         let client = self.db.get().await.map_err(Error::from)?;
         let scope = self.fresh(&**client, scope).await?;
         bilibi_tenancy::prove_owner(&**client, &scope).await?;
-        let sql = format!(
-            "SELECT u.id,u.name FROM users u
-             JOIN user_identities i ON i.id=u.identity_id
-             JOIN persons p ON p.tenant_id=u.tenant_id AND p.id=u.person_id
-             JOIN platform_operator o ON o.tenant_id=u.tenant_id AND o.singleton
-             WHERE u.tenant_id=$1 AND {ACTIVE_STAFF} AND u.id<>$2
-               AND ($3='' OR starts_with(lower(u.name),$3) OR position(' '||$3 in lower(u.name))>0)
-             ORDER BY lower(u.name),u.id LIMIT $4"
-        );
-        Ok(client
-            .query(
-                &sql,
-                &[
-                    &scope.tenant(),
-                    &scope.user(),
-                    &text.to_lowercase(),
-                    &(crate::staff_choices::STAFF_CHOICE_MAX as i64),
-                ],
-            )
-            .await?
-            .into_iter()
-            .map(|row| StaffChoice {
-                id: row.get(0),
-                name: row.get(1),
-            })
-            .collect())
+        Ok(crate::staff_choices::search_live_staff(
+            &**client,
+            scope.tenant(),
+            text,
+            Some(scope.user()),
+        )
+        .await?)
     }
 
     pub async fn offer_ownership(
@@ -179,37 +198,14 @@ impl UserService {
                 &[&"core/user.ownership-transfer"],
             )
             .await?;
-        tx.sql()
-            .query_opt(
-                &format!(
-                    "SELECT u.id FROM users u
-                     JOIN user_identities i ON i.id=u.identity_id
-                     JOIN persons p ON p.tenant_id=u.tenant_id AND p.id=u.person_id
-                     JOIN platform_operator o ON o.tenant_id=u.tenant_id AND o.singleton
-                     WHERE u.tenant_id=$1 AND u.id=$2 AND {ACTIVE_STAFF} AND u.id<>$3"
-                ),
-                &[&scope.tenant(), &target, &scope.user()],
-            )
-            .await?
-            .ok_or(OwnershipError::Target)?;
-        let expired = tx
-            .sql()
-            .query(
-                "UPDATE user_ownership_transfers SET status='expired',resolved_at=clock_timestamp()
-                 WHERE tenant_id=$1 AND status='pending' AND expires_at<=clock_timestamp()
-                 RETURNING id,tenant_id,from_user_id,to_user_id",
-                &[&scope.tenant()],
-            )
-            .await?;
-        for row in expired {
-            tx.record(Change {
-                kind: "user.ownership_transfer".into(),
-                id: row.get(0),
-                old: json!({"tenant_id":row.get::<_,i64>(1),"from_user_id":row.get::<_,i64>(2),"to_user_id":row.get::<_,i64>(3),"status":"pending"}),
-                new: json!({"status":"expired"}),
-            })
-            .await?;
+        if target == scope.user()
+            || active_staff(tx.sql(), scope.tenant(), target)
+                .await?
+                .is_none()
+        {
+            return Err(OwnershipError::Target);
         }
+        expire_offers(&mut tx, scope.tenant(), scope.user()).await?;
         let pending: bool = tx
             .sql()
             .query_one(
@@ -277,52 +273,37 @@ impl UserService {
             .await?;
         let scope = self.fresh(tx.sql(), scope).await?;
         direct_browser(&scope)?;
-        tx.sql()
-            .execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
-                &[&"core/user.ownership-transfer"],
-            )
-            .await?;
-        let row = tx
-            .sql()
-            .query_opt(
-                &format!(
-                    "SELECT x.from_user_id,x.to_user_id,x.expires_at>clock_timestamp(),i.email
-                     FROM user_ownership_transfers x
-                     JOIN users u ON u.tenant_id=x.tenant_id AND u.id=x.to_user_id
-                     JOIN user_identities i ON i.id=u.identity_id
-                     JOIN persons p ON p.tenant_id=u.tenant_id AND p.id=u.person_id
-                     JOIN platform_operator o ON o.tenant_id=u.tenant_id AND o.singleton
-                     WHERE x.id=$1 AND x.tenant_id=$2 AND x.to_user_id=$3 AND x.status='pending'
-                       AND {ACTIVE_STAFF} FOR UPDATE OF x"
-                ),
-                &[&offer, &scope.tenant(), &scope.user()],
-            )
-            .await?
-            .ok_or(OwnershipError::Unavailable)?;
-        if !row.get::<_, bool>(2) {
-            return Err(OwnershipError::Expired);
-        }
-        let from: i64 = row.get(0);
-        let to: i64 = row.get(1);
-        let email: String = row.get(3);
         let receipt = tx
             .sql()
             .query_opt(
-                "SELECT user_id,admin_email FROM user_bootstrap
-                 WHERE id=1 AND tenant_id=$1 FOR UPDATE",
+                "SELECT b.user_id,b.admin_email FROM user_bootstrap b
+             JOIN platform_operator o ON o.tenant_id=b.tenant_id AND o.singleton
+             WHERE b.id=1 AND b.tenant_id=$1 FOR UPDATE OF b",
                 &[&scope.tenant()],
             )
             .await?
             .ok_or(OwnershipError::Unavailable)?;
-        if receipt.get::<_, i64>(0) != from {
-            return Err(OwnershipError::Unavailable);
+        let from: i64 = receipt.get(0);
+        let to = scope.user();
+        let email = active_staff(tx.sql(), scope.tenant(), to)
+            .await?
+            .ok_or(OwnershipError::Target)?
+            .email;
+        let row = tx.sql().query_opt(
+            "SELECT expires_at>clock_timestamp() FROM user_ownership_transfers
+             WHERE id=$1 AND tenant_id=$2 AND to_user_id=$3 AND from_user_id=$4 AND status='pending'",
+            &[&offer, &scope.tenant(), &to, &from],
+        ).await?.ok_or(OwnershipError::Unavailable)?;
+        if !row.get::<_, bool>(0) {
+            return Err(OwnershipError::Expired);
         }
         let old_email: String = receipt.get(1);
         let tenant = scope.tenant();
         tx.sql()
             .execute(
-                "UPDATE user_bootstrap SET user_id=$2,admin_email=$3 WHERE id=1 AND tenant_id=$1",
+                "UPDATE user_bootstrap SET user_id=$2,admin_email=$3,
+                 affiliation_settled_at=COALESCE(affiliation_settled_at,clock_timestamp())
+                 WHERE id=1 AND tenant_id=$1",
                 &[&tenant, &to, &email],
             )
             .await?;
@@ -344,63 +325,6 @@ impl UserService {
             id: offer,
             old: json!({"status":"pending"}),
             new: json!({"status":"accepted"}),
-        })
-        .await?;
-        self.notification_boundary
-            .notify(
-                &mut tx,
-                &scope,
-                &[from, to],
-                &Notice::new("Installation ownership transferred")
-                    .kind("ownership_transfer")
-                    .body("The installation owner has changed.")
-                    .url("/settings/ownership")
-                    .icon("shield-check"),
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn decline_ownership(
-        &self,
-        scope: &Scope,
-        offer: i64,
-    ) -> std::result::Result<(), OwnershipError> {
-        direct_browser(scope)?;
-        let mut client = self.db.get().await.map_err(Error::from)?;
-        let mut tx = self
-            .mutations
-            .begin(
-                &mut client,
-                scope.mutation_context("user.ownership_transfer.decline"),
-            )
-            .await?;
-        let scope = self.fresh(tx.sql(), scope).await?;
-        direct_browser(&scope)?;
-        let row = tx
-            .sql()
-            .query_opt(
-                "SELECT expires_at>clock_timestamp() FROM user_ownership_transfers
-                 WHERE id=$1 AND tenant_id=$2 AND to_user_id=$3 AND status='pending' FOR UPDATE",
-                &[&offer, &scope.tenant(), &scope.user()],
-            )
-            .await?
-            .ok_or(OwnershipError::Unavailable)?;
-        if !row.get::<_, bool>(0) {
-            return Err(OwnershipError::Expired);
-        }
-        tx.sql()
-            .execute(
-                "UPDATE user_ownership_transfers SET status='declined',resolved_at=clock_timestamp() WHERE id=$1 AND tenant_id=$2",
-                &[&offer, &scope.tenant()],
-            )
-            .await?;
-        tx.record(Change {
-            kind: "user.ownership_transfer".into(),
-            id: offer,
-            old: json!({"status":"pending"}),
-            new: json!({"status":"declined"}),
         })
         .await?;
         tx.commit().await?;

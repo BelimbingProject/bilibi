@@ -177,19 +177,6 @@ async fn main() -> Result<()> {
     }
 
     let owner_code = owner.step_up().await;
-    let declined = app.user.offer_ownership(&owner_code, 7).await?;
-    app.user.decline_ownership(&next.scope, declined).await?;
-    let client = db.get().await?;
-    ensure(
-        client
-            .query_one("SELECT user_id=1 FROM user_bootstrap", &[])
-            .await?
-            .get(0),
-        "a declined offer leaves the owner unchanged",
-    )?;
-    drop(client);
-
-    let owner_code = owner.step_up().await;
     let expired = app.user.offer_ownership(&owner_code, 7).await?;
     db.get()
         .await?
@@ -262,6 +249,21 @@ async fn main() -> Result<()> {
             .await
             .is_err(),
         "the previous owner cannot use the existing owner-only installation policy action",
+    )?;
+
+    let software = app
+        .services
+        .get::<bilibi_base::software::Software>(bilibi_base::software::SERVICE)?;
+    ensure(
+        software.status(&next.scope).await.is_ok(),
+        "the owner can open Software without a role grant",
+    )?;
+    ensure(
+        matches!(
+            software.status(&owner.scope).await,
+            Err(bilibi_database::Error::Forbidden)
+        ),
+        "the former owner's administrator role does not open Software",
     )?;
 
     let client = db.get().await?;

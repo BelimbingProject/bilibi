@@ -296,10 +296,22 @@ async fn effective_in_company(
                 .then(|| (row.get(0), Reach::from_rank(rank.unwrap_or(2))))
         })
         .collect();
+    let owner = if operator && user == scope.user() {
+        match bilibi_tenancy::prove_owner(client.client(), scope).await {
+            Ok(_) => true,
+            Err(bilibi_database::Error::Forbidden | bilibi_database::Error::Unauthorized) => false,
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
+    };
     let effective: BTreeSet<&'static str> = vocabulary
         .capabilities
         .iter()
         .filter(|(key, owned)| {
+            if owned.definition.audience == crate::Audience::Owner {
+                return owner;
+            }
             owned.definition.admits(kind)
                 && (operator || !owned.definition.is_platform())
                 && !denied.contains(**key)

@@ -508,7 +508,6 @@ impl Software {
         input: &Value,
     ) -> SoftwareResult<Review> {
         authorize_operator(client, scope, MANAGE).await?;
-        bilibi_tenancy::prove_owner(client, scope).await?;
         if let Some(job) = jobs::active(client, scope.tenant()).await? {
             return Err(SoftwareError::field(
                 "job",
@@ -939,7 +938,7 @@ macro_rules! provenance {
 }
 inventory::submit! { Contribution::new(VOCABULARY, "base/software", provenance!(), &VocabularyContribution {
     domains: &[], verbs: &[],
-    capabilities: &[CapabilityDefinition::platform(VIEW), CapabilityDefinition::platform(MANAGE)],
+    capabilities: &[CapabilityDefinition::owner(VIEW), CapabilityDefinition::owner(MANAGE)],
     roles: &[],
     system_principals: &[],
 }) }

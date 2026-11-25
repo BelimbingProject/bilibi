@@ -432,7 +432,7 @@ const AUDIT_TABLES: [(&str, &str); 2] = [
     ),
     (
         "base_audit_mutations",
-        "auditable_type = 'base/software.job'",
+        "auditable_type IN ('base/software.job', 'user.bootstrap', 'user.ownership_transfer')",
     ),
 ];
 /// Takes the history aside: for each table its columns (so a history table
