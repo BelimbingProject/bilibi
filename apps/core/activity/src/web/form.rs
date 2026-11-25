@@ -756,7 +756,7 @@ impl Dialog {
                             .map(|(l, v)| (l.as_str(), v.as_str()))
                             .collect::<Vec<_>>(),
                     ))
-                    .hint("Default is your own setting, then the organisation's. Change yours with Reminder defaults on the Activities list."),
+                    .hint("Default is your own setting, then the organisation's. Change yours in My settings under Calendar."),
             );
             fields.push(
                 self.field(words, prefix, "reminder_email", "Email reminders")
