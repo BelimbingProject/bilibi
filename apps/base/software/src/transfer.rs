@@ -91,7 +91,7 @@ impl Software {
                 let policy = release_proof::Policy::load(paths).map_err(Error::refused)?;
                 let trust = release_proof::facts(paths).map_err(Error::refused)?;
                 let github = self
-                    .github_listing(&**client, scope, force, prerelease, &policy)
+                    .github_listing(&**client, Some(scope), force, prerelease, &policy)
                     .await?;
                 (trust, github)
             }
@@ -111,12 +111,13 @@ impl Software {
                     json!(crate::github::same_asset(release, &installed["github"]));
             }
         }
+        let update = crate::update::discover(self.paths.as_ref(), &github);
         if let Some(fields) = github.as_object_mut() {
             fields.remove("latest");
             fields.remove("complete");
         }
         Ok(
-            json!({"instance": review::instance_json(&instance), "release_trust": trust, "installed_asset": installed, "uploads": uploads, "github": github}),
+            json!({"instance": review::instance_json(&instance), "release_trust": trust, "installed_asset": installed, "uploads": uploads, "github": github, "update": update}),
         )
     }
 

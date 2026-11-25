@@ -83,7 +83,7 @@ Installed Domains and Extensions missing from the selected catalogue also have a
 
 The page, ChatGPT card and agents read the same installed facts from the compiled composition. The `uncatalogued` field in `base.software.catalogue` (and so in `base.software.open`) lists installed modules missing from the catalogue; `base.software.status` stays free of catalogue reads.
 
-**Releases** (`?tab=releases`) shows Release trust as read-only proof, repository, workflow, minimum tag and key fingerprint facts, then the installed version, current or last install, backups and **Get an update**. GitHub releases and their identities appear above a folded **Upload a release file** section, with queued files and their review on the same mounted page; switching tabs preserves pending uploads and reviews. Backup file locations are folded and only available to accounts that can manage software. The old `/system/software/releases` page redirects to the Releases tab.
+**Releases** (`?tab=releases`) shows the installed and latest stable versions and links to the release notes. Choose **Update to** for a compatible newer release, or copy the AI prompt. Both paths use the same install review, fresh 2FA and installer job. Active progress appears inline, and a failed or interrupted job shows its reason, a diagnosis prompt and **Undo** when available. Read-only release trust, GitHub access settings, manual file selection, uploads, backups and history are under **Details**. The old `/system/software/releases` page redirects to the Releases tab.
 
 The MCP App (`ui://bilibi/software-v1.html`, `card/software-v1.html`) is titled **Manage domains and extensions** and uses the same software contracts. Its catalogue cards show the repository under **Source** and the generated **Installation commands** when available.
 
@@ -144,6 +144,21 @@ Release trust is one closed policy, never a fallback list:
 
 The initial `scripts/install-server.sh trust` writes the first `/opt/bilibi/<instance>/trust/release.json` and records the terminal operator’s UID with the UTC time. Existing instances can enroll using a minimum tag newer than their installed releases. Root owns both the policy and replay files. The instance’s application and installer can read them. Only the instance’s privileged installer helper may write them after enrollment. A later `base.software.trust` safe write requires the installation owner's fresh 2FA and queues a one-step installer job; the reviewed step-up target includes the complete new facts and derived key fingerprint. The installer’s privileged helper records the requesting account, validates the key again and atomically replaces the record. A queued trust job can be cancelled until the installer claims it. Software shows that actor and time plus the instance's highest admitted tag. Operator verification uses no transparency log, so private repository and asset names are not published to Rekor.
 
+### Update notices
+
+The automatic check sends the active installation owner one bell notice per newly discovered stable setup tag in the accepted repository. The notice opens Software › Releases. Publisher-written change notes appear as plain text. When the release body contains only App Maker’s standard packaging instructions, the notice reads “No change notes were supplied.”
+
+Bilibi checks the official public repository every 15 minutes without credentials. Opening Releases checks the configured source using the listing cache and the signed-in operator’s access. The receipt and bell notice commit together, so retries cannot announce the same release twice.
+
+The `update` field of `base.software.releases` reports the running setup version and one of the following states.
+
+| State | Meaning |
+| --- | --- |
+| `ready` | A complete, fresh listing has a newer stable setup with one matching file. The result includes the publisher’s notes and the exact asset for review. Admission and proof verification occur during installation. |
+| `current` | The running setup version is at least as new as the newest stable setup found. |
+| `unavailable` | Source acceptance, the running setup, the listing or a unique compatible file could not be established. The reason identifies the missing check. |
+| `source_checkout` | This program has no installed release folder. |
+
 ### Install from GitHub
 
 The repository shown on **Software › Releases** comes from Release trust; changing GitHub settings cannot redirect installation to another repository.
@@ -173,7 +188,7 @@ Each failed check is a plain sentence that says what to do next: "This release w
 
 The **Releases** tab uses `release_files.rs` within `web.rs`. Each GitHub row names its asset and full archive SHA-256, and marks the installed asset. Installed facts show the local release number separately from repository/release/asset IDs, target, tag, setup commit, archive SHA-256 and program SHA-256. `status.installed_asset` and `releases.installed_asset` return the same evidence, recovered from successful install history and the current release folder. Missing older evidence is null, never inferred from a tag. Undo returns the identity of the restored release.
 
-Upload and queued files live inside **Upload a release file**. Uploads require manage permission. The operator proof input appears beside the archive and is required only by operator trust. GitHub release-list settings and release-trust replacement require fresh 2FA. Opening the tab uses the cached list; **Refresh**, expiry or an install review asks GitHub through the App. Job polling does not. The [terminal update command](../../../docs/server-install.md#putting-a-release-into-service) uses the same reviewed install and Undo operations.
+Upload and queued files live inside **Details**. Uploads require manage permission. The operator proof input appears beside the archive and is required only by operator trust. GitHub release-list settings and release-trust replacement require fresh 2FA. Opening the tab uses the cached list; **Refresh**, expiry or an install review asks GitHub through the App. Job polling does not. The [terminal update command](../../../docs/server-install.md#putting-a-release-into-service) uses the same reviewed install and Undo operations.
 
 ### Staging and Production
 

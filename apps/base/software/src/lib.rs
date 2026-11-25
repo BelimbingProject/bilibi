@@ -20,6 +20,7 @@ mod review;
 mod transfer;
 mod transport;
 mod update;
+mod update_notice;
 mod web;
 
 use bilibi_authz::{
@@ -780,7 +781,7 @@ impl Software {
             // after review is refused here. A rate limit still serves the
             // saved list; the download checks the file again.
             let mut listing = self
-                .github_listing(client, scope, true, true, &policy)
+                .github_listing(client, Some(scope), true, true, &policy)
                 .await?;
             if input.get("staging").is_some() {
                 let pin = github::pin_from_listing(&listing, input)?;
@@ -997,8 +998,8 @@ inventory::submit! { Contribution::new(ROUTES, "base/software.releases", provena
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/software", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/step_up", "base/system", "base/notifications", "base/integration", "base/audit", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql")), ("base-software-005-paused", include_str!("../migrations/005-paused.sql")), ("base-software-006-installer-heartbeat", include_str!("../migrations/006-installer-heartbeat.sql")), ("base-software-007-release-trust", include_str!("../migrations/007-release-trust.sql"))],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/step_up", "base/system", "base/notifications", "base/schedule", "base/integration", "base/audit", "base/ui", "base/menu", "base/datetime", "base/locale"],
+        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql")), ("base-software-005-paused", include_str!("../migrations/005-paused.sql")), ("base-software-006-installer-heartbeat", include_str!("../migrations/006-installer-heartbeat.sql")), ("base-software-007-release-trust", include_str!("../migrations/007-release-trust.sql")), ("base-software-008-update-notices", include_str!("../migrations/008-update-notices.sql"))],
         // Declaration order is build order: the page service reads this one.
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let software = Arc::new(Software {
