@@ -15,6 +15,7 @@ pub(crate) const INVITATION: &str = "core.user.invitation";
 pub(crate) const EMAIL_VERIFICATION: &str = "core.user.email_verification";
 pub(crate) const NEW_DEVICE_SIGN_IN: &str = "core.user.new_device_sign_in";
 pub(crate) const TWO_FACTOR_RESET: &str = "core.user.two_factor_reset";
+pub(crate) const TWO_FACTOR_RESET_REQUEST: &str = "core.user.two_factor_reset_request";
 
 /// The text of a message whose link stands alone between two passages.
 pub(crate) fn around_link(text: &Text, link: &str) -> String {
@@ -239,6 +240,38 @@ template!(
                 ("subject", TWO_FACTOR_SUBJECT),
                 ("by_admin", TWO_FACTOR_ADMIN_BODY),
                 ("by_server_admin", TWO_FACTOR_SYSTEM_BODY),
+            ],
+        }],
+    }
+);
+
+const RESET_REQUEST_MAIL: &[&str] = &["subject", "details", "closing"];
+template!(
+    TWO_FACTOR_RESET_REQUEST,
+    Template {
+        key: TWO_FACTOR_RESET_REQUEST,
+        label: "2FA reset request email",
+        audience: Audience::Staff,
+        outputs: &[Output::PlainText],
+        slots: &[
+            Slot::subject(),
+            Slot::text("details", "Request details"),
+            Slot::text("closing", "What the administrator should do"),
+        ],
+        variables: &[
+            Variable::text("account", "Account", "Aisha Rahman <aisha@example.test>", RESET_REQUEST_MAIL),
+            Variable::text("company", "Company", "Example Trading", RESET_REQUEST_MAIL),
+            Variable::text("time", "Request time", "2026-11-25 09:15 UTC", RESET_REQUEST_MAIL),
+            Variable::text("ip_address", "IP address", "203.0.113.7", RESET_REQUEST_MAIL),
+        ],
+        base_language: "en",
+        defaults: &[DefaultText {
+            language: "en",
+            version: "1",
+            slots: &[
+                ("subject", "2FA reset requested for {{account}}"),
+                ("details", "Account: {{account}}\nCompany: {{company}}\nTime: {{time}}\nIP address: {{ip_address}}"),
+                ("closing", "Open the account and review the request. A reset signs the person out everywhere; the request itself changes no access."),
             ],
         }],
     }

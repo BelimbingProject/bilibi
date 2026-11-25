@@ -35,12 +35,12 @@ pub enum TwoFactorEmailError {
     Other(#[from] Error),
 }
 
-struct Account {
-    id: i64,
-    tenant: i64,
-    name: String,
-    email: String,
-    active: bool,
+pub(super) struct Account {
+    pub(super) id: i64,
+    pub(super) tenant: i64,
+    pub(super) name: String,
+    pub(super) email: String,
+    pub(super) active: bool,
 }
 
 /// Staff accounts only: a customer's factor is not a staff reset (ADR 16).
@@ -57,7 +57,7 @@ fn account_from(row: &tokio_postgres::Row) -> Account {
     }
 }
 
-fn reset_notice(body: &str) -> Result<Notice, Error> {
+pub(super) fn reset_notice(body: &str) -> Result<Notice, Error> {
     let notice = Notice::new(crate::wording::TWO_FACTOR_SUBJECT)
         .kind("two_factor_reset")
         .body(body)
@@ -68,7 +68,7 @@ fn reset_notice(body: &str) -> Result<Notice, Error> {
 
 /// The packaged reset email; `slot` says who reset it. The
 /// reset stands without it, so a mail that cannot be built is only logged.
-fn reset_mail(service: &UserService, account: &Account, slot: &str) -> Option<Message> {
+pub(super) fn reset_mail(service: &UserService, account: &Account, slot: &str) -> Option<Message> {
     let to = Address::new(Some(&account.name), &account.email).ok()?;
     let wording = service
         .templates
@@ -91,7 +91,7 @@ fn reset_mail(service: &UserService, account: &Account, slot: &str) -> Option<Me
 /// identity across its memberships and records who did it. Returns the ended
 /// session ids for announce after commit. Session ids are not written into
 /// the audit payload.
-async fn clear_confirmed(
+pub(super) async fn clear_confirmed(
     service: &UserService,
     tx: &mut MutationTransaction<'_>,
     account: &Account,
@@ -129,7 +129,7 @@ async fn clear_confirmed(
     crate::sign_in_identity::end_everywhere(&service.sessions, tx, identity, account.id, None).await
 }
 
-fn wake(
+pub(super) fn wake(
     service: &UserService,
     tenant: i64,
     user: i64,
@@ -195,6 +195,8 @@ impl UserService {
             }
             Err(error) => return Err(error.into()),
         };
+        let identity = crate::sign_in_identity::id(tx.sql(), account.tenant, account.id).await?;
+        super::recovery::close_requests(&mut tx, account.tenant, identity, None).await?;
         if account.active {
             let notice = reset_notice(crate::wording::TWO_FACTOR_SYSTEM_BODY)?;
             notifications::record_in_tenant(&mut tx, account.tenant, &[account.id], &notice)

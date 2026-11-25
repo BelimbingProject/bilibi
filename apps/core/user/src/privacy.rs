@@ -50,6 +50,7 @@ const BOOTSTRAP_KIND: &str = "user.bootstrap";
 /// An agent's two-factor reset, which once recorded the account's name and
 /// email.
 const TWO_FACTOR_RESET_KIND: &str = "user_two_factor_reset";
+const TWO_FACTOR_RESET_REQUEST_KIND: &str = "user_two_factor_reset_request";
 /// Every top-level attribute of a SCIM document: an identity provider may
 /// send any attribute or vendor extension, all of them about the person.
 const SCIM_FIELDS: [&str; 1] = ["*"];
@@ -90,7 +91,8 @@ impl Handler for Accounts {
             let row = client
                 .query_one(
                     "SELECT count(*) FILTER (WHERE u.person_id=$2), count(*) FILTER (WHERE u.person_id IS DISTINCT FROM $2 AND lower(i.email)=ANY($3)), \
-                     (SELECT count(*) FROM notifications n JOIN users u ON u.tenant_id=n.tenant_id AND u.id=n.user_id WHERE n.tenant_id=$1 AND u.person_id=$2) \
+                     (SELECT count(*) FROM notifications n JOIN users u ON u.tenant_id=n.tenant_id AND u.id=n.user_id WHERE n.tenant_id=$1 AND u.person_id=$2), \
+                     (SELECT count(*) FROM user_two_factor_reset_requests r JOIN users u ON u.tenant_id=r.tenant_id AND u.id=r.user_id WHERE r.tenant_id=$1 AND u.person_id=$2) \
                      FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1",
                     &[&scope.tenant(), &subject.person.get(), &emails(subject)],
                 )
@@ -134,6 +136,11 @@ impl Handler for Accounts {
                         by_person: row.get(2),
                         by_identifier: 0,
                     },
+                    KindCount {
+                        kind: TWO_FACTOR_RESET_REQUEST_KIND.into(),
+                        by_person: row.get(3),
+                        by_identifier: 0,
+                    },
                 ],
                 ..Located::default()
             })
@@ -154,7 +161,8 @@ impl Handler for Accounts {
                      coalesce((SELECT jsonb_agg(jsonb_build_object('type',n.type,'title',n.title,'body',n.body,'url',n.url,'read_at',n.read_at::text,'created_at',n.created_at::text) ORDER BY n.id) \
                        FROM notifications n WHERE n.tenant_id=u.tenant_id AND n.user_id=u.id),'[]'::jsonb), \
                      coalesce((SELECT jsonb_agg(s.document ORDER BY s.id) FROM user_scim_users s \
-                       WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id),'[]'::jsonb) \
+                       WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id),'[]'::jsonb), \
+                     coalesce((SELECT jsonb_agg(jsonb_build_object('company',r.company_name,'request_ip',host(r.request_ip),'recipient',r.recipient_kind,'requested_at',r.requested_at::text,'closed_at',r.closed_at::text) ORDER BY r.id) FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id),'[]'::jsonb) \
                      FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.person_id=$2 ORDER BY u.id",
                     &[&scope.tenant(), &subject.person.get()],
                 )
@@ -196,6 +204,7 @@ impl Handler for Accounts {
                         "status": row.get::<_, String>(3), "email_verified_at": row.get::<_, Option<String>>(4),
                         "deleted_at": row.get::<_, Option<String>>(5), "notifications": row.get::<_, Value>(6),
                         "scim_documents": row.get::<_, Value>(7),
+                        "two_factor_reset_requests": row.get::<_, Value>(8),
                     })
                 })
                 .collect();
@@ -338,6 +347,58 @@ impl Handler for Accounts {
                     .into_iter()
                     .filter(|id| !held_notices.contains_key(id))
                     .collect();
+                let requests: Vec<(i64, Option<String>)> = tx
+                    .sql()
+                    .query(
+                        "SELECT id,host(request_ip) FROM user_two_factor_reset_requests WHERE tenant_id=$1 AND user_id=$2 ORDER BY id FOR UPDATE",
+                        &[&tenant, &user],
+                    )
+                    .await?
+                    .iter()
+                    .map(|row| (row.get(0), row.get(1)))
+                    .collect();
+                let held_requests = holds
+                    .records(
+                        tx.sql(),
+                        grant,
+                        TWO_FACTOR_RESET_REQUEST_KIND,
+                        &requests.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                    )
+                    .await?;
+                for (request, hold) in &held_requests {
+                    erased
+                        .kept
+                        .push(Kept::held(TWO_FACTOR_RESET_REQUEST_KIND, request, *hold));
+                }
+                let requests: Vec<(i64, String)> = requests
+                    .into_iter()
+                    .filter_map(|(id, ip)| (!held_requests.contains_key(&id)).then_some((id, ip?)))
+                    .collect();
+                let request_ids: Vec<i64> = if requests.is_empty() {
+                    Vec::new()
+                } else {
+                    tx.mutate(move |sql| {
+                        Box::pin(async move {
+                            let ids: Vec<i64> = requests.iter().map(|(id, _)| *id).collect();
+                            sql.execute(
+                                "UPDATE user_two_factor_reset_requests SET request_ip=NULL WHERE tenant_id=$1 AND id=ANY($2)",
+                                &[&tenant, &ids],
+                            )
+                            .await?;
+                            let changes = requests
+                                .into_iter()
+                                .map(|(id, ip)| Change {
+                                    kind: TWO_FACTOR_RESET_REQUEST_KIND.into(),
+                                    id,
+                                    old: json!({"request_ip": ip}),
+                                    new: json!({"request_ip": null}),
+                                })
+                                .collect();
+                            Ok((ids, changes))
+                        })
+                    })
+                    .await?
+                };
                 let placeholder = format!("erased-{user}@erased.invalid");
                 // The account's other records, each kept while a hold names
                 // it, and written only while it, or its history, still holds
@@ -559,6 +620,11 @@ impl Handler for Accounts {
                 }
                 erased.count(USER_KIND, Action::Anonymised, 1);
                 erased.count(NOTIFICATION_KIND, Action::Deleted, removed.len() as i64);
+                erased.count(
+                    TWO_FACTOR_RESET_REQUEST_KIND,
+                    Action::Anonymised,
+                    request_ids.len() as i64,
+                );
                 // Only records this transaction changed: the database clears
                 // evidence of nothing else.
                 if !done {
@@ -579,6 +645,13 @@ impl Handler for Accounts {
                     .records
                     .extend(other.into_iter().map(|(kind, id)| ErasedRecord {
                         kind: kind.into(),
+                        id,
+                        person: None,
+                    }));
+                erased
+                    .records
+                    .extend(request_ids.into_iter().map(|id| ErasedRecord {
+                        kind: TWO_FACTOR_RESET_REQUEST_KIND.into(),
                         id,
                         person: None,
                     }));
@@ -648,7 +721,7 @@ impl Handler for Accounts {
 
 inventory::submit! { Contribution::new(PERSONAL_DATA, "core/user.accounts",
 Provenance { module: "core/user", source: file!(), line: line!() },
-&PersonalData { label: "User accounts and notifications", kinds: &[USER_KIND, IDENTITY_KIND, NOTIFICATION_KIND, INVITATION_KIND, SCIM_KIND, EXTERNAL_IDENTITY_KIND, BOOTSTRAP_KIND, TWO_FACTOR_RESET_KIND], person_subjects: &[], handler: &ACCOUNTS }) }
+&PersonalData { label: "User accounts and notifications", kinds: &[USER_KIND, IDENTITY_KIND, NOTIFICATION_KIND, INVITATION_KIND, SCIM_KIND, EXTERNAL_IDENTITY_KIND, BOOTSTRAP_KIND, TWO_FACTOR_RESET_KIND, TWO_FACTOR_RESET_REQUEST_KIND], person_subjects: &[], handler: &ACCOUNTS }) }
 inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.user",
 Provenance { module: "core/user", source: file!(), line: line!() },
 &RecordKind { kind: USER_KIND, fields: &["name", "email"], subject_identifier: false, person: false }) }
@@ -673,6 +746,9 @@ Provenance { module: "core/user", source: file!(), line: line!() },
 inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.two_factor_reset",
 Provenance { module: "core/user", source: file!(), line: line!() },
 &RecordKind { kind: TWO_FACTOR_RESET_KIND, fields: &["name", "email"], subject_identifier: false, person: false }) }
+inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.two_factor_reset_request",
+Provenance { module: "core/user", source: file!(), line: line!() },
+&RecordKind { kind: TWO_FACTOR_RESET_REQUEST_KIND, fields: &["company", "request_ip"], subject_identifier: false, person: false }) }
 
 /// Deletes a tenant membership's provider links and external sessions, one
 /// `Change` per row. The installation-owned identity and credentials stay.

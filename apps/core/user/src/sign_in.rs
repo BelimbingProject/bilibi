@@ -13,6 +13,7 @@ use bilibi_step_up::{Availability, Challenge, Method, Purpose, Spent};
 use bilibi_tenancy::{AccountKind, Channel, Scope};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::net::IpAddr;
 use tokio_postgres::GenericClient;
 
 pub const SIGN_IN: &str = "core.user.sign_in";
@@ -353,6 +354,54 @@ impl UserService {
             csrf: pending.scope.csrf.clone(),
             methods: self.step_up.enrolled_methods(&pending.scope).await?,
         })
+    }
+
+    /// File a reset request only while this staff pending sign-in still holds
+    /// the password proof and its own CSRF value.
+    pub async fn request_sign_in_two_factor_reset(
+        &self,
+        token: &str,
+        csrf: &str,
+        ip: Option<IpAddr>,
+    ) -> Result<crate::two_factor::recovery::RequestOutcome> {
+        self.request_sign_in_two_factor_reset_of(token, csrf, ip, AccountKind::Staff)
+            .await
+    }
+
+    /// The same request from a customer portal pending sign-in.
+    pub async fn portal_request_sign_in_two_factor_reset(
+        &self,
+        token: &str,
+        csrf: &str,
+        ip: Option<IpAddr>,
+    ) -> Result<crate::two_factor::recovery::RequestOutcome> {
+        self.request_sign_in_two_factor_reset_of(token, csrf, ip, AccountKind::Customer)
+            .await
+    }
+
+    async fn request_sign_in_two_factor_reset_of(
+        &self,
+        token: &str,
+        csrf: &str,
+        ip: Option<IpAddr>,
+        kind: AccountKind,
+    ) -> Result<crate::two_factor::recovery::RequestOutcome> {
+        let pending = self.pending(token, kind).await?;
+        let mut client = self.db.get().await?;
+        let mut tx = self
+            .mutations
+            .begin(
+                &mut client,
+                pending
+                    .scope
+                    .mutation_context("user.two_factor.reset_requested"),
+            )
+            .await?;
+        let held = self.hold_pending(&tx, &pending, csrf).await?;
+        let outcome =
+            crate::two_factor::recovery::request_in(self, &mut tx, &held.scope, ip).await?;
+        tx.commit().await?;
+        Ok(outcome)
     }
 
     async fn hold_pending(

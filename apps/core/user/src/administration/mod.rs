@@ -72,6 +72,7 @@ pub struct Options {
     /// OR semantics; at most [`MAX_ROLE_IDS`] unique positive ids.
     pub role_ids: Vec<i64>,
     pub membership: Option<Membership>,
+    pub reset_requested: bool,
     pub sort: Sort,
     pub descending: bool,
     /// One-based, at most [`MAX_PAGE`].
@@ -100,6 +101,12 @@ pub struct Entry {
     pub roles: Vec<Role>,
     pub membership: Membership,
     pub invitation: Option<i64>,
+    pub reset_requested_at: Option<SystemTime>,
+    pub two_factor_enabled: bool,
+    pub installation_owner: bool,
+    /// A portal customer included only because its open reset request is work
+    /// for this page. It is not a second customer-account list.
+    pub reset_request_only: bool,
 }
 
 pub struct Page {
@@ -172,6 +179,6 @@ inventory::submit! {
 // the facade rather than an operation contract (`base/agent_api` page).
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, SERVICE, bilibi_module_registry::Provenance { module: "core/user", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
     service: SERVICE,
-    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ],
-    pending: bilibi_module_registry::contributions::Pending::Every { reason: "Account administration writes through the User facade; no contract yet." },
+    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ("reset_two_factor", crate::two_factor::recovery::RESET), ],
+    pending: bilibi_module_registry::contributions::Pending::Every { reason: "Invitation and membership administration still write through the User facade." },
 }) }

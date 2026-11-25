@@ -518,6 +518,17 @@ pub async fn challenge(
                 }
                 challenge_card(&app, &site, &token, &submission.method, &message, "").await
             }
+            "request_reset" => {
+                let address=api::client_address(peer.as_ref().map(|Extension(ConnectInfo(peer))|*peer),&headers);
+                let outcome=app.user.portal_request_sign_in_two_factor_reset(&token,&submission.csrf,address).await?;
+                let message=if outcome.created {
+                    format!("Request sent to {}. You'll get an email when 2FA is reset.",outcome.recipient)
+                } else {
+                    let at=jiff::Timestamp::try_from(outcome.requested_at).map_err(|_|Error::Internal)?;
+                    format!("A request was already sent to {} at {}. You'll get an email when 2FA is reset.",outcome.recipient,at.strftime("%Y-%m-%d %H:%M UTC"))
+                };
+                challenge_card(&app,&site,&token,&submission.method,&message,"").await
+            }
             "verify" => match app
                 .user
                 .portal_complete_sign_in(&token, &submission.csrf, &submission.method, &submission.code)

@@ -20,6 +20,7 @@ pub const CREATE: &str = "admin.user.create";
 pub const UPDATE: &str = "admin.user.update";
 pub const DELETE: &str = "admin.user.delete";
 pub const INVITE: &str = "admin.user.invite";
+pub use crate::two_factor::recovery::CAPABILITY as RESET_TWO_FACTOR;
 const READ: &[&str] = &[LIST, VIEW];
 const ALL: &[&str] = &[
     LIST,
@@ -28,6 +29,7 @@ const ALL: &[&str] = &[
     UPDATE,
     DELETE,
     INVITE,
+    RESET_TWO_FACTOR,
     crate::sso::config::MANAGE,
 ];
 const fn role(
@@ -46,8 +48,8 @@ const fn role(
 }
 // The two user-management roles, and the tenant owner's share.
 inventory::submit! { Contribution::new(VOCABULARY, "core/user", Provenance { module: "core/user", source: file!(), line: line!() }, &VocabularyContribution {
-    domains: &[], verbs: &["invite"],
-    capabilities: &[C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(DELETE), C::tenant(INVITE), C::platform(crate::reset::MANAGE_LIFETIME), C::tenant(crate::sso::config::MANAGE)],
+    domains: &[], verbs: &["invite", "two-factor-reset"],
+    capabilities: &[C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(DELETE), C::tenant(INVITE), C::tenant(RESET_TWO_FACTOR), C::platform(crate::reset::MANAGE_LIFETIME), C::tenant(crate::sso::config::MANAGE)],
     roles: &[
         role("user_viewer", "User Viewer", "Read-only access to user management.", READ),
         role("user_editor", "User Editor", "Read-write access to user management.", ALL),
@@ -76,7 +78,7 @@ bilibi_menu::contribute!(
 static GRID: bilibi_grid::GridContribution = bilibi_grid::GridContribution {
     record_fields: &[bilibi_grid::RecordFields { table: "users", fields: crate::record_fields::ALL }],
     tables: &[bilibi_grid::TableDecl::new("users", "Users", LIST,
-        bilibi_grid::Source::tenant("SELECT u.id,u.name,i.email,i.email_verified_at,u.created_at,u.updated_at,u.person_id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.deleted_at IS NULL AND u.kind='staff'"), "id", &[
+        bilibi_grid::Source::tenant("SELECT u.id,u.name,i.email,i.email_verified_at,u.created_at,u.updated_at,u.person_id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.deleted_at IS NULL AND (u.kind='staff' OR (u.kind='customer' AND EXISTS(SELECT 1 FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id AND r.closed_at IS NULL)) )"), "id", &[
             bilibi_grid::Field::new("id", "ID", bilibi_grid::FieldType::Integer),
             bilibi_grid::Field::record(crate::record_fields::NAME),
             bilibi_grid::Field::record(crate::record_fields::EMAIL),

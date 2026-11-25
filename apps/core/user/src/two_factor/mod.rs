@@ -17,11 +17,16 @@
 mod agent;
 mod provider;
 mod qr;
+pub(crate) mod recovery;
 mod totp;
 
-pub(crate) use agent::bind;
+pub(crate) fn bind(users: std::sync::Arc<UserService>) -> bilibi_module_registry::Result<()> {
+    agent::bind(users.clone())?;
+    recovery::bind(users)
+}
 pub use agent::{TwoFactorEmailError, TwoFactorEmailReset};
 pub use provider::{Authenticator, METHOD};
+pub use recovery::RequestOutcome;
 
 use crate::{credential_attempts, password, UserService};
 use bilibi_audit::{record_action, Attribution};

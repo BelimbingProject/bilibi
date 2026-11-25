@@ -199,6 +199,7 @@ WALKTHROUGHS=(
   'core|user-memberships|apps/core/user|memberships-walkthrough|migrate|BILIBI_MEMBERSHIPS_DEMO=disposable|-'
   'core|user-tenant-owner-bootstrap|apps/core/user|tenant-owner-bootstrap-walkthrough|migrate|BILIBI_TENANT_OWNER_DEMO=disposable DATABASE_POOL_SIZE=1 BILIBI_MAIL_DIR=@/mailbox -MAIL_HOST|-'
   'core|user-notifications|apps/core/user|notifications-walkthrough|migrate|BILIBI_DISPOSABLE_NOTIFICATIONS_DEMO=yes|-'
+  'core|user-two-factor-reset-request|apps/core/user|two-factor-reset-request-walkthrough|migrate|BILIBI_TWO_FACTOR_RESET_REQUEST_DEMO=disposable|-'
   # Installs the fixture and two disabled connections; the protocol itself needs
   # tokens made in a browser (scripts/scim-conformance.py).
   'core|user-scim|apps/core/user|scim-walkthrough|migrate|BILIBI_SCIM_WALKTHROUGH=disposable|-'

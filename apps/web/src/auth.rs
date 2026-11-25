@@ -807,6 +807,17 @@ pub async fn challenge(
                 if let Some(seconds) = challenge.retry_after_seconds { message.push_str(&format!(" Try again in {seconds} seconds.")); }
                 challenge_card(&app,token,&submission.method,&message,"").await
             }
+            "request_reset" => {
+                let address=api::client_address(peer.as_ref().map(|Extension(ConnectInfo(peer))|*peer),&headers);
+                let outcome=app.user.request_sign_in_two_factor_reset(token,&submission.csrf,address).await?;
+                let message=if outcome.created {
+                    format!("Request sent to {}. You'll get an email when 2FA is reset.",outcome.recipient)
+                } else {
+                    let at=jiff::Timestamp::try_from(outcome.requested_at).map_err(|_|Error::Internal)?;
+                    format!("A request was already sent to {} at {}. You'll get an email when 2FA is reset.",outcome.recipient,at.strftime("%Y-%m-%d %H:%M UTC"))
+                };
+                challenge_card(&app,token,&submission.method,&message,"").await
+            }
             "verify" => match app.user.complete_sign_in(token,&submission.csrf,&submission.method,&submission.code).await? {
                 Some(session) => admitted(&app,&headers,peer,session).await,
                 None => challenge_card(&app,token,&submission.method,"","The code was not accepted. Check it or wait if too many attempts were made.").await,
