@@ -91,8 +91,6 @@ pub trait NotificationSink: Send + Sync {
         recipients: &'a [i64],
         notice: &'a Notice,
     ) -> RecordFuture<'a>;
-    /// Resolve the active installation owner inside this transaction.
-    fn installation_owner<'a>(&'a self, tx: &'a MutationTransaction<'_>) -> OwnerFuture<'a>;
     /// Called once after commit; delivery wakes only these recipients.
     fn committed(&self, tenant: i64, recipients: &[i64]);
     /// Which of `recipients` `record` would accept now in the transaction's
@@ -106,7 +104,6 @@ pub trait NotificationSink: Send + Sync {
         Box::pin(async move { Ok(recipients.to_vec()) })
     }
 }
-pub type OwnerFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<i64>>> + Send + 'a>>;
 pub type EligibleFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<i64>>> + Send + 'a>>;
 
 /// Bind exactly once during service installation. An unbound sink fails boot;
@@ -213,10 +210,6 @@ impl NotificationBoundary {
         self.sink.get().map(|sink| sink.as_ref()).ok_or_else(|| {
             bilibi_module_registry::RegistryError::Service("unbound notification sink".into())
         })
-    }
-    /// Sole recipient of installation-wide notices, when active in this tenant.
-    pub async fn installation_owner(&self, tx: &MutationTransaction<'_>) -> Result<Option<i64>> {
-        self.sink()?.installation_owner(tx).await
     }
     /// The recipients among `recipients` that can be notified now, sorted
     /// and without repeats.

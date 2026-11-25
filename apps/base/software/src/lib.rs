@@ -20,7 +20,6 @@ mod review;
 mod transfer;
 mod transport;
 mod update;
-mod update_notice;
 mod web;
 
 use bilibi_authz::{
@@ -384,6 +383,17 @@ impl Software {
         }
         tx.commit().await
     }
+    async fn reconcile_installer_activation(&self) -> Result<()> {
+        let Some(paths) = &self.paths else {
+            return Ok(());
+        };
+        let client = self.db.get().await?;
+        for job in jobs::ready_for_installer(&**client).await? {
+            paths.wake_installer(job).map_err(Error::refused)?;
+        }
+        Ok(())
+    }
+
     /// Runs beside the server for as long as it serves (`bilibi-web run`
     /// starts it like the queue executor): settles outcomes every few
     /// seconds, so a job the installer finished while this program was
@@ -395,6 +405,9 @@ impl Software {
         loop {
             if *stop.borrow() {
                 return Ok(());
+            }
+            if let Err(error) = self.reconcile_installer_activation().await {
+                eprintln!("warning: ready installer jobs could not be signalled: {error:?}");
             }
             if let Err(error) = self.end_silent().await {
                 eprintln!("warning: silent software jobs were not ended this round: {error:?}");
@@ -984,8 +997,8 @@ inventory::submit! { Contribution::new(ROUTES, "base/software.releases", provena
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/software", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/step_up", "base/system", "base/notifications", "base/schedule", "base/integration", "base/audit", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql")), ("base-software-005-paused", include_str!("../migrations/005-paused.sql")), ("base-software-006-installer-heartbeat", include_str!("../migrations/006-installer-heartbeat.sql")), ("base-software-007-release-trust", include_str!("../migrations/007-release-trust.sql")), ("base-software-008-update-notices", include_str!("../migrations/008-update-notices.sql"))],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/step_up", "base/system", "base/notifications", "base/integration", "base/audit", "base/ui", "base/menu", "base/datetime", "base/locale"],
+        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql")), ("base-software-005-paused", include_str!("../migrations/005-paused.sql")), ("base-software-006-installer-heartbeat", include_str!("../migrations/006-installer-heartbeat.sql")), ("base-software-007-release-trust", include_str!("../migrations/007-release-trust.sql"))],
         // Declaration order is build order: the page service reads this one.
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let software = Arc::new(Software {

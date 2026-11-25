@@ -138,14 +138,14 @@ Download a second, newer protected release into the same task assets, then prove
 ```sh
 export PROOF_UPDATE_TAG=setup-v1.0.1
 gh-axi release download "$PROOF_UPDATE_TAG" --repo "$PROOF_REPOSITORY" --dir "$BILIBI_PROOF_DATA/assets"
-docs/server-proof/lab.sh run 'systemctl is-active --quiet bilibi-installer@production.path; ! systemctl is-active --quiet bilibi-installer@production.service'
+docs/server-proof/lab.sh run 'systemctl is-active --quiet bilibi-installer@production.path; [[ $(systemctl is-active bilibi-installer@production.service) == inactive ]]'
 ```
 
 The driver writes one fresh code to the private proof folder; the PTY helper waits until the command has disabled echo before supplying it, redacts an unexpected echo and deletes the file. Run the installed command, then check its journal proves activation and its clean idle exit:
 
 ```sh
 docs/server-proof/drive.py terminal-code production-terminal-code
-docs/server-proof/lab.sh run "since=\$(date --iso-8601=seconds); python3 /src/docs/server-proof/terminal.py /data/private/production-terminal-code bilibi update production --to $PROOF_UPDATE_TAG | tee /data/proof/terminal-update.log; journalctl -u bilibi-installer@production.service --since \"\$since\" --grep='checking production\|no work ready; exiting' --quiet; ! systemctl is-active --quiet bilibi-installer@production.service; systemctl is-active --quiet bilibi-installer@production.path; test -z \"\$(find /opt/bilibi/production/incoming/installer-jobs -name 'job-*.ready' -print -quit)\""
+docs/server-proof/lab.sh run "since=\$(date --iso-8601=seconds); python3 /src/docs/server-proof/terminal.py /data/private/production-terminal-code bilibi update production --to ${PROOF_UPDATE_TAG#setup-v} | tee /data/proof/terminal-update.log; timeout 30 bash -c 'until [[ \$(systemctl is-active bilibi-installer@production.service) == inactive ]]; do sleep 1; done'; journalctl -u bilibi-installer@production.service --since \"\$since\" --grep='checking production' --quiet; journalctl -u bilibi-installer@production.service --since \"\$since\" --grep='no work ready; exiting' --quiet; systemctl is-active --quiet bilibi-installer@production.path; test -z \"\$(find /opt/bilibi/production/incoming/installer-jobs -name 'job-*.ready' -print -quit)\""
 ```
 
 The transcript must show the pinned available releases, From, To, composition, migrations, backup, every installer step and `Done`, without the authenticator code. The service journal must contain both its start scan and idle exit after the job. Queue a reviewed `switch: ask` install through `drive.py plan`, confirm the job is running before its pause, run `docs/server-proof/lab.sh reboot`, then confirm the enabled boot service marks that job interrupted and returns to inactive while its path remains waiting; this is the boot-recovery case in [Installer recovery](../../apps/installer/README.md#if-the-server-restarts-mid-way).
@@ -154,7 +154,7 @@ Finally prove the same command door performs Undo through the same job contract:
 
 ```sh
 docs/server-proof/drive.py terminal-code production-terminal-code
-docs/server-proof/lab.sh run "python3 /src/docs/server-proof/terminal.py /data/private/production-terminal-code bilibi update production --undo | tee /data/proof/terminal-undo.log; ! systemctl is-active --quiet bilibi-installer@production.service; systemctl is-active --quiet bilibi-installer@production.path"
+docs/server-proof/lab.sh run "python3 /src/docs/server-proof/terminal.py /data/private/production-terminal-code bilibi update production --undo | tee /data/proof/terminal-undo.log; timeout 30 bash -c 'until [[ \$(systemctl is-active bilibi-installer@production.service) == inactive ]]; do sleep 1; done'; systemctl is-active --quiet bilibi-installer@production.path"
 docs/server-proof/lab.sh run '/src/docs/server-proof/rows.sh'
 ```
 

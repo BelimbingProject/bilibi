@@ -171,7 +171,7 @@ fn releases_schema() -> Value {
     }})
 }
 fn releases_output() -> Value {
-    json!({"type":"object","description":"update (state: ready, current, unavailable or source_checkout; current version, checked_at; ready includes release notes and the exact install asset); instance (origin, role, label); installed_asset (local_release, program_sha256, github with repository_id, release_id, asset_id, tag, target, archive_sha256, program_sha256, setup_commit); uploads; github (repository, repository_id, accepted, target, releases with release_id, asset_id, tag, digest, target, installed; or message)."})
+    json!({"type":"object","description":"instance (origin, role, label); installed_asset (local_release, program_sha256, github with repository_id, release_id, asset_id, tag, target, archive_sha256, program_sha256, setup_commit); uploads; github (repository, repository_id, accepted, target, releases with release_id, asset_id, tag, digest, target, installed; or message)."})
 }
 fn job_schema() -> Value {
     json!({"type":"object","properties":{

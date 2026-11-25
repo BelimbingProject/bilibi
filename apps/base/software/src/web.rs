@@ -12,7 +12,7 @@
 //! review being confirmed, and a flash. Every render reads the status again,
 //! and a mounted page is woken by each job write through `follow.rs`, so the
 //! installer's progress rows appear as they are written.
-use crate::{follow::Follow, release_files::UpdatePrompt, MANAGE};
+use crate::{follow::Follow, MANAGE};
 use askama::Template;
 use bilibi_agent_api::{
     page::{Call, PageContracts},
@@ -32,8 +32,8 @@ use bilibi_ui::{
     },
     params, Alert, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, Choice,
     ColumnType, ColumnsOutcome, ConfirmDialog, Fact, Facts, Field, FlashMap, FlexRow, FlexTable,
-    Fold, Header, Html, InputKind, Instant, ListColumns, ListSpec, ListState, StatusKind, Tab,
-    TableEmpty, Tabs, NO_FLASH,
+    Fold, Header, Html, InputKind, Instant, ListColumns, ListSpec, ListState, SectionHeading,
+    StatusKind, Tab, TableEmpty, Tabs, NO_FLASH,
 };
 use jiff::Timestamp;
 use serde_json::{json, Value};
@@ -688,30 +688,48 @@ impl View {
         } else {
             self.catalogue(scope).await?
         };
-        let content = if releases {
+        let transfer = if releases {
             let active = status["job"]["state"] == "queued" || status["job"]["state"] == "running";
-            let mut details = if can_manage {
+            let install = if can_manage {
                 self.install_card(&instance, &status, active)?
             } else {
                 Html::EMPTY
             };
-            details.push(&self.instance_card(&instance, &status)?);
-            let state = text(&status["job"]["state"]);
-            let mut job = Html::EMPTY;
-            if !status["job"].is_null() {
-                let card = self.job_card(&display, &instance, can_manage, &status)?;
-                if active || matches!(state, "failed" | "interrupted") {
-                    job = card;
-                } else {
-                    details.push(&card);
-                }
-            }
-            details.push(&self.backups_card(&display, &status)?);
-            details.push(&self.history_card(&display, &status)?);
-            self.releases.body(scope, active, job, details).await?
+            self.releases.body(scope, install).await?
         } else {
-            self.modules.body(&status, &catalogue, &self.propose)?
+            Html::EMPTY
         };
+        let mut content = Html::EMPTY;
+        if releases {
+            content.push(&self.instance_card(&instance, &status)?);
+            if status["job"].is_null() {
+                content.push(&render(Card {
+                    id: "software-job",
+                    title: "Last install",
+                    body: Html::text("No install or undo has been requested on this server yet."),
+                    ..Card::default()
+                })?);
+            } else {
+                content.push(&self.job_card(&display, &instance, can_manage, &status)?);
+            }
+            content.push(&self.backups_card(&display, &status)?);
+            content.push(&render(SectionHeading {
+                title: "Get an update",
+                description:
+                    "Install a verified setup file from GitHub or upload a saved copy of one.",
+                ..SectionHeading::default()
+            })?);
+            content.push(&transfer);
+            let history = self.history_card(&display, &status)?;
+            content.push(&render(Fold {
+                id: "software-history-details",
+                title: "Install history",
+                body: history,
+                ..Fold::default()
+            })?);
+        } else {
+            content.push(&self.modules.body(&status, &catalogue, &self.propose)?);
+        }
         self.page(&instance, content)
     }
 
@@ -995,29 +1013,7 @@ impl View {
             });
         }
         let result = &job["result"];
-        let failed = matches!(state, "failed" | "interrupted");
-        let failed_step = steps_json
-            .iter()
-            .find(|step| step["state"] == "failed")
-            .or_else(|| {
-                steps_json.iter().find(|step| {
-                    !step["started_at"].is_null()
-                        && matches!(text(&step["state"]), "running" | "skipped")
-                })
-            });
-        let result_message = if failed {
-            result["message"]
-                .as_str()
-                .filter(|message| !message.trim().is_empty())
-                .or_else(|| {
-                    failed_step
-                        .and_then(|step| step["detail"]["message"].as_str())
-                        .filter(|message| !message.trim().is_empty())
-                })
-                .unwrap_or("No failure reason was recorded.")
-        } else {
-            text(&result["message"])
-        };
+        let result_message = text(&result["message"]).to_owned();
         let result_kind = match state {
             "done" => Some(StatusKind::Success),
             "failed" => Some(StatusKind::Error),
@@ -1037,7 +1033,7 @@ impl View {
         }
         let undo = &status["undo"];
         let undo_offered =
-            can_manage && undo["available"] == true && (failed || undo["job"].as_i64() == Some(id));
+            can_manage && undo["available"] == true && undo["job"].as_i64() == Some(id);
         if state == "done" && kind == "install" {
             if instance.role == bilibi_system::Role::Staging {
                 notes.push("Next: try it here.".to_owned());
@@ -1087,11 +1083,11 @@ impl View {
         let steps = render(Fold {
             id: "software-job-details",
             title: "Install steps",
-            open: active || failed,
+            open: active || state == "failed" || state == "interrupted",
             body: render(JobSteps { steps })?,
             ..Fold::default()
         })?;
-        let mut body = render(JobBody {
+        let body = render(JobBody {
             id,
             heading,
             summary,
@@ -1100,22 +1096,10 @@ impl View {
             worker: job["worker"].as_str().map(str::to_owned),
             steps,
             result_kind,
-            result_message: result_message.to_owned(),
+            result_message,
             notes,
             actions,
         })?;
-        if failed && can_manage {
-            let step = failed_step.map_or("No step was recorded", |step| text(&step["label"]));
-            let message = result_message
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            body.push(&render(UpdatePrompt {
-                id: "software-diagnosis-prompt",
-                label: "Copy AI diagnosis prompt",
-                prompt: &format!("Diagnose and help fix Bilibi software job {id} at {}. Step: {step}. Message: {message}", instance.origin),
-            })?);
-        }
         let title = match state {
             "queued" | "running" => "Current job",
             _ => "Last install",

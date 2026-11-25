@@ -17,7 +17,6 @@ bilibi-locale.workspace = true
 bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-notifications.workspace = true
-bilibi-schedule.workspace = true
 bilibi-settings.workspace = true
 bilibi-step-up.workspace = true
 bilibi-system.workspace = true

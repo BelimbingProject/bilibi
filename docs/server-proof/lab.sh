@@ -72,10 +72,13 @@ run)
 reboot)
     actual=$(sudo -n machinectl show "$NAME" -p RootDirectory --value)
     [[ $actual == "$ROOT" ]] || { echo "Refusing machine outside this task: $actual" >&2; exit 1; }
+    previous_boot=$(run "cat /proc/sys/kernel/random/boot_id")
+    [[ -n $previous_boot ]]
     sudo -n machinectl reboot "$NAME"
     for _ in {1..90}; do
         if [[ $(sudo -n machinectl show "$NAME" -p State --value 2>/dev/null || true) == running ]] &&
-            sudo -n systemd-run -M "$NAME" -P --wait --quiet --collect /bin/true 2>/dev/null; then
+            boot=$(run "cat /proc/sys/kernel/random/boot_id" 2>/dev/null) &&
+            [[ -n $boot && $boot != "$previous_boot" ]]; then
             network
             exit 0
         fi

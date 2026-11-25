@@ -27,8 +27,8 @@ ENV = dict(os.environ, CHROME_DEVTOOLS_AXI_SESSION=os.environ.get('CHROME_DEVTOO
            CHROME_DEVTOOLS_AXI_USER_DATA_DIR=str(DATA / 'chrome'),
            CHROME_DEVTOOLS_AXI_CHROME_ARGS='--ignore-certificate-errors')
 CTX = ssl._create_unverified_context()  # Only the disposable lab's internal CA.
-EMAIL = os.environ.get('LAB_EMAIL', 'owner@proof.invalid')
-PASSWORD = Path(os.environ.get('LAB_PASSWORD_FILE', PRIVATE / 'password')).read_text().strip()
+EMAIL = 'owner@proof.invalid'
+PASSWORD = (PRIVATE / 'password').read_text().strip()
 
 def state():
     return json.loads(STATE.read_text()) if STATE.exists() else {}
