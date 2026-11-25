@@ -2,9 +2,28 @@ use crate::Software;
 use bilibi_database::{Change, Context, Error, Result};
 use bilibi_notifications::Notice;
 use serde_json::{json, Value};
+use std::{sync::Arc, time::Duration};
+use tokio::{sync::watch, time};
 
 impl Software {
-    pub(super) async fn check_for_update(&self) -> Result<()> {
+    pub async fn run_update_checks(self: Arc<Self>, mut stop: watch::Receiver<bool>) {
+        let mut ticks = time::interval(Duration::from_secs(15 * 60));
+        ticks.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        while !*stop.borrow() {
+            tokio::select! {
+                biased;
+                _ = stop.changed() => return,
+                () = async {
+                    ticks.tick().await;
+                    if let Err(error) = self.check_for_update().await {
+                        eprintln!("warning: software update check failed: {error:?}");
+                    }
+                } => {}
+            }
+        }
+    }
+
+    async fn check_for_update(&self) -> Result<()> {
         let Some(paths) = self.paths.as_ref() else {
             return Ok(());
         };
