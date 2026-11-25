@@ -83,7 +83,7 @@ The signed-in home page renders `core.portal.welcome_notice` through [Base Templ
 
 ## Customer accounts
 
-- The staff page lists the tenant's customer accounts (`bilibi_user::customer_accounts`, the one read of `users` that lists customers; staff reads never do).
+- The staff page lists the tenant's customer accounts (`bilibi_user::customer_accounts`, the canonical read of customer accounts). The installation owner can review and reset eligible customer accounts with an open 2FA reset request from **Customer accounts**.
 - **Revoke access** suspends the account through Core User (`set_customer_active_in`): it cannot sign in, fails its standing, and every session it holds ends at once. **Restore** lets it sign in again; no session comes back.
 
 ## Events

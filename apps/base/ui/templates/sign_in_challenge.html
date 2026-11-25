@@ -28,6 +28,12 @@
 {% else %}
 {% call feedback::alert(kind=bilibi_ui::StatusKind::Warning) %}No 2FA method is set up for this account. Ask an administrator for help before signing in again.{% endcall %}
 {% endif %}
+{% if password_origin %}
+<form method="post" action="{{ action }}" class="flex justify-center">
+{{ request_reset_fields }}
+{% call ui::button(button_type="submit", name="action", value="request_reset", id="sign-in-request-reset") %}Lost your phone? Ask for a reset{% endcall %}
+</form>
+{% endif %}
 <form method="post" action="{{ action }}" class="flex justify-center">
 {{ cancel_fields }}
 {% call ui::button(button_type="submit", name="action", value="cancel", id="sign-in-cancel") %}Cancel sign-in{% endcall %}
