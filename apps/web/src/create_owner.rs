@@ -1,16 +1,6 @@
-//! `bilibi-web create-owner`: the first owner account of an install, for a
-//! production database the development seed never touches. The account takes
-//! the operator's own attributes instead of the seed's. Everything is written
-//! by the owners: Company provisions the operator tenant and its company, User
-//! creates the account and the bootstrap receipt on the audited mutation
-//! boundary, Authz grants the role, and User then gives the account its
-//! Person, business affiliation and first desk. The host only reads flags.
-//!
-//! No password passes through this command. The owner claims the account
-//! from an emailed link (choose a password), then sets up 2FA; rerunning the
-//! command resends the link until the password is chosen and reports the
-//! claim afterwards, so whoever runs the install never holds the owner's
-//! sign-in. The last line is always `Owner claim: <state>`.
+//! Terminal entry point for installation owner setup and recovery. See
+//! `docs/server-install.md` for usage and `apps/core/user/README.md` for the
+//! bootstrap and ownership contracts.
 use bilibi_company::{self as primary, NewCompany, ProvisionOutcome};
 use bilibi_database::{Db, Error, Result};
 use bilibi_user::{

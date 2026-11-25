@@ -346,7 +346,7 @@ Initial setup appears under **Administration → Audit Log → Actions** as **Sy
 
 ## Transfer or recover installation ownership
 
-For a planned handover, open **Account → My settings → Ownership** in the signed-in app and follow the [reviewed transfer procedure](../apps/core/user/README.md#ownership-transfer-srcownershiprs).
+For a planned handover, follow the [reviewed transfer procedure](../apps/core/user/README.md#ownership-transfer-srcownershiprs).
 
 If the current owner is unavailable, use the trusted server terminal to name a replacement in the operator tenant:
 

@@ -39,7 +39,7 @@ The catalogue recommends the newest compatible release tested with this exact Pl
 | Installed Platform, Domains and Extensions | Host-supplied `bilibi_module_registry::Composition`, compiled into the program |
 | Available software and CI evidence | Published `catalogue.json` ([versions contract](../../../docs/versions.md)) |
 | Jobs, steps and enabled add-ons | `base_software_jobs`, `base_software_steps`, `base_software_plugins` |
-| What a backup restore loses | Server-wide `base_audit_mutations` since the backup |
+| What Undo counts in its restore review | Server-wide `base_audit_mutations` since the backup |
 | Trusted release proof | `/opt/bilibi/<instance>/trust/release.json`, pinned at setup and replaceable only by the installer from an owner-reviewed fresh-2FA job |
 | Highest admitted release | `/opt/bilibi/<instance>/trust/release-state.json`, outside the database and release backups |
 
@@ -109,7 +109,7 @@ Migration `base-software-003-local-builds` cancels legacy queued or running `cha
 
 - The installer writes a PostgreSQL dump under the instance folder at `backups/job-<n>/<database>.dump` before changing anything.
 - After a successful install or undo, it keeps the newest `KEEP_BACKUPS` backup folders (`apps/installer/src/flow.rs`, `prune`) and removes older ones. There is no fixed age in days. The backup step records the number as `keep_backups`; `status` carries the sentence once as `backup_rule`, and only the Backups section states it.
-- Undo restores the pre-install backup only when the install changed the database structure. It then loses data entered since that backup. Otherwise, Undo switches the program back and leaves data alone. Undo takes a new safety backup first.
+- Undo takes a safety backup before switching the program back. See the [installer's Undo procedure](../../installer/README.md#undo) for when it restores the database and what survives the restore.
 - If restoration fails, the service stays stopped and the job message names the file to restore by hand.
 
 ## How a worker plugs in
@@ -125,7 +125,7 @@ The separate installer (`apps/installer`) reads and writes the durable job table
 6. After the queue is empty, retain the markers seen before the idle scan, scan once more after ten seconds, remove only that snapshot when it is still empty, and exit. A new marker written during the final scan stays behind and activates another run.
 7. The server settles finished outcomes every 15 seconds and at startup through `MutationBoundary` as a `base/software.job` change under `software.finished`, attributed to the recorded worker. After commit it re-proves the requester’s live account through `Authentication` and sends a `software.job` notice. Missing accounts get no notice; notification failure never prevents settlement. Notice bodies are bounded to 900 characters.
 
-Before a database update committed, a restarted install ends interrupted and restores the previous running release. After the update committed, or during restore/switch-back, the installer resumes. It carries existing software and step-up evidence unchanged across a restore; every other write since the backup is lost. See [`apps/installer/README.md`](../../installer/README.md).
+Before a database update committed, a restarted install ends interrupted and restores the previous running release. After the update committed, or during restore/switch-back, the installer resumes. See the [installer's restore caveats](../../installer/README.md#caveats).
 
 ## Release archives
 

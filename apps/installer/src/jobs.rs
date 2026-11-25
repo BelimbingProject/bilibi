@@ -420,11 +420,8 @@ const HISTORY_TABLES: [&str; 4] = [
     "base_software_steps",
     "base_software_plugins",
 ];
-/// The audit rows of the software changes themselves, written after a
-/// backup: the 2FA check and the queue record of the job doing a restore, and
-/// the recorded outcomes of the jobs carried with it. A restore would drop
-/// them with everything else entered since, so they are carried like the
-/// history: (table, which rows).
+/// Audit rows selected for replay after a restore (table and row predicate).
+/// See the restore caveats in the installer README.
 const AUDIT_TABLES: [(&str, &str); 2] = [
     (
         "base_audit_actions",
