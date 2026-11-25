@@ -687,7 +687,7 @@ inventory::submit! { Contribution::new(VOCABULARY,"authz.builtin",Provenance {mo
         },
         RoleDefinition {
             description: "Full control within a single tenant: commerce, AI, messaging, company, employees, and addresses. No platform administration.",
-            ..role("tenant_owner", "Tenant Owner", false, &["admin.authz.field.manage", "admin.authz.step-up.manage"])
+            ..role("tenant_owner", "Tenant Owner", false, &["admin.authz.field.manage", "admin.authz.step-up.manage", bilibi_tenancy::VIEW, bilibi_tenancy::RENAME])
         },
         RoleDefinition {
             description: "Read-only access to decision logs, system logs, and sessions for compliance.",

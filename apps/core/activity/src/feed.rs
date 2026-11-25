@@ -125,21 +125,22 @@ async fn own(client: &dyn ReadClient, scope: &Scope, capability: &str) -> WriteR
     Ok(())
 }
 
-fn public_feed_origin(tenant: i64) -> WriteResult<String> {
-    let configured = std::env::var("PUBLIC_TENANT_ID")
-        .ok()
-        .and_then(|id| id.parse().ok());
-    std::env::var("PUBLIC_ORIGIN")
-        .ok()
-        .filter(|origin| configured == Some(tenant) && !origin.is_empty())
-        .map(|origin| origin.trim_end_matches('/').to_owned())
-        .ok_or_else(|| WriteError::Invalid(vec![FieldError::new(
-            "site",
-            "Configure the public listener for this workspace before creating a calendar feed link.",
-        )]))
-}
-
 impl Activities {
+    /// The address of the tenant's public site, which a feed link names.
+    async fn public_feed_origin(
+        &self,
+        client: &dyn ReadClient,
+        tenant: i64,
+    ) -> WriteResult<String> {
+        self.public
+            .origin(client, tenant)
+            .await?
+            .ok_or_else(|| WriteError::Invalid(vec![FieldError::new(
+                "site",
+                "Turn the public site on and give it a hostname (Administration, Public site) before creating a calendar feed link.",
+            )]))
+    }
+
     /// The reader's own feed key, if they have one.
     pub async fn feed_key(&self, scope: &Scope) -> Result<Option<FeedKey>> {
         let client = self.db.get().await?;
@@ -254,7 +255,7 @@ impl Activities {
         scope: &Scope,
     ) -> WriteResult<()> {
         own(client, scope, VIEW).await?;
-        public_feed_origin(scope.tenant())?;
+        self.public_feed_origin(client, scope.tenant()).await?;
         Ok(())
     }
 
@@ -268,7 +269,7 @@ impl Activities {
     ) -> WriteResult<(FeedKey, String, String)> {
         let scope = self.fresh(tx.sql(), scope).await?;
         own(tx.sql(), &scope, VIEW).await?;
-        let origin = public_feed_origin(scope.tenant())?;
+        let origin = self.public_feed_origin(tx.sql(), scope.tenant()).await?;
         // A link anyone holding it can read: ask for the second factor first.
         self.step_up
             .require(
@@ -404,9 +405,6 @@ impl Activities {
             return Ok(None);
         };
         let user: i64 = row.get(0);
-        if public_feed_origin(tenant).is_err() {
-            return Ok(None);
-        }
         let scope = match self
             .authentication
             .authenticate_job(&**client, tenant, user, None)

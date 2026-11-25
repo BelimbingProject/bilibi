@@ -140,13 +140,12 @@ impl Pages {
         })?;
         // Changing the password goes through the emailed reset link, which
         // proves the holder of the address as an in-place form would not.
-        if let Some(site) = site {
-            let forgot = format!("/portal/forgot/{}", site.address);
+        if site.is_some() {
             card.push(&render(&ActionLink {
                 id: "portal-account-password",
                 icon: "key",
                 title: "Change my password",
-                href: &forgot,
+                href: "/portal/forgot",
                 body: Html::text("Change my password"),
                 ..ActionLink::default()
             })?);

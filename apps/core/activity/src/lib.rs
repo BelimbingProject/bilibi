@@ -320,6 +320,8 @@ pub struct Activities {
     settings: Arc<bilibi_settings::Settings>,
     step_up: Arc<bilibi_step_up::StepUp>,
     people: Arc<bilibi_person::PersonService>,
+    /// The public site, whose primary hostname a feed link names.
+    public: Arc<bilibi_public::Public>,
 }
 impl Activities {
     async fn fresh(
@@ -942,6 +944,7 @@ inventory::submit! { Module {
             settings: s.get("base/settings.store")?,
             step_up: s.get(bilibi_step_up::SERVICE)?,
             people: s.get(bilibi_person::SERVICE)?,
+            public: s.get(bilibi_public::SERVICE)?,
         });
         agent_operations::bind(activities.clone())?;
         follow_up::bind(activities.clone())?;

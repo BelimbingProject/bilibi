@@ -62,6 +62,45 @@ async fn serve() -> Result<()> {
                 }
             }
         }
+        Some("public-hostname") => {
+            // Names a tenant's public site by a hostname (the launcher and the
+            // installer call it); staff change the rest on the Public site page.
+            let mut args: Vec<String> = std::env::args().skip(2).collect();
+            let on = args.iter().any(|arg| arg == "--on");
+            args.retain(|arg| arg != "--on");
+            let parsed = flags(&args, ["--tenant", "--hostname"])
+                .and_then(|[tenant, hostname]| Some((tenant.parse::<i64>().ok()?, hostname)));
+            let Some((tenant, hostname)) = parsed.filter(|(tenant, _)| *tenant > 0) else {
+                eprintln!("usage: bilibi-web public-hostname --tenant ID --hostname NAME [--on]");
+                return Err(Error::Invalid);
+            };
+            let origin = std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost".into());
+            let app = bilibi_web::App::new(db.clone(), &origin)?;
+            let public = app
+                .services
+                .get::<bilibi_base::public::Public>(bilibi_base::public::SERVICE)?;
+            match public
+                .bind_hostname(&app.mutations, tenant, hostname, on)
+                .await?
+            {
+                Ok(site) => println!(
+                    "Public site of tenant {tenant}: {} ({}), {}",
+                    hostname,
+                    site.title,
+                    if site.enabled {
+                        "on"
+                    } else {
+                        "off until staff turn it on"
+                    }
+                ),
+                Err(errors) => {
+                    for error in errors {
+                        eprintln!("{}: {}", error.field, error.message);
+                    }
+                    return Err(Error::Invalid);
+                }
+            }
+        }
         Some("create-owner") => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             bilibi_web::create_owner(&db, &args).await?;
@@ -164,34 +203,22 @@ async fn serve() -> Result<()> {
             let origin =
                 std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into());
             let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".into());
+            // Each request's hostname names the tenant's public site; the
+            // origin gives the listener's scheme and port.
             let public_site = match (
                 std::env::var("PUBLIC_ORIGIN").ok(),
                 std::env::var("PUBLIC_BIND_ADDR").ok(),
-                std::env::var("PUBLIC_TENANT_ID").ok(),
             ) {
-                (Some(origin), Some(bind), Some(tenant)) => {
-                    let tenant =
-                        tenant
-                            .parse::<i64>()
-                            .ok()
-                            .filter(|id| *id > 0)
-                            .ok_or_else(|| {
-                                eprintln!("PUBLIC_TENANT_ID must be a positive tenant ID");
-                                Error::Invalid
-                            })?;
-                    Some((origin, bind, tenant))
-                }
-                (None, None, None) => None,
+                (Some(origin), Some(bind)) => Some((origin, bind)),
+                (None, None) => None,
                 _ => {
-                    eprintln!(
-                        "PUBLIC_ORIGIN, PUBLIC_BIND_ADDR and PUBLIC_TENANT_ID must be set together"
-                    );
+                    eprintln!("PUBLIC_ORIGIN and PUBLIC_BIND_ADDR must be set together");
                     return Err(Error::Invalid);
                 }
             };
             if public_site
                 .as_ref()
-                .is_some_and(|(public_origin, public_bind, _)| {
+                .is_some_and(|(public_origin, public_bind)| {
                     public_bind == &bind
                         || origin_host(public_origin)
                             .zip(origin_host(&origin))
@@ -229,8 +256,8 @@ async fn serve() -> Result<()> {
             let listener = tokio::net::TcpListener::bind(&bind)
                 .await
                 .map_err(|_| Error::Internal)?;
-            let public = if let Some((public_origin, public_bind, tenant)) = &public_site {
-                let public = app.clone().at_public_site(public_origin, *tenant);
+            let public = if let Some((public_origin, public_bind)) = &public_site {
+                let public = app.clone().at_public_site(public_origin);
                 match public.secure_origin().await {
                     Ok(true) => {}
                     Ok(false) => {

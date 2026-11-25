@@ -70,7 +70,6 @@ pub struct App {
     pub db: Db,
     pub origin: Arc<str>,
     pub site: Site,
-    public_tenant: Option<i64>,
     settings: Arc<bilibi_base::settings::Settings>,
     pub step_up: Arc<bilibi_base::step_up::StepUp>,
     /// The host the server listens on, shown in the status bar;
@@ -183,7 +182,6 @@ impl App {
             db,
             origin: origin.into(),
             site: Site::Staff,
-            public_tenant: None,
             settings,
             step_up,
             listen_address: None,
@@ -206,16 +204,25 @@ impl App {
         })
     }
 
-    /// The scope of the public site this listener serves; the staff listener
-    /// serves none.
+    /// The public site the request being served reached, found by its
+    /// hostname at the public listener's door (`public_host`); none on the
+    /// staff listener.
     fn public_scope(&self) -> Result<bilibi_base::public::PublicScope> {
-        let tenant = self.public_tenant.ok_or(Error::NotFound)?;
-        Ok(self.public.site(tenant))
+        public::site()
+    }
+    /// The browser origin of the public site the request reached: this
+    /// listener's scheme and port with the request's own hostname, which the
+    /// door already proved names a live site.
+    fn public_origin(&self, headers: &HeaderMap) -> Option<String> {
+        let scheme = self.origin.split_once("://")?.0;
+        let host = headers.get(header::HOST)?.to_str().ok()?;
+        Some(format!("{scheme}://{host}"))
     }
 
-    pub fn at_public_site(mut self, origin: &str, tenant: i64) -> Self {
+    /// The public listener's app: `origin` gives its scheme and port; each
+    /// request's hostname names the tenant's site (`base/public`).
+    pub fn at_public_site(mut self, origin: &str) -> Self {
         self.site = Site::Public;
-        self.public_tenant = Some(tenant);
         self.origin = origin.into();
         self
     }
@@ -415,33 +422,32 @@ pub fn public_router(app: App) -> Router {
     let router = routes::install_moved(pages, &app.moved.public)
         .merge(webhooks::router())
         .merge(visitor::router())
-        .route("/portal/sign-in", get(portal_auth::sign_in_root))
         .route(
-            "/portal/sign-in/{site}",
+            "/portal/sign-in",
             get(portal_auth::sign_in_page).post(portal_auth::sign_in),
         )
         .route(
-            "/portal/sign-in/{site}/challenge",
+            "/portal/sign-in/challenge",
             get(portal_auth::challenge_page).post(portal_auth::challenge),
         )
         .route(
-            "/portal/forgot/{site}",
+            "/portal/forgot",
             get(portal_auth::forgot_page).post(portal_auth::forgot),
         )
         .route(
-            "/portal/reset/{site}/{token}",
+            "/portal/reset/{token}",
             get(portal_auth::reset_page).post(portal_auth::reset),
         )
         .route(
-            "/portal/accept/{site}/{token}",
+            "/portal/accept/{token}",
             get(portal_auth::accept_page).post(portal_auth::accept),
         )
         .route(
-            "/portal/register/{site}",
+            "/portal/register",
             get(portal_auth::register_page).post(portal_auth::register),
         )
         .route(
-            "/portal/verify/{site}/{token}",
+            "/portal/verify/{token}",
             get(portal_auth::verify_page).post(portal_auth::verify),
         )
         .route(media::STREAM, get(media::stream))
@@ -450,16 +456,12 @@ pub fn public_router(app: App) -> Router {
         .route("/fonts/{name}", get(embedded_asset))
         .route("/assets/{name}", get(embedded_asset))
         .route("/favicon.svg", get(embedded_asset))
-        .route("/favicon.ico", get(embedded_asset))
-        .layer(middleware::from_fn_with_state(
-            app.clone(),
-            public::listener,
-        ));
+        .route("/favicon.ico", get(embedded_asset));
     finish_router(router, app, perf)
 }
 
 fn finish_router(router: Router<App>, app: App, perf: Arc<bilibi_base::perf::Recorder>) -> Router {
-    router
+    let router = router
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), errors::pages))
         .layer(middleware::from_fn_with_state(
@@ -474,13 +476,31 @@ fn finish_router(router: Router<App>, app: App, perf: Arc<bilibi_base::perf::Rec
                     is_textual,
                 )),
         )
-        .layer(middleware::from_fn_with_state(perf, perf::requests))
-        .layer(middleware::from_fn_with_state(
-            app.clone(),
-            proxies::resolve,
-        ))
-        .layer(middleware::from_fn_with_state(app.clone(), host_guard))
-        .with_state(app)
+        .layer(middleware::from_fn_with_state(perf, perf::requests));
+    // Outermost last. The staff door checks its one host first. The public
+    // one first finds the client behind a trusted proxy, then looks the
+    // hostname up, a database lookup spending the sender's lookup budget so
+    // a flood of made-up hostnames is bounded before it reaches the
+    // database, on every path; then the listener budget counts the visitor.
+    let router = match app.site {
+        Site::Staff => router
+            .layer(middleware::from_fn_with_state(
+                app.clone(),
+                proxies::resolve,
+            ))
+            .layer(middleware::from_fn_with_state(app.clone(), host_guard)),
+        Site::Public => router
+            .layer(middleware::from_fn_with_state(
+                app.clone(),
+                public::listener,
+            ))
+            .layer(middleware::from_fn_with_state(app.clone(), public::door))
+            .layer(middleware::from_fn_with_state(
+                app.clone(),
+                proxies::resolve,
+            )),
+    };
+    router.with_state(app)
 }
 
 async fn host_guard(
@@ -765,7 +785,12 @@ fn token(headers: &HeaderMap) -> Result<String> {
         .ok_or(Error::Unauthorized)
 }
 fn origin(app: &App, headers: &HeaderMap) -> Result<()> {
-    if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) == Some(&app.origin) {
+    let expected = match app.site {
+        Site::Staff => Some(app.origin.to_string()),
+        Site::Public => app.public_origin(headers),
+    };
+    let given = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    if given.is_some() && given == expected.as_deref() {
         Ok(())
     } else {
         Err(Error::Forbidden)

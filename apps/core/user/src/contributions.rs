@@ -58,7 +58,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "core/user", Provenance { mod
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.reset-password", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/reset-password/{token}" }) }
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.accept-invitation", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/accept/{token}" }) }
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.resend-invitation", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/accept/{token}/resend" }) }
-inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.portal-reset-password", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/portal/reset/{site}/{token}" }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.portal-reset-password", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/portal/reset/{token}" }) }
 
 // The `admin.user` menu entry for the tenant-wide `/users` index.
 bilibi_menu::contribute!(

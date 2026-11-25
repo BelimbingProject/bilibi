@@ -369,6 +369,16 @@ async fn setting(
     }
     Ok(())
 }
+/// Gives `tenant`'s public site `host` and turns it on.
+async fn public_site(app: &bilibi_web::App, tenant: i64, host: &str) -> Result<()> {
+    app.services
+        .get::<bilibi_base::public::Public>(bilibi_base::public::SERVICE)?
+        .bind_hostname(&app.mutations, tenant, host, true)
+        .await?
+        .map_err(|_| Error::Invalid)?;
+    Ok(())
+}
+
 async fn prepare_host(db: &Db, services: Arc<Services>) -> Result<Setup> {
     let root = std::env::var("BILIBI_MEDIA_DEMO_ROOT").map_err(|_| Error::Invalid)?;
     bilibi_walkthrough_fixture::install(db).await?;
@@ -429,8 +439,19 @@ async fn serve(db: Db) -> Result<()> {
         .collect();
     let page = std::env::var("PAGE_ADDR").unwrap_or_else(|_| "127.0.0.1:3992".into());
     open_sites(&pages, &pages);
-    let app = bilibi_web::App::new(db.clone(), &origin)?.at_public_site(&origin, 1);
+    let app = bilibi_web::App::new(db.clone(), &origin)?.at_public_site(&origin);
     let setup = prepare_host(&db, app.services.clone()).await?;
+    // The public listener answers for tenant 1's site at the origin's name.
+    if let Some(name) = url::Url::parse(&origin)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+    {
+        if let Err(error) = public_site(&app, 1, &name).await {
+            eprintln!(
+                "Bind a hostname to tenant 1's public site first ({error}); {name} is not one."
+            );
+        }
+    }
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let running = tokio::spawn(executor(&setup.services)?.run(stopped));
     tokio::spawn(control_server(
@@ -616,10 +637,30 @@ impl Reply {
         serde_json::from_str(&self.body).unwrap_or(Value::Null)
     }
 }
+/// The hostname a listener address answers for: a public listener answers
+/// only for a hostname of a site (`base/public`), never its bare address.
+static HOSTS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+fn name_listener(addr: &str, host: &str) {
+    HOSTS
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("hosts")
+        .insert(addr.to_owned(), host.to_owned());
+}
+fn host_of(addr: &str) -> String {
+    HOSTS
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("hosts")
+        .get(addr)
+        .cloned()
+        .unwrap_or_else(|| addr.to_owned())
+}
 /// One HTTP/1.1 request on a fresh connection.
 async fn http(addr: &str, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Reply {
     let mut stream = TcpStream::connect(addr).await.expect("connect");
-    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+    let host = host_of(addr);
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
     for (name, value) in headers {
         request.push_str(&format!("{name}: {value}\r\n"));
     }
@@ -684,6 +725,9 @@ async fn socket_from(
     let mut request = format!("ws://{addr}/visitor/v1/live")
         .into_client_request()
         .map_err(|e| e.to_string())?;
+    request
+        .headers_mut()
+        .insert("Host", host_of(addr).parse().map_err(|_| "host")?);
     if let Some(origin) = origin {
         request
             .headers_mut()
@@ -820,7 +864,14 @@ async fn prepare(db: Db) -> Result<()> {
         .await
         .map_err(internal)?;
     let addr = listener.local_addr().map_err(internal)?.to_string();
-    let host = format!("http://{addr}");
+    // Each tenant's public site has its own hostname; the listener answers
+    // for a site's hostname at its own port, never for its bare address.
+    let port = addr
+        .rsplit_once(':')
+        .map_or("", |(_, port)| port)
+        .to_owned();
+    name_listener(&addr, &format!("one.visitor.localhost:{port}"));
+    let host = format!("http://one.visitor.localhost:{port}");
     open_sites(&[PAGE.into()], &[PAGE.into()]);
     let staff_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -831,12 +882,19 @@ async fn prepare(db: Db) -> Result<()> {
         .await
         .map_err(internal)?;
     let other_addr = other_listener.local_addr().map_err(internal)?.to_string();
+    let other_port = other_addr
+        .rsplit_once(':')
+        .map_or("", |(_, port)| port)
+        .to_owned();
+    name_listener(&other_addr, &format!("two.visitor.localhost:{other_port}"));
     let staff_app = bilibi_web::App::new(db.clone(), &staff_host)?;
-    let app = staff_app.clone().at_public_site(&host, 1);
+    let app = staff_app.clone().at_public_site(&host);
     let other_app = staff_app
         .clone()
-        .at_public_site(&format!("http://{other_addr}"), 2);
+        .at_public_site(&format!("http://two.visitor.localhost:{other_port}"));
     let setup = prepare_host(&db, app.services.clone()).await?;
+    public_site(&app, 1, "one.visitor.localhost").await?;
+    public_site(&app, 2, "two.visitor.localhost").await?;
     tokio::spawn(async move {
         let _ = axum::serve(
             staff_listener,
@@ -1994,6 +2052,9 @@ async fn prepare(db: Db) -> Result<()> {
         let mut request = format!("ws://{target}{path}")
             .into_client_request()
             .expect("request");
+        request
+            .headers_mut()
+            .insert("Host", host_of(target).parse().expect("host"));
         request
             .headers_mut()
             .insert("Origin", origin.parse().expect("origin"));

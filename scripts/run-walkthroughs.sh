@@ -123,7 +123,7 @@ WALKTHROUGHS=(
   'base|settings|apps/base/settings|settings-walkthrough|operator|BILIBI_DISPOSABLE_SETTINGS_DEMO=yes|-;inspect'
   'base|workflow-owner|apps/base/workflow|owner|migrate|BILIBI_DISPOSABLE_WORKFLOW_DEMO=yes|init;available 4 1;approve 4 1;history 4 1;proof-delivery 4 2;proof-maintenance 4;approval-init 4;proof-bell 4'
 
-  'privacy|privacy-requests|apps/base/privacy|requests-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium PUBLIC_ORIGIN=https://privacy-public.localhost PUBLIC_TENANT_ID=1|seed;-'
+  'privacy|privacy-requests|apps/base/privacy|requests-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium PUBLIC_ORIGIN=https://privacy-public.localhost|seed;-'
   'privacy|privacy-job-read|apps/base/privacy|requests-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy|seed;job-read'
   'privacy|privacy-failures|apps/base/privacy|failures-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-job-ends|apps/base/privacy|job-ends-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
@@ -188,6 +188,7 @@ WALKTHROUGHS=(
   'core|person-custom-fields|apps/core/person|person-custom-fields|migrate|BILIBI_PERSON_DEMO=disposable|-|serve'
   'core|person-portal|apps/core/person|person-portal|migrate|BILIBI_PERSON_DEMO=disposable|-'
   'core|product|apps/core/product|product-walkthrough|seed|BILIBI_PRODUCT_WALKTHROUGH=disposable|-'
+  'core|tenant-rename|apps/core/tenant|tenant-rename-walkthrough|none|BILIBI_TENANT_DEMO=disposable|-'
   'core|tenant-suspension|apps/core/tenant|tenant-suspension-walkthrough|none|BILIBI_TENANT_DEMO=disposable|-'
   'core|user-company-accounts|apps/core/user|company-accounts-walkthrough|migrate|BILIBI_COMPANY_ACCOUNTS_DEMO=disposable|-'
   'core|user-company-pickers|apps/core/user|company-picker-bounds-proof|migrate|BILIBI_USER_DEMO=disposable|-'

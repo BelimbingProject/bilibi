@@ -10,12 +10,26 @@
 
 | Item | Value |
 | --- | --- |
-| Facade | `Public`, service `base/public.site`: the listener budget (`admit`) and the scope of the site the listener serves (`site`), both for the host |
+| Facade | `Public`, service `base/public.site`: site records and hostnames (`site_of`, `set_site_in`, `add_hostname_in`, `remove_hostname_in`, with previews), hostname resolution (`resolve`; `resolve_from` for a request, spending its sender's lookup budget), the address for emailed links (`origin`), the site a request reached (`site`, `logo_matches`), the listener budget (`admit`) and the deployment binding (`bind_hostname`) |
+| Staff page | **Administration → Public site** at `/public-site` (`admin.public-site.view`; writes need `admin.public-site.manage`) |
+| Agent operations | `base.public.site.get` (read), `base.public.site.set`, `base.public.hostname.add`, `base.public.hostname.remove` (safe writes); the page writes through the same contracts |
+| Command | `bilibi-web public-hostname --tenant ID --hostname NAME [--on]` (`install-server.sh public-hostname`) |
 | Contributions | `PUBLIC_PAGES` (`PublicPage`), `PUBLIC_LINKS` (`PublicLink`) |
 | Owner types | `PageService` (`bilibi_ui::page::PageService<PublicScope, Error>`), `LinkService`, `Link`, `LinkRequest`, `Reply`, `Target`, `Cache`, `PIXEL` |
 | Budgets | `SenderBudget { per_minute, per_hour }`, required on every page and link; `Counter` holds one budget's counters |
-| Settings | `public.sender_per_minute` (default 1,200) and `public.sender_per_hour` (default 20,000), installation-wide: the listener budget |
-| Tables | None |
+| Settings | Installation-wide: `public.lookups_per_minute` (default 120) and `public.lookups_per_hour` (default 2,000), the lookup budget; `public.sender_per_minute` (default 1,200) and `public.sender_per_hour` (default 20,000), the listener budget |
+| Tables | `public_sites` (one per tenant: address, title, logo, on or off), `public_site_hostnames` (unique across the installation, one primary per site) |
+
+## Sites and hostnames
+
+**The hostname names the tenant.** The public listener finds a request's site by its `Host` alone (`Public::resolve`): a hostname of a site that is on, of a live tenant, at the listener's own port. An unknown hostname, a site that is off and a tenant that is not live are one bare 404, for every path. The request then runs with that site's `PublicScope`.
+
+- **One site per tenant**, off until staff turn it on: an address (`acme`, lowercase letters, digits and inner hyphens, unique; `www`, `app`, `admin`, `api`, `mail`, `staff`, `portal` and `public` are kept), a title (what visitors and customers see on its pages and emails) and a logo (a PNG, JPEG, GIF or WebP image in Media, streamed to the site's own pages only).
+- **Hostnames**: lowercase names such as `shop.example.com`, without scheme or port, never an IP address or the staff site's own name. A hostname belongs to one site across the installation. The first is primary, a newly primary one takes over, and the primary one goes only when it is the last.
+- **Emailed links** (customer invitations, account-request confirmations, calendar feeds) use `Public::origin(tenant)`: the public listener's scheme (and port, when not the default) with the site's primary hostname, and nothing while the site is off or has none. A customer password reset uses the hostname the customer asked from.
+- Answers are reused for five seconds per server (at most 10,000 hostnames); a write on the same server forgets them. Every other lookup, on any path, first spends one of its sender's lookups (`Public::resolve_from`); past the lookup budget the answer is 429 without a lookup, so a flood of made-up hostnames from one sender is bounded before it reaches the database. A `Host` whose port is not a number names nothing.
+- **Staff** manage the site on **Administration → Public site**: the site card reads first and opens its form in place (address, title, the on/off toggle, the logo); the hostnames list has **+ Hostname**, a primary action and a confirmed remove. Agents use `base.public.*`; every page write is one of those contracts.
+- **Deployment**: `bilibi-web public-hostname --tenant 1 --hostname shop.example.com [--on]` makes the site (address `site-<tenant>`, the tenant's name as title, off) if it has none and gives it that primary hostname, audited as `system · public-site`. The launcher binds `shop.<name>.localhost` to tenant 1 and turns it on at first setup.
 
 ## A page
 
@@ -49,11 +63,12 @@ inventory::submit! { Contribution::new(PUBLIC_LINKS, "cx/email.click", provenanc
 
 ## Budgets
 
-Every public request passes two counts, cheapest first, before the owner is called. Over either, the answer is `429 Too many requests`.
+Every public request passes these counts, in order, before the owner is called. Over any, the answer is `429 Too many requests`.
 
 | Count | Counts | Set by |
 | --- | --- | --- |
-| Listener | Every request of one sender to the whole public site: pages, links, assets, portal pages, the visitor edge. Signed `/webhooks` calls are machines with their own limits and are not counted | The operator: `public.sender_per_minute`, `public.sender_per_hour` |
+| Lookup | Every hostname of one sender the server must look up in the database, on any path, before the request is known to reach a site. An answer read in the last five seconds is free | The operator: `public.lookups_per_minute`, `public.lookups_per_hour` |
+| Listener | Every request of one sender to the whole public site, after its hostname named a site: pages, links, assets, portal pages, the visitor edge, any path under `/webhooks/` that is no registered webhook. A POST to a registered signed webhook is a machine with its own limits (`base/integration`) and is not counted | The operator: `public.sender_per_minute`, `public.sender_per_hour` |
 | Route | Every request of one sender to one page or link | The declaring module: `budget` |
 
 - A sender is an IPv4 address or an IPv6 /64, through the trusted-proxy boundary (`session.trusted_proxies`), as on the visitor edge and the sign-in limiter.
@@ -72,10 +87,10 @@ Discovery refuses a page or link with a malformed path, an empty operation, a pa
 
 ## Proof
 
-`apps/web/examples/public-site-reference.rs --sender-admission` (walkthrough `public-sender-admission`) drives the real public router: a page and its POST link refuse a sender past its minute budget and admit another sender, an hour budget still refuses after the minute resets, a link of tenant 2 is refused on tenant 1's site like an unknown token, and with a listener budget of 3 a fourth request from one sender is refused even on a link with room of its own while another sender is admitted.
+`apps/web/examples/public-site-reference.rs --sender-admission` (walkthrough `public-sender-admission`) drives the real public router with two tenants' sites on two hostnames: a page and its POST link refuse a sender past its minute budget and admit another sender, an hour budget still refuses after the minute resets, each hostname names its own tenant and a link of one tenant is refused on the other's hostname like an unknown token, an unknown hostname and the listener's bare address get a bare 404, a site switched off answers 404 while the other still answers, and with a listener budget of 3 a fourth request from one sender is refused even on a link with room of its own while another sender is admitted. `site-boundary-walkthrough` proves the hostnames at the portal and a customer of one tenant being nobody on the other's hostname; then, with the listener budget spent, a path under `/webhooks/` that is no webhook is refused while five deliveries to the registered signed webhook still reach its boundary, and with a lookup budget of 5 a sender rotating made-up hostnames on `/webhooks/x` gets five 404s and then 429 for twenty more new names without a lookup, while another sender's lookup and a hostname read in the last five seconds still answer, and a `Host` whose port is not a number names nothing.
 
 ## Not yet
 
-- Site records and hostnames: the listener serves the one tenant named by `PUBLIC_TENANT_ID`.
+- Verifying a custom hostname (a TXT record) and base-domain subdomains for a shared server; the on-demand TLS "ask" address.
 - Actions: a POST that creates a record with no session behind it (tickets, trap field, fill time, places per hour, receipts).
 - Guest cookie, caching rules, the public content-security policy and the challenge port.
