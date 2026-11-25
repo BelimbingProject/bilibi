@@ -193,14 +193,51 @@ impl<'a> Run<'a> {
                 result["message"].as_str().unwrap_or("")
             ));
         }
-        self.forget_history();
         jobs::finish_with_plugins(&mut *self.client, &self.job, state, &result, plugins).await?;
+        self.forget_history();
         self.log(&format!(
             "{state}: {}",
             result["message"].as_str().unwrap_or("")
         ));
         Ok(())
     }
+    pub async fn settle_failed_restore(&mut self, key: &str) -> Db<bool> {
+        if self.state(key) != "failed" {
+            return Ok(false);
+        }
+        self.finish("failed", self.detail(key)).await?;
+        Ok(true)
+    }
+
+    pub async fn fail_restore(&mut self, key: &str, dump: &std::path::Path, why: &str) -> Db<()> {
+        let backup = self.detail("backup");
+        let mut result = json!({
+            "backup": backup["backup"], "backup_at": backup["backup_at"],
+        });
+        let manual_dump = if key == "restore" {
+            if let Ok(undone) = self.undone().await? {
+                result["release"] = json!(undone.release);
+                result["previous_release"] = json!(undone.release);
+            }
+            result["migrated"] = json!(false);
+            self.backup_file()
+        } else {
+            if let Ok(back) = self.back_plan(&self.failure_reason()).await? {
+                result = back.base;
+            }
+            result["switched_back"] = json!(false);
+            dump.to_path_buf()
+        };
+        result["restored"] = json!(false);
+        result["message"] = json!(format!(
+            "The restore step failed for {}: {why}. Restore {} by hand before starting the service. The service remains stopped.",
+            dump.display(),
+            manual_dump.display()
+        ));
+        self.fail_with(key, result.clone()).await?;
+        self.finish("failed", result).await
+    }
+
     /// The saved history of a restore in this job; see `backup::restore`.
     fn history_file(&self, key: &str) -> PathBuf {
         self.job_backups().join(format!("history-{key}.json"))
@@ -208,8 +245,6 @@ impl<'a> Run<'a> {
     fn job_backups(&self) -> PathBuf {
         self.layout.backups().join(format!("job-{}", self.job.id))
     }
-    /// Removed before the outcome is recorded, so a job that has finished
-    /// never has a saved history that could be restored again.
     fn forget_history(&self) {
         for entry in fs::read_dir(self.job_backups())
             .into_iter()
@@ -1012,16 +1047,7 @@ impl<'a> Run<'a> {
                     .await?;
                 }
                 Err(why) => {
-                    let mut result = back.base.clone();
-                    result["switched_back"] = json!(false);
-                    result["restored"] = json!(false);
-                    result["message"] = json!(format!(
-                        "{} The restore step failed: {why}. Restore {} by hand. The service remains stopped to protect the incomplete database.",
-                        back.lead,
-                        file.display()
-                    ));
-                    self.set("switch_back", "failed", result.clone()).await?;
-                    return self.finish("failed", result).await;
+                    return self.fail_restore("switch_back", file, &why).await;
                 }
             }
         }
@@ -1202,16 +1228,7 @@ impl<'a> Run<'a> {
                         .await?
                 }
                 Err(why) => {
-                    let result = json!({
-                        "release": undone.release, "previous_release": undone.release, "migrated": false,
-                        "backup": safety["backup"], "backup_at": safety["backup_at"], "restored": false,
-                        "message": format!(
-                            "The restore step failed for {}: {why}. Restore the safety backup {} by hand before starting release {}. The service remains stopped.",
-                            file.display(), self.backup_file().display(), undone.release
-                        ),
-                    });
-                    self.fail_with("restore", result.clone()).await?;
-                    return self.finish("failed", result).await;
+                    return self.fail_restore("restore", &file, &why).await;
                 }
             }
         }

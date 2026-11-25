@@ -219,16 +219,6 @@ fn validate_restore(saved: &Value) -> Result<(), String> {
 pub(crate) async fn clear(client: &Client) -> Result<(), String> {
     drop_each(
         client,
-        "extensions",
-        "SELECT format('DROP EXTENSION IF EXISTS %I CASCADE', ext.extname)
-         FROM pg_extension AS ext
-         JOIN pg_namespace AS nsp ON nsp.oid = ext.extnamespace
-         WHERE nsp.nspname = 'public'
-         ORDER BY ext.oid",
-    )
-    .await?;
-    drop_each(
-        client,
         "foreign keys",
         "SELECT format(
              'ALTER TABLE IF EXISTS %I.%I DROP CONSTRAINT IF EXISTS %I CASCADE',
@@ -264,22 +254,6 @@ pub(crate) async fn clear(client: &Client) -> Result<(), String> {
              rel.relispartition DESC,
              CASE rel.relkind WHEN 'v' THEN 0 WHEN 'm' THEN 1 WHEN 'S' THEN 3 ELSE 2 END,
              rel.oid",
-    )
-    .await?;
-    drop_each(
-        client,
-        "routines",
-        "SELECT format(
-             'DROP %s IF EXISTS %I.%I(%s) CASCADE',
-             CASE proc.prokind WHEN 'p' THEN 'PROCEDURE' WHEN 'a' THEN 'AGGREGATE' ELSE 'FUNCTION' END,
-             nsp.nspname,
-             proc.proname,
-             pg_get_function_identity_arguments(proc.oid)
-         )
-         FROM pg_proc AS proc
-         JOIN pg_namespace AS nsp ON nsp.oid = proc.pronamespace
-         WHERE nsp.nspname = 'public'
-         ORDER BY proc.oid",
     )
     .await?;
     client
