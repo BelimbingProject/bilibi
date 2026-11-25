@@ -171,10 +171,23 @@ impl ActorVerifier for AccountVerifier {
         user: i64,
     ) -> ProofFuture<'a, ()> {
         Box::pin(async move {
-            client.query_opt(
-                "SELECT id FROM user_bootstrap WHERE id=1 AND tenant_id=$1 AND user_id=$2 FOR SHARE",
-                &[&tenant, &user],
-            ).await?.ok_or(Error::Forbidden)?;
+            const RECEIPT: &str =
+                "SELECT id FROM user_bootstrap WHERE id=1 AND tenant_id=$1 AND user_id=$2";
+            let mode = client
+                .query_opt("SHOW transaction_read_only", &[])
+                .await?
+                .ok_or(Error::Internal)?;
+            // Read-only snapshots cannot take row locks. Writable transactions
+            // must still hold the receipt until their owner-authorized work ends.
+            let query = if mode.get::<_, &str>(0) == "on" {
+                RECEIPT.to_owned()
+            } else {
+                format!("{RECEIPT} FOR SHARE")
+            };
+            client
+                .query_opt(&query, &[&tenant, &user])
+                .await?
+                .ok_or(Error::Forbidden)?;
             Ok(())
         })
     }
@@ -328,7 +341,7 @@ pub(crate) async fn password_identity(
         Standing::Live(_) => {}
         Standing::Frozen(Freeze::CompanyArchived) => return Err(CredentialError::CompanyArchived),
         Standing::Frozen(Freeze::Identity) | Standing::Unknown => {
-            return Err(CredentialError::WorkspaceUnavailable)
+            return Err(CredentialError::WorkspaceUnavailable);
         }
     }
     drop(client);
