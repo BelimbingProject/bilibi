@@ -546,9 +546,6 @@ pub struct Field {
     pub attrs: Attrs,
 }
 
-// Field's template escapes its values and is itself an HTML fragment.
-impl askama::filters::HtmlSafe for Field {}
-
 impl Field {
     pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
         self.field = identity.into();

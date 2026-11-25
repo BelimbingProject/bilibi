@@ -92,7 +92,7 @@
 
 {#- Render the typed Field separately. Expanding its full control tree at
     every call site makes form-heavy pages exhaust the debug worker stack. -#}
-{% macro input(field) %}{{ field }}{% endmacro %}
+{% macro input(field) %}{{ field|safe }}{% endmacro %}
 
 {#- An input with label, hint and error lines; field is a bilibi_ui::Field.
     An inset field (Field::placement) puts the label after the control inside
