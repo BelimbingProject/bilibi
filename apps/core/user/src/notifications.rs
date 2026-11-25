@@ -332,6 +332,26 @@ impl bilibi_notifications::NotificationSink for Notifications {
     ) -> bilibi_notifications::RecordFuture<'a> {
         Box::pin(record(tx, scope, recipients, notice))
     }
+    fn installation_owner<'a>(
+        &'a self,
+        tx: &'a MutationTransaction<'_>,
+    ) -> bilibi_notifications::OwnerFuture<'a> {
+        Box::pin(async move {
+            let tenant = tx.context().tenant;
+            let Some(row) = tx
+                .sql()
+                .query_opt(
+                    "SELECT user_id FROM user_bootstrap WHERE tenant_id=$1",
+                    &[&tenant],
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            let user: i64 = row.get(0);
+            Ok(matches!(crate::identity::standing(tx.sql(),tenant,user).await?, crate::identity::Standing::Live(account) if account.installation_owner).then_some(user))
+        })
+    }
     fn committed(&self, tenant: i64, recipients: &[i64]) {
         self.changed(tenant, recipients);
     }
