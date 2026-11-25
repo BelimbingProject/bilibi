@@ -294,5 +294,13 @@ elif cmd == 'snapshot':
     print(browser('snapshot'))
 elif cmd == 'shot':
     print(browser('screenshot', str(DATA / 'proof/shots' / args[0])))
+elif cmd == 'terminal-code':
+    name = args[0] if args else f'{LABEL}-terminal-code'
+    if '/' in name or name in ('', '.', '..'):
+        raise SystemExit('The private code-file name must be one path segment')
+    target = PRIVATE / name
+    target.write_text(code() + '\n')
+    target.chmod(0o600)
+    print(f'Fresh 2FA code saved privately for one terminal command: /data/private/{name}')
 else:
     raise SystemExit('Unknown command')

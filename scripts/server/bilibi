@@ -1,0 +1,6 @@
+#!/bin/sh
+if [ "${1:-}" != update ]; then
+    printf '%s\n' 'usage: sudo bilibi update <instance> [--to <version> | --undo]' >&2
+    exit 2
+fi
+exec /opt/bilibi/install-server.sh "$@"

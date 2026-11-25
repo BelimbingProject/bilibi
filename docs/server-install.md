@@ -30,7 +30,7 @@ sudo scripts/install-server.sh installer production /path/to/bilibi-installer-x8
   --tag setup-v1.0.0 --proof /path/to/bilibi-installer-x86_64-unknown-linux-gnu.proof.json
 ```
 
-The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and two proxy site blocks, and prints what to do next. The second pins the repository, immutable repository number, workflow and oldest acceptable tag. The third verifies and copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The remaining commands set mail, create the first account and start the installer service that carries out later owner-reviewed Software jobs. Open `https://app.example.com`, sign in with the owner's claimed account and Caddy serves the staff site. `https://shop.example.com` is the public listener's name: it serves a workspace's public site once that workspace gives its site the hostname, on **Administration › Public site** (which also turns the site on), or with `sudo scripts/install-server.sh public-hostname production --tenant 1 --hostname shop.example.com --on`. Until then it answers 404.
+The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and two proxy site blocks, and prints what to do next. The second pins the repository, immutable repository number, workflow and oldest acceptable tag. The third verifies and copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The remaining commands set mail, create the first account and enable the installer for later owner-reviewed Software jobs. Open `https://app.example.com`, sign in with the owner's claimed account and Caddy serves the staff site. `https://shop.example.com` is the public listener's name: it serves a workspace's public site once that workspace gives its site the hostname, on **Administration › Public site** (which also turns the site on), or with `sudo scripts/install-server.sh public-hostname production --tenant 1 --hostname shop.example.com --on`. Until then it answers 404.
 
 Letting an AI assistant do the install? Give it [the Install Bilibi skill](install-with-ai/SKILL.md). Every command takes `--json` for one machine-readable line per step, with a stable error code and what to do next.
 
@@ -104,7 +104,7 @@ Each instance lives in one folder:
     releases/current -> 2        the release in service; the installer moves this link
     current -> releases/current  fixed, so the service always starts current/bilibi-web
     backups/job-<n>/  the database backup the installer took before job <n> changed anything
-    incoming/         a release on its way in: downloaded from the source or uploaded as a file, until the installer copies it
+    incoming/         a release on its way in, plus installer-jobs/job-<n>.ready activation markers
     installer         the verified installer for this instance (root:root)
     trust/release.json        the instance’s pinned release proof policy (root:bilibi, 0640)
     trust/release-state.json  highest admitted setup tag and archive digest (root:bilibi, 0640)
@@ -212,7 +212,7 @@ Staging is optional. When used, install and check the exact GitHub asset there f
 
 ## Putting a release into service
 
-**After the first release, the owner does this from the Software page**, and the installer service does the work: copy and check, pause, back up, update the database, switch, check, and switch back by itself when the check fails. The page also offers Undo. What each step does, and what Undo loses, is in [`apps/installer/README.md`](../apps/installer/README.md).
+**After the first release, the owner does this from the Software page or the root-only server command**, and the on-demand installer service does the work: copy and check, pause, back up, update the database, switch, check, and switch back by itself when the check fails. The page also offers Undo. From an interactive server terminal, `sudo bilibi update <instance> [--to X.Y.Z]` lists compatible releases from the pinned repository, shows the same review, asks for the installation owner's fresh 2FA code, queues the same operation and follows every step. By default it selects the newest published stable setup if it is newer than the running setup from that repository. Use `--to X.Y.Z` to select the stable setup tagged `setup-vX.Y.Z`. Either selection requires a fresh, complete release listing and exactly one compatible asset for the selected tag. For Undo, `sudo bilibi update <instance> --undo` reviews and follows Undo. There is no flag to skip 2FA, proof verification or backup. What each step does, and what Undo loses, is in [`apps/installer/README.md`](../apps/installer/README.md).
 
 The installer records the admitted tag and digest before copying a numbered release. A failure after that write consumes the tag. Fix the cause and publish a new setup tag.
 
@@ -248,7 +248,7 @@ sudo scripts/install-server.sh switch production 1
 > [!WARNING]
 > Migrations are forward-only. Switching back to an older release after a newer one changed tables leaves those changes in place; the older program may not expect them. That case is the Software page's Undo, which restores the backup the installer took first and says what would be lost, with a count. Use `switch` only for releases that share the same database shape.
 
-`status` names the server's GitHub App, if any, then lists every instance, its role, address, service, installer and mail states, and releases. It says so first when another run is still working: only one run goes at a time, a rerun waits for the earlier one, and a dropped connection does not stop a run on the server.
+`status` names the server's GitHub App, if any, then lists every instance, its role, address, service, installer and mail states, and releases. Installer state `idle` means its service is stopped normally while its path unit is waiting. It says so first when another run is still working: only one run goes at a time, a rerun waits for the earlier one, and a dropped connection does not stop a run on the server.
 
 ## Private application repositories
 
@@ -307,9 +307,9 @@ sudo scripts/install-server.sh installer production /path/to/bilibi-installer-x8
   --tag setup-v1.0.0 --proof /path/to/bilibi-installer-x86_64-unknown-linux-gnu.proof.json
 ```
 
-The script verifies the installer against the named instance’s pin, writes it to `/opt/bilibi/<instance>/installer` as root, and restarts that instance’s installer service. Repeat the command for each instance that should use Software installs. A stopped job is settled as described in [If the server restarts mid-way](../apps/installer/README.md#if-the-server-restarts-mid-way).
+The script verifies the installer against the named instance’s pin, writes it to `/opt/bilibi/<instance>/installer` as root, enables its boot recovery service and path activation, and starts one recovery scan. Repeat the command for each instance that should use Software installs. Existing instances gain the new units when an operator reruns this same `installer` command. A stopped job is settled as described in [If the server restarts mid-way](../apps/installer/README.md#if-the-server-restarts-mid-way).
 
-The installer reads its own instance’s database and port from `env`. The unit skips startup until the instance has a verified installer binary.
+The installer reads its own instance’s database and port from `env`. The service unit skips startup until the instance has a verified installer binary. See the [worker activation contract](../apps/base/software/README.md#how-a-worker-plugs-in) for queue activation and idle shutdown.
 
 ## The first account
 
@@ -500,7 +500,7 @@ Script commands:
 | `identity-recover <instance> --email <old> --new-email <new>` | Recover an installation-wide staff sign-in address and sign it out everywhere |
 | `identity-delete <instance> --email <address> --confirm <address>` | Immediately anonymise a portable identity after its last membership is gone |
 | `identity-retention <instance>` | Anonymise up to 100 unused portable identities whose configured retention ended |
-| `installer <instance> <bilibi-installer> --tag <setup-vX.Y.Z> [--proof <proof.json>]` | Verify the pinned proof, copy the installer to `/opt/bilibi/<instance>/installer` and start `bilibi-installer@<instance>`; rerun to update it |
+| `installer <instance> <bilibi-installer> --tag <setup-vX.Y.Z> [--proof <proof.json>]` | [Install or update the verified installer and enable activation](#the-installer-service) |
 | `github-app --client-id <id> --repo <owner/name>` (key on standard input), `github-app --check`, `github-app --remove` | [The server's GitHub App](#private-application-repositories) for a private application repository |
 | `verify <instance> <file> --kind server-tools\|installer\|setup --tag <setup-vX.Y.Z> [--proof <proof.json>]` | Check a file with the pinned proof policy without installing it |
 | `switch <instance> <n>` | Put a kept release in service |
@@ -522,7 +522,7 @@ Keys in `env` (the service's environment; `README.md` explains each):
 
 **A proxy on another machine.** The script puts Caddy on the same machine, and Bilibi then sees each person's own address with nothing to set. If you put a load balancer or reverse proxy on another machine in front of Bilibi, add its address or network to **Trusted proxy addresses** in the Session settings (`session.trusted_proxies`, for example `10.0.0.5` or `10.1.0.0/16`). Until you do, everyone counts as the proxy's one address and shares one sign-in limit. List only proxies you run: anyone at a listed address can claim to be any client.
 
-Files outside `/opt/bilibi`: `/etc/systemd/system/bilibi@.service`, `/etc/systemd/system/bilibi-installer@.service`, `/etc/systemd/system/caddy.service.d/bilibi.conf`, `/etc/sudoers.d/bilibi-build`, `/etc/caddy/sites/bilibi-<instance>.caddy`, and one `import` line in `/etc/caddy/Caddyfile`.
+Files outside `/opt/bilibi`: `/usr/local/bin/bilibi`, `/etc/systemd/system/bilibi@.service`, `/etc/systemd/system/bilibi-installer@.service`, `/etc/systemd/system/bilibi-installer@.path`, `/etc/systemd/system/caddy.service.d/bilibi.conf`, `/etc/sudoers.d/bilibi-build`, `/etc/caddy/sites/bilibi-<instance>.caddy`, and one `import` line in `/etc/caddy/Caddyfile`. Setup keeps the command's root-owned plumbing at `/opt/bilibi/install-server.sh` and `/opt/bilibi/lib/versions.sh`.
 
 ## Where to go next
 
