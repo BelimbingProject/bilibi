@@ -22,7 +22,10 @@ mod layout {
 
 use serde_json::json;
 use std::{error::Error, os::unix::fs::PermissionsExt, path::PathBuf};
-use tokio_postgres::NoTls;
+use tokio_postgres::{Client, NoTls};
+
+const BASELINE_TABLES: usize = 220;
+const UPDATE_TABLES: usize = 12;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -39,6 +42,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "use an empty disposable database"
     );
     client
+        .batch_execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        .await?;
+    client
         .batch_execute(include_str!(
             "../../base/settings/migrations/001-settings.sql"
         ))
@@ -53,6 +59,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
          INSERT INTO base_settings (key,tenant_id,scope_type,scope_id,value,is_encrypted)
          VALUES ('installation.mode',0,'global',0,'\"isolated\"',false),
                 ('unrelated',0,'global',0,'\"keep\"',false);",
+        )
+        .await?;
+    create_scale_tables(&client, "restore_scale", BASELINE_TABLES).await?;
+    client
+        .execute(
+            "INSERT INTO restore_scale_1 (id, payload) VALUES (1, 'before update')",
+            &[],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO restore_scale_220 (id, payload) VALUES (1, 'before update')",
+            &[],
         )
         .await?;
     let customer = root.join("customer");
@@ -78,7 +97,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )?;
     backup::dump(&pg, &dump)?;
     composition::admit(&composition::status(&reviewed)?, "isolated")?;
+    create_scale_tables(&client, "release_update", UPDATE_TABLES).await?;
     client.batch_execute("CREATE TABLE release_migration (id bigint); INSERT INTO release_migration VALUES (731);
+        INSERT INTO restore_scale_220 (id, payload) VALUES (2, 'after update');
         UPDATE base_settings SET value='\"shared\"' WHERE key='installation.mode'").await?;
     let refused = backup::restore(
         &client,
@@ -122,6 +143,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?
         .get::<_, bool>(0));
     assert_eq!(
+        table_count(&client, "restore_scale_%").await?,
+        BASELINE_TABLES
+    );
+    assert_eq!(table_count(&client, "release_update_%").await?, 0);
+    assert_eq!(
+        client
+            .query_one("SELECT count(*) FROM restore_scale_220", &[])
+            .await?
+            .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
         client
             .query_one(
                 "SELECT value #>> '{}' FROM base_settings WHERE key='unrelated'",
@@ -131,7 +164,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .get::<_, String>(0),
         "keep"
     );
-    println!("PASS: admitted rollback restores data while preserving Shared policy");
+    assert!(composition::status(&reviewed)?.contains("Bilibi 0.1.0"));
+    println!("PASS: schema-changing release undone across {BASELINE_TABLES} baseline tables and {UPDATE_TABLES} update tables; original data and target release answer returned");
 
     let shared_dump = root.join("shared.dump");
     backup::dump(&pg, &shared_dump)?;
@@ -159,11 +193,85 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &interrupted,
         json!({"dump": shared_dump, "history": history}).to_string(),
     )?;
-    client
-        .batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
-        .await?;
+    backup::clear(&client).await?;
     backup::restore(&client, &pg, &shared_dump, "", &interrupted, None).await?;
     assert_eq!(jobs::installation_mode(&client).await?, "isolated");
     println!("PASS: interrupted recovery uses the durable pre-restore policy");
+
+    let safety_dump = root.join("safety.dump");
+    backup::dump(&pg, &safety_dump)?;
+    let corrupt_dump = root.join("corrupt.dump");
+    std::fs::write(&corrupt_dump, b"not a PostgreSQL archive")?;
+    let failed_history = root.join("history-failed.json");
+    let failure = match backup::restore(
+        &client,
+        &pg,
+        &corrupt_dump,
+        "",
+        &failed_history,
+        Some(&customer),
+    )
+    .await
+    {
+        Ok(_) => panic!("the corrupt restore must fail"),
+        Err(failure) => failure,
+    };
+    assert!(failure.contains("pg_restore failed"), "{failure}");
+    backup::set_aside(&failed_history);
+    backup::restore(
+        &client,
+        &pg,
+        &safety_dump,
+        "",
+        &root.join("history-recovery.json"),
+        Some(&customer),
+    )
+    .await?;
+    assert_eq!(
+        table_count(&client, "restore_scale_%").await?,
+        BASELINE_TABLES
+    );
+    assert!(composition::status(&customer)?.contains("Bilibi 0.1.0"));
+    println!("PASS: a failed restore names its pg_restore step and the safety dump recovers the data before the current release answers");
     Ok(())
+}
+
+async fn create_scale_tables(
+    client: &Client,
+    prefix: &str,
+    count: usize,
+) -> Result<(), tokio_postgres::Error> {
+    for number in 1..=count {
+        let reference = if number == 1 {
+            String::new()
+        } else {
+            format!(
+                ", previous_id bigint REFERENCES {prefix}_{}(id)",
+                number - 1
+            )
+        };
+        client
+            .batch_execute(&format!(
+                "CREATE TABLE {prefix}_{number} (id bigint PRIMARY KEY, payload text{reference});
+                 CREATE INDEX {prefix}_{number}_payload_idx ON {prefix}_{number}(payload)"
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
+async fn table_count(client: &Client, pattern: &str) -> Result<usize, tokio_postgres::Error> {
+    let count: i64 = client
+        .query_one(
+            "SELECT count(*)
+             FROM pg_class AS relation
+             JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+             WHERE namespace.nspname = 'public'
+               AND relation.relkind IN ('r', 'p')
+               AND relation.relname LIKE $1",
+            &[&pattern],
+        )
+        .await?
+        .get(0);
+    Ok(count as usize)
 }

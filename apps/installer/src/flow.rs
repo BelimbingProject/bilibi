@@ -895,6 +895,57 @@ impl<'a> Run<'a> {
             .join(format!("job-{}", self.job.id))
             .join(format!("{}.dump", self.pg.dbname()))
     }
+    /// An Undo already has a safety dump of the state it is leaving. If the
+    /// requested older dump cannot be restored, use that safety dump to put
+    /// the still-current release back into service before reporting failure.
+    async fn recover_failed_undo_restore(
+        &self,
+        failed_dump: &std::path::Path,
+        safety: &Value,
+        current_release: u64,
+        why: &str,
+    ) -> String {
+        let failed_history = self.history_file("restore");
+        backup::set_aside(&failed_history);
+        let Some(safety_dump) = safety["backup"].as_str().map(PathBuf::from) else {
+            return format!(
+                "The restore step failed: {why}. The restore file is {}. No safety backup path was recorded, so the service remains stopped.",
+                failed_dump.display()
+            );
+        };
+        let recovery_history = self.history_file("restore-recovery");
+        match backup::restore(
+            &*self.client,
+            self.pg,
+            &safety_dump,
+            safety["backup_at"].as_str().unwrap_or(""),
+            &recovery_history,
+            Some(&self.layout.release(current_release)),
+        )
+        .await
+        {
+            Ok(_) => {
+                let started = match self.start_current().await {
+                    Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
+                    Err(error) => Err(error),
+                };
+                format!(
+                    "The restore step failed: {why}. The requested restore file remains at {}. The state before this Undo was recovered from {}. {}",
+                    failed_dump.display(),
+                    safety_dump.display(),
+                    service_recovery(started, current_release)
+                )
+            }
+            Err(recovery_why) => {
+                backup::set_aside(&recovery_history);
+                format!(
+                    "The restore step failed: {why}. Recovery from the safety backup also failed: {recovery_why}. Restore {} by hand; the requested older restore file is {}. The service remains stopped to protect the incomplete database.",
+                    safety_dump.display(),
+                    failed_dump.display()
+                )
+            }
+        }
+    }
     /// The new program's `migrate` (one transaction, all or nothing) and its
     /// production seeds. `migrated` says whether the shape changed.
     async fn migrate(&self, release: u64, before: i64) -> Result<Value, String> {
@@ -1016,7 +1067,7 @@ impl<'a> Run<'a> {
                     result["switched_back"] = json!(false);
                     result["restored"] = json!(false);
                     result["message"] = json!(format!(
-                        "{} The database could not be put back: {why}. The service was left stopped; restore {} by hand before starting it.",
+                        "{} The restore step failed: {why}. Restore {} by hand. The service remains stopped to protect the incomplete database.",
                         back.lead,
                         file.display()
                     ));
@@ -1202,10 +1253,13 @@ impl<'a> Run<'a> {
                         .await?
                 }
                 Err(why) => {
+                    let message = self
+                        .recover_failed_undo_restore(&file, &safety, undone.release, &why)
+                        .await;
                     let result = json!({
                         "release": undone.release, "previous_release": undone.release, "migrated": false,
                         "backup": safety["backup"], "backup_at": safety["backup_at"], "restored": false,
-                        "message": format!("The database could not be put back: {why}. The service was left stopped; restore {} by hand (the state before this undo is in {}).", file.display(), safety["backup"].as_str().unwrap_or("the safety backup")),
+                        "message": message,
                     });
                     self.fail_with("restore", result.clone()).await?;
                     return self.finish("failed", result).await;
@@ -1393,6 +1447,15 @@ fn pause_sentence(seconds: i64) -> String {
         "The pause lasted {seconds} second{}.",
         if seconds == 1 { "" } else { "s" }
     )
+}
+
+fn service_recovery(started: Result<(), String>, release: u64) -> String {
+    match started {
+        Ok(()) => format!("Release {release} is back in service and answers."),
+        Err(why) => format!(
+            "Starting release {release} was attempted, but it does not answer: {why}. Check the service."
+        ),
+    }
 }
 fn with_pause(message: &str, seconds: Option<i64>) -> String {
     match seconds {

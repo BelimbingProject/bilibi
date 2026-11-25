@@ -264,7 +264,10 @@ impl Installer {
                 return Ok(true);
             }
             if let Err(why) = backup::restore(client, &self.pg, &dump, "", &history, None).await {
-                eprintln!("bilibi-installer: job {id}: the cut-off restore failed: {why}");
+                eprintln!(
+                    "bilibi-installer: job {id}: the cut-off restore from {} failed: {why}; the service remains stopped to protect the incomplete database",
+                    dump.display()
+                );
                 backup::set_aside(&history);
             }
             finished = true;
