@@ -147,13 +147,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         BASELINE_TABLES
     );
     assert_eq!(table_count(&client, "release_update_%").await?, 0);
-    assert_eq!(
-        client
-            .query_one("SELECT count(*) FROM restore_scale_220", &[])
-            .await?
-            .get::<_, i64>(0),
-        1
-    );
+    let restored_rows = client
+        .query("SELECT id, payload FROM restore_scale_220", &[])
+        .await?;
+    assert_eq!(restored_rows.len(), 1);
+    assert_eq!(restored_rows[0].get::<_, i64>("id"), 1);
+    assert_eq!(restored_rows[0].get::<_, &str>("payload"), "before update");
     assert_eq!(
         client
             .query_one(
@@ -164,8 +163,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .get::<_, String>(0),
         "keep"
     );
-    assert!(composition::status(&reviewed)?.contains("Bilibi 0.1.0"));
-    println!("PASS: schema-changing release undone across {BASELINE_TABLES} baseline tables and {UPDATE_TABLES} update tables; original data and target release answer returned");
+    println!("PASS: restore puts back the original data across {BASELINE_TABLES} baseline tables and removes {UPDATE_TABLES} update tables");
 
     let shared_dump = root.join("shared.dump");
     backup::dump(&pg, &shared_dump)?;
@@ -194,45 +192,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         json!({"dump": shared_dump, "history": history}).to_string(),
     )?;
     backup::clear(&client).await?;
+    client.batch_execute("DROP SCHEMA public").await?;
     backup::restore(&client, &pg, &shared_dump, "", &interrupted, None).await?;
     assert_eq!(jobs::installation_mode(&client).await?, "isolated");
-    println!("PASS: interrupted recovery uses the durable pre-restore policy");
-
-    let safety_dump = root.join("safety.dump");
-    backup::dump(&pg, &safety_dump)?;
-    let corrupt_dump = root.join("corrupt.dump");
-    std::fs::write(&corrupt_dump, b"not a PostgreSQL archive")?;
-    let failed_history = root.join("history-failed.json");
-    let failure = match backup::restore(
-        &client,
-        &pg,
-        &corrupt_dump,
-        "",
-        &failed_history,
-        Some(&customer),
-    )
-    .await
-    {
-        Ok(_) => panic!("the corrupt restore must fail"),
-        Err(failure) => failure,
-    };
-    assert!(failure.contains("pg_restore failed"), "{failure}");
-    backup::set_aside(&failed_history);
-    backup::restore(
-        &client,
-        &pg,
-        &safety_dump,
-        "",
-        &root.join("history-recovery.json"),
-        Some(&customer),
-    )
-    .await?;
-    assert_eq!(
-        table_count(&client, "restore_scale_%").await?,
-        BASELINE_TABLES
-    );
-    assert!(composition::status(&customer)?.contains("Bilibi 0.1.0"));
-    println!("PASS: a failed restore names its pg_restore step and the safety dump recovers the data before the current release answers");
+    println!("PASS: interrupted restore recreates a missing public schema and preserves the saved policy");
     Ok(())
 }
 

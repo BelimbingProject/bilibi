@@ -282,38 +282,15 @@ pub(crate) async fn clear(client: &Client) -> Result<(), String> {
          ORDER BY proc.oid",
     )
     .await?;
-    drop_each(
-        client,
-        "types",
-        "SELECT format(
-             'DROP %s IF EXISTS %I.%I CASCADE',
-             CASE typ.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END,
-             nsp.nspname,
-             typ.typname
-         )
-         FROM pg_type AS typ
-         JOIN pg_namespace AS nsp ON nsp.oid = typ.typnamespace
-         WHERE nsp.nspname = 'public'
-           AND typ.typisdefined
-           AND typ.typelem = 0
-           AND typ.typrelid = 0
-         ORDER BY typ.oid",
-    )
-    .await?;
     client
-        .execute("DROP SCHEMA public CASCADE", &[])
+        .batch_execute("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
         .await
         .map_err(|error| {
             format!(
-                "could not remove the cleared schema: {}",
+                "could not replace the cleared schema: {}",
                 jobs::short(&error)
             )
-        })?;
-    client
-        .execute("CREATE SCHEMA public", &[])
-        .await
-        .map_err(|error| format!("could not create the empty schema: {}", jobs::short(&error)))?;
-    Ok(())
+        })
 }
 
 async fn drop_each(client: &Client, kind: &str, query: &str) -> Result<(), String> {
