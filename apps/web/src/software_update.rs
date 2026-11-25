@@ -139,7 +139,7 @@ pub async fn software_update(db: &Db, args: &[String]) -> Result<()> {
     print_review(&preview["instance"], facts);
 
     let code = prompt_code()?;
-    let presented = scope.presenting_step_up(&code);
+    let presented = scope.clone().presenting_step_up(&code);
     let committed = plans
         .commit(&presented, &authority, &operations)
         .await
