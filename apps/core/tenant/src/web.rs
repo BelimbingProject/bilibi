@@ -2,9 +2,8 @@
 //! tenant list, its Add Tenant dialog and the Suspend and Reactivate row
 //! actions with their reason dialog.
 //!
-//! The route is `OperatorCapability(LIST)`: the host proves the explicit
-//! operator identity and the capability on every request and live event. This
-//! page re-proves the identity for its reads (`prove_operator`) and asks the
+//! The directory reads require operator standing and LIST. The own-tenant
+//! list uses the detail operation with VIEW. The page asks the
 //! bound authorizer for `CREATE`, `SUSPEND` or `REACTIVATE` before it shows the
 //! dialog or button and again before it writes, as the source checks `allowed?`
 //! on both. A refusal is a flash, never a page-clearing error. Parent names and
@@ -18,8 +17,7 @@ use bilibi_agent_api::{
 use bilibi_database::{Db, Error, Result};
 use bilibi_datetime::{DisplayContext, DisplayPolicy, Format, Precision};
 use bilibi_tenancy::{
-    Authorization, Move, OperatorProof, Scope, Suspension, TenantErrors, TenantIdentity,
-    TenantStatus,
+    Authorization, Move, OperatorProof, Scope, Suspension, TenantErrors, TenantStatus,
 };
 use bilibi_ui::page::{
     LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
@@ -28,7 +26,7 @@ use bilibi_ui::page::{
 use bilibi_ui::{
     params, Badge, BadgeKind, BuiltinColumn, Choice, ColumnType, ColumnsOutcome, CreateButton,
     Field, FlashMap, FlexRow, FlexTable, Form, Html, IconButton, InputKind, ListColumns, ListSpec,
-    ListState, SortDir, StatusKind, TableEmpty, NO_FLASH,
+    ListState, RecordLink, SortDir, StatusKind, TableEmpty, NO_FLASH,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -102,6 +100,15 @@ pub struct Pages {
     pub authorization: Arc<Authorization>,
 }
 
+struct DirectoryTenant {
+    id: i64,
+    parent_id: Option<i64>,
+    name: String,
+    status: TenantStatus,
+    is_platform_operator: bool,
+    suspension: Option<Suspension>,
+}
+
 /// One tenant as the table shows it.
 struct TenantRow {
     id: i64,
@@ -114,7 +121,7 @@ struct TenantRow {
 }
 
 fn present(
-    identities: &[TenantIdentity],
+    identities: &[DirectoryTenant],
     sort_by: Option<&str>,
     descending: bool,
 ) -> Vec<TenantRow> {
@@ -344,17 +351,19 @@ struct TenantsPage {
     columns: ListColumns,
     create: Option<Draft>,
     moving: Option<MoveDraft>,
+    framed: bool,
     flash: Option<(StatusKind, String)>,
 }
 
 impl TenantsPage {
-    fn new(pages: &Pages, query: &HashMap<String, String>) -> Result<Self> {
+    fn new(pages: &Pages, query: &HashMap<String, String>, framed: bool) -> Result<Self> {
         Ok(Self {
             pages: pages.clone(),
             list: ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?,
             columns: ListColumns::mount("tenants", builtins()).map_err(|_| Error::Internal)?,
             create: None,
             moving: None,
+            framed,
             flash: None,
         })
     }
@@ -413,11 +422,57 @@ impl TenantsPage {
         self.columns.load(rows, |row| row.id.to_string());
     }
 
+    fn name_link(&self, id: i64, body: Html) -> Result<Html> {
+        render(RecordLink {
+            workspace: self.framed,
+            kind: "core/tenant",
+            record_id: &id.to_string(),
+            href: &format!("/tenancy/tenants/{id}"),
+            class: "font-medium text-ink-strong hover:underline",
+            body,
+        })
+    }
+
+    async fn own_body(&self, scope: &Scope) -> Result<String> {
+        let result = self
+            .pages
+            .contracts
+            .read(
+                scope,
+                crate::DETAIL,
+                &serde_json::json!({"tenant_id":scope.tenant()}),
+            )
+            .await
+            .map_err(contract_error)?;
+        let tenant = &result["result"];
+        let id = tenant["id"].as_i64().ok_or(Error::Internal)?;
+        let name = tenant["name"].as_str().ok_or(Error::Internal)?;
+        let mut id_column = builtin(fields::ID).right();
+        id_column.kind = ColumnType::Integer;
+        let columns = ListColumns::mount("own-tenant", vec![id_column, builtin(fields::NAME)])
+            .map_err(|_| Error::Internal)?;
+        let row = FlexRow::new(id.to_string())
+            .slot("id", render(NumberCell { value: id })?)
+            .slot("name", self.name_link(id, Html::text(name))?);
+        let mut table = FlexTable::new("own-tenant", columns.flex_columns(), vec![row]);
+        table.caption = "Tenants";
+        TenantsView {
+            title_actions: Html::EMPTY,
+            flash: NO_FLASH,
+            actions: Html::EMPTY,
+            table: render(table)?,
+            create: None,
+            moving: None,
+        }
+        .render()
+        .map_err(|_| Error::Internal)
+    }
+
     fn table(
         &self,
         rows: &[TenantRow],
         display: &DisplayContext,
-        may: (bool, bool),
+        may: (bool, bool, bool),
     ) -> Result<Html> {
         let mut flex_rows = Vec::with_capacity(rows.len());
         for row in rows {
@@ -427,10 +482,20 @@ impl TenantsPage {
                 .slot("id", render(NumberCell { value: row.id })?)
                 .slot(
                     "name",
-                    render(NameCell {
-                        name: &row.name,
-                        operator: row.is_platform_operator,
-                    })?,
+                    if may.2 {
+                        self.name_link(
+                            row.id,
+                            render(NameCell {
+                                name: &row.name,
+                                operator: row.is_platform_operator,
+                            })?,
+                        )?
+                    } else {
+                        render(NameCell {
+                            name: &row.name,
+                            operator: row.is_platform_operator,
+                        })?
+                    },
                 )
                 .slot(
                     "parent",
@@ -498,9 +563,9 @@ impl TenantsPage {
         render(table)
     }
 
-    fn form(&self, identities: &[TenantIdentity]) -> Option<CreateForm> {
+    fn form(&self, identities: &[DirectoryTenant]) -> Option<CreateForm> {
         let draft = self.create.as_ref()?;
-        let mut parents: Vec<&TenantIdentity> = identities.iter().collect();
+        let mut parents: Vec<&DirectoryTenant> = identities.iter().collect();
         parents.sort_by_key(|identity| identity.id);
         let mut summary = bilibi_ui::ErrorSummary::new("tenant-create-errors");
         for (id, label, errors) in [
@@ -588,6 +653,9 @@ impl TenantsPage {
     }
 
     async fn body(&mut self, scope: &Scope, rows_changed: bool) -> Result<String> {
+        if !self.may(scope, bilibi_tenancy::LIST).await? {
+            return self.own_body(scope).await;
+        }
         // Preserve the complete directory/parent picker while reading
         // through the bounded search contract in pages of at most 100.
         let mut identities = Vec::new();
@@ -605,7 +673,7 @@ impl TenantsPage {
                 .map_err(contract_error)?;
             let rows = result["result"].as_array().ok_or(Error::Internal)?;
             for row in rows {
-                identities.push(TenantIdentity {
+                identities.push(DirectoryTenant {
                     id: row["id"].as_i64().ok_or(Error::Internal)?,
                     parent_id: row["parent_id"].as_i64(),
                     name: row["name"].as_str().ok_or(Error::Internal)?.into(),
@@ -639,6 +707,19 @@ impl TenantsPage {
         let may = (
             self.may(scope, Move::Suspend.capability()).await?,
             self.may(scope, Move::Reactivate.capability()).await?,
+            {
+                let client = self.pages.db.get().await?;
+                match self
+                    .pages
+                    .authorization
+                    .authorize_scope(&**client, scope, bilibi_tenancy::VIEW)
+                    .await
+                {
+                    Ok(()) => true,
+                    Err(Error::Forbidden) => false,
+                    Err(error) => return Err(error),
+                }
+            },
         );
         let display = self.display(scope).await?;
         let rows = present(
@@ -923,11 +1004,26 @@ impl Page<Scope, Error> for Pages {
     }
     fn render<'a>(&'a self, request: PageRequest<'a, Scope>) -> PageFuture<'a, Error> {
         Box::pin(async move {
+            let scope = request.scope.ok_or(Error::Unauthorized)?;
+            if request.operation == "detail" {
+                let mut detail = crate::detail::Detail::new(self.clone(), detail_id(&request)?);
+                let body = detail
+                    .update(LiveRequest {
+                        scope,
+                        credential: "",
+                        input: LiveInput::Refresh,
+                    })
+                    .await?;
+                return Ok(PageBody {
+                    html: body.html,
+                    live: true,
+                    title: None,
+                });
+            }
             if request.operation != "tenants" {
                 return Err(Error::NotFound);
             }
-            let scope = request.scope.ok_or(Error::Unauthorized)?;
-            let html = TenantsPage::new(self, request.query)?
+            let html = TenantsPage::new(self, request.query, request.framed)?
                 .body(scope, true)
                 .await?;
             Ok(PageBody {
@@ -939,11 +1035,18 @@ impl Page<Scope, Error> for Pages {
     }
     fn mount<'a>(&'a self, request: PageRequest<'a, Scope>) -> MountFuture<'a, Scope, Error> {
         Box::pin(async move {
+            request.scope.ok_or(Error::Unauthorized)?;
+            if request.operation == "detail" {
+                return Ok(Some(Box::new(crate::detail::Detail::new(
+                    self.clone(),
+                    detail_id(&request)?,
+                )) as Box<dyn LiveState<Scope, Error>>));
+            }
             if request.operation != "tenants" {
                 return Err(Error::NotFound);
             }
             let state: Box<dyn LiveState<Scope, Error>> =
-                Box::new(TenantsPage::new(self, request.query)?);
+                Box::new(TenantsPage::new(self, request.query, request.framed)?);
             Ok(Some(state))
         })
     }
@@ -973,7 +1076,11 @@ impl LiveState<Scope, Error> for TenantsPage {
     }
 }
 
-fn contract_error(error: ContractError) -> Error {
+fn detail_id(request: &PageRequest<'_, Scope>) -> Result<i64> {
+    params::positive_id(request.path.get("id").map(String::as_str)).ok_or(Error::Invalid)
+}
+
+pub(super) fn contract_error(error: ContractError) -> Error {
     match error {
         ContractError::Backend(error) => error,
         ContractError::Forbidden => Error::Forbidden,

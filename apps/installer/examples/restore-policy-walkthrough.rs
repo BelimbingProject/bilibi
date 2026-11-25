@@ -22,7 +22,10 @@ mod layout {
 
 use serde_json::json;
 use std::{error::Error, os::unix::fs::PermissionsExt, path::PathBuf};
-use tokio_postgres::NoTls;
+use tokio_postgres::{Client, NoTls};
+
+const BASELINE_TABLES: usize = 220;
+const UPDATE_TABLES: usize = 12;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -55,6 +58,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ('unrelated',0,'global',0,'\"keep\"',false);",
         )
         .await?;
+    create_scale_tables(&client, "restore_scale", BASELINE_TABLES).await?;
+    client
+        .execute(
+            "INSERT INTO restore_scale_220 (id, payload) VALUES (1, 'before update')",
+            &[],
+        )
+        .await?;
     let customer = root.join("customer");
     let reviewed = root.join("reviewed");
     for (dir, extensions) in [
@@ -78,7 +88,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )?;
     backup::dump(&pg, &dump)?;
     composition::admit(&composition::status(&reviewed)?, "isolated")?;
+    create_scale_tables(&client, "release_update", UPDATE_TABLES).await?;
     client.batch_execute("CREATE TABLE release_migration (id bigint); INSERT INTO release_migration VALUES (731);
+        INSERT INTO restore_scale_220 (id, payload) VALUES (2, 'after update');
         UPDATE base_settings SET value='\"shared\"' WHERE key='installation.mode'").await?;
     let refused = backup::restore(
         &client,
@@ -122,6 +134,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?
         .get::<_, bool>(0));
     assert_eq!(
+        table_count(&client, "restore_scale_%").await?,
+        BASELINE_TABLES
+    );
+    assert_eq!(table_count(&client, "release_update_%").await?, 0);
+    let restored_rows = client
+        .query("SELECT id, payload FROM restore_scale_220", &[])
+        .await?;
+    assert_eq!(restored_rows.len(), 1);
+    assert_eq!(restored_rows[0].get::<_, i64>("id"), 1);
+    assert_eq!(restored_rows[0].get::<_, &str>("payload"), "before update");
+    assert_eq!(
         client
             .query_one(
                 "SELECT value #>> '{}' FROM base_settings WHERE key='unrelated'",
@@ -131,7 +154,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .get::<_, String>(0),
         "keep"
     );
-    println!("PASS: admitted rollback restores data while preserving Shared policy");
+    println!("PASS: restore puts back the original data across {BASELINE_TABLES} baseline tables and removes {UPDATE_TABLES} update tables");
 
     let shared_dump = root.join("shared.dump");
     backup::dump(&pg, &shared_dump)?;
@@ -159,11 +182,50 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &interrupted,
         json!({"dump": shared_dump, "history": history}).to_string(),
     )?;
-    client
-        .batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
-        .await?;
+    backup::clear(&client).await?;
+    client.batch_execute("DROP SCHEMA public").await?;
     backup::restore(&client, &pg, &shared_dump, "", &interrupted, None).await?;
     assert_eq!(jobs::installation_mode(&client).await?, "isolated");
-    println!("PASS: interrupted recovery uses the durable pre-restore policy");
+    println!("PASS: interrupted restore recreates a missing public schema and preserves the saved policy");
     Ok(())
+}
+
+async fn create_scale_tables(
+    client: &Client,
+    prefix: &str,
+    count: usize,
+) -> Result<(), tokio_postgres::Error> {
+    for number in 1..=count {
+        let reference = if number == 1 {
+            String::new()
+        } else {
+            format!(
+                ", previous_id bigint REFERENCES {prefix}_{}(id)",
+                number - 1
+            )
+        };
+        client
+            .batch_execute(&format!(
+                "CREATE TABLE {prefix}_{number} (id bigint PRIMARY KEY, payload text{reference});
+                 CREATE INDEX {prefix}_{number}_payload_idx ON {prefix}_{number}(payload)"
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
+async fn table_count(client: &Client, pattern: &str) -> Result<usize, tokio_postgres::Error> {
+    let count: i64 = client
+        .query_one(
+            "SELECT count(*)
+             FROM pg_class AS relation
+             JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+             WHERE namespace.nspname = 'public'
+               AND relation.relkind IN ('r', 'p')
+               AND relation.relname LIKE $1",
+            &[&pattern],
+        )
+        .await?
+        .get(0);
+    Ok(count as usize)
 }

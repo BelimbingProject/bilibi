@@ -22,6 +22,8 @@ use serde_json::{json, Value};
 use std::{fs, path::Path, sync::Mutex, time::Duration};
 use tokio_postgres::GenericClient;
 
+const OFFICIAL_RELEASE_REPOSITORY: &str = "BelimbingProject/bilibi-try";
+const OFFICIAL_RELEASE_REPOSITORY_ID: i64 = 1462459642;
 pub const REFRESH_MINUTES: &str = "software.github_refresh_minutes";
 pub const DEFAULT_REFRESH_MINUTES: i64 = 15;
 
@@ -41,6 +43,7 @@ const DOWNLOAD_HOSTS: &[&str] = &[
     "github-releases.githubusercontent.com",
 ];
 
+static LISTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static MEMORY: Mutex<Option<Value>> = Mutex::new(None);
 
 /// `owner/name`, the shape GitHub uses in a repository address.
@@ -101,7 +104,7 @@ impl Software {
     async fn github_saved(
         &self,
         client: &(impl GenericClient + Sync),
-        _scope: &Scope,
+        scope: Option<&Scope>,
         policy: Option<&release_proof::Policy>,
     ) -> Result<Saved> {
         let refresh_minutes = self
@@ -115,9 +118,8 @@ impl Software {
             repository: None,
             repository_id: None,
             refresh_minutes,
-            app: app::load(self.paths.as_ref())
-                .ok()
-                .flatten()
+            app: scope
+                .and_then(|_| app::load(self.paths.as_ref()).ok().flatten())
                 .map(|app| app.client_id),
         };
         if let Some(policy) = policy {
@@ -133,11 +135,20 @@ impl Software {
     pub(crate) async fn github_listing(
         &self,
         client: &(impl GenericClient + Sync),
-        scope: &Scope,
+        scope: Option<&Scope>,
         force: bool,
         prerelease: bool,
         policy: &release_proof::Policy,
     ) -> Result<Value> {
+        if scope.is_none()
+            && (!policy
+                .repository
+                .eq_ignore_ascii_case(OFFICIAL_RELEASE_REPOSITORY)
+                || policy.repository_id != OFFICIAL_RELEASE_REPOSITORY_ID)
+        {
+            return Ok(Value::Null);
+        }
+        let _listing = LISTING.lock().await;
         let saved = self.github_saved(client, scope, Some(policy)).await?;
         let repository = &policy.repository;
         let proof_required = policy.requires_operator_proof();
@@ -154,36 +165,35 @@ impl Software {
             .paths
             .as_ref()
             .map(|paths| paths.dir.join("data").join("github-listing.json"));
-        if !force {
-            if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
-                if fresh(&cached, saved.refresh_minutes) || limited(&cached) {
-                    return Ok(present(
-                        &cached,
-                        &saved,
-                        target,
-                        prerelease,
-                        false,
-                        proof_required,
-                    ));
-                }
-            }
-        } else if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
-            if limited(&cached) {
+        let cached = || {
+            read_cache(cache_path.as_deref(), repository).filter(|cache| {
+                scope.is_some()
+                    || (cache["private"] == false
+                        && cache["repository_id"] == OFFICIAL_RELEASE_REPOSITORY_ID)
+            })
+        };
+        if let Some(cached) = cached() {
+            let fresh = fresh(&cached, saved.refresh_minutes);
+            if (!force && fresh) || limited(&cached) {
                 return Ok(present(
                     &cached,
                     &saved,
                     target,
                     prerelease,
-                    false,
+                    !fresh,
                     proof_required,
                 ));
             }
         }
-        let fetched = match self.github_token(scope, repository).await {
+        let token = match scope {
+            Some(scope) => self.github_token(scope, repository).await,
+            None => Ok(None),
+        };
+        let fetched = match token {
             Ok(token) => {
                 fetch_listing(
                     &self.integration,
-                    scope,
+                    scope.map_or(Origin::System, Origin::User),
                     repository,
                     token.as_deref(),
                     target,
@@ -260,7 +270,9 @@ impl Software {
             .map(release_proof::Policy::load)
             .transpose()
             .map_err(bilibi_database::Error::refused)?;
-        let saved = self.github_saved(client, scope, policy.as_ref()).await?;
+        let saved = self
+            .github_saved(client, Some(scope), policy.as_ref())
+            .await?;
         github_review(input, &saved)
     }
 
@@ -438,9 +450,14 @@ pub(crate) async fn recheck(
     pin: &Pin,
     token: Option<&str>,
 ) -> std::result::Result<(), String> {
-    let repo = fetch_repo(&software.integration, scope, &pin.repository, token)
-        .await
-        .map_err(|message| format!("Could not check the GitHub repository: {message}"))?;
+    let repo = fetch_repo(
+        &software.integration,
+        Origin::User(scope),
+        &pin.repository,
+        token,
+    )
+    .await
+    .map_err(|message| format!("Could not check the GitHub repository: {message}"))?;
     if repo.0 != pin.repository_id {
         return Err(format!(
             "GitHub repository {} is number {} now, not {}. Nothing was downloaded. Accept the repository again, then review the release.",
@@ -535,12 +552,16 @@ fn present(
 ) -> Value {
     let repository = cache["repository"].as_str().unwrap_or("");
     let live_id = cache["repository_id"].as_i64();
-    let accepted = saved.repository.as_deref() == Some(repository)
+    let configured = saved
+        .repository
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case(repository));
+    let accepted = configured
         && saved.repository_id.is_some()
         && (live_id.is_none() || saved.repository_id == live_id);
     let identity_changed = saved.repository_id.is_some()
         && live_id.is_some()
-        && saved.repository.as_deref() == Some(repository)
+        && configured
         && saved.repository_id != live_id;
     let mut releases: Vec<Value> = cache["releases"]
         .as_array()
@@ -598,6 +619,14 @@ fn present(
         };
     }
     json!({
+        "latest": if accepted && !identity_changed && !stale
+            && cache["attempt_at"].is_null() && cache["stale"] != true
+            && cache["available"] == true && cache["complete"] == true {
+            cache["latest"].clone()
+        } else {
+            Value::Null
+        },
+        "complete": cache["complete"],
         "available": cache["available"].as_bool().unwrap_or(false),
         "repository": repository,
         "repository_id": live_id,
@@ -607,7 +636,7 @@ fn present(
         "target": target,
         "prerelease": prerelease,
         "fetched_at": cache["fetched_at"],
-        "stale": stale || cache["stale"].as_bool().unwrap_or(false),
+        "stale": stale || cache["attempt_at"].is_string() || cache["stale"].as_bool().unwrap_or(false),
         "app": saved.app,
         "refresh_minutes": saved.refresh_minutes,
         "limited_until": cache["limited_until"],
@@ -646,7 +675,10 @@ fn read_cache(path: Option<&Path>, repository: &str) -> Option<Value> {
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
     });
     let value = from_file.or_else(|| MEMORY.lock().ok().and_then(|guard| guard.clone()))?;
-    (value["repository"].as_str() == Some(repository)).then_some(value)
+    value["repository"]
+        .as_str()
+        .is_some_and(|name| name.eq_ignore_ascii_case(repository))
+        .then_some(value)
 }
 fn write_cache(path: Option<&Path>, value: &Value) {
     if let Ok(mut guard) = MEMORY.lock() {
@@ -670,22 +702,28 @@ fn write_cache(path: Option<&Path>, value: &Value) {
 
 async fn fetch_listing(
     integration: &bilibi_integration::Integration,
-    scope: &Scope,
+    origin: Origin<'_>,
     repository: &str,
     token: Option<&str>,
     target: &str,
     cache_path: Option<&Path>,
 ) -> std::result::Result<Value, String> {
-    let (id, private) = fetch_repo(integration, scope, repository, token).await?;
+    let (id, private) = fetch_repo(integration, origin, repository, token).await?;
+    if matches!(origin, Origin::System) && (private || id != OFFICIAL_RELEASE_REPOSITORY_ID) {
+        return Err("The official public GitHub repository could not be verified.".into());
+    }
     let previous = read_cache(cache_path, repository);
     let etag = previous
         .as_ref()
+        .filter(|cache| {
+            cache["complete"] == true && cache["repository_id"] == id && cache["private"] == private
+        })
         .and_then(|cache| cache["etag"].as_str())
         .map(str::to_owned);
     let url = format!("{API}/repos/{repository}/releases?per_page=30");
     let first = get_raw(
         integration,
-        scope,
+        origin,
         &url,
         token,
         etag.as_deref(),
@@ -714,28 +752,62 @@ async fn fetch_listing(
         ));
     }
     let mut body = json_body(&first.body)?;
-    let mut rated = &first;
-    let mut page_keep = None;
-    if let Some(next) = next_link(&header_text(&first, "link").unwrap_or_default()) {
-        if next.starts_with(API) && rate_headers_remaining(&first) > 10 {
-            if let Ok(page) = get_raw(integration, scope, &next, token, None, "releases.list").await
-            {
-                if (200..300).contains(&page.status) {
-                    if let Ok(mut more) = json_body(&page.body) {
-                        if let (Some(left), Some(right)) =
-                            (body.as_array_mut(), more.as_array_mut())
-                        {
-                            left.append(right);
-                        }
-                    }
-                    page_keep = Some(page);
-                }
-            }
+    let releases = body
+        .as_array_mut()
+        .ok_or_else(|| "GitHub returned an unreadable release list.".to_owned())?;
+    let mut next = next_link(&header_text(&first, "link").unwrap_or_default());
+    let single_page = next.is_none();
+    let mut last = None;
+    let mut pages = 1;
+    let mut page_error = None;
+    // Keep the same rate-limit reserve. A partial listing is useful in Details,
+    // but cannot establish which version to announce.
+    let named_pages = format!("{API}/repos/{repository}/releases?");
+    let numbered_pages = format!("{API}/repositories/{id}/releases?");
+    while let Some(url) = next.as_deref() {
+        if !url
+            .get(..named_pages.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&named_pages))
+            && !url.starts_with(&numbered_pages)
+        {
+            break;
         }
+        if pages >= 10 || rate_headers_remaining(last.as_ref().unwrap_or(&first)) <= 10 {
+            break;
+        }
+        let page = match get_raw(integration, origin, url, token, None, "releases.list").await {
+            Ok(page) => page,
+            Err(error) => {
+                page_error = Some(error);
+                break;
+            }
+        };
+        if page.status != 200 {
+            page_error = Some(github_status(
+                repository,
+                page.status,
+                token.is_some(),
+                &page,
+            ));
+            last = Some(page);
+            break;
+        }
+        let Ok(Value::Array(mut more)) = json_body(&page.body) else {
+            page_error = Some("GitHub returned an unreadable release list.".to_owned());
+            last = Some(page);
+            break;
+        };
+        releases.append(&mut more);
+        let following = next_link(&header_text(&page, "link").unwrap_or_default());
+        if following == next {
+            break;
+        }
+        next = following;
+        pages += 1;
+        last = Some(page);
     }
-    if let Some(page) = page_keep.as_ref() {
-        rated = page;
-    }
+    let rated = last.as_ref().unwrap_or(&first);
+    let latest = super::update::latest(releases);
     let releases = body
         .as_array()
         .into_iter()
@@ -749,7 +821,10 @@ async fn fetch_listing(
         "repository": repository,
         "repository_id": id,
         "private": private,
-        "etag": header_text(&first, "etag"),
+        "etag": if single_page {header_text(&first, "etag")} else {None},
+        "complete":next.is_none(),
+        "message":page_error,
+        "latest":latest,
         "fetched_at": jiff::Timestamp::now().to_string(),
         "releases": releases,
     });
@@ -830,13 +905,13 @@ fn asset_row(
 
 async fn fetch_repo(
     integration: &bilibi_integration::Integration,
-    scope: &Scope,
+    origin: Origin<'_>,
     repository: &str,
     token: Option<&str>,
 ) -> std::result::Result<(i64, bool), String> {
     let reply = get_raw(
         integration,
-        scope,
+        origin,
         &format!("{API}/repos/{repository}"),
         token,
         None,
@@ -855,7 +930,10 @@ async fn fetch_repo(
     let id = body["id"].as_i64().ok_or_else(|| {
         format!("GitHub answered for {repository}, but not with a repository number.")
     })?;
-    Ok((id, body["private"].as_bool().unwrap_or(false)))
+    let private = body["private"]
+        .as_bool()
+        .ok_or_else(|| format!("GitHub did not confirm whether {repository} is public."))?;
+    Ok((id, private))
 }
 
 async fn get_json(
@@ -865,7 +943,15 @@ async fn get_json(
     token: Option<&str>,
     operation: &str,
 ) -> std::result::Result<Value, String> {
-    let reply = get_raw(integration, scope, url, token, None, operation).await?;
+    let reply = get_raw(
+        integration,
+        Origin::User(scope),
+        url,
+        token,
+        None,
+        operation,
+    )
+    .await?;
     if reply.status != 200 {
         return Err(github_status(
             "GitHub",
@@ -879,7 +965,7 @@ async fn get_json(
 
 async fn get_raw(
     integration: &bilibi_integration::Integration,
-    scope: &Scope,
+    origin: Origin<'_>,
     url: &str,
     token: Option<&str>,
     etag: Option<&str>,
@@ -900,7 +986,7 @@ async fn get_raw(
     }
     integration
         .send(
-            Origin::User(scope),
+            origin,
             &Call {
                 system: SYSTEM.into(),
                 operation: operation.into(),

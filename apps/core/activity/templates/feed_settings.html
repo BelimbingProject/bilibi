@@ -6,8 +6,9 @@
 {% import "components.html" as ui %}
 {{ flash }}
 {% call ui::page(variant=bilibi_ui::PageVariant::List) %}
-{% call settings::layout(header=header, current=bilibi_ui::SettingsTab::CalendarFeed, heading="Calendar feed", subheading="Subscribe to your activities from a calendar app. The link is read-only and shows what you may see.") %}
+{% call settings::layout(header=header, current=bilibi_ui::SettingsTab::CalendarFeed, heading="Calendar") %}
 <div class="space-y-3">
+{{ reminders }}
 {{ own }}
 {{ link }}
 {{ everyone }}

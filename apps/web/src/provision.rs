@@ -1,14 +1,15 @@
 //! Server-side tenant and platform provisioning commands.
 use bilibi_company::{self as primary, NewCompany, ProvisionOutcome};
 use bilibi_database::{Db, Error, Result};
-use bilibi_user::FirstTenantOwnerError;
+use bilibi_user::{FirstTenantOwnerError, TenantOwnerTarget};
 
-const TENANT_USAGE: &str = "usage: bilibi-web tenant-provision --tenant-name NAME --company-name NAME --company-code CODE [--owner-email ADDRESS]";
+const TENANT_USAGE: &str = "usage: bilibi-web tenant-provision --tenant-name NAME --company-name NAME --company-code CODE [--owner-email ADDRESS]\n       bilibi-web tenant-provision --tenant-id ID --owner-email ADDRESS";
 const PLATFORM_USAGE: &str = "usage: bilibi-web platform-provision [--tenant-name NAME] --company-name NAME --company-code CODE";
 
 #[derive(Default)]
 struct Options {
     tenant_name: Option<String>,
+    tenant_id: Option<String>,
     company_name: Option<String>,
     company_code: Option<String>,
     owner_email: Option<String>,
@@ -33,6 +34,7 @@ fn parse(command: &str, args: &[String]) -> Result<Options> {
     while let Some(flag) = rest.next() {
         let slot = match flag.as_str() {
             "--tenant-name" => &mut options.tenant_name,
+            "--tenant-id" if command == "tenant-provision" => &mut options.tenant_id,
             "--company-name" => &mut options.company_name,
             "--company-code" => &mut options.company_code,
             "--owner-email" if command == "tenant-provision" => &mut options.owner_email,
@@ -64,12 +66,32 @@ pub async fn provision(db: &Db, command: &str, args: &[String]) -> Result<()> {
         ..NewCompany::default()
     };
     let tenant_name = options.tenant_name.unwrap_or_default();
-    if company.name.is_empty()
-        || company.code.is_none()
-        || (command == "tenant-provision" && tenant_name.is_empty())
-    {
-        return Err(usage(command));
-    }
+    let target = if let Some(raw_id) = options.tenant_id {
+        if !tenant_name.is_empty()
+            || !company.name.is_empty()
+            || company.code.is_some()
+            || options.owner_email.is_none()
+        {
+            return Err(usage(command));
+        }
+        let tenant = raw_id
+            .parse::<i64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| usage(command))?;
+        TenantOwnerTarget::Reissue { tenant }
+    } else {
+        if company.name.is_empty()
+            || company.code.is_none()
+            || (command == "tenant-provision" && tenant_name.is_empty())
+        {
+            return Err(usage(command));
+        }
+        TenantOwnerTarget::Create {
+            name: &tenant_name,
+            company: &company,
+        }
+    };
     if let Some(email) = options.owner_email {
         let origin = std::env::var("APP_ORIGIN").map_err(|_| {
             eprintln!("Set APP_ORIGIN to this installation's public origin.");
@@ -86,14 +108,10 @@ pub async fn provision(db: &Db, command: &str, args: &[String]) -> Result<()> {
             }
             Err(error) => return Err(error),
         }
-        return match app
-            .user
-            .provision_tenant_owner(&tenant_name, &company, &email)
-            .await
-        {
-            Ok(invitation) => {
+        return match app.user.provision_tenant_owner(target, &email).await {
+            Ok((tenant, invitation)) => {
                 println!(
-                    "Owner invitation {} sent to {}. The owner must use the emailed link to create a new sign-in.",
+                    "Tenant {tenant}: Owner invitation {} sent to {}. The owner must use the emailed link to create a new sign-in.",
                     invitation.id, invitation.email
                 );
                 Ok(())
