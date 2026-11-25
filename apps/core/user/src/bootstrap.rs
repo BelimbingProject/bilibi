@@ -271,10 +271,9 @@ async fn operator_accounts(
 pub struct FirstAdministratorCreated {
     pub user: i64,
     pub email: String,
-    /// The grant-all role the account holds.
+    /// The grant-all role assigned during initial setup.
     pub role: Option<i64>,
-    /// A receipt from an earlier bootstrap named an account that no longer
-    /// exists and now names this one.
+    /// The write replaced an earlier ownership receipt.
     pub receipt_replaced: bool,
 }
 
@@ -363,8 +362,8 @@ impl UserService {
     /// seam, and the one-time bootstrap receipt that makes it the
     /// installation owner, on one audited transaction as the `create-owner`
     /// system principal. With recovery it assigns the receipt to active operator staff or creates a claim.
-    /// `settle_bootstrap_affiliation` then creates its Person, business
-    /// affiliation and first desk.
+    /// After initial setup, `settle_bootstrap_affiliation` creates the
+    /// Person, business affiliation and first desk.
     pub async fn create_first_administrator(
         &self,
         grants: &Grants,

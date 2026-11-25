@@ -134,8 +134,8 @@ pub async fn holders(
 }
 
 /// Bounded capability-holder enumeration for owner eligibility routing. As
-/// for [`holders`], a platform or portal key holds nobody, and the caller
-/// keeps only live staff accounts (ADR 16).
+/// for [`holders`], this accepts tenant keys only, and the caller keeps only
+/// live staff accounts (ADR 16).
 pub async fn holder_page(
     client: &impl GenericClient,
     scope: &Scope,

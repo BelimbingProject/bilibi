@@ -60,7 +60,7 @@ Undo takes back the newest finished install. The steps:
 | Step | What we do |
 | --- | --- |
 | **Back up the database** (the pause starts) | Stop the service and dump the database as it is now, so even a failed Undo can be put back. |
-| **Restore the backup taken before the change** (only when that change updated the database) | Count what was entered since that backup, from the audit trail, and keep the counts in the step. Then save the job history (`base_software_*`) to a file beside the safety backup, restore the backup and carry the current owner receipt forward in the same database transaction, then put the history back, so Undo does not erase its own record. The audit rows of the software changes written since the backup (the 2FA check and the queue record of this Undo, the recorded outcomes of the jobs carried back) are carried too. |
+| **Restore the backup taken before the change** (only when that change updated the database) | Count what was entered since that backup, from the audit trail, and keep the counts in the step. Then save the job history (`base_software_*`) to a file beside the safety backup, restore the backup and carry the current owner receipt forward in the same database transaction, then put the history back, so Undo does not erase its own record. The restore also [carries forward audit rows](#caveats). |
 | **Switch back to the previous program** | Point `current` at the previous release and start it. |
 | **Check that it works** | As for an install. If the previous release does not answer, a **Switch back to release N** step returns to the release that was running, with the safety backup when the database was restored. |
 
