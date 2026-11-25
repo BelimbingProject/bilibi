@@ -212,7 +212,7 @@ Staging is optional. When used, install and check the exact GitHub asset there f
 
 ## Putting a release into service
 
-**After the first release, the owner does this from the Software page or the root-only server command**, and the on-demand installer service does the work: copy and check, pause, back up, update the database, switch, check, and switch back by itself when the check fails. The page also offers Undo. From a server terminal, `sudo bilibi update <instance> [--to <version>]` lists the pinned release, shows the same review, asks for the installation owner's fresh 2FA code, queues the same operation and follows every step; `sudo bilibi update <instance> --undo` reviews and follows Undo. There is no flag to skip 2FA, proof verification or backup. What each step does, and what Undo loses, is in [`apps/installer/README.md`](../apps/installer/README.md).
+**After the first release, the owner does this from the Software page or the root-only server command**, and the on-demand installer service does the work: copy and check, pause, back up, update the database, switch, check, and switch back by itself when the check fails. The page also offers Undo. From a server terminal, `sudo bilibi update <instance> [--to X.Y.Z]` lists the pinned release, shows the same review, asks for the installation owner's fresh 2FA code, queues the same operation and follows every step. By default it looks for a newer stable setup. Use `--to X.Y.Z` to select the stable setup tagged `setup-vX.Y.Z`; `sudo bilibi update <instance> --undo` reviews and follows Undo. There is no flag to skip 2FA, proof verification or backup. What each step does, and what Undo loses, is in [`apps/installer/README.md`](../apps/installer/README.md).
 
 The installer records the admitted tag and digest before copying a numbered release. A failure after that write consumes the tag. Fix the cause and publish a new setup tag.
 
@@ -309,7 +309,7 @@ sudo scripts/install-server.sh installer production /path/to/bilibi-installer-x8
 
 The script verifies the installer against the named instance’s pin, writes it to `/opt/bilibi/<instance>/installer` as root, enables its boot recovery service and path activation, and starts one recovery scan. Repeat the command for each instance that should use Software installs. A stopped job is settled as described in [If the server restarts mid-way](../apps/installer/README.md#if-the-server-restarts-mid-way).
 
-The installer reads its own instance’s database and port from `env`. The service unit skips startup until the instance has a verified installer binary. It exits after ten idle seconds; `bilibi-installer@<instance>.path` stays active and starts it when the app commits a ready marker. The service is also enabled at boot, before the app, to finish or undo interrupted work. Bilibi only writes the marker in its shared incoming folder and has no permission to start or stop systemd units.
+The installer reads its own instance’s database and port from `env`. The service unit skips startup until the instance has a verified installer binary. It exits after ten idle seconds; `bilibi-installer@<instance>.path` stays active and starts it when the app commits a ready marker. The service is also enabled at boot, before the app, to finish or undo interrupted work. Bilibi restores missing ready markers at startup and during its regular settlement pass. It writes markers in its shared incoming folder and has no permission to start or stop systemd units.
 
 ## The first account
 

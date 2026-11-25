@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Drive one interactive server command without disclosing its 2FA code."""
+import errno
 import os
 from pathlib import Path
 import pty
@@ -26,7 +27,7 @@ pending = b''
 sent = False
 deadline = time.monotonic() + 600
 try:
-    while child.poll() is None or pending:
+    while True:
         if time.monotonic() >= deadline:
             child.terminate()
             raise SystemExit('terminal command did not finish within ten minutes')
@@ -34,11 +35,12 @@ try:
         if ready:
             try:
                 chunk = os.read(master, 8192)
-            except OSError:
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
                 chunk = b''
             if not chunk:
-                pending = b''
-                continue
+                break
             pending += chunk
             if not sent and prompt in pending:
                 os.write(master, secret + b'\n')
@@ -49,11 +51,9 @@ try:
             if len(pending) > keep:
                 os.write(sys.stdout.fileno(), pending[:-keep])
                 pending = pending[-keep:]
-        elif child.poll() is not None:
-            if pending:
-                os.write(sys.stdout.fileno(), pending.replace(secret, b'[redacted]'))
-            pending = b''
-    status = child.wait()
+    if pending:
+        os.write(sys.stdout.fileno(), pending.replace(secret, b'[redacted]'))
+    status = child.wait(timeout=max(0, deadline - time.monotonic()))
 finally:
     os.close(master)
     secret_file.unlink(missing_ok=True)

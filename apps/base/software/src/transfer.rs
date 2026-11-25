@@ -111,13 +111,12 @@ impl Software {
                     json!(crate::github::same_asset(release, &installed["github"]));
             }
         }
-        let update = crate::update::discover(self.paths.as_ref(), &github);
         if let Some(fields) = github.as_object_mut() {
             fields.remove("latest");
             fields.remove("complete");
         }
         Ok(
-            json!({"instance": review::instance_json(&instance), "release_trust": trust, "installed_asset": installed, "uploads": uploads, "github": github, "update":update}),
+            json!({"instance": review::instance_json(&instance), "release_trust": trust, "installed_asset": installed, "uploads": uploads, "github": github}),
         )
     }
 
@@ -571,10 +570,17 @@ impl Software {
             .await
             .map_err(db)?;
         staged.keep_folder = handed;
-        if handed {
-            paths.wake_installer(job.id)?;
+        drop(client);
+        if !handed {
+            return Ok(false);
         }
-        Ok(handed)
+        if let Err(error) = self.reconcile_installer_activation().await {
+            eprintln!(
+                "software job {}: ready installer jobs could not be signalled: {error:?}",
+                job.id
+            );
+        }
+        Ok(true)
     }
 
     async fn download_proof_asset(

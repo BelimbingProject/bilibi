@@ -41,7 +41,6 @@ const DOWNLOAD_HOSTS: &[&str] = &[
     "github-releases.githubusercontent.com",
 ];
 
-static LISTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static MEMORY: Mutex<Option<Value>> = Mutex::new(None);
 
 /// `owner/name`, the shape GitHub uses in a repository address.
@@ -139,7 +138,6 @@ impl Software {
         prerelease: bool,
         policy: &release_proof::Policy,
     ) -> Result<Value> {
-        let _listing = LISTING.lock().await;
         let saved = self.github_saved(client, scope, Some(policy)).await?;
         let repository = &policy.repository;
         let proof_required = policy.requires_operator_proof();
@@ -733,8 +731,6 @@ async fn fetch_listing(
     let single_page = next.is_none();
     let mut last = None;
     let mut pages = 1;
-    // Keep the same rate-limit reserve. A partial listing is useful in Details,
-    // but cannot establish which version to announce.
     let named_pages = format!("{API}/repos/{repository}/releases?");
     let numbered_pages = format!("{API}/repositories/{id}/releases?");
     while let Some(url) = next.as_deref() {

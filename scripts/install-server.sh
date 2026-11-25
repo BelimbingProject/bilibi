@@ -21,7 +21,7 @@
 #   install-server.sh verify <instance> <file> --kind server-tools|installer|setup --tag <setup-vX.Y.Z> [--proof <proof.json>]
 #   install-server.sh switch <instance> <release number>
 #   install-server.sh status [<instance>]
-#   bilibi update <instance> [--to <version> | --undo]
+#   bilibi update <instance> [--to X.Y.Z | --undo]
 #   install-server.sh --json <command> ...   one JSON line per step, for an AI agent or script
 #
 # Only the layout, the first release and the installer service live here.
@@ -1014,6 +1014,9 @@ installer() {
     local bin web_active=
     bin=$(installer_bin "$instance")
     systemctl is-active --quiet "$unit_name$instance" && web_active=1
+    if systemctl is-active --quiet "$installer_path$instance.path"; then
+        systemctl stop "$installer_path$instance.path"
+    fi
     systemctl stop "$installer_unit$instance"
     install_unit
     ensure_instance_access "$instance"

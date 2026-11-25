@@ -1945,7 +1945,6 @@ dependencies = [
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-notifications",
- "bilibi-schedule",
  "bilibi-settings",
  "bilibi-step-up",
  "bilibi-system",

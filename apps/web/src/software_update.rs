@@ -12,13 +12,13 @@ use bilibi_tenancy::{Authentication, ProofFuture, Scope};
 use serde_json::{json, Value};
 use std::{
     io::{self, IsTerminal, Write},
-    process::Command,
+    process::{Command, Stdio},
     sync::Arc,
     time::Duration,
 };
 use tokio_postgres::Transaction;
 
-const USAGE: &str = "usage: bilibi update <instance> [--to <version> | --undo]
+const USAGE: &str = "usage: bilibi update <instance> [--to X.Y.Z | --undo]
 Run this through the root-only `bilibi` server command. It lists a release from the
 pinned Release trust, shows the same review as Software > Releases, asks for the
 installation owner's current 2FA code, then follows the installer job to the end.";
@@ -112,7 +112,7 @@ pub async fn software_update(db: &Db, args: &[String]) -> Result<()> {
     let registry = app.services.get::<Registry>("base/agent_api.registry")?;
     let plans = app.services.get::<Plans>("base/agent_api.plans")?;
 
-    let operation = if options.undo {
+    let mut operation = if options.undo {
         PlannedOperation {
             key: "base.software.undo".into(),
             input: json!({}),
@@ -120,12 +120,11 @@ pub async fn software_update(db: &Db, args: &[String]) -> Result<()> {
     } else {
         PlannedOperation {
             key: "base.software.install".into(),
-            input: release_input(&registry, db, &scope, options.to.as_deref()).await?,
+            input: release_input(&app, &scope, options.to.as_deref()).await?,
         }
     };
-    let operations = [operation];
     let preview = plans
-        .preview(&authority, &operations)
+        .preview(&authority, std::slice::from_ref(&operation))
         .await
         .map_err(report_contract)?;
     if preview["valid"] != true || preview["results"][0]["valid"] != true {
@@ -136,12 +135,16 @@ pub async fn software_update(db: &Db, args: &[String]) -> Result<()> {
         return Err(Error::Invalid);
     }
     let facts = &preview["results"][0]["preview"]["result"];
+    if options.undo {
+        let job = facts["job"].as_i64().ok_or(Error::Internal)?;
+        operation.input = json!({"job": job});
+    }
     print_review(&preview["instance"], facts);
 
     let code = prompt_code()?;
     let presented = scope.clone().presenting_step_up(&code);
     let committed = plans
-        .commit(&presented, &authority, &operations)
+        .commit(&presented, &authority, &[operation])
         .await
         .map_err(report_contract)?;
     drop(code);
@@ -156,87 +159,25 @@ pub async fn software_update(db: &Db, args: &[String]) -> Result<()> {
     follow(&registry, db, &scope, job).await
 }
 
-async fn release_input(
-    registry: &Registry,
-    db: &Db,
-    scope: &Scope,
-    wanted: Option<&str>,
-) -> Result<Value> {
-    let reply = registry
-        .read(
-            db,
-            scope,
-            "base.software.releases",
-            &json!({"refresh": true, "prerelease": wanted.is_some()}),
-        )
-        .await
-        .map_err(report_contract)?;
-    let releases = &reply["result"]["github"];
-    let repository = releases["repository"]
-        .as_str()
-        .unwrap_or("the pinned repository");
-    let repository_id = releases["repository_id"].as_i64().unwrap_or(0);
-    let rows = releases["releases"].as_array().ok_or_else(|| {
-        eprintln!(
-            "No release is available from pinned Release trust{}.",
-            releases["message"]
-                .as_str()
-                .map(|message| format!(": {message}"))
-                .unwrap_or_default()
-        );
-        Error::NotFound
-    })?;
+async fn release_input(app: &crate::App, scope: &Scope, wanted: Option<&str>) -> Result<Value> {
+    use bilibi_base::software::{Software, SERVICE};
+    let software = app.services.get::<Software>(SERVICE)?;
+    let (listing, asset) = software.terminal_update(scope, wanted).await?;
+    let repository = listing["repository"].as_str().ok_or(Error::Internal)?;
     println!("Available releases from pinned Release trust ({repository}):");
-    for row in rows.iter().filter(|row| row["installed"] != true) {
+    for row in listing["releases"].as_array().into_iter().flatten() {
         println!(
-            "  {}  {}  {}{}",
+            "  {}  {}  {}",
             row["tag"].as_str().unwrap_or("?"),
             row["target"].as_str().unwrap_or("?"),
             row["name"].as_str().unwrap_or("?"),
-            if row["prerelease"] == true {
-                " (pre-release)"
-            } else {
-                ""
-            }
         );
     }
-    let selected = rows
-        .iter()
-        .filter(|row| row["installed"] != true)
-        .find(|row| {
-            wanted.is_none_or(|wanted| {
-                row["tag"]
-                    .as_str()
-                    .is_some_and(|tag| version_matches(tag, wanted))
-            })
-        })
-        .ok_or_else(|| {
-            match wanted {
-                Some(version) => eprintln!("No available release matches {version}."),
-                None => eprintln!("There is no newer release to install."),
-            }
-            Error::NotFound
-        })?;
-    println!("Selected: {}", selected["tag"].as_str().unwrap_or("?"));
-    Ok(json!({
-        "asset": selected["asset_id"],
-        "repository_id": repository_id,
-        "release_id": selected["release_id"],
-        "tag": selected["tag"],
-        "target": selected["target"],
-        "digest": selected["digest"],
-        "switch": "auto",
-    }))
-}
-
-fn version_matches(tag: &str, wanted: &str) -> bool {
-    fn version(value: &str) -> &str {
-        value
-            .strip_prefix("setup-v")
-            .or_else(|| value.strip_prefix('v'))
-            .unwrap_or(value)
-    }
-    tag == wanted || version(tag) == version(wanted)
+    println!(
+        "Selected: {}",
+        asset["tag"].as_str().ok_or(Error::Internal)?
+    );
+    Ok(asset)
 }
 
 fn print_review(instance: &Value, facts: &Value) {
@@ -290,18 +231,34 @@ fn print_review(instance: &Value, facts: &Value) {
 }
 
 fn prompt_code() -> Result<String> {
-    eprint!("Current 2FA code: ");
-    io::stderr().flush().map_err(|_| Error::Internal)?;
-    let hidden = Command::new("stty")
+    let original = Command::new("stty")
+        .arg("-g")
+        .stdin(Stdio::inherit())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .ok_or_else(|| Error::refused("Could not read the terminal settings."))?;
+    let mut stderr = io::stderr().lock();
+    if !Command::new("stty")
         .arg("-echo")
         .status()
-        .is_ok_and(|status| status.success());
-    let mut code = String::new();
-    let read = io::stdin().read_line(&mut code);
-    if hidden {
-        let _ = Command::new("stty").arg("echo").status();
+        .is_ok_and(|status| status.success())
+    {
+        return Err(Error::refused("Could not disable terminal echo."));
     }
-    eprintln!();
+    let mut code = String::new();
+    let read = write!(stderr, "Current 2FA code: ")
+        .and_then(|()| stderr.flush())
+        .and_then(|()| io::stdin().read_line(&mut code));
+    let restored = Command::new("stty")
+        .arg(original.trim())
+        .status()
+        .is_ok_and(|status| status.success());
+    let _ = writeln!(stderr);
+    if !restored {
+        return Err(Error::refused("Could not restore the terminal settings."));
+    }
     read.map_err(|_| Error::Invalid)?;
     let code = code.trim().to_owned();
     if code.is_empty() || code.len() > 256 {

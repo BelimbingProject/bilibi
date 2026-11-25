@@ -113,12 +113,18 @@ impl Paths {
         }
         self.require_installer_activation()?;
         let marker = self.installer_jobs().join(format!("job-{job}.ready"));
-        fs::write(&marker, format!("{job}\n")).map_err(|error| {
-            format!(
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(format!(
                 "The installer could not be activated ({}: {error}).",
                 marker.display()
-            )
-        })
+            )),
+        }
     }
     /// The release in service: `current` resolves to `releases/<n>`.
     pub fn current(&self) -> Option<u64> {

@@ -30,6 +30,12 @@ const RETRY_AFTER: Duration = Duration::from_secs(5);
 /// inside the shortest silence the app accepts.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
 
+enum Scan {
+    Worked,
+    Empty,
+    Deferred,
+}
+
 pub struct Installer {
     layout: Layout,
     service: Service,
@@ -81,12 +87,12 @@ impl Installer {
             let mut idle_markers = self.layout.activation_markers();
             loop {
                 match self.scan(&mut client).await {
-                    Ok(true) => {
+                    Ok(Scan::Worked) => {
                         reported.clear();
                         idle_markers = self.layout.activation_markers();
                         continue;
                     }
-                    Ok(false) => reported.clear(),
+                    Ok(Scan::Empty | Scan::Deferred) => reported.clear(),
                     Err(error) => {
                         let text = jobs::short(&error);
                         if text != reported {
@@ -107,10 +113,11 @@ impl Installer {
                     }
                     _ = tokio::time::sleep(IDLE_AFTER) => {
                         match self.scan(&mut client).await {
-                            Ok(true) => {
+                            Ok(Scan::Worked) => {
                                 idle_markers = self.layout.activation_markers();
                             }
-                            Ok(false) => {
+                            Ok(Scan::Deferred) => {}
+                            Ok(Scan::Empty) => {
                                 self.layout.remove_activation_markers(&idle_markers);
                                 println!("bilibi-installer: no work ready; exiting");
                                 return Ok(());
@@ -163,28 +170,28 @@ impl Installer {
         Ok((client, listener, receive))
     }
     /// One job, if there is one for this worker: first the one it was running
-    /// when last stopped, then the oldest waiting. True when it did some work.
-    async fn scan(&self, client: &mut Client) -> Result<bool, tokio_postgres::Error> {
+    /// when last stopped, then the oldest waiting.
+    async fn scan(&self, client: &mut Client) -> Result<Scan, tokio_postgres::Error> {
         let lock = match std::fs::File::open(&self.layout.dir) {
             Ok(lock) => lock,
             Err(error) => {
                 eprintln!("bilibi-installer: could not open the instance folder: {error}");
-                return Ok(false);
+                return Ok(Scan::Deferred);
             }
         };
         match lock.try_lock() {
             Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(Scan::Deferred),
             Err(error) => {
                 eprintln!("bilibi-installer: could not lock the instance: {error}");
-                return Ok(false);
+                return Ok(Scan::Deferred);
             }
         }
         let result = self.scan_job(client).await;
         client
             .batch_execute("SELECT pg_advisory_unlock_all()")
             .await?;
-        result
+        result.map(|worked| if worked { Scan::Worked } else { Scan::Empty })
     }
     async fn scan_job(&self, client: &mut Client) -> Result<bool, tokio_postgres::Error> {
         if self.finish_cut_off_restores(&*client).await? {
