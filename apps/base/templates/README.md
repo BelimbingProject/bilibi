@@ -36,7 +36,7 @@ mailer.deliver_linked_for(tenant, &message, Some(&link)).await?;
 
 | Module | Templates |
 | --- | --- |
-| `core/user` | `core.user.password_reset`, `core.user.sign_in_locked`, `core.user.invitation`, `core.user.email_verification`, `core.user.new_device_sign_in`, `core.user.two_factor_reset` |
+| `core/user` | `core.user.password_reset`, `core.user.sign_in_locked`, `core.user.invitation`, `core.user.email_verification`, `core.user.new_device_sign_in`, `core.user.two_factor_reset`, `core.user.two_factor_reset_request` |
 | `core/portal` | `core.portal.registration_confirmation`, `core.portal.invitation` |
 | `core/activity` | `core.activity.invitation`, `core.activity.guest_reminder`, `core.activity.reminder` |
 | `core/document` | `core.document.share` |

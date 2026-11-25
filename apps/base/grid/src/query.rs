@@ -345,13 +345,15 @@ pub(crate) async fn project_catalog<S: AsRef<str>>(
     let ids = Value::Array(ids.to_vec());
     let tenant = catalog.tenant();
     let user = catalog.user();
+    let company = catalog.company();
     let iso = |date: civil::Date| date.to_string();
     let trend_from = iso(months[0]);
     let trend_to = iso(today.first_of_month().saturating_add(1.month()));
     let since = iso(lenses.since.unwrap_or_else(|| default_since(today)));
-    let proof_head = "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr)";
+    let proof_head =
+        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company)";
     let proof_rows = format!(
-        "FROM {} r CROSS JOIN actor WHERE {} IN (SELECT (id #>> '{{}}')::{cast} FROM jsonb_array_elements($3::jsonb) AS x(id))",
+        "FROM {} r CROSS JOIN actor WHERE {} IN (SELECT (id #>> '{{}}')::{cast} FROM jsonb_array_elements($4::jsonb) AS x(id))",
         source(root),
         field("r", root, root.key())
     );
@@ -360,13 +362,14 @@ pub(crate) async fn project_catalog<S: AsRef<str>>(
         catalog,
         root,
         specs.iter().map(AsRef::as_ref),
-        (proof_head, &proof_rows, &[&tenant, &user, &ids]),
+        (proof_head, &proof_rows, &[&tenant, &user, &company, &ids]),
         bounds,
     )
     .await?;
     let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[
         &tenant,
         &user,
+        &company,
         &ids,
         &trend_from,
         &trend_to,
@@ -489,12 +492,13 @@ pub async fn stats<S: AsRef<str>>(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr) SELECT {ranges} FROM (SELECT {values} FROM {} r CROSS JOIN actor) s",
+        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company) SELECT {ranges} FROM (SELECT {values} FROM {} r CROSS JOIN actor) s",
         source(root)
     );
     let tenant = scope.tenant();
     let user = scope.user();
-    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[&tenant, &user];
+    let company = scope.current_company().map(|company| company.get());
+    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[&tenant, &user, &company];
     let explain: Value = tx
         .query_one(&format!("EXPLAIN (FORMAT JSON) {sql}"), params)
         .await?
@@ -532,8 +536,8 @@ pub async fn stats<S: AsRef<str>>(
 }
 
 /// Build an owner-list membership subquery over visible text paths. Execute
-/// immediately with the same scope, binding tenant/user/normalized search to
-/// $1/$2/$3, inside the owner's paginated SELECT and count. Unavailable paths
+/// immediately with the same scope, binding tenant/user/company/normalized
+/// search to $1/$2/$3/$4, inside the owner's paginated SELECT and count. Unavailable paths
 /// contribute no matches. Only catalog identifiers enter the returned SQL.
 /// Many-links search every value before list-cell truncation or aggregation.
 /// The caller owns its statement timeout and pagination, as for its own search.
@@ -570,20 +574,20 @@ pub async fn text_search_sql(
         matches.push(matching_keys(&catalog, root, &column, f.id));
     }
     let key = field("r", root, root.key());
-    // Reference both scope parameters even for sources that only use tenant.
+    // Reference every scope parameter even for sources that only use tenant.
     let predicate = if matches.is_empty() {
         "false".into()
     } else {
         format!("{key} IN ({})", matches.join(" UNION ALL "))
     };
     Ok(format!(
-        "SELECT {key} FROM {} r CROSS JOIN (SELECT $1::bigint AS tenant, $2::bigint AS usr) actor WHERE {predicate}",
+        "SELECT {key} FROM {} r CROSS JOIN (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company) actor WHERE {predicate}",
         source(root)
     ))
 }
 
 /// The keys of `root` rows whose `column` path reaches a row whose field
-/// `field_id` holds the term ($3), built from the matching rows backwards.
+/// `field_id` holds the term ($4), built from the matching rows backwards.
 fn matching_keys(catalog: &Catalog, root: &Table, column: &Column, field_id: &str) -> String {
     let links: Vec<&Link> = column
         .hops
@@ -600,7 +604,7 @@ fn matching_keys(catalog: &Catalog, root: &Table, column: &Column, field_id: &st
         .collect();
     let last = tables[tables.len() - 1];
     let mut keys = format!(
-        "SELECT {} FROM {} m WHERE lower({}) LIKE '%' || replace(replace(replace($3::text, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'",
+        "SELECT {} FROM {} m WHERE lower({}) LIKE '%' || replace(replace(replace($4::text, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'",
         field("m", last, last.key()),
         source(last),
         field("m", last, field_id)
@@ -659,7 +663,8 @@ pub(crate) fn ident(name: &str) -> String {
 
 /// A scalar path resolved under the caller's fresh scoped catalog. The owner
 /// executes this expression with its root row aliased `r`, binding the same
-/// tenant/user to $1/$2 as every catalog source. No caller SQL is accepted.
+/// tenant/user/company to $1/$2/$3 as every catalog source. No caller SQL is
+/// accepted.
 pub fn scalar_expression(catalog: &Catalog, root: &str, path: &str) -> Result<String, QueryError> {
     let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
     let column = catalog
@@ -729,8 +734,9 @@ pub struct ScalarJoin {
     pub alias: String,
     /// The joined scalar value, using only catalog-validated identifiers.
     pub expression: String,
-    /// The `LEFT JOIN` clause for the alias. The caller binds the same `$1`/`$2`
-    /// tenant and user values used by the declared owner source.
+    /// The `LEFT JOIN` clause for the alias. The caller binds the same
+    /// `$1`/`$2`/`$3` tenant, user and selected company values used by the
+    /// declared owner source.
     pub clause: String,
 }
 
@@ -1024,7 +1030,7 @@ fn statement(
     // key bare, allowing its index to bound the page lookup. Type identifiers
     // come from PostgreSQL metadata, never from a request.
     format!(
-        "WITH input AS (SELECT (id #>> '{{}}')::{key_cast} AS key, min(ord) AS ord FROM jsonb_array_elements($3::jsonb) WITH ORDINALITY AS x(id,ord) GROUP BY 1), actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $4::text::date AS trend_from, $5::text::date AS trend_to, $6::text::date AS since, $7::jsonb AS subjects) SELECT {select} FROM input JOIN {} r ON {} = input.key CROSS JOIN actor ORDER BY input.ord LIMIT 101",
+        "WITH input AS (SELECT (id #>> '{{}}')::{key_cast} AS key, min(ord) AS ord FROM jsonb_array_elements($4::jsonb) WITH ORDINALITY AS x(id,ord) GROUP BY 1), actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company, $5::text::date AS trend_from, $6::text::date AS trend_to, $7::text::date AS since, $8::jsonb AS subjects) SELECT {select} FROM input JOIN {} r ON {} = input.key CROSS JOIN actor ORDER BY input.ord LIMIT 101",
         source(root),
         field("r", root, root.key())
     )

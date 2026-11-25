@@ -433,9 +433,16 @@ async fn challenge_card(
         .collect::<Vec<_>>();
     challenge_card_response(
         site,
-        bilibi_ui::SignInChallengePage::new(&pending.csrf, &methods, method, message, error)
-            .map_err(|_| Error::Internal)?
-            .at(CHALLENGE.to_owned()),
+        bilibi_ui::SignInChallengePage::new(
+            &pending.csrf,
+            &methods,
+            method,
+            message,
+            error,
+            pending.password_origin,
+        )
+        .map_err(|_| Error::Internal)?
+        .at(CHALLENGE.to_owned()),
         StatusCode::OK,
     )
 }
@@ -517,6 +524,16 @@ pub async fn challenge(
                     message.push_str(&format!(" Try again in {seconds} seconds."));
                 }
                 challenge_card(&app, &site, &token, &submission.method, &message, "").await
+            }
+            "request_reset" => {
+                let outcome=app.user.portal_request_sign_in_two_factor_reset(&token,&submission.csrf).await?;
+                let message=if outcome.created {
+                    format!("Request sent to {}. You'll get an email when 2FA is reset.",outcome.recipient)
+                } else {
+                    let at=jiff::Timestamp::try_from(outcome.requested_at).map_err(|_|Error::Internal)?;
+                    format!("A request was already sent at {}. You'll get an email when 2FA is reset.",at.strftime("%Y-%m-%d %H:%M UTC"))
+                };
+                challenge_card(&app,&site,&token,&submission.method,&message,"").await
             }
             "verify" => match app
                 .user

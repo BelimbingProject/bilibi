@@ -51,6 +51,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
 struct View {
     flash: Html,
     header: Html,
+    reminders: Html,
     own: Html,
     link: Html,
     everyone: Html,
@@ -287,6 +288,11 @@ impl Feed {
                     self.list.next_sort(&key);
                 }
             }
+            "save_reminder_defaults" => {
+                self.flash = Some(
+                    super::reminder_defaults::save(&self.pages, scope, credential, value).await?,
+                );
+            }
             "clear-flash" => self.flash = None,
             _ => return Err(Error::Invalid),
         }
@@ -364,10 +370,16 @@ impl Feed {
                 ..Button::default()
             })?);
         }
-        let mut body = render(Facts {
+        let mut body = render(SectionHeading {
+            id: "feed-own-heading",
+            title: "Calendar feed",
+            description: "Subscribe in another calendar app with a read-only link to the activities you can see.",
+            ..SectionHeading::default()
+        })?;
+        body.push(&render(Facts {
             id: "feed-facts",
             items: facts,
-        })?;
+        })?);
         body.push(&actions);
         let own = render(Card {
             id: "feed-own",
@@ -433,6 +445,7 @@ impl Feed {
                 title: Html::text("My settings"),
                 ..Header::default()
             })?,
+            reminders: super::reminder_defaults::settings(&self.pages, scope).await?,
             own,
             link,
             everyone,
