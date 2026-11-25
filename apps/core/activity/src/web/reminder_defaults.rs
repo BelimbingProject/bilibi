@@ -2,7 +2,9 @@
 use super::{refusal, reminder_choices, render, sentences, Pages, Refusal};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
-use bilibi_ui::{params, Button, ButtonVariant, Card, Choice, Combobox, Form, Html, StatusKind};
+use bilibi_ui::{
+    params, Attrs, Button, ButtonVariant, Card, Choice, Combobox, Form, Html, StatusKind,
+};
 use serde_json::{json, Value};
 
 pub(super) async fn settings(pages: &Pages, scope: &Scope) -> Result<Html> {
@@ -11,9 +13,14 @@ pub(super) async fn settings(pages: &Pages, scope: &Scope) -> Result<Html> {
     }
     let defaults = pages.activities.reminder_defaults(scope).await?;
     let minutes = defaults.minutes.as_deref();
+    let required = Attrs {
+        required: true,
+        ..Attrs::default()
+    };
     let mut body = render(
         Combobox::new("activities-defaults-reminders", "defaults[reminders]")
             .label("Remind me")
+            .attrs(required.clone())
             .value(reminder_choices::code(minutes))
             .options(
                 reminder_choices::options(minutes, "Organisation default")
@@ -25,6 +32,7 @@ pub(super) async fn settings(pages: &Pages, scope: &Scope) -> Result<Html> {
     body.push(&render(
         Combobox::new("activities-defaults-email", "defaults[reminder_email]")
             .label("Email reminders")
+            .attrs(required)
             .value(reminder_choices::email_code(defaults.email))
             .options(
                 reminder_choices::EMAIL
@@ -74,10 +82,12 @@ pub(super) async fn save(
         .map_err(Error::refused)?;
     let email = form
         .get("reminder_email")
+        .filter(|code| !code.trim().is_empty())
         .and_then(|v| reminder_choices::parse_email(v))
         .ok_or(Error::Invalid)?;
     let minutes = form
         .get("reminders")
+        .filter(|code| !code.trim().is_empty())
         .and_then(|v| reminder_choices::parse(v))
         .ok_or(Error::Invalid)?;
     let mut input = json!({"reminder_email":email});

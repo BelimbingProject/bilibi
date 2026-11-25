@@ -276,7 +276,7 @@ impl Detail {
         };
         match outcome {
             Ok(count) => Ok(Some(LiveBody {
-                redirect: Some(crate::contributions::CALENDAR_ADDRESS.into()),
+                redirect: Some("/activities".into()),
                 flash: Some((StatusKind::Success, series_delete::deleted(count))),
                 ..LiveBody::default()
             })),
@@ -746,7 +746,7 @@ impl Detail {
                 {
                     Ok(_) if wanted == Confirm::Delete => {
                         return Ok(Some(LiveBody {
-                            redirect: Some(crate::contributions::CALENDAR_ADDRESS.into()),
+                            redirect: Some("/activities".into()),
                             flash: Some((StatusKind::Success, "Activity deleted.".into())),
                             ..LiveBody::default()
                         }));
