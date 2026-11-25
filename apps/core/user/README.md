@@ -315,7 +315,7 @@ Authenticator-app codes (TOTP, RFC 6238: HMAC-SHA-1, 6 digits, 30 s) for the sig
 
 Pages (signed in only, live, `Cache-Control: no-store` like every page):
 
-- `/settings/two-factor?method=core.user.authenticator`: set up (password, QR code, setup key, first code), or move to a new phone (a code from the old phone, a new QR code, the new phone's first code). There is no self-service turn-off. The installation owner's page also keeps the terminal fallback in a closed **If you cannot sign in** detail.
+- `/settings/two-factor?method=core.user.authenticator`: set up (password, QR code, setup key, first code), or move to a new phone (a code from the old phone, a new QR code, the new phone's first code). There is no self-service turn-off.
 - `/settings/two-factor/confirm?method=core.user.authenticator&return=<path>`: the authenticator step-up prompt. Success returns to `return`, which must be a local path (`safe_return`).
 - A customer has the same two pages on the portal, mounted by Core Portal: `/portal/account/two-factor` (`PortalTwoFactor`) and `/portal/account/two-factor/confirm` (`PortalConfirm`). The authenticator's `prompt` and `setup` answer these paths for a customer account (`PORTAL_CONFIRM_PATH`, `PORTAL_TWO_FACTOR_PATH`), so Base Step-up sends a customer who owes a check to the portal, never to a staff page. Both keep `return` only when it is a portal address.
 

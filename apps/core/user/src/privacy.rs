@@ -308,6 +308,71 @@ impl Handler for Accounts {
                     // The approver's own account cannot be the one erased.
                     return Err(Error::Forbidden);
                 }
+                let reset_requests: Vec<i64> = tx
+                    .sql()
+                    .query(
+                        "SELECT id FROM user_two_factor_reset_requests WHERE tenant_id=$1 AND user_id=$2 ORDER BY id FOR UPDATE",
+                        &[&tenant, &user],
+                    )
+                    .await?
+                    .iter()
+                    .map(|row| row.get(0))
+                    .collect();
+                let held_reset_requests = holds
+                    .records(
+                        tx.sql(),
+                        grant,
+                        TWO_FACTOR_RESET_REQUEST_KIND,
+                        &reset_requests,
+                    )
+                    .await?;
+                for (request, hold) in &held_reset_requests {
+                    erased
+                        .kept
+                        .push(Kept::held(TWO_FACTOR_RESET_REQUEST_KIND, request, *hold));
+                }
+                let reset_requests: Vec<i64> = reset_requests
+                    .into_iter()
+                    .filter(|id| !held_reset_requests.contains_key(id))
+                    .collect();
+                if !reset_requests.is_empty() {
+                    let removed = tx
+                        .mutate(move |sql| {
+                            Box::pin(async move {
+                                let rows = sql
+                                    .query(
+                                        "DELETE FROM user_two_factor_reset_requests WHERE tenant_id=$1 AND id=ANY($2) RETURNING id",
+                                        &[&tenant, &reset_requests],
+                                    )
+                                    .await?;
+                                let ids: Vec<i64> =
+                                    rows.iter().map(|row| row.get(0)).collect();
+                                let changes = ids
+                                    .iter()
+                                    .map(|id| Change {
+                                        kind: TWO_FACTOR_RESET_REQUEST_KIND.into(),
+                                        id: *id,
+                                        old: json!({"status":"recorded"}),
+                                        new: json!({"status":"erased"}),
+                                    })
+                                    .collect();
+                                Ok((ids, changes))
+                            })
+                        })
+                        .await?;
+                    erased.count(
+                        TWO_FACTOR_RESET_REQUEST_KIND,
+                        Action::Deleted,
+                        removed.len() as i64,
+                    );
+                    erased
+                        .records
+                        .extend(removed.into_iter().map(|id| ErasedRecord {
+                            kind: TWO_FACTOR_RESET_REQUEST_KIND.into(),
+                            id,
+                            person: None,
+                        }));
+                }
                 // The sign-in history (time, address, device) is security
                 // evidence: erasure leaves it, and Session's expiry sweep
                 // deletes each record 90 days after the sign-in.

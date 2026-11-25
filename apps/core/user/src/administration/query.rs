@@ -172,3 +172,41 @@ pub async fn list(
         total_entries: u64::try_from(total).unwrap_or_default(),
     })
 }
+
+pub(super) async fn recovery_entry(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    tenant: i64,
+    user: i64,
+) -> Result<Option<Entry>> {
+    bilibi_tenancy::prove_owner(client, scope).await?;
+    let actor_identity = crate::sign_in_identity::id(client, scope.tenant(), scope.user()).await?;
+    client
+        .query_opt(
+            "SELECT u.id,u.name,i.email,u.created_at,u.status,\
+             (SELECT company_name FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id AND r.closed_at IS NULL ORDER BY r.requested_at DESC LIMIT 1),\
+             (SELECT max(requested_at) FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id AND r.closed_at IS NULL),\
+             EXISTS(SELECT 1 FROM user_two_factor f WHERE f.identity_id=u.identity_id AND f.confirmed_at IS NOT NULL)\
+             FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL\
+             WHERE u.tenant_id=$1 AND u.id=$2 AND u.kind='staff' AND u.deleted_at IS NULL AND u.identity_id<>$3\
+               AND EXISTS(SELECT 1 FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id AND r.closed_at IS NULL)",
+            &[&tenant, &user, &actor_identity],
+        )
+        .await?
+        .map(|row| {
+            Ok(Entry {
+                id: row.get(0),
+                name: row.get(1),
+                email: row.get(2),
+                created_at: row.get(3),
+                membership: Membership::parse(row.get(4)).ok_or(Error::Internal)?,
+                desks: row.get(5),
+                roles: Vec::new(),
+                invitation: None,
+                reset_requested_at: row.get(6),
+                two_factor_enabled: row.get(7),
+                can_reset: true,
+            })
+        })
+        .transpose()
+}

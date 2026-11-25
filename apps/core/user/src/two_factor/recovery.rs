@@ -72,6 +72,24 @@ pub(crate) async fn administrators(
     bilibi_authz::holders(client, tenant, CAPABILITY, i64::MAX).await
 }
 
+async fn notification_administrators(
+    client: &impl tokio_postgres::GenericClient,
+    tenant: i64,
+    customer: bool,
+) -> Result<Vec<i64>> {
+    let reset = administrators(client, tenant).await?;
+    let surface = if customer {
+        "admin.portal.view"
+    } else {
+        crate::LIST
+    };
+    let list = bilibi_authz::holders(client, tenant, surface, i64::MAX).await?;
+    Ok(reset
+        .into_iter()
+        .filter(|user| list.contains(user))
+        .collect())
+}
+
 pub(crate) const OWNER_ONLY: &str = "(u.kind='customer' OR EXISTS(SELECT 1 FROM users owner JOIN user_bootstrap b ON b.tenant_id=owner.tenant_id AND b.user_id=owner.id WHERE owner.identity_id=u.identity_id) OR EXISTS(SELECT 1 FROM users other WHERE other.identity_id=u.identity_id AND other.tenant_id<>u.tenant_id AND other.deleted_at IS NULL))";
 
 async fn owner_only(
@@ -121,7 +139,7 @@ async fn recipient_rows(
     Ok(recipients)
 }
 
-fn request_url(scope: &Scope, email: &str, user: i64) -> String {
+fn request_url(scope: &Scope, user: i64) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     query.append_pair("recoveryTenant", &scope.tenant().to_string());
     if scope.actor().kind() == bilibi_tenancy::AccountKind::Customer {
@@ -131,7 +149,7 @@ fn request_url(scope: &Scope, email: &str, user: i64) -> String {
             query.finish()
         )
     } else {
-        query.append_pair("search", email);
+        query.append_pair("recoveryAccount", &user.to_string());
         query.append_pair("resetRequested", "open");
         format!("/users?{}", query.finish())
     }
@@ -180,12 +198,18 @@ pub(crate) async fn request_in(
         return Ok(RequestOutcome { created: false, requested_at: row.get(0), recipient: String::new() });
     }
     let admins = administrators(tx.sql(), scope.tenant()).await?;
+    let notification_admins = notification_administrators(
+        tx.sql(),
+        scope.tenant(),
+        scope.actor().kind() == bilibi_tenancy::AccountKind::Customer,
+    )
+    .await?;
     let mut owner =
         owner_only(tx.sql(), scope.tenant(), scope.user()).await? || admins.contains(&scope.user());
     let mut recipients = if owner {
         Vec::new()
     } else {
-        recipient_rows(tx, scope, false, &admins).await?
+        recipient_rows(tx, scope, false, &notification_admins).await?
     };
     if recipients.is_empty() {
         owner = true;
@@ -221,15 +245,15 @@ pub(crate) async fn request_in(
     let user = scope.user();
     let company_for_change = company.clone();
     let (requested_at, time): (SystemTime, String) = tx.mutate(move |sql| Box::pin(async move {
-        let row = sql.query_one("INSERT INTO user_two_factor_reset_requests(tenant_id,user_id,identity_id,company_id,company_name,recipient_kind) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,requested_at,to_char(requested_at AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI UTC')", &[&tenant,&user,&identity,&company_id,&company_for_change,&recipient_kind]).await?;
+        let row = sql.query_one("INSERT INTO user_two_factor_reset_requests(tenant_id,user_id,identity_id,company_name,recipient_kind) VALUES($1,$2,$3,$4,$5) RETURNING id,requested_at,to_char(requested_at AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI UTC')", &[&tenant,&user,&identity,&company_for_change,&recipient_kind]).await?;
         Ok(((row.get(1),row.get(2)),vec![Change { kind:"user_two_factor_reset_request".into(), id:row.get(0), old:json!({}), new:json!({"user_id":user,"company":company_for_change,"requested_at":row.get::<_,SystemTime>(1),"recipient":recipient_kind}) }]))
     })).await?;
-    let url = request_url(scope, &email, user);
+    let url = request_url(scope, user);
     let notice = Notice::new("2FA reset requested")
         .kind("two_factor_reset_request")
         .icon("shield-exclamation")
         .body(format!(
-            "{account} requested a 2FA reset for {company} at {time}."
+            "A person requested a 2FA reset at {time}. Open the linked account for details."
         ))
         .url(&url);
     let recipient_ids: Vec<_> = recipients.iter().map(|recipient| recipient.user).collect();
@@ -266,19 +290,27 @@ pub(crate) async fn request_in(
 async fn account(
     client: &(impl tokio_postgres::GenericClient + Sync),
     scope: &Scope,
+    tenant: i64,
     user: i64,
 ) -> Result<(Account, bool)> {
-    if scope.impersonator().is_some() || user == scope.user() {
+    if scope.impersonator().is_some() {
         return Err(Error::Forbidden);
     }
     bilibi_authz::authorize_key(client, scope, CAPABILITY).await?;
-    let row = client.query_opt("SELECT u.id,u.tenant_id,u.name,i.email,u.status='active' FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.kind IN ('staff','customer') AND u.deleted_at IS NULL", &[&scope.tenant(),&user]).await?.ok_or(Error::NotFound)?;
-    let actor_owner = installation_owner(client, scope).await?;
+    let actor_owner = if tenant == scope.tenant() {
+        installation_owner(client, scope).await?
+    } else {
+        bilibi_tenancy::prove_owner(client, scope).await?;
+        true
+    };
+    let row = client.query_opt("SELECT u.id,u.tenant_id,u.name,i.email,u.status='active',u.identity_id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.kind IN ('staff','customer') AND u.deleted_at IS NULL", &[&tenant,&user]).await?.ok_or(Error::NotFound)?;
+    let actor_identity = crate::sign_in_identity::id(client, scope.tenant(), scope.user()).await?;
+    if row.get::<_, i64>(5) == actor_identity {
+        return Err(Error::Forbidden);
+    }
     if !actor_owner
-        && (owner_only(client, scope.tenant(), user).await?
-            || administrators(client, scope.tenant())
-                .await?
-                .contains(&user))
+        && (owner_only(client, tenant, user).await?
+            || administrators(client, tenant).await?.contains(&user))
     {
         return Err(Error::Forbidden);
     }
@@ -298,10 +330,11 @@ async fn reset_in(
     service: &UserService,
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
+    tenant: i64,
     user: i64,
 ) -> Result<Value> {
-    lock_reset_target(tx, user).await?;
-    let (account, owner) = account(tx.sql(), scope, user).await?;
+    lock_reset_target(tx, tenant, user).await?;
+    let (account, owner) = account(tx.sql(), scope, tenant, user).await?;
     let (ended, rows) = clear_confirmed(service, tx, &account, json!({"reset_by":if owner {"installation_owner"} else {"tenant_administrator"},"reset_by_user_id":scope.user()}), Some(scope.user())).await?;
     if account.active {
         notifications::record_in_tenant(
@@ -321,7 +354,7 @@ async fn reset_in(
     let target = account.id;
     let service = USERS.get().cloned().ok_or(Error::Internal)?;
     tx.after_commit(move || wake(&service, tenant, target, ended, mail));
-    Ok(json!({"user_id":user,"reset":true,"closed_requests":rows}))
+    Ok(json!({"tenant_id":tenant,"user_id":user,"reset":true,"closed_requests":rows}))
 }
 
 pub(super) async fn close_requests(
@@ -401,21 +434,50 @@ impl UserService {
 pub async fn customer_reset_requests(
     client: &(impl tokio_postgres::GenericClient + Sync),
     scope: &Scope,
+    tenant: i64,
     accounts: &[i64],
 ) -> Result<std::collections::HashMap<i64, SystemTime>> {
     if accounts.is_empty()
-        || !installation_owner(client, scope).await?
         || !bilibi_authz::decide(client, scope, CAPABILITY)
             .await?
             .allowed
     {
         return Ok(std::collections::HashMap::new());
     }
-    Ok(client.query("SELECT r.user_id,max(r.requested_at) FROM user_two_factor_reset_requests r JOIN users u ON u.tenant_id=r.tenant_id AND u.id=r.user_id WHERE r.tenant_id=$1 AND r.user_id=ANY($2) AND r.closed_at IS NULL AND u.kind='customer' AND u.deleted_at IS NULL AND u.id<>$3 GROUP BY r.user_id", &[&scope.tenant(), &accounts, &scope.user()]).await?.iter().map(|row| (row.get(0),row.get(1))).collect())
+    if tenant != scope.tenant() {
+        bilibi_tenancy::prove_owner(client, scope).await?;
+    }
+    Ok(client.query("SELECT r.user_id,max(r.requested_at) FROM user_two_factor_reset_requests r JOIN users u ON u.tenant_id=r.tenant_id AND u.id=r.user_id WHERE r.tenant_id=$1 AND r.user_id=ANY($2) AND r.closed_at IS NULL AND u.kind='customer' AND u.deleted_at IS NULL GROUP BY r.user_id", &[&tenant, &accounts]).await?.iter().map(|row| (row.get(0),row.get(1))).collect())
+}
+
+pub async fn recovery_customer_account(
+    client: &(impl tokio_postgres::GenericClient + Sync),
+    scope: &Scope,
+    tenant: i64,
+    user: i64,
+) -> Result<Option<crate::CustomerAccount>> {
+    if !customer_reset_requests(client, scope, tenant, &[user])
+        .await?
+        .contains_key(&user)
+    {
+        return Ok(None);
+    }
+    crate::customers::customer_account_in_tenant(client, tenant, user, false).await
 }
 
 struct Reset;
 impl WriteHandler for Reset {
+    fn transaction_tenant(
+        &self,
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<Option<i64>> {
+        Ok(Some(
+            input["tenant_id"]
+                .as_i64()
+                .unwrap_or_else(|| scope.tenant()),
+        ))
+    }
     fn owner(&self) -> &'static str {
         "core/user"
     }
@@ -430,14 +492,17 @@ impl WriteHandler for Reset {
                 .as_i64()
                 .filter(|id| *id > 0)
                 .ok_or(Error::Invalid)?;
+            let tenant = input["tenant_id"]
+                .as_i64()
+                .unwrap_or_else(|| scope.tenant());
             let (account, _) = match client.transaction() {
-                Some(tx) => account(tx, scope, user).await?,
+                Some(tx) => account(tx, scope, tenant, user).await?,
                 None => {
                     let pooled = users()?.db.get().await.map_err(Error::from)?;
-                    account(&**pooled, scope, user).await?
+                    account(&**pooled, scope, tenant, user).await?
                 }
             };
-            Ok(json!({"user_id":user,"account":account.name,"signs_out_everywhere":true,"emails_account":true}).into())
+            Ok(json!({"tenant_id":tenant,"user_id":user,"account":account.name,"signs_out_everywhere":true,"emails_account":true}).into())
         })
     }
     fn commit<'a>(
@@ -451,12 +516,15 @@ impl WriteHandler for Reset {
                 .as_i64()
                 .filter(|id| *id > 0)
                 .ok_or(Error::Invalid)?;
-            Ok(reset_in(users()?, tx, scope, user).await?.into())
+            let tenant = input["tenant_id"]
+                .as_i64()
+                .unwrap_or_else(|| scope.tenant());
+            Ok(reset_in(users()?, tx, scope, tenant, user).await?.into())
         })
     }
 }
 fn schema() -> Value {
-    json!({"type":"object","required":["user_id"],"properties":{"user_id":{"type":"integer","minimum":1}}})
+    json!({"type":"object","required":["user_id"],"properties":{"tenant_id":{"type":"integer","minimum":1},"user_id":{"type":"integer","minimum":1}}})
 }
 fn output() -> Value {
     json!({"type":"object"})

@@ -86,19 +86,23 @@ pub(super) fn reset_mail(service: &UserService, account: &Account, slot: &str) -
     ))
 }
 
-pub(super) async fn lock_reset_target(
+pub(crate) async fn lock_reset_target(
     tx: &MutationTransaction<'_>,
+    tenant: i64,
     user: i64,
 ) -> Result<(), Error> {
+    if tx.context().tenant != tenant {
+        return Err(Error::Forbidden);
+    }
     // Serialize resets and membership removal through the owning account row.
     tx.sql()
         .query_opt(
             "SELECT id FROM users WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE",
-            &[&tx.context().tenant, &user],
+            &[&tenant, &user],
         )
         .await?
         .ok_or(Error::NotFound)?;
-    let identity = crate::sign_in_identity::id(tx.sql(), tx.context().tenant, user).await?;
+    let identity = crate::sign_in_identity::id(tx.sql(), tenant, user).await?;
     tx.sql()
         .query_one(
             "SELECT id FROM user_identities WHERE id=$1 FOR UPDATE",
@@ -198,7 +202,7 @@ impl UserService {
                 Context::system(account.tenant, "two-factor-reset", "user.two_factor.reset"),
             )
             .await?;
-        lock_reset_target(&tx, account.id).await?;
+        lock_reset_target(&tx, account.tenant, account.id).await?;
         let ended = match clear_confirmed(
             self,
             &mut tx,

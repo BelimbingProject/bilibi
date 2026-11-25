@@ -112,11 +112,20 @@ pub async fn customer_account(
     user: i64,
     lock: bool,
 ) -> Result<Option<CustomerAccount>> {
+    customer_account_in_tenant(client, scope.tenant(), user, lock).await
+}
+
+pub(crate) async fn customer_account_in_tenant(
+    client: &impl GenericClient,
+    tenant: i64,
+    user: i64,
+    lock: bool,
+) -> Result<Option<CustomerAccount>> {
     let lock = if lock { " FOR UPDATE" } else { "" };
     client
         .query_opt(
             &format!("SELECT {CUSTOMER_COLUMNS} FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.kind='customer' AND u.deleted_at IS NULL{lock}"),
-            &[&scope.tenant(), &user],
+            &[&tenant, &user],
         )
         .await?
         .map(|row| CustomerAccount::from_row(&row))

@@ -30,9 +30,9 @@ use bilibi_ui::{
         PageFuture, PageRequest,
     },
     params, Badge, BadgeKind, BuiltinColumn, Card, ColumnType, ConfirmDialog, CreateButton,
-    FilterToolbar, FlashGroup, FlashMap, Header, Html, IconButton, IconKind, Instant, ListSpec,
-    ListState, MultiSelect, PageCounts, Pagination, RecordLink, RowMode, SortDir, StatusKind,
-    TableEmpty, ToolbarControl,
+    FilterToolbar, FlashGroup, FlashMap, FlexRow, Header, Html, IconButton, IconKind, Instant,
+    ListSpec, ListState, MultiSelect, PageCounts, Pagination, RecordLink, RowMode, SortDir,
+    StatusKind, TableEmpty, ToolbarControl,
 };
 use jiff::Timestamp;
 use serde_json::{json, Value};
@@ -335,6 +335,7 @@ struct Index {
     role_ids: Vec<i64>,
     membership: Option<Membership>,
     reset_requested: bool,
+    linked_recovery: Option<(i64, i64)>,
     columns: PageColumns,
     framed: bool,
     flash: Flash,
@@ -342,7 +343,7 @@ struct Index {
     pending_delete: Option<Entry>,
     /// The listed invitation a revoke dialog is open for.
     pending_revoke: Option<Entry>,
-    pending_reset: Option<Entry>,
+    pending_reset: Option<(Entry, i64)>,
     reset_error: Option<String>,
     /// The entries last drawn, so a `request_delete` names only a listed row.
     listed: Vec<Entry>,
@@ -363,6 +364,7 @@ impl Index {
             role_ids: Vec::new(),
             membership: None,
             reset_requested: false,
+            linked_recovery: None,
             columns,
             framed,
             flash: Flash::default(),
@@ -391,6 +393,14 @@ impl Index {
         self.reset_requested = query
             .get(RESET_REQUESTED)
             .is_some_and(|value| value == "open");
+        self.linked_recovery = query
+            .get("recoveryTenant")
+            .and_then(|tenant| params::positive_id(Some(tenant)))
+            .zip(
+                query
+                    .get("recoveryAccount")
+                    .and_then(|user| params::positive_id(Some(user))),
+            );
         self.list.search = bounded_search(&self.list.search);
         self.list.page = self.list.page.min(MAX_PAGE);
     }
@@ -584,6 +594,17 @@ impl Index {
             let client = self.pages.db.get().await?;
             list_users(&**client, scope, &companies, &self.options()).await?
         };
+        let cross_recovery = self
+            .linked_recovery
+            .filter(|(tenant, _)| *tenant != scope.tenant());
+        if let Some((tenant, user)) = cross_recovery {
+            let client = self.pages.db.get().await?;
+            page.entries = super::query::recovery_entry(&**client, scope, tenant, user)
+                .await?
+                .into_iter()
+                .collect();
+            page.total_entries = page.entries.len() as u64;
+        }
         let total_pages = page.total_entries.div_ceil(self.list.page_size);
         if self.list.clamp_to_last_page(total_pages, true) {
             let client = self.pages.db.get().await?;
@@ -593,7 +614,14 @@ impl Index {
         let keys: Vec<Value> = page.entries.iter().map(|e| json!(e.id)).collect();
         // Grid bounds each projection to 100
         // ids, so a large page is composed from bounded batches.
-        if keys.is_empty() {
+        if cross_recovery.is_some() {
+            self.columns.load(scope, &[], &display).await?;
+            self.columns.rows = page
+                .entries
+                .iter()
+                .map(|entry| FlexRow::new(entry.id.to_string()))
+                .collect();
+        } else if keys.is_empty() {
             self.columns.load(scope, &[], &display).await?;
         } else {
             let mut rows = Vec::with_capacity(keys.len());
@@ -606,14 +634,28 @@ impl Index {
         let compact = self.columns.mode() == RowMode::Compact;
         // Where a staff account may go from here ("Add to team"): rows become
         // draggable and offer "Non-local actions" only when a page accepts one.
-        let add_to = self.pages.records.add_to(scope, "user").await?;
+        let add_to = if cross_recovery.is_some() {
+            Vec::new()
+        } else {
+            self.pages.records.add_to(scope, "user").await?
+        };
+        let cross_grants = Grants {
+            view: false,
+            invite: false,
+            delete: false,
+            impersonate: false,
+            reset: grants.reset,
+        };
         let mut rows = self.columns.rows.clone();
         for row in &mut rows {
             let Some(user) = page.entries.iter().find(|e| e.id.to_string() == row.key) else {
                 continue;
             };
             row.dom_id = Some(format!("user-{}", user.id));
-            let name = if grants.view && user.membership != Membership::Invited {
+            let name = if cross_recovery.is_none()
+                && grants.view
+                && user.membership != Membership::Invited
+            {
                 render(&RecordLink {
                     workspace: self.framed,
                     kind: "core/user",
@@ -700,7 +742,16 @@ impl Index {
             if !add_to.is_empty() && user.membership != Membership::Invited {
                 row.record = Some(("user".into(), row.key.clone()));
             }
-            row.actions = self.actions(scope, &grants, user, &add_to)?;
+            row.actions = self.actions(
+                scope,
+                if cross_recovery.is_some() {
+                    &cross_grants
+                } else {
+                    &grants
+                },
+                user,
+                &add_to,
+            )?;
         }
         let mut actions = Html::EMPTY;
         if grants.invite {
@@ -815,7 +866,7 @@ impl Index {
                 confirm_event: "revoke",
                 cancel_event: "cancel_revoke",
             })?,
-            (_, _, Some(entry)) => self.pages.users.two_factor_reset_dialog(scope, &entry.name, self.reset_error.as_deref()).await?,
+            (_, _, Some((entry, _))) => self.pages.users.two_factor_reset_dialog(scope, &entry.name, self.reset_error.as_deref()).await?,
             (None, None, None) => Html::EMPTY,
         };
         let rows = page.entries.len();
@@ -860,6 +911,10 @@ impl Index {
         }
         if self.reset_requested {
             query.insert(RESET_REQUESTED.into(), "open".into());
+        }
+        if let Some((tenant, user)) = self.linked_recovery {
+            query.insert("recoveryTenant".into(), tenant.to_string());
+            query.insert("recoveryAccount".into(), user.to_string());
         }
         query.extend(self.columns.params());
         query
@@ -966,7 +1021,12 @@ impl Index {
                     .filter(|entry| entry.can_reset && entry.two_factor_enabled)
                     .cloned()
                 {
-                    self.pending_reset = Some(entry);
+                    let tenant = self
+                        .linked_recovery
+                        .filter(|(_, linked)| *linked == entry.id)
+                        .map(|(tenant, _)| tenant)
+                        .unwrap_or_else(|| scope.tenant());
+                    self.pending_reset = Some((entry, tenant));
                     self.reset_error = None;
                     self.pending_delete = None;
                     self.pending_revoke = None;
@@ -979,7 +1039,7 @@ impl Index {
                 self.reset_error = None;
             }
             "reset_two_factor" => {
-                let Some(entry) = self.pending_reset.clone() else {
+                let Some((entry, tenant)) = self.pending_reset.clone() else {
                     return Ok(());
                 };
                 let proof = value
@@ -1003,7 +1063,7 @@ impl Index {
                 match self
                     .pages
                     .contracts
-                    .submit(&call, json!({"user_id":entry.id}))
+                    .submit(&call, json!({"tenant_id":tenant,"user_id":entry.id}))
                     .await
                 {
                     Ok(_) => {

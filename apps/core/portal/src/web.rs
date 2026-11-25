@@ -213,7 +213,7 @@ struct PortalPage {
     accounts: ListState,
     account_columns: ListColumns,
     linked_recovery: Option<(i64, i64)>,
-    reset_account: Option<(i64, String)>,
+    reset_account: Option<(i64, i64, String)>,
     reset_error: Option<String>,
     requests: ListState,
     request_columns: ListColumns,
@@ -452,7 +452,7 @@ impl PortalPage {
 
     /// The customer accounts invitations made, with revoke and restore.
     async fn accounts_table(&mut self, scope: &Scope, can_manage: bool) -> Result<Html> {
-        let (mut rows, total) = {
+        let (mut rows, mut total) = {
             let client = self.pages.db.get().await?;
             self.pages
                 .access
@@ -466,31 +466,50 @@ impl PortalPage {
         };
         let reset_requests = {
             let client = self.pages.db.get().await?;
-            let mut ids: Vec<_> = rows.iter().map(|row| row.id).collect();
-            let linked = self
+            if let Some((tenant, id)) = self
                 .linked_recovery
-                .filter(|(tenant, _)| *tenant == scope.tenant())
-                .map(|(_, id)| id);
-            if let Some(id) = linked {
-                ids.push(id);
-            }
-            let requests = bilibi_user::customer_reset_requests(&**client, scope, &ids).await?;
-            if let Some(id) = linked
-                .filter(|id| requests.contains_key(id) && !rows.iter().any(|row| row.id == *id))
+                .filter(|(tenant, _)| *tenant != scope.tenant())
             {
-                if let Some(account) =
-                    bilibi_user::customer_account(&**client, scope, id, false).await?
-                {
-                    rows.insert(0, account);
+                let requests =
+                    bilibi_user::customer_reset_requests(&**client, scope, tenant, &[id]).await?;
+                rows = bilibi_user::recovery_customer_account(&**client, scope, tenant, id)
+                    .await?
+                    .into_iter()
+                    .collect();
+                total = rows.len() as i64;
+                requests
+            } else {
+                let mut ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+                let linked = self.linked_recovery.map(|(_, id)| id);
+                if let Some(id) = linked {
+                    ids.push(id);
                 }
+                let requests =
+                    bilibi_user::customer_reset_requests(&**client, scope, scope.tenant(), &ids)
+                        .await?;
+                if let Some(id) = linked
+                    .filter(|id| requests.contains_key(id) && !rows.iter().any(|row| row.id == *id))
+                {
+                    if let Some(account) =
+                        bilibi_user::customer_account(&**client, scope, id, false).await?
+                    {
+                        rows.insert(0, account);
+                    }
+                }
+                requests
             }
-            requests
         };
         let display = self.display(scope).await?;
         let companies = {
             let client = self.pages.db.get().await?;
             let mut names = HashMap::new();
-            for id in rows.iter().filter_map(|row| row.organisation) {
+            let cross_tenant = self
+                .linked_recovery
+                .is_some_and(|(tenant, _)| tenant != scope.tenant());
+            for id in rows
+                .iter()
+                .filter_map(|row| (!cross_tenant).then_some(row.organisation).flatten())
+            {
                 if let std::collections::hash_map::Entry::Vacant(entry) = names.entry(id) {
                     if let Some(identity) = bilibi_company::identity(&**client, scope, id).await? {
                         entry.insert(identity.display_name);
@@ -941,7 +960,7 @@ impl PortalPage {
             }
         }
         let reset_dialog = match &self.reset_account {
-            Some((_, name)) => {
+            Some((_, _, name)) => {
                 self.pages
                     .users
                     .two_factor_reset_dialog(scope, name, self.reset_error.as_deref())
@@ -1102,15 +1121,21 @@ impl PortalPage {
         match get("type").ok_or(Error::Invalid)? {
             "request_reset_two_factor" => {
                 let id = params::positive_id(get("id")).ok_or(Error::Invalid)?;
+                let tenant = self
+                    .linked_recovery
+                    .filter(|(_, linked)| *linked == id)
+                    .map(|(tenant, _)| tenant)
+                    .unwrap_or_else(|| scope.tenant());
                 let client = self.pages.db.get().await?;
-                if bilibi_user::customer_reset_requests(&**client, scope, &[id])
+                if bilibi_user::customer_reset_requests(&**client, scope, tenant, &[id])
                     .await?
                     .contains_key(&id)
                 {
-                    let account = bilibi_user::customer_account(&**client, scope, id, false)
-                        .await?
-                        .ok_or(Error::NotFound)?;
-                    self.reset_account = Some((id, account.name));
+                    let account =
+                        bilibi_user::recovery_customer_account(&**client, scope, tenant, id)
+                            .await?
+                            .ok_or(Error::NotFound)?;
+                    self.reset_account = Some((tenant, id, account.name));
                     self.reset_error = None;
                 } else {
                     self.flash(StatusKind::Error, "This account cannot be reset by you.");
@@ -1121,7 +1146,7 @@ impl PortalPage {
                 self.reset_error = None;
             }
             "reset_two_factor" => {
-                let Some((id, name)) = self.reset_account.clone() else {
+                let Some((tenant, id, name)) = self.reset_account.clone() else {
                     return Ok(());
                 };
                 let Some(proof) = get("proof")
@@ -1143,7 +1168,7 @@ impl PortalPage {
                 match self
                     .pages
                     .contracts
-                    .submit(&call, json!({"user_id": id}))
+                    .submit(&call, json!({"tenant_id":tenant,"user_id": id}))
                     .await
                 {
                     Ok(_) => {
@@ -1591,6 +1616,14 @@ impl LiveState<Scope, Error> for PortalPage {
                         .map_err(|_| Error::Internal)?;
                     self.requests = ListState::parse(values, REQUESTS_SPEC.clone())
                         .map_err(|_| Error::Internal)?;
+                    self.linked_recovery = values
+                        .get("recoveryTenant")
+                        .and_then(|tenant| params::positive_id(Some(tenant)))
+                        .zip(
+                            values
+                                .get("recoveryAccount")
+                                .and_then(|user| params::positive_id(Some(user))),
+                        );
                 }
                 LiveInput::Event(value) => {
                     self.event(request.scope, request.credential, value).await?
@@ -1600,6 +1633,10 @@ impl LiveState<Scope, Error> for PortalPage {
             let mut query = self.list.to_params();
             query.extend(self.accounts.to_params());
             query.extend(self.requests.to_params());
+            if let Some((tenant, user)) = self.linked_recovery {
+                query.insert("recoveryTenant".into(), tenant.to_string());
+                query.insert("recoveryAccount".into(), user.to_string());
+            }
             Ok(LiveBody {
                 html,
                 query,

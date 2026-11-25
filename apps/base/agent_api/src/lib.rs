@@ -259,6 +259,16 @@ pub trait ReadHandler: Send + Sync {
 /// them, enforce owner field policy, and record every mutation through the
 /// supplied transaction. Never open or commit a separate transaction.
 pub trait WriteHandler: Send + Sync {
+    /// Select a different tenant for this operation's mutation boundary.
+    ///
+    /// This is only for an owner that independently proves installation-wide
+    /// standing in `preview` and `commit`. The caller's scope, capability,
+    /// credential and step-up stay unchanged; only the audited transaction's
+    /// tenant changes. A plan may not mix transaction tenants.
+    fn transaction_tenant(&self, _scope: &Scope, _input: &Value) -> Result<Option<i64>> {
+        Ok(None)
+    }
+
     fn local_script_action(&self) -> bool {
         false
     }

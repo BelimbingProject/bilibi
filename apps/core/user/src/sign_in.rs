@@ -397,14 +397,7 @@ impl UserService {
                     .mutation_context("user.two_factor.reset_requested"),
             )
             .await?;
-        let identity =
-            crate::sign_in_identity::id(tx.sql(), pending.scope.tenant(), pending.scope.user())
-                .await?;
-        tx.sql()
-            .query_one(
-                "SELECT id FROM user_identities WHERE id=$1 FOR UPDATE",
-                &[&identity],
-            )
+        crate::two_factor::lock_reset_target(&tx, pending.scope.tenant(), pending.scope.user())
             .await?;
         let held = self.hold_pending(&tx, &pending, csrf).await?;
         if !held.password_origin {
@@ -599,6 +592,8 @@ impl UserService {
                 &mut client,
                 pending.scope.mutation_context("user.sign_in.admitted"),
             )
+            .await?;
+        crate::two_factor::lock_reset_target(&tx, pending.scope.tenant(), pending.scope.user())
             .await?;
         let held = match self.hold_pending(&tx, &pending, csrf).await {
             Ok(held) => held,
