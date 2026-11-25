@@ -549,8 +549,9 @@ impl Integration {
     }
 }
 
-// Conservative global-unicast ranges for untrusted metadata fetches. IPv4
-// mapped IPv6 is classified as IPv4, including private/link-local addresses.
+// Conservative global-unicast ranges for untrusted metadata fetches and
+// connector destinations. IPv4 mapped IPv6 is classified as IPv4, including
+// private/link-local addresses.
 pub(crate) fn public_address(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(ip) => {

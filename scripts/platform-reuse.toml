@@ -115,6 +115,15 @@ skip = ["apps/base/integration/*", "apps/web/*"]
   pattern = '\b(reqwest|ureq|isahc|surf|attohttpc|minreq)::|\bhyper(_util)?::client'
 
 [[rule]]
+id = "connector_socket"
+use = "base/integration"
+why = "A socket to a host someone configured goes through ConnectorPolicy, which checks every resolved address against the operator's policy and connects only to what it checked."
+skip = ["apps/base/integration/*"]
+  [[rule.code]]
+  files = ["*.rs"]
+  pattern = '\bTcpStream::connect(_timeout)?\b|\bto_socket_addrs\s*\(|\blookup_host\s*\('
+
+[[rule]]
 id = "local_time"
 use = "base/datetime"
 why = "Store instants in UTC (timestamptz) and show them through bilibi_datetime, which applies the reader's timezone and clock."

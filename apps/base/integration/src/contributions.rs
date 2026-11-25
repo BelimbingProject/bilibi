@@ -1,10 +1,10 @@
-//! Integration's contributed vocabulary, retention and webhook settings,
-//! scheduled payload retention and the audit redaction for manually deleted
-//! exchanges.
+//! Integration's contributed vocabulary, retention, webhook and connector
+//! destination settings, scheduled payload retention and the audit redaction
+//! for manually deleted exchanges.
 use bilibi_audit::{Redaction, REDACTIONS};
 use bilibi_authz::{CapabilityDefinition, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::{Contribution, Provenance};
-use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
+use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Validator, ValueType, DEFINITIONS};
 use serde_json::json;
 
 /// Belimbing's durable keys cover both directions. Tenant-usable: an ordinary
@@ -69,6 +69,29 @@ inventory::submit! { Contribution::new(REDACTIONS, "base/integration.exchange", 
     kind: "base/integration.exchange",
     fields: &["endpoint", "request_headers", "request_body", "response_headers", "response_body", "error_message"],
 }) }
+
+/// Global operator setting: whether a connector's own socket (a mailbox
+/// server, a phone system a tenant configures) may reach private addresses.
+pub const CONNECTOR_PRIVATE_NETWORKS: &str = "integration.connector_private_networks";
+/// Global operator setting: hosts and address blocks a connector may reach
+/// even when the address is not public, each on one port or any.
+pub const CONNECTOR_ALLOWED_DESTINATIONS: &str = "integration.connector_allowed_destinations";
+inventory::submit! { Contribution::new(DEFINITIONS, CONNECTOR_PRIVATE_NETWORKS, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Boolean, scopes: &[ScopeKind::Global], default: || json!(false), nullable: false, encrypted: false,
+    minimum: None, maximum: None, validator: None,
+    editor: Some(Editor { group: "Connectors", label: "Connectors may reach private networks",
+        help: "Yes lets the mail servers and phone systems that tenants set up be on private addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7). Loopback and other local addresses still need an entry in the allowed destinations; link-local and cloud metadata addresses are always refused.",
+        capability: None, reveal_duration_ms: 5_000 }),
+})) }
+inventory::submit! { Contribution::new(DEFINITIONS, CONNECTOR_ALLOWED_DESTINATIONS, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Array, scopes: &[ScopeKind::Global], default: || json!([]), nullable: false, encrypted: false,
+    minimum: None, maximum: None,
+    validator: Some(Validator { accepts: crate::destination::valid_allowed,
+        message: "Give a JSON array of at most 200 entries: \"host\", \"host:port\", an address or block such as \"10.0.0.0/8\" or \"10.0.0.5:5039\", or \"[fd00::5]:993\"" }),
+    editor: Some(Editor { group: "Connectors", label: "Connector destinations allowed",
+        help: "A JSON array of mail servers and phone systems that tenants' connectors may reach even on a private or local address, such as [\"pbx.internal:5039\", \"10.20.0.0/16\"]. A host name allows every address it resolves to; an entry without a port allows any port. Link-local and cloud metadata addresses are always refused.",
+        capability: None, reveal_duration_ms: 5_000 }),
+})) }
 
 /// Platform-wide inbound webhook limits the host reads once per admission
 /// window: bytes per body, verified deliveries per
