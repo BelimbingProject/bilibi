@@ -23,7 +23,7 @@ The [capability rename migration](migrations/009-capability-rename.sql) updates 
 - **Off until staff turn the public site on.** While off, its anonymous pages answer 404 (the public listener does not resolve its hostname), its signed-in customers' pages, downloads and live socket answer 404, and no invitation is sent or redeemed.
 - The portal's own option is whether it **takes requests for an account** (`customer_portal_options.registration`, off by default), set on this module's staff page or with `core.portal.options.set`.
 
-The walkthrough opens the staff page, saves and reopens the setup form, and checks the new sign-in address on the public site. [Site-boundary walkthrough](../../web/examples/site-boundary-walkthrough.rs)
+The walkthrough opens the staff page, saves and reopens the setup form, and verifies that public sign-in remains reachable on the configured hostname. [Site-boundary walkthrough](../../web/examples/site-boundary-walkthrough.rs)
 
 ## Welcome notice
 
