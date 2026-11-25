@@ -95,6 +95,7 @@ pub async fn effective_system(
                 && !effective.direct_denied.contains(*key)
                 && vocabulary.capabilities.get(key).is_some_and(|capability| {
                     capability.definition.admits(AccountKind::Staff)
+                        && capability.definition.audience != crate::Audience::Owner
                         && (operator || !capability.definition.is_platform())
                 })
         })
@@ -134,8 +135,8 @@ pub async fn holders(
 }
 
 /// Bounded capability-holder enumeration for owner eligibility routing. As
-/// for [`holders`], a platform or portal key holds nobody, and the caller
-/// keeps only live staff accounts (ADR 16).
+/// for [`holders`], this accepts tenant keys only, and the caller keeps only
+/// live staff accounts (ADR 16).
 pub async fn holder_page(
     client: &impl GenericClient,
     scope: &Scope,
@@ -296,13 +297,29 @@ async fn effective_in_company(
                 .then(|| (row.get(0), Reach::from_rank(rank.unwrap_or(2))))
         })
         .collect();
+    let owner = if operator && user == scope.user() {
+        match bilibi_tenancy::prove_owner(client.client(), scope).await {
+            Ok(_) => true,
+            Err(bilibi_database::Error::Forbidden | bilibi_database::Error::Unauthorized) => false,
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
+    };
     let effective: BTreeSet<&'static str> = vocabulary
         .capabilities
         .iter()
         .filter(|(key, owned)| {
+            if denied.contains(**key) {
+                return false;
+            }
+            match owned.definition.audience {
+                crate::Audience::Owner => return owner,
+                crate::Audience::PlatformOrOwner if owner => return true,
+                _ => {}
+            }
             owned.definition.admits(kind)
                 && (operator || !owned.definition.is_platform())
-                && !denied.contains(**key)
                 && ((grant_all && owned.definition.audience != crate::Audience::Portal)
                     || allowed.contains(**key)
                     || roles.contains_key(**key))

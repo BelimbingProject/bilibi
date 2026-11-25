@@ -338,15 +338,20 @@ async fn documents(client: &Client, request: i64, kind: &str) -> Result<Vec<Stri
 }
 /// Makes a retrying job of `request` on `worker` run now (disposable DB only).
 async fn hurry(client: &Client, worker: &str, request: i64, last: bool) -> Result<()> {
-    client
+    // The request records the failure before the queue schedules the retry.
+    let updated = client
         .execute(
-            &format!(
-                "UPDATE base_queue_jobs SET available_at=clock_timestamp(){} WHERE worker_id=$1 AND args->>'request_id'=$2 AND state='retryable'",
-                if last { ",max_attempts=attempt+1" } else { "" }
-            ),
-            &[&worker, &request.to_string()],
+            "UPDATE base_queue_jobs
+             SET available_at=CASE WHEN state='retryable' THEN clock_timestamp() ELSE available_at END,
+                 max_attempts=CASE WHEN $3 THEN attempt+1 ELSE max_attempts END
+             WHERE worker_id=$1 AND args->>'request_id'=$2
+               AND (state='retryable' OR ($3 AND state='executing'))",
+            &[&worker, &request.to_string(), &last],
         )
         .await?;
+    if last {
+        check(updated == 1, "the next retry is the final attempt")?;
+    }
     Ok(())
 }
 /// `export.json` of a completed access request, read as the operator does.

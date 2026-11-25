@@ -28,6 +28,8 @@ pub enum Audience {
     Tenant,
     /// Staff of the operator tenant only (the `platform_operator` identity).
     Platform,
+    Owner,
+    PlatformOrOwner,
     /// Customer accounts on the tenant's portal; never staff.
     Portal,
 }
@@ -69,8 +71,23 @@ impl CapabilityDefinition {
             reach: false,
         }
     }
+    pub const fn owner(key: &'static str) -> Self {
+        Self {
+            audience: Audience::Owner,
+            ..Self::platform(key)
+        }
+    }
+    pub const fn platform_or_owner(key: &'static str) -> Self {
+        Self {
+            audience: Audience::PlatformOrOwner,
+            ..Self::platform(key)
+        }
+    }
     pub fn is_platform(&self) -> bool {
-        self.audience == Audience::Platform
+        matches!(
+            self.audience,
+            Audience::Platform | Audience::Owner | Audience::PlatformOrOwner
+        )
     }
     /// Opt in only after every owner path proves its target company through
     /// `authorize_company_proof` (Core Company's `authorize_work_target`).

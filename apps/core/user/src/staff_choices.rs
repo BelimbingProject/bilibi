@@ -124,9 +124,9 @@ macro_rules! live_staff_from {
 /// The name test is a word-start match through `position`, so typed `%` and
 /// `_` stay literal and no pattern is built.
 const SEARCH: &str = concat!(
-    "SELECT u.id,u.name ",
+    "SELECT u.id,CASE WHEN $4::bigint IS NULL THEN u.name ELSE concat(u.name,' (',i.email,', account #',u.id,')') END ",
     live_staff_from!(),
-    " AND ($2='' OR starts_with(lower(u.name),$2) OR position(' '||$2 in lower(u.name))>0) ORDER BY lower(u.name),u.id LIMIT $3"
+    " AND u.id IS DISTINCT FROM $4 AND ($2='' OR starts_with(lower(u.name),$2) OR position(' '||$2 in lower(u.name))>0) ORDER BY lower(u.name),u.id LIMIT $3"
 );
 const AMONG: &str = concat!(
     "SELECT COALESCE(array_agg(u.id ORDER BY u.id),'{}'::bigint[]) ",
@@ -167,13 +167,23 @@ async fn search(
     }
     // Decided and logged for the actor, failing closed for an unknown key.
     authorize_key(client, scope, capability).await?;
+    search_live_staff(client, scope.tenant(), text, None).await
+}
+
+pub(crate) async fn search_live_staff(
+    client: &impl GenericClient,
+    tenant: i64,
+    text: &str,
+    exclude: Option<i64>,
+) -> Result<Vec<StaffChoice>> {
     Ok(client
         .query(
             SEARCH,
             &[
-                &scope.tenant(),
+                &tenant,
                 &text.to_lowercase(),
                 &(STAFF_CHOICE_MAX as i64),
+                &exclude,
             ],
         )
         .await?

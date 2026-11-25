@@ -47,6 +47,9 @@ const SCIM_KIND: &str = "user.scim_user";
 pub(crate) const EXTERNAL_IDENTITY_KIND: &str = "user.external_identity";
 /// The first administrator's receipt, as the bootstrap records it.
 const BOOTSTRAP_KIND: &str = "user.bootstrap";
+pub(crate) const OWNERSHIP_TRANSFER_KIND: &str = "user.ownership_transfer";
+const OWNERSHIP_TRANSFERS: &str =
+    "FROM user_ownership_transfers WHERE tenant_id=$1 AND (from_user_id=ANY($2) OR to_user_id=ANY($2))";
 /// An agent's two-factor reset, which once recorded the account's name and
 /// email.
 const TWO_FACTOR_RESET_KIND: &str = "user_two_factor_reset";
@@ -114,8 +117,20 @@ impl Handler for Accounts {
                 .map(|row| row.get(0))
                 .collect();
             let actions = bilibi_audit::count_account_actions(client, scope, &users).await?;
+            let ownership_transfers = client
+                .query_one(
+                    &format!("SELECT count(*) {OWNERSHIP_TRANSFERS}"),
+                    &[&scope.tenant(), &users],
+                )
+                .await?
+                .get(0);
             Ok(Located {
                 kinds: vec![
+                    KindCount {
+                        kind: OWNERSHIP_TRANSFER_KIND.into(),
+                        by_person: ownership_transfers,
+                        by_identifier: 0,
+                    },
                     KindCount {
                         kind: AUDIT_ACTIONS_KIND.into(),
                         by_person: actions,
@@ -225,8 +240,25 @@ impl Handler for Accounts {
                     })
                 })
                 .collect();
+            let ownership_transfers: Vec<Value> = client
+                .query(
+                    &format!("SELECT id,from_user_id=ANY($2),to_user_id=ANY($2),status,created_at::text,expires_at::text,resolved_at::text {OWNERSHIP_TRANSFERS} ORDER BY id"),
+                    &[&scope.tenant(), &user_ids],
+                )
+                .await?
+                .iter()
+                .map(|row| json!({
+                    "id": row.get::<_, i64>(0),
+                    "offered": row.get::<_, bool>(1),
+                    "received": row.get::<_, bool>(2),
+                    "status": row.get::<_, String>(3),
+                    "created_at": row.get::<_, String>(4),
+                    "expires_at": row.get::<_, String>(5),
+                    "resolved_at": row.get::<_, Option<String>>(6),
+                }))
+                .collect();
             Ok(Exported {
-                records: json!({"accounts": records, "invitations": invitations, "audit_actions": actions}),
+                records: json!({"accounts": records, "invitations": invitations, "audit_actions": actions, "ownership_transfers": ownership_transfers}),
                 files: Vec::new(),
             })
         })
@@ -253,6 +285,31 @@ impl Handler for Accounts {
             let ids: Vec<i64> = users.iter().map(|row| row.get(0)).collect();
             let held_users = holds.records(tx.sql(), grant, USER_KIND, &ids).await?;
             let mut erased = Erased::default();
+            let transfers: Vec<i64> = tx
+                .sql()
+                .query(
+                    &format!("SELECT id {OWNERSHIP_TRANSFERS} ORDER BY id"),
+                    &[&tenant, &ids],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            let held_transfers = holds
+                .records(tx.sql(), grant, OWNERSHIP_TRANSFER_KIND, &transfers)
+                .await?;
+            for id in transfers {
+                erased.kept.push(match held_transfers.get(&id) {
+                    Some(hold) => Kept::held(OWNERSHIP_TRANSFER_KIND, id, *hold),
+                    None => Kept {
+                        kind: OWNERSHIP_TRANSFER_KIND.into(),
+                        id: id.to_string(),
+                        reason: KeptReason::Evidence,
+                        until: None,
+                        hold: None,
+                    },
+                });
+            }
             for row in users {
                 let (user, name, email, status, done, identity): (
                     i64,
@@ -722,7 +779,7 @@ impl Handler for Accounts {
 
 inventory::submit! { Contribution::new(PERSONAL_DATA, "core/user.accounts",
 Provenance { module: "core/user", source: file!(), line: line!() },
-&PersonalData { label: "User accounts and notifications", kinds: &[USER_KIND, IDENTITY_KIND, NOTIFICATION_KIND, INVITATION_KIND, SCIM_KIND, EXTERNAL_IDENTITY_KIND, BOOTSTRAP_KIND, TWO_FACTOR_RESET_KIND, TWO_FACTOR_RESET_REQUEST_KIND], person_subjects: &[], handler: &ACCOUNTS }) }
+&PersonalData { label: "User accounts and notifications", kinds: &[USER_KIND, IDENTITY_KIND, NOTIFICATION_KIND, INVITATION_KIND, SCIM_KIND, EXTERNAL_IDENTITY_KIND, BOOTSTRAP_KIND, TWO_FACTOR_RESET_KIND, TWO_FACTOR_RESET_REQUEST_KIND, OWNERSHIP_TRANSFER_KIND], person_subjects: &[], handler: &ACCOUNTS }) }
 inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.user",
 Provenance { module: "core/user", source: file!(), line: line!() },
 &RecordKind { kind: USER_KIND, fields: &["name", "email"], subject_identifier: false, person: false }) }
@@ -744,6 +801,9 @@ Provenance { module: "core/user", source: file!(), line: line!() },
 inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.bootstrap",
 Provenance { module: "core/user", source: file!(), line: line!() },
 &RecordKind { kind: BOOTSTRAP_KIND, fields: &["admin_email"], subject_identifier: false, person: false }) }
+inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.ownership_transfer",
+Provenance { module: "core/user", source: file!(), line: line!() },
+&RecordKind { kind: OWNERSHIP_TRANSFER_KIND, fields: &["from_user_id", "to_user_id"], subject_identifier: false, person: false }) }
 inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.two_factor_reset",
 Provenance { module: "core/user", source: file!(), line: line!() },
 &RecordKind { kind: TWO_FACTOR_RESET_KIND, fields: &["name", "email"], subject_identifier: false, person: false }) }
