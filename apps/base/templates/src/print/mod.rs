@@ -1,14 +1,19 @@
 //! The owner contributes the schema and samples. A layout only arranges those facts.
 mod facts;
 mod layout;
+pub(crate) mod operations;
+pub(crate) mod preview;
 mod render;
+mod revisions;
+pub(crate) mod sweep;
 
 pub use facts::{PrintFacts, PrintField, PrintKind, PrintValue};
 pub use layout::CompiledPrint;
 
 use crate::{catalogue, Origin, Problem};
 use bilibi_module_registry::{Consumer, Entry, RegistryError};
-use std::collections::BTreeSet;
+use serde::Serialize;
+use std::{borrow::Cow, collections::BTreeSet};
 
 pub const PRINT_CATALOGUE: &str = "base/templates.print_catalogue";
 const MAX_FIELDS: usize = 128;
@@ -32,11 +37,11 @@ pub struct PrintDefault {
     pub layout: &'static str,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ResolvedPrint<'a> {
     pub language: String,
     pub origin: Origin,
-    pub layout: &'a str,
+    pub layout: Cow<'a, str>,
 }
 
 impl PrintContract {
@@ -48,19 +53,8 @@ impl PrintContract {
     ) -> Checked<ResolvedPrint<'static>> {
         catalogue::languages(requested, fallback, self.base_language)?
             .into_iter()
-            .find_map(|language| {
-                let default = self
-                    .defaults
-                    .iter()
-                    .find(|item| item.language == language)?;
-                Some(ResolvedPrint {
-                    language,
-                    origin: Origin::Packaged {
-                        version: default.version.to_owned(),
-                    },
-                    layout: default.layout,
-                })
-            })
+            .find_map(|language| self.defaults.iter().find(|item| item.language == language))
+            .map(PrintDefault::resolve)
             .ok_or_else(|| Problem::new(self.key, "The print contract has no packaged layout."))
     }
 
@@ -109,6 +103,18 @@ impl PrintContract {
             return Err(Problem::new(id, "Package a layout for the base language."));
         }
         Ok(())
+    }
+}
+
+impl PrintDefault {
+    fn resolve(&self) -> ResolvedPrint<'static> {
+        ResolvedPrint {
+            language: self.language.into(),
+            origin: Origin::Packaged {
+                version: self.version.into(),
+            },
+            layout: Cow::Borrowed(self.layout),
+        }
     }
 }
 

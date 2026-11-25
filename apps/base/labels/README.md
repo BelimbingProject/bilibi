@@ -52,6 +52,8 @@ A module contributes one `CustomisationSection` under `SECTIONS` for each kind o
 
 Each page row supplies a stable audit kind, record ID and revision. A section with no `UndoAction` supplies inspection-only rows. For a section with an action, each row also supplies the versioned input for the write. The page retains that input server-side and accepts confirmation only for the displayed action, record and revision. The confirmed action calls `PageContracts::submit`, then the page reads the sections again. For a section with an action, register the event and write contract with a [contributed page binding](../agent_api/README.md#shared-pages-with-contributed-owner-contracts) for `base/labels.customisations`. Project rows through the owner's read operation so its access checks apply.
 
+For a private document preview, contribute a `PreviewLink` under `PREVIEW_LINKS` against the section's override read. The page renders the relative link beside Restore. The owner's `DOWNLOADS` service proves access again when opened.
+
 ## What can be changed (agents)
 
 **One read answers "what can I change here?":** `base.labels.customisations.discover`, for any signed-in person's agent. It adds no page.

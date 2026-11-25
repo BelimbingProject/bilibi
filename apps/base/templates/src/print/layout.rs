@@ -138,6 +138,17 @@ impl CompiledPrint<'_> {
         )
     }
 
+    /// Print the contract's synthetic facts with the same physical layout.
+    pub fn preview_document(&self, accent: Accent) -> Checked<InlineDocument> {
+        render::document(
+            self.preview()?,
+            &self.language,
+            self.contract.label,
+            self.paper,
+            accent,
+        )
+    }
+
     fn render_facts(&self, facts: PrintFacts<'_>) -> Checked<String> {
         let facts = super::facts::check_facts(self.contract.fields, facts)?;
         render::fragment(&self.blocks, &facts)

@@ -6,7 +6,7 @@ use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::Catalog;
 use bilibi_party_ids::OrganisationId;
 use bilibi_settings::{Settings, Target};
-use bilibi_tenancy::{NamedOrganisation, PartyProofs, ReadClient, Scope};
+use bilibi_tenancy::{NamedOrganisation, PartyProofs, ProofClient, ReadClient, Scope};
 use serde::Serialize;
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
@@ -90,6 +90,10 @@ impl Templates {
             .or_else(|| self.platform.get(key))
             .copied()
             .ok_or(Error::NotFound)
+    }
+
+    pub(crate) fn print_contracts(&self) -> impl Iterator<Item = &'static PrintContract> + '_ {
+        self.print.values().copied()
     }
 
     pub fn print_contract(&self, key: &str) -> Result<&'static PrintContract> {
@@ -255,9 +259,9 @@ impl Templates {
         self.parties.organisations_in_scope(client, scope).await
     }
 
-    async fn authorize(
+    pub(crate) async fn authorize(
         &self,
-        client: &dyn ReadClient,
+        client: &dyn ProofClient,
         scope: &Scope,
         company: Option<OrganisationId>,
         write: bool,

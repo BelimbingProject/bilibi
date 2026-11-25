@@ -267,6 +267,15 @@ impl Artifacts {
             max_bytes: max.filter(|max| *max > 0).ok_or(Error::Policy)? as usize,
         })
     }
+    /// Render an authorized inline document to PDF bytes without storing it.
+    pub async fn print_document(
+        &self,
+        client: &Client,
+        document: InlineDocument,
+    ) -> Result<Vec<u8>> {
+        let config = self.pdf_config(client, Some(document.paper)).await?;
+        print_html(&config, document.html).await
+    }
 }
 
 impl<O: Owner> Owned<'_, O> {
@@ -283,28 +292,16 @@ impl<O: Owner> Owned<'_, O> {
         options.validate()?;
         self.authorize(&*client, Operation::Create, Some(&reference))
             .await?;
-        let config = self
-            .store
-            .pdf_config(&*client, Some(document.paper))
-            .await?;
-        self.print_inline(client, reference, document.html, &config, options)
-            .await
-    }
-
-    async fn print_inline(
-        &self,
-        client: &mut Client,
-        reference: Reference,
-        html: String,
-        config: &engine::Config,
-        options: &PdfOptions,
-    ) -> Result<PdfArtifact> {
-        if html.is_empty() || html.len() > config.max_bytes {
-            return Err(Error::Invalid);
-        }
-        let bytes = engine::print(config, engine::Source::Html(html)).await?;
+        let bytes = self.store.print_document(client, document).await?;
         self.persist_pdf(client, reference, &bytes, options).await
     }
+}
+
+async fn print_html(config: &engine::Config, html: String) -> Result<Vec<u8>> {
+    if html.is_empty() || html.len() > config.max_bytes {
+        return Err(Error::Invalid);
+    }
+    engine::print(config, engine::Source::Html(html)).await
 }
 
 impl<O: HtmlOwner> Owned<'_, O> {
@@ -351,8 +348,8 @@ impl<O: HtmlOwner> Owned<'_, O> {
             .owner
             .render_html(self.scope, self.company, &reference, data)
             .await?;
-        self.print_inline(client, reference, html, &config, options)
-            .await
+        let bytes = print_html(&config, html).await?;
+        self.persist_pdf(client, reference, &bytes, options).await
     }
     /// Like `render_inline`, but the browser fetches the page from this app's
     /// single-use signed `/pdf/render/{token}` URL, which needs

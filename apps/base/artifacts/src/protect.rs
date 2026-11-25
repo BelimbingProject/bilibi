@@ -49,6 +49,7 @@ pub struct PdfOptions {
     password: Option<Secret>,
     owner_password: Option<Secret>,
     retention: Option<crate::Retention>,
+    expires_in_days: Option<i64>,
 }
 const UNVERSIONED: &str = "unversioned";
 impl PdfOptions {
@@ -71,6 +72,13 @@ impl PdfOptions {
         self.password.is_some()
     }
     pub(crate) fn validate(&self) -> Result<()> {
+        if self
+            .expires_in_days
+            .is_some_and(|days| !(1..=36_500).contains(&days))
+            || (self.expires_in_days.is_some() && self.retention.is_some())
+        {
+            return Err(Error::Invalid);
+        }
         for version in [&self.template_version, &self.data_version]
             .into_iter()
             .flatten()
@@ -85,6 +93,14 @@ impl PdfOptions {
     pub fn retained(mut self, retention: crate::Retention) -> Self {
         self.retention = Some(retention);
         self
+    }
+    /// Shorten the lifetime of temporary PDF output, such as a private preview.
+    pub fn expires_in_days(mut self, days: i64) -> Self {
+        self.expires_in_days = Some(days);
+        self
+    }
+    pub(crate) fn expiry(&self) -> Option<i64> {
+        self.expires_in_days
     }
     pub(crate) fn retention(&self) -> Option<&crate::Retention> {
         self.retention.as_ref()
