@@ -535,16 +535,12 @@ fn present(
 ) -> Value {
     let repository = cache["repository"].as_str().unwrap_or("");
     let live_id = cache["repository_id"].as_i64();
-    let configured = saved
-        .repository
-        .as_deref()
-        .is_some_and(|name| name.eq_ignore_ascii_case(repository));
-    let accepted = configured
+    let accepted = saved.repository.as_deref() == Some(repository)
         && saved.repository_id.is_some()
         && (live_id.is_none() || saved.repository_id == live_id);
     let identity_changed = saved.repository_id.is_some()
         && live_id.is_some()
-        && configured
+        && saved.repository.as_deref() == Some(repository)
         && saved.repository_id != live_id;
     let mut releases: Vec<Value> = cache["releases"]
         .as_array()
@@ -652,10 +648,7 @@ fn read_cache(path: Option<&Path>, repository: &str) -> Option<Value> {
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
     });
     let value = from_file.or_else(|| MEMORY.lock().ok().and_then(|guard| guard.clone()))?;
-    value["repository"]
-        .as_str()
-        .is_some_and(|name| name.eq_ignore_ascii_case(repository))
-        .then_some(value)
+    (value["repository"].as_str() == Some(repository)).then_some(value)
 }
 fn write_cache(path: Option<&Path>, value: &Value) {
     if let Ok(mut guard) = MEMORY.lock() {

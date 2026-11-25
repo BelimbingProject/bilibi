@@ -248,7 +248,6 @@ pub struct OperatorAccounts {
 pub struct InstallationOwner {
     pub tenant: i64,
     pub user: i64,
-    pub email: String,
 }
 
 async fn operator_accounts(
@@ -332,14 +331,13 @@ impl UserService {
         let client = self.db.get().await?;
         Ok(client
             .query_opt(
-                "SELECT tenant_id, user_id, admin_email FROM user_bootstrap WHERE id=1",
+                "SELECT tenant_id, user_id FROM user_bootstrap WHERE id=1",
                 &[],
             )
             .await?
             .map(|row| InstallationOwner {
                 tenant: row.get(0),
                 user: row.get(1),
-                email: row.get(2),
             }))
     }
 

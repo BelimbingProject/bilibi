@@ -74,11 +74,7 @@ fn select(
         let current = setup["tag"]
             .as_str()
             .and_then(version)
-            .filter(|_| {
-                setup["repository"]
-                    .as_str()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(repository))
-            })
+            .filter(|_| setup["repository"].as_str() == Some(repository))
             .ok_or("The running setup version for the pinned repository is unknown. Specify --to X.Y.Z.")?;
         if version(tag).is_none_or(|published| published <= current) {
             return Err("There is no newer release to install.");

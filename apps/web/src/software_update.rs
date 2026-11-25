@@ -102,10 +102,7 @@ pub async fn software_update(db: &Db, args: &[String]) -> Result<()> {
     };
     let client = db.get().await?;
     let scope = authority.scope(&**client).await.map_err(|_| {
-        eprintln!(
-            "The installation owner account ({}) is not active.",
-            owner.email
-        );
+        eprintln!("The installation owner account is not active.");
         Error::Unauthorized
     })?;
     drop(client);
