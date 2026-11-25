@@ -116,7 +116,7 @@ impl Role {
     pub fn effect(self) -> &'static str {
         match self {
             Self::Dev | Self::Staging => "Changes here do not affect production.",
-            Self::Production => "Changes here change real data.",
+            Self::Production => "",
         }
     }
     /// What a change here does, in one or two short sentences.
@@ -124,7 +124,7 @@ impl Role {
         match self {
             Self::Dev => "This is a development copy. Changes here do not affect production.",
             Self::Staging => "This is a test copy. Changes here do not affect production.",
-            Self::Production => "This is the live system. Changes here change real data.",
+            Self::Production => "",
         }
     }
     /// The default colour, one of `DESIGN.md`'s status roles.
@@ -379,6 +379,8 @@ impl Instance {
     /// test copy. Changes here do not affect production."
     pub fn notice(&self) -> String {
         format!("You are on {}. {}", self.label, self.role.consequence())
+            .trim_end()
+            .to_owned()
     }
     /// Agent connection identity includes the role even when the operator's
     /// label is ambiguous, and the canonical address rather than request data.
@@ -390,6 +392,8 @@ impl Instance {
             self.origin,
             self.role.consequence()
         )
+        .trim_end()
+        .to_owned()
     }
     /// What the Agent API and MCP send, so an agent can tell its person
     /// "this will create the order on Staging".
@@ -412,7 +416,6 @@ impl Instance {
             role: self.role.env_value(),
             label: &self.label,
             title: &title,
-            message: self.role.consequence(),
         })
     }
     /// The status bar always names the role, including Production.

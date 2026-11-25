@@ -347,7 +347,7 @@ impl ModalWidth {
 /// an open modal is inert.
 #[derive(Template, Debug, Default)]
 #[template(
-    source = r#"{% import "dialog.html" as ui %}{% call ui::modal(id=id, title=title, cancel_event=cancel_event, width=width, description=description, role=role, owns_flash=flash.is_some(), messages=flash.unwrap_or_default()) %}{{ body|safe }}{% endcall %}"#,
+    source = r#"{% import "dialog.html" as ui %}{% call ui::modal(id=id, title=title, cancel_event=cancel_event, width=width, description=description, role=role, owns_flash=flash.is_some(), messages=flash.unwrap_or_default(), close_icon=close_icon) %}{{ body|safe }}{% endcall %}"#,
     ext = "html"
 )]
 pub struct Modal<'a> {
@@ -357,6 +357,7 @@ pub struct Modal<'a> {
     pub width: ModalWidth,
     pub description: &'a str,
     pub role: &'a str,
+    pub close_icon: bool,
     pub flash: Option<FlashMap<'a>>,
     pub body: Html,
 }

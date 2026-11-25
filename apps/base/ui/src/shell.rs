@@ -287,7 +287,7 @@ pub struct ShellContext<'a> {
     pub listen_address: Option<&'a str>,
     /// The application or working-build identity supplied by the host.
     pub version: Option<VersionBadge>,
-    pub components: Vec<bilibi_module_registry::Container>,
+    pub can_view_software: bool,
     /// The open page's controls in the top bar, left of the bell
     /// (`topbar_actions` slot), from `Page::topbar_actions`.
     pub topbar_actions: Html,
@@ -296,17 +296,6 @@ pub struct ShellContext<'a> {
     pub page_search: Html,
 }
 impl ShellContext<'_> {
-    fn component_tag(&self) -> crate::StatusbarTag<'static> {
-        crate::StatusbarTag {
-            id: "app-components",
-            label: "Components",
-            title: "Installed Domains and Extensions",
-            controls: "app-components-panel",
-            state: "",
-            quiet: true,
-        }
-    }
-
     pub fn initials(&self) -> String {
         self.user
             .split_whitespace()

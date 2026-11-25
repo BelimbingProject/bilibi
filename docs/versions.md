@@ -14,7 +14,7 @@ Domains:
 Extensions: none mounted
 ```
 
-The Platform and Finance are both at release 0.1.0. The command gives the exact commit for each. The status bar’s Components popover shows the installed Finance version.
+The Platform and Finance are both at release 0.1.0. The command gives the exact commit for each. For viewers with Software access, the status bar version links to Software, which shows the installed Finance version.
 
 You may already have questions: where does a version number come from, how do you make a release, what counts as "tested together", and what happens on a developer's machine without a pin? We cover each below.
 
@@ -173,7 +173,7 @@ Opening or editing the Platform PR body starts a new run, as does pushing a Plat
 
 ## Versions inside the program
 
-**The program is the truth about what it contains.** `scripts/discover-modules.py --pin` records the Platform commit, its version and release tag, each mounted Domain or Extension's commit and release, and each Extension's reviewed/customer code declaration in `.local/composition/manifest.txt`. The executable host's build script (`apps/web/build.rs`) compiles that manifest into the program, and `bilibi_web::composition` hands it to `bilibi-web status` and anything else that asks. Those composition facts are compiled in, so they cannot drift from the running code. The application release identity is separate: the status bar reads the `release.json` packaged beside the executable.
+**The program is the truth about what it contains.** `scripts/discover-modules.py --pin` records the Platform commit, its version and release tag, each mounted Domain or Extension's commit, date, branch, package version and release when known, and each Extension's reviewed/customer code declaration in `.local/composition/manifest.txt`. The executable host's build script (`apps/web/build.rs`) compiles that manifest into the program, and `bilibi_web::composition` hands it to `bilibi-web status` and anything else that asks. Those composition facts are compiled in, so they cannot drift from the running code. The application release identity is separate: the status bar reads the `release.json` packaged beside the executable.
 
 Pin, then build:
 

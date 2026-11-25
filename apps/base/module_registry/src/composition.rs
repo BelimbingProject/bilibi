@@ -48,6 +48,8 @@ pub struct Container {
     pub commit: Option<&'static str>,
     /// The release the container is at, `0.1.0`; `None` when unpinned or built from an untagged commit.
     pub version: Option<&'static str>,
+    /// Source branch captured at build time, when known.
+    pub branch: Option<&'static str>,
     /// Extensions declare reviewed or customer code; Domains have no value.
     pub extension_code: Option<ExtensionCode>,
 }
@@ -86,6 +88,25 @@ impl Composition {
     }
 }
 impl Container {
+    pub fn display_name(&self) -> String {
+        let name = self.id.replace('_', " ");
+        let mut chars = name.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+            .unwrap_or_default()
+    }
+    pub fn build_label(&self) -> String {
+        if let Some(version) = self.version {
+            return format!("v{version}");
+        }
+        let Some(commit) = self.commit else {
+            return "Version unavailable".to_owned();
+        };
+        let short = commit.get(..7).unwrap_or(commit);
+        self.branch
+            .map_or_else(|| short.to_owned(), |branch| format!("{branch} {short}"))
+    }
     pub fn short_commit(&self) -> Option<&'static str> {
         self.commit.map(short)
     }
