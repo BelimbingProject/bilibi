@@ -29,16 +29,16 @@ inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/per
 | Field | Meaning |
 | --- | --- |
 | `label`, `path` | What the records are called; their page with `{id}`, for links from row results |
-| `table` | The owner's Grid table: its tenant/company scope governs this record type, and a field restricted there for the person is not offered |
+| `table` | The registered Grid table: its tenant/company scope governs this record type, and a field restricted there for the person is not offered |
 | `import.capability` | The owner's import capability (verb `import`, from its own vocabulary), with the same tenant/company scope as the Grid table; checked for every row |
 | `import.create`, `import.id` | The owner's write contract creating one record, and where the record's id is in its result |
 | `import.duplicates` | Optional. The owner's read answering candidates for the match `fields`, and its update contract with the id, version and fields properties. A field the file leaves out keeps the record's value |
 | `import.references` | Create fields holding another record's id: a `parent` record type whose earlier import names it by source key, and/or a `lookup` read that must find exactly one record |
 | `export` | Optional; `None` keeps the type out of export. The owner's export capability, scoped like the Grid table, and its list read contract, which takes integer `page` and `page_size` and returns the records with their `import.id` |
-| `bulk_update` | Optional; `None` keeps the type out of bulk updates. The owner's capability, scoped like the Grid table (verb `bulk-update`), its paged list read (records with `import.id` and `version`), its read of one record by `get_id`, its update contract with the id, version and fields properties, and the `fields` people may set: scalar properties of the update's fields (choices, dates, flags, numbers, or an owner's id) |
+| `bulk_update` | Optional for tenant-wide Grid tables. The owner's tenant-wide capability (verb `bulk-update`), its paged list read (records with `import.id` and `version`), its read of one record by `get_id`, its update contract with the id, version and fields properties, and the `fields` people may set: scalar properties of the update's fields (choices, dates, flags, numbers, or an owner's id) |
 
 - **Mappable fields are data:** the create contract's top-level string, number, integer and boolean properties, with its `enum` as choices and `required` as required; opted-in [tenant-defined fields](#tenant-defined-fields-in-csv-import) are added from the current tenant's definitions.
-- **Boot refuses** an unknown or foreign Grid table, a capability whose tenant/company scope differs from that table, an unknown or foreign contract, a write a job cannot call (step-up declared, or `Channel::Job` left out), a list read a job cannot call or that does not page, an undeclared or foreign capability, a match field, reference, lookup property or parent that does not exist, and a bulk field that is not a scalar of the update's fields.
+- **Boot refuses** an unknown Grid table, a bulk update on a company-scoped Grid table, an import or export capability whose tenant/company scope differs from its table, an unknown or foreign contract, a write a job cannot call (step-up declared, or `Channel::Job` left out), a list read a job cannot call or that does not page, an undeclared or foreign capability, a match field, reference, lookup property or parent that does not exist, and a bulk field that is not a scalar of the update's fields.
 - A lookup read must match exactly (Core Person's duplicates read matches email exactly); a scoring read such as Core Company's duplicates is not a lookup. Several matches are always a row error.
 
 Adopters: Core Person (`core/person.contacts`, matched on email or phone; exported from the Contacts list with `admin.person.export`; kind set in bulk with `admin.person.bulk-update`) and Core Affiliation (`core/affiliation.affiliations`, the contact by source key of a contacts import or by email; the organisation as a column of ids or one fixed value).
@@ -110,7 +110,7 @@ This seam supports [CX lead import 117](https://github.com/cx2027/bilibi-dom-cx/
 
 A run is visible only to the person who started it while working at the desk where it was opened.
 
-For a company-scoped Grid table, import, export, bulk update and their agent operations authorize the record capability in the company captured from the sealed page scope. The list and owner contracts receive that same scope; no URL, filter, CSV column or operation input can select another company. A tenant-scoped Grid table keeps its tenant-wide record capability and behavior. Base's Imports-page capabilities remain tenant-wide in both cases.
+For a company-scoped Grid table, import, export and their agent operations authorize the record capability in the company captured from the sealed page scope. The list and owner contracts receive that same scope; no URL, filter, CSV column or operation input can select another company. A tenant-scoped Grid table keeps its tenant-wide record capability and behavior. Base's Imports-page capabilities remain tenant-wide in both cases.
 
 ## An export
 

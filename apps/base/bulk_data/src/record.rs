@@ -332,12 +332,6 @@ pub(crate) fn register(
         let table = grid
             .table(record.table)
             .ok_or_else(|| invalid(entry, format!("names unknown Grid table {}", record.table)))?;
-        if table.owner != module {
-            return Err(invalid(
-                entry,
-                format!("names Grid table {} of another module", record.table),
-            ));
-        }
         let company_scoped = table.source().company_scoped;
         let own = |operation: &RegisteredOperation, what: &str| {
             if operation.provenance.module == module {
@@ -367,8 +361,7 @@ pub(crate) fn register(
                 )
             })
         };
-        let capability = |key: &str| {
-            match vocabulary.capabilities.get(key) {
+        let capability = |key: &str, company_scoped: bool| match vocabulary.capabilities.get(key) {
             Some(owned)
                 if owned.provenance.module == module
                     && owned.definition.audience == bilibi_authz::Audience::Tenant
@@ -379,16 +372,18 @@ pub(crate) fn register(
             _ => Err(invalid(
                 entry,
                 format!(
-                    "names capability {key}, which {module} does not declare as a {} capability matching Grid table {}",
-                    if company_scoped { "company-scoped" } else { "tenant-wide" },
-                    record.table
+                    "names capability {key}, which {module} does not declare as a {} capability",
+                    if company_scoped {
+                        "company-scoped"
+                    } else {
+                        "tenant-wide"
+                    }
                 ),
             )),
-        }
         };
-        capability(record.import.capability)?;
+        capability(record.import.capability, company_scoped)?;
         if let Some(export) = &record.export {
-            capability(export.capability)?;
+            capability(export.capability, company_scoped)?;
             let list = readable(export.list)?;
             own(list, "list contract")?;
             if !paged(list) {
@@ -481,7 +476,13 @@ pub(crate) fn register(
         }
         let (mut bulk_fields, mut bulk_update_fields) = (Vec::new(), Vec::new());
         if let Some(bulk) = &record.bulk_update {
-            capability(bulk.capability)?;
+            if company_scoped {
+                return Err(invalid(
+                    entry,
+                    "bulk update requires a tenant-wide Grid table",
+                ));
+            }
+            capability(bulk.capability, false)?;
             let list = readable(bulk.list)?;
             own(list, "bulk update list contract")?;
             if !paged(list) {

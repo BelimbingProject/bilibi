@@ -185,12 +185,12 @@ impl Watchers {
                     "to": to.field(to_field)?.source_key(),
                 }),
                 bilibi_grid::Join::Edge(source) => {
-                    json!({"edge": source.sql, "tenant_scoped": source.tenant_scoped, "company_scoped": source.company_scoped})
+                    json!({"edge": source.sql, "tenant_scoped": source.tenant_scoped})
                 }
             };
             Some(
                 json!({"id": link.id(), "from": from.id(), "to": to.id(), "kind": format!("{:?}", link.kind()),
-                "join": join, "source": to.source().sql, "tenant_scoped": to.source().tenant_scoped, "company_scoped": to.source().company_scoped,
+                "join": join, "source": to.source().sql, "tenant_scoped": to.source().tenant_scoped,
                 "key": to.key(), "key_column": to.key_field().source_key(), "capability": to.capability()}),
             )
         };
@@ -239,7 +239,7 @@ impl Watchers {
             })
             .collect();
         let mut binding = json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
-            "subject": trigger.subject, "logical_event": trigger.logical_event, "version": trigger.version, "source": root.source().sql, "key": root.key(), "key_column": root.key_field().source_key(), "tenant_scoped": root.source().tenant_scoped, "company_scoped": root.source().company_scoped,
+            "subject": trigger.subject, "logical_event": trigger.logical_event, "version": trigger.version, "source": root.source().sql, "key": root.key(), "key_column": root.key_field().source_key(), "tenant_scoped": root.source().tenant_scoped,
             "capability": root.capability(), "fields": fields?, "actions": actions?});
         let lookups = lookups?;
         if !lookups.is_empty() {

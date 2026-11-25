@@ -172,7 +172,7 @@ async fn company_scope_proof(
     plans: &Plans,
     registry: &Registry,
 ) -> Result<(), Failure> {
-    {
+    let seed_ids = {
         let sql = db.get().await?;
         sql.batch_execute(
             "INSERT INTO persons(tenant_id,code,name,kind) VALUES(1,'grid_company_staff','Grid company staff','human') ON CONFLICT (tenant_id,code) DO NOTHING;
@@ -202,7 +202,19 @@ async fn company_scope_proof(
             &[&role],
         )
         .await?;
-    }
+        sql.query(
+            "SELECT id::text FROM reference_import_records WHERE tenant_id=1 AND ((company_id=1 AND code='Company A seed') OR (company_id=2 AND code='Company B seed'))",
+            &[],
+        )
+        .await?
+        .into_iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>()
+    };
+    require(
+        seed_ids.len() == 2,
+        "both companies have their seeded record",
+    )?;
 
     let login = app
         .user
@@ -241,7 +253,7 @@ async fn company_scope_proof(
     require(
         a_rows.to_string().contains("Company A seed")
             && !a_rows.to_string().contains("Company B seed"),
-        "the company Grid read receives company A and excludes company B",
+        "the owner list reads company A and excludes company B",
     )?;
     require(
         b.read(
@@ -330,39 +342,58 @@ async fn company_scope_proof(
         "Bulk Data export is refused in company B without its company grant",
     )?;
 
-    let tenant_run = b
-        .upload(
-            "core/person.contacts",
-            "tenant-wide.csv",
-            b"Name,Kind,company_id\r\nTenant wide still works,human,1\r\n",
-        )
-        .await?;
-    let tenant_import = b
-        .pass(
-            "base.bulk_data.import.start",
-            tenant_run,
-            &json!({"fields":[{"field":"name","column":"Name"},{"field":"kind","column":"Kind"}]}),
-        )
-        .await?;
-    require(
-        tenant_import.run.create == 1,
-        "a tenant-wide Bulk Data import still works unchanged",
-    )?;
-    let tenant_export = b
+    let selected = a
         .write(
             "base.bulk_data.export.start",
-            json!({"record_type":"core/person.contacts","filter":"{\"search\":\"Tenant wide still works\"}","columns":["name"]}),
+            json!({"record_type":owner::TYPE,"ids":seed_ids,"columns":["code"]}),
         )
         .await?;
-    let tenant_export_id = tenant_export["id"]
+    let selected_id = selected["id"]
         .as_i64()
-        .ok_or("missing tenant export id")?;
-    settle_export(db, bulk, &b.scope, tenant_export_id).await?;
-    let (_, file) = bulk.export_file(&b.scope, tenant_export_id).await?;
+        .ok_or("missing selected export id")?;
+    settle_export(db, bulk, &a.scope, selected_id).await?;
+    let (_, file) = bulk.export_file(&a.scope, selected_id).await?;
+    let file = String::from_utf8(file)?;
     require(
-        String::from_utf8(file)?.contains("Tenant wide still works"),
-        "a tenant-wide Grid source and export still work unchanged",
+        file.contains("Company A seed") && !file.contains("Company B seed"),
+        "Grid projects only the company A record from the two selected IDs",
     )?;
+
+    for (person, name) in [(&a, "Tenant wide from A"), (&b, "Tenant wide from B")] {
+        let tenant_run = person
+            .upload(
+                "core/person.contacts",
+                "tenant-wide.csv",
+                format!("Name,Kind,company_id\r\n{name},human,1\r\n").as_bytes(),
+            )
+            .await?;
+        let tenant_import = person
+            .pass(
+                "base.bulk_data.import.start",
+                tenant_run,
+                &json!({"fields":[{"field":"name","column":"Name"},{"field":"kind","column":"Kind"}]}),
+            )
+            .await?;
+        require(
+            tenant_import.run.create == 1,
+            "a tenant-wide Bulk Data import still works unchanged",
+        )?;
+        let tenant_export = person
+            .write(
+                "base.bulk_data.export.start",
+                json!({"record_type":"core/person.contacts","filter":json!({"search":name}).to_string(),"columns":["name"]}),
+            )
+            .await?;
+        let tenant_export_id = tenant_export["id"]
+            .as_i64()
+            .ok_or("missing tenant export id")?;
+        settle_export(db, bulk, &person.scope, tenant_export_id).await?;
+        let (_, file) = bulk.export_file(&person.scope, tenant_export_id).await?;
+        require(
+            String::from_utf8(file)?.contains(name),
+            "a tenant-wide Grid source and export still work unchanged",
+        )?;
+    }
     Ok(())
 }
 
