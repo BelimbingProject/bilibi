@@ -217,7 +217,16 @@ pub(super) async fn walkthrough(proof: &Proof) -> Result<()> {
         })?;
         let record = proof.open(one, 1, name, "urgent", "10").await?;
         proof.settled().await?;
-        let receipts = proof.receipts(record).await?;
+        // A retry may be scheduled beyond `settled`'s short readiness window.
+        // Wait for this run's terminal receipt before judging its script result.
+        let mut receipts = proof.receipts(record).await?;
+        for _ in 0..600 {
+            if receipts.iter().any(|receipt| receipt.0 == id && !matches!(receipt.1.as_str(), "queued" | "matched")) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            receipts = proof.receipts(record).await?;
+        }
         let outcome = receipts
             .iter()
             .find(|receipt| receipt.0 == id)

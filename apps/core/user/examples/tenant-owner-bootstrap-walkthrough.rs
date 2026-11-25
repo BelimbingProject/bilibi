@@ -123,6 +123,19 @@ fn provision(tenant: &str, email: Option<&str>, mailbox: Option<&Path>) -> Resul
     command.output().map_err(|_| Error::Internal)
 }
 
+fn reissue(tenant: i64, email: &str) -> Result<Output> {
+    web_command()?
+        .args([
+            "tenant-provision",
+            "--tenant-id",
+            &tenant.to_string(),
+            "--owner-email",
+            email,
+        ])
+        .output()
+        .map_err(|_| Error::Internal)
+}
+
 fn expect_output(output: Output, refusal: Option<&str>) -> Result<()> {
     let matches = match refusal {
         None => output.status.success(),
@@ -396,7 +409,7 @@ async fn main() -> Result<()> {
     let before_retry = snapshot(&client).await?;
     let mail_before_retry = count(&mailbox)?;
     expect_output(
-        provision(&workspace, Some(OWNER), None)?,
+        reissue(tenant, OWNER)?,
         Some("the bootstrap owner has no pending invitation"),
     )?;
     let after_retry = snapshot(&client).await?;
@@ -414,7 +427,7 @@ async fn main() -> Result<()> {
     let independent = snapshot(&client).await?;
     expect_output(
         provision("Independent workspace", Some(OWNER), None)?,
-        Some("a matching tenant already exists without a matching owner bootstrap receipt"),
+        Some("a tenant with that name already exists"),
     )?;
     let after_independent = snapshot(&client).await?;
     let mail_after_independent = count(&mailbox)?;
@@ -430,27 +443,22 @@ async fn main() -> Result<()> {
     let blocked = directory.join("blocked-delivery");
     std::fs::write(&blocked, b"file in place of mailbox").map_err(|_| Error::Internal)?;
     let retry_workspace = "Delivery retry workspace";
-    expect_output(
-        provision(retry_workspace, Some(retry_email), Some(&blocked))?,
-        Some(
-            "Owner invitation delivery failed after commit. Rerun the same command to reissue it.",
-        ),
-    )?;
+    let failed_delivery = provision(retry_workspace, Some(retry_email), Some(&blocked))?;
     let original = retry_state(&client, retry_workspace).await?;
+    expect_output(failed_delivery, Some(&format!(
+        "Owner invitation delivery failed after commit for tenant {}. Reissue with --tenant-id {} and --owner-email.", original.tenant, original.tenant
+    )))?;
     if !original.unexpired || original.reissues != 0 || count(&mailbox)? != mail_before_retry {
         return Err(Error::Internal);
     }
     println!("Delivery failure kept one pending invitation");
     let before_wrong_address = snapshot(&client).await?;
-    expect_output(
-        provision(retry_workspace, Some(OWNER), None)?,
-        Some(DEDICATED),
-    )?;
+    expect_output(reissue(original.tenant, OWNER)?, Some(DEDICATED))?;
     if snapshot(&client).await? != before_wrong_address || count(&mailbox)? != mail_before_retry {
         return Err(Error::Internal);
     }
     println!("Dedicated-address refusal kept the pending invitation");
-    expect_output(provision(retry_workspace, Some(retry_email), None)?, None)?;
+    expect_output(reissue(original.tenant, retry_email)?, None)?;
     let first_token = invitation_token(
         &mailbox,
         mail_before_retry,
@@ -471,7 +479,7 @@ async fn main() -> Result<()> {
         "UPDATE user_invitations SET expires_at=clock_timestamp()-interval '1 minute' WHERE tenant_id=$1 AND id=$2",
         &[&original.tenant, &original.invitation],
     ).await?;
-    expect_output(provision(retry_workspace, Some(retry_email), None)?, None)?;
+    expect_output(reissue(original.tenant, retry_email)?, None)?;
     let new_token = invitation_token(
         &mailbox,
         mail_before_retry + 1,
@@ -484,12 +492,12 @@ async fn main() -> Result<()> {
     let ambiguous = snapshot(&client).await?;
     expect_output(
         provision(retry_workspace, Some(retry_email), None)?,
-        Some("more than one tenant matches the supplied tenant and primary company"),
+        Some("a tenant with that name already exists"),
     )?;
     if snapshot(&client).await? != ambiguous || count(&mailbox)? != mail_before_retry + 2 {
         return Err(Error::Internal);
     }
-    println!("Ambiguous retry kept both invitations");
+    println!("Duplicate-name creation was refused without changing either tenant");
     for (command, name) in [
         ("tenant-provision", "Legacy tenant"),
         ("platform-provision", "Legacy platform"),
@@ -625,10 +633,7 @@ async fn main() -> Result<()> {
     let before_refusal = snapshot(&client).await?;
     let pending = retry_state(&client, reserved_workspace).await?;
     drop(client);
-    expect_output(
-        provision(reserved_workspace, Some(member_email), None)?,
-        Some(DEDICATED),
-    )?;
+    expect_output(reissue(pending.tenant, member_email)?, Some(DEDICATED))?;
     assert!(matches!(
         app.user.member_invitation(&owner_token).await,
         Err(InvitationError::DedicatedSignIn)
@@ -659,10 +664,7 @@ async fn main() -> Result<()> {
     }
     drop(client);
     let replacement_email = "replacement@customer.example.test";
-    expect_output(
-        provision(reserved_workspace, Some(replacement_email), None)?,
-        None,
-    )?;
+    expect_output(reissue(pending.tenant, replacement_email)?, None)?;
     let replacement_token = invitation_token(
         &mailbox,
         before + 1,
@@ -737,11 +739,7 @@ async fn main() -> Result<()> {
     println!("Replacement owner accepted and verified");
     let accepted_state = snapshot(&client).await?;
     expect_output(
-        provision(
-            reserved_workspace,
-            Some("unused@customer.example.test"),
-            None,
-        )?,
+        reissue(pending.tenant, "unused@customer.example.test")?,
         Some("the bootstrap owner has no pending invitation"),
     )?;
     if snapshot(&client).await? != accepted_state || count(&mailbox)? != before + 2 {
