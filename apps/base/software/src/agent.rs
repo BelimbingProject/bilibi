@@ -160,7 +160,7 @@ fn trust_schema() -> Value {
         "repository":{"type":"string","maxLength":140,"description":"The operator's repository as owner/name."},
         "repository_id":{"type":"integer","minimum":1,"description":"The repository's immutable number from a trusted record."},
         "workflow":{"type":"string","maxLength":255,"description":"The exact trusted workflow identity."},
-        "minimum_tag":{"type":"string","maxLength":80,"description":"The oldest tag this installation accepts, setup-vX.Y.Z."},
+        "minimum_tag":{"type":"string","maxLength":80,"description":"The oldest tag this installation accepts: setup-vX.Y.Z or nightly-YYYY-MM-DD. It names the one channel (stable setup or nightly) the installation accepts; a tag from the other channel is refused."},
         "public_key":{"type":"string","maxLength":16384,"description":"Required for operator: the Ed25519 public key in PEM form. Omit for github."}
     }})
 }

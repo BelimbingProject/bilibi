@@ -41,7 +41,7 @@ The catalogue recommends the newest compatible release tested with this exact Pl
 | Jobs, steps and enabled add-ons | `base_software_jobs`, `base_software_steps`, `base_software_plugins` |
 | What Undo counts in its restore review | Server-wide `base_audit_mutations` since the backup |
 | Trusted release proof | `/opt/bilibi/<instance>/trust/release.json`, pinned at setup and replaceable only by the installer from an owner-reviewed fresh-2FA job |
-| Highest admitted release | `/opt/bilibi/<instance>/trust/release-state.json`, outside the database and release backups |
+| Highest admitted release per channel | `/opt/bilibi/<instance>/trust/release-state.json`, outside the database and release backups |
 
 ## Access
 
@@ -135,6 +135,8 @@ The upload is resumable: while Media has a staging disk (`media.upload.staging_d
 
 A gzip-compressed tar carries `bilibi-web`, `SHA256SUMS` and optionally `manifest.txt`, `Cargo.lock`, `release.json`, `bundle.json` and `plugins/`. The application repository created by `./bilibi new <name>` builds and packages the complete composition in the operator's chosen CI; see [application workspaces](../../../docs/application-workspaces.md). Only an archive accepted by Release trust is installable. After verification, Bilibi writes `admission.json` beside the unpacked files with the proof kind, archive digest and pinned identities; it never trusts that file from inside an archive. Archive parsing, safe paths and compatibility checks live in private `src/transport.rs`.
 
+A release tag is a stable `setup-vX.Y.Z` or a `nightly-YYYY-MM-DD`, and the policy's minimum tag names the one channel it accepts: setup versions by number, or nightlies by date. A tag of the other channel is refused, never compared, so a nightly can neither pass a setup floor nor lower one. `release-state.json` keeps the highest admitted tag and digest per channel, so an older nightly is refused after a newer nightly, and a setup release never raises or lowers the nightly floor.
+
 Release trust is one closed policy, never a fallback list:
 
 | Kind | Proof | Network needed to verify |
@@ -142,7 +144,7 @@ Release trust is one closed policy, never a fallback list:
 | `github` | GitHub artifact attestation for the archive from the pinned repository number, workflow and tag | Yes; anonymous for public repositories, server GitHub App for private repositories |
 | `operator` | One canonical DSSE statement signed by the pinned Ed25519 key, binding archive SHA-256, repository name and number, workflow, tag, kind and target | No; local archive, proof, trust record and OpenSSL only |
 
-The initial `scripts/install-server.sh trust` writes the first `/opt/bilibi/<instance>/trust/release.json` and records the terminal operator’s UID with the UTC time. Existing instances can enroll using a minimum tag newer than their installed releases. Root owns both the policy and replay files. The instance’s application and installer can read them. Only the instance’s privileged installer helper may write them after enrollment. A later `base.software.trust` safe write requires the installation owner's fresh 2FA and queues a one-step installer job; the reviewed step-up target includes the complete new facts and derived key fingerprint. The installer’s privileged helper records the requesting account, validates the key again and atomically replaces the record. A queued trust job can be cancelled until the installer claims it. Software shows that actor and time plus the instance's highest admitted tag. Operator verification uses no transparency log, so private repository and asset names are not published to Rekor.
+The initial `scripts/install-server.sh trust` writes the first `/opt/bilibi/<instance>/trust/release.json` and records the terminal operator’s UID with the UTC time. Existing instances can enroll using a minimum tag newer than their installed releases, in the channel those releases came from. Root owns both the policy and replay files. The instance’s application and installer can read them. Only the instance’s privileged installer helper may write them after enrollment. A later `base.software.trust` safe write requires the installation owner's fresh 2FA and queues a one-step installer job; the reviewed step-up target includes the complete new facts and derived key fingerprint. The installer’s privileged helper records the requesting account, validates the key again and atomically replaces the record. A queued trust job can be cancelled until the installer claims it. Software shows that actor and time plus the instance's highest admitted tag. Operator verification uses no transparency log, so private repository and asset names are not published to Rekor.
 
 ### Update notices
 

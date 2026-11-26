@@ -6,8 +6,8 @@
 # The layout, and why it is this way, is in docs/server-install.md.
 #
 #   install-server.sh create <instance> --role dev|staging|production --site <staff-host> [--public-site <public-host> | --no-public-site] [--staff-bind <address> | --no-staff-bind] [--public-bind <address>] [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
-#   install-server.sh trust <instance> --github|--operator-key <public.pem> --repo <owner/name> --repo-id <n> [--workflow <identity>] --minimum-tag <setup-vX.Y.Z>
-#   install-server.sh release <instance> <setup archive> --tag <setup-vX.Y.Z> [--proof <proof.json>]
+#   install-server.sh trust <instance> --github|--operator-key <public.pem> --repo <owner/name> --repo-id <n> [--workflow <identity>] --minimum-tag <setup-vX.Y.Z|nightly-YYYY-MM-DD>
+#   install-server.sh release <instance> <setup archive> --tag <setup-vX.Y.Z|nightly-YYYY-MM-DD> [--proof <proof.json>]
 #   install-server.sh mail <instance> --host <relay> --port <n> --username <user> --tls starttls|implicit_tls --from-address <address> [--from-name <name>] --password-stdin
 #   install-server.sh create-owner <instance> --email <owner address> [--name <name>] [--company-name <name>]
 #   install-server.sh tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>
@@ -17,15 +17,17 @@
 #   install-server.sh identity-recover <instance> --email <old> --new-email <new>
 #   install-server.sh identity-delete <instance> --email <address> --confirm <address>
 #   install-server.sh identity-retention <instance>
-#   install-server.sh installer <instance> <bilibi-installer binary> --tag <setup-vX.Y.Z> [--proof <proof.json>]
+#   install-server.sh installer <instance> <bilibi-installer binary> --tag <setup-vX.Y.Z|nightly-YYYY-MM-DD> [--proof <proof.json>]
 #   install-server.sh github-app --client-id <id> --repo <owner/name>   (the App private key on standard input)
 #   install-server.sh github-app --check | --remove
-#   install-server.sh verify <instance> <file> --kind server-tools|installer|setup --tag <setup-vX.Y.Z> [--proof <proof.json>]
+#   install-server.sh verify <instance> <file> --kind server-tools|installer|setup --tag <setup-vX.Y.Z|nightly-YYYY-MM-DD> [--proof <proof.json>]
 #   install-server.sh switch <instance> <release number>
 #   install-server.sh status [<instance>]
 #   bilibi update <instance> [--to X.Y.Z | --undo]
 #   install-server.sh --json <command> ...   one JSON line per step, for an AI agent or script
 #
+# A tag is a stable setup-vX.Y.Z or a nightly-YYYY-MM-DD. The trust minimum tag
+# picks the instance's one channel; a tag of the other channel is refused.
 # Only the layout, the first release and the installer service live here.
 # Build releases in a separate development checkout, then install a tested release here.
 # Backing up before a switch, checking the new release, switching back and Undo
@@ -68,7 +70,9 @@ say() { printf '%s\n' "$*"; }
 need_root() { [[ $(id -u) -eq 0 ]] || fail 'run this as root' "sudo $0 $*" NOT_ROOT; }
 valid_name() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]; }
 valid_repository() { [[ $1 =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; }
-valid_setup_tag() { [[ $1 =~ ^setup-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+# A release tag names one channel: a stable setup-vX.Y.Z or a trial nightly-YYYY-MM-DD.
+# Release trust is pinned to one channel, and never mixes the two.
+valid_setup_tag() { [[ $1 =~ ^setup-v[0-9]+\.[0-9]+\.[0-9]+$ || $1 =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; }
 instance_dir() { printf '%s/%s' "$root" "$1"; }
 release_policy() { printf '%s/trust/release.json' "$(instance_dir "$1")"; }
 release_state() { printf '%s/trust/release-state.json' "$(instance_dir "$1")"; }
@@ -867,9 +871,9 @@ artifact_target() {
     local kind=$1 name=${2##*/}
     case $kind in
         setup)
-            [[ $name =~ ^bilibi-setup-v[0-9]+\.[0-9]+\.[0-9]+-([A-Za-z0-9_.-]+)\.tar\.gz$ ]] ||
-                fail 'the setup archive name must be bilibi-setup-vX.Y.Z-<target>.tar.gz' 'use the published file name unchanged' INVALID_INPUT
-            printf '%s' "${BASH_REMATCH[1]}"
+            [[ $name =~ ^bilibi-(setup-v[0-9]+\.[0-9]+\.[0-9]+|nightly-[0-9]{4}-[0-9]{2}-[0-9]{2})-([A-Za-z0-9_.-]+)\.tar\.gz$ ]] ||
+                fail 'the setup archive name must be bilibi-setup-vX.Y.Z-<target>.tar.gz or bilibi-nightly-YYYY-MM-DD-<target>.tar.gz' 'use the published file name unchanged' INVALID_INPUT
+            printf '%s' "${BASH_REMATCH[2]}"
             ;;
         installer)
             [[ $name =~ ^bilibi-installer-([A-Za-z0-9_.-]+)$ ]] ||
@@ -895,8 +899,15 @@ verify_provenance() {
     local -a trust_values
     [[ -f $release_trust && ! -L $release_trust ]] || fail 'this instance has no release trust anchor' "pin the instance policy with: $0 trust $instance --github|--operator-key ..." TRUST_NOT_SET
     ensure_trust_directory "$instance"
-    python3 "$release_proof" check-tag --trust "$release_trust" --tag "$tag" >/dev/null ||
+    local tag_refusal
+    if ! tag_refusal=$(python3 "$release_proof" check-tag --trust "$release_trust" --tag "$tag" 2>&1); then
+        # A tag of the other channel is not "too old": this installation never
+        # accepts it, whatever its number or date.
+        if [[ $tag_refusal == *"accepts only"* ]]; then
+            fail "release $tag is on a different release channel than this server's release trust" 'install a release from the channel this server trusts, or have the installation owner replace the trust policy' SIGNATURE_WRONG_CHANNEL
+        fi
         fail "release $tag is outside this server's trusted tag range" 'use a newer signed release' SIGNATURE_REPLAY
+    fi
     values=$(python3 "$release_proof" trust-values --trust "$release_trust") || fail 'the server release trust record is invalid' 'have the installation owner replace it on Software with a fresh 2FA code' TRUST_INVALID
     mapfile -t trust_values <<<"$values"
     ((${#trust_values[@]} == 5)) || fail 'the server release trust record is incomplete' 'have the installation owner replace it on Software with a fresh 2FA code' TRUST_INVALID
@@ -998,6 +1009,7 @@ installer() {
         esac
     done
     [[ -n $tag ]] || usage
+    valid_setup_tag "$tag" || fail 'the release tag must be setup-vX.Y.Z or nightly-YYYY-MM-DD' '' INVALID_INPUT
     need_root installer "$@"
     # A downloaded release asset has no execute bit; the verified copy is
     # installed with its own mode below.
@@ -1091,6 +1103,7 @@ verify_command() {
     done
     [[ $kind == setup || $kind == installer || $kind == server-tools ]] || usage
     [[ -n $tag ]] || usage
+    valid_setup_tag "$tag" || fail 'the release tag must be setup-vX.Y.Z or nightly-YYYY-MM-DD' '' INVALID_INPUT
     need_root verify
     [[ -f $source ]] || fail "$source is not a file"
     stage_source "$source"
@@ -1230,6 +1243,7 @@ release() {
         esac
     done
     [[ -n $tag ]] || usage
+    valid_setup_tag "$tag" || fail 'the release tag must be setup-vX.Y.Z or nightly-YYYY-MM-DD' '' INVALID_INPUT
     need_root release "$@"
     lock_release_policy "$instance"
     [[ -f $source ]] || fail "$source is not a setup release archive"

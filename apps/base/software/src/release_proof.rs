@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::PathBuf,
@@ -49,8 +50,42 @@ pub struct Policy {
 #[serde(deny_unknown_fields)]
 struct Replay {
     version: u8,
-    highest_tag: String,
-    highest_digest: String,
+    /// One highest admitted release per channel, named `setup` or `nightly`.
+    highest: HashMap<String, Admitted>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Admitted {
+    tag: String,
+    digest: String,
+}
+
+impl Admitted {
+    /// The tag's channel when it is a canonical tag of that channel.
+    fn tag_order(&self) -> Option<Channel> {
+        tag_order(&self.tag).map(|(channel, _)| channel)
+    }
+}
+
+impl Replay {
+    /// The highest admitted release of `channel`, in that channel's order.
+    fn highest(&self, channel: Channel) -> Option<Highest<'_>> {
+        let name = channel_name_of(channel);
+        let entry = self.highest.get(name)?;
+        let (found, order) = tag_order(&entry.tag)?;
+        (found == channel).then(|| Highest {
+            tag: &entry.tag,
+            digest: &entry.digest,
+            order,
+        })
+    }
+}
+
+struct Highest<'a> {
+    tag: &'a str,
+    digest: &'a str,
+    order: Order,
 }
 
 pub struct Change {
@@ -104,8 +139,11 @@ pub fn review_change(input: &Value) -> Result<Change, (String, String)> {
         );
     }
     let minimum_tag = input["minimum_tag"].as_str().unwrap_or("").trim();
-    if let Err(message) = version(minimum_tag) {
-        return field("minimum_tag", &message);
+    if tag_order(minimum_tag).is_none() {
+        return field(
+            "minimum_tag",
+            "Enter the oldest accepted tag as setup-vX.Y.Z or nightly-YYYY-MM-DD.",
+        );
     }
     let public_key = input["public_key"].as_str().map(str::trim);
     let fingerprint = match kind {
@@ -220,7 +258,10 @@ impl Policy {
         {
             return Err("The server's trusted release workflow is invalid.".into());
         }
-        version(&self.minimum_tag)?;
+        tag_order(&self.minimum_tag).ok_or_else(|| {
+            "The server's minimum trusted release tag is not setup-vX.Y.Z or nightly-YYYY-MM-DD."
+                .to_owned()
+        })?;
         if self.changed_at.parse::<jiff::Timestamp>().is_err()
             || self.changed_by.is_empty()
             || self.changed_by.len() > 255
@@ -279,10 +320,10 @@ impl Policy {
     }
 
     pub fn check_tag(&self, tag: &str) -> Result<(), String> {
-        if version(tag)? < version(&self.minimum_tag)? {
+        let minimum = &self.minimum_tag;
+        if policy_order(minimum, tag)? < policy_order(minimum, minimum)? {
             return Err(format!(
-                "Release {tag} is older than this server's minimum trusted release {}.",
-                self.minimum_tag
+                "Release {tag} is older than this server's minimum trusted release {minimum}."
             ));
         }
         Ok(())
@@ -383,29 +424,38 @@ impl Policy {
     }
 }
 
+/// Refuse a tag at or below this channel's highest admitted one. The replay
+/// record keeps one highest tag and digest per channel, so a nightly and a
+/// setup release never raise or lower each other's floor.
 pub fn check_replay(paths: &Paths, tag: &str) -> Result<(), String> {
-    let wanted = version(tag)?;
+    let (channel, wanted) = tag_order(tag)
+        .ok_or_else(|| "The release tag must be setup-vX.Y.Z or nightly-YYYY-MM-DD.".to_owned())?;
     let Some(replay) = load_replay(paths)? else {
         return Ok(());
     };
-    if wanted <= version(&replay.highest_tag)? {
+    let Some(highest) = replay.highest(channel) else {
+        return Ok(());
+    };
+    if wanted <= highest.order {
         return Err(format!(
             "Release {tag} conflicts with the highest admitted release {}. Use Software Undo for a deliberate rollback.",
-            replay.highest_tag
+            highest.tag
         ));
     }
     Ok(())
 }
 
 pub fn facts(paths: &Paths) -> Result<Value, String> {
-    let mut facts = Policy::load(paths)?.facts();
-    if let Some(replay) = load_replay(paths)? {
-        facts["highest_admitted_tag"] = json!(replay.highest_tag);
-        facts["highest_admitted_digest"] = json!(replay.highest_digest);
-    } else {
-        facts["highest_admitted_tag"] = Value::Null;
-        facts["highest_admitted_digest"] = Value::Null;
-    }
+    let policy = Policy::load(paths)?;
+    let channel = tag_order(&policy.minimum_tag).map(|(channel, _)| channel);
+    let highest = load_replay(paths)?.and_then(|replay| {
+        let channel = channel?;
+        let entry = replay.highest(channel)?;
+        Some((entry.tag.to_owned(), entry.digest.to_owned()))
+    });
+    let mut facts = policy.facts();
+    facts["highest_admitted_tag"] = json!(highest.as_ref().map(|(tag, _)| tag));
+    facts["highest_admitted_digest"] = json!(highest.as_ref().map(|(_, digest)| digest));
     Ok(facts)
 }
 
@@ -424,15 +474,16 @@ fn load_replay(paths: &Paths) -> Result<Option<Replay>, String> {
     let replay: Replay = serde_json::from_slice(&bytes)
         .map_err(|_| "The release replay record is not valid.".to_owned())?;
     if replay.version != VERSION
-        || replay.highest_digest.len() != 64
-        || !replay
-            .highest_digest
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+        || replay.highest.iter().any(|(channel, entry)| {
+            entry
+                .tag_order()
+                .is_none_or(|found| channel_name_of(found) != channel)
+                || entry.digest.len() != 64
+                || !entry.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
     {
         return Err("The release replay record is not valid.".into());
     }
-    version(&replay.highest_tag)?;
     Ok(Some(replay))
 }
 
@@ -470,10 +521,85 @@ fn valid_fingerprint(value: &str) -> bool {
     })
 }
 
-fn version(tag: &str) -> Result<(u64, u64, u64), String> {
-    let Some(value) = tag.strip_prefix("setup-v") else {
-        return Err("The release tag must be setup-vX.Y.Z.".into());
+/// One release tag's place in its channel. A policy is pinned to one channel,
+/// setup or nightly, and never mixes the two (see `Channel`).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Order {
+    /// `setup-vX.Y.Z`, by version.
+    Setup(u64, u64, u64),
+    /// `nightly-YYYY-MM-DD`, by date.
+    Nightly(u64, u64, u64),
+}
+
+/// Which kind of release tag an installation accepts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Channel {
+    Setup,
+    Nightly,
+}
+
+/// The channel a canonical tag belongs to, or `None` when it is neither
+/// `setup-vX.Y.Z` nor `nightly-YYYY-MM-DD` (or the date is not real).
+pub(crate) fn tag_order(tag: &str) -> Option<(Channel, Order)> {
+    if let Some(value) = tag.strip_prefix("setup-v") {
+        let (major, minor, patch) = canonical_version(value)?;
+        return Some((Channel::Setup, Order::Setup(major, minor, patch)));
+    }
+    let value = tag.strip_prefix("nightly-")?;
+    let mut parts = value.split('-');
+    let part = |part: Option<&str>| -> Option<u64> {
+        let part = part?;
+        (part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| part.parse().ok())
+            .flatten()
     };
+    let year = parts.next()?;
+    let (month, day) = (part(parts.next()), part(parts.next()));
+    if year.len() != 4 || parts.next().is_some() {
+        return None;
+    }
+    let year: u64 = year.parse().ok()?;
+    let (month, day) = (month?, day?);
+    jiff::civil::Date::new(year.try_into().ok()?, month as i8, day as i8).ok()?;
+    Some((Channel::Nightly, Order::Nightly(year, month, day)))
+}
+
+/// A tag's order under one policy: it must be of the policy's channel.
+/// Comparing across channels would let a nightly pass a setup floor, or the
+/// reverse, so the other channel is refused, never ordered.
+pub(crate) fn policy_order(minimum: &str, tag: &str) -> Result<Order, String> {
+    let (accepted, order) = tag_order(tag)
+        .ok_or_else(|| "The release tag must be setup-vX.Y.Z or nightly-YYYY-MM-DD.".to_owned())?;
+    let (policy, _) = tag_order(minimum).ok_or_else(|| {
+        "The release trust minimum tag must be setup-vX.Y.Z or nightly-YYYY-MM-DD.".to_owned()
+    })?;
+    if accepted != policy {
+        return Err(format!(
+            "Release {tag} is not a {} tag, and this installation accepts only {} tags from {minimum}.",
+            channel_name(accepted),
+            channel_name(policy),
+        ));
+    }
+    Ok(order)
+}
+
+fn channel_name(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Setup => "setup-vX.Y.Z",
+        Channel::Nightly => "nightly-YYYY-MM-DD",
+    }
+}
+
+/// The replay record's key for a channel.
+fn channel_name_of(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Setup => "setup",
+        Channel::Nightly => "nightly",
+    }
+}
+
+/// `X.Y.Z` without leading zeros, as `setup-v` carries it.
+fn canonical_version(value: &str) -> Option<(u64, u64, u64)> {
     let mut parts = value.split('.');
     let parse = |part: Option<&str>| -> Option<u64> {
         let part = part?;
@@ -491,7 +617,48 @@ fn version(tag: &str) -> Result<(u64, u64, u64), String> {
         parse(parts.next()),
         parts.next(),
     ) {
-        (Some(major), Some(minor), Some(patch), None) => Ok((major, minor, patch)),
-        _ => Err("The release tag must be setup-vX.Y.Z.".into()),
+        (Some(major), Some(minor), Some(patch), None) => Some((major, minor, patch)),
+        _ => None,
     }
+}
+
+/// `setup-v1.2.3` from a published name like `bilibi-setup-v1.2.3-<target>.tar.gz`,
+/// or `nightly-2026-11-25` from `bilibi-nightly-2026-11-25-<target>.tar.gz`.
+pub(crate) fn setup_identity_of(filename: &str) -> Option<(String, String)> {
+    let rest = filename.strip_prefix("bilibi-")?;
+    if let Some(nightly) = rest.strip_prefix("nightly-") {
+        let mut parts = nightly.splitn(4, '-');
+        let (year, month, day, target) =
+            (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+        let tag = format!("nightly-{year}-{month}-{day}");
+        let target = target.strip_suffix(".tar.gz")?;
+        return matches!(tag_order(&tag), Some((Channel::Nightly, _)))
+            .then(|| (tag, target.to_owned()))
+            .filter(|(_, target)| valid_target(target));
+    }
+    let version = rest.strip_prefix("setup-v")?;
+    let end = version
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(version.len());
+    let numbers: Vec<&str> = version[..end].split('.').collect();
+    if numbers.len() != 3
+        || numbers.iter().any(|number| {
+            number.is_empty()
+                || (number.len() > 1 && number.starts_with('0'))
+                || !number.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+    let target = version[end..].strip_prefix('-')?.strip_suffix(".tar.gz")?;
+    valid_target(target).then(|| (format!("setup-v{}", &version[..end]), target.to_owned()))
+}
+
+/// The target in a published file name: `x86_64-unknown-linux-gnu` and the like.
+fn valid_target(target: &str) -> bool {
+    !target.is_empty()
+        && target.len() <= 128
+        && target
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
 }

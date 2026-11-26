@@ -2,9 +2,9 @@
 
 **Document Type:** Architecture Decision Record
 **Status:** Accepted
-**Agents:** codex/gpt-5 (author)
+**Agents:** codex/gpt-5 (author), pi/kimi-k2.5-thinking-medium (revision)
 **Scope:** Proof accepted before a Bilibi server installs a release artifact
-**Last Updated:** 2026-11-24
+**Last Updated:** 2026-11-25
 
 ## Context
 
@@ -38,11 +38,11 @@ The release carries a sidecar DSSE envelope whose Ed25519 signature covers the e
 - the SHA-256 digest of the complete artifact;
 - the repository name and immutable ID pinned by the installation;
 - the workflow identity pinned by the installation;
-- the exact `setup-vX.Y.Z` tag;
+- the exact release tag, `setup-vX.Y.Z` or `nightly-YYYY-MM-DD`;
 - the artifact kind and target; and
 - the signing-key fingerprint.
 
-The verifier rejects unknown or duplicate statement fields, a non-canonical setup tag, more than one subject, and more than one signature. It verifies the complete artifact's digest, the signature and every pinned identity before opening the archive. The signed statement is the proof; `release.json` and `SHA256SUMS` inside the archive remain consistency and content checks, not trust anchors.
+The verifier rejects unknown or duplicate statement fields, a non-canonical tag, more than one subject, and more than one signature. It verifies the complete artifact's digest, the signature and every pinned identity before opening the archive. The signed statement is the proof; `release.json` and `SHA256SUMS` inside the archive remain consistency and content checks, not trust anchors.
 
 The private key never goes to the server. The operator keeps it in the protected release workflow, a signing service or equivalent custody that represents the workflow named in the trust policy. The signature proves that this key signed the workflow claim; Bilibi cannot prove that a CI job really ran if the operator lets another process use the same private key. A separate release key with access limited to that workflow keeps this claim meaningful.
 
@@ -50,7 +50,9 @@ The proof envelope can travel beside a GitHub release asset fetched through the 
 
 ### Trust ownership
 
-Root records each instance’s first proof policy from the terminal, with the operator UID and UTC time. On an existing instance without a pin, the operator sets a minimum tag newer than its previous releases. For operator signatures it records the public key fingerprint, repository name and immutable ID, workflow and minimum setup tag. For GitHub attestations it records the repository ID, workflow and minimum setup tag.
+Root records each instance’s first proof policy from the terminal, with the operator UID and UTC time. On an existing instance without a pin, the operator sets a minimum tag newer than its previous releases. For operator signatures it records the public key fingerprint, repository name and immutable ID, workflow and minimum tag. For GitHub attestations it records the repository ID, workflow and minimum tag.
+
+**A tag names one channel, and a policy accepts one channel.** The tag is either a stable `setup-vX.Y.Z` or a `nightly-YYYY-MM-DD`, and the minimum tag fixes which: setup versions are ordered by number, nightlies by date. A tag of the other channel is refused rather than compared, because the two have no common order and comparing them would let a nightly pass a setup floor, or an old setup pass a nightly one. There is no mixing and no fallback between channels.
 
 After bootstrap, only the installation owner may replace the policy, repository, workflow or public key, and every replacement requires fresh 2FA. There is no environment-variable override, automatic key discovery, repository-name lookup or ordinary settings-editor path. The change is audited and preserves the release high-water mark.
 
@@ -60,7 +62,7 @@ Trust state and its high-water mark live outside release folders and database ba
 
 ### Replay and rollback
 
-Normal installation accepts only a setup tag strictly newer than the installation's highest admitted tag. The installation records the admitted tag and artifact digest before the artifact can become a new independent install. A second request for the same tag and digest may only resume the same durable admission or report that the same artifact is already current; it may not create another install. The same tag with different bytes, the same or an older tag after another release was admitted, and a tag below the setup floor are refused before unpacking.
+Normal installation accepts only a tag strictly newer than the highest admitted tag of its own channel. The installation records the admitted tag and artifact digest, one record per channel, before the artifact can become a new independent install. A separate record per channel keeps a setup release from reopening an older nightly, or the reverse. A second request for the same tag and digest may only resume the same durable admission or report that the same artifact is already current; it may not create another install. The same tag with different bytes, the same or an older tag after another release was admitted, and a tag below the setup floor are refused before unpacking.
 
 Undo remains the deliberate rollback door. It uses a release already admitted and retained on that server, requires the existing owner review and fresh 2FA, restores a backup when required, and never lowers the release high-water mark. A release process that needs corrected bytes publishes a new setup tag rather than moving or rebuilding an old tag.
 
