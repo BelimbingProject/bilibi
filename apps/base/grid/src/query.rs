@@ -192,7 +192,16 @@ pub async fn project_lenses<S: AsRef<str>>(
     specs: &[S],
     lenses: &Lenses,
 ) -> Result<Projection, QueryError> {
-    read(db, scope, root, ids, specs, lenses, Bounds::default()).await
+    let mut client = db.get().await.map_err(Error::from)?;
+    let tx = client
+        .build_transaction()
+        .read_only(true)
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .start()
+        .await?;
+    let result = read_on(&tx, scope, root, ids, specs, lenses).await?;
+    tx.commit().await?;
+    Ok(result)
 }
 
 /// The full value of one masked field of one record (ADR 05): the same read
@@ -260,28 +269,29 @@ pub async fn reveal_on(
     .await
 }
 
-async fn read<S: AsRef<str>>(
-    db: &Db,
+pub async fn project_on<S: AsRef<str>>(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    root: &str,
+    ids: &[Value],
+    specs: &[S],
+) -> Result<Projection, QueryError> {
+    read_on(tx, scope, root, ids, specs, &Lenses::default()).await
+}
+
+async fn read_on<S: AsRef<str>>(
+    tx: &tokio_postgres::Transaction<'_>,
     scope: &Scope,
     root: &str,
     ids: &[Value],
     specs: &[S],
     lenses: &Lenses,
-    bounds: Bounds,
 ) -> Result<Projection, QueryError> {
+    let bounds = Bounds::default();
     bounds.check()?;
-    let mut client = db.get().await.map_err(Error::from)?;
-    let tx = client
-        .build_transaction()
-        .read_only(true)
-        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-        .start()
-        .await?;
     tx.batch_execute(&bounds.sql()).await?;
-    let catalog = Catalog::for_scope(&*tx, scope).await?;
-    let result = project_catalog(&tx, &catalog, root, ids, specs, lenses, bounds).await?;
-    tx.commit().await?;
-    Ok(result)
+    let catalog = Catalog::for_scope(tx, scope).await?;
+    project_catalog(tx, &catalog, root, ids, specs, lenses, bounds).await
 }
 
 pub(crate) async fn project_catalog<S: AsRef<str>>(

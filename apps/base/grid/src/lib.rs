@@ -30,7 +30,7 @@ pub use page_columns::{Outcome, PageColumns, ViewCaller};
 pub use page_metadata::{PageColumnsFuture, PageDetailsFuture, PageMetadata, PAGE_METADATA};
 pub use page_views::{PageViews, PAGE_VIEWS};
 pub use query::{
-    project, project_lenses, scalar_access, scalar_expression, scalar_join, stats,
+    project, project_lenses, project_on, scalar_access, scalar_expression, scalar_join, stats,
     validate_projection_on, Lenses, Projection, QueryError, Row, ScalarJoin, Stats, BOUNDS,
     MAX_ESTIMATED_COST,
 };

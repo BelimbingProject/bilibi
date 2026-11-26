@@ -630,8 +630,12 @@ impl BulkData {
             }
         };
         include_reach(root);
+        let mut masks = BTreeMap::new();
         for spec in &run.columns {
             if let Ok(column) = seeing.catalog.resolve(root, spec) {
+                if let Some(kind) = seeing.catalog.mask(&column) {
+                    masks.insert(spec, kind);
+                }
                 for link in column.hops.iter().chain(&column.many).chain(&column.tail) {
                     include_reach(seeing.catalog.table(link.to())?);
                 }
@@ -642,7 +646,7 @@ impl BulkData {
             .into_iter()
             .map(|table| (table, seeing.restricted.get(table)))
             .collect();
-        let access = json!([seen, restricted, reach]).to_string();
+        let access = json!([seen, masks, restricted, reach]).to_string();
         Some(
             Sha256::digest(access.as_bytes())
                 .iter()
@@ -801,9 +805,14 @@ impl BulkData {
                 "This kind of record can no longer be exported.".into(),
             )));
         };
-        // Taken before the read: a grant revoked or a field restricted while
-        // it runs refuses the file at download either way.
-        let seeing = self.seeing(client, scope).await?;
+        let tx = client
+            .build_transaction()
+            .read_only(true)
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await?;
+        let seeing = self.seeing(&tx, scope).await?;
+        tx.commit().await?;
         let Some(access) = self.access(&seeing, run) else {
             return Ok(Err(Failed(
                 "You no longer have permission to export these records.".into(),
@@ -882,8 +891,20 @@ impl BulkData {
                 if started.elapsed() > BUDGET {
                     return Ok(Err(too_long()));
                 }
+                let tx = client
+                    .build_transaction()
+                    .read_only(true)
+                    .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+                    .start()
+                    .await?;
+                let current = self.seeing(&tx, scope).await?;
+                if self.access(&current, run).as_deref() != Some(access.as_str()) {
+                    return Ok(Err(Failed(
+                        "Your access changed while the list was being exported. Export the list again.".into(),
+                    )));
+                }
                 let projection =
-                    match bilibi_grid::project(&self.db, scope, table, batch, &visible).await {
+                    match bilibi_grid::project_on(&tx, scope, table, batch, &visible).await {
                         Ok(projection) => projection,
                         Err(bilibi_grid::QueryError::Database(error))
                             if !matches!(error, Error::Forbidden | Error::Unauthorized) =>
@@ -896,6 +917,7 @@ impl BulkData {
                             )))
                         }
                     };
+                tx.commit().await?;
                 let ids_of: std::collections::BTreeMap<&str, &str> = projection
                     .columns
                     .iter()
