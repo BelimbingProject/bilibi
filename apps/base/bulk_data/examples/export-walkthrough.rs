@@ -318,11 +318,13 @@ async fn main() -> Result<(), Failure> {
         )
         .await
         .ok_or("linked export was not started")?;
+    let declared_input = json!({
+        "record_type": JOINED_CONTACTS,
+        "filter": r#"{"search":"Exp Alice"}"#,
+        "columns": ["work_email"]
+    });
     let declared = manager
-        .write(
-            "base.bulk_data.export.start",
-            json!({"record_type": JOINED_CONTACTS, "filter": r#"{"search":"Exp Alice"}"#, "columns": ["work_email"]}),
-        )
+        .write("base.bulk_data.export.start", declared_input.clone())
         .await?["id"]
         .as_i64()
         .ok_or("declared source export was not started")?;
@@ -334,7 +336,7 @@ async fn main() -> Result<(), Failure> {
         }
     }
     sql.execute(
-        "INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id) VALUES(1,1,'person_affiliations','work_email')",
+        "INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES(1,1,'person_affiliations','work_email','mask')",
         &[],
     )
     .await?;
@@ -347,6 +349,26 @@ async fn main() -> Result<(), Failure> {
             );
         }
         println!("work email restriction invalidated export {id}");
+    }
+    let masked = manager
+        .write("base.bulk_data.export.start", declared_input)
+        .await?["id"]
+        .as_i64()
+        .ok_or("declared source export under mask was not started")?;
+    manager.settle(masked).await;
+    bulk.export_file(&manager.scope, masked).await?;
+    sql.execute(
+        "UPDATE field_restrictions SET mode='withhold' WHERE tenant_id=1 AND role_id=1 AND table_id='person_affiliations' AND field_id='work_email'",
+        &[],
+    )
+    .await?;
+    if manager.export(masked).await?.downloadable
+        || !matches!(
+            bulk.export_file(&manager.scope, masked).await,
+            Err(Error::Forbidden)
+        )
+    {
+        return Err("changing work email from mask to withhold did not invalidate the export".into());
     }
     let replacement = manager
         .exports(

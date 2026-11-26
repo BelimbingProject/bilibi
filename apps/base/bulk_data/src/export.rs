@@ -34,7 +34,7 @@ use jiff::Timestamp;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 use tokio_postgres::{GenericClient, Row};
 
 pub(crate) const SERVICE: &str = "base/bulk_data.export-job";
@@ -211,8 +211,7 @@ pub(crate) async fn load(
 struct Seeing {
     held: std::collections::BTreeSet<&'static str>,
     catalog: bilibi_grid::Catalog,
-    /// Each relevant table's restricted fields, sorted.
-    restricted: std::collections::BTreeMap<&'static str, Vec<String>>,
+    restricted: BTreeMap<String, BTreeMap<String, &'static str>>,
 }
 
 /// Why an export whose job ended first did not finish.
@@ -577,7 +576,7 @@ impl BulkData {
             run.state == ExportState::Completed && !run.expired && run.access.is_some()
         };
         if runs.iter().any(ready) {
-            let seeing = self.seeing(client, scope, runs).await?;
+            let seeing = self.seeing(client, scope).await?;
             for run in runs.iter_mut() {
                 if ready(run) {
                     run.downloadable = self.access(&seeing, run) == run.access;
@@ -594,32 +593,12 @@ impl BulkData {
         &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
-        runs: &[ExportRun],
     ) -> Result<Seeing> {
         let held = bilibi_authz::effective_capabilities(client, scope).await?;
         let catalog = bilibi_grid::Catalog::for_scope(client, scope)
             .await
             .map_err(|_| Error::Internal)?;
-        let mut restricted = std::collections::BTreeMap::new();
-        for run in runs {
-            let Ok((registered, _)) = self.exportable(&run.record_type) else {
-                continue;
-            };
-            let Some(tables) = access_tables(registered.definition.table, &run.columns) else {
-                continue;
-            };
-            for table in tables {
-                if !restricted.contains_key(table) {
-                    let mut fields: Vec<String> =
-                        bilibi_authz::restrictions_for(client, scope, table)
-                            .await?
-                            .into_iter()
-                            .collect();
-                    fields.sort();
-                    restricted.insert(table, fields);
-                }
-            }
-        }
+        let restricted = bilibi_authz::fields::restriction_modes(client, scope).await?;
         Ok(Seeing {
             held,
             catalog,
@@ -661,12 +640,7 @@ impl BulkData {
         let tables = access_tables(table, &run.columns)?;
         let restricted: std::collections::BTreeMap<_, _> = tables
             .into_iter()
-            .map(|table| {
-                (
-                    table,
-                    seeing.restricted.get(table).map_or(&[][..], Vec::as_slice),
-                )
-            })
+            .map(|table| (table, seeing.restricted.get(table)))
             .collect();
         let access = json!([seen, restricted, reach]).to_string();
         Some(
@@ -829,9 +803,7 @@ impl BulkData {
         };
         // Taken before the read: a grant revoked or a field restricted while
         // it runs refuses the file at download either way.
-        let seeing = self
-            .seeing(client, scope, std::slice::from_ref(run))
-            .await?;
+        let seeing = self.seeing(client, scope).await?;
         let Some(access) = self.access(&seeing, run) else {
             return Ok(Err(Failed(
                 "You no longer have permission to export these records.".into(),
