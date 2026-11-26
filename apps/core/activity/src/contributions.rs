@@ -221,10 +221,11 @@ inventory::submit! { Contribution::new(EMBEDS, "core/activity.record", provenanc
 inventory::submit! { Contribution::new(PAGE_WRITES, "core/activity.pages", provenance!(), &PageWrites {
     service: crate::web::SERVICE,
     contracts: &[
-        ("create_task", "core.activity.create_task"),
-        ("log_call", "core.activity.log_call"),
-        ("create_meeting", "core.activity.create_meeting"),
-        ("create_note", "core.activity.create_note"),
+        // One event form saves as whichever kind it holds.
+        ("save_event", "core.activity.create_task"),
+        ("save_event", "core.activity.log_call"),
+        ("save_event", "core.activity.create_meeting"),
+        ("save_event", "core.activity.create_note"),
         // The calendar's compact draft saves as whichever kind it holds, so it
         // lists every create contract one entry can begin.
         ("slot_save", "core.activity.create_meeting"),

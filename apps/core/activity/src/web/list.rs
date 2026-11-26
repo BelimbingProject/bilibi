@@ -507,7 +507,7 @@ impl Index {
                 }
             }
             "close_modal" => self.dialog = None,
-            "create_task" | "log_call" | "create_meeting" | "create_note" => {
+            "save_event" => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {

@@ -9,7 +9,7 @@ use bilibi_records::{Hit, Resolved};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
     choices, error_sentence, params, Alert, Button, ButtonVariant, Choice, ErrorSummary, Field,
-    Html, InputKind, Modal, ModalWidth, RecordPicker, SearchMultiOption, SearchMultiSelect,
+    Fold, Html, InputKind, Modal, ModalWidth, RecordPicker, SearchMultiOption, SearchMultiSelect,
     StatusKind,
 };
 use serde_json::{json, Value};
@@ -57,6 +57,8 @@ pub(crate) struct Dialog {
     /// How many activities the last save created (a repeating one makes
     /// one per occurrence).
     created: usize,
+    /// It edits an existing activity rather than making one.
+    editing: bool,
 }
 
 /// The posted field each contract input path refuses.
@@ -125,6 +127,7 @@ impl Dialog {
             notice: String::new(),
             submitted: false,
             created: 0,
+            editing: false,
         }
     }
     /// The dialog for a slot chosen on the calendar: a call or meeting
@@ -236,13 +239,12 @@ impl Dialog {
         dialog.tags = draft.tags.clone();
         Ok(dialog)
     }
+    /// The one event every event form submits: the kind chosen in it decides
+    /// which create contract the page calls.
+    pub const SUBMIT: &'static str = "save_event";
+
     pub fn submit_event(&self) -> &'static str {
-        match self.kind {
-            Kind::Call => "log_call",
-            Kind::Meeting => "create_meeting",
-            Kind::Note => "create_note",
-            Kind::Task => "create_task",
-        }
+        Self::SUBMIT
     }
     fn contract(&self) -> &'static str {
         match self.kind {
@@ -408,6 +410,16 @@ impl Dialog {
     }
     async fn read(&mut self, pages: &Pages, scope: &Scope, value: &Value) -> Result<()> {
         let form = params::form_values_checked(value, FORM, LIMIT).map_err(Error::refused)?;
+        if let Some(kind) = form.get("kind").and_then(|kind| Kind::parse(kind)) {
+            if kind != self.kind {
+                self.kind = kind;
+                // Each kind opens in its own status and reads its own fields.
+                if kind == Kind::Task {
+                    self.values.insert("status".into(), "held".into());
+                    self.values.insert("priority".into(), "medium".into());
+                }
+            }
+        }
         for key in [
             "title",
             "due_at",
@@ -824,88 +836,87 @@ impl Dialog {
             .required()
             .attr("maxlength", "160")];
         let zone = clock.hint();
-        match self.kind {
-            Kind::Task => {
-                fields.push(
-                    self.field(words, prefix, "due_at", "Due")
-                        .kind(InputKind::DatetimeLocal)
-                        .hint(&zone),
-                );
-                fields.push(
-                    self.field(words, prefix, "start_at", "Start")
-                        .kind(InputKind::DatetimeLocal),
-                );
-                fields.push(
-                    self.field(words, prefix, "priority", "Priority")
-                        .kind(InputKind::Select)
-                        .options(choices(
-                            &Priority::ALL
-                                .iter()
-                                .map(|p| (p.label(), p.code()))
-                                .collect::<Vec<_>>(),
-                        )),
-                );
-            }
-            Kind::Call => {
-                fields.push(
-                    self.field(words, prefix, "status", "Status")
-                        .kind(InputKind::Select)
-                        .options(choices(&[("Held", "held"), ("Planned", "planned")])),
-                );
-                fields.push(
-                    self.field(words, prefix, "direction", "Direction")
-                        .kind(InputKind::Select)
-                        .options(choices(&[("Outbound", "outbound"), ("Inbound", "inbound")])),
-                );
-                fields.push(
-                    self.field(words, prefix, "starts_at", "Starts")
-                        .kind(InputKind::DatetimeLocal)
-                        .required()
-                        .hint(&zone),
-                );
-                fields.push(
-                    self.field(words, prefix, "ends_at", "Ends")
-                        .kind(InputKind::DatetimeLocal)
-                        .required(),
-                );
-                fields.push(
-                    self.field(words, prefix, "outcome", "Outcome")
-                        .attr("maxlength", "100"),
-                );
-            }
-            Kind::Meeting => {
-                fields.push(
-                    self.field(words, prefix, "starts_at", "Starts")
-                        .kind(InputKind::DatetimeLocal)
-                        .required()
-                        .hint(&zone),
-                );
-                fields.push(
-                    self.field(words, prefix, "ends_at", "Ends")
-                        .kind(InputKind::DatetimeLocal)
-                        .required(),
-                );
-                fields.push(
-                    self.field(words, prefix, "location", "Location")
-                        .attr("maxlength", "255"),
-                );
-                fields.push(
-                    self.field(words, prefix, "join_url", "Join link")
-                        .kind(InputKind::Url)
-                        .attr("maxlength", "2000")
-                        .hint("An https:// link to the video call, if there is one."),
-                );
-                fields.push(
-                    self.field(words, prefix, "meeting_type", "Meeting type")
-                        .attr("maxlength", "100"),
-                );
-            }
-            Kind::Note => {}
+        // One field order for every event, whatever it is: what it is, when
+        // it is, and the rest behind Details. The kind only decides which
+        // contract saves it and which fields it can fill.
+        fields.push(
+            self.field(words, prefix, "kind", "What it is")
+                .kind(InputKind::Select)
+                .value(self.kind.code())
+                .options(choices(&[
+                    ("A meeting", "meeting"),
+                    ("A call", "call"),
+                    ("A task", "task"),
+                    ("A note", "note"),
+                ])),
+        );
+        fields.push(
+            self.field(words, prefix, "starts_at", "Starts")
+                .kind(InputKind::DatetimeLocal)
+                .hint(&zone),
+        );
+        fields.push(
+            self.field(words, prefix, "ends_at", "Ends")
+                .kind(InputKind::DatetimeLocal),
+        );
+        let mut details = Vec::new();
+        if self.kind == Kind::Task {
+            details.push(
+                self.field(words, prefix, "due_at", "Due")
+                    .kind(InputKind::DatetimeLocal)
+                    .hint(&zone),
+            );
+            details.push(
+                self.field(words, prefix, "start_at", "Start")
+                    .kind(InputKind::DatetimeLocal),
+            );
+            details.push(
+                self.field(words, prefix, "priority", "Priority")
+                    .kind(InputKind::Select)
+                    .options(choices(
+                        &Priority::ALL
+                            .iter()
+                            .map(|p| (p.label(), p.code()))
+                            .collect::<Vec<_>>(),
+                    )),
+            );
+        }
+        if self.kind == Kind::Call {
+            details.push(
+                self.field(words, prefix, "status", "Status")
+                    .kind(InputKind::Select)
+                    .options(choices(&[("Held", "held"), ("Planned", "planned")])),
+            );
+            details.push(
+                self.field(words, prefix, "direction", "Direction")
+                    .kind(InputKind::Select)
+                    .options(choices(&[("Outbound", "outbound"), ("Inbound", "inbound")])),
+            );
+            details.push(
+                self.field(words, prefix, "outcome", "Outcome")
+                    .attr("maxlength", "100"),
+            );
+        }
+        if self.kind == Kind::Meeting {
+            details.push(
+                self.field(words, prefix, "location", "Location")
+                    .attr("maxlength", "255"),
+            );
+            details.push(
+                self.field(words, prefix, "join_url", "Join link")
+                    .kind(InputKind::Url)
+                    .attr("maxlength", "2000")
+                    .hint("An https:// link to the video call, if there is one."),
+            );
+            details.push(
+                self.field(words, prefix, "meeting_type", "Meeting type")
+                    .attr("maxlength", "100"),
+            );
         }
         if self.kind != Kind::Note {
-            fields.extend(self.repeat_fields(words, prefix));
+            details.extend(self.repeat_fields(words, prefix));
             let options = reminder_choices::options(None, "Default");
-            fields.push(
+            details.push(
                 self.field(words, prefix, "reminders", "Reminders")
                     .kind(InputKind::Select)
                     .options(choices(
@@ -916,7 +927,7 @@ impl Dialog {
                     ))
                     .hint("Default is your own setting, then the organisation's. Change yours in My settings under Calendar."),
             );
-            fields.push(
+            details.push(
                 self.field(words, prefix, "reminder_email", "Email reminders")
                     .kind(InputKind::Select)
                     .options(choices(reminder_choices::EMAIL))
@@ -926,7 +937,7 @@ impl Dialog {
             if let Some((user, name)) = &self.assignee {
                 assignees.insert(0, (name.as_str(), user.to_string()));
             }
-            fields.push(
+            details.push(
                 Field::in_form(FORM, "assignee")
                     .id(format!("{prefix}-assignee"))
                     .label(words.field("assignee_user_id", "Assigned to"))
@@ -987,6 +998,19 @@ impl Dialog {
         }
         for field in fields {
             body.push(&render(field)?);
+        }
+        {
+            let mut folded = Html::EMPTY;
+            for field in details {
+                folded.push(&render(field)?);
+            }
+            body.push(&render(Fold {
+                id: &format!("{prefix}-details"),
+                title: "Details",
+                summary: "Place, guests, repeat, reminders and tags.",
+                open: !self.errors.is_empty(),
+                body: folded,
+            })?);
         }
         let selected = self.related.as_ref().map(|r| {
             (
@@ -1090,12 +1114,7 @@ impl Dialog {
             button_type: "submit",
             variant: ButtonVariant::Primary,
             working: "Saving…",
-            body: Html::text(match self.kind {
-                Kind::Call => "Save call",
-                Kind::Meeting => "Save meeting",
-                Kind::Note => "Save note",
-                Kind::Task => "Save task",
-            }),
+            body: Html::text("Save"),
             ..Button::default()
         })?);
         let form = render(FormView {
@@ -1104,11 +1123,10 @@ impl Dialog {
             actions,
             body,
         })?;
-        let title = match self.kind {
-            Kind::Call => "Log a call",
-            Kind::Meeting => "New meeting",
-            Kind::Note => "New note",
-            Kind::Task => "New task",
+        let title = if self.editing {
+            "Edit the event"
+        } else {
+            "New event"
         };
         render(Modal {
             id: &format!("{prefix}-modal"),
