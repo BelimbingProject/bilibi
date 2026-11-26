@@ -160,8 +160,7 @@ static GRID: GridContribution = GridContribution {
         LIST,
         Source::tenant(
             "SELECT d.id, d.company_id, d.head_affiliation_id AS head_id, d.status, t.code AS type_code, t.name AS type_name, d.created_at FROM company_departments d JOIN companies c ON c.tenant_id = d.tenant_id AND c.id = d.company_id AND c.deleted_at IS NULL LEFT JOIN company_department_types t ON t.id = d.department_type_id WHERE d.tenant_id = $1",
-        )
-        .reads(&["companies"]),
+        ),
         "id",
         &[
             Field::new("id", "ID", Integer),

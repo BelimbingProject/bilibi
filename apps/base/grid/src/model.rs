@@ -27,7 +27,7 @@ pub struct Source {
     pub sql: &'static str,
     pub tenant_scoped: bool,
     pub company_scoped: bool,
-    /// Other Grid tables whose stored fields this statement reads. Consumers
+    /// Other Grid tables whose fields supply projected values. Consumers
     /// that cache results use these table ids to pin their field restrictions.
     pub extra_tables: &'static [&'static str],
 }
@@ -58,7 +58,7 @@ impl Source {
             extra_tables: &[],
         }
     }
-    /// Declares other Grid tables read by this source, so cached output is
+    /// Declares other Grid tables supplying projected values, so cached output is
     /// invalidated when any of their field restrictions change.
     pub const fn reads(self, tables: &'static [&'static str]) -> Self {
         Self {
