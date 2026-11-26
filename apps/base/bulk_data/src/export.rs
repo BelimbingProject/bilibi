@@ -1099,16 +1099,20 @@ fn access_tables(root: &str, specs: &[String]) -> Option<std::collections::BTree
     let installed = bilibi_grid::installed().ok()?;
     let root = installed.table(root)?;
     let mut tables = std::collections::BTreeSet::from([root.id()]);
+    let mut extra_tables = std::collections::BTreeSet::new();
     for spec in specs {
         let column = bilibi_grid::column::resolve(spec, root, &|id| installed.table(id)).ok()?;
         for link in column.hops.iter().chain(&column.many).chain(&column.tail) {
             tables.insert(link.to());
+            if let bilibi_grid::Join::Edge(source) = link.decl.join {
+                extra_tables.extend(source.extra_tables.iter().copied());
+            }
         }
     }
-    let sources: Vec<_> = tables.iter().copied().collect();
-    for table in sources {
-        tables.extend(installed.table(table)?.source().extra_tables);
+    for table in &tables {
+        extra_tables.extend(installed.table(table)?.source().extra_tables.iter().copied());
     }
+    tables.extend(extra_tables);
     Some(tables)
 }
 
