@@ -129,8 +129,8 @@ impl Person<'_> {
             .map_err(|error| error.to_string())
     }
     async fn export(&self, id: i64) -> Result<ExportRun, Error> {
-        let client = self.db.get().await?;
-        self.bulk.export(&**client, &self.scope, id).await
+        let mut client = self.db.get().await?;
+        self.bulk.export(&mut client, &self.scope, id).await
     }
     /// Waits until the export's job has finished it.
     async fn settle(&self, id: i64) -> ExportRun {
@@ -632,11 +632,11 @@ async fn main() -> Result<(), Failure> {
         path.exists()
     );
     check("export of the expired file").await;
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
     let listed = bulk
-        .exports(&**client, &manager.scope, 50)
+        .exports(&mut client, &manager.scope, 50)
         .await?
         .into_iter()
         .find(|run| run.id == made)

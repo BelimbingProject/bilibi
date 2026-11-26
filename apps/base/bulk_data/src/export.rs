@@ -528,7 +528,23 @@ impl BulkData {
     /// The person's own export, marked as [`BulkData::mark`] says.
     pub async fn export(
         &self,
-        client: &(impl GenericClient + Sync),
+        client: &mut tokio_postgres::Client,
+        scope: &Scope,
+        id: i64,
+    ) -> Result<ExportRun> {
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await?;
+        let run = self.export_in(&tx, scope, id).await?;
+        tx.commit().await?;
+        Ok(run)
+    }
+
+    async fn export_in(
+        &self,
+        client: &tokio_postgres::Transaction<'_>,
         scope: &Scope,
         id: i64,
     ) -> Result<ExportRun> {
@@ -660,21 +676,25 @@ impl BulkData {
     pub async fn export_file(&self, scope: &Scope, id: i64) -> Result<(String, Vec<u8>)> {
         let mut object = self.db.get().await?;
         let client: &mut tokio_postgres::Client = &mut object;
-        let run = self.export(&*client, scope, id).await?;
-        let artifact = run.artifact.clone().ok_or(Error::NotFound)?;
-        if run.expired {
-            // Past its expiry the file is gone, or about to be purged.
-            return Err(Error::NotFound);
-        }
-        if !run.downloadable {
-            // What the person may see has changed since the file was made.
-            return Err(Error::Forbidden);
-        }
+        let run = load(client, scope, id, false).await?;
+        let artifact = run.artifact.as_deref().ok_or(Error::NotFound)?;
         let company = OrganisationId::new(run.company).map_err(|_| Error::Internal)?;
         let document = self
             .artifacts
             .for_owner(scope, company, &FILES)
-            .read(client, &artifact)
+            .read_checked(client, artifact, &(self, scope, id, artifact), |context, tx| {
+                Box::pin(async move {
+                    let &(bulk, scope, id, artifact) = context;
+                    let run = bulk.export_in(tx, scope, id).await?;
+                    if run.expired || run.artifact.as_deref() != Some(artifact) {
+                        return Err(Error::NotFound);
+                    }
+                    if !run.downloadable {
+                        return Err(Error::Forbidden);
+                    }
+                    Ok(())
+                })
+            })
             .await
             .map_err(crate::artifact)?;
         let stem: String = self
@@ -1095,13 +1115,18 @@ impl BulkData {
     /// The person's newest exports, marked as their pages show them.
     pub async fn exports(
         &self,
-        client: &(impl GenericClient + Sync),
+        client: &mut tokio_postgres::Client,
         scope: &Scope,
         limit: i64,
     ) -> Result<Vec<ExportRun>> {
-        bilibi_authz::authorize_key(client, scope, VIEW).await?;
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await?;
+        bilibi_authz::authorize_key(&tx, scope, VIEW).await?;
         let company = scope.current_company().ok_or(Error::Forbidden)?.get();
-        let mut runs = client
+        let mut runs = tx
             .query(
                 &format!("SELECT {COLUMNS} FROM base_bulk_data_exports WHERE tenant_id=$1 AND started_by=$2 AND company_id=$3 ORDER BY id DESC LIMIT $4"),
                 &[&scope.tenant(), &scope.user(), &company, &limit.clamp(1, 100)],
@@ -1110,7 +1135,8 @@ impl BulkData {
             .iter()
             .map(ExportRun::from_row)
             .collect::<Result<Vec<_>>>()?;
-        self.mark(client, scope, &mut runs).await?;
+        self.mark(&tx, scope, &mut runs).await?;
+        tx.commit().await?;
         Ok(runs)
     }
 }

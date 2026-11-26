@@ -123,7 +123,7 @@ impl ReadHandler for Read {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let bulk = bulk()?;
-            let object = bulk.db.get().await.map_err(Error::from)?;
+            let mut object = bulk.db.get().await.map_err(Error::from)?;
             let client: &tokio_postgres::Client = &object;
             Ok(match self {
                 Self::Types => {
@@ -207,7 +207,7 @@ impl ReadHandler for Read {
                     )))
                 }
                 Self::Export => {
-                    let run = bulk.export(client, scope, id(input, "export_id")?).await?;
+                    let run = bulk.export(&mut object, scope, id(input, "export_id")?).await?;
                     let mut answer = json!(run);
                     answer["label"] = json!(bulk.label(&run.record_type));
                     if run.downloadable {
@@ -216,7 +216,7 @@ impl ReadHandler for Read {
                     Output::Data(Data::Json(answer))
                 }
                 Self::Exports => {
-                    Output::Data(Data::Json(json!(bulk.exports(client, scope, 50).await?)))
+                    Output::Data(Data::Json(json!(bulk.exports(&mut object, scope, 50).await?)))
                 }
                 Self::UpdateFields => {
                     let record_type = input["record_type"].as_str().ok_or(Error::Invalid)?;

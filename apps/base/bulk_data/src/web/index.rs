@@ -123,7 +123,7 @@ impl Index {
 
     pub(super) async fn render(&mut self, scope: &Scope) -> Result<String> {
         let pages = self.pages.clone();
-        let object = pages.db.get().await?;
+        let mut object = pages.db.get().await?;
         let client: &tokio_postgres::Client = &object;
         let display = pages.display(client, scope).await?;
         let may_create = effective_capabilities(client, scope)
@@ -134,8 +134,8 @@ impl Index {
             .bulk
             .runs(client, scope, self.state.offset() as i64, size)
             .await?;
-        let exports = pages.bulk.exports(client, scope, RECENT).await?;
         let updates = pages.bulk.updates(client, scope, RECENT).await?;
+        let exports = pages.bulk.exports(&mut object, scope, RECENT).await?;
         drop(object);
         if self.rows_changed {
             self.columns.load(&runs, |run: &Run| run.id.to_string());
