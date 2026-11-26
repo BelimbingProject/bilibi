@@ -27,6 +27,9 @@ pub struct Source {
     pub sql: &'static str,
     pub tenant_scoped: bool,
     pub company_scoped: bool,
+    /// Other Grid tables whose stored fields this statement reads. Consumers
+    /// that cache results use these table ids to pin their field restrictions.
+    pub extra_tables: &'static [&'static str],
 }
 impl Source {
     pub const fn tenant(sql: &'static str) -> Self {
@@ -34,6 +37,7 @@ impl Source {
             sql,
             tenant_scoped: true,
             company_scoped: false,
+            extra_tables: &[],
         }
     }
     /// Rows of the selected company. `$1`, `$2` and `$3` are the tenant,
@@ -43,6 +47,7 @@ impl Source {
             sql,
             tenant_scoped: true,
             company_scoped: true,
+            extra_tables: &[],
         }
     }
     pub const fn global(sql: &'static str) -> Self {
@@ -50,6 +55,15 @@ impl Source {
             sql,
             tenant_scoped: false,
             company_scoped: false,
+            extra_tables: &[],
+        }
+    }
+    /// Declares other Grid tables read by this source, so cached output is
+    /// invalidated when any of their field restrictions change.
+    pub const fn reads(self, tables: &'static [&'static str]) -> Self {
+        Self {
+            extra_tables: tables,
+            ..self
         }
     }
 }
@@ -574,6 +588,23 @@ impl Installed {
         }
         for (link, provenance) in pending {
             link_into(&mut tables, link, &provenance)?;
+        }
+        for table in tables.values() {
+            let mut seen = BTreeSet::new();
+            for extra in table.source().extra_tables {
+                if !seen.insert(*extra) {
+                    return Err(invalid(format!(
+                        "grid table {} names extra source table {extra} more than once",
+                        table.id()
+                    )));
+                }
+                if !tables.contains_key(extra) {
+                    return Err(invalid(format!(
+                        "grid table {} names unknown extra source table {extra}",
+                        table.id()
+                    )));
+                }
+            }
         }
         for entry in entries {
             let contribution = entry.get::<GridContribution>()?;

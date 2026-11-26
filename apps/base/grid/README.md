@@ -43,7 +43,10 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
   wraps it in a subquery, so every hop of a path carries its owner's boundary and
   Grid never adds a tenant predicate. It must be one `SELECT`/`WITH` statement
   that references every parameter its scope requires. A request never supplies
-  the company parameter.
+  the company parameter. When its SQL reads stored fields from another Grid
+  table, declare that table with `.reads(&["table_id"])`; the default is none.
+  Bulk Data then includes that table's field restrictions in saved-export access
+  fingerprints. Discovery refuses an unknown or repeated extra table.
 - `Field`s: `Field::new`/`choice`; `column` names the source key when it differs
   from the id; `hidden` fields exist only for joins; `protected` keeps a field
   out of operator restriction (the key, label, time, hidden and join fields are

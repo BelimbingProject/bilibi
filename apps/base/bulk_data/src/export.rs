@@ -210,7 +210,7 @@ pub(crate) async fn load(
 struct Seeing {
     held: std::collections::BTreeSet<&'static str>,
     catalog: bilibi_grid::Catalog,
-    /// Each table's restricted fields, sorted and joined.
+    /// Each relevant table's restricted fields, sorted and joined.
     restricted: std::collections::BTreeMap<&'static str, String>,
 }
 
@@ -588,7 +588,7 @@ impl BulkData {
 
     /// What the person may see, read once for any number of exports: their
     /// capabilities, Grid's catalog for them and the restricted fields of
-    /// each export's table.
+    /// every table that can supply an export's columns.
     async fn seeing(
         &self,
         client: &(impl GenericClient + Sync),
@@ -604,14 +604,19 @@ impl BulkData {
             let Ok((registered, _)) = self.exportable(&run.record_type) else {
                 continue;
             };
-            let table = registered.definition.table;
-            if !restricted.contains_key(table) {
-                let mut fields: Vec<String> = bilibi_authz::restrictions_for(client, scope, table)
-                    .await?
-                    .into_iter()
-                    .collect();
-                fields.sort();
-                restricted.insert(table, fields.join(","));
+            let Some(tables) = access_tables(registered.definition.table, &run.columns) else {
+                continue;
+            };
+            for table in tables {
+                if !restricted.contains_key(table) {
+                    let mut fields: Vec<String> =
+                        bilibi_authz::restrictions_for(client, scope, table)
+                            .await?
+                            .into_iter()
+                            .collect();
+                    fields.sort();
+                    restricted.insert(table, fields.join(","));
+                }
             }
         }
         Ok(Seeing {
@@ -624,7 +629,8 @@ impl BulkData {
     /// What the person may see of an export's columns, as text: `None` when
     /// they no longer hold the Imports pages, the type's export capability
     /// or its list contract's capability; else which columns Grid lets them
-    /// read, which fields are restricted and how far their row grants reach.
+    /// read, which fields are restricted on every source table and how far
+    /// their row grants reach.
     /// Taken when the file is made and compared on every read of the export.
     fn access(&self, seeing: &Seeing, run: &ExportRun) -> Option<String> {
         let (registered, export) = self.exportable(&run.record_type).ok()?;
@@ -654,11 +660,20 @@ impl BulkData {
                 }
             }
         }
-        let restricted = seeing.restricted.get(table).map_or("", String::as_str);
+        let tables = access_tables(table, &run.columns)?;
+        let restricted: std::collections::BTreeMap<_, _> = tables
+            .into_iter()
+            .map(|table| {
+                (
+                    table,
+                    seeing.restricted.get(table).map_or("", String::as_str),
+                )
+            })
+            .collect();
         if reach.is_empty() {
-            Some(format!("{seen}:{restricted}"))
+            Some(format!("{seen}:{}", json!(restricted)))
         } else {
-            Some(format!("{seen}:{restricted}:{}", json!(reach)))
+            Some(format!("{seen}:{}:{}", json!(restricted), json!(reach)))
         }
     }
 
@@ -1104,6 +1119,25 @@ impl BulkData {
         self.mark(client, scope, &mut runs).await?;
         Ok(runs)
     }
+}
+
+/// Grid tables whose fields can contribute to these columns: the root,
+/// resolved linked sources and extra tables declared by each source in use.
+fn access_tables(root: &str, specs: &[String]) -> Option<std::collections::BTreeSet<&'static str>> {
+    let installed = bilibi_grid::installed().ok()?;
+    let root = installed.table(root)?;
+    let mut tables = std::collections::BTreeSet::from([root.id()]);
+    for spec in specs {
+        let column = bilibi_grid::column::resolve(spec, root, &|id| installed.table(id)).ok()?;
+        for link in column.hops.iter().chain(&column.many).chain(&column.tail) {
+            tables.insert(link.to());
+        }
+    }
+    let sources: Vec<_> = tables.iter().copied().collect();
+    for table in sources {
+        tables.extend(installed.table(table)?.source().extra_tables);
+    }
+    Some(tables)
 }
 
 /// Each column's label, from the installed catalog, and whether the person

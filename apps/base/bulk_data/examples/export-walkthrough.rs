@@ -257,6 +257,49 @@ async fn main() -> Result<(), Failure> {
         )
         .await;
 
+    println!("\n== a linked source restriction invalidates an old file");
+    let linked = manager
+        .exports(
+            "name and linked work title",
+            json!({"search": "Exp Alice"}),
+            &["name", "work.title:list"],
+        )
+        .await
+        .ok_or("linked export was not started")?;
+    sql.execute(
+        "INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id) VALUES(1,1,'person_affiliations','title')",
+        &[],
+    )
+    .await?;
+    let old = manager.export(linked).await?;
+    let old_file = bulk.export_file(&manager.scope, linked).await;
+    println!(
+        "linked title restricted since export {linked}: downloadable {} — download {}",
+        old.downloadable,
+        old_file
+            .as_ref()
+            .map_or_else(|error| format!("refused ({error})"), |_| "ok".into())
+    );
+    if old.downloadable || !matches!(old_file, Err(Error::Forbidden)) {
+        return Err("the linked table restriction did not invalidate the old file".into());
+    }
+    let replacement = manager
+        .exports(
+            "new export after the linked title restriction",
+            json!({"search": "Exp Alice"}),
+            &["name", "work.title:list"],
+        )
+        .await
+        .ok_or("replacement linked export was not started")?;
+    if !manager.export(replacement).await?.downloadable {
+        return Err("the replacement export was not downloadable".into());
+    }
+    sql.execute(
+        "DELETE FROM field_restrictions WHERE tenant_id=1 AND role_id=1 AND table_id='person_affiliations' AND field_id='title'",
+        &[],
+    )
+    .await?;
+
     println!("\n== ticked records only");
     let ticked: Vec<String> = sql
         .query(

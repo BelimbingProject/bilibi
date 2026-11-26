@@ -304,7 +304,7 @@ static GRID: GridContribution = GridContribution {
             "document_revisions",
             "Document revisions",
             VIEW,
-            Source::tenant("SELECT r.id,r.document_id,r.revision,r.name,r.file_name,r.content_type,r.byte_size,r.external_url,r.change_log,r.label,r.replaces_revision_id,r.scan_status,r.created_by,r.created_at FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id AND d.deleting_at IS NULL JOIN core_document_access a ON a.tenant_id=r.tenant_id AND a.document_id=r.document_id AND a.user_id=$2 AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) WHERE r.tenant_id=$1"),
+            Source::tenant("SELECT r.id,r.document_id,r.revision,r.name,r.file_name,r.content_type,r.byte_size,r.external_url,r.change_log,r.label,r.replaces_revision_id,r.scan_status,r.created_by,r.created_at FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id AND d.deleting_at IS NULL JOIN core_document_access a ON a.tenant_id=r.tenant_id AND a.document_id=r.document_id AND a.user_id=$2 AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) WHERE r.tenant_id=$1").reads(&["documents"]),
             "id",
             &[
                 Field::new("id", "ID", FieldType::Integer).protected(),
@@ -327,7 +327,7 @@ static GRID: GridContribution = GridContribution {
             "document_links",
             "Document links",
             VIEW,
-            Source::tenant("SELECT l.id,l.document_id,l.record_kind,l.record_id,l.linked_by,l.linked_at FROM core_document_links l JOIN core_documents d ON d.tenant_id=l.tenant_id AND d.id=l.document_id AND d.deleting_at IS NULL JOIN core_document_access a ON a.tenant_id=l.tenant_id AND a.document_id=l.document_id AND a.user_id=$2 AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) WHERE l.tenant_id=$1"),
+            Source::tenant("SELECT l.id,l.document_id,l.record_kind,l.record_id,l.linked_by,l.linked_at FROM core_document_links l JOIN core_documents d ON d.tenant_id=l.tenant_id AND d.id=l.document_id AND d.deleting_at IS NULL JOIN core_document_access a ON a.tenant_id=l.tenant_id AND a.document_id=l.document_id AND a.user_id=$2 AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) WHERE l.tenant_id=$1").reads(&["documents"]),
             "id",
             &[
                 Field::new("id", "ID", FieldType::Integer).protected(),
