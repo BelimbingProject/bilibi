@@ -33,6 +33,7 @@ use bilibi_tenancy::Scope;
 use jiff::Timestamp;
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio_postgres::{GenericClient, Row};
 
@@ -210,8 +211,8 @@ pub(crate) async fn load(
 struct Seeing {
     held: std::collections::BTreeSet<&'static str>,
     catalog: bilibi_grid::Catalog,
-    /// Each relevant table's restricted fields, sorted and joined.
-    restricted: std::collections::BTreeMap<&'static str, String>,
+    /// Each relevant table's restricted fields, sorted.
+    restricted: std::collections::BTreeMap<&'static str, Vec<String>>,
 }
 
 /// Why an export whose job ended first did not finish.
@@ -615,7 +616,7 @@ impl BulkData {
                             .into_iter()
                             .collect();
                     fields.sort();
-                    restricted.insert(table, fields.join(","));
+                    restricted.insert(table, fields);
                 }
             }
         }
@@ -666,15 +667,17 @@ impl BulkData {
             .map(|table| {
                 (
                     table,
-                    seeing.restricted.get(table).map_or("", String::as_str),
+                    seeing.restricted.get(table).map_or(&[][..], Vec::as_slice),
                 )
             })
             .collect();
-        if reach.is_empty() {
-            Some(format!("{seen}:{}", json!(restricted)))
-        } else {
-            Some(format!("{seen}:{}:{}", json!(restricted), json!(reach)))
-        }
+        let access = json!([seen, restricted, reach]).to_string();
+        Some(
+            Sha256::digest(access.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        )
     }
 
     /// The file of a finished export, read through Artifacts (audited), as

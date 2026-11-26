@@ -46,7 +46,7 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
   the company parameter. When projected values use fields from another Grid
   table, declare that table with `.reads(&["table_id"])`. The default is none.
   Bulk Data then includes that table's field restrictions in saved-export access
-  fingerprints. Discovery refuses an unknown or repeated extra table.
+  fingerprints. Discovery refuses unknown extra tables.
 - `Field`s: `Field::new`/`choice`; `column` names the source key when it differs
   from the id; `hidden` fields exist only for joins; `protected` keeps a field
   out of operator restriction (the key, label, time, hidden and join fields are

@@ -590,14 +590,7 @@ impl Installed {
             link_into(&mut tables, link, &provenance)?;
         }
         for table in tables.values() {
-            let mut seen = BTreeSet::new();
             for extra in table.source().extra_tables {
-                if !seen.insert(*extra) {
-                    return Err(invalid(format!(
-                        "grid table {} names extra source table {extra} more than once",
-                        table.id()
-                    )));
-                }
                 if !tables.contains_key(extra) {
                     return Err(invalid(format!(
                         "grid table {} names unknown extra source table {extra}",

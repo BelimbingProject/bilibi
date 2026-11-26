@@ -31,7 +31,7 @@ static JOINED_GRID: GridContribution = GridContribution {
         Source::tenant(
             "SELECT p.id, (SELECT max(a.work_email) FROM person_affiliations a WHERE a.tenant_id=p.tenant_id AND a.person_id=p.id) AS work_email FROM persons p WHERE p.tenant_id=$1",
         )
-        .reads(&["person_affiliations"]),
+        .reads(&["person_affiliations", "person_affiliations"]),
         "id",
         &[
             Field::new("id", "ID", FieldType::Integer).protected(),
