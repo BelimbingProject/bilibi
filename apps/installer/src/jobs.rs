@@ -420,11 +420,8 @@ const HISTORY_TABLES: [&str; 4] = [
     "base_software_steps",
     "base_software_plugins",
 ];
-/// The audit rows of the software changes themselves, written after a
-/// backup: the 2FA check and the queue record of the job doing a restore, and
-/// the recorded outcomes of the jobs carried with it. A restore would drop
-/// them with everything else entered since, so they are carried like the
-/// history: (table, which rows).
+/// Audit rows selected for replay after a restore (table and row predicate).
+/// See the restore caveats in the installer README.
 const AUDIT_TABLES: [(&str, &str); 2] = [
     (
         "base_audit_actions",
@@ -432,7 +429,7 @@ const AUDIT_TABLES: [(&str, &str); 2] = [
     ),
     (
         "base_audit_mutations",
-        "auditable_type = 'base/software.job'",
+        "auditable_type IN ('base/software.job', 'user.bootstrap', 'user.ownership_transfer')",
     ),
 ];
 /// Takes the history aside: for each table its columns (so a history table
@@ -602,8 +599,27 @@ pub async fn restore_history(
             .iter()
             .map(|row| row.get(0))
             .collect();
-        for row in history[table]["rows"].as_array().into_iter().flatten() {
-            let kept: serde_json::Map<String, Value> = row
+        let rows = history[table]["rows"].as_array();
+        let audit = AUDIT_TABLES.iter().any(|(name, _)| *name == table);
+        let partition_month = if audit
+            && columns.iter().any(|name| name == "partition_month")
+            && rows.is_some_and(|rows| !rows.is_empty())
+        {
+            client
+                .execute("SELECT base_audit_prepare_partitions()", &[])
+                .await?;
+            let month = client
+                .query_one(
+                    "SELECT date_trunc('month', clock_timestamp() AT TIME ZONE 'UTC')::date::text",
+                    &[],
+                )
+                .await?;
+            Some(month.get::<_, String>(0))
+        } else {
+            None
+        };
+        for row in rows.into_iter().flatten() {
+            let mut kept: serde_json::Map<String, Value> = row
                 .as_object()
                 .map(|fields| {
                     fields
@@ -613,21 +629,13 @@ pub async fn restore_history(
                         .collect()
                 })
                 .unwrap_or_default();
-            if AUDIT_TABLES.iter().any(|(name, _)| *name == table) {
-                if let Some(month) = kept.get("partition_month").and_then(Value::as_str) {
-                    if month != "infinity" {
-                        let chain = if table == "base_audit_actions" {
-                            "actions"
-                        } else {
-                            "mutations"
-                        };
-                        client
-                            .execute(
-                                "SELECT base_audit_create_partition($1,$2::text::date)",
-                                &[&chain, &month],
-                            )
-                            .await?;
-                    }
+            if audit {
+                // Append the original evidence to the restored chain. Its
+                // previous link may depend on changes the restore discarded.
+                kept.remove("chain_seq");
+                kept.remove("chain_hash");
+                if let Some(month) = &partition_month {
+                    kept.insert("partition_month".into(), json!(month));
                 }
             }
             let inserted = client

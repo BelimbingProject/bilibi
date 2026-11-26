@@ -156,6 +156,7 @@ impl Pages {
                 request.framed,
             )?),
             "profile" => Box::new(crate::account_ui::Profile::new(self.clone())),
+            "ownership" => Box::new(crate::account_ui::Ownership::new(self.clone())),
             "two_factor" | "confirm_access" => {
                 crate::factor_choice::state(
                     self.users.clone(),
@@ -195,6 +196,7 @@ impl Page<Scope, Error> for Pages {
             "invite" => Some("Invite User"),
             "detail" => Some("User"),
             "profile" => Some("Profile"),
+            "ownership" => Some("Installation ownership"),
             "notifications" => Some("Notifications"),
             // The password and appearance pages carry no name.
             _ => None,

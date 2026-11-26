@@ -214,10 +214,8 @@ pub struct OperatorCompany {
 /// Why no first administrator was created.
 #[derive(Debug, thiserror::Error)]
 pub enum FirstAdministratorError {
-    /// The operator tenant already holds accounts (deleted ones excepted):
-    /// how many, and the earliest one's email. Nothing was written.
-    #[error("the platform operator already has {count} account(s), the first being {first}")]
-    AccountsExist { count: i64, first: String },
+    #[error("the platform operator already has accounts")]
+    AccountsExist,
     /// A field refused: the same wording the administrator form uses.
     #[error("Invalid account fields")]
     Validation(Vec<FieldError>),
@@ -273,10 +271,9 @@ async fn operator_accounts(
 pub struct FirstAdministratorCreated {
     pub user: i64,
     pub email: String,
-    /// The grant-all role the account holds.
-    pub role: i64,
-    /// A receipt from an earlier bootstrap named an account that no longer
-    /// exists and now names this one.
+    /// The grant-all role assigned during initial setup.
+    pub role: Option<i64>,
+    /// The write replaced an earlier ownership receipt.
     pub receipt_replaced: bool,
 }
 
@@ -348,18 +345,31 @@ impl UserService {
         operator_accounts(&**client, tenant).await
     }
 
+    /// The owner's sign-in address as the bootstrap receipt records it.
+    pub async fn recorded_owner_email(&self, tenant: i64) -> Result<Option<String>> {
+        let client = self.db.get().await?;
+        Ok(client
+            .query_opt(
+                "SELECT admin_email FROM user_bootstrap WHERE id=1 AND tenant_id=$1",
+                &[&tenant],
+            )
+            .await?
+            .map(|row| row.get(0)))
+    }
+
     /// Creates the install's first administrator: the account in the
     /// platform-operator tenant, the grant-all role through Authz's bootstrap
     /// seam, and the one-time bootstrap receipt that makes it the
     /// installation owner, on one audited transaction as the `create-owner`
-    /// system principal. Refuses while the operator tenant holds any account.
-    /// `settle_bootstrap_affiliation` then creates its Person, business
-    /// affiliation and first desk.
+    /// system principal. With recovery it assigns the receipt to active operator staff or creates a claim.
+    /// After initial setup, `settle_bootstrap_affiliation` creates the
+    /// Person, business affiliation and first desk.
     pub async fn create_first_administrator(
         &self,
         grants: &Grants,
         operator: OperatorCompany,
         input: &FirstAdministrator,
+        recover: bool,
     ) -> std::result::Result<FirstAdministratorCreated, FirstAdministratorError> {
         let errors = validate_first_administrator(input);
         if !errors.is_empty() {
@@ -375,13 +385,16 @@ impl UserService {
             .mutations
             .begin(
                 &mut client,
-                Context::system(operator.tenant, CREATE_OWNER_PRINCIPAL, BOOTSTRAP_ACTION),
+                Context::system(
+                    operator.tenant,
+                    CREATE_OWNER_PRINCIPAL,
+                    if recover {
+                        "user.bootstrap.recover"
+                    } else {
+                        BOOTSTRAP_ACTION
+                    },
+                ),
             )
-            .await?;
-        // Lock: serializes this bootstrap with every other
-        // account insert, so the emptiness proof below holds until commit.
-        tx.sql()
-            .batch_execute("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
             .await?;
         let Some(names) = tx
             .sql()
@@ -397,10 +410,81 @@ impl UserService {
         else {
             return Err(FirstAdministratorError::NotOperator);
         };
-        if let Some(OperatorAccounts { count, first }) =
-            operator_accounts(tx.sql(), operator.tenant).await?
-        {
-            return Err(FirstAdministratorError::AccountsExist { count, first });
+        let tenant = operator.tenant;
+        let previous: Option<(i64, String)> = tx.sql().query_opt(
+            "SELECT user_id,admin_email FROM user_bootstrap WHERE id=1 AND tenant_id=$1 FOR UPDATE",
+            &[&tenant],
+        ).await?.map(|row| (row.get(0), row.get(1)));
+        // Lock: serializes this bootstrap with every other
+        // account insert, so the emptiness proof below holds until commit.
+        tx.sql()
+            .batch_execute("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
+            .await?;
+        if !recover {
+            if tx
+                .sql()
+                .query_opt(
+                    "SELECT id FROM users WHERE tenant_id=$1 AND deleted_at IS NULL LIMIT 1",
+                    &[&tenant],
+                )
+                .await?
+                .is_some()
+            {
+                return Err(FirstAdministratorError::AccountsExist);
+            }
+        } else if previous.is_none() {
+            return Err(Error::Invalid.into());
+        }
+
+        if recover {
+            if let Some(row) = tx
+                .sql()
+                .query_opt(
+                    "SELECT u.id FROM users u JOIN user_identities i ON i.id=u.identity_id
+                 WHERE u.tenant_id=$1 AND u.kind='staff' AND u.deleted_at IS NULL
+                   AND i.deleted_at IS NULL AND lower(i.email)=lower($2)",
+                    &[&tenant, &email],
+                )
+                .await?
+            {
+                let user = row.get(0);
+                let email = crate::ownership::active_staff(tx.sql(), tenant, user)
+                    .await?
+                    .filter(|identity| identity.email.eq_ignore_ascii_case(&email))
+                    .ok_or_else(|| {
+                        FirstAdministratorError::Validation(vec![field_error(
+                            "email",
+                            "Choose an active staff account in the operator tenant.",
+                        )])
+                    })?
+                    .email;
+                let (old_user, old_email) = previous.ok_or(Error::Internal)?;
+                let receipt_replaced = old_user != user;
+                if receipt_replaced {
+                    tx.sql().execute(
+                        "UPDATE user_bootstrap SET user_id=$2,admin_email=$3,affiliation_settled_at=now()
+                         WHERE id=1 AND tenant_id=$1",
+                        &[&tenant, &user, &email],
+                    ).await?;
+                    tx.record(Change {
+                        kind: "user.bootstrap".into(),
+                        id: 1,
+                        old: json!({"user_id": old_user, "admin_email": old_email}),
+                        new: json!({"user_id": user, "admin_email": email}),
+                    })
+                    .await?;
+                    crate::ownership::expire_offers(&mut tx, tenant, user).await?;
+                    tx.commit().await?;
+                    drop(client);
+                    self.email_recovered_owner(tenant, &old_email).await;
+                }
+                return Ok(FirstAdministratorCreated {
+                    user,
+                    email,
+                    role: None,
+                    receipt_replaced,
+                });
+            }
         }
         if email_taken(tx.sql(), &email, None).await? {
             return Err(FirstAdministratorError::Validation(vec![field_error(
@@ -408,7 +492,6 @@ impl UserService {
                 EMAIL_TAKEN,
             )]));
         }
-        let tenant = operator.tenant;
         let (insert_name, insert_email) = (name, email.clone());
         let user: i64 = tx
             .mutate(move |sql| {
@@ -443,31 +526,27 @@ impl UserService {
                 })
             })
             .await?;
-        let role = grants
-            .grant_first_administrator_in(&mut tx, tenant, user)
-            .await?;
-        // The receipt names the owner. One from
-        // an earlier bootstrap can only remain here with its account deleted,
-        // since the tenant holds none: it then names the new owner.
-        let previous: Option<(i64, String)> = tx
-            .sql()
-            .query_opt(
-                "SELECT user_id, admin_email FROM user_bootstrap FOR UPDATE",
-                &[],
+        let role = if recover {
+            None
+        } else {
+            Some(
+                grants
+                    .grant_first_administrator_in(&mut tx, tenant, user)
+                    .await?,
             )
-            .await?
-            .map(|row| (row.get(0), row.get(1)));
+        };
         let (tenant_name, company_name, company_code): (String, String, String) =
             (names.get(0), names.get(1), names.get(2));
         let receipt_replaced = previous.is_some();
         let receipt_email = email.clone();
+        let former_email = previous.as_ref().map(|(_, email)| email.clone());
         tx.mutate(move |sql| {
             Box::pin(async move {
                 let old = match &previous {
                     Some((old_user, old_email)) => {
                         sql.execute(
-                            "UPDATE user_bootstrap SET tenant_name=$1,company_name=$2,company_code=$3,admin_email=$4,tenant_id=$5,user_id=$6,company_id=$7,completed_at=now(),affiliation_settled_at=NULL WHERE id=1",
-                            &[&tenant_name, &company_name, &company_code, &receipt_email, &tenant, &user, &operator.company],
+                            "UPDATE user_bootstrap SET tenant_name=$1,company_name=$2,company_code=$3,admin_email=$4,tenant_id=$5,user_id=$6,company_id=$7,completed_at=now(),affiliation_settled_at=CASE WHEN $8 THEN now() END WHERE id=1 AND tenant_id=$5",
+                            &[&tenant_name, &company_name, &company_code, &receipt_email, &tenant, &user, &operator.company, &recover],
                         )
                         .await?;
                         json!({"user_id": old_user, "admin_email": old_email})
@@ -493,24 +572,53 @@ impl UserService {
             })
         })
         .await?;
-        let mut who = Attribution::system(Some(CREATE_OWNER_PRINCIPAL))?;
-        who.tenant = Some(tenant);
-        record_action(
-            tx.sql(),
-            &who,
-            None,
-            BOOTSTRAP_COMPLETED,
-            json!({"user_id": user, "role": "core_admin", "created": true}),
-            true,
-        )
-        .await?;
+        if recover {
+            crate::ownership::expire_offers(&mut tx, tenant, user).await?;
+        } else {
+            let mut who = Attribution::system(Some(CREATE_OWNER_PRINCIPAL))?;
+            who.tenant = Some(tenant);
+            record_action(
+                tx.sql(),
+                &who,
+                None,
+                BOOTSTRAP_COMPLETED,
+                json!({"user_id": user, "role": "core_admin", "created": true}),
+                true,
+            )
+            .await?;
+        }
         tx.commit().await?;
+        drop(client);
+        if recover {
+            if let Some(old_email) = former_email {
+                self.email_recovered_owner(tenant, &old_email).await;
+            }
+        }
         Ok(FirstAdministratorCreated {
             user,
             email,
             role,
             receipt_replaced,
         })
+    }
+
+    async fn email_recovered_owner(&self, tenant: i64, email: &str) {
+        use bilibi_mail::{Address, Message};
+        let Ok(address) = Address::new(None, email) else {
+            eprintln!("Former owner notice could not be sent: invalid address.");
+            return;
+        };
+        let message = Message::text(
+            address,
+            "Bilibi installation ownership recovered",
+            format!(
+                "Installation ownership at {} was reassigned through server recovery.",
+                self.origin
+            ),
+        );
+        if self.mailer.deliver_for(tenant, &message).await.is_err() {
+            eprintln!("Former owner notice could not be delivered.");
+        }
     }
 
     /// The server owner's claim, read from the bootstrap receipt's account,

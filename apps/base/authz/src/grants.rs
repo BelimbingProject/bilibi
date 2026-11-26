@@ -151,9 +151,14 @@ impl Grants {
     /// These writes administer staff (ADR 16): a portal capability is never
     /// granted to a staff account or a custom role, where it could only sit
     /// inert. Clearing one stays possible.
-    fn staff_key(&self, key: &str) -> Result<()> {
+    fn staff_key(&self, key: &str, deny: bool) -> Result<()> {
         match self.vocabulary.capabilities.get(key) {
-            Some(owned) if owned.definition.audience != crate::Audience::Portal => Ok(()),
+            Some(owned)
+                if owned.definition.audience != crate::Audience::Portal
+                    && (deny || owned.definition.audience != crate::Audience::Owner) =>
+            {
+                Ok(())
+            }
             _ => Err(Error::Invalid),
         }
     }
@@ -255,7 +260,7 @@ impl Grants {
                 return Err(Error::Forbidden);
             }
             for (key, reach) in keys {
-                self.staff_key(&key)?;
+                self.staff_key(&key, false)?;
                 if bounds.company_id.is_some()
                     && !self
                         .vocabulary
@@ -456,9 +461,6 @@ impl Grants {
         rule: Option<Direct>,
     ) -> Result<()> {
         self.known(key)?;
-        if rule.is_some() {
-            self.staff_key(key)?;
-        }
         self.verify_user(tx.sql(), actor, actor.user()).await?;
         authorize_key(tx.sql(), actor, "admin.authz.role.update").await?;
         self.verify_user(tx.sql(), actor, user).await?;
@@ -509,6 +511,9 @@ impl Grants {
         key: &str,
         rule: Option<Direct>,
     ) -> Result<()> {
+        if let Some(rule) = rule {
+            self.staff_key(key, rule == Direct::Deny)?;
+        }
         let needed = match rule {
             Some(Direct::Deny) => return Ok(()),
             Some(Direct::Allow(reach)) => {
@@ -593,7 +598,7 @@ impl Grants {
     ) -> Result<()> {
         self.known(key)?;
         if let Some(reach) = grant {
-            self.staff_key(key)?;
+            self.staff_key(key, false)?;
             self.reach_supported(key, reach)?;
         }
         self.verify_user(tx.sql(), actor, actor.user()).await?;

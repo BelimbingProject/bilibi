@@ -95,7 +95,10 @@ impl Panel {
     async fn handle(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         let name = event(value)?;
         if let Some(dialog) = &mut self.dialog {
-            if dialog.event(&self.pages, scope, name, value).await? {
+            if dialog
+                .event(&self.pages, scope, credential, name, value)
+                .await?
+            {
                 return Ok(());
             }
         }
@@ -131,7 +134,7 @@ impl Panel {
                 self.dialog = Some(Dialog::new(kind, related));
             }
             "close_modal" => self.dialog = None,
-            "create_task" | "log_call" | "create_meeting" | "create_note" => {
+            "save_event" => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {

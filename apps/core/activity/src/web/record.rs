@@ -465,7 +465,10 @@ impl Detail {
     ) -> Result<Option<LiveBody>> {
         let name = event(value)?;
         if let Some(dialog) = &mut self.dialog {
-            if dialog.event(&self.pages, scope, name, value).await? {
+            if dialog
+                .event(&self.pages, scope, credential, name, value)
+                .await?
+            {
                 return Ok(None);
             }
         }
@@ -781,7 +784,7 @@ impl Detail {
                 }
             }
             "close_modal" => self.dialog = None,
-            "create_task" | "log_call" | "create_meeting" | "create_note" => {
+            "save_event" => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {
@@ -1144,6 +1147,33 @@ impl Detail {
                 "reminded".into(),
                 clock.time("activity-reminded-at", reminded)?,
             ));
+        }
+        if !a.tags.is_empty() {
+            // The labels of the codes it holds, each marked when retired.
+            let client = self.pages.db.get().await?;
+            let mut listed = Html::EMPTY;
+            for code in &a.tags {
+                let label = self
+                    .pages
+                    .picklists
+                    .label(&**client, scope, crate::TAGS, code)
+                    .await?
+                    .map_or_else(
+                        || code.clone(),
+                        |label| {
+                            if label.retired {
+                                format!("{} (retired)", label.text)
+                            } else {
+                                label.text
+                            }
+                        },
+                    );
+                if !listed.is_empty() {
+                    listed.push(&Html::text(", "));
+                }
+                listed.push(&Html::text(&label));
+            }
+            items.push(("Tags", "tags".into(), listed));
         }
         let mut created = Html::text(&format!("{} · ", name(a.created_by)));
         created.push(&clock.time("activity-created-at", a.created_at)?);
@@ -1585,7 +1615,16 @@ impl Detail {
         drop(client);
 
         let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-        let a = self.pages.activities.get(scope, self.id).await?;
+        let mut a = self.pages.activities.get(scope, self.id).await?;
+        // Its tags, one more read on this page's connection: `get` takes a
+        // proof client, which cannot read a list of rows.
+        {
+            let connection = self.pages.db.get().await?;
+            a.tags = crate::store::tags(&**connection, scope.tenant(), &[a.id])
+                .await?
+                .remove(&a.id)
+                .unwrap_or_default();
+        }
         let editable = self.pages.activities.may_edit(scope, &a).await?;
         let series = self.pages.activities.series(scope, &a).await?;
         let mut actions = Html::EMPTY;

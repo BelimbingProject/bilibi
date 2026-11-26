@@ -330,10 +330,10 @@ sudo scripts/install-server.sh create-owner production --email owner@example.com
 
 ```
 Platform operator ready: tenant 1 “Example Operations”, company 1 “Example Operations”.
-Owner created: owner@example.com (account 1), Core Administrator of the platform operator.
+Recorded installation owner: owner@example.com (account 1).
 The owner now has a Person, business affiliation and desk in the platform operator's company.
 A claim link was emailed to owner@example.com. The owner opens it, chooses a password, signs in at https://erp.example.com/login and sets up 2FA.
-Next: when the owner has done both, rerun the same command to confirm.
+Next: when the owner has chosen a password and set up 2FA, rerun the same command to confirm.
 Owner claim: sent
 ```
 
@@ -349,11 +349,21 @@ Owner claim: sent
 | `claimed` | Password and 2FA are set up: the install is finished |
 | `mail-not-ready`, `not-delivered` | Mail cannot be sent; fix [outgoing mail](#outgoing-mail) and rerun |
 
-The link is a password-reset link and expires with the **Password reset link lifetime** setting (three days by default). The command has no option to create or claim the owner without that email, on purpose: whoever runs the install never holds the owner's sign-in. Root on the server can still change anything; this guards against mistakes and shortcuts, not a malicious administrator.
+The link is a password-reset link and expires with the **Password reset link lifetime** setting (three days by default). Claiming a newly created owner account requires that email, so whoever runs the install never holds the owner's sign-in. Root on the server can still change anything; this guards against mistakes and shortcuts, not a malicious administrator.
 
-Everything the command creates is written the way the app writes it, so it shows in the audit log under Administration → Audit Log → Actions as **System · create-owner**: the retained `user.bootstrap.completed` action with the account, email and role, and the data changes for the account, its Core Administrator role and the bootstrap receipt that marks the account as the server owner. The emailed link is recorded as `user.reset_requested`. On Dev, the development seed's `ai@agent.my` already exists and the command reports that owner instead.
+Initial setup appears under **Administration → Audit Log → Actions** as **System · create-owner**. See the [Core User bootstrap contract](../apps/core/user/README.md#bootstrap-administrator-srcbootstraprs) for the recorded changes. On Dev, the development seed's `ai@agent.my` already exists and the command reports that owner.
 
-Behind the scenes this is the development seed's bootstrap with your details instead of the seed's, through the same owners: Company provisions the operator company, User creates the account and receipt, Authz grants the role, and User gives the owner a Person, business affiliation and first desk ([`apps/core/user/README.md`](../apps/core/user/README.md), Bootstrap administrator).
+## Transfer or recover installation ownership
+
+For a planned handover, follow the [reviewed transfer procedure](../apps/core/user/README.md#ownership-transfer-srcownershiprs).
+
+If the current owner is unavailable, use the trusted server terminal to name a replacement in the operator tenant:
+
+```sh
+sudo scripts/install-server.sh create-owner production --recover --email replacement@example.com
+```
+
+An active staff account keeps its existing sign-in and roles. An unused address receives a claim link for a new account. The command records the ownership change in the audit log and attempts to notify the former owner. To report the recorded owner's claim status, rerun `create-owner` without `--recover`.
 
 ## Outgoing mail
 
@@ -503,6 +513,7 @@ Script commands:
 | `mail <instance> --host <relay> --port <n> --username <user> --tls starttls\|implicit_tls --from-address <address> [--from-name <name>] --password-stdin` | [Outgoing mail](#outgoing-mail) relay in `env`; restarts a running service |
 | `create-owner <instance> --email <address> [--name <name>] [--company-name <name> [--company-code <code>] [--tenant-name <name>]]` | [Server owner setup](#the-first-account): creates the owner and emails the claim link; rerun to resend or check the claim |
 | `public-hostname <instance> --tenant <id> --hostname <public-host> [--on]` | Gives workspace `<id>`'s public site that hostname as its primary one (making the site, off, if it has none; `--on` turns it on). The same as adding it on **Administration › Public site**. The command is `bilibi-web public-hostname` in the instance's environment |
+| `create-owner <instance> --recover --email <address> [--name <name>]` | [Recover installation ownership](#transfer-or-recover-installation-ownership) |
 | `--json <command> ...` | [Machine-readable mode](#machine-readable-mode) |
 | `tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>` | [Customer tenant and first-owner setup](#the-first-owner-of-a-customer-tenant) |
 | `two-factor-reset <instance> --email <address>` | Turn off one staff account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
