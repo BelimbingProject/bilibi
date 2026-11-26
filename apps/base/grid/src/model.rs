@@ -58,8 +58,7 @@ impl Source {
             extra_tables: &[],
         }
     }
-    /// Declares other Grid tables supplying projected values, so cached output is
-    /// invalidated when any of their field restrictions change.
+    /// Declares the extra table IDs that consumers can use to track field restrictions.
     pub const fn reads(self, tables: &'static [&'static str]) -> Self {
         Self {
             extra_tables: tables,

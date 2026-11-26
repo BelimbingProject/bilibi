@@ -627,12 +627,9 @@ impl BulkData {
         })
     }
 
-    /// What the person may see of an export's columns, as text: `None` when
-    /// they no longer hold the Imports pages, the type's export capability
-    /// or its list contract's capability; else which columns Grid lets them
-    /// read, which fields are restricted on every source table and how far
-    /// their row grants reach.
-    /// Taken when the file is made and compared on every read of the export.
+    /// A fixed-length fingerprint of column visibility, source field
+    /// restrictions and row reach. Returns `None` if the reader lacks a
+    /// required grant or the export's columns no longer resolve.
     fn access(&self, seeing: &Seeing, run: &ExportRun) -> Option<String> {
         let (registered, export) = self.exportable(&run.record_type).ok()?;
         let list = self.jobs.readable(export.list).ok()?.definition.capability;

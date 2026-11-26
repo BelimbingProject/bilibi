@@ -40,7 +40,11 @@ static JOINED_GRID: GridContribution = GridContribution {
     )],
     links: &[],
 };
-bilibi_grid::contribute!("core/person", "person.walkthrough_joined_grid", &JOINED_GRID);
+bilibi_grid::contribute!(
+    "core/person",
+    "person.walkthrough_joined_grid",
+    &JOINED_GRID
+);
 inventory::submit! {
     Contribution::new(
         bilibi_bulk_data::RECORD_TYPES,
@@ -338,7 +342,9 @@ async fn main() -> Result<(), Failure> {
         let run = manager.export(id).await?;
         let file = bulk.export_file(&manager.scope, id).await;
         if run.downloadable || !matches!(file, Err(Error::Forbidden)) {
-            return Err(format!("the work email restriction did not invalidate export {id}").into());
+            return Err(
+                format!("the work email restriction did not invalidate export {id}").into(),
+            );
         }
         println!("work email restriction invalidated export {id}");
     }
