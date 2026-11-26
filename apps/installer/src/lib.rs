@@ -311,31 +311,21 @@ impl Installer {
                     "job {id}: the restore from {} failed before a restart; recording the failure",
                     dump.display()
                 );
-                let rebuilt = backup::rebuild_failed(client, &history).await;
-                match (rebuilt, jobs::restore_job(client, id).await?) {
-                    (Ok(()), Some((job, _))) => {
-                        let mut run = flow::Run::new(
-                            client,
-                            &self.layout,
-                            &self.service,
-                            &self.pg,
-                            job,
-                            true,
-                        )
-                        .await?;
-                        run.fail_restore(key, &dump, &why).await?;
-                    }
-                    (rebuilt, _) => {
-                        let more = rebuilt
-                            .err()
-                            .map(|more| format!(" {more}"))
-                            .unwrap_or_default();
-                        eprintln!(
-                            "bilibi-installer: job {id}: the restore from {} failed: {why}{more}; the service remains stopped",
-                            dump.display()
-                        );
-                        backup::set_aside(&history);
-                    }
+                let why = match backup::rebuild_failed(client, &history).await {
+                    Ok(()) => why,
+                    Err(more) => format!("{why} {more}"),
+                };
+                if let Some((job, _)) = jobs::restore_job(client, id).await? {
+                    let mut run =
+                        flow::Run::new(client, &self.layout, &self.service, &self.pg, job, true)
+                            .await?;
+                    run.fail_restore(key, &dump, &why).await?;
+                } else {
+                    eprintln!(
+                        "bilibi-installer: job {id}: the restore from {} failed: {why}; the service remains stopped",
+                        dump.display()
+                    );
+                    backup::set_aside(&history);
                 }
                 finished = true;
                 continue;
