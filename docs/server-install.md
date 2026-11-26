@@ -37,7 +37,9 @@ The first command installs PostgreSQL 18 and Caddy, creates the users and folder
 ```sh
 sudo scripts/install-server.sh trust production --github --repo BelimbingProject/bilibi-try --repo-id 1462459642 --minimum-tag nightly-2026-11-01
 sudo scripts/install-server.sh release production /path/to/bilibi-nightly-2026-11-25-x86_64-unknown-linux-gnu.tar.gz --tag nightly-2026-11-25
-``` The third verifies and copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The remaining commands set mail, create the first account and enable the installer for later owner-reviewed Software jobs. Open `https://app.example.com`, sign in with the owner's claimed account and Caddy serves the staff site. `https://shop.example.com` is the public listener's name: it serves a workspace's public site once that workspace gives its site the hostname, on **Administration › Public site** (which also turns the site on), or with `sudo scripts/install-server.sh public-hostname production --tenant 1 --hostname shop.example.com --on`. Until then it answers 404.
+```
+
+The third verifies and copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The remaining commands set mail, create the first account and enable the installer for later owner-reviewed Software jobs. Open `https://app.example.com`, sign in with the owner's claimed account and Caddy serves the staff site. `https://shop.example.com` is the public listener's name: it serves a workspace's public site once that workspace gives its site the hostname, on **Administration › Public site** (which also turns the site on), or with `sudo scripts/install-server.sh public-hostname production --tenant 1 --hostname shop.example.com --on`. Until then it answers 404.
 
 Letting an AI assistant do the install? Give it [the Install Bilibi skill](install-with-ai/SKILL.md). Every command takes `--json` for one machine-readable line per step, with a stable error code and what to do next.
 

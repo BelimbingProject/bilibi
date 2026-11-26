@@ -6,8 +6,8 @@
 # The layout, and why it is this way, is in docs/server-install.md.
 #
 #   install-server.sh create <instance> --role dev|staging|production --site <staff-host> [--public-site <public-host> | --no-public-site] [--staff-bind <address> | --no-staff-bind] [--public-bind <address>] [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
-#   install-server.sh trust <instance> --github|--operator-key <public.pem> --repo <owner/name> --repo-id <n> [--workflow <identity>] --minimum-tag <setup-vX.Y.Z>
-#   install-server.sh release <instance> <setup archive> --tag <setup-vX.Y.Z> [--proof <proof.json>]
+#   install-server.sh trust <instance> --github|--operator-key <public.pem> --repo <owner/name> --repo-id <n> [--workflow <identity>] --minimum-tag <setup-vX.Y.Z|nightly-YYYY-MM-DD>
+#   install-server.sh release <instance> <setup archive> --tag <setup-vX.Y.Z|nightly-YYYY-MM-DD> [--proof <proof.json>]
 #   install-server.sh mail <instance> --host <relay> --port <n> --username <user> --tls starttls|implicit_tls --from-address <address> [--from-name <name>] --password-stdin
 #   install-server.sh create-owner <instance> --email <owner address> [--name <name>] [--company-name <name>]
 #   install-server.sh tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>
@@ -17,15 +17,17 @@
 #   install-server.sh identity-recover <instance> --email <old> --new-email <new>
 #   install-server.sh identity-delete <instance> --email <address> --confirm <address>
 #   install-server.sh identity-retention <instance>
-#   install-server.sh installer <instance> <bilibi-installer binary> --tag <setup-vX.Y.Z> [--proof <proof.json>]
+#   install-server.sh installer <instance> <bilibi-installer binary> --tag <setup-vX.Y.Z|nightly-YYYY-MM-DD> [--proof <proof.json>]
 #   install-server.sh github-app --client-id <id> --repo <owner/name>   (the App private key on standard input)
 #   install-server.sh github-app --check | --remove
-#   install-server.sh verify <instance> <file> --kind server-tools|installer|setup --tag <setup-vX.Y.Z> [--proof <proof.json>]
+#   install-server.sh verify <instance> <file> --kind server-tools|installer|setup --tag <setup-vX.Y.Z|nightly-YYYY-MM-DD> [--proof <proof.json>]
 #   install-server.sh switch <instance> <release number>
 #   install-server.sh status [<instance>]
 #   bilibi update <instance> [--to X.Y.Z | --undo]
 #   install-server.sh --json <command> ...   one JSON line per step, for an AI agent or script
 #
+# A tag is a stable setup-vX.Y.Z or a nightly-YYYY-MM-DD. The trust minimum tag
+# picks the instance's one channel; a tag of the other channel is refused.
 # Only the layout, the first release and the installer service live here.
 # Build releases in a separate development checkout, then install a tested release here.
 # Backing up before a switch, checking the new release, switching back and Undo
