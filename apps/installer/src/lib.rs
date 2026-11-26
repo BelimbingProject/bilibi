@@ -283,7 +283,7 @@ impl Installer {
                 .as_ref()
                 .is_some_and(|(_, state)| !matches!(state.as_str(), "queued" | "running"))
             {
-                let _ = std::fs::remove_file(&history);
+                backup::forget(&history);
                 continue;
             }
             jobs::lock_installation(client).await?;
@@ -303,6 +303,42 @@ impl Installer {
                     Err(error) if jobs::table_missing(&error) => {}
                     Err(error) => return Err(error),
                 }
+            }
+            // The restore already failed and a restart cut off its cleanup:
+            // record that failure, and never run the restore again.
+            if let Some(why) = backup::noted_failure(&history) {
+                println!(
+                    "job {id}: the restore from {} failed before a restart; recording the failure",
+                    dump.display()
+                );
+                let rebuilt = backup::rebuild_failed(client, &history).await;
+                match (rebuilt, jobs::restore_job(client, id).await?) {
+                    (Ok(()), Some((job, _))) => {
+                        let mut run = flow::Run::new(
+                            client,
+                            &self.layout,
+                            &self.service,
+                            &self.pg,
+                            job,
+                            true,
+                        )
+                        .await?;
+                        run.fail_restore(key, &dump, &why).await?;
+                    }
+                    (rebuilt, _) => {
+                        let more = rebuilt
+                            .err()
+                            .map(|more| format!(" {more}"))
+                            .unwrap_or_default();
+                        eprintln!(
+                            "bilibi-installer: job {id}: the restore from {} failed: {why}{more}; the service remains stopped",
+                            dump.display()
+                        );
+                        backup::set_aside(&history);
+                    }
+                }
+                finished = true;
+                continue;
             }
             println!(
                 "job {id}: a restore was cut off by a restart; finishing it from {}",

@@ -93,7 +93,9 @@ pub struct Restored {
 /// is marked restored, and a run that finds it so does nothing: the
 /// database is not restored a second time over what was entered since. When
 /// the restore fails and the job tables are gone, they are made again from
-/// the file, so the failure can still be recorded.
+/// the file, so the failure can still be recorded. A clear or `pg_restore`
+/// that fails is noted beside the file before that cleanup begins (see
+/// [`noted_failure`]), and a restore with that note is never run again.
 pub async fn restore(
     client: &Client,
     pg: &PgEnv,
@@ -131,6 +133,9 @@ async fn replace(
             problems: Vec::new(),
         });
     }
+    if let Some(why) = noted_failure(history_file) {
+        return Err(why);
+    }
     if !dump.is_file() {
         return Err(format!("the backup {} is missing", dump.display()));
     }
@@ -161,16 +166,10 @@ async fn replace(
         }
     };
     if let Err(why) = clear(client).await {
-        return Err(match rebuild(client, &saved, true).await {
-            Ok(()) => why,
-            Err(more) => format!("{why} {more}"),
-        });
+        return Err(give_up(client, &saved, history_file, why).await);
     }
     if let Err(why) = restore_with_owner(pg, dump, &kept) {
-        return Err(match rebuild(client, &saved, true).await {
-            Ok(()) => why,
-            Err(more) => format!("{why} {more}"),
-        });
+        return Err(give_up(client, &saved, history_file, why).await);
     }
     let (carried, problems) = jobs::restore_history(client, &saved)
         .await
@@ -276,6 +275,36 @@ async fn drop_each(client: &Client, kind: &str, query: &str) -> Result<(), Strin
         })?;
     }
     Ok(())
+}
+/// Ends a restore whose clear or `pg_restore` failed. The failure is noted
+/// beside the saved history first, durably, and only then does the cleanup
+/// clear what is left and make the job tables again. Until the caller has
+/// recorded the failed step, the saved history still describes a restore to
+/// run: a restart in that window finds the note and records this failure
+/// instead of restoring again (`Installer::finish_cut_off_restores`).
+async fn give_up(client: &Client, saved: &Value, history_file: &Path, why: String) -> String {
+    let why = match note_failure(history_file, &why) {
+        Ok(()) => why,
+        Err(more) => format!("{why} {more}"),
+    };
+    match rebuild(client, saved, true).await {
+        Ok(()) => why,
+        Err(more) => format!("{why} {more}"),
+    }
+}
+/// After a restart, gives a restore that failed before it ([`noted_failure`])
+/// its job tables and history again from the saved file, so the failure can
+/// be recorded. The cut-off cleanup may have left the tables missing or half
+/// refilled, and nothing in the database outlives the failure, so they are
+/// always cleared and made again. It never runs `pg_restore`.
+pub async fn rebuild_failed(client: &Client, history_file: &Path) -> Result<(), String> {
+    let (_, saved) = read_saved(history_file).ok_or_else(|| {
+        format!(
+            "the saved history {} could not be read",
+            history_file.display()
+        )
+    })?;
+    rebuild(client, &saved, true).await
 }
 /// After a restore that failed, gives the database back its job tables and
 /// the history, so the job can record that it failed. `wipe` first clears
@@ -523,6 +552,41 @@ fn literal(value: &Value) -> String {
     };
     format!("'{}'", json.replace('\'', "''"))
 }
+/// Where a restore's failure is noted beside its saved history. The name
+/// starts `history-`, so the job forgets it with the history once its outcome
+/// is recorded.
+fn failure_name(history_file: &Path) -> PathBuf {
+    history_file.with_extension("failure")
+}
+fn note_failure(history_file: &Path, why: &str) -> Result<(), String> {
+    let file = failure_name(history_file);
+    write_durably(&file, why.as_bytes()).map_err(|error| {
+        format!(
+            "The failure could not be noted in {}: {error}",
+            file.display()
+        )
+    })
+}
+/// The failure noted beside a saved history ([`give_up`]): the restore must
+/// not run again, and the reason is recorded as the job's failure. A note
+/// that cannot be read, or cannot be told absent, still counts as a failure.
+pub fn noted_failure(history_file: &Path) -> Option<String> {
+    let file = failure_name(history_file);
+    match fs::read(&file) {
+        Ok(why) => Some(String::from_utf8_lossy(&why).into_owned()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => Some(format!(
+            "The restore failed before the installer restarted, and its note {} could not be read: {error}",
+            file.display()
+        )),
+    }
+}
+/// Removes a saved history whose job outcome is already recorded, with its
+/// failure note.
+pub fn forget(history_file: &Path) {
+    let _ = fs::remove_file(failure_name(history_file));
+    let _ = fs::remove_file(history_file);
+}
 fn restored_name(history_file: &Path) -> PathBuf {
     history_file.with_extension("restored")
 }
@@ -542,22 +606,28 @@ fn read_saved(file: &Path) -> Option<(PathBuf, Value)> {
     ))
 }
 fn write_saved(file: &Path, dump: &Path, history: &Value) -> Result<(), String> {
-    let wrote = |error: std::io::Error| {
-        format!("could not save the history in {}: {error}", file.display())
-    };
-    if let Some(dir) = file.parent() {
-        fs::create_dir_all(dir).map_err(wrote)?;
-    }
-    let partial = file.with_extension("partial");
-    let mut out = fs::File::create(&partial).map_err(wrote)?;
-    out.write_all(
+    write_durably(
+        file,
         json!({"dump": dump.display().to_string(), "history": history})
             .to_string()
             .as_bytes(),
     )
-    .and_then(|()| out.sync_all())
-    .map_err(wrote)?;
-    fs::rename(&partial, file).map_err(wrote)
+    .map_err(|error| format!("could not save the history in {}: {error}", file.display()))
+}
+/// Writes `file` whole or not at all, and makes it survive a crash: the bytes
+/// go to a partial file that is synced, renamed into place, and the rename
+/// synced in its folder.
+fn write_durably(file: &Path, bytes: &[u8]) -> io::Result<()> {
+    let dir = file.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir)?;
+    let mut partial = file.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = PathBuf::from(partial);
+    let mut out = fs::File::create(&partial)?;
+    out.write_all(bytes)?;
+    out.sync_all()?;
+    fs::rename(&partial, file)?;
+    fs::File::open(dir)?.sync_all()
 }
 
 /// The last lines of a tool's output, for a plain error message.
