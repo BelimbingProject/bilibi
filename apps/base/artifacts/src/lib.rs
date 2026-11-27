@@ -1063,11 +1063,28 @@ impl<O: Owner> Owned<'_, O> {
             &'a tokio_postgres::Transaction<'_>,
         ) -> bilibi_tenancy::ProofFuture<'a, ()>,
     ) -> Result<Document> {
-        let tx = self.begin(client, "artifacts.read").await?;
-        tx.sql()
-            .batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            .await?;
-        self.read_in(tx, id, context, check).await
+        let mut retries_left = 2;
+        loop {
+            let result = async {
+                let tx = self.begin(client, "artifacts.read").await?;
+                tx.sql()
+                    .batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    .await?;
+                self.read_in(tx, id, context, check).await
+            }
+            .await;
+            let serialization_failure = match &result {
+                Err(Error::Database(error)) => error.is_serialization_failure(),
+                Err(Error::Sql(error)) => {
+                    error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+                }
+                _ => false,
+            };
+            if !serialization_failure || retries_left == 0 {
+                return result;
+            }
+            retries_left -= 1;
+        }
     }
 
     async fn read_in<C: Sync>(
