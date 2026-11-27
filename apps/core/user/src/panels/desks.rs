@@ -8,9 +8,9 @@ use bilibi_security::Scope;
 use bilibi_tenancy::{OrganisationDirectory, OrganisationSearch};
 use bilibi_ui::{
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, PageRequest},
-    params, BuiltinColumn, Button, Card, Choice, ColumnsOutcome, ConfirmDialog, Field, FlexRow,
-    FlexTable, Form, Html, IconButton, InputKind, ListColumns, ListSpec, ListState, NoticeKind,
-    Pagination, PanelNotice, SectionHeading, TableEmpty,
+    params, BuiltinColumn, Button, ButtonVariant, Card, Choice, ColumnsOutcome, ConfirmDialog,
+    Field, FlexRow, FlexTable, Form, Html, IconButton, InputKind, ListColumns, ListSpec, ListState,
+    Modal, MultiSelect, NoticeKind, Pagination, PanelNotice, SectionHeading, TableEmpty,
 };
 use serde_json::json;
 use std::{
@@ -38,7 +38,7 @@ struct View<'a> {
 }
 #[derive(Template)]
 #[template(
-    source = "{{ heading }}{{ table }}{{ pagination }}{{ search }}{{ form }}",
+    source = "{{ heading }}{{ table }}{{ pagination }}{{ search }}",
     ext = "html"
 )]
 struct Body {
@@ -46,7 +46,6 @@ struct Body {
     table: Html,
     pagination: Html,
     search: Html,
-    form: Html,
 }
 pub(crate) struct Desks {
     pages: Pages,
@@ -59,6 +58,8 @@ pub(crate) struct Desks {
     notice: Option<(NoticeKind, String)>,
     pending: Option<(i64, i64)>,
     rows_changed: bool,
+    adding: bool,
+    selected: Vec<String>,
 }
 impl Desks {
     pub fn new(pages: Pages, request: &PageRequest<'_, Scope>) -> Result<Self> {
@@ -89,6 +90,8 @@ impl Desks {
             notice: None,
             pending: None,
             rows_changed: true,
+            adding: false,
+            selected: Vec::new(),
         })
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
@@ -234,7 +237,31 @@ impl Desks {
         pagination.page_event = "desk_page";
         pagination.filters_event = "desk_filters";
         pagination.target = &self.anchor;
-        let (search, form) = if can_add {
+        let companies = if can_add && !self.company {
+            let assigned: HashSet<i64> = client
+                .query(
+                    "SELECT company_id FROM user_desks WHERE tenant_id=$1 AND person_id=$2",
+                    &[&scope.tenant(), &self.id],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            bilibi_company::Directory
+                .selectable(
+                    &**client,
+                    scope,
+                    bilibi_company::UPDATE,
+                    OrganisationSearch::text("").limit(usize::MAX),
+                )
+                .await?
+                .into_iter()
+                .filter(|company| !assigned.contains(&company.id.get()))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let search = if can_add && self.company {
             let pattern = format!(
                 "%{}%",
                 self.search
@@ -261,7 +288,7 @@ impl Desks {
                     .collect()
             };
             let field = Field::in_form("desk", "id")
-                .label(if self.company { "Person" } else { "Company" })
+                .label("Person")
                 .kind(InputKind::Select)
                 .options(
                     std::iter::once(Choice::new("Choose…", ""))
@@ -272,22 +299,18 @@ impl Desks {
                         )
                         .collect(),
                 );
-            let search = render(&Form {
+            let mut search = render(&Form {
                 id: &format!("{}-find", self.anchor),
                 event: "desk_search",
                 change: true,
                 body: render(
                     &Field::in_form("desk_search", "search")
-                        .label(if self.company {
-                            "Find a person"
-                        } else {
-                            "Find a company"
-                        })
+                        .label("Find a person")
                         .value(&self.search),
                 )?,
                 ..Form::default()
             })?;
-            let form = render(&Form {
+            search.push(&render(&Form {
                 id: &format!("{}-add", self.anchor),
                 event: "desk_assign",
                 body: render(&field)?,
@@ -297,19 +320,41 @@ impl Desks {
                     ..Button::default()
                 })?,
                 ..Form::default()
-            })?;
-            (search, form)
+            })?);
+            search
         } else {
-            (Html::EMPTY, Html::EMPTY)
+            Html::EMPTY
         };
-        let heading=render(&SectionHeading{title:if self.company {"People with a desk here"}else{"Desks"},count:Some(total as usize),description:"A desk lets a person choose this company. Their permissions decide what they can do.",..SectionHeading::default()})?;
+        let heading = render(&SectionHeading {
+            title: if self.company {
+                "People with a desk here"
+            } else {
+                "Desks"
+            },
+            count: Some(total as usize),
+            description: if self.company {
+                "A desk lets a person choose this company. Their permissions decide what they can do."
+            } else {
+                "Select which companies the person can work in."
+            },
+            actions: if !self.company && !companies.is_empty() {
+                render(&Button {
+                    event: "desk_open_add",
+                    button_type: "button",
+                    body: Html::text("Add companies"),
+                    ..Button::default()
+                })?
+            } else {
+                Html::EMPTY
+            },
+            ..SectionHeading::default()
+        })?;
         let card = render(&Card {
             body: render(&Body {
                 heading,
                 table: render(&table)?,
                 pagination: render(&pagination)?,
                 search,
-                form,
             })?,
             ..Card::default()
         })?;
@@ -326,7 +371,54 @@ impl Desks {
             })
             .transpose()?
             .unwrap_or(Html::EMPTY);
-        let dialog = if self.pending.is_some() {
+        let dialog = if self.adding && !self.company {
+            let picker = MultiSelect::new(format!("{}-companies", self.anchor), "company_ids")
+                .label("Companies")
+                .searchable()
+                .placeholder("Select companies")
+                .options(
+                    companies
+                        .iter()
+                        .map(|company| Choice::new(&company.name, company.id.get().to_string()))
+                        .collect(),
+                )
+                .values(self.selected.clone());
+            let mut actions = render(&Button {
+                event: "desk_close_add",
+                button_type: "button",
+                body: Html::text("Cancel"),
+                ..Button::default()
+            })?;
+            actions.push(&render(&Button {
+                button_type: "submit",
+                variant: ButtonVariant::Primary,
+                body: Html::text("Add companies"),
+                ..Button::default()
+            })?);
+            let mut body = Html::EMPTY;
+            if let Some((kind, message)) = &self.notice {
+                body.push(&render(&PanelNotice {
+                    id: &format!("{}-add-notice", self.anchor),
+                    kind: *kind,
+                    body: Html::text(message),
+                    ..PanelNotice::default()
+                })?);
+            }
+            body.push(&render(&picker)?);
+            render(&Modal {
+                id: &format!("{}-add-dialog", self.anchor),
+                title: "Add companies",
+                cancel_event: "desk_close_add",
+                body: render(&Form {
+                    id: &format!("{}-add-form", self.anchor),
+                    event: "desk_assign_many",
+                    body,
+                    actions,
+                    ..Form::default()
+                })?,
+                ..Modal::default()
+            })?
+        } else if self.pending.is_some() {
             render(&ConfirmDialog {
                 id: &format!("{}-remove", self.anchor),
                 consequence: "Remove desk?",
@@ -386,6 +478,58 @@ impl LiveState<Scope, Error> for Desks {
                             .take(200)
                             .collect();
                     }
+                    "desk_open_add" => {
+                        self.adding = true;
+                        self.selected.clear();
+                        self.notice = None;
+                    }
+                    "desk_close_add" => {
+                        self.adding = false;
+                        self.notice = None;
+                    }
+                    "desk_assign_many" => {
+                        let values = value["company_ids[]"].as_array().ok_or(Error::Invalid)?;
+                        self.selected = values
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .filter(|v| !v.is_empty())
+                            .map(str::to_owned)
+                            .collect();
+                        let mut ids = self
+                            .selected
+                            .iter()
+                            .map(|id| params::positive_id(Some(id)).ok_or(Error::Invalid))
+                            .collect::<Result<Vec<_>>>()?;
+                        ids.sort_unstable();
+                        ids.dedup();
+                        if ids.is_empty() {
+                            self.notice =
+                                Some((NoticeKind::Error, "Select at least one company.".into()));
+                        } else {
+                            let call = bilibi_agent_api::page::Call {
+                                scope: request.scope,
+                                credential: request.credential,
+                                service: "core/user.pages",
+                                event: key,
+                                contract: "core.user.desk.set",
+                            };
+                            let inputs = ids.iter().map(|id| json!({"company_id":id,"person_id":self.id,"assigned":true})).collect();
+                            match self.pages.contracts.submit_many(&call, inputs).await {
+                                Ok(_) => {
+                                    self.adding = false;
+                                    self.selected.clear();
+                                    self.notice =
+                                        Some((NoticeKind::Success, "Desks added.".into()));
+                                }
+                                Err(bilibi_agent_api::Error::Backend(
+                                    error @ (Error::Unauthorized | Error::StepUpRequired { .. }),
+                                )) => return Err(error),
+                                Err(error) => {
+                                    self.notice = Some((NoticeKind::Error, error.to_string()))
+                                }
+                            }
+                        }
+                    }
                     "desk_cancel_remove" => self.pending = None,
                     "desk_remove" => {
                         let id = params::positive_id(value["id"].as_str()).ok_or(Error::Invalid)?;
@@ -402,9 +546,7 @@ impl LiveState<Scope, Error> for Desks {
                                 params::form_values_checked(value, "desk", params::FIELD_LIMIT)
                                     .map_err(Error::refused)?;
                             let id = params::positive_id(fields.get("id").map(String::as_str))
-                                .ok_or_else(|| {
-                                    Error::refused("Choose a person or company first.")
-                                })?;
+                                .ok_or_else(|| Error::refused("Choose a person first."))?;
                             if self.company {
                                 (self.id, id)
                             } else {

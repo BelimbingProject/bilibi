@@ -296,6 +296,7 @@ A page's write event calls the contract the agent doors call, through `base/agen
 | Call | Use for | Path |
 |---|---|---|
 | `submit(call, input)` | A form the person just reviewed (inline edit, create, a dialog that collects input) | `Plans::submit`: the owner's preview, then its commit, in one transaction; no code |
+| `submit_many(call, inputs)` | A form applying the same contract to several records | `Plans::commit`: rechecks every input and commits all in one transaction, within the configured plan limit |
 | `preview(call, input)` then `commit(call, input)` | A confirmation dialog (Core Person's retire) | Show the dry-run review, then send the same server-held input to a write that repeats every check |
 | `read(scope, key, input)` | A direct read | `Registry::read` |
 
