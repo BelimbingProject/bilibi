@@ -98,14 +98,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await?;
     let customer = root.join("customer");
-    let legacy = root.join("legacy");
     let reviewed = root.join("reviewed");
     for (dir, extensions) in [
         (
             &customer,
             "Extensions:\n  local unpinned, code: customer, modules: custom",
         ),
-        (&legacy, "Extensions:\n  local unpinned, modules: custom"),
         (&reviewed, "Extensions: none mounted"),
     ] {
         std::fs::create_dir_all(dir)?;
@@ -140,7 +138,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &dump,
         "",
         &root.join("history-undo.json"),
-        backup::RestoreTarget::Undo(Some(&customer)),
+        Some(&customer),
     )
     .await;
     let message = refused
@@ -166,8 +164,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &pg,
         &dump,
         "",
-        &root.join("history-switch_back.json"),
-        backup::RestoreTarget::Recovery(Some(&legacy)),
+        &root.join("history-rollback.json"),
+        Some(&reviewed),
     )
     .await?;
     assert_eq!(jobs::installation_mode(&client).await?, "shared");
@@ -232,7 +230,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &shared_dump,
         "",
         &root.join("history-isolated.json"),
-        backup::RestoreTarget::Undo(Some(&customer)),
+        Some(&customer),
     )
     .await?;
     assert_eq!(jobs::installation_mode(&client).await?, "isolated");
@@ -247,15 +245,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )?;
     backup::clear(&client).await?;
     client.batch_execute("DROP SCHEMA public").await?;
-    backup::restore(
-        &client,
-        &pg,
-        &shared_dump,
-        "",
-        &interrupted,
-        backup::RestoreTarget::Undo(None),
-    )
-    .await?;
+    backup::restore(&client, &pg, &shared_dump, "", &interrupted, None).await?;
     assert_eq!(jobs::installation_mode(&client).await?, "isolated");
     println!("PASS: interrupted restore recreates a missing public schema and preserves the saved policy");
     Ok(())

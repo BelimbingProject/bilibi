@@ -308,12 +308,7 @@ impl Installer {
                 "job {id}: a restore was cut off by a restart; finishing it from {}",
                 dump.display()
             );
-            let target = if key == "switch_back" {
-                backup::RestoreTarget::Recovery(None)
-            } else {
-                backup::RestoreTarget::Undo(None)
-            };
-            if let Err(why) = backup::restore(client, &self.pg, &dump, "", &history, target).await {
+            if let Err(why) = backup::restore(client, &self.pg, &dump, "", &history, None).await {
                 if let Some((job, _)) = jobs::restore_job(client, id).await? {
                     let mut run =
                         flow::Run::new(client, &self.layout, &self.service, &self.pg, job, true)

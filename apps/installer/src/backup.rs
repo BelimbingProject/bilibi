@@ -80,11 +80,6 @@ pub struct Restored {
     pub carried: i64,
     pub problems: Vec<String>,
 }
-pub enum RestoreTarget<'a> {
-    Undo(Option<&'a Path>),
-    Recovery(Option<&'a Path>),
-}
-
 /// Replaces the database's contents with a dump: the software history, and
 /// the audit rows of the software changes made after `since` (the instant
 /// the dump was taken), are saved to `history_file` first, the `public` schema is dropped and made
@@ -105,7 +100,7 @@ pub async fn restore(
     dump: &Path,
     since: &str,
     history_file: &Path,
-    target: RestoreTarget<'_>,
+    target: Option<&Path>,
 ) -> Result<Restored, String> {
     let outcome = replace(client, pg, dump, since, history_file, target).await;
     let Err(why) = &outcome else {
@@ -128,7 +123,7 @@ async fn replace(
     dump: &Path,
     since: &str,
     history_file: &Path,
-    target: RestoreTarget<'_>,
+    target: Option<&Path>,
 ) -> Result<Restored, String> {
     if restored(history_file) {
         return Ok(Restored {
@@ -139,15 +134,8 @@ async fn replace(
     if !dump.is_file() {
         return Err(format!("the backup {} is missing", dump.display()));
     }
-    let (target, recovering) = match target {
-        RestoreTarget::Undo(target) => (target, false),
-        RestoreTarget::Recovery(target) => (target, true),
-    };
     let saved = match read_saved(history_file) {
-        Some((_, saved)) => {
-            validate_restore(&saved, recovering)?;
-            saved
-        }
+        Some((_, saved)) => saved,
         None => {
             let mut saved = jobs::history(client, since).await.map_err(|error| {
                 format!(
@@ -157,11 +145,12 @@ async fn replace(
             })?;
             let target = target.ok_or("The restore has no target release composition.")?;
             saved["target_composition"] = json!(composition::status(target)?);
-            validate_restore(&saved, recovering)?;
+            validate_restore(&saved)?;
             write_saved(history_file, dump, &saved)?;
             saved
         }
     };
+    validate_restore(&saved)?;
     let kept = match keep_owner(client).await {
         Ok(kept) => kept,
         Err(why) => {
@@ -195,7 +184,7 @@ async fn replace(
     let _ = fs::rename(history_file, restored_name(history_file));
     Ok(Restored { carried, problems })
 }
-fn validate_restore(saved: &Value, recovering: bool) -> Result<(), String> {
+fn validate_restore(saved: &Value) -> Result<(), String> {
     let rows = saved["base_settings"]["rows"]
         .as_array()
         .ok_or("The restore record has no saved installation policy; restore refused.")?;
@@ -209,7 +198,7 @@ fn validate_restore(saved: &Value, recovering: bool) -> Result<(), String> {
     let status = saved["target_composition"]
         .as_str()
         .ok_or("The restore record has no target composition; restore refused.")?;
-    composition::admit_with_recovery(status, mode, recovering)
+    composition::admit(status, mode)
         .map(|_| ())
         .map_err(|why| format!("Restore refused: {why}"))
 }

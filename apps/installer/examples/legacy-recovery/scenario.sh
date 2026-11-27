@@ -156,10 +156,19 @@ grep -q 'Code: MIGRATION_FAILED' "$root_dir/shell.log"
 [[ $(readlink -f "$FIXTURE_CURRENT") == "$root_dir/shell/dev/releases/1" ]]
 [[ $(curl -fsS "$origin/login") == legacy-release ]]
 
-systemctl stop bilibi@dev
-legacy_dir=$(readlink -f "$FIXTURE_CURRENT")
-(cd "$legacy_dir" && sha256sum bilibi-web > SHA256SUMS)
-cp "$FIXTURE_EVENTS" "$root_dir/before-switch"
+mkdir "$root_dir/shell/dev/releases/3" "$root_dir/worker/dev/releases/3"
+cat > "$root_dir/shell/dev/releases/3/bilibi-web" <<'STUB'
+#!/usr/bin/env bash
+case $1 in
+    status) printf '%s\n' 'Bilibi 0.3.0' 'Domains: none mounted' 'Extensions:' '  local unpinned, code: customer, modules: custom';;
+    migrate) echo "customer migration must not run"; exit 2;;
+    login) echo customer-release;;
+    *) exit 2;;
+esac
+STUB
+chmod +x "$root_dir/shell/dev/releases/3/bilibi-web"
+cp "$root_dir/shell/dev/releases/3/bilibi-web" "$root_dir/worker/dev/releases/3/"
+(cd "$root_dir/shell/dev/releases/3" && sha256sum bilibi-web > SHA256SUMS)
 if bash -s -- "$root_dir" >"$root_dir/switch.log" 2>&1 <<'SHELL'
     root_dir=$1
     source scripts/install-server.sh
@@ -169,15 +178,31 @@ if bash -s -- "$root_dir" >"$root_dir/switch.log" 2>&1 <<'SHELL'
     lock_installation() { :; }
     read_installation_mode() { installation_mode=shared; }
     runuser() { shift 3; "$@"; }
-    switch dev 1
+    switch dev 3
 SHELL
 then
     cat "$root_dir/switch.log"
     exit 1
 fi
-grep -q 'must declare reviewed or customer code' "$root_dir/switch.log"
-cmp "$root_dir/before-switch" "$FIXTURE_EVENTS"
-[[ $(readlink -f "$FIXTURE_CURRENT") == "$legacy_dir" ]]
-[[ $(curl -s -o /dev/null -w '%{http_code}' "$origin/login") == 503 ]]
+grep -q 'requires an isolated installation' "$root_dir/switch.log"
+[[ -z $(grep -Fx "$root_dir/shell/dev/releases/3" "$FIXTURE_EVENTS" || true) ]]
+[[ $(readlink -f "$FIXTURE_CURRENT") == "$root_dir/shell/dev/releases/1" ]]
+[[ $(curl -fsS "$origin/login") == legacy-release ]]
 
-echo "PASS: both installers recover the answering legacy release, and manual switch refuses it."
+export FIXTURE_CURRENT=$root_dir/worker/dev/current
+sql >/dev/null <<'SQL'
+INSERT INTO base_software_jobs (tenant_id,kind,request,review,requested_by)
+VALUES (1,'install','{}','{}',1);
+INSERT INTO base_software_steps (tenant_id,job_id,seq,key,label,state,detail) VALUES
+  (1,2,1,'fetch','Fetch','done','{"release":3,"previous":1}'),
+  (1,2,2,'backup','Backup','pending',NULL),
+  (1,2,3,'migrate','Migrate','pending',NULL);
+SQL
+systemctl start bilibi@dev
+timeout 30 "$installer" --worker "$root_dir/worker/dev"
+[[ $(sql -c "SELECT state FROM base_software_jobs WHERE id=2 AND result->>'message' LIKE '%requires an isolated installation%'") == failed ]]
+[[ -z $(grep -Fx "$root_dir/worker/dev/releases/3" "$FIXTURE_EVENTS" || true) ]]
+[[ $(readlink -f "$FIXTURE_CURRENT") == "$root_dir/worker/dev/releases/1" ]]
+[[ $(curl -fsS "$origin/login") == legacy-release ]]
+
+echo "PASS: both installers recover the legacy release and refuse customer code in Shared mode."

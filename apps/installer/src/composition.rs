@@ -30,10 +30,6 @@ pub fn parse(status: &str) -> Value {
 }
 
 pub fn admit(status: &str, mode: &str) -> Result<Value, String> {
-    admit_with_recovery(status, mode, false)
-}
-
-pub fn admit_with_recovery(status: &str, mode: &str, recovering: bool) -> Result<Value, String> {
     if !matches!(mode, "shared" | "isolated") {
         return Err("The saved installation.mode is invalid.".into());
     }
@@ -58,8 +54,7 @@ pub fn admit_with_recovery(status: &str, mode: &str, recovering: bool) -> Result
             .ok_or("The release reports an invalid Extension declaration.")?;
         let id = extension["id"].as_str().unwrap_or("unknown");
         match extension["code"].as_str() {
-            None if recovering => {}
-            Some("reviewed") => {}
+            None | Some("reviewed") => {}
             Some("customer") if mode == "isolated" => {}
             Some("customer") => return Err(format!("Extension {id} requires an isolated installation; use an isolated installation, or prepare a code-free release.")),
             _ => return Err(format!("Extension {id} must declare reviewed or customer code.")),
@@ -91,8 +86,10 @@ fn platform(line: &str) -> Option<Value> {
 fn container(line: &str) -> Option<Value> {
     let (id, rest) = line.split_once(", modules:")?.0.trim().split_once(' ')?;
     let (rest, code) = rest
-        .rsplit_once(", code: ")
-        .map_or((rest, None), |(rest, code)| (rest, Some(code)));
+        .rsplit_once(", code:")
+        .map_or((rest, None), |(rest, code)| {
+            (rest, Some(code.strip_prefix(' ').unwrap_or(code)))
+        });
     let (version, commit) = match rest {
         "unpinned" => (None, None),
         _ => match rest.split_once(", commit ") {
