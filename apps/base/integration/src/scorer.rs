@@ -164,11 +164,14 @@ impl Scorers {
 }
 
 fn setting_matches(setting: Option<&Setting>, value_type: ValueType, encrypted: bool) -> bool {
-    matches!(setting, Some(Setting::Definition(definition))
-        if definition.value_type == value_type
-            && definition.scopes.contains(&ScopeKind::Tenant)
-            && definition.encrypted == encrypted
-            && definition.editor.is_some())
+    setting
+        .and_then(Setting::definition)
+        .is_some_and(|definition| {
+            definition.value_type == value_type
+                && definition.scopes.contains(&ScopeKind::Tenant)
+                && definition.encrypted == encrypted
+                && definition.editor.is_some()
+        })
 }
 
 /// One consented event offered to a scorer.

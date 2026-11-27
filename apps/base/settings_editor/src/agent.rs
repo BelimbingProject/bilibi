@@ -9,7 +9,7 @@ use bilibi_agent_api::{
 use bilibi_authz::{authorize_proof, effective_capabilities};
 use bilibi_database::{Error, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance};
-use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Settings, Target, ValueType};
+use bilibi_settings::{Definition, Editor, ScopeKind, Settings, Target, ValueType};
 use bilibi_step_up::StepUp;
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
@@ -49,7 +49,7 @@ fn field(key: &str) -> bilibi_agent_api::Result<Field> {
         .definitions()
         .lookup(key)
         .map_err(|_| AgentError::NotFound)?;
-    let Setting::Definition(definition) = owned.setting else {
+    let Some(definition) = owned.setting.definition() else {
         return Err(AgentError::NotFound);
     };
     let editor = definition.editor.as_ref().ok_or(AgentError::NotFound)?;
@@ -154,9 +154,7 @@ impl ReadHandler for List {
                 .definitions()
                 .tenant_admin()
                 .filter_map(|owned| {
-                    let Setting::Definition(definition) = owned.setting else {
-                        return None;
-                    };
+                    let definition = owned.setting.definition()?;
                     let editor = definition.editor.as_ref()?;
                     if editor
                         .capability
@@ -356,9 +354,14 @@ impl WriteHandler for Change {
                     .definitions()
                     .tenant_admin()
                     .filter(|owned| {
-                        matches!(owned.setting, Setting::Definition(definition)
-                            if !definition.encrypted && definition.editor.as_ref().is_some_and(|editor|
-                                editor.capability.is_none_or(|capability| capabilities.contains(capability))))
+                        owned.setting.definition().is_some_and(|definition| {
+                            !definition.encrypted
+                                && definition.editor.as_ref().is_some_and(|editor| {
+                                    editor
+                                        .capability
+                                        .is_none_or(|capability| capabilities.contains(capability))
+                                })
+                        })
                     })
                     .map(|owned| owned.pattern)
                     .collect();

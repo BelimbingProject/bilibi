@@ -11,7 +11,8 @@ pattern (lexical order breaks equal lengths). Definitions and runtime claims
 share one ownership namespace, so duplicate ownership fails at discovery.
 
 `Definition` owns JSON type, allowed scopes, default, nullable/encrypted flags,
-numeric bounds, custom validator, and optional P3 editor metadata. Defaults are
+numeric bounds, custom validator, optional P3 editor metadata, and an optional
+principal read capability for encrypted values. Defaults are
 validated at discovery, and every write validates again. `RuntimeClaim` permits
 operational JSON at any scope, has no default, rejects null writes, and is never
 a secret: use an encrypted definition for secrets. Undeclared keys, wildcard
@@ -55,9 +56,12 @@ User means the actor's own account; tenant means their tenant. A named system
 principal's scope (SP1, `Scope::principal()`, the scope Queue hands a system
 job) reads plain values like any scope, has no user target, writes no global
 value (that reproves the operator), and receives a stored encrypted value only
-when it is granted that definition's editor `capability` in the tenant, decided
-through Tenancy's `Authorization::authorize_scope` on the same connection; a
-definition without an editor capability, or a missing grant, refuses the read.
+when it is granted the capability declared by `Definition::principal_read` in
+the tenant, decided through Tenancy's `Authorization::authorize_scope` on the
+same connection. Without `principal_read`, the definition keeps the existing
+editor `capability` rule exactly; no editor capability or no grant refuses the
+read. The principal read capability is never consulted for a person: human
+editing, masked reads and reveals continue to use only the editor capability.
 `Settings::new` leaves that decision unbound, so a principal is refused until `with_authorization` binds Tenancy's decision (the module factory does). Each company read,
 write, and delete calls `base/tenancy.parties` on the same DB connection. A missing
 provider refuses. A read resolves an archived company's values (its reports stay readable); a write or delete needs the organisation proof, which refuses an archived company. Core owns this binding; Settings never queries Company tables.

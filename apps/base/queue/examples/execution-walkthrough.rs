@@ -2,8 +2,10 @@
 //! Modes let an operator exercise actual process death, retries and revocation,
 //! and (SP1) a job that runs as a named system principal with a sealed scope.
 use bilibi_authz::{
-    grants::Grants, CapabilityDefinition, SystemPrincipalDefinition, SystemScope,
-    VocabularyContribution, VOCABULARY,
+    authorize_proof,
+    grants::{Direct, Grants},
+    CapabilityDefinition, Reach, SystemPrincipalDefinition, SystemScope, VocabularyContribution,
+    VOCABULARY,
 };
 use bilibi_base::{
     party_ids::OrganisationId,
@@ -22,24 +24,32 @@ use std::{sync::Arc, time::Duration};
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 
 /// The specimen's named system principal, declared for the binding's
-/// capability and for the company secret's editor capability. Declaration
-/// grants nothing: `grant` gives it the durable tenant grants.
+/// capability and for the company secret's principal read capability.
+/// Declaration grants nothing: `grant` gives it the durable tenant grants.
 const PRINCIPAL: &str = "queue-specimen";
-const SECRET_VIEW: &str = "companies.secret.view";
+const SECRET_READ: &str = "companies.secret.read";
+const SECRET_EDIT: &str = "companies.secret.edit";
 /// An encrypted company setting only the granted principal may read.
 const SECRET_KEY: &str = "queue.specimen.secret";
+/// An existing-style definition that falls back to its editor capability.
+const LEGACY_SECRET_KEY: &str = "queue.specimen.legacy-secret";
 /// The fixture company the specimen reads its secret for.
 const COMPANY: i64 = 1;
 inventory::submit! { Contribution::new(VOCABULARY, "queue.execution-walkthrough", Provenance { module: "base/queue", source: file!(), line: line!() }, &VocabularyContribution {
     domains: &[], verbs: &[],
-    capabilities: &[CapabilityDefinition::tenant(SECRET_VIEW)],
+    capabilities: &[CapabilityDefinition::tenant(SECRET_READ), CapabilityDefinition::tenant(SECRET_EDIT)],
     roles: &[],
-    system_principals: &[SystemPrincipalDefinition { name: PRINCIPAL, capabilities: &["companies.update", SECRET_VIEW] }],
+    system_principals: &[SystemPrincipalDefinition { name: PRINCIPAL, capabilities: &["companies.update", SECRET_READ] }],
 }) }
-inventory::submit! { Contribution::new(DEFINITIONS, SECRET_KEY, Provenance { module: "base/queue", source: file!(), line: line!() }, &Setting::Definition(Definition {
+inventory::submit! { Contribution::new(DEFINITIONS, SECRET_KEY, Provenance { module: "base/queue", source: file!(), line: line!() }, &Definition {
     value_type: ValueType::String, scopes: &[ScopeKind::Company], default: || Value::Null, nullable: true, encrypted: true,
     minimum: None, maximum: None, validator: None,
-    editor: Some(Editor { group: "Queue specimen", label: "Specimen company secret", help: "A private walkthrough value, stored encrypted.", capability: Some(SECRET_VIEW), reveal_duration_ms: 5_000 }),
+    editor: Some(Editor { group: "Queue specimen", label: "Specimen company secret", help: "A private walkthrough value, stored encrypted.", capability: Some(SECRET_EDIT), reveal_duration_ms: 5_000 }),
+}.principal_read(SECRET_READ)) }
+inventory::submit! { Contribution::new(DEFINITIONS, LEGACY_SECRET_KEY, Provenance { module: "base/queue", source: file!(), line: line!() }, &Setting::Definition(Definition {
+    value_type: ValueType::String, scopes: &[ScopeKind::Company], default: || Value::Null, nullable: true, encrypted: true,
+    minimum: None, maximum: None, validator: None,
+    editor: Some(Editor { group: "Queue specimen", label: "Legacy specimen secret", help: "An existing-style private walkthrough value.", capability: Some(SECRET_READ), reveal_duration_ms: 5_000 }),
 })) }
 
 fn allowlist(args: Value) -> Result<Value> {
@@ -122,8 +132,9 @@ impl Handler for Specimen {
 }
 impl Specimen {
     /// SP1: the company secret through the attempt's sealed scope. Settings
-    /// hands a principal the plaintext only with the definition's capability
-    /// granted; the value itself is never printed. `None` lets the effect run.
+    /// hands a principal the plaintext only with the definition's principal
+    /// read capability granted; the value itself is never printed. `None`
+    /// lets the effect run.
     async fn read_secret(&self, execution: &Execution) -> Option<Outcome> {
         let Some(scope) = execution.scope() else {
             return Some(Outcome::Cancel("scope_missing"));
@@ -162,6 +173,25 @@ impl Specimen {
                     resolved.encrypted && value.is_some(),
                     value.map_or(0, |s| s.chars().count())
                 );
+                let legacy = self
+                    .settings
+                    .get(
+                        &**client,
+                        scope,
+                        Target::Company(company),
+                        LEGACY_SECRET_KEY,
+                    )
+                    .await;
+                match legacy {
+                    Ok(legacy) if legacy.encrypted && legacy.value.is_string() => {
+                        println!("legacy editor-capability fallback read: decrypted=true");
+                    }
+                    Err(Error::Forbidden) => {
+                        println!("legacy editor-capability fallback read refused: Forbidden");
+                        return Some(Outcome::Cancel("legacy_secret_refused"));
+                    }
+                    _ => return Some(Outcome::Retry("owner_unavailable")),
+                }
                 None
             }
             Err(Error::Forbidden) => {
@@ -470,56 +500,101 @@ async fn main() -> Result<()> {
     }
     if matches!(
         command.as_str(),
-        "grant" | "revoke" | "revoke-secret" | "store-secret"
+        "grant" | "revoke" | "revoke-secret" | "store-secret" | "prove-human"
     ) {
         // The fixture administrator acts; `set_system` is the same audited
         // write the Authz system-principal screen makes.
         let admin = authentication
             .authenticate(&**client, 1, 4, String::new())
             .await?;
+        if command == "store-secret" {
+            // Stored encrypted; the worker later proves it can read it
+            // without this process or the worker printing the value.
+            let company = OrganisationId::new(COMPANY).map_err(|_| Error::Invalid)?;
+            let mut tx = boundary
+                .begin(
+                    &mut client,
+                    admin.mutation_context("queue.specimen.store-secret"),
+                )
+                .await?;
+            settings
+                .put(
+                    &mut tx,
+                    &admin,
+                    Target::Company(company),
+                    SECRET_KEY,
+                    json!("specimen-secret-not-for-printing"),
+                )
+                .await?;
+            settings
+                .put(
+                    &mut tx,
+                    &admin,
+                    Target::Company(company),
+                    LEGACY_SECRET_KEY,
+                    json!("legacy-specimen-secret-not-for-printing"),
+                )
+                .await?;
+            tx.commit().await?;
+            println!(
+                "stored {SECRET_KEY} and {LEGACY_SECRET_KEY} for company {COMPANY} (encrypted)"
+            );
+            return Ok(());
+        }
+        // Grants owns its connection, so release the authentication read
+        // before asking it to open one.
+        drop(client);
         match command.as_str() {
             "grant" => {
-                for key in ["companies.update", SECRET_VIEW] {
+                for key in ["companies.update", SECRET_READ] {
                     grants
                         .set_system(&admin, PRINCIPAL, key, Some(true))
                         .await?;
                 }
-                println!("granted {PRINCIPAL}: companies.update, {SECRET_VIEW}");
+                println!("granted {PRINCIPAL}: companies.update, {SECRET_READ}");
             }
             "revoke-secret" => {
                 grants
-                    .set_system(&admin, PRINCIPAL, SECRET_VIEW, None)
+                    .set_system(&admin, PRINCIPAL, SECRET_READ, None)
                     .await?;
-                println!("revoked {PRINCIPAL}: {SECRET_VIEW}");
+                println!("revoked {PRINCIPAL}: {SECRET_READ}");
             }
             "revoke" => {
-                for key in ["companies.update", SECRET_VIEW] {
+                for key in ["companies.update", SECRET_READ] {
                     grants.set_system(&admin, PRINCIPAL, key, None).await?;
                 }
-                println!("revoked {PRINCIPAL}: companies.update, {SECRET_VIEW}");
+                println!("revoked {PRINCIPAL}: companies.update, {SECRET_READ}");
             }
-            _ => {
-                // Stored encrypted; the worker later proves it can read it
-                // without this process or the worker printing the value.
-                let company = OrganisationId::new(COMPANY).map_err(|_| Error::Invalid)?;
-                let mut tx = boundary
-                    .begin(
-                        &mut client,
-                        admin.mutation_context("queue.specimen.store-secret"),
-                    )
+            "prove-human" => {
+                grants
+                    .set_direct(&admin, 1, SECRET_READ, Some(Direct::Allow(Reach::All)))
                     .await?;
-                settings
-                    .put(
-                        &mut tx,
-                        &admin,
-                        Target::Company(company),
-                        SECRET_KEY,
-                        json!("specimen-secret-not-for-printing"),
-                    )
+                let client = db.get().await?;
+                let human = authentication
+                    .authenticate(&**client, 1, 1, "walkthrough".into())
                     .await?;
-                tx.commit().await?;
-                println!("stored {SECRET_KEY} for company {COMPANY} (encrypted)");
+                authorize_proof(&**client, &human, SECRET_READ).await?;
+                let editor_capability = settings
+                    .definitions()
+                    .lookup(SECRET_KEY)?
+                    .setting
+                    .definition()
+                    .and_then(|definition| definition.editor.as_ref())
+                    .and_then(|editor| editor.capability)
+                    .ok_or(Error::Internal)?;
+                if editor_capability != SECRET_EDIT
+                    || !matches!(
+                        authorize_proof(&**client, &human, editor_capability).await,
+                        Err(Error::Forbidden)
+                    )
+                {
+                    return Err(Error::Internal);
+                }
+                println!(
+                    "human read-only grant: {SECRET_READ}=allowed editor={editor_capability}=Forbidden"
+                );
             }
+            _ => return Err(Error::Invalid),
         }
         return Ok(());
     }
