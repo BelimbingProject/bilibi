@@ -1679,6 +1679,19 @@ impl MultiSelect {
         template.replace(":count", &count.to_string())
     }
 
+    pub fn filter_summary(&self) -> String {
+        let selected = self.selected_options();
+        match selected.len() {
+            0 => self.placeholder.clone(),
+            1 => selected[0].label.clone(),
+            count => self
+                .selection_label
+                .split_once('|')
+                .map_or(self.selection_label.as_str(), |(_, plural)| plural)
+                .replace(":count", &count.to_string()),
+        }
+    }
+
     pub fn show_chips(&self) -> bool {
         self.selected_count() > 0
     }

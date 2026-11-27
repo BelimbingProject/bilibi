@@ -29,6 +29,10 @@ impl PlanReferences {
     pub fn contains(&self, field: &str) -> bool {
         self.0.contains_key(field)
     }
+    /// The kind of new record `field` links to, when it holds a reference.
+    pub fn kind(&self, field: &str) -> Option<&'static str> {
+        self.0.get(field).map(|link| link.kind)
+    }
     /// Refuse undeclared endpoints and links to another record kind.
     pub fn require(&self, allowed: &[(&str, &str)]) -> Result<()> {
         for (field, link) in &self.0 {
@@ -137,8 +141,48 @@ fn join(path: &str, key: &str) -> String {
         format!("{path}.{key}")
     }
 }
+/// Refuse, before any preview, a link `owner` does not declare in
+/// [`crate::WriteHandler::accepts_references`], saying what to do instead.
+/// `at` prefixes the field path (`operations[3].input` in a review).
+pub(crate) fn supported(
+    owner: &dyn crate::WriteHandler,
+    key: &str,
+    references: &PlanReferences,
+    at: &str,
+) -> Result<()> {
+    let accepted = owner.accepts_references();
+    for (field, link) in &references.0 {
+        if accepted.contains(&(field.as_str(), link.kind)) {
+            continue;
+        }
+        let fix = format!(
+            "Save step {} first, then use its ID here, or send this step without the link.",
+            link.step
+        );
+        let message = if accepted.is_empty() {
+            format!(
+                "`{key}` cannot use the new {} from step {} in the same review. {fix}",
+                link.kind, link.step
+            )
+        } else {
+            let fields = accepted
+                .iter()
+                .map(|(field, kind)| format!("`{field}` (a new {kind})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "`{key}` can link only {fields} to a record created in the same review, not `{field}` to the new {} from step {}. {fix}",
+                link.kind, link.step
+            )
+        };
+        return Err(crate::invalid(&join(at, field), message));
+    }
+    Ok(())
+}
 /// Resolve only the declared created ID, never an arbitrary result path.
-pub(crate) fn resolve(input: &Value, committed: &[Value]) -> Result<Value> {
+/// `schema` is the step's input schema: a field typed string receives the
+/// ID as text, as a concrete ID would be written there.
+pub(crate) fn resolve(schema: &Value, input: &Value, committed: &[Value]) -> Result<Value> {
     Ok(match input {
         Value::Object(object) if object.contains_key("$ref") => {
             let step = step(input).ok_or_else(|| crate::invalid("$ref", "invalid reference"))?;
@@ -156,18 +200,26 @@ pub(crate) fn resolve(input: &Value, committed: &[Value]) -> Result<Value> {
                 .ok_or_else(|| {
                     crate::invalid("$ref", "owner did not return the declared created ID")
                 })?;
-            id.clone()
+            match (schema["type"].as_str(), id) {
+                (Some("string"), Value::Number(number)) => Value::String(number.to_string()),
+                _ => id.clone(),
+            }
         }
         Value::Object(object) => Value::Object(
             object
                 .iter()
-                .map(|(key, value)| Ok((key.clone(), resolve(value, committed)?)))
+                .map(|(key, value)| {
+                    Ok((
+                        key.clone(),
+                        resolve(&schema["properties"][key], value, committed)?,
+                    ))
+                })
                 .collect::<Result<_>>()?,
         ),
         Value::Array(array) => Value::Array(
             array
                 .iter()
-                .map(|value| resolve(value, committed))
+                .map(|value| resolve(&schema["items"], value, committed))
                 .collect::<Result<_>>()?,
         ),
         scalar => scalar.clone(),
