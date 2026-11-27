@@ -198,7 +198,7 @@ The role comes from **`instance.role` in the settings table**. The explicit inst
 
 Builds run in a development workspace, which may live on a Dev server, or in your application repository’s GitHub Actions. The role identifies the instance; it never enables a build job in Bilibi.
 
-Click the role in the status bar to open **Instance settings** (`/system/instance`). A Core Administrator in the platform-operator organisation can change the role, name and colour. Every role change needs a fresh 2FA code, even on Dev, and is audited. The page warns before moving to or from Production: this changes warnings and 2FA rules without moving any data. Other accounts cannot change the role.
+Click the role in the status bar to open **Server Instance** (`/system/instance`). A Core Administrator in the platform-operator organisation can change the role, name and colour. Every role change needs a fresh 2FA code, even on Dev, and is audited. Changing the role changes warnings and 2FA rules without moving any data. Other accounts cannot change the role.
 
 The name and colour also remain available in the generic operator settings. Empty name and colour follow the current role:
 
@@ -530,7 +530,7 @@ Keys in `env` (the service's environment; `README.md` explains each):
 
 | Key | Set to |
 | --- | --- |
-| `BILIBI_ENV` | Initial role for the install seed: `development`, `staging` or `production`; later changes use Instance settings |
+| `BILIBI_ENV` | Initial role for the install seed: `development`, `staging` or `production`; later changes use Server Instance |
 | `APP_ORIGIN` | `https://<staff-site>`, the exact staff address |
 | `BIND_ADDR` | `127.0.0.1:<port>`, the staff listener where Caddy forwards |
 | `PUBLIC_ORIGIN` | `https://<public-site>`, present only when `--public-site` enables public routes. It gives the public listener's scheme and port; each request's hostname names the workspace's site |
