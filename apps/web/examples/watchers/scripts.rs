@@ -2,9 +2,34 @@
 use super::{check, Proof, DELIVER, DELIVERY_PRINCIPAL, OPENED, WATCHER_CAPABILITIES};
 use bilibi_database::{Error, Result};
 use serde_json::{json, Value};
+use std::time::Duration;
+
+// A retry can be scheduled beyond the queue's short readiness window.
+async fn wait_for_terminal_run(proof: &Proof, case: i64, watcher: i64) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if proof.receipts(case).await?.iter().any(|receipt| {
+                receipt.0 == watcher && !matches!(receipt.1.as_str(), "queued" | "matched")
+            }) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        println!("Timed out waiting for watcher {watcher} on case {case}");
+        Error::Internal
+    })?
+}
 
 pub(super) async fn walkthrough(proof: &Proof) -> Result<()> {
     let one = &proof.one;
+    // This proof exercises script outcomes under CI load, including database
+    // operations within the script budget. The infinite loop still times out.
+    proof
+        .setting(one, "watchers.script_milliseconds", json!(1000))
+        .await?;
     proof
         .grant(one, DELIVERY_PRINCIPAL, DELIVER, Some(true))
         .await?;
@@ -66,7 +91,7 @@ pub(super) async fn walkthrough(proof: &Proof) -> Result<()> {
     let looked_up = proof
         .open(one, 1, "Lookup-driven case", "urgent", "10")
         .await?;
-    proof.settled().await?;
+    wait_for_terminal_run(proof, looked_up, lookup_id).await?;
     let looked_up_state = proof.case(looked_up).await?;
     if looked_up_state.0.as_deref() != Some("priority") {
         proof.show(looked_up).await?;
@@ -216,17 +241,8 @@ pub(super) async fn walkthrough(proof: &Proof) -> Result<()> {
             Error::Invalid
         })?;
         let record = proof.open(one, 1, name, "urgent", "10").await?;
-        proof.settled().await?;
-        // A retry may be scheduled beyond `settled`'s short readiness window.
-        // Wait for this run's terminal receipt before judging its script result.
-        let mut receipts = proof.receipts(record).await?;
-        for _ in 0..600 {
-            if receipts.iter().any(|receipt| receipt.0 == id && !matches!(receipt.1.as_str(), "queued" | "matched")) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            receipts = proof.receipts(record).await?;
-        }
+        wait_for_terminal_run(proof, record, id).await?;
+        let receipts = proof.receipts(record).await?;
         let outcome = receipts
             .iter()
             .find(|receipt| receipt.0 == id)
@@ -244,7 +260,7 @@ pub(super) async fn walkthrough(proof: &Proof) -> Result<()> {
         );
         if expected.is_none() {
             let normal = proof.open(one, 1, "Normal case", "normal", "10").await?;
-            proof.settled().await?;
+            wait_for_terminal_run(proof, normal, id).await?;
             let receipts = proof.receipts(normal).await?;
             check(
                 proof.case(normal).await?.1 == 0
@@ -285,7 +301,7 @@ pub(super) async fn walkthrough(proof: &Proof) -> Result<()> {
     let refused = proof
         .open(one, 1, "Permission revoked", "urgent", "10")
         .await?;
-    proof.settled().await?;
+    wait_for_terminal_run(proof, refused, permission_id).await?;
     let receipts = proof.receipts(refused).await?;
     check(
         receipts.iter().any(|receipt| {
@@ -420,7 +436,9 @@ async fn outbound(proof: &Proof) -> Result<()> {
     let good = open("Urgent shared case", "urgent", "desk@partner.example").await?;
     let hostile = open("Redirected case", "urgent", "drop@attacker.example").await?;
     let wide = open("Wide payload case", "low", "desk@partner.example").await?;
-    proof.settled().await?;
+    for case in [good, hostile, wide] {
+        wait_for_terminal_run(proof, case, id).await?;
+    }
     check(
         approved_send(&notices(good).await?),
         "a queued run sends only the approved data to the approved destination",
