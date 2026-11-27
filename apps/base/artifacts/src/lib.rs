@@ -1105,6 +1105,11 @@ impl<O: Owner> Owned<'_, O> {
             return Err(Error::NotFound);
         }
         check(context, tx.sql()).await?;
+        // The callback may wait (an owner's eligibility queries) past the
+        // deadline; judge expiry again on the live clock before bytes load.
+        if self.fetch(&tx, id).await?.expired {
+            return Err(Error::NotFound);
+        }
         let bytes = storage::io(|| storage::read(&row.root, id, row.metadata.byte_size as usize))?;
         if digest(&bytes) != row.metadata.sha256 {
             return Err(Error::Integrity);
