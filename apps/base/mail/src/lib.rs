@@ -352,7 +352,7 @@ inventory::submit! {
         services: &[Service { id: REPORTS, factory: |_| Ok(Arc::new(DeliveryReports::from_inventory())) }, Service { id: SERVICE, factory: |services| {
             let mut mailer = Mailer::from_env().map_err(|error| bilibi_module_registry::RegistryError::Service(error.to_string()))?;
             mailer.settings = Some((services.get::<Db>("base/database.pool")?.as_ref().clone(), services.get("base/settings.store")?));
-            bilibi_module_registry::server_log!(Warning,"mail: {}", mailer.describe());
+            eprintln!("mail: {}", mailer.describe());
             Ok(Arc::new(mailer))
         }}],
     }
