@@ -39,7 +39,19 @@ impl bilibi_company::WorkAccess for crate::UserService {
             let Some(person) = scope.actor().person() else {
                 return Ok(false);
             };
-            Ok(client.query_opt("SELECT id FROM user_desks WHERE tenant_id=$1 AND person_id=$2 AND company_id=$3 FOR KEY SHARE", &[&scope.tenant(), &person.get(), &company.get()]).await?.is_some())
+            let mode = client
+                .query_opt("SHOW transaction_read_only", &[])
+                .await?
+                .ok_or(Error::Internal)?;
+            let sql = if mode.get::<_, &str>(0) == "on" {
+                "SELECT id FROM user_desks WHERE tenant_id=$1 AND person_id=$2 AND company_id=$3"
+            } else {
+                "SELECT id FROM user_desks WHERE tenant_id=$1 AND person_id=$2 AND company_id=$3 FOR KEY SHARE"
+            };
+            Ok(client
+                .query_opt(sql, &[&scope.tenant(), &person.get(), &company.get()])
+                .await?
+                .is_some())
         })
     }
 }
