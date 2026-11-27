@@ -14,11 +14,12 @@ use bilibi_ui::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
         PageFuture, PageRequest,
     },
-    BuiltinColumn, FlexRow, FlexTable, Header, Html, ListColumns, ListSpec, ListState, PageCounts,
-    Pagination, StatusbarTag, TableEmpty,
+    BuiltinColumn, FlexRow, FlexTable, Header, Html, ListColumns, ListSpec, ListState,
+    StatusbarTag, TableEmpty,
 };
 use std::{collections::HashMap, sync::Arc};
 const PATH: &str = "/system/diagnostics";
+const ROW_LIMIT: u64 = 100;
 const SERVICE: &str = "base/perf.diagnostics-pages";
 
 #[derive(Clone)]
@@ -35,19 +36,15 @@ impl Pages {
         bilibi_authz::authorize_operator(&**c, scope, VIEW).await?;
         Ok(())
     }
-    async fn rows(&self) -> Result<Vec<Row>> {
+    async fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         for provider in self.providers.iter() {
-            rows.extend(
-                (provider.read)(&self.db, &self.settings)
-                    .await?
-                    .into_iter()
-                    .take(100),
-            );
+            if let Ok(found) = (provider.read)(&self.db, &self.settings).await {
+                rows.extend(found);
+            }
         }
-        rows.sort_by_key(|r| std::cmp::Reverse(r.last_seen));
-        rows.truncate(100);
-        Ok(rows)
+        rows.sort_by_key(|r| (r.severity != "error", std::cmp::Reverse(r.last_seen)));
+        rows
     }
 }
 pub(crate) fn providers(
@@ -59,7 +56,11 @@ pub(crate) fn providers(
         .map(|entry| entry.get::<Provider>())
         .collect()
 }
-fn panel(rows: Vec<Row>, display: &bilibi_datetime::DisplayContext) -> Result<String> {
+fn panel(
+    rows: Vec<Row>,
+    limit: usize,
+    display: &bilibi_datetime::DisplayContext,
+) -> Result<String> {
     let errors: i64 = rows
         .iter()
         .filter(|r| r.severity == "error")
@@ -96,7 +97,7 @@ fn panel(rows: Vec<Row>, display: &bilibi_datetime::DisplayContext) -> Result<St
     .map_err(|_| Error::Internal)?;
     let visible = !rows.is_empty();
     let mut body = Html::EMPTY;
-    for (index, row) in rows.into_iter().enumerate() {
+    for (index, row) in rows.into_iter().take(limit).enumerate() {
         let at = jiff::Timestamp::try_from(row.last_seen).map_err(|_| Error::Internal)?;
         let rendered = display.render(
             at,
@@ -146,7 +147,7 @@ struct State {
     list: ListState,
 }
 impl State {
-    fn new(pages: Pages, panel: bool, query: &HashMap<String, String>) -> Result<Self> {
+    fn new(pages: Pages, panel: bool) -> Result<Self> {
         let columns = ListColumns::mount(
             "diagnostics-table",
             vec![
@@ -159,9 +160,10 @@ impl State {
         )
         .map_err(|_| Error::Internal)?;
         let list = ListState::parse(
-            query,
+            &HashMap::new(),
             ListSpec {
-                page_sizes: vec![25, 50, 100],
+                page_sizes: vec![ROW_LIMIT],
+                default_page_size: ROW_LIMIT,
                 ..ListSpec::default()
             }
             .shared()
@@ -190,13 +192,10 @@ impl State {
             .display(&**client, scope, None, locale)
             .await?;
         drop(client);
-        let rows = match self.pages.rows().await {
-            Ok(rows) => rows,
-            Err(_) if self.panel => Vec::new(),
-            Err(error) => return Err(error),
-        };
+        let rows = self.pages.rows().await;
+        let limit = self.list.page_size as usize;
         if self.panel {
-            return panel(rows, &display);
+            return panel(rows, limit, &display);
         }
         let mut body = Html::render(&Header {
             title: Html::text("Diagnostics"),
@@ -204,12 +203,9 @@ impl State {
             ..Header::default()
         })
         .map_err(|_| Error::Internal)?;
-        let total = rows.len();
-        let start = (self.list.page.saturating_sub(1) * self.list.page_size) as usize;
         let entries = rows
             .iter()
-            .skip(start)
-            .take(self.list.page_size as usize)
+            .take(limit)
             .enumerate()
             .map(|(i, row)| {
                 let at = jiff::Timestamp::try_from(row.last_seen).map_err(|_| Error::Internal)?;
@@ -243,14 +239,6 @@ impl State {
             "No diagnostics have been recorded.",
         )));
         body.push(&Html::render(&table).map_err(|_| Error::Internal)?);
-        body.push(
-            &Html::render(&Pagination::new(
-                "diagnostics-pagination",
-                PageCounts::new(self.list.page, self.list.page_size, total as u64),
-                &[25, 50, 100],
-            ))
-            .map_err(|_| Error::Internal)?,
-        );
         Ok(body.to_string())
     }
 }
@@ -265,7 +253,7 @@ impl Page<Scope, Error> for Pages {
                 "status" => true,
                 _ => return Err(Error::NotFound),
             };
-            let state = State::new(self.clone(), panel, req.query)?;
+            let state = State::new(self.clone(), panel)?;
             Ok(PageBody {
                 html: state.body(req.scope.ok_or(Error::Unauthorized)?).await?,
                 live: true,
@@ -282,8 +270,9 @@ impl Page<Scope, Error> for Pages {
                 "status" => true,
                 _ => return Err(Error::NotFound),
             };
-            Ok(Some(Box::new(State::new(self.clone(), panel, req.query)?)
-                as Box<dyn LiveState<Scope, Error>>))
+            Ok(Some(
+                Box::new(State::new(self.clone(), panel)?) as Box<dyn LiveState<Scope, Error>>
+            ))
         })
     }
 }
@@ -293,22 +282,7 @@ impl LiveState<Scope, Error> for State {
             self.pages.authorize(req.scope).await?;
             match req.input {
                 LiveInput::Refresh => (),
-                LiveInput::Params(values) if !self.panel => {
-                    self.list = ListState::parse(
-                        values,
-                        self.list
-                            .spec()
-                            .clone()
-                            .shared()
-                            .map_err(|_| Error::Internal)?,
-                    )
-                    .map_err(|_| Error::Internal)?;
-                }
-                LiveInput::Event(v)
-                    if !self.panel && v.get("type").and_then(|v| v.as_str()) == Some("page") =>
-                {
-                    self.list.put_page(v.get("page").and_then(|v| v.as_str()));
-                }
+                LiveInput::Params(_) if !self.panel => (),
                 LiveInput::Event(v)
                     if !self.panel
                         && v.get("type").and_then(|v| v.as_str()) == Some("diagnostics_grid") =>
@@ -332,11 +306,6 @@ impl LiveState<Scope, Error> for State {
             }
             Ok(LiveBody {
                 html: self.body(req.scope).await?,
-                query: if self.panel {
-                    HashMap::new()
-                } else {
-                    self.list.to_params()
-                },
                 ..LiveBody::default()
             })
         })

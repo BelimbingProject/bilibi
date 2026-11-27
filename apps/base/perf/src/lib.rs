@@ -128,7 +128,7 @@ setting!(
 inventory::submit! {
     Module { id: "base/perf", layer: bilibi_module_registry::Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/authz", "base/queue", "base/schedule", "base/settings", "base/dashboard", "base/tenancy", "base/datetime", "base/locale", "base/menu", "base/ui"],
-        migrations: &[("base-perf-001", include_str!("../migrations/001-perf.sql")), ("base-perf-002-diagnostics", include_str!("../migrations/002-diagnostics.sql"))],
+        migrations: &[("base-perf-001", include_str!("../migrations/001-perf.sql")), ("base-perf-002-diagnostics", include_str!("../migrations/002-diagnostics.sql")), ("base-perf-003-diagnostic-kind", include_str!("../migrations/003-diagnostic-kind.sql"))],
         services: &[
             Service { id: "base/perf.diagnostics-pages", factory: |services| {
                 let modules = bilibi_module_registry::discover()?;

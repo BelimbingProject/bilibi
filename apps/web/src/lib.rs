@@ -156,7 +156,7 @@ impl App {
         let perf = services.get::<bilibi_base::perf::Recorder>("base/perf.recorder")?;
         for dropped in menu.dropped() {
             eprintln!("warning: {dropped}");
-            perf.diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
+            perf.diagnostic(bilibi_base::perf::Diagnostic::MenuEntry);
         }
         let routes = Arc::new(routes::bind(&services)?);
         let downloads = Arc::new(routes::bind_downloads(&services, &routes)?);
@@ -632,13 +632,9 @@ async fn response_headers(
         "same-origin"
     };
     let mut response = next.run(request).await;
-    if let Some(Failure(cause)) = response.extensions_mut().remove::<Failure>() {
+    if let Some(Failure(cause, diagnostic)) = response.extensions_mut().remove::<Failure>() {
         eprintln!("error: {line} failed: {cause}");
-        app.perf
-            .diagnostic(bilibi_base::perf::Diagnostic::RequestError);
-    } else if response.status() == StatusCode::SERVICE_UNAVAILABLE {
-        app.perf
-            .diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
+        app.perf.diagnostic(diagnostic);
     }
     let frame_ancestors = match app.site {
         Site::Staff => "'self'",
@@ -721,7 +717,7 @@ fn credential_path(paths: &CredentialPaths, path: &str) -> bool {
 struct HttpError(Error, Option<std::sync::Arc<errors::Failure>>);
 /// The cause of a server-side `HttpError`, for `response_headers` to log.
 #[derive(Clone)]
-struct Failure(String);
+struct Failure(String, bilibi_base::perf::Diagnostic);
 /// Whether an error is the server's fault (logged), not the request's.
 pub(crate) fn server_fault(error: &Error) -> bool {
     !matches!(
@@ -745,9 +741,20 @@ impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let mut response = (errors::status_of(&self.0), self.0.to_string()).into_response();
         if server_fault(&self.0) {
+            use bilibi_base::perf::Diagnostic;
+            let diagnostic = match &self.0 {
+                Error::Database(_) | Error::Pool(_) => Diagnostic::RequestDatabase,
+                Error::Registry(_) => Diagnostic::RequestRegistry,
+                Error::MigrationDefinition(_) | Error::MigrationOwner { .. } => {
+                    Diagnostic::RequestMigration
+                }
+                Error::SeedDefinition(_) => Diagnostic::RequestSeed,
+                Error::UnrecoveredTransaction(_) => Diagnostic::RequestTransaction,
+                _ => Diagnostic::RequestInternal,
+            };
             response
                 .extensions_mut()
-                .insert(Failure(format!("{:?}", self.0)));
+                .insert(Failure(format!("{:?}", self.0), diagnostic));
         }
         if let Some(failure) = self.1 {
             response.extensions_mut().insert(failure);

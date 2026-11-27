@@ -1122,7 +1122,7 @@ impl<S: Side> Session<S> {
                     if crate::server_fault(&error) {
                         eprintln!("error: live shell panel {id} failed to refresh: {error:?}");
                         app.perf
-                            .diagnostic(bilibi_base::perf::Diagnostic::LiveError);
+                            .diagnostic(bilibi_base::perf::Diagnostic::LiveShellRefresh);
                     }
                 }
             }
@@ -1326,7 +1326,7 @@ impl<S: Side> Session<S> {
                     if crate::server_fault(&error) {
                         eprintln!("error: live panel {id} on {} failed: {error:?}", self.path);
                         app.perf
-                            .diagnostic(bilibi_base::perf::Diagnostic::LiveError);
+                            .diagnostic(bilibi_base::perf::Diagnostic::LivePanelUpdate);
                     }
                     self.panels.remove(&id);
                     messages.push(json!({"type":"error", "target":id, "message":error.to_string(), "clear":true}));
@@ -1495,7 +1495,7 @@ impl<S: Side> Session<S> {
             Err(error) => {
                 eprintln!("error: an upload could not be staged: {error:?}");
                 app.perf
-                    .diagnostic(bilibi_base::perf::Diagnostic::LiveError);
+                    .diagnostic(bilibi_base::perf::Diagnostic::LiveUpload);
                 None
             }
         };
@@ -1994,7 +1994,7 @@ pub async fn run<S: Side>(
             Err(error) => {
                 if crate::server_fault(&error) {
                     app.perf
-                        .diagnostic(bilibi_base::perf::Diagnostic::LiveError);
+                        .diagnostic(bilibi_base::perf::Diagnostic::LiveEvent);
                     eprintln!(
                         "error: live {target} event on {} failed: {error:?}",
                         session.path

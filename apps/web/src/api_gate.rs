@@ -202,7 +202,7 @@ fn flush(app: &App, closed: Counts) {
             };
             if let Err(error) = written {
                 eprintln!("warning: aggregated agent edge refusals for {endpoint} were not audited: {error}");
-                perf.diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
+                perf.diagnostic(bilibi_base::perf::Diagnostic::AgentRefusalAudit);
             }
         }
     });

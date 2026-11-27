@@ -77,12 +77,12 @@ impl Proxies {
                 Ok(None) => {
                     eprintln!("warning: {TRUSTED_PROXIES_KEY} could not be understood");
                     app.perf
-                        .diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
+                        .diagnostic(bilibi_base::perf::Diagnostic::ProxySettingInvalid);
                 }
                 Err(error) => {
                     eprintln!("warning: {TRUSTED_PROXIES_KEY} could not be read: {error}");
                     app.perf
-                        .diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
+                        .diagnostic(bilibi_base::perf::Diagnostic::ProxySettingRead);
                 }
             }
         }

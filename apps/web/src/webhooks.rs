@@ -277,7 +277,7 @@ impl Boundary {
                     "warning: aggregated webhook refusals for {handler} were not audited: {error}"
                 );
                 self.perf
-                    .diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
+                    .diagnostic(bilibi_base::perf::Diagnostic::WebhookRefusalAudit);
             }
         }
     }
