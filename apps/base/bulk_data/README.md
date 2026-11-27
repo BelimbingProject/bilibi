@@ -31,7 +31,7 @@ inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/per
 | `label`, `path` | What the records are called; their page with `{id}`, for links from row results |
 | `table` | The registered Grid table: its tenant/company scope governs this record type, and a field restricted there for the person is not offered |
 | `id` | The record ID property in create results, duplicate candidates and list records |
-| `import` | Optional; `None` excludes the type from imports and saved mappings |
+| `import` | Use `Some(Import { … })` to support imports and saved mappings. For a read-only source that offers CSV export, set `import: None` and configure `export`. |
 | `import.capability` | The owner's import capability (verb `import`, from its own vocabulary), with the same tenant/company scope as the Grid table; checked for every row |
 | `import.create` | The owner's write contract creating one record |
 | `import.duplicates` | Optional. The owner's read answering candidates for the match `fields`, and its update contract with the id, version and fields properties. A field the file leaves out keeps the record's value |
@@ -47,7 +47,7 @@ Adopters: Core Person (`core/person.contacts`, matched on email or phone; export
 
 ## Upgrade notes for agents
 
-Move each `Import.id` to `RecordType.id` and wrap each import declaration in `Some(...)`. Use `import: None` for types that cannot be imported; keep at least one of import, export or bulk update.
+Move each `Import.id` to `RecordType.id` and wrap each supported import declaration in `Some(...)`. See [the `import` field](#opting-a-record-type-in) for export-only types.
 
 ## Tenant-defined fields in CSV import
 
@@ -55,7 +55,7 @@ Move each `Import.id` to `RecordType.id` and wrap each import declaration in `So
 
 - Each row goes through the owner's existing preview and commit: type, text limits, active choice checks, permissions, version fences and audit all apply there. An invalid custom value refuses the row.
 - A duplicate update sends only mapped custom keys. Unmapped keys, including archived values, stay in the owner's JSON column. Saved mappings retain stable field names and are rechecked before reuse; an archived or unavailable key is refused rather than silently dropped. On the mapping page, choose **Not imported** for an unavailable field to remove its mapping, or restore the field or access before checking or importing.
-- Owners opt in with a `CustomImport` contribution to `CUSTOM_IMPORTS`, under their existing import type id. Name the owning `base/custom_fields` record type and the create and update operations' top-level custom-patch array properties (`create_field`, `update_field`). Those arrays hold `{key, value, values}` pairs: `value` text (or null) for every kind but several choices, `values` an array of codes for several choices. Boot verifies both contributions belong to the same module and the contracts accept that shape; `cf_` is reserved on opted-in types. Existing `RecordType` declarations need no change.
+- Owners opt in with a `CustomImport` contribution to `CUSTOM_IMPORTS`, using the key of a record type that supports import. Name the owning `base/custom_fields` record type and the create and update operations' top-level custom-patch array properties (`create_field`, `update_field`). Those arrays hold `{key, value, values}` pairs: `value` text (or null) for every kind but several choices, `values` an array of codes for several choices. Boot verifies both contributions belong to the same module and the contracts accept that shape; `cf_` is reserved on opted-in types.
 - Import field discovery is fresh and tenant-scoped. The importer sees only its tenant's active definitions. The owner's normal transactional validation remains the final authority if definitions or choices change while a job runs.
 
 ## Letting people undo an import
