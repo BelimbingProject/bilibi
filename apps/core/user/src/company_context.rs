@@ -12,7 +12,8 @@
 //! trail says which company was current from when; a refused switch leaves a
 //! non-retained `user.company.switch_refused` action naming the requested
 //! company. The reach check itself writes no authorization decision. An empty
-//! choice keeps the scope's current valid desk.
+//! choice keeps the scope's current valid desk. Choosing the company that is
+//! already current answers as a switch and writes nothing (#958).
 use crate::UserService;
 use bilibi_audit::{record_action, Attribution, RequestInfo};
 use bilibi_database::Error;
@@ -83,6 +84,12 @@ impl UserService {
             }
         }
         let before = scope.current_company().map(OrganisationId::get);
+        // Choosing the current company again (a double click, a page that
+        // re-sends its state) is the switch already made: it answers like one
+        // and writes nothing, neither the session nor an audit action.
+        if company == before {
+            return Ok(Switched { company });
+        }
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("user.company.switch"))
@@ -109,13 +116,39 @@ impl UserService {
         let user = scope.user();
         // Company -> User -> Session, as account mutations revoke sessions
         // after locking their user. A view's choice is never a saved preference.
+        // A saved preference that already names this company (another session
+        // chose it) is left as it is; MutationBoundary refuses a write that
+        // changes nothing.
         if scope.impersonator().is_none() {
-            tx.mutate(move|sql|Box::pin(async move {
-                let old:Option<i64>=sql.query_opt("SELECT last_desk_id FROM users WHERE tenant_id=$1 AND id=$2 AND kind='staff' FOR UPDATE",&[&tenant,&user]).await?.ok_or(Error::Unauthorized)?.get(0);
-                sql.execute("UPDATE users SET last_desk_id=$3 WHERE tenant_id=$1 AND id=$2",&[&tenant,&user,&to]).await?;
-                let changes=if old==to {Vec::new()}else{vec![bilibi_database::Change{kind:"user.desk_choice".into(),id:user,old:json!({"company_id":old}),new:json!({"company_id":to})}]};
-                Ok(((),changes))
-            })).await?;
+            let old: Option<i64> = tx
+                .sql()
+                .query_opt(
+                    "SELECT last_desk_id FROM users WHERE tenant_id=$1 AND id=$2 AND kind='staff' FOR UPDATE",
+                    &[&tenant, &user],
+                )
+                .await
+                .map_err(Error::from)?
+                .ok_or(Error::Unauthorized)?
+                .get(0);
+            if old != to {
+                tx.mutate(move |sql| {
+                    Box::pin(async move {
+                        sql.execute(
+                            "UPDATE users SET last_desk_id=$3 WHERE tenant_id=$1 AND id=$2",
+                            &[&tenant, &user, &to],
+                        )
+                        .await?;
+                        let change = bilibi_database::Change {
+                            kind: "user.desk_choice".into(),
+                            id: user,
+                            old: json!({"company_id": old}),
+                            new: json!({"company_id": to}),
+                        };
+                        Ok(((), vec![change]))
+                    })
+                })
+                .await?;
+            }
         }
         match self
             .sessions
