@@ -1165,15 +1165,15 @@ if not extensions.startswith("\n") or not extensions.strip():
 for line in extensions.splitlines():
     if not line:
         continue
-    declaration, modules, _ = line.partition(", modules:")
+    declaration, modules_marker, modules = line.partition(", modules:")
     identity, code_marker, code = declaration.rpartition(", code:")
     if not code_marker:
         identity, code = declaration, "customer"
     else:
         code = code[1:] if code.startswith(" ") else ""
-    if not line.startswith("  ") or not modules or not re.fullmatch(
+    if not line.startswith("  ") or not modules_marker or not re.fullmatch(
         r"[^\s,:]+ (?:unpinned|[^\s,:]+, commit [^\s,:]+)", identity.lstrip()
-    ):
+    ) or (modules.strip() and not re.fullmatch(r"[^\s,:]+(?:, [^\s,:]+)*", modules.strip())):
         sys.exit("Invalid Extension declaration")
     name = identity.strip().split(" ", 1)[0]
     if code not in {"reviewed", "customer"}:

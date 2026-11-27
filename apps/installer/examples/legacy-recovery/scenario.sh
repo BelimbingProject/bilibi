@@ -181,11 +181,15 @@ esac
 STUB
 chmod +x "$root_dir/shared"
 for instance in "$root_dir"/{worker,shell}/dev; do
-    mkdir "$instance/releases/4" "$instance/releases/5" "$instance/releases/6"
+    mkdir "$instance/releases/"{4,5,6,7,8,9,10}
     cp "$root_dir/shared" "$instance/releases/4/bilibi-web"
     sed 's/ unpinned, modules:/ unpinned, code:reviewed, modules:/' "$root_dir/legacy" > "$instance/releases/5/bilibi-web"
     sed 's/ unpinned, modules:/ unpinned, code : reviewed, modules:/' "$root_dir/legacy" > "$instance/releases/6/bilibi-web"
-    chmod +x "$instance/releases/"{5,6}/bilibi-web
+    sed 's/modules: custom/modules: custom, code: reviewed/' "$root_dir/legacy" > "$instance/releases/7/bilibi-web"
+    sed 's/modules: custom/code: reviewed, modules: custom, code: customer/' "$root_dir/legacy" > "$instance/releases/8/bilibi-web"
+    cp "$instance/releases/7/bilibi-web" "$instance/releases/9/bilibi-web"
+    cp "$instance/releases/8/bilibi-web" "$instance/releases/10/bilibi-web"
+    chmod +x "$instance/releases/"{5,6,7,8,9,10}/bilibi-web
     ln -sfn 4 "$instance/releases/current"
 done
 : > "$FIXTURE_EVENTS"
@@ -194,11 +198,12 @@ admission_case() {
     refusal='requires an isolated installation'
     case $1 in
         5) mode=isolated; refusal='must declare reviewed or customer code';;
-        6) mode=isolated; refusal='invalid Extension declaration';;
+        6|7|8) mode=isolated; refusal='invalid Extension declaration';;
+        9|10) refusal='invalid Extension declaration';;
     esac
 }
 systemctl start bilibi@dev
-for target in 1 3 5 6; do
+for target in 1 3 5 6 7 8 9 10; do
     admission_case "$target"
     (cd "$root_dir/shell/dev/releases/$target" && sha256sum bilibi-web > SHA256SUMS)
     if bash -s -- "$root_dir" "$target" "$mode" >"$root_dir/switch.log" 2>&1 <<'SHELL'
@@ -225,7 +230,7 @@ done
 
 export FIXTURE_CURRENT=$root_dir/worker/dev/current
 systemctl start bilibi@dev
-for target in 1 3 5 6; do
+for target in 1 3 5 6 7 8 9 10; do
     admission_case "$target"
     sql -c "UPDATE base_settings SET value='\"$mode\"' WHERE key='installation.mode'" >/dev/null
     job=$(sql -c "INSERT INTO base_software_jobs (tenant_id,kind,request,review,requested_by)

@@ -85,11 +85,8 @@ fn platform(line: &str) -> Option<Value> {
 /// `  connector 0.1.0, commit abc, code: reviewed, modules: a, b`, `  finance untagged,
 /// commit abc, modules: a` or `  finance unpinned, modules: a`.
 fn container(line: &str) -> Option<Value> {
-    let (id, rest) = line
-        .split_once(", modules:")?
-        .0
-        .trim_start()
-        .split_once(' ')?;
+    let (declaration, modules) = line.split_once(", modules:")?;
+    let (id, rest) = declaration.trim_start().split_once(' ')?;
     let (rest, code) = rest
         .rsplit_once(", code:")
         .map_or((rest, None), |(rest, code)| {
@@ -111,7 +108,8 @@ fn container(line: &str) -> Option<Value> {
             (Some(version).filter(|v| *v != "untagged"), Some(commit))
         }
     };
-    if !token(id) {
+    let modules = modules.trim();
+    if !token(id) || (!modules.is_empty() && !modules.split(", ").all(token)) {
         return None;
     }
     Some(json!({"id": id, "version": version, "commit": commit, "code": code}))
