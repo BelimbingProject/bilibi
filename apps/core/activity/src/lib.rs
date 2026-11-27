@@ -366,8 +366,18 @@ impl Activities {
     /// tenant; `Forbidden` when it is not the reader's to see.
     pub async fn get(&self, scope: &Scope, id: i64) -> Result<Activity> {
         let client = self.db.get().await?;
-        let scope = self.fresh(&**client, scope).await?;
-        store::get(&**client, &scope, id).await
+        self.get_on(&**client, scope, id).await
+    }
+    /// [`Activities::get`] on the caller's connection or transaction, for a
+    /// module that already holds one: the same checks and answer.
+    pub async fn get_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        id: i64,
+    ) -> Result<Activity> {
+        let scope = self.fresh(client, scope).await?;
+        store::get(client, &scope, id).await
     }
     /// The guests of an activity the reader may see.
     pub async fn guests(&self, scope: &Scope, id: i64) -> Result<Vec<GuestRow>> {
@@ -447,7 +457,17 @@ impl Activities {
     /// Whether the reader may change, close or delete `activity`.
     pub async fn may_edit(&self, scope: &Scope, activity: &Activity) -> Result<bool> {
         let client = self.db.get().await?;
-        store::may_edit(&**client, scope, activity).await
+        self.may_edit_on(&**client, scope, activity).await
+    }
+    /// [`Activities::may_edit`] on the caller's connection or transaction,
+    /// for a module that already holds one: the same rule and answer.
+    pub async fn may_edit_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        activity: &Activity,
+    ) -> Result<bool> {
+        store::may_edit(client, scope, activity).await
     }
 
     /// The checks a create makes, with no write, on the client a plan hands
