@@ -96,7 +96,14 @@ inventory::submit! { Consumer::new::<HandlerBinding>(HANDLERS,"base/queue",valid
 
 #[derive(Clone, Copy, Debug)]
 pub enum JobFailure {
-    Retry,
+    WorkerError {
+        kind: &'static str,
+        message: &'static str,
+    },
+    WorkerWarning {
+        kind: &'static str,
+        message: &'static str,
+    },
     Preparation,
     Panic,
     Timeout,
@@ -250,8 +257,15 @@ pub struct Execution {
     capability: &'static str,
     authentication: Arc<Authentication>,
     boundary: Arc<MutationBoundary>,
+    observers: Arc<[Arc<ObserverService>]>,
 }
 impl Execution {
+    pub fn report_error(&self, kind: &'static str, message: &'static str) {
+        report_failure(&self.observers, JobFailure::WorkerError { kind, message });
+    }
+    pub fn report_warning(&self, kind: &'static str, message: &'static str) {
+        report_failure(&self.observers, JobFailure::WorkerWarning { kind, message });
+    }
     pub fn identity(&self) -> &Identity {
         &self.identity
     }
@@ -414,16 +428,16 @@ pub struct Executor {
     authentication: Arc<Authentication>,
     boundary: Arc<MutationBoundary>,
     handlers: BTreeMap<&'static str, BoundHandler>,
-    observers: Vec<Arc<ObserverService>>,
+    observers: Arc<[Arc<ObserverService>]>,
     endings: BTreeMap<&'static str, BoundEnding>,
     config: Config,
 }
-impl Executor {
-    fn report_failure(&self, failure: JobFailure) {
-        for observer in &self.observers {
-            observer.0.failure(failure);
-        }
+fn report_failure(observers: &[Arc<ObserverService>], failure: JobFailure) {
+    for observer in observers {
+        observer.0.failure(failure);
     }
+}
+impl Executor {
     /// Call after Services::install: owners are upstream of Queue and bind their
     /// handler services during boot. Missing/foreign bindings fail before work.
     pub fn from_services(services: &Services, config: Config) -> Result<Arc<Self>> {
@@ -466,7 +480,7 @@ impl Executor {
         if queue.workers().iter().any(|w| !handlers.contains_key(w.id)) {
             return Err(Error::Invalid);
         }
-        let observers = catalog
+        let observers: Vec<_> = catalog
             .entries::<ObserverBinding>(OBSERVERS)?
             .iter()
             .map(|entry| services.get(entry.get::<ObserverBinding>()?.service))
@@ -503,7 +517,7 @@ impl Executor {
             authentication: services.get("base/tenancy.authentication")?,
             boundary: services.get("base/database.mutations")?,
             handlers,
-            observers,
+            observers: observers.into(),
             endings,
             config: config.validate()?,
         }))
@@ -532,7 +546,7 @@ impl Executor {
                     let id = match &ended { Ok((id, _)) => *id, Err(error) => error.id() };
                     let Some(which) = running.remove(&id) else { continue };
                     eprintln!("queue {which:?} loop ended; restarting it");
-                    self.report_failure(JobFailure::Loop);
+                    report_failure(&self.observers, JobFailure::Loop);
                     self.start(&mut slots, &mut running, which, &shutdown, true);
                 }
             }
@@ -581,13 +595,13 @@ impl Executor {
                         continue;
                     }
                     eprintln!("queue execution infrastructure unavailable");
-                    self.report_failure(JobFailure::Execution);
+                    report_failure(&self.observers, JobFailure::Execution);
                 }
                 // Only an empty queue or an error waits a poll interval.
                 Ok(None) => {}
                 Err(_) => {
                     eprintln!("queue claim infrastructure unavailable");
-                    self.report_failure(JobFailure::Claim);
+                    report_failure(&self.observers, JobFailure::Claim);
                 }
             }
             tokio::select! {
@@ -635,10 +649,10 @@ impl Executor {
                                 _ => {
                                     more = false;
                                     eprintln!("queue ending hook failed");
-                                    self.report_failure(JobFailure::EndingHook);
+                                    report_failure(&self.observers, JobFailure::EndingHook);
                                     if store::ending_failed(&self.db, id).await.is_err() {
                                         eprintln!("queue ending infrastructure unavailable");
-                                        self.report_failure(JobFailure::EndingWrite);
+                                        report_failure(&self.observers, JobFailure::EndingWrite);
                                     }
                                 }
                             }
@@ -649,7 +663,7 @@ impl Executor {
                     }
                     Err(_) => {
                         eprintln!("queue ending infrastructure unavailable");
-                        self.report_failure(JobFailure::EndingRead);
+                        report_failure(&self.observers, JobFailure::EndingRead);
                     }
                 }
             }
@@ -780,6 +794,7 @@ impl Executor {
                 capability,
                 authentication: self.authentication.clone(),
                 boundary: self.boundary.clone(),
+                observers: self.observers.clone(),
             },
             bound.service.clone(),
             args,
@@ -800,14 +815,14 @@ impl Executor {
         };
         let mut child = JoinSet::new();
         child.spawn(async move {
-            let mut retry_failure = JobFailure::Retry;
+            let mut failure = None;
             let work: HandlerFuture<'_> = Box::pin(async {
                 match executor.prepare(&claim).await {
                     Ok((execution, handler, args)) => handler.0.perform(&execution, args).await,
                     Err(Error::Unauthorized | Error::Forbidden) => Outcome::Cancel("actor_refused"),
                     Err(Error::Invalid | Error::NotFound) => Outcome::Cancel("worker_args_refused"),
                     Err(_) => {
-                        retry_failure = JobFailure::Preparation;
+                        failure = Some(JobFailure::Preparation);
                         Outcome::Retry("prepare_unavailable")
                     }
                 }
@@ -819,7 +834,7 @@ impl Executor {
                     observer.0.observe(facts.clone(), work)
                 })
                 .await;
-            (outcome, retry_failure)
+            (outcome, failure)
         });
         let lease = Duration::from_secs(self.config.lease_seconds as u64);
         let beat = lease / 3;
@@ -832,13 +847,13 @@ impl Executor {
         let mut renewed_at = tokio::time::Instant::now();
         let deadline = tokio::time::sleep(self.config.max_runtime);
         tokio::pin!(deadline);
-        let (outcome, retry_failure) = loop {
+        let (outcome, failure) = loop {
             tokio::select! {
                 result = child.join_next() => break match result {
                     Some(Ok(result)) => result,
-                    _ => (Outcome::Retry("worker_panicked"), JobFailure::Panic),
+                    _ => (Outcome::Retry("worker_panicked"), Some(JobFailure::Panic)),
                 },
-                _ = &mut deadline => break (Outcome::Retry("worker_timed_out"), JobFailure::Timeout),
+                _ = &mut deadline => break (Outcome::Retry("worker_timed_out"), Some(JobFailure::Timeout)),
                 _ = heartbeat.tick(), if beats.is_empty() => {
                     let (db, token, seconds) = (self.db.clone(), token.clone(), self.config.lease_seconds);
                     let asked = tokio::time::Instant::now();
@@ -866,9 +881,7 @@ impl Executor {
         let (state, code, failure) = match outcome {
             Outcome::Completed => ("completed", None, None),
             Outcome::Cancel(code) if valid_code(code) => ("cancelled", Some(code), None),
-            Outcome::Retry(code) if valid_code(code) => {
-                (retry_state, Some(code), Some(retry_failure))
-            }
+            Outcome::Retry(code) if valid_code(code) => (retry_state, Some(code), failure),
             _ => (
                 retry_state,
                 Some("invalid_worker_result"),
@@ -877,7 +890,7 @@ impl Executor {
         };
         if let Some(failure) = failure {
             eprintln!("queue job attempt failed: {failure:?}");
-            self.report_failure(failure);
+            report_failure(&self.observers, failure);
         }
         store::finish(&self.db, id, &token, state, code).await?;
         Ok(())

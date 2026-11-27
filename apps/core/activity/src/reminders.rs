@@ -98,6 +98,10 @@ impl Handler for Sweep {
                 Ok(()) => Outcome::Completed,
                 Err(error) => {
                     eprintln!("error: activity reminders: {error}");
+                    execution.report_error(
+                        "activity_reminders_unavailable",
+                        "An activity reminder job failed.",
+                    );
                     Outcome::Retry("activity_reminders_unavailable")
                 }
             }

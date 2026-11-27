@@ -90,7 +90,7 @@ BILIBI_DISPOSABLE_PERF_DEMO=yes DATABASE_URL=postgres://... \
 
 ## Server diagnostics
 
-The status bar shows recent server errors and warnings to platform operators with `admin.system.perf.view` (included in the System Viewer role). Its panel links to the read-only Diagnostics list. The shell refreshes the panel with its normal live refresh. An empty store draws no tag. Both views show up to 100 rows, with errors first. The tag count includes occurrences beyond that display limit.
+The status bar shows recent server errors and warnings to platform operators with `admin.system.perf.view` (included in the System Viewer role). Its panel links to the read-only Diagnostics list. The shell refreshes the panel with its normal live refresh. A successful empty read draws no tag. Both views indicate when a provider could not be read. Both views show up to 100 rows, with errors first. The tag count includes occurrences beyond that display limit.
 
 Server warning and failure logging and Queue's executor submit predefined diagnostic messages through the recorder's bounded, best-effort queue. Messages deliberately contain no error strings, request bodies, credentials or identifiers; stderr remains the place for the original logs. Each failure kind within a severity and source has one row with count, first and last seen, and the latest safe message. The writer and the existing Perf retention job remove expired rows using `diagnostics.keep_days` (default seven). Reads hide expired rows even before pruning. Diagnostics do not depend on the performance sampling settings. A full queue or unavailable database can drop diagnostics rather than delay the work.
 

@@ -223,6 +223,7 @@ impl Handler for InviteJob {
                 }
                 Err(error) => {
                     eprintln!("error: activity invitations: {error}");
+                    execution.report_error("invite_failed", "An activity invitation job failed.");
                     Outcome::Retry("invite_failed")
                 }
             }
@@ -321,6 +322,10 @@ impl InviteJob {
                 eprintln!(
                     "error: core/activity could not deliver an invitation (job {})",
                     execution.job_id
+                );
+                execution.report_error(
+                    "invite_delivery_failed",
+                    "An activity invitation could not be delivered.",
                 );
                 delivered = false;
                 continue;

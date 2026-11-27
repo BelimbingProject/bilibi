@@ -86,6 +86,10 @@ impl bilibi_queue::Handler for DiscardJob {
                 }
                 Err(error) => {
                     eprintln!("warning: unattached document file awaits discard retry: {error}");
+                    execution.report_warning(
+                        "discard_unfinished",
+                        "An unattached document file could not be discarded.",
+                    );
                     Outcome::Retry("discard_unfinished")
                 }
             }

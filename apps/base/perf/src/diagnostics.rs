@@ -101,10 +101,12 @@ impl Diagnostic {
             ),
             Self::Job(failure) => {
                 let (kind, message) = match failure {
-                    JobFailure::Retry => (
-                        "job_retry",
-                        "A background job failed and requested a retry.",
-                    ),
+                    JobFailure::WorkerError { kind, message } => {
+                        return ("error", "Job", kind, message)
+                    }
+                    JobFailure::WorkerWarning { kind, message } => {
+                        return ("warning", "Job", kind, message)
+                    }
                     JobFailure::Preparation => {
                         ("job_preparation", "A background job could not be prepared.")
                     }

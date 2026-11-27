@@ -36,15 +36,17 @@ impl Pages {
         bilibi_authz::authorize_operator(&**c, scope, VIEW).await?;
         Ok(())
     }
-    async fn rows(&self) -> Vec<Row> {
+    async fn rows(&self) -> (Vec<Row>, bool) {
         let mut rows = Vec::new();
+        let mut unavailable = false;
         for provider in self.providers.iter() {
-            if let Ok(found) = (provider.read)(&self.db, &self.settings).await {
-                rows.extend(found);
+            match (provider.read)(&self.db, &self.settings).await {
+                Ok(found) => rows.extend(found),
+                Err(_) => unavailable = true,
             }
         }
         rows.sort_by_key(|r| (r.severity != "error", std::cmp::Reverse(r.last_seen)));
-        rows
+        (rows, unavailable)
     }
 }
 pub(crate) fn providers(
@@ -59,6 +61,7 @@ pub(crate) fn providers(
 fn panel(
     rows: Vec<Row>,
     limit: usize,
+    unavailable: bool,
     display: &bilibi_datetime::DisplayContext,
 ) -> Result<String> {
     let errors: i64 = rows
@@ -76,7 +79,11 @@ fn panel(
     } else {
         (warnings, "warning", "warning")
     };
-    let label = format!("{count} {word}{}", if count == 1 { "" } else { "s" });
+    let label = if count == 0 && unavailable {
+        "Diagnostics unavailable".to_owned()
+    } else {
+        format!("{count} {word}{}", if count == 1 { "" } else { "s" })
+    };
     let tag = Html::render(&StatusbarTag {
         id: "app-diagnostics-tag",
         label: &label,
@@ -95,8 +102,8 @@ fn panel(
         body: Html::text("All diagnostics"),
     })
     .map_err(|_| Error::Internal)?;
-    let visible = !rows.is_empty();
-    let mut body = Html::EMPTY;
+    let visible = unavailable || !rows.is_empty();
+    let mut body = availability(unavailable)?;
     for (index, row) in rows.into_iter().take(limit).enumerate() {
         let at = jiff::Timestamp::try_from(row.last_seen).map_err(|_| Error::Internal)?;
         let rendered = display.render(
@@ -139,6 +146,17 @@ fn panel(
     })
     .map_err(|_| Error::Internal)?
     .to_string())
+}
+fn availability(unavailable: bool) -> Result<Html> {
+    if !unavailable {
+        return Ok(Html::EMPTY);
+    }
+    Html::render(&bilibi_ui::Alert {
+        kind: bilibi_ui::StatusKind::Warning,
+        body: Html::text("Some diagnostics could not be loaded."),
+        ..Default::default()
+    })
+    .map_err(|_| Error::Internal)
 }
 struct State {
     pages: Pages,
@@ -192,10 +210,10 @@ impl State {
             .display(&**client, scope, None, locale)
             .await?;
         drop(client);
-        let rows = self.pages.rows().await;
+        let (rows, unavailable) = self.pages.rows().await;
         let limit = self.list.page_size as usize;
         if self.panel {
-            return panel(rows, limit, &display);
+            return panel(rows, limit, unavailable, &display);
         }
         let mut body = Html::render(&Header {
             title: Html::text("Diagnostics"),
@@ -203,6 +221,7 @@ impl State {
             ..Header::default()
         })
         .map_err(|_| Error::Internal)?;
+        body.push(&availability(unavailable)?);
         let entries = rows
             .iter()
             .take(limit)
@@ -235,9 +254,11 @@ impl State {
         table.zoom = self.columns.zoom;
         table.suggestions = self.columns.flex_suggestions();
         table.add_query = &self.columns.add_query;
-        table.empty = Some(TableEmpty::Content(Html::text(
-            "No diagnostics have been recorded.",
-        )));
+        table.empty = Some(TableEmpty::Content(Html::text(if unavailable {
+            "No results are available."
+        } else {
+            "No diagnostics have been recorded."
+        })));
         body.push(&Html::render(&table).map_err(|_| Error::Internal)?);
         Ok(body.to_string())
     }
@@ -279,7 +300,6 @@ impl Page<Scope, Error> for Pages {
 impl LiveState<Scope, Error> for State {
     fn update<'a>(&'a mut self, req: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
-            self.pages.authorize(req.scope).await?;
             match req.input {
                 LiveInput::Refresh => (),
                 LiveInput::Params(_) if !self.panel => (),

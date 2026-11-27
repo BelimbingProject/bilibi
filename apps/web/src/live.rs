@@ -990,33 +990,41 @@ impl<S: Side> Session<S> {
             return Ok(());
         }
         for slot in crate::shell::embeds(app)? {
-            match Self::check(app, slot.embed.access, token).await {
-                Ok(_) => {}
+            let mounted = self.shell.contains_key(&slot.id);
+            let state = async {
+                Self::check(app, slot.embed.access, token).await?;
+                if mounted {
+                    return Ok(None);
+                }
+                let service: Arc<Service<S::Context>> = app.services.get(slot.embed.service)?;
+                let empty = HashMap::new();
+                let state = crate::render_fields(
+                    app,
+                    Some(S::scope(scope)),
+                    service.0.mount(PageRequest {
+                        operation: slot.embed.operation,
+                        scope: Some(scope),
+                        path: &empty,
+                        query: &empty,
+                        body: &[],
+                        framed: false,
+                    }),
+                )
+                .await?
+                .ok_or(Error::Invalid)?;
+                Ok(Some(state))
+            }
+            .await;
+            let state = match state {
+                Ok(Some(state)) => state,
+                Ok(None) => continue,
                 Err(Error::Forbidden) => {
                     self.shell.remove(&slot.id);
                     continue;
                 }
+                Err(_) if slot.id == crate::shell::DIAGNOSTICS_TARGET => continue,
                 Err(error) => return Err(error),
-            }
-            if self.shell.contains_key(&slot.id) {
-                continue;
-            }
-            let service: Arc<Service<S::Context>> = app.services.get(slot.embed.service)?;
-            let empty = HashMap::new();
-            let state = crate::render_fields(
-                app,
-                Some(S::scope(scope)),
-                service.0.mount(PageRequest {
-                    operation: slot.embed.operation,
-                    scope: Some(scope),
-                    path: &empty,
-                    query: &empty,
-                    body: &[],
-                    framed: false,
-                }),
-            )
-            .await?
-            .ok_or(Error::Invalid)?;
+            };
             self.generation += 1;
             let mounted = Mounted::new(
                 state,
@@ -1112,6 +1120,15 @@ impl<S: Side> Session<S> {
         for id in ids {
             match self.update(app, token, &id, LiveInput::Refresh).await {
                 Ok(fragments) => messages.extend(fragments),
+                Err(_) if id == crate::shell::DIAGNOSTICS_TARGET => {
+                    messages.push(fragment(
+                        &id,
+                        LiveBody {
+                            html: crate::shell::empty_diagnostics().to_string(),
+                            ..LiveBody::default()
+                        },
+                    ));
+                }
                 Err(Error::Unauthorized) => return Err(Error::Unauthorized),
                 // An embed the account lost stops refreshing; the next drawn
                 // shell leaves it out.

@@ -342,8 +342,19 @@ async fn context<'a>(
             "shell.diagnostics" => &mut diagnostics,
             _ => continue,
         };
-        if permits(app, scope, slot.embed.access).await? {
-            *rendered = render_embed(app, scope, &slot.embed).await?;
+        let result = async {
+            if permits(app, scope, slot.embed.access).await? {
+                render_embed(app, scope, &slot.embed).await.map(Some)
+            } else {
+                Ok(None)
+            }
+        }
+        .await;
+        match result {
+            Ok(Some(html)) => *rendered = html,
+            Ok(None) => {}
+            Err(_) if slot.id == DIAGNOSTICS_TARGET => *rendered = empty_diagnostics(),
+            Err(error) => return Err(error),
         }
     }
     // Display only and unlogged: the editor and its save authorize for real.
@@ -469,6 +480,20 @@ pub struct ShellEmbed {
     pub id: String,
     pub embed_id: &'static str,
     pub embed: Embed,
+}
+
+pub(crate) const DIAGNOSTICS_TARGET: &str = "app-diagnostics";
+
+pub(crate) fn empty_diagnostics() -> Html {
+    Html::render(&bilibi_ui::StatusbarPanel {
+        id: DIAGNOSTICS_TARGET,
+        panel_id: "",
+        label: "",
+        visible: false,
+        tag: Html::default(),
+        body: Html::default(),
+    })
+    .unwrap_or_default()
 }
 
 pub fn embeds(app: &App) -> Result<Vec<ShellEmbed>> {

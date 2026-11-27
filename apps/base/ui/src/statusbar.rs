@@ -33,7 +33,7 @@ pub struct StatusbarTag<'a> {
 /// root even when empty so the live shell can show a newly arrived status.
 #[derive(Template, Debug)]
 #[template(
-    source = r#"{% import "feedback.html" as fb %}<div id="{{ id }}" data-target="{{ id }}" class="relative flex shrink-0 items-center">{% if visible %}{{ tag|safe }}{% call fb::statusbar_panel(id=panel_id, label=label) %}<div class="max-h-[70vh] space-y-2 overflow-y-auto p-3">{{ body|safe }}</div>{% endcall %}{% endif %}</div>"#,
+    source = r#"{% import "feedback.html" as fb %}{% import "components.html" as c %}<div id="{{ id }}" data-target="{{ id }}" class="relative flex shrink-0 items-center">{% if visible %}{{ tag|safe }}{% call fb::statusbar_panel(id=panel_id, label=label) %}<div role="dialog" aria-label="{{ label }}"><div class="flex justify-end px-2 pt-1"><button type="button" data-statusbar-close aria-label="Close {{ label }}" class="ui-icon-button rounded-sm p-1 text-ink-muted hover:bg-surface-sunken focus-visible:ring-2 focus-visible:ring-brand-strong">{% call c::icon(name="close", class="size-4") %}{% endcall %}</button></div><div class="max-h-[70vh] space-y-2 overflow-y-auto p-3">{{ body|safe }}</div></div>{% endcall %}{% endif %}</div>"#,
     ext = "html"
 )]
 pub struct StatusbarPanel<'a> {

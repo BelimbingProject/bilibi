@@ -240,6 +240,7 @@ impl Handler for EmailJob {
                 }
                 Err(error) => {
                     eprintln!("error: document email: {error}");
+                    execution.report_error("email_failed", "A document email job failed.");
                     Outcome::Retry("email_failed")
                 }
             }

@@ -120,6 +120,10 @@ impl bilibi_queue::Handler for DeleteJob {
                 }
                 Err(error) => {
                     eprintln!("warning: document delete awaits retry: {error}");
+                    execution.report_warning(
+                        "delete_unfinished",
+                        "A document deletion could not finish.",
+                    );
                     Outcome::Retry("delete_unfinished")
                 }
             }

@@ -81,6 +81,10 @@ impl Handler for GuestReminderJob {
                 }
                 Err(error) => {
                     eprintln!("error: activity guest reminders: {error}");
+                    execution.report_error(
+                        "guest_reminder_failed",
+                        "An activity guest reminder job failed.",
+                    );
                     Outcome::Retry("guest_reminder_failed")
                 }
             }
@@ -198,6 +202,10 @@ impl GuestReminderJob {
                 eprintln!(
                     "error: core/activity could not deliver a guest reminder (job {})",
                     execution.job_id
+                );
+                execution.report_error(
+                    "guest_reminder_delivery_failed",
+                    "An activity guest reminder could not be delivered.",
                 );
                 delivered = false;
                 continue;
