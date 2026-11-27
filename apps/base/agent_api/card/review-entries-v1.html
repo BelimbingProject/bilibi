@@ -936,7 +936,7 @@ async function check() {
       $('reviews').hidden=true;
       status('Stopped after checking '+checked+' of '+rows.length+' entries. Press Check again, or edit an entry, to check again.','warning');return;
     }
-    if(!refused){state.plans=plans;state.plansRevision=revision;}
+    if(!refused){state.plans=plans;state.plansRevision=revision;state.next=0;}
     else {
       // Tell the model once per distinct refusal, not on every automatic check.
       const refusal=JSON.stringify(contextRows(state.rows));

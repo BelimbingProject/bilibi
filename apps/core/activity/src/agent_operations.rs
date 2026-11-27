@@ -713,12 +713,6 @@ impl WriteHandler for Create {
     fn owner(&self) -> &'static str {
         crate::MODULE
     }
-    fn creates(&self) -> Option<bilibi_agent_api::CreatedRecord> {
-        Some(bilibi_agent_api::CreatedRecord {
-            kind: crate::RECORD,
-            id_pointer: "/id",
-        })
-    }
     fn accepts_references(&self) -> &'static [(&'static str, &'static str)] {
         NEW_RELATED
     }
