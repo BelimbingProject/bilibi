@@ -623,9 +623,12 @@ impl BulkData {
     /// required grant or the export's columns no longer resolve.
     fn access(&self, seeing: &Seeing, run: &ExportRun) -> Option<String> {
         let (registered, export) = self.exportable(&run.record_type).ok()?;
-        let list = self.jobs.readable(export.list).ok()?.definition.capability;
+        let list = self.jobs.readable(export.list).ok()?.definition;
         let held = &seeing.held;
-        if !(held.contains(VIEW) && held.contains(export.capability) && held.contains(list)) {
+        if !(held.contains(VIEW)
+            && held.contains(export.capability)
+            && held.contains(list.capability))
+        {
             return None;
         }
         let table = registered.definition.table;
@@ -654,7 +657,27 @@ impl BulkData {
             }
         }
         let installed = bilibi_grid::installed().ok()?;
-        let tables = access_tables(installed, table, &run.columns)?;
+        let mut tables =
+            access_tables(installed, table, run.columns.iter().map(String::as_str), false)?;
+        let mut selection_reach = BTreeMap::new();
+        if run.ids.is_none() {
+            let bilibi_agent_api::Handler::Read(handler) = list.handler else {
+                return None;
+            };
+            if let Some((root, paths)) = handler.selection_grid_paths() {
+                let selection = access_tables(installed, root, paths.iter().copied(), true)?;
+                for table in &selection {
+                    selection_reach.insert(
+                        *table,
+                        seeing
+                            .catalog
+                            .table(table)
+                            .map(|table| [table.reach().map(|reach| reach.code())]),
+                    );
+                }
+                tables.extend(selection);
+            }
+        }
         let restricted: BTreeMap<_, _> = tables
             .iter()
             .copied()
@@ -680,7 +703,7 @@ impl BulkData {
                 )
             })
             .collect();
-        let access = json!([seen, masks, restricted, aliases, reach]).to_string();
+        let access = json!([seen, masks, restricted, aliases, reach, selection_reach]).to_string();
         Some(
             Sha256::digest(access.as_bytes())
                 .iter()
@@ -1184,16 +1207,21 @@ impl BulkData {
 
 /// Grid tables whose fields can contribute to these columns: the root,
 /// resolved linked sources and extra tables declared by each source in use.
-fn access_tables(
+fn access_tables<'a>(
     installed: &bilibi_grid::Installed,
     root: &str,
-    specs: &[String],
+    specs: impl IntoIterator<Item = &'a str>,
+    optional_paths: bool,
 ) -> Option<std::collections::BTreeSet<&'static str>> {
     let root = installed.table(root)?;
     let mut tables = std::collections::BTreeSet::from([root.id()]);
     let mut extra_tables = std::collections::BTreeSet::new();
     for spec in specs {
-        let column = bilibi_grid::column::resolve(spec, root, &|id| installed.table(id)).ok()?;
+        let column = match bilibi_grid::column::resolve(spec, root, &|id| installed.table(id)) {
+            Ok(column) => column,
+            Err(_) if optional_paths => continue,
+            Err(_) => return None,
+        };
         for link in column.hops.iter().chain(&column.many).chain(&column.tail) {
             tables.insert(link.to());
             if let bilibi_grid::Join::Edge(source) = link.decl.join {

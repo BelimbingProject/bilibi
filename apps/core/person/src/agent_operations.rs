@@ -171,6 +171,12 @@ impl ReadHandler for Read {
     fn owner(&self) -> &'static str {
         "core/person"
     }
+    fn selection_grid_paths(&self) -> Option<(&'static str, &'static [&'static str])> {
+        match self {
+            Self::List => Some(("persons", identity::CONTACT_SEARCH_PATHS)),
+            Self::Get | Self::Duplicates => None,
+        }
+    }
     fn call<'a>(
         &'a self,
         client: &'a dyn OperationClient,

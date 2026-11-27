@@ -318,9 +318,16 @@ async fn main() -> Result<(), Failure> {
         )
         .await
         .ok_or("linked export was not started")?;
+    let alice: String = sql
+        .query_one(
+            "SELECT id::text FROM persons WHERE tenant_id=1 AND name='Exp Alice'",
+            &[],
+        )
+        .await?
+        .get(0);
     let declared_input = json!({
         "record_type": JOINED_CONTACTS,
-        "filter": r#"{"search":"Exp Alice"}"#,
+        "ids": [alice],
         "columns": ["work_email"]
     });
     let declared = manager
@@ -409,6 +416,40 @@ async fn main() -> Result<(), Failure> {
     }
     sql.execute(
         "DELETE FROM field_restrictions WHERE tenant_id=1 AND role_id=1 AND table_id='persons' AND field_id='work_email'",
+        &[],
+    )
+    .await?;
+
+    let searched = manager
+        .exports(
+            "name selected by work email",
+            json!({"search": "alice@work.exp.test"}),
+            &["name"],
+        )
+        .await
+        .ok_or("work email search export was not started")?;
+    let (_, bytes) = bulk.export_file(&manager.scope, searched).await?;
+    if !std::str::from_utf8(&bytes)?
+        .lines()
+        .any(|line| line == "Exp Alice")
+    {
+        return Err("the work email search did not select Alice".into());
+    }
+    sql.execute(
+        "INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES(1,1,'person_affiliations','work_email','withhold')",
+        &[],
+    )
+    .await?;
+    if manager.export(searched).await?.downloadable
+        || !matches!(
+            bulk.export_file(&manager.scope, searched).await,
+            Err(Error::Forbidden)
+        )
+    {
+        return Err("the search field restriction did not invalidate the name-only export".into());
+    }
+    sql.execute(
+        "DELETE FROM field_restrictions WHERE tenant_id=1 AND role_id=1 AND table_id='person_affiliations' AND field_id='work_email'",
         &[],
     )
     .await?;

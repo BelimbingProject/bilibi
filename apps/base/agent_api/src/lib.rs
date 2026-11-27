@@ -247,6 +247,9 @@ pub trait ReadHandler: Send + Sync {
     fn requires_transaction(&self) -> bool {
         false
     }
+    fn selection_grid_paths(&self) -> Option<(&'static str, &'static [&'static str])> {
+        None
+    }
     fn call<'a>(
         &'a self,
         client: &'a dyn OperationClient,

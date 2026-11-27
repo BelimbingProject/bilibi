@@ -9,6 +9,13 @@ use tokio_postgres::GenericClient;
 
 pub const SYSTEM_KEY: &str = "platform-orchestrator";
 
+pub(crate) const CONTACT_SEARCH_PATHS: &[&str] = &[
+    "work.work_email:list",
+    "work.work_phone:list",
+    "work.title:list",
+    "work.company.name:list",
+];
+
 async fn fields(client: &impl GenericClient, scope: &Scope) -> Result<Restrictions> {
     Ok(Restrictions {
         fields: restrictions_for(client, scope, "persons").await?,
@@ -89,12 +96,7 @@ pub async fn search(
             client,
             scope,
             "persons",
-            &[
-                "work.work_email:list",
-                "work.work_phone:list",
-                "work.title:list",
-                "work.company.name:list",
-            ],
+            CONTACT_SEARCH_PATHS,
         )
         .await?;
         let pattern = format!(
