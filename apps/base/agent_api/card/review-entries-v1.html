@@ -373,6 +373,8 @@ async function opened(answer) {
     if(schema.items)await choices(schema.items);
   }
   try {for(const row of state.rows)await choices(schemaFor(row));} finally {busy(false);renderEditor();}
+  // A replayed card may belong to a review that was replaced or ended since it opened.
+  if(!await stillCurrent())return;
   await check();
 }
 function setValue(object,path,value) {
