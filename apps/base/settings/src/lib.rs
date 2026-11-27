@@ -180,11 +180,14 @@ impl Settings {
         }
         Ok(())
     }
-    fn plan(&self, key: &str) -> Result<(Option<&Definition>, bool)> {
-        match self.definitions.lookup(key)?.setting {
-            Setting::Definition(d) => Ok((Some(d), d.encrypted)),
-            Setting::RuntimeClaim => Ok((None, false)),
-        }
+    fn plan(&self, key: &str) -> Result<(Option<&Definition>, bool, Option<&'static str>)> {
+        let setting = self.definitions.lookup(key)?.setting;
+        let definition = setting.definition();
+        Ok((
+            definition,
+            definition.is_some_and(|definition| definition.encrypted),
+            setting.principal_read_capability(),
+        ))
     }
     fn decode(&self, key: &str, scope: StorageScope, row: &Row, encrypted: bool) -> Result<Value> {
         let stored_encrypted: bool = row.get("is_encrypted");
@@ -202,10 +205,10 @@ impl Settings {
     /// One uncached SQL snapshot for all requested keys and the inheritance
     /// chain. Callers must mask encrypted fields before putting them in HTML.
     /// A named system principal (`Scope::principal`, SP1) receives a stored
-    /// encrypted value only when it is granted that definition's editor
-    /// capability in the tenant (the same grant screen an administrator uses
-    /// for its other capabilities); a definition without one, or a missing
-    /// grant, refuses the whole read with `Forbidden`.
+    /// encrypted value only when it is granted the definition's explicit
+    /// principal read capability, or its editor capability when no principal
+    /// capability was declared. A missing capability or grant refuses the
+    /// whole read with `Forbidden`.
     pub async fn resolve_many(
         &self,
         client: &dyn ReadClient,
@@ -277,7 +280,7 @@ impl Settings {
         let rows = client.query("SELECT s.key,s.tenant_id,s.scope_type,s.scope_id,s.value,s.is_encrypted FROM base_settings s JOIN jsonb_to_recordset($2::jsonb) AS requested(tenant_id bigint,scope_type text,scope_id bigint) USING(tenant_id,scope_type,scope_id) WHERE s.key=ANY($1)", &[&keys,&identities]).await?;
         let mut result = std::collections::BTreeMap::new();
         for key in keys {
-            let (definition, encrypted) = self.plan(key)?;
+            let (definition, encrypted, principal_read) = self.plan(key)?;
             let allowed: Vec<_> = chain
                 .iter()
                 .copied()
@@ -307,10 +310,7 @@ impl Settings {
                 }
                 Some((scope, row)) => {
                     if encrypted && actor.principal().is_some() {
-                        let capability = definition
-                            .and_then(|d| d.editor.as_ref())
-                            .and_then(|editor| editor.capability)
-                            .ok_or(Error::Forbidden)?;
+                        let capability = principal_read.ok_or(Error::Forbidden)?;
                         self.authorization
                             .authorize_scope(client, actor, capability)
                             .await?;
@@ -354,10 +354,13 @@ impl Settings {
     /// runtime claims and keys that cannot hold a global value refuse: a secret
     /// needs an explicit, authorized `get`.
     pub async fn get_global(&self, client: &dyn ReadClient, key: &str) -> Result<Value> {
-        let definition = match self.definitions.lookup(key)?.setting {
-            Setting::Definition(d) if !d.encrypted && d.scopes.contains(&ScopeKind::Global) => d,
-            _ => return Err(Error::Invalid),
-        };
+        let definition = self
+            .definitions
+            .lookup(key)?
+            .setting
+            .definition()
+            .filter(|d| !d.encrypted && d.scopes.contains(&ScopeKind::Global))
+            .ok_or(Error::Invalid)?;
         let row = client.query_opt("SELECT value,is_encrypted FROM base_settings WHERE key=$1 AND tenant_id=0 AND scope_type='global' AND scope_id=0", &[&key]).await?;
         let Some(row) = row else {
             return Ok((definition.default)());
@@ -380,10 +383,13 @@ impl Settings {
         tenant: i64,
         key: &str,
     ) -> Result<Value> {
-        let definition = match self.definitions.lookup(key)?.setting {
-            Setting::Definition(d) if !d.encrypted && d.scopes.contains(&ScopeKind::Tenant) => d,
-            _ => return Err(Error::Invalid),
-        };
+        let definition = self
+            .definitions
+            .lookup(key)?
+            .setting
+            .definition()
+            .filter(|d| !d.encrypted && d.scopes.contains(&ScopeKind::Tenant))
+            .ok_or(Error::Invalid)?;
         let global = definition.scopes.contains(&ScopeKind::Global);
         let row = client.query_opt("SELECT value,is_encrypted FROM base_settings WHERE key=$1 AND ((tenant_id=$2 AND scope_type='tenant' AND scope_id=$2) OR ($3 AND tenant_id=0 AND scope_type='global' AND scope_id=0)) ORDER BY tenant_id DESC LIMIT 1", &[&key, &tenant, &global]).await?;
         let Some(row) = row else {
@@ -406,10 +412,13 @@ impl Settings {
         actor: &Scope,
         key: &str,
     ) -> Result<Vec<(i64, Value)>> {
-        let definition = match self.definitions.lookup(key)?.setting {
-            Setting::Definition(d) if !d.encrypted && d.scopes.contains(&ScopeKind::Company) => d,
-            _ => return Err(Error::Invalid),
-        };
+        let definition = self
+            .definitions
+            .lookup(key)?
+            .setting
+            .definition()
+            .filter(|d| !d.encrypted && d.scopes.contains(&ScopeKind::Company))
+            .ok_or(Error::Invalid)?;
         let rows = client.query("SELECT scope_id,value,is_encrypted FROM base_settings WHERE key=$1 AND tenant_id=$2 AND scope_type='company' ORDER BY scope_id", &[&key, &actor.tenant()]).await?;
         rows.iter()
             .map(|row| {
@@ -438,7 +447,7 @@ impl Settings {
         key: &str,
         value: Value,
     ) -> Result<()> {
-        let (definition, encrypted) = self.plan(key)?;
+        let (definition, encrypted, _) = self.plan(key)?;
         if value.to_string().len() > 1_048_576 {
             return Err(Error::Invalid);
         }
@@ -459,7 +468,7 @@ impl Settings {
         target: Target,
         key: &str,
     ) -> Result<()> {
-        let (_, encrypted) = self.plan(key)?;
+        let (_, encrypted, _) = self.plan(key)?;
         self.write(tx, actor, target, key, None, encrypted).await
     }
     pub async fn lock_tenant_override(
@@ -516,7 +525,7 @@ impl Settings {
             bilibi_tenancy::prove_operator(tx.sql(), actor).await?;
         }
         let scope = self.chain(tx.sql(), actor, target, true).await?[0];
-        let (definition, _) = self.plan(key)?;
+        let (definition, _, _) = self.plan(key)?;
         if definition.is_some_and(|d| !d.scopes.contains(&scope.kind)) {
             return Err(Error::Invalid);
         }
