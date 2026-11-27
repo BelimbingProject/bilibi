@@ -76,9 +76,8 @@ pub struct Definition {
     pub editor: Option<Editor>,
 }
 impl Definition {
-    /// Give named system principals a capability dedicated to decrypting this
-    /// setting. Human editing and reveal paths continue to use only the
-    /// editor capability.
+    /// Set the capability checked when a named system principal reads a stored
+    /// encrypted value through Settings.
     pub const fn principal_read(self, capability: &'static str) -> Setting {
         Setting::PrincipalReadable {
             definition: self,
