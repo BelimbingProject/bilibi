@@ -253,7 +253,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 | Panel notice | Where a panel cannot reach the page flash |
 | Connection | Banners announce a dropped socket. The page reconnects with backoff and remounts in place |
 | Error pages | One shell from `apps/web/src/errors.rs`. Debug detail only in debug builds |
-| Which Bilibi | The status bar always shows the stored server role, instance label and colour. A Core Administrator can click it to open Instance settings. Staging also shows the top-bar badge; Every role shows a badge on sign-in. A review or confirmation opens with the instance banner on every instance, production included. Dev and Staging use the operator's `instance.colour` status role. Production uses a neutral badge. Dev and Staging explain the effect of changes in sign-in tooltips and reviews. The operator's `instance.label` keeps the name in words |
+| Which Bilibi | The status bar always shows the stored server role, instance label and colour. A Core Administrator can click it to open Server Instance. Staging also shows the top-bar badge; Every role shows a badge on sign-in. A review or confirmation opens with the instance banner on every instance, production included. Dev and Staging use the operator's `instance.colour` status role. Production uses a neutral badge. Dev and Staging explain the effect of changes in sign-in tooltips and reviews. The operator's `instance.label` keeps the name in words |
 
 - A failure says what happened, what it cost, and what to do next.
 - Recover before reporting. Users are not an error channel.

@@ -146,7 +146,7 @@ The launcher reads its settings from your shell first, then from an optional `.e
 
 Servers never read `.env`: `install-server.sh` writes each server instance its own `env` file ([server installation](docs/server-install.md)).
 
-The launcher sets `BILIBI_ENV=development` unless you already set it, so the install seed identifies a fresh local copy as Dev. A saved role in Instance settings takes precedence. It starts a private database, builds, migrates, seeds and rebuilds on change. While the HTTPS app is down, its waiting page shows the current build step and elapsed time. A failed build shows the latest diagnostics; fix the error and save a file to rebuild. Cargo output stays in the terminal, and a previous successful build keeps serving until its replacement is ready. If a migration says it "requires a fresh database", the local database predates a clean-break change: stop Bilibi, delete `.local/postgres18` (or empty the database named by `DATABASE_URL`) and run `./bilibi start` again; back it up with `pg_dump` first if you need its data. Restart it after changing an environment variable.
+The launcher sets `BILIBI_ENV=development` unless you already set it, so the install seed identifies a fresh local copy as Dev. A saved role in Server Instance takes precedence. It starts a private database, builds, migrates, seeds and rebuilds on change. While the HTTPS app is down, its waiting page shows the current build step and elapsed time. A failed build shows the latest diagnostics; fix the error and save a file to rebuild. Cargo output stays in the terminal, and a previous successful build keeps serving until its replacement is ready. If a migration says it "requires a fresh database", the local database predates a clean-break change: stop Bilibi, delete `.local/postgres18` (or empty the database named by `DATABASE_URL`) and run `./bilibi start` again; back it up with `pg_dump` first if you need its data. Restart it after changing an environment variable.
 
 The launcher's Rust build ends with its elapsed time, the number of crates Cargo reported compiling, its exit code and the timing report at `target/cargo-timings/cargo-timing.html`. A start after stopping still asks Cargo to check the build; a successful build reporting `0 crates compiled` reused the compiled crates, even if that check took time.
 
@@ -168,11 +168,11 @@ The launcher's Rust build ends with its elapsed time, the number of crates Cargo
 | `BILIBI_SETTINGS_KEY` | 64 hex characters. Encrypts secret settings and authenticator keys. 2FA setup refuses without it. Unset: `./bilibi start` supplies one |
 | `BILIBI_MEDIA_SIGNING_KEY` | 64 hex characters, for signed file links. Unset: `./bilibi start` supplies one |
 | `BILIBI_SSO_ALLOW_PRIVATE_ENDPOINTS` | `1` lets company sign-in reach identity providers on private networks and literal-loopback HTTP. Unset: public HTTPS only. See [company sign-in](apps/core/user/sso.md) |
-| `BILIBI_ENV` | `development`, `staging` or `production`. Initial role for the install seed. Unset means `production`; `./bilibi start` defaults to `development`. Later role changes use Instance settings. Other values refuse installation |
+| `BILIBI_ENV` | `development`, `staging` or `production`. Initial role for the install seed. Unset means `production`; `./bilibi start` defaults to `development`. Later role changes use Server Instance. Other values refuse installation |
 
-Use [Instance settings](apps/base/system/README.md) to distinguish a test copy from the live system. To customise the staff interface for your installation, see [Change the installation brand](apps/base/branding/README.md#change-it).
+Use [Server Instance](apps/base/system/README.md) to distinguish a test copy from the live system. To customise the staff interface for your installation, see [Change the installation brand](apps/base/branding/README.md#change-it).
 
-The stored server role also decides whether ordinary Base Step-up checks apply. Click the status-bar role to open Instance settings. A Core Administrator can change it with a fresh 2FA code; changing to or from Production carries a warning and every change is audited.
+The stored server role also decides whether ordinary Base Step-up checks apply. Click the status-bar role to open Server Instance. A Core Administrator can change it with a fresh 2FA code; every change is audited.
 
 | Server role | Step-up operations (declared by each module, set per tenant) |
 |--------------|--------------------------------------------------------------|
@@ -186,7 +186,7 @@ Terminate TLS at a reverse proxy, and keep the database on a private network: Bi
 
 ## Run it on a server
 
-`scripts/install-server.sh` sets up Dev, Staging and Production instances under `/opt/bilibi`, each with its own database, service and address, and puts releases into service. The install seed saves the initial `BILIBI_ENV` role in settings. Later changes use the protected Instance settings page. Build software on your own machine, then install the tested release on any of them. Follow the [server installation guide](docs/server-install.md) to set up an instance, its server owner and first owners of customer tenants. For a running server, see [reviewed updates and Undo](docs/server-install.md#putting-a-release-into-service). To let your own AI assistant install it, give it [the Install Bilibi skill](docs/install-with-ai/SKILL.md) ([guide](docs/install-with-ai/README.md)).
+`scripts/install-server.sh` sets up Dev, Staging and Production instances under `/opt/bilibi`, each with its own database, service and address, and puts releases into service. The install seed saves the initial `BILIBI_ENV` role in settings. Later changes use the protected Server Instance page. Build software on your own machine, then install the tested release on any of them. Follow the [server installation guide](docs/server-install.md) to set up an instance, its server owner and first owners of customer tenants. For a running server, see [reviewed updates and Undo](docs/server-install.md#putting-a-release-into-service). To let your own AI assistant install it, give it [the Install Bilibi skill](docs/install-with-ai/SKILL.md) ([guide](docs/install-with-ai/README.md)).
 
 ## Add a business area
 

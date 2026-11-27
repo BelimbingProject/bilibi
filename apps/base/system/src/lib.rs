@@ -104,7 +104,7 @@ async fn action_gate(
 impl Page<Scope, Error> for Pages {
     fn title(&self, operation: &str) -> Option<&'static str> {
         Some(match operation {
-            "instance" => "Instance settings",
+            "instance" => "Server Instance",
             "installation" => "Installation policy",
             "info" => "System Info",
             "localization" => "Language & Region",
