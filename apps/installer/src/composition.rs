@@ -20,10 +20,10 @@ pub fn parse(status: &str) -> Value {
                 Some(("Extensions", rest)) if rest.trim().is_empty() => 2,
                 _ => 0,
             };
-        } else if let Some(container) = container(line) {
+        } else {
             match section {
-                1 => domains.push(container),
-                2 => extensions.push(container),
+                1 => domains.extend(domain(line)),
+                2 => extensions.extend(extension(line)),
                 _ => {}
             }
         }
@@ -78,15 +78,30 @@ fn platform(line: &str) -> Option<Value> {
     Some(json!({"version": version, "release": release, "commit": commit}))
 }
 
+fn domain(line: &str) -> Option<Value> {
+    let (id, rest) = line.split_once(", modules:")?.0.trim().split_once(' ')?;
+    let (rest, code) = rest
+        .rsplit_once(", code: ")
+        .map_or((rest, None), |(rest, code)| (rest, Some(code)));
+    let (version, commit) = match rest {
+        "unpinned" => (None, None),
+        _ => match rest.split_once(", commit ") {
+            Some((version, commit)) => (Some(version).filter(|v| *v != "untagged"), Some(commit)),
+            None => (None, None),
+        },
+    };
+    Some(json!({"id": id, "version": version, "commit": commit, "code": code}))
+}
+
 fn container_fields(line: &str) -> Option<regex_lite::Captures<'_>> {
     static DECLARATION: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\A  (?P<id>[a-z][a-z0-9]*(?:_[a-z0-9]+)*) (?:unpinned|(?P<version>[A-Za-z0-9._+-]+), commit (?P<commit>[A-Za-z0-9]+))(?:, code: (?P<code>reviewed|customer))?, modules: [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*(?:, [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*)*\z")
+        Regex::new(r"\A  (?P<id>[a-z][a-z0-9]*(?:_[a-z0-9]+)*) (?:unpinned|(?P<version>[^,\r\n]+), commit (?P<commit>[A-Za-z0-9]+))(?:, code: (?P<code>reviewed|customer))?, modules: [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*(?:, [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*)*\z")
             .expect("valid release status grammar")
     });
     DECLARATION.captures(line)
 }
 
-fn container(line: &str) -> Option<Value> {
+fn extension(line: &str) -> Option<Value> {
     let fields = container_fields(line)?;
     let version = fields
         .name("version")

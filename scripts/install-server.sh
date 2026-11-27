@@ -1163,7 +1163,7 @@ if extensions.strip() == "none mounted":
 if not extensions.startswith("\n") or not extensions.strip():
     sys.exit("Invalid Extension composition")
 declaration = re.compile(
-    r"  (?P<id>[a-z][a-z0-9]*(?:_[a-z0-9]+)*) (?:unpinned|(?P<version>[A-Za-z0-9._+-]+), commit (?P<commit>[A-Za-z0-9]+))(?:, code: (?P<code>reviewed|customer))?, modules: [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*(?:, [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*)*"
+    r"  (?P<id>[a-z][a-z0-9]*(?:_[a-z0-9]+)*) (?:unpinned|(?P<version>[^,\r\n]+), commit (?P<commit>[A-Za-z0-9]+))(?:, code: (?P<code>reviewed|customer))?, modules: [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*(?:, [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*)*"
 )
 for line in extensions.splitlines():
     if not line:

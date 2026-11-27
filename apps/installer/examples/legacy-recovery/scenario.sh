@@ -56,7 +56,8 @@ STUB
 chmod +x "$root_dir"/bin/* "$root_dir/legacy" "$root_dir/archive/bilibi-web"
 export PATH="$root_dir/bin:$PATH"
 for instance in "$root_dir"/{worker,shell}/dev; do
-    cp "$root_dir/legacy" "$instance/releases/1/bilibi-web"
+    sed 's|legacy unpinned|legacy dev/sbg, commit abc123|' "$root_dir/legacy" > "$instance/releases/1/bilibi-web"
+    chmod +x "$instance/releases/1/bilibi-web"
     ln -s releases/current "$instance/current"
     ln -s 1 "$instance/releases/current"
 done
@@ -181,7 +182,7 @@ esac
 STUB
 chmod +x "$root_dir/shared"
 for instance in "$root_dir"/{worker,shell}/dev; do
-    mkdir "$instance/releases/"{4,5,6,7,8,9,10,11,12,13}
+    mkdir "$instance/releases/"{4,5,6,7,8,9,10,11,12,13,14,15,16,17}
     cp "$root_dir/shared" "$instance/releases/4/bilibi-web"
     sed 's/ unpinned, modules:/ unpinned, code:reviewed, modules:/' "$root_dir/legacy" > "$instance/releases/5/bilibi-web"
     sed 's/ unpinned, modules:/ unpinned, code : reviewed, modules:/' "$root_dir/legacy" > "$instance/releases/6/bilibi-web"
@@ -192,7 +193,11 @@ for instance in "$root_dir"/{worker,shell}/dev; do
     sed 's|legacy/extra|legacy/extra, code|' "$root_dir/legacy" > "$instance/releases/11/bilibi-web"
     sed 's|legacy/custom, legacy/extra||' "$root_dir/legacy" > "$instance/releases/12/bilibi-web"
     sed "s/'  legacy/'   legacy/" "$root_dir/legacy" > "$instance/releases/13/bilibi-web"
-    chmod +x "$instance/releases/"{5,6,7,8,9,10,11,12,13}/bilibi-web
+    sed 's|  legacy unpinned, modules: legacy/custom, legacy/extra| legacy unpinned, modules: custom, code:reviewed|' "$root_dir/legacy" > "$instance/releases/14/bilibi-web"
+    sed 's|  legacy unpinned, modules: legacy/custom, legacy/extra| legacy unpinned, code: reviewed, modules: custom, code: customer|' "$root_dir/legacy" > "$instance/releases/15/bilibi-web"
+    sed 's|  legacy unpinned, modules: legacy/custom, legacy/extra| legacy unpinned, modules: legacy/custom, code|' "$root_dir/legacy" > "$instance/releases/16/bilibi-web"
+    sed 's|  legacy unpinned, modules: legacy/custom, legacy/extra| legacy unpinned, modules: |' "$root_dir/legacy" > "$instance/releases/17/bilibi-web"
+    chmod +x "$instance/releases/"{5,6,7,8,9,10,11,12,13,14,15,16,17}/bilibi-web
     ln -sfn 4 "$instance/releases/current"
 done
 : > "$FIXTURE_EVENTS"
@@ -200,12 +205,12 @@ admission_case() {
     mode=shared
     refusal='requires an isolated installation'
     case $1 in
-        5|6|7|8|11|12|13) mode=isolated; refusal='invalid Extension declaration';;
+        5|6|7|8|11|12|13|14|15|16|17) mode=isolated; refusal='invalid Extension declaration';;
         9|10) refusal='invalid Extension declaration';;
     esac
 }
 systemctl start bilibi@dev
-for target in 1 3 5 6 7 8 9 10 11 12 13; do
+for target in 1 3 5 6 7 8 9 10 11 12 13 14 15 16 17; do
     admission_case "$target"
     (cd "$root_dir/shell/dev/releases/$target" && sha256sum bilibi-web > SHA256SUMS)
     if bash -s -- "$root_dir" "$target" "$mode" >"$root_dir/switch.log" 2>&1 <<'SHELL'
@@ -232,7 +237,7 @@ done
 
 export FIXTURE_CURRENT=$root_dir/worker/dev/current
 systemctl start bilibi@dev
-for target in 1 3 5 6 7 8 9 10 11 12 13; do
+for target in 1 3 5 6 7 8 9 10 11 12 13 14 15 16 17; do
     admission_case "$target"
     sql -c "UPDATE base_settings SET value='\"$mode\"' WHERE key='installation.mode'" >/dev/null
     job=$(sql -c "INSERT INTO base_software_jobs (tenant_id,kind,request,review,requested_by)
