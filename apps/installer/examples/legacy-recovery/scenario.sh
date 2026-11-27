@@ -40,7 +40,7 @@ STUB
 cat > "$root_dir/legacy" <<'STUB'
 #!/usr/bin/env bash
 case $1 in
-    status) printf '%s\n' 'Bilibi 0.1.0' 'Domains: none mounted' 'Extensions:' '  legacy unpinned, modules: custom';;
+    status) printf '%s\n' 'Bilibi 0.1.0' 'Domains: none mounted' 'Extensions:' '  legacy unpinned, modules: legacy/custom, legacy/extra';;
     login) echo legacy-release;;
     *) exit 2;;
 esac
@@ -163,7 +163,7 @@ mkdir "$root_dir/shell/dev/releases/3" "$root_dir/worker/dev/releases/3"
 cat > "$root_dir/shell/dev/releases/3/bilibi-web" <<'STUB'
 #!/usr/bin/env bash
 case $1 in
-    status) printf '%s\n' 'Bilibi 0.3.0' 'Domains: none mounted' 'Extensions:' '  local unpinned, code: customer, modules: custom';;
+    status) printf '%s\n' 'Bilibi 0.3.0' 'Domains: none mounted' 'Extensions:' '  local unpinned, code: customer, modules: local/custom';;
     migrate) echo "customer migration must not run"; exit 2;;
     login) echo customer-release;;
     *) exit 2;;
@@ -181,15 +181,18 @@ esac
 STUB
 chmod +x "$root_dir/shared"
 for instance in "$root_dir"/{worker,shell}/dev; do
-    mkdir "$instance/releases/"{4,5,6,7,8,9,10}
+    mkdir "$instance/releases/"{4,5,6,7,8,9,10,11,12,13}
     cp "$root_dir/shared" "$instance/releases/4/bilibi-web"
     sed 's/ unpinned, modules:/ unpinned, code:reviewed, modules:/' "$root_dir/legacy" > "$instance/releases/5/bilibi-web"
     sed 's/ unpinned, modules:/ unpinned, code : reviewed, modules:/' "$root_dir/legacy" > "$instance/releases/6/bilibi-web"
-    sed 's/modules: custom/modules: custom, code: reviewed/' "$root_dir/legacy" > "$instance/releases/7/bilibi-web"
-    sed 's/modules: custom/code: reviewed, modules: custom, code: customer/' "$root_dir/legacy" > "$instance/releases/8/bilibi-web"
+    sed 's|legacy/extra|legacy/extra, code: reviewed|' "$root_dir/legacy" > "$instance/releases/7/bilibi-web"
+    sed 's|modules: legacy/custom, legacy/extra|code: reviewed, modules: legacy/custom, legacy/extra, code: customer|' "$root_dir/legacy" > "$instance/releases/8/bilibi-web"
     cp "$instance/releases/7/bilibi-web" "$instance/releases/9/bilibi-web"
     cp "$instance/releases/8/bilibi-web" "$instance/releases/10/bilibi-web"
-    chmod +x "$instance/releases/"{5,6,7,8,9,10}/bilibi-web
+    sed 's|legacy/extra|legacy/extra, code|' "$root_dir/legacy" > "$instance/releases/11/bilibi-web"
+    sed 's|legacy/custom, legacy/extra||' "$root_dir/legacy" > "$instance/releases/12/bilibi-web"
+    sed "s/'  legacy/'   legacy/" "$root_dir/legacy" > "$instance/releases/13/bilibi-web"
+    chmod +x "$instance/releases/"{5,6,7,8,9,10,11,12,13}/bilibi-web
     ln -sfn 4 "$instance/releases/current"
 done
 : > "$FIXTURE_EVENTS"
@@ -197,13 +200,12 @@ admission_case() {
     mode=shared
     refusal='requires an isolated installation'
     case $1 in
-        5) mode=isolated; refusal='must declare reviewed or customer code';;
-        6|7|8) mode=isolated; refusal='invalid Extension declaration';;
+        5|6|7|8|11|12|13) mode=isolated; refusal='invalid Extension declaration';;
         9|10) refusal='invalid Extension declaration';;
     esac
 }
 systemctl start bilibi@dev
-for target in 1 3 5 6 7 8 9 10; do
+for target in 1 3 5 6 7 8 9 10 11 12 13; do
     admission_case "$target"
     (cd "$root_dir/shell/dev/releases/$target" && sha256sum bilibi-web > SHA256SUMS)
     if bash -s -- "$root_dir" "$target" "$mode" >"$root_dir/switch.log" 2>&1 <<'SHELL'
@@ -230,7 +232,7 @@ done
 
 export FIXTURE_CURRENT=$root_dir/worker/dev/current
 systemctl start bilibi@dev
-for target in 1 3 5 6 7 8 9 10; do
+for target in 1 3 5 6 7 8 9 10 11 12 13; do
     admission_case "$target"
     sql -c "UPDATE base_settings SET value='\"$mode\"' WHERE key='installation.mode'" >/dev/null
     job=$(sql -c "INSERT INTO base_software_jobs (tenant_id,kind,request,review,requested_by)

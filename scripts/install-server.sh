@@ -1162,22 +1162,17 @@ if extensions.strip() == "none mounted":
     sys.exit(0)
 if not extensions.startswith("\n") or not extensions.strip():
     sys.exit("Invalid Extension composition")
+declaration = re.compile(
+    r"  (?P<id>[a-z][a-z0-9]*(?:_[a-z0-9]+)*) (?:unpinned|(?P<version>[A-Za-z0-9._+-]+), commit (?P<commit>[A-Za-z0-9]+))(?:, code: (?P<code>reviewed|customer))?, modules: [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*(?:, [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*)*"
+)
 for line in extensions.splitlines():
     if not line:
         continue
-    declaration, modules_marker, modules = line.partition(", modules:")
-    identity, code_marker, code = declaration.rpartition(", code:")
-    if not code_marker:
-        identity, code = declaration, "customer"
-    else:
-        code = code[1:] if code.startswith(" ") else ""
-    if not line.startswith("  ") or not modules_marker or not re.fullmatch(
-        r"[^\s,:]+ (?:unpinned|[^\s,:]+, commit [^\s,:]+)", identity.lstrip()
-    ) or (modules.strip() and not re.fullmatch(r"[^\s,:]+(?:, [^\s,:]+)*", modules.strip())):
+    match = declaration.fullmatch(line)
+    if not match:
         sys.exit("Invalid Extension declaration")
-    name = identity.strip().split(" ", 1)[0]
-    if code not in {"reviewed", "customer"}:
-        sys.exit(f"Extension {name} must declare reviewed or customer code")
+    name = match["id"]
+    code = match["code"] or "customer"
     if code == "customer" and mode == "shared":
         sys.exit(f"Extension {name} requires an isolated installation; use an isolated installation, or prepare a code-free release")
 ' "$installation_mode"
