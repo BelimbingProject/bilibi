@@ -274,8 +274,8 @@ impl Installer {
         let mut finished = false;
         for (id, history, dump) in backup::unfinished_restores(&self.layout.backups()) {
             let key = match history.file_name().and_then(|name| name.to_str()) {
-                Some("history-restore.json") => "restore",
-                Some("history-switch_back.json") => "switch_back",
+                Some("history-restore.json" | "history-restore.held") => "restore",
+                Some("history-switch_back.json" | "history-switch_back.held") => "switch_back",
                 _ => continue,
             };
             let recorded = jobs::restore_job(client, id).await?;
@@ -283,7 +283,7 @@ impl Installer {
                 .as_ref()
                 .is_some_and(|(_, state)| !matches!(state.as_str(), "queued" | "running"))
             {
-                let _ = std::fs::remove_file(&history);
+                backup::forget(&history);
                 continue;
             }
             jobs::lock_installation(client).await?;
@@ -303,6 +303,33 @@ impl Installer {
                     Err(error) if jobs::table_missing(&error) => {}
                     Err(error) => return Err(error),
                 }
+            }
+            // The restore already failed and a restart cut off its cleanup,
+            // or its failure could not be noted and its history was held:
+            // record that failure, and never run the restore again.
+            if let Some(why) = backup::noted_failure(&history) {
+                println!(
+                    "job {id}: the restore from {} failed before a restart; recording the failure",
+                    dump.display()
+                );
+                let why = match backup::rebuild_failed(client, &history).await {
+                    Ok(()) => why,
+                    Err(more) => format!("{why} {more}"),
+                };
+                if let Some((job, _)) = jobs::restore_job(client, id).await? {
+                    let mut run =
+                        flow::Run::new(client, &self.layout, &self.service, &self.pg, job, true)
+                            .await?;
+                    run.fail_restore(key, &dump, &why).await?;
+                } else {
+                    eprintln!(
+                        "bilibi-installer: job {id}: the restore from {} failed: {why}; the service remains stopped",
+                        dump.display()
+                    );
+                    backup::set_aside(&history);
+                }
+                finished = true;
+                continue;
             }
             println!(
                 "job {id}: a restore was cut off by a restart; finishing it from {}",
