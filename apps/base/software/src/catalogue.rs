@@ -69,6 +69,8 @@ pub struct Release {
     #[serde(default)]
     pub released: Option<String>,
     pub commit: String,
+    #[serde(default)]
+    pub committed_at: Option<String>,
     /// The Platform versions a Domain release needs, `>=0.1.0, <0.2.0`.
     #[serde(default)]
     pub platform: Option<String>,
@@ -166,7 +168,7 @@ impl Catalogue {
                             })
                             .filter_map(|set| set.platform.version.as_deref())
                             .collect();
-                        json!({"version": version, "released": release.released, "commit": release.commit,
+                        json!({"version": version, "released": release.released, "commit": release.commit, "committed_at": release.committed_at,
                                "platform": release.platform, "tested_on": tested_on})
                     })
                     .collect();
@@ -187,7 +189,7 @@ impl Catalogue {
             "platform": {"name": self.platform.name, "repository": self.platform.repository,
                          "versions": self.platform.versions.iter().map(|(v, r)| json!({"version": v, "released": r.released, "commit": r.commit})).collect::<Vec<_>>()},
             "domains": domains,
-            "extensions": self.extensions.iter().map(|(id, ext)| json!({"id": id, "name": ext.name, "description": ext.description, "repository": ext.repository, "modules": ext.modules, "versions": ext.versions.iter().map(|(v, r)| json!({"version":v, "commit":r.commit, "released":r.released, "platform":r.platform})).collect::<Vec<_>>() })).collect::<Vec<_>>(),
+            "extensions": self.extensions.iter().map(|(id, ext)| json!({"id": id, "name": ext.name, "description": ext.description, "repository": ext.repository, "modules": ext.modules, "versions": ext.versions.iter().map(|(v, r)| json!({"version":v, "commit":r.commit, "committed_at":r.committed_at, "released":r.released, "platform":r.platform})).collect::<Vec<_>>() })).collect::<Vec<_>>(),
             "plugins": plugins,
             "tested": self.tested.iter().map(|set| json!({
                 "platform": {"version": set.platform.version, "commit": set.platform.commit},

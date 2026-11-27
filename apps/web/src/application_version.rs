@@ -37,7 +37,7 @@ pub(super) fn application_version(
         if nightly != nightly_date.to_string() || nightly.len() != 10 {
             return None;
         }
-        nightly_date.strftime("%y%m%d").to_string()
+        format!("Nightly {}", display.render_date(nightly_date))
     } else {
         tag.strip_prefix("setup-")?.to_owned()
     };

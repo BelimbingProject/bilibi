@@ -102,7 +102,7 @@ def check_versions(versions, where, platform_versions=None):
             requirement = parse_requirement(facts.get('platform'), here)
             expect(any(satisfies(candidate, requirement) for candidate in platform_versions),
                    f'{here}: no listed Platform version satisfies {facts["platform"]!r}')
-        unknown = set(facts) - {'released', 'commit', 'platform', 'notes'}
+        unknown = set(facts) - {'released', 'commit', 'committed_at', 'platform', 'notes'}
         expect(not unknown, f'{here}: unknown keys {sorted(unknown)}')
 
 
@@ -426,7 +426,11 @@ def add_release(catalogue, role, container, version, tag_object, commit):
     require_gates(slug, commit)
     requirement = requirement_at(facts, version, slug, commit, where)
     released = released_on(slug, tag_object, commit)
-    return add_version(catalogue, role, container, version, commit, released, requirement, facts['repository'])
+    added = add_version(catalogue, role, container, version, commit, released, requirement, facts['repository'])
+    if added:
+        stamp = json.loads(github(['api', f'repos/{slug}/commits/{commit}']))['commit']['committer']['date']
+        facts['versions'][version]['committed_at'] = stamp
+    return added
 
 
 def add_platform_version(catalogue, version, commit, released):

@@ -5,16 +5,19 @@
 //! actor holds. Every later call takes the catalog, not the scope: a path is
 //! resolved against it, so a table or field it left out cannot be reached by any
 //! spelling. Build it again wherever the page refreshes its own capabilities.
+mod source_description;
+
+use self::source_description::describe_source;
 use crate::column::{self, Agg, Column, ColumnError, MAX_SPEC};
-use crate::{Field, FieldType, Installed, Join, LinkKind, Source, Table};
+use crate::{Field, FieldType, Installed, Join, LinkKind, Table};
 use bilibi_database::Error;
 use bilibi_tenancy::Scope;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     fmt,
-    sync::{Arc, Mutex, OnceLock},
+    sync::Arc,
 };
-use tokio_postgres::{types::Type, GenericClient};
+use tokio_postgres::GenericClient;
 
 pub const MAX_COLUMNS: usize = 32;
 pub const MAX_SUGGESTIONS: usize = 50;
@@ -60,65 +63,6 @@ impl From<CatalogError> for Error {
             }
         }
     }
-}
-
-/// Static source descriptions contain selected keys and arity, never scope data.
-#[derive(Debug)]
-struct SourceDescription {
-    keys: Vec<String>,
-    parameters: usize,
-}
-type Description = Arc<SourceDescription>;
-type Descriptions = HashMap<(&'static str, bool, bool), Description>;
-fn descriptions() -> &'static Mutex<Descriptions> {
-    static CACHE: OnceLock<Mutex<Descriptions>> = OnceLock::new();
-    CACHE.get_or_init(Default::default)
-}
-
-/// A static statement's shape, read from the server's description of it
-/// (nothing runs) and kept for the process: static SQL has a fixed shape. Every placeholder must be a bigint the grid can bind.
-async fn describe_source(
-    client: &impl GenericClient,
-    what: &str,
-    source: &Source,
-) -> Result<Description, CatalogError> {
-    let cache_key = (source.sql, source.tenant_scoped, source.company_scoped);
-    if let Some(keys) = descriptions()
-        .lock()
-        .ok()
-        .and_then(|c| c.get(&cache_key).cloned())
-    {
-        return Ok(keys);
-    }
-    let statement = client.prepare(source.sql).await.map_err(|error| {
-        CatalogError::Misdeclared(format!("{what}: the server refused the source: {error}"))
-    })?;
-    let expected = if source.company_scoped {
-        3..=3
-    } else if source.tenant_scoped {
-        1..=2
-    } else {
-        0..=0
-    };
-    if !expected.contains(&statement.params().len())
-        || statement.params().iter().any(|ty| *ty != Type::INT8)
-    {
-        return Err(CatalogError::Misdeclared(format!(
-            "{what}: a tenant source takes bigint $1 (tenant) and optionally $2 (user), a company source takes $1 (tenant), $2 (user) and $3 (company), and a global source takes none"
-        )));
-    }
-    let keys = Arc::new(SourceDescription {
-        keys: statement
-            .columns()
-            .iter()
-            .map(|column| column.name().to_string())
-            .collect(),
-        parameters: statement.params().len(),
-    });
-    if let Ok(mut cache) = descriptions().lock() {
-        cache.insert(cache_key, keys.clone());
-    }
-    Ok(keys)
 }
 
 /// What one account may read: the visible tables with restricted fields removed.
@@ -196,8 +140,25 @@ impl Catalog {
         let installed = crate::installed().map_err(|_| Error::Internal)?;
         // One read for what the reader holds and how far it reaches (#683).
         let grants = bilibi_authz::effective_grants(client, scope).await?;
-        let restricted = bilibi_authz::fields::restricted(client, scope).await?;
-        let masked = bilibi_authz::fields::masked(client, scope).await?;
+        let restricted = bilibi_authz::fields::restriction_modes(client, scope).await?;
+        let fields = bilibi_authz::field_catalog::field_catalog()?;
+        let is_restricted = |table: &str, field: &str| {
+            restricted
+                .get(table)
+                .is_some_and(|fields| fields.contains_key(field))
+        };
+        let mask_kind = |table: &str, field: &str| {
+            let mode = restricted.get(table)?.get(field)?;
+            if *mode == bilibi_authz::restrictions::Mode::Mask.as_str()
+                && scope.principal().is_none()
+            {
+                fields
+                    .field(table, field)
+                    .and_then(|(_, field)| field.personal)
+            } else {
+                None
+            }
+        };
         // A record owner can expose a field stored in a linked Extension table.
         // Apply that record-level restriction to the resolved Grid field too,
         // so the alternate path cannot bypass the Company's field identity
@@ -207,13 +168,9 @@ impl Catalog {
         let mut contributed_masks: BTreeMap<&'static str, BTreeMap<String, &'static str>> =
             BTreeMap::new();
         for (root, record_field, table, field) in
-            installed.restricted_record_field_columns(|table, field| {
-                restricted
-                    .get(table)
-                    .is_some_and(|fields| fields.contains(field))
-            })
+            installed.restricted_record_field_columns(is_restricted)
         {
-            match masked.get(root).and_then(|m| m.get(record_field)) {
+            match mask_kind(root, record_field) {
                 Some(kind) => {
                     contributed_masks
                         .entry(table)
@@ -225,6 +182,64 @@ impl Catalog {
                 }
             }
         }
+        let mut effective_hidden: BTreeMap<&'static str, BTreeSet<&'static str>> = BTreeMap::new();
+        let mut effective_masks: BTreeMap<&'static str, BTreeMap<String, &'static str>> =
+            BTreeMap::new();
+        for (id, table) in installed.map() {
+            for field in restricted
+                .get(*id)
+                .into_iter()
+                .flat_map(|fields| fields.keys())
+            {
+                let Some(field) = table.field(field) else {
+                    continue;
+                };
+                if table.is_protected(field.id) {
+                    continue;
+                }
+                if let Some(kind) = mask_kind(id, field.id) {
+                    effective_masks
+                        .entry(*id)
+                        .or_default()
+                        .insert(field.id.to_owned(), kind);
+                } else {
+                    effective_hidden.entry(*id).or_default().insert(field.id);
+                }
+            }
+            effective_hidden
+                .entry(*id)
+                .or_default()
+                .extend(contributed_hidden.get(*id).into_iter().flatten().copied());
+            effective_masks.entry(*id).or_default().extend(
+                contributed_masks
+                    .get(*id)
+                    .into_iter()
+                    .flatten()
+                    .map(|(field, kind)| (field.clone(), *kind)),
+            );
+        }
+        loop {
+            let mut changed = false;
+            for (id, table) in installed.map() {
+                for derived in table.source().derived {
+                    let source_hidden = effective_hidden
+                        .get(derived.table)
+                        .is_some_and(|fields| fields.contains(derived.field));
+                    let source_masked = effective_masks
+                        .get(derived.table)
+                        .is_some_and(|fields| fields.contains_key(derived.field));
+                    if source_hidden || source_masked {
+                        changed |= effective_hidden
+                            .entry(*id)
+                            .or_default()
+                            .insert(derived.column);
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         let mut tables = BTreeMap::new();
         let mut masks = BTreeMap::new();
         for (id, table) in installed.map() {
@@ -234,29 +249,12 @@ impl Catalog {
             let Some(reach) = grants.reach_of(table.capability()) else {
                 continue;
             };
-            let mut own = masked.get(*id).cloned().unwrap_or_default();
-            own.extend(
-                contributed_masks
-                    .get(*id)
-                    .into_iter()
-                    .flatten()
-                    .map(|(field, kind)| (field.clone(), *kind)),
-            );
+            let mut own = effective_masks.remove(*id).unwrap_or_default();
+            let hidden = effective_hidden.remove(*id).unwrap_or_default();
+            own.retain(|field, _| !hidden.contains(field.as_str()));
             if let Some((_, field)) = reveal.filter(|(table, _)| table == id) {
                 own.remove(field);
             }
-            // Protected fields are never offered for restriction, so a stale row
-            // naming one is inert here (record pages still mask by name). A
-            // masked field stays, and its values are masked when projected.
-            let mut hidden: BTreeSet<&str> = restricted
-                .get(*id)
-                .into_iter()
-                .flatten()
-                .map(String::as_str)
-                .filter(|field| !table.is_protected(field))
-                .filter(|field| !masked.get(*id).is_some_and(|m| m.contains_key(*field)))
-                .collect();
-            hidden.extend(contributed_hidden.get(*id).into_iter().flatten().copied());
             let table = table.without(&hidden);
             tables.insert(
                 *id,
@@ -279,13 +277,12 @@ impl Catalog {
         // withholds from this reader (custom fields are withheld, never masked).
         if let Some(hook) = crate::custom::hook() {
             for custom in hook.tables(client, scope).await? {
-                let withheld = restricted.get(custom.table).cloned().unwrap_or_default();
-                add_custom(&mut tables, custom, &withheld);
+                let restriction = restricted.get(custom.table);
+                add_custom(&mut tables, custom, restriction);
             }
         }
         for custom in proposed {
-            let withheld = restricted.get(custom.table).cloned().unwrap_or_default();
-            add_custom(&mut tables, custom.clone(), &withheld);
+            add_custom(&mut tables, custom.clone(), restricted.get(custom.table));
         }
         let catalog = Self {
             subject_scope: None,
@@ -625,7 +622,7 @@ impl Catalog {
 fn add_custom(
     tables: &mut BTreeMap<&'static str, Table>,
     custom: crate::custom::CustomTable,
-    withheld: &std::collections::HashSet<String>,
+    restricted: Option<&BTreeMap<String, &str>>,
 ) {
     let Some(json) = tables
         .get(custom.table)
@@ -641,7 +638,7 @@ fn add_custom(
             continue;
         }
         let id = crate::custom::custom_field_id(&column.key);
-        if withheld.contains(id) {
+        if restricted.is_some_and(|fields| fields.contains_key(id)) {
             continue;
         }
         let sql = column.value.replace(

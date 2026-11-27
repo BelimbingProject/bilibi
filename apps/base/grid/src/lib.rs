@@ -57,8 +57,8 @@ pub use custom::{
     CustomColumns, CustomFuture, CustomTable,
 };
 pub use model::{
-    id_valid, GridContribution, Installed, Join, Link, LinkDecl, LinkKind, RecordFields, Source,
-    Subject, Table, TableDecl, MAX_FIELDS, MAX_LINKS_PER_TABLE, MAX_TABLES,
+    id_valid, DerivedColumn, GridContribution, Installed, Join, Link, LinkDecl, LinkKind,
+    RecordFields, Source, Subject, Table, TableDecl, MAX_FIELDS, MAX_LINKS_PER_TABLE, MAX_TABLES,
 };
 
 #[doc(hidden)]
