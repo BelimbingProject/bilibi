@@ -24,7 +24,7 @@ Professional, compact, warm, trustworthy. Dense enough for operations, calm enou
 
 **One thing one door, one door many keys.**
 
-**One thing one door.** Each kind of record has exactly one list and one record page, reached from one menu item. Its stages (draft, waiting for approval, posted, rejected, archived) and its sources (typed in, imported, created by another module) are columns and filters on that list, never separate pages or menu items. One action creates it ("+ Journal"), wherever it is started. Views of one subject are tabs on its one page, not sub-items in the menu: Currencies is one menu item with Base currency and Exchange rates tabs. Approvals may also surface in a shared queue such as "Waiting for my approval", but that queue links back to the record's one home.
+**One thing one door.** Each kind of record has one list and, when needed, one record page, reached from one menu item. If a record page would only edit one field, edit that field in place in the list instead. Its stages (draft, waiting for approval, posted, rejected, archived) and its sources (typed in, imported, created by another module) are columns and filters on that list, never separate pages or menu items. One action creates it ("+ Journal"), wherever it is started. Views of one subject are tabs on its one page, not sub-items in the menu: Currencies is one menu item with Base currency and Exchange rates tabs. Approvals may also surface in a shared queue such as "Waiting for my approval", but that queue links back to the record's one home.
 
 *Example:* journals. Posted entries and manual journals waiting for approval are one Journals list with a status filter, not "Journal entries" and "Manual journals".
 
