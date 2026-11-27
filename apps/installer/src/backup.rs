@@ -82,7 +82,7 @@ pub struct Restored {
 }
 pub enum RestoreTarget<'a> {
     Undo(Option<&'a Path>),
-    Recovery,
+    Recovery(Option<&'a Path>),
 }
 
 /// Replaces the database's contents with a dump: the software history, and
@@ -105,19 +105,9 @@ pub async fn restore(
     dump: &Path,
     since: &str,
     history_file: &Path,
-    current_release: Option<u64>,
     target: RestoreTarget<'_>,
 ) -> Result<Restored, String> {
-    let outcome = replace(
-        client,
-        pg,
-        dump,
-        since,
-        history_file,
-        current_release,
-        target,
-    )
-    .await;
+    let outcome = replace(client, pg, dump, since, history_file, target).await;
     let Err(why) = &outcome else {
         return outcome;
     };
@@ -138,7 +128,6 @@ async fn replace(
     dump: &Path,
     since: &str,
     history_file: &Path,
-    current_release: Option<u64>,
     target: RestoreTarget<'_>,
 ) -> Result<Restored, String> {
     if restored(history_file) {
@@ -150,8 +139,15 @@ async fn replace(
     if !dump.is_file() {
         return Err(format!("the backup {} is missing", dump.display()));
     }
+    let (target, recovering) = match target {
+        RestoreTarget::Undo(target) => (target, false),
+        RestoreTarget::Recovery(target) => (target, true),
+    };
     let saved = match read_saved(history_file) {
-        Some((_, saved)) => saved,
+        Some((_, saved)) => {
+            validate_restore(&saved, recovering)?;
+            saved
+        }
         None => {
             let mut saved = jobs::history(client, since).await.map_err(|error| {
                 format!(
@@ -159,19 +155,13 @@ async fn replace(
                     jobs::short(&error)
                 )
             })?;
-            saved["current_release"] = json!(current_release);
-            if let RestoreTarget::Undo(target) = target {
-                let target = target.ok_or("The restore has no target release composition.")?;
-                saved["target_composition"] = json!(composition::status(target)?);
-                validate_restore(&saved)?;
-            }
+            let target = target.ok_or("The restore has no target release composition.")?;
+            saved["target_composition"] = json!(composition::status(target)?);
+            validate_restore(&saved, recovering)?;
             write_saved(history_file, dump, &saved)?;
             saved
         }
     };
-    if matches!(target, RestoreTarget::Undo(_)) {
-        validate_restore(&saved)?;
-    }
     let kept = match keep_owner(client).await {
         Ok(kept) => kept,
         Err(why) => {
@@ -205,7 +195,7 @@ async fn replace(
     let _ = fs::rename(history_file, restored_name(history_file));
     Ok(Restored { carried, problems })
 }
-fn validate_restore(saved: &Value) -> Result<(), String> {
+fn validate_restore(saved: &Value, recovering: bool) -> Result<(), String> {
     let rows = saved["base_settings"]["rows"]
         .as_array()
         .ok_or("The restore record has no saved installation policy; restore refused.")?;
@@ -219,7 +209,7 @@ fn validate_restore(saved: &Value) -> Result<(), String> {
     let status = saved["target_composition"]
         .as_str()
         .ok_or("The restore record has no target composition; restore refused.")?;
-    composition::admit(status, mode)
+    composition::admit_with_recovery(status, mode, recovering)
         .map(|_| ())
         .map_err(|why| format!("Restore refused: {why}"))
 }
@@ -508,7 +498,7 @@ fn restore_with_owner(pg: &PgEnv, dump: &Path, owner: &Value) -> Result<(), Stri
 /// The restores a restart cut off, found by their saved history: the job,
 /// the file and the dump being restored, newest job first. A file marked
 /// restored is not among them.
-pub fn unfinished_restores(backups: &Path) -> Vec<(i64, PathBuf, PathBuf, Option<u64>)> {
+pub fn unfinished_restores(backups: &Path) -> Vec<(i64, PathBuf, PathBuf)> {
     let mut found = Vec::new();
     for dir in fs::read_dir(backups).into_iter().flatten().flatten() {
         let Some(id) = dir
@@ -525,12 +515,12 @@ pub fn unfinished_restores(backups: &Path) -> Vec<(i64, PathBuf, PathBuf, Option
                     .file_name()
                     .to_str()
                     .is_some_and(|name| name.starts_with("history-"));
-            if let (true, Some((dump, saved))) = (is_saved, read_saved(&path)) {
-                found.push((id, path, dump, saved["current_release"].as_u64()));
+            if let (true, Some((dump, _))) = (is_saved, read_saved(&path)) {
+                found.push((id, path, dump));
             }
         }
     }
-    found.sort_by_key(|(id, _, _, _)| std::cmp::Reverse(*id));
+    found.sort_by_key(|(id, _, _)| std::cmp::Reverse(*id));
     found
 }
 /// A JSON value as one SQL literal (a quoted string: PostgreSQL reads it as

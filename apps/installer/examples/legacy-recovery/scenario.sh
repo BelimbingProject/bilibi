@@ -1,18 +1,14 @@
-#!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
-installer=${1:-target/debug/bilibi-installer}
+installer=$1
+shift
 root_dir=$(mktemp -d "$PWD/.legacy-recovery.XXXXXX")
 cleanup() {
     if [[ -n ${health_pid:-} ]]; then kill "$health_pid"; fi
-    if [[ -f $root_dir/pg/postmaster.pid ]]; then
-        pg_ctl -D "$root_dir/pg" -m immediate stop >/dev/null
-    fi
     rm -rf -- "$root_dir"
 }
 trap cleanup EXIT
-mkdir -p "$root_dir"/{bin,archive,worker/dev/releases/{1,2,3},shell/dev/releases/1}
+mkdir -p "$root_dir"/{bin,archive,worker/dev/releases/{1,2},shell/dev/releases/1}
 export FIXTURE_EVENTS=$root_dir/events
 export FIXTURE_CURRENT=$root_dir/worker/dev/current
 export BILIBI_RELEASE_USER=fixture
@@ -73,7 +69,6 @@ cp "$root_dir/archive/bilibi-web" "$root_dir/worker/dev/releases/2/"
 python3 - "$root_dir" <<'PY' &
 import http.server
 import pathlib
-import socket
 import subprocess
 import sys
 
@@ -92,26 +87,21 @@ class Health(http.server.BaseHTTPRequestHandler):
         self.wfile.write(output)
 
 server = http.server.HTTPServer(("127.0.0.1", 0), Health)
-with socket.socket() as database:
-    database.bind(("127.0.0.1", 0))
-    (root / "ports").write_text(f"{server.server_port} {database.getsockname()[1]}\n")
+(root / "port").write_text(f"{server.server_port}\n")
 server.serve_forever()
 PY
 health_pid=$!
 for attempt in {1..50}; do
-    [[ ! -s $root_dir/ports ]] || break
+    [[ ! -s $root_dir/port ]] || break
     sleep 0.1
 done
-read -r health_port pg_port < "$root_dir/ports"
+health_port=$(cat "$root_dir/port")
 origin="http://127.0.0.1:$health_port"
 for instance in "$root_dir"/{worker,shell}/dev; do
     printf 'BIND_ADDR=127.0.0.1:%s\nAPP_ORIGIN=%s\n' "$health_port" "$origin" > "$instance/env"
 done
-initdb -D "$root_dir/pg" -A trust -U installer --no-locale >/dev/null
-pg_ctl -D "$root_dir/pg" -l "$root_dir/postgres.log" \
-    -o "-h 127.0.0.1 -p $pg_port -c unix_socket_directories=" -w start >/dev/null
-export DATABASE_URL="postgresql://installer@127.0.0.1:$pg_port/postgres"
 sql() { psql -XAt -v ON_ERROR_STOP=1 "$DATABASE_URL" "$@"; }
+[[ $(sql -c "SELECT to_regclass('public.base_software_jobs') IS NULL") == t ]]
 migrations=apps/base/software/migrations
 sql -f "$migrations/001-jobs.sql" -f "$migrations/005-paused.sql" \
     -f "$migrations/006-installer-heartbeat.sql" >/dev/null
@@ -127,7 +117,7 @@ INSERT INTO base_software_steps (tenant_id,job_id,seq,key,label,state,detail) VA
 SQL
 
 systemctl start bilibi@dev
-timeout 30 "$installer" "$root_dir/worker/dev"
+timeout 30 "$installer" --worker "$root_dir/worker/dev"
 [[ $(sql -c "SELECT state FROM base_software_jobs WHERE id=1 AND result->>'migrated'='false' AND result->>'message' LIKE '%fixture migration refused%'") == failed ]]
 [[ $(sql -c 'TABLE bilibi_migrations') == baseline ]]
 [[ $(readlink -f "$FIXTURE_CURRENT") == "$root_dir/worker/dev/releases/1" ]]
@@ -166,25 +156,4 @@ grep -q 'Code: MIGRATION_FAILED' "$root_dir/shell.log"
 [[ $(readlink -f "$FIXTURE_CURRENT") == "$root_dir/shell/dev/releases/1" ]]
 [[ $(curl -fsS "$origin/login") == legacy-release ]]
 
-export FIXTURE_CURRENT=$root_dir/worker/dev/current
-ln -sfn 3 "$root_dir/worker/dev/releases/current"
-sql >/dev/null <<'SQL'
-INSERT INTO base_software_jobs
-  (tenant_id,kind,state,request,review,requested_by,worker,paused_at)
-VALUES (1,'install','running','{}','{}',1,'installer@dev',now()),
-       (2,'install','running','{}','{}',1,'installer@dev',now());
-INSERT INTO base_software_steps (tenant_id,job_id,seq,key,label,state,detail) VALUES
-  (1,2,1,'fetch','Fetch','done','{"release":2,"previous":1}'),
-  (1,2,2,'migrate','Migrate','failed','{"migrated":true}'),
-  (2,3,1,'fetch','Fetch','done','{"release":2,"previous":1}');
-SQL
-mkdir -p "$root_dir/worker/dev/backups/job-3"
-printf '{"dump":"unused.dump","history":{"current_release":1}}\n' \
-    > "$root_dir/worker/dev/backups/job-3/history-switch_back.json"
-: > "$FIXTURE_EVENTS"
-timeout 30 "$installer" "$root_dir/worker/dev"
-[[ ! -s $FIXTURE_EVENTS ]]
-[[ $(sql -c 'TABLE bilibi_migrations') == baseline ]]
-[[ $(readlink -f "$FIXTURE_CURRENT") == "$root_dir/worker/dev/releases/3" ]]
-[[ $(sql -c "SELECT count(*) FROM base_software_jobs WHERE state='interrupted'") == 2 ]]
-echo 'PASS: both installers recover the answering legacy release and stale recovery leaves current alone.'
+echo "PASS: both installers recover the answering legacy release."

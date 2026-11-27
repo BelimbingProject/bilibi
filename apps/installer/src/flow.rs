@@ -29,7 +29,6 @@ const MIGRATE_LIMIT_SECONDS: &str = "1800";
 /// How many releases besides the current and previous one are kept.
 const KEEP_RELEASES: usize = 3;
 const KEEP_BACKUPS: usize = 3;
-const RELEASE_MOVED: &str = "Current no longer belongs to this release job. Recovery stopped.";
 
 type Db<T> = Result<T, tokio_postgres::Error>;
 
@@ -319,10 +318,6 @@ impl<'a> Run<'a> {
     pub async fn resume(&mut self) -> Db<bool> {
         let paused = self.job.paused;
         if paused {
-            if !self.owns_current().await? {
-                self.interrupted(RELEASE_MOVED).await?;
-                return Ok(true);
-            }
             jobs::lock_installation(&*self.client).await?;
             // From the first moment: nothing may be entered while the
             // database is being decided on.
@@ -350,7 +345,7 @@ impl<'a> Run<'a> {
         }
         if self.update_committed().await? {
             if self.is_done("switch") {
-                let answered = match self.start_current().await {
+                let answered = match self.start_current(None).await {
                     Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                     Err(why) => Err(why),
                 };
@@ -547,7 +542,7 @@ impl<'a> Run<'a> {
         if !self.is_done("switch") {
             self.start("switch", &format!("Switching to release {release}"))
                 .await?;
-            if let Err(reason) = self.switch_to(release, true).await {
+            if let Err(reason) = self.switch_to(release, false).await {
                 self.fail("switch", &reason).await?;
                 return self.switch_back().await;
             }
@@ -940,7 +935,7 @@ impl<'a> Run<'a> {
     async fn migrate(&self, release: u64, before: i64) -> Result<Value, String> {
         let program = self.layout.release(release).join("bilibi-web");
         self.service.stop()?;
-        self.admit_release(release).await?;
+        self.admit_release(release, false).await?;
         run_program(&program, "migrate", MIGRATE_LIMIT_SECONDS)?;
         run_program(&program, "seed-production", "600")?;
         let after = jobs::ledger_count(&*self.client)
@@ -953,61 +948,32 @@ impl<'a> Run<'a> {
             "ledger_before": before, "applied": applied, "migrated": applied > 0,
         }))
     }
-    async fn admit_release(&self, release: u64) -> Result<(), String> {
+    async fn admit_release(&self, release: u64, recovering: bool) -> Result<(), String> {
         let status = composition::status(&self.layout.release(release))?;
         let mode = jobs::installation_mode(&*self.client)
             .await
             .map_err(|error| jobs::short(&error))?;
-        composition::admit(&status, &mode)?;
+        composition::admit_with_recovery(&status, &mode, recovering)?;
         Ok(())
     }
-    async fn start_current(&self) -> Result<(), String> {
+    async fn start_current(&self, previous: Option<u64>) -> Result<(), String> {
         let release = self
             .layout
             .current()
             .ok_or("There is no current release to start.")?;
-        self.admit_release(release).await?;
+        self.admit_release(release, previous == Some(release))
+            .await?;
         self.service.start()
     }
-    async fn release_transition(&self) -> Db<Option<(u64, u64)>> {
-        if self.job.kind == "undo" {
-            return Ok(self
-                .undone()
-                .await?
-                .ok()
-                .map(|undo| (undo.release, undo.previous)));
-        }
-        let fetched = self.detail("fetch");
-        Ok(fetched["previous"]
-            .as_u64()
-            .zip(fetched["release"].as_u64()))
-    }
-    async fn owns_current(&self) -> Db<bool> {
-        let Some((previous, candidate)) = self.release_transition().await? else {
-            return Ok(false);
-        };
-        let current = self.layout.current();
-        Ok(match self.state("switch_back") {
-            "done" => current == Some(previous),
-            "running" => current == Some(previous) || current == Some(candidate),
-            _ => match self.state("switch") {
-                "done" => current == Some(candidate),
-                "running" | "failed" => current == Some(previous) || current == Some(candidate),
-                _ => current == Some(previous),
-            },
-        })
-    }
     async fn restart_previous(&self) -> Db<Result<(), String>> {
-        let previous = self
-            .release_transition()
-            .await?
-            .map(|(previous, _)| previous);
-        if previous.is_none() || self.layout.current() != previous {
-            return Ok(Err(RELEASE_MOVED.into()));
-        }
-        Ok(self.service.start())
+        let previous = if self.job.kind == "undo" {
+            self.undone().await?.ok().map(|undone| undone.release)
+        } else {
+            self.detail("fetch")["previous"].as_u64()
+        };
+        Ok(self.start_current(previous).await)
     }
-    async fn switch_to(&self, release: u64, admit: bool) -> Result<(), String> {
+    async fn switch_to(&self, release: u64, recovering: bool) -> Result<(), String> {
         if !self.layout.release(release).join("bilibi-web").is_file() {
             return Err(format!(
                 "release {release} is missing from {}",
@@ -1015,9 +981,7 @@ impl<'a> Run<'a> {
             ));
         }
         self.service.stop()?;
-        if admit {
-            self.admit_release(release).await?;
-        }
+        self.admit_release(release, recovering).await?;
         self.layout
             .point_current(release)
             .map_err(|error| format!("could not point current at release {release}: {error}"))?;
@@ -1027,9 +991,6 @@ impl<'a> Run<'a> {
     /// with the backup restored first when the database was changed. It is a
     /// step of the job like the others, so a restart in it ends the same way.
     async fn switch_back(&mut self) -> Db<()> {
-        if !self.owns_current().await? {
-            return self.interrupted(RELEASE_MOVED).await;
-        }
         if matches!(self.state("switch_back"), "done" | "failed") {
             let mut result = self.detail("switch_back");
             if self.is_done("switch_back") {
@@ -1080,8 +1041,7 @@ impl<'a> Run<'a> {
                 file,
                 back.base["backup_at"].as_str().unwrap_or(""),
                 &self.history_file("switch_back"),
-                self.layout.current(),
-                backup::RestoreTarget::Recovery,
+                backup::RestoreTarget::Recovery(Some(&self.layout.release(back.to))),
             )
             .await
             {
@@ -1100,7 +1060,7 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        let answered = match self.switch_to(back.to, false).await {
+        let answered = match self.switch_to(back.to, true).await {
             Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
             Err(why) => Err(why),
         };
@@ -1225,7 +1185,7 @@ impl<'a> Run<'a> {
             }
         }
         jobs::lock_installation(&*self.client).await?;
-        if let Err(reason) = self.admit_release(undone.previous).await {
+        if let Err(reason) = self.admit_release(undone.previous, false).await {
             return self.nothing_changed("backup", &reason).await;
         }
         if !self.is_done("backup") {
@@ -1268,7 +1228,6 @@ impl<'a> Run<'a> {
                 &file,
                 &undone.since,
                 &self.history_file("restore"),
-                self.layout.current(),
                 backup::RestoreTarget::Undo(Some(&self.layout.release(undone.previous))),
             )
             .await
@@ -1286,7 +1245,7 @@ impl<'a> Run<'a> {
         if !self.is_done("switch") {
             self.start("switch", &format!("Switching back to release {previous}"))
                 .await?;
-            if let Err(reason) = self.switch_to(previous, true).await {
+            if let Err(reason) = self.switch_to(previous, false).await {
                 self.fail("switch", &reason).await?;
                 return self.switch_back().await;
             }

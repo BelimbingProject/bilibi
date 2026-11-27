@@ -30,6 +30,10 @@ pub fn parse(status: &str) -> Value {
 }
 
 pub fn admit(status: &str, mode: &str) -> Result<Value, String> {
+    admit_with_recovery(status, mode, false)
+}
+
+pub fn admit_with_recovery(status: &str, mode: &str, recovering: bool) -> Result<Value, String> {
     if !matches!(mode, "shared" | "isolated") {
         return Err("The saved installation.mode is invalid.".into());
     }
@@ -54,6 +58,7 @@ pub fn admit(status: &str, mode: &str) -> Result<Value, String> {
             .ok_or("The release reports an invalid Extension declaration.")?;
         let id = extension["id"].as_str().unwrap_or("unknown");
         match extension["code"].as_str() {
+            None if recovering => {}
             Some("reviewed") => {}
             Some("customer") if mode == "isolated" => {}
             Some("customer") => return Err(format!("Extension {id} requires an isolated installation; use an isolated installation, or prepare a code-free release.")),
