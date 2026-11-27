@@ -799,7 +799,10 @@ impl UserService {
             Ok(connection) => Ok(Some(connection)),
             Err(error @ (Error::Database(_) | Error::Pool(_))) => Err(error),
             Err(error) => {
-                eprintln!("sso: connection {public} is unreadable and was skipped: {error}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "sso: connection {public} is unreadable and was skipped: {error}"
+                );
                 Ok(None)
             }
         }

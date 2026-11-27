@@ -46,7 +46,10 @@ impl Follow {
 async fn listen(url: String, db: Db, sender: broadcast::Sender<Change>) {
     loop {
         if let Err(why) = listen_once(&url, &db, &sender).await {
-            eprintln!("software: the job notification connection dropped: {why}");
+            bilibi_module_registry::server_log!(
+                Error,
+                "software: the job notification connection dropped: {why}"
+            );
         }
         tokio::time::sleep(RETRY).await;
     }

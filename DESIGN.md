@@ -24,7 +24,7 @@ Professional, compact, warm, trustworthy. Dense enough for operations, calm enou
 
 **One thing one door, one door many keys.**
 
-**One thing one door.** Each kind of record has exactly one list and one record page, reached from one menu item. Its stages (draft, waiting for approval, posted, rejected, archived) and its sources (typed in, imported, created by another module) are columns and filters on that list, never separate pages or menu items. One action creates it ("+ Journal"), wherever it is started. Views of one subject are tabs on its one page, not sub-items in the menu: Currencies is one menu item with Base currency and Exchange rates tabs. Approvals may also surface in a shared queue such as "Waiting for my approval", but that queue links back to the record's one home.
+**One thing one door.** Each kind of record has one list and, when needed, one record page, reached from one menu item. If a record page would only edit one field, edit that field in place in the list instead. Its stages (draft, waiting for approval, posted, rejected, archived) and its sources (typed in, imported, created by another module) are columns and filters on that list, never separate pages or menu items. One action creates it ("+ Journal"), wherever it is started. Views of one subject are tabs on its one page, not sub-items in the menu: Currencies is one menu item with Base currency and Exchange rates tabs. Approvals may also surface in a shared queue such as "Waiting for my approval", but that queue links back to the record's one home.
 
 *Example:* journals. Posted entries and manual journals waiting for approval are one Journals list with a status filter, not "Journal entries" and "Manual journals".
 
@@ -171,6 +171,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 *Every list is a `FlexTable`.* Never the plain `Table`.
 
 - **State:** `ListState` keeps page, search, filters, sort and page size in the URL. Reload and shared links reopen the same view.
+- **Filter boxes:** empty filters read “All <things>” consistently, including multi-selects; selected multi-selects show a short summary.
 - **Toolbar:** search sits first, with filter boxes to its right, above the table in the open. A list a person reads whole (exchange rates) has no search box. Leave 12 px between the page header and the toolbar. On a phone (below `sm`) only search stays in the row, beside one "Filters" button that says how many filters are set ("Filters (2)"); it opens the filters as a sheet along the bottom, and each set filter shows under search as a chip whose × clears it (as Gmail, Linear and Shopify Admin do). Filters apply as they change, so the sheet stays open until Done, Close, Escape or a tap outside. Desktop is unchanged. No second card.
 - **Phone column order:** A list may name its most useful columns to show first on phones; the API and ordering contract are in [Shared UI](apps/base/ui/README.md#phone-lists-and-header-actions).
 - **Row links:** Below `sm` (640 px) or on a coarse pointer, every row link has a real tap target at least 44 × 44 px; targets never overlap.
@@ -276,6 +277,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
   - Sidebar: the menu, pinned items and account entry at the bottom.
   - Status bar: the server role and instance label use the role's badge treatment. Staging and Production show the [packaged application version](apps/web/README.md#versions-bilibi-web-status). Dev shows the working version, a marker for uncommitted changes, and the listen address. The version label links to Software for viewers with access to the page, which shows installed Domain and Extension versions. The role comes from `instance.role`, never the build mode. See `docs/versions.md`.
   - In the status bar's centre, the AI tag: the text AI in a bordered box, drawn like the role tag. A faint border means every AI connection is off or none exists; the success colours (green surface, line and text) mean at least one is switched on. The tooltip says which ("One or more AI connections are on" or "AI is off"), so colour is never the only cue. It stays visible at phone width. Clicking it opens a panel upward: when nothing is connected, the prompt to paste into an AI app and the server address, each with a Copy button, a link to enter the code a cloud app or bot shows, plus a note to use an AI program on this computer when the server is a Dev copy or not reachable from the internet; when connected, under the heading Connected AI the connected apps, each with its own on/off pill toggle, its last use as the shared datetime component in the time zone chosen in the top bar and the client it was approved from, a Manage link (the only link to the settings page), and Recent activity, newest first. Each activity line says what the AI operated on ("Read 12 companies", "Saved a change to Company Acme Sdn Bhd", "Prepared a change to 3 invoices for you to review"): the kind of record, how many and, for one record, its name as the reader's own field access and company reach show it, never a masked or out-of-reach name. Asking what the AI can do or how an action works is left to the full activity page, which the heading links to for readers who can open it. The panel follows new requests and connection changes live. Approvals, bot notifications and an in-app assistant are later stages.
+  - Next to the AI tag, [server diagnostics](apps/base/perf/README.md#server-diagnostics) uses the shared status-bar tag and disclosure panel. The tag uses the severity’s semantic colours and names the severity in words.
   - Below `lg` the menu is an off-canvas drawer.
 - Pages never render chrome. The host wraps them (`apps/web/src/shell.rs`).
 - The bell has **To do** and **Notifications** tabs, with separate counts for actionable work and unread notifications. To do starts with approvals waiting for the signed-in person; each row links to its record and See all opens the full approvals page. There is no approvals sidebar entry. Opening the bell or marking notifications read never completes a to-do. Notifications continue to follow new deliveries live.
@@ -308,14 +310,19 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **A drop opens the target's own review**, the dialog its button opens, with the record chosen. Nothing is written until the person confirms, and the confirm runs the target's existing operation: its permission check, rules and history. A drop carries references only (`kind:id`) and the target re-reads every record under the person's own scope.
 - **Rows are draggable only when a page the person may use accepts their kind;** the menu shows the same targets. A target that takes fewer records than are ticked stays in the menu, greyed, saying how many it takes.
 
+- Hide an add control when it cannot add anything; do not explain its absence with an empty state.
+- Use one searchable picker for each record choice, without a separate search field.
+
 ## Writing and tone
+
+- Keep titles and section headings short noun phrases, never sentences. Write each help line as a clear instruction starting with a verb.
 
 - **Scan before reading.** Headings, labels, badges, counts and table structure carry the workflow. Do not explain what a visible label already says.
 - **Put information where it acts.** A page title stays true across tabs. Tab guidance lives in the tab.
 - **Consistency.** Same thing, same look, same place.
 - **Sentence case.** Titles, buttons, labels, options and badges raise only the first word and names: "Set up", "Past due", "Debits equal credits", never "Set Up". The shared badge raises the first letter of a stored lower-case value ("draft" reads "Draft") and nothing else.
 - **Calm.** No urgency, no badge spam, no dark patterns.
-- **Versions.** Show a version and commit date-time, never a commit hash as a version. Put the full hash in a tooltip at most.
+- **Values.** Values say what they are: never show a lone code, number, date or word the reader has to decode; put what it is beside it.
 - **Details.** Every expandable summary names what it contains.
 - **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator", commands to install something are "Installation commands".
 - **Never "your developer".** A label or sentence never sends the reader to another person ("Code for your developer", "Ask your developer to test it first"): the reader may be that person, and the others learn nothing. Say what the thing is and let the reader decide who acts.

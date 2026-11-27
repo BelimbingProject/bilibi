@@ -329,7 +329,10 @@ pub(crate) async fn password_identity(
         let mail = users.reset_mail();
         tokio::spawn(async move {
             if let Err(error) = mail.sign_in_failed(tenant, user, limits).await {
-                eprintln!("sign-in: a wrong password for user {user} was not counted: {error}");
+                bilibi_module_registry::server_log!(
+                    Error,
+                    "sign-in: a wrong password for user {user} was not counted: {error}"
+                );
             }
         });
         return Err(CredentialError::Rejected);

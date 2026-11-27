@@ -674,7 +674,10 @@ impl Sessions {
             match self.prune_tenant(&mut client, boundary, tenant, idle).await {
                 Ok(count) => pruned += count,
                 Err(error) => {
-                    eprintln!("warning: session expiry in tenant {tenant} failed: {error:?}");
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "warning: session expiry in tenant {tenant} failed: {error:?}"
+                    );
                     failed = Some(error);
                 }
             }

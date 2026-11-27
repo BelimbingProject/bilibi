@@ -16,7 +16,7 @@ impl Software {
                 () = async {
                     ticks.tick().await;
                     if let Err(error) = self.check_for_update().await {
-                        eprintln!("warning: software update check failed: {error:?}");
+                        bilibi_module_registry::server_log!(Warning,"warning: software update check failed: {error:?}");
                     }
                 } => {}
             }

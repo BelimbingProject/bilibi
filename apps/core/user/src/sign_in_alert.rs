@@ -23,7 +23,10 @@ impl UserService {
         let (users, token) = (self.clone(), token.to_owned());
         tokio::spawn(async move {
             if let Err(error) = users.send_new_device_alert(&token, &device).await {
-                eprintln!("mail: new-device sign-in email was not sent: {error}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "mail: new-device sign-in email was not sent: {error}"
+                );
             }
         });
     }
@@ -93,7 +96,8 @@ impl UserService {
             .deliver_linked_for(scope.tenant(), &message, Some(&link))
             .await
         {
-            eprintln!(
+            bilibi_module_registry::server_log!(
+                Warning,
                 "mail: new-device sign-in email for user {} was not delivered: {error}",
                 scope.user()
             );

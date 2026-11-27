@@ -353,6 +353,16 @@ impl Write {
     }
 }
 impl WriteHandler for Write {
+    fn accepts_references(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Assign => &[
+                ("source_organisation_id", "company"),
+                ("target_id", "company"),
+                ("target_id", "person"),
+            ],
+            _ => &[],
+        }
+    }
     fn preview_dependent<'a>(
         &'a self,
         client: &'a dyn OperationClient,
@@ -361,15 +371,21 @@ impl WriteHandler for Write {
         references: &'a bilibi_agent_api::PlanReferences,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            if !matches!(self, Self::Assign) {
-                return Err(Error::Invalid.into());
-            }
+            references.require(self.accepts_references())?;
             let kind = match input["target_kind"].as_str() {
                 Some("organisation") => "company",
                 Some("person") => "person",
                 _ => return Err(Error::Invalid.into()),
             };
-            references.require(&[("source_organisation_id", "company"), ("target_id", kind)])?;
+            if references
+                .kind("target_id")
+                .is_some_and(|linked| linked != kind)
+            {
+                return Err(invalid(vec![FieldError::new(
+                    "target_id",
+                    "this field cannot refer to that new record",
+                )]));
+            }
             if input["source_organisation_id"] == input["target_id"] && kind == "company" {
                 return Err(invalid(vec![FieldError::new(
                     "target_id",

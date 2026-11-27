@@ -1,6 +1,6 @@
 # Perf history
 
-**Use it for:** the timing history of requests, live events, jobs and processes, and the Performance page.
+**Use it for:** the timing history of requests, live events, jobs and processes, the Performance page, and bounded server diagnostics.
 
 **Not for:** timing logs or a metrics table of your own.
 
@@ -87,3 +87,15 @@ because it truncates `base_perf_samples`:
 BILIBI_DISPOSABLE_PERF_DEMO=yes DATABASE_URL=postgres://... \
   cargo run -p bilibi-perf --example perf-walkthrough
 ```
+
+## Server diagnostics
+
+Platform operators with `admin.system.perf.view` (included in the System Viewer role) can open **Diagnostics** at `/system/diagnostics`. The status-bar tag opens a panel with the source, message, occurrence count and last-seen time for each group. **All diagnostics** opens the read-only list, which also shows severity. Both views show up to 100 groups, with errors first and the most recently seen first within each severity. Times follow the shell’s display policy.
+
+The tag counts all retained error occurrences when there are errors and all retained warning occurrences otherwise, including groups beyond the display limit. The shell refreshes the panel on its normal live refresh. An empty successful read hides the tag. If a provider fails, both views indicate that some diagnostics could not be loaded and keep the results from successful providers. With no results in that case, the tag reads **Diagnostics unavailable**. A failure of the shell embed itself leaves diagnostics hidden and the staff page usable.
+
+The server captures warnings and errors emitted through `server_log!` after the sink is installed. It submits the static format template to a bounded, best-effort queue. Interpolated values go to stderr only. The recorder groups occurrences by severity, source and normalized template. The panic hook records the source filename and a fixed message and also runs the original hook. System health checks are deferred.
+
+**Diagnostics retention (days)** in Performance settings (`diagnostics.keep_days`, default seven) expires groups based on the last occurrence. The diagnostics writer and Perf retention job prune expired groups, and reads filter them immediately. Capture runs independently of performance sampling. A full queue or unavailable database can drop occurrences without delaying the work that emitted them.
+
+Modules can contribute a `DiagnosticProvider` to `DIAGNOSTIC_PROVIDERS` through the module registry. Providers must return bounded, non-sensitive installation-wide facts. The UI rechecks operator access before reading providers.

@@ -475,7 +475,8 @@ pub(crate) fn artifact_error(error: bilibi_artifacts::Error) -> WriteError {
         A::LegalHold => WriteError::LegalHold,
         A::Retained => WriteError::Retained,
         error => {
-            eprintln!(
+            bilibi_module_registry::server_log!(
+                Error,
                 "error: a document file could not be handled as a private document: {}",
                 error.code()
             );
@@ -685,7 +686,10 @@ pub(crate) async fn store(
                 error => artifact_error(error),
             })?;
         if let Err(error) = media.discard_draft(client, scope, &staged.public_id).await {
-            eprintln!("warning: a scanned document staging file awaits Media cleanup: {error}");
+            bilibi_module_registry::server_log!(
+                Warning,
+                "warning: a scanned document staging file awaits Media cleanup: {error}"
+            );
         }
         Some(metadata)
     } else {

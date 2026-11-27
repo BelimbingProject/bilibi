@@ -574,9 +574,8 @@ impl Dialog {
         if let Some((user, _)) = &self.assignee {
             input["assignee_user_id"] = json!(user);
         }
-        if self.shared {
-            input["shared"] = json!(true);
-        }
+        // Always the box's answer: a note's contract default is shared.
+        input["shared"] = json!(self.shared);
         if !self.tags.is_empty() {
             input["tags"] = json!(self.tags);
         }
