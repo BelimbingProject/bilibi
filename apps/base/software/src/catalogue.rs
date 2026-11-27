@@ -69,6 +69,8 @@ pub struct Release {
     #[serde(default)]
     pub released: Option<String>,
     pub commit: String,
+    #[serde(default)]
+    pub committed_at: Option<String>,
     /// The Platform versions a Domain release needs, `>=0.1.0, <0.2.0`.
     #[serde(default)]
     pub platform: Option<String>,
@@ -166,7 +168,7 @@ impl Catalogue {
                             })
                             .filter_map(|set| set.platform.version.as_deref())
                             .collect();
-                        json!({"version": version, "released": release.released, "commit": release.commit,
+                        json!({"version": version, "released": release.released, "commit": release.commit, "committed_at": release.committed_at,
                                "platform": release.platform, "tested_on": tested_on})
                     })
                     .collect();
@@ -187,7 +189,7 @@ impl Catalogue {
             "platform": {"name": self.platform.name, "repository": self.platform.repository,
                          "versions": self.platform.versions.iter().map(|(v, r)| json!({"version": v, "released": r.released, "commit": r.commit})).collect::<Vec<_>>()},
             "domains": domains,
-            "extensions": self.extensions.iter().map(|(id, ext)| json!({"id": id, "name": ext.name, "description": ext.description, "repository": ext.repository, "modules": ext.modules, "versions": ext.versions.iter().map(|(v, r)| json!({"version":v, "commit":r.commit, "released":r.released, "platform":r.platform})).collect::<Vec<_>>() })).collect::<Vec<_>>(),
+            "extensions": self.extensions.iter().map(|(id, ext)| json!({"id": id, "name": ext.name, "description": ext.description, "repository": ext.repository, "modules": ext.modules, "versions": ext.versions.iter().map(|(v, r)| json!({"version":v, "commit":r.commit, "committed_at":r.committed_at, "released":r.released, "platform":r.platform})).collect::<Vec<_>>() })).collect::<Vec<_>>(),
             "plugins": plugins,
             "tested": self.tested.iter().map(|set| json!({
                 "platform": {"version": set.platform.version, "commit": set.platform.commit},
@@ -264,6 +266,100 @@ impl Reader {
             .map(Arc::new)
             .map_err(|_| format!("{url} is not a catalogue in format 1"))?;
         Ok(catalogue)
+    }
+}
+
+impl crate::Software {
+    /// Fill missing times for displayed catalogue releases from their public GitHub commits.
+    pub(crate) async fn fill_commit_times(&self, scope: &Scope, catalogue: &mut Value) {
+        let mut jobs = Vec::new();
+        for kind in ["domains", "extensions"] {
+            for (index, item) in catalogue[kind].as_array().into_iter().flatten().enumerate() {
+                let Some(repository) = item["repository"].as_str().and_then(github_repository)
+                else {
+                    continue;
+                };
+                let Some(version) = item["latest_version"]
+                    .as_str()
+                    .or_else(|| item["recommended_version"].as_str())
+                else {
+                    continue;
+                };
+                let Some((release_index, release)) =
+                    item["versions"].as_array().and_then(|versions| {
+                        versions
+                            .iter()
+                            .enumerate()
+                            .find(|(_, release)| release["version"] == version)
+                    })
+                else {
+                    continue;
+                };
+                if release["committed_at"].is_string() {
+                    continue;
+                }
+                let Some(commit) = release["commit"].as_str().filter(|commit| {
+                    commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+                }) else {
+                    continue;
+                };
+                jobs.push((
+                    kind,
+                    index,
+                    release_index,
+                    format!("https://api.github.com/repos/{repository}/commits/{commit}"),
+                ));
+            }
+        }
+        for (kind, index, release_index, url) in jobs {
+            let Ok(reply) = self
+                .integration
+                .send(
+                    Origin::User(scope),
+                    &Call {
+                        system: "github".into(),
+                        operation: "software.catalogue.commit".into(),
+                        ..Call::default()
+                    },
+                    Outgoing::get(url)
+                        .header("user-agent", "bilibi")
+                        .timeout(Duration::from_secs(3))
+                        .max_body_bytes(MAX_BYTES),
+                )
+                .await
+            else {
+                continue;
+            };
+            if reply.status != 200 {
+                continue;
+            }
+            let Ok(body) = serde_json::from_slice::<Value>(&reply.body) else {
+                continue;
+            };
+            if let Some(at) = body["commit"]["committer"]["date"]
+                .as_str()
+                .filter(|at| at.parse::<jiff::Timestamp>().is_ok())
+            {
+                catalogue[kind][index]["versions"][release_index]["committed_at"] = json!(at);
+            }
+        }
+    }
+}
+
+fn github_repository(repository: &str) -> Option<&str> {
+    let path = repository
+        .strip_prefix("https://github.com/")?
+        .trim_end_matches('/');
+    let mut parts = path.split('/');
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(name), None) if valid(owner) && valid(name) => Some(path),
+        _ => None,
     }
 }
 

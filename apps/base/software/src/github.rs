@@ -163,6 +163,7 @@ impl Software {
                         prerelease,
                         false,
                         proof_required,
+                        &policy.minimum_tag,
                     ));
                 }
             }
@@ -175,6 +176,7 @@ impl Software {
                     prerelease,
                     false,
                     proof_required,
+                    &policy.minimum_tag,
                 ));
             }
         }
@@ -203,12 +205,20 @@ impl Software {
                 // ask a GitHub that just refused or did not answer. Refresh
                 // still asks again.
                 let mut kept = read_cache(cache_path.as_deref(), repository).unwrap_or_else(
-                    || json!({"available": false, "repository": repository, "releases": []}),
+                    || json!({"available": false, "repository": repository, "latest_nightly": null, "releases": []}),
                 );
                 kept["attempt_at"] = json!(jiff::Timestamp::now().to_string());
                 kept["message"] = json!(message);
                 write_cache(cache_path.as_deref(), &kept);
-                let mut shown = present(&kept, &saved, target, prerelease, true, proof_required);
+                let mut shown = present(
+                    &kept,
+                    &saved,
+                    target,
+                    prerelease,
+                    true,
+                    proof_required,
+                    &policy.minimum_tag,
+                );
                 shown["message"] = json!(message);
                 return Ok(shown);
             }
@@ -220,6 +230,7 @@ impl Software {
             prerelease,
             false,
             proof_required,
+            &policy.minimum_tag,
         ))
     }
 
@@ -542,6 +553,7 @@ fn present(
     prerelease: bool,
     stale: bool,
     proof_required: bool,
+    minimum_tag: &str,
 ) -> Value {
     let repository = cache["repository"].as_str().unwrap_or("");
     let live_id = cache["repository_id"].as_i64();
@@ -557,7 +569,14 @@ fn present(
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .filter(|row| prerelease || row["prerelease"].as_bool() != Some(true))
+        .filter(|row| {
+            prerelease
+                || row["prerelease"].as_bool() != Some(true)
+                || (minimum_tag.starts_with("nightly-")
+                    && row["tag"]
+                        .as_str()
+                        .is_some_and(|tag| tag.starts_with("nightly-")))
+        })
         .collect();
     releases.retain(|row| row["target"].as_str() == Some(target));
     let mut message = cache["message"].as_str().unwrap_or("").to_owned();
@@ -608,7 +627,7 @@ fn present(
         };
     }
     json!({
-        "latest": cache["latest"],
+        "latest": if minimum_tag.starts_with("nightly-") { &cache["latest_nightly"] } else { &cache["latest"] },
         "complete": cache["complete"],
         "available": cache["available"].as_bool().unwrap_or(false),
         "repository": repository,
@@ -658,7 +677,8 @@ fn read_cache(path: Option<&Path>, repository: &str) -> Option<Value> {
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
     });
     let value = from_file.or_else(|| MEMORY.lock().ok().and_then(|guard| guard.clone()))?;
-    (value["repository"].as_str() == Some(repository)).then_some(value)
+    (value["repository"].as_str() == Some(repository) && value.get("latest_nightly").is_some())
+        .then_some(value)
 }
 fn write_cache(path: Option<&Path>, value: &Value) {
     if let Ok(mut guard) = MEMORY.lock() {
@@ -782,7 +802,8 @@ async fn fetch_listing(
         last = Some(page);
     }
     let rated = last.as_ref().unwrap_or(&first);
-    let latest = super::update::latest(releases);
+    let latest = super::update::latest(releases, "setup-v0.0.0");
+    let latest_nightly = super::update::latest(releases, "nightly-0001-01-01");
     let releases = body
         .as_array()
         .into_iter()
@@ -800,6 +821,7 @@ async fn fetch_listing(
         "complete":next.is_none(),
         "message":page_error,
         "latest":latest,
+        "latest_nightly":latest_nightly,
         "fetched_at": jiff::Timestamp::now().to_string(),
         "releases": releases,
     });
@@ -854,8 +876,8 @@ fn asset_row(
         return None;
     }
     let name = asset["name"].as_str()?.to_owned();
-    let suffix = format!("-{target}.tar.gz");
-    if !name.starts_with("bilibi-setup-") || !name.ends_with(&suffix) {
+    let (asset_tag, asset_target) = release_proof::setup_identity_of(&name)?;
+    if asset_tag != tag || asset_target != target {
         return None;
     }
     let digest = normalize_digest(asset["digest"].as_str().unwrap_or(""))?;

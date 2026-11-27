@@ -313,16 +313,24 @@ impl ReleaseFiles {
         let latest = match (
             facts["github"]["repository"].as_str(),
             release["tag"].as_str(),
-            release["version"].as_str(),
         ) {
-            (Some(repository), Some(tag), Some(version)) => render(ActionLink {
+            (Some(repository), Some(tag)) => render(ActionLink {
                 id: "software-latest-notes",
                 href: &format!("https://github.com/{repository}/releases/tag/{tag}"),
                 title: "Release notes",
-                body: Html::text(version),
+                body: Html::text(tag),
                 ..ActionLink::default()
             })?,
-            _ => Html::text("Unavailable"),
+            _ if facts["github"]["repository"].as_str().is_none() => {
+                Html::text("No update source is set. Set up release trust on the server.")
+            }
+            _ if update["reason"] == "no_stable_release" => {
+                Html::text("No releases found. Publish a release to the update source.")
+            }
+            _ if update["reason"] == "source_not_accepted" => {
+                Html::text("The update source is not trusted. Check release trust on the server.")
+            }
+            _ => Html::text("Cannot check GitHub. Check the update source and try Refresh."),
         };
         let mut body = render(Facts {
             id: "software-update-versions",
@@ -349,43 +357,67 @@ impl ReleaseFiles {
                     "software-update",
                     &format!(
                         "Update to {}",
-                        release["version"].as_str().ok_or(Error::Internal)?
+                        release["tag"].as_str().ok_or(Error::Internal)?
                     ),
                 )?);
             }
             body.push(&render(UpdatePrompt {
                 id: "software-update-prompt",
                 label: "Copy AI update prompt",
-                prompt: &format!("Check the Bilibi server at {} for a stable update and show me the install review.", instance.origin),
+                prompt: &format!(
+                    "Check the Bilibi server at {} for an update and show me the install review.",
+                    instance.origin
+                ),
             })?);
         }
         body.push(&job);
-        let mut details = self.trust_section(&facts)?;
-        details.push(&self.github_section(&facts, manages, enrolled)?);
+        let mut source = self.source_section(&facts, manages, enrolled)?;
+        source.push(&render(Fold {
+            id: "software-security-details",
+            title: "Security details",
+            body: self.trust_section(&facts)?,
+            ..Fold::default()
+        })?);
+        body.push(&render(Fold {
+            id: "software-update-source",
+            title: "Update source",
+            open: self.github_error.is_some(),
+            body: source,
+            ..Fold::default()
+        })?);
+        let mut files = self.github_section(&facts, manages)?;
         if manages {
-            details.push(&self.upload_section(&instance)?);
+            files.push(&self.upload_section(&instance)?);
         }
         if facts["uploads"]
             .as_array()
             .is_some_and(|uploads| !uploads.is_empty())
         {
-            details.push(&self.waiting_section(&facts, manages)?);
+            files.push(&self.waiting_section(&facts, manages)?);
         }
-        details.push(&extra_details);
         body.push(&render(Fold {
-            id: "software-release-details",
-            title: "Details",
-            open: self.github_error.is_some(),
-            body: details,
+            id: "software-release-files",
+            title: "Choose a release file",
+            body: files,
+            ..Fold::default()
+        })?);
+        body.push(&render(Fold {
+            id: "software-release-history",
+            title: "Installation and backup history",
+            body: extra_details,
             ..Fold::default()
         })?);
         if let Some(paths) = &self.pages.software.paths {
             body.push(&render(Fold {
-                id: "software-release-details",
-                title: "Details",
-                body: render(TerminalCommand {
-                    command: &format!("sudo bilibi update {}", paths.name),
-                })?,
+                id: "software-release-terminal",
+                title: "Update from the server terminal",
+                body: {
+                    let mut content = Html::text("This command downloads the newest trusted release, backs up the database and installs it. If the check fails, it switches back automatically. Use --undo to return to the previous release.");
+                    content.push(&render(TerminalCommand {
+                        command: &format!("sudo bilibi update {}", paths.name),
+                    })?);
+                    content
+                },
                 ..Fold::default()
             })?);
         }
@@ -496,7 +528,7 @@ impl ReleaseFiles {
         section(
             "software-release-trust",
             "Release trust",
-            "Read-only facts pinned for this installation. Changing them requires the installation owner and a fresh 2FA code.",
+            "Only the installation owner can change release trust.",
             Html::default(),
             false,
             body,
@@ -577,126 +609,41 @@ impl ReleaseFiles {
             render(table)?,
         )
     }
-    /// Setup files from the GitHub repository the owner named.
-    fn github_section(&self, facts: &Value, manages: bool, enrolled: bool) -> Result<Html> {
+    fn source_section(&self, facts: &Value, manages: bool, enrolled: bool) -> Result<Html> {
         let github = &facts["github"];
-        let repository = github["repository"].as_str().unwrap_or("");
-        let accepted = github["accepted"].as_bool() == Some(true);
-        let identity_changed = github["identity_changed"].as_bool() == Some(true);
-        let app = github["app"].as_str();
+        let repository = github["repository"].as_str().unwrap_or("Not set");
         let minutes = github["refresh_minutes"].as_i64().unwrap_or(15);
+        let trust = match facts["release_trust"]["kind"].as_str() {
+            Some("github") => "Trusts releases with GitHub attestations.",
+            Some("operator") => "Trusts releases signed by the operator key.",
+            _ => "Release trust is not set.",
+        };
         let mut body = render(Facts {
-            id: "release-files-github-facts",
+            id: "release-source-facts",
             items: vec![
                 Fact {
+                    id: "release-source-repository",
                     title: "Repository",
-                    id: "release-files-github-repository-fact",
-                    value: Html::text(if repository.is_empty() {
-                        "Not set"
-                    } else {
-                        repository
-                    }),
+                    value: Html::text(repository),
                 },
                 Fact {
-                    title: "Repository identity",
-                    id: "release-files-github-accepted",
-                    value: Html::text(if accepted { "Matches Release trust" } else { "Does not match Release trust" }),
+                    id: "release-source-interval",
+                    title: "Update checks",
+                    value: Html::text(&format!("Check for updates every {minutes} minutes")),
                 },
                 Fact {
-                    title: "Read access",
-                    id: "release-files-github-token-fact",
-                    value: Html::text(&match app {
-                        Some(client_id) => format!("This server's GitHub App {client_id}: a new read-only token for each check"),
-                        None => "Anonymous for public repositories; GitHub App required for private repositories".into(),
-                    }),
-                },
-                Fact {
-                    title: "Check every",
-                    id: "release-files-github-refresh-fact",
-                    value: Html::text(&format!(
-                        "{minutes} minute{}",
-                        if minutes == 1 { "" } else { "s" }
-                    )),
+                    id: "release-source-trust",
+                    title: "Trust",
+                    value: Html::text(trust),
                 },
             ],
         })?;
-        let mut notice = github["message"].as_str().unwrap_or("").to_owned();
-        if github["stale"].as_bool() == Some(true) {
-            if !notice.is_empty() {
-                notice.push(' ');
-            }
-            notice.push_str("This list was saved earlier. GitHub could not be asked just now.");
-        }
-        if !notice.is_empty() {
-            body.push(&Html::text(&notice));
-        }
-        let installed = &facts["installed_asset"];
-        body.push(&render(Facts {
-            id: "software-installed-asset",
-            items: vec![
-                Fact {
-                    id: "software-installed-local-release",
-                    title: "Local release",
-                    value: Html::text(
-                        &installed["local_release"]
-                            .as_u64()
-                            .map_or("Not recorded".into(), |n| n.to_string()),
-                    ),
-                },
-                Fact {
-                    id: "software-installed-github-asset",
-                    title: "Installed GitHub asset",
-                    value: Html::text(&if installed["github"].is_object() {
-                        let pin = &installed["github"];
-                        format!(
-                            "{} · tag {} · repository {} / release {} / asset {} · {}",
-                            pin["repository"].as_str().unwrap_or(""),
-                            pin["tag"].as_str().unwrap_or(""),
-                            pin["repository_id"],
-                            pin["release_id"],
-                            pin["asset_id"],
-                            pin["target"].as_str().unwrap_or("")
-                        )
-                    } else {
-                        "Not recorded".into()
-                    }),
-                },
-                Fact {
-                    id: "software-installed-archive",
-                    title: "Archive SHA-256",
-                    value: Html::text(
-                        installed["github"]["archive_sha256"]
-                            .as_str()
-                            .unwrap_or("Not recorded"),
-                    ),
-                },
-                Fact {
-                    id: "software-installed-program",
-                    title: "Program SHA-256",
-                    value: Html::text(
-                        installed["program_sha256"]
-                            .as_str()
-                            .unwrap_or("Not recorded"),
-                    ),
-                },
-                Fact {
-                    id: "software-installed-setup",
-                    title: "Setup commit",
-                    value: Html::text(
-                        installed["github"]["setup_commit"]
-                            .as_str()
-                            .unwrap_or("Not recorded"),
-                    ),
-                },
-            ],
-        })?);
         if manages {
             let minutes_field = Field::in_form("github", "refresh_minutes")
                 .id("release-files-github-minutes")
-                .label("Check GitHub every this many minutes")
+                .label("Check for updates every (minutes)")
                 .kind(InputKind::Number)
                 .value(minutes.to_string())
-                .hint("15 means the list is refreshed at most every 15 minutes, and again when you choose Refresh.")
                 .wrapper_class("mb-0 w-full sm:w-72")
                 .attr("min", "1")
                 .attr("max", "1440");
@@ -720,11 +667,19 @@ impl ReleaseFiles {
                 ..Form::default()
             })?);
         }
-        body.push(&self.github_table(
+        Ok(body)
+    }
+
+    /// Release files offered by the configured repository.
+    fn github_section(&self, facts: &Value, manages: bool) -> Result<Html> {
+        let github = &facts["github"];
+        let accepted = github["accepted"].as_bool() == Some(true);
+        let identity_changed = github["identity_changed"].as_bool() == Some(true);
+        let body = self.github_table(
             github,
             manages && accepted && !identity_changed,
             github["repository_id"].as_i64().unwrap_or(0),
-        )?);
+        )?;
         let mut actions = render(Button {
             id: "release-files-github-refresh",
             button_type: "button",
@@ -747,7 +702,7 @@ impl ReleaseFiles {
         section(
             "release-files-github",
             "GitHub releases",
-            "Install a setup file from the repository pinned in Release trust, or upload a saved copy. Bilibi verifies the one proof policy pinned for this server before unpacking either source.",
+            "Choose a release to review and install.",
             actions,
             false,
             body,

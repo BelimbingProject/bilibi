@@ -314,6 +314,8 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Consistency.** Same thing, same look, same place.
 - **Sentence case.** Titles, buttons, labels, options and badges raise only the first word and names: "Set up", "Past due", "Debits equal credits", never "Set Up". The shared badge raises the first letter of a stored lower-case value ("draft" reads "Draft") and nothing else.
 - **Calm.** No urgency, no badge spam, no dark patterns.
+- **Versions.** Show a version and commit date-time, never a commit hash as a version. Put the full hash in a tooltip at most.
+- **Details.** Every expandable summary names what it contains.
 - **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator", commands to install something are "Installation commands".
 - **Never "your developer".** A label or sentence never sends the reader to another person ("Code for your developer", "Ask your developer to test it first"): the reader may be that person, and the others learn nothing. Say what the thing is and let the reader decide who acts.
 - **Facts, not advice.** State what is true in one short line ("Works with Bilibi 0.2.1") and stop. No paragraph of cautions, and no instruction for a step the control already makes plain ("Run these in your local code folder, then test it in the browser").

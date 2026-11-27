@@ -87,14 +87,22 @@ impl Software {
             .collect::<Vec<_>>();
         let installed = self.installed_asset(&**client, scope).await?;
         let (trust, mut github) = match self.paths.as_ref() {
-            Some(paths) => {
-                let policy = release_proof::Policy::load(paths).map_err(Error::refused)?;
-                let trust = release_proof::facts(paths).map_err(Error::refused)?;
-                let github = self
-                    .github_listing(&**client, Some(scope), force, prerelease, &policy)
-                    .await?;
-                (trust, github)
-            }
+            Some(paths) => match release_proof::Policy::load(paths) {
+                Ok(policy) => {
+                    let trust = release_proof::facts(paths).map_err(Error::refused)?;
+                    let github = self
+                        .github_listing(&**client, Some(scope), force, prerelease, &policy)
+                        .await?;
+                    (trust, github)
+                }
+                Err(_) => (
+                    Value::Null,
+                    json!({
+                        "available": false,
+                        "message": "Release trust is not set or cannot be read. Set up release trust on the server.",
+                    }),
+                ),
+            },
             None => (
                 Value::Null,
                 json!({
@@ -111,7 +119,13 @@ impl Software {
                     json!(crate::github::same_asset(release, &installed["github"]));
             }
         }
-        let update = crate::update::discover(self.paths.as_ref(), &github);
+        let mut update = crate::update::discover(self.paths.as_ref(), &github);
+        if update["current"].is_null() {
+            update["current"] = json!(format!(
+                "Bilibi v{} (release tag not recorded)",
+                self.composition.version
+            ));
+        }
         if let Some(fields) = github.as_object_mut() {
             fields.remove("latest");
             fields.remove("complete");

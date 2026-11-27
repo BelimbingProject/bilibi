@@ -5,24 +5,24 @@ use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
 use std::fs;
 
-pub(super) fn version(tag: &str) -> Option<Version> {
-    let parsed = Version::parse(tag.strip_prefix("setup-v")?)?;
-    (tag == format!("setup-v{parsed}")).then_some(parsed)
-}
-
-/// Keep the newest stable setup even when its target file is missing: an older
-/// usable file must not turn a missing publication into "up to date".
-pub(super) fn latest(releases: &[Value]) -> Option<String> {
+/// Keep the newest release in the chosen channel even when its target file is missing.
+pub(super) fn latest(releases: &[Value], minimum: &str) -> Option<String> {
     releases
         .iter()
-        .filter(|r| r["draft"] == false && r["prerelease"] == false)
-        .filter_map(|r| version(r["tag_name"].as_str()?))
-        .max()
-        .map(|version| format!("setup-v{version}"))
+        .filter(|r| r["draft"] == false)
+        .filter_map(|r| {
+            let tag = r["tag_name"].as_str()?;
+            if minimum.starts_with("setup-") && r["prerelease"] != false {
+                return None;
+            }
+            Some((crate::release_proof::policy_order(minimum, tag).ok()?, tag))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, tag)| tag.to_owned())
 }
 
 impl Software {
-    /// Select the terminal's exact stable release asset before install review.
+    /// Select the terminal's exact release asset before install review.
     pub async fn terminal_update(
         &self,
         scope: &Scope,
@@ -65,7 +65,7 @@ fn select(
     } else {
         let tag = listing["latest"]
             .as_str()
-            .ok_or("There is no published stable setup release.")?;
+            .ok_or("There is no published release for this update source.")?;
         let record = paths
             .current()
             .and_then(|n| fs::read(paths.release(n).join("release.json")).ok())
@@ -73,10 +73,12 @@ fn select(
         let setup = &record.as_ref().unwrap_or(&Value::Null)["setup"];
         let current = setup["tag"]
             .as_str()
-            .and_then(version)
+            .and_then(crate::release_proof::tag_order)
             .filter(|_| setup["repository"].as_str() == Some(repository))
             .ok_or("The running setup version for the pinned repository is unknown. Specify --to X.Y.Z.")?;
-        if version(tag).is_none_or(|published| published <= current) {
+        if crate::release_proof::tag_order(tag)
+            .is_none_or(|(channel, published)| channel != current.0 || published <= current.1)
+        {
             return Err("There is no newer release to install.");
         }
         tag.to_owned()
@@ -85,7 +87,7 @@ fn select(
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|row| row["tag"] == tag && row["prerelease"] == false);
+        .filter(|row| row["tag"] == tag);
     match (rows.next(), rows.next()) {
         (Some(row), None) => Ok(json!({
             "repository_id": listing["repository_id"],
@@ -96,10 +98,8 @@ fn select(
             "digest": row["digest"],
             "switch": "auto",
         })),
-        (None, _) => Err("The requested stable setup has no compatible release file."),
-        (_, Some(_)) => {
-            Err("The requested stable setup has more than one compatible release file.")
-        }
+        (None, _) => Err("The requested release has no compatible file."),
+        (_, Some(_)) => Err("The requested release has more than one compatible file."),
     }
 }
 
@@ -112,8 +112,10 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
         .and_then(|n| fs::read(paths.release(n).join("release.json")).ok())
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
     let setup = &record.as_ref().unwrap_or(&Value::Null)["setup"];
-    let current = setup["tag"].as_str().and_then(version);
-    let mut result = json!({"state":"unavailable","current":current.map(|v|v.to_string()),"checked_at":listing["fetched_at"]});
+    let current = setup["tag"]
+        .as_str()
+        .and_then(crate::release_proof::tag_order);
+    let mut result = json!({"state":"unavailable","current":setup["tag"].as_str().map(|tag| tag.strip_prefix("setup-").unwrap_or(tag)),"checked_at":listing["fetched_at"]});
     let Some(repository) = listing["repository"].as_str() else {
         result["reason"] = json!("source_not_set");
         return result;
@@ -126,7 +128,9 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
         "incomplete_list"
     } else {
         let latest = &listing["latest"];
-        let Some((tag, published)) = latest.as_str().and_then(|tag| Some((tag, version(tag)?)))
+        let Some((tag, (channel, published))) = latest
+            .as_str()
+            .and_then(|tag| Some((tag, crate::release_proof::tag_order(tag)?)))
         else {
             result["reason"] = json!("no_stable_release");
             return result;
@@ -135,7 +139,7 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
             .as_array()
             .into_iter()
             .flatten()
-            .find(|row| row["tag"] == tag && row["prerelease"] == false)
+            .find(|row| row["tag"] == tag)
             .cloned()
             .unwrap_or_else(|| json!({"tag": tag}));
         result["release"] = release;
@@ -147,6 +151,11 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
             result["reason"] = json!("unknown_installed_release");
             return result;
         };
+        let (current_channel, current) = current;
+        if current_channel != channel {
+            result["reason"] = json!("unknown_installed_release");
+            return result;
+        }
         if published <= current {
             result["state"] = json!("current");
             return result;
@@ -155,7 +164,7 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|r| r["tag"] == tag && r["prerelease"] == false);
+            .filter(|r| r["tag"] == tag);
         match (rows.next(), rows.next()) {
             (None, _) => "no_matching_file",
             (_, Some(_)) => "ambiguous_files",

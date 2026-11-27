@@ -192,15 +192,7 @@ struct Review {
 }
 enum Dialog {
     Review(Review),
-    Cancel {
-        job: i64,
-        running: bool,
-    },
-    /// The installation commands of one catalogue entry.
-    Commands {
-        kind: String,
-        id: String,
-    },
+    Cancel { job: i64, running: bool },
 }
 
 struct View {
@@ -328,7 +320,11 @@ impl View {
                 return Ok(value.clone());
             }
         }
-        let value = read(&self.pages.contracts, scope, "base.software.catalogue").await?;
+        let mut value = read(&self.pages.contracts, scope, "base.software.catalogue").await?;
+        self.pages
+            .software
+            .fill_commit_times(scope, &mut value)
+            .await;
         self.catalogue = Some((std::time::Instant::now(), value.clone()));
         Ok(value)
     }
@@ -349,10 +345,6 @@ impl View {
             return Ok(());
         }
         match kind {
-            "commands" => {
-                self.dialog = modules::commands_target(get("module").unwrap_or_default())
-                    .map(|(kind, id)| Dialog::Commands { kind, id });
-            }
             "request_install" => {
                 self.bundle = values.get("bundle").cloned().unwrap_or_default();
                 if value.get("asset").is_some() {
@@ -710,7 +702,8 @@ impl View {
             details.push(&self.history_card(&display, &status)?);
             self.releases.body(scope, active, job, details).await?
         } else {
-            self.modules.body(&status, &catalogue, &self.propose)?
+            self.modules
+                .body(&status, &catalogue, &self.propose, &display)?
         };
         self.page(&instance, content)
     }
@@ -771,10 +764,6 @@ impl View {
                     cancel_event: "cancel_dialog",
                 })?
             }
-            Some(Dialog::Commands { kind, id }) => match &self.catalogue {
-                Some((_, catalogue)) => modules::commands_dialog(catalogue, kind, id)?,
-                None => Html::EMPTY,
-            },
             None => Html::EMPTY,
         };
         let mut flash = NO_FLASH;
@@ -821,7 +810,14 @@ impl View {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|item| format!("{} {}", text(&item["name"]), text(&item["build_label"])))
+                .map(|item| match item["version"].as_str() {
+                    Some(version) => format!(
+                        "{} v{}",
+                        text(&item["name"]),
+                        version.trim_start_matches('v')
+                    ),
+                    None => text(&item["name"]).to_owned(),
+                })
                 .collect();
             if components.is_empty() {
                 "None".to_owned()
