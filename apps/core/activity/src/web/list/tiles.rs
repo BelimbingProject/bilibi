@@ -28,7 +28,7 @@ const SLOT_HOUR: i64 = 9;
 
 #[derive(Template)]
 #[template(
-    source = r#"{% import "dialog.html" as ui %}{% call ui::modal(id="activities-slot-modal", title="Add at this time", cancel_event="cancel_slot", width=bilibi_ui::ModalWidth::Compact, description_html=summary) %}{{ form|safe }}{% endcall %}"#,
+    source = r#"{% import "dialog.html" as ui %}{% call ui::modal(id="activities-slot-modal", title="Add at this time", cancel_event="cancel_slot", width=bilibi_ui::ModalWidth::Compact, description_html=summary) %}{{ form }}{% endcall %}"#,
     ext = "html"
 )]
 struct SlotDialog {
