@@ -64,9 +64,16 @@ pub(super) async fn read(
     let mut added = BTreeMap::new();
     for m in &members {
         if let Ok(at) = jiff::Timestamp::try_from(m.added_at) {
+            let r = display.render(at, Format::DateTime, Precision::Minute);
             added.insert(
                 m.user_id,
-                display.render(at, Format::DateTime, Precision::Minute).text,
+                bilibi_ui::flex_table::Instant::new(
+                    &r.iso,
+                    &r.text,
+                    &r.company,
+                    &r.utc,
+                    r.mode.as_str(),
+                ),
             );
         }
     }
@@ -349,7 +356,13 @@ fn members(state: &State, record: &Record) -> Result<Html> {
         })?;
         let mut row = row.clone().slot("name", name).slot("lead", toggle).slot(
             "added",
-            Html::text(added.get(&m.user_id).map(String::as_str).unwrap_or("—")),
+            match added.get(&m.user_id) {
+                Some(at) => render(bilibi_ui::flex_table::InstantView {
+                    id: &format!("team-member-{}-added", m.user_id),
+                    instant: at,
+                })?,
+                None => Html::text("—"),
+            },
         );
         row.dom_id = Some(format!("team-member-{}", m.user_id));
         row.label = Some(m.name.clone());

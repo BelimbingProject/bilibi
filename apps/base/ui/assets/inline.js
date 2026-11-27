@@ -131,6 +131,17 @@
         else trigger.removeAttribute('aria-describedby');
       }
       this.editor()?.classList.toggle('hidden', !this.active);
+      const timezoneHint = this.el.querySelector('[data-role="edit-timezone"]');
+      if (timezoneHint) {
+        const timezone = this.active ? this.timezone : undefined;
+        const text = timezone ? `Time zone: ${timezone}` : '';
+        if (timezoneHint.textContent !== text) timezoneHint.textContent = text;
+        timezoneHint.hidden = !timezone;
+        const dateInput = this.editor()?.querySelector('[data-role="input"]');
+        const description = [timezone && timezoneHint.id, describedBy].filter(Boolean).join(' ');
+        if (description) dateInput?.setAttribute('aria-describedby', description);
+        else dateInput?.removeAttribute('aria-describedby');
+      }
       const input = this.control();
       if (input) {
         input.setAttribute('aria-invalid', String(['error', 'conflict'].includes(this.el.dataset.status)));
@@ -159,8 +170,15 @@
       if (this.el.dataset.editable !== 'true' || this.active) return;
       this.active = true;
       const current = this.el.dataset.value;
-      const draft = this.draft || {value: current, original: current};
+      const draft = this.draft || {
+        value: current,
+        original: current,
+        comparison: this.el.dataset.comparisonValue ?? current,
+        timezone: this.el.dataset.timezone,
+      };
       this.original = draft.original;
+      this.comparison = draft.comparison;
+      this.timezone = draft.timezone;
       this.openedPendingValue = this.pending.has(draft) ? draft.value : undefined;
       const input = this.control();
       if (!input) { this.active = false; return; }
@@ -197,7 +215,9 @@
         this.cancel(returnFocus);
         return;
       }
-      const draft = {value, original: this.original};
+      const draft = {
+        value, original: this.original, comparison: this.comparison, timezone: this.timezone,
+      };
       this.draft = draft;
       this.active = false;
       this.pending.add(draft);
@@ -206,18 +226,26 @@
       if (returnFocus) this.trigger()?.focus();
       this.emit(this.el.dataset.saveEvent, {
         id: this.el.dataset.id, field: this.el.dataset.field, value,
-        fact: this.el.id, original: draft.original,
-        prepareOriginal: () => draft.original,
+        fact: this.el.id, original: draft.comparison,
+        ...(draft.timezone ? {timezone: draft.timezone} : {}),
+        prepareOriginal: () => draft.comparison,
         onReply: (reply) => {
           this.pending.delete(draft);
           if (!this.el.isConnected) return;
           if (reply.type === 'error') {
             if (this.draft === draft) this.message(reply.message || 'The change was not confirmed. Open the field to retry, or press Escape to discard the draft.');
           } else if (this.el.dataset.status === 'saved') {
-            if (this.el.dataset.value === draft.value) {
-              if (this.active && this.original === draft.original) this.original = draft.value;
+            if (this.el.dataset.value === draft.value && this.el.dataset.timezone === draft.timezone) {
+              const comparison = this.el.dataset.comparisonValue ?? draft.value;
+              if (this.active && this.timezone === draft.timezone && this.comparison === draft.comparison) {
+                this.original = draft.value;
+                this.comparison = comparison;
+              }
               for (const pending of this.pending) {
-                if (pending.original === draft.original) pending.original = draft.value;
+                if (pending.timezone === draft.timezone && pending.comparison === draft.comparison) {
+                  pending.original = draft.value;
+                  pending.comparison = comparison;
+                }
               }
             }
             if (this.draft === draft) this.draft = null;

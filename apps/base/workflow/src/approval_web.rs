@@ -25,6 +25,7 @@ pub(crate) struct Pages {
 #[template(path = "approvals.html")]
 struct View<'a> {
     title: &'a str,
+    timezone_request: Option<&'a str>,
     record: Option<String>,
     parts: Vec<Html>,
     dialog: Html,
@@ -155,6 +156,9 @@ struct State {
     reason: String,
     flash: Option<(StatusKind, String)>,
     error: String,
+    browser_zone: Option<String>,
+    cover_zone: Option<String>,
+    timezone_request: String,
 }
 impl State {
     fn new(pages: &Pages, req: &PageRequest<'_, Scope>) -> Result<Self> {
@@ -236,6 +240,9 @@ impl State {
             reason: String::new(),
             flash: None,
             error: String::new(),
+            browser_zone: None,
+            cover_zone: None,
+            timezone_request: uuid::Uuid::new_v4().to_string(),
         })
     }
     fn title(&self) -> &'static str {
@@ -527,7 +534,18 @@ impl State {
         self.columns.load(&self.items, |i| i.request.id.to_string());
         Ok(())
     }
-    async fn body(&self, scope: &Scope) -> Result<String> {
+    fn cover_timezone(&self, display: &bilibi_datetime::DisplayContext) -> Option<String> {
+        if display.mode == bilibi_datetime::Mode::Local && self.browser_zone.is_none() {
+            return None;
+        }
+        Some(
+            display
+                .clock(self.browser_zone.as_deref(), jiff::Timestamp::now())
+                .timezone,
+        )
+    }
+
+    async fn body(&mut self, scope: &Scope) -> Result<String> {
         let navigation = render(Tabs {
             id: "approval-tabs",
             label: "Approval pages",
@@ -558,9 +576,24 @@ impl State {
         match self.mode {
             "rules" => parts.extend(self.policy_parts()?),
             "cover" => {
+                let client = self.pages.db.get().await?;
+                let locale = self
+                    .pages
+                    .locales
+                    .resolve(&**client, scope, None)
+                    .await?
+                    .locale;
+                let display = self
+                    .pages
+                    .display
+                    .display(&**client, scope, None, locale)
+                    .await?;
+                if self.cover_zone.is_none() {
+                    self.cover_zone = self.cover_timezone(&display);
+                }
                 if self.cases.is_empty() {
                     parts.push(Html::text("No approval types are available to cover."));
-                } else {
+                } else if let Some(zone) = &self.cover_zone {
                     parts.push(form(
                         "cover-form",
                         "cover_review",
@@ -589,14 +622,17 @@ impl State {
                                     )
                                     .collect(),
                             ),
-                            field("starts", "From (UTC)", "").kind(InputKind::DatetimeLocal),
-                            field("ends", "Until (UTC)", "").kind(InputKind::DatetimeLocal),
+                            field("starts", &format!("From ({zone})"), "")
+                                .kind(InputKind::DatetimeLocal),
+                            field("ends", &format!("Until ({zone})"), "")
+                                .kind(InputKind::DatetimeLocal),
                         ],
                         button("Review cover", "", "", "")?,
                         false,
                     )?);
+                } else {
+                    parts.push(Html::text("Waiting for browser time zone."));
                 }
-                let client = self.pages.db.get().await?;
                 let principals = self
                     .cover
                     .iter()
@@ -620,17 +656,6 @@ impl State {
                     )
                     .await
                     .map_err(|_| Error::Internal)?;
-                let locale = self
-                    .pages
-                    .locales
-                    .resolve(&**client, scope, None)
-                    .await?
-                    .locale;
-                let display = self
-                    .pages
-                    .display
-                    .display(&**client, scope, None, locale)
-                    .await?;
                 drop(client);
                 let mut rows = Vec::new();
                 for cover in &self.cover {
@@ -1061,6 +1086,8 @@ impl State {
         };
         View {
             title: self.title(),
+            timezone_request: (self.mode == "cover" && !self.cases.is_empty())
+                .then_some(self.timezone_request.as_str()),
             record: if self.mode == "detail" {
                 self.id.map(|id| id.to_string())
             } else {
@@ -1503,6 +1530,13 @@ impl State {
     async fn event(&mut self, request: &LiveRequest<'_, Scope>, event: &Value) -> Result<()> {
         let kind = value(event, "type");
         let input = fields(event);
+        if kind == "browser_timezone" && self.mode == "cover" && !self.cases.is_empty() {
+            self.browser_zone = input
+                .get("timezone")
+                .filter(|zone| bilibi_datetime::valid_timezone(zone))
+                .cloned();
+            return Ok(());
+        }
         if kind.starts_with("approval.") {
             let dialog = self.dialog.clone().ok_or(Error::Conflict)?;
             if kind != format!("approval.{}", dialog.contract) {
@@ -1831,11 +1865,19 @@ impl State {
                     .get("delegate")
                     .and_then(|v| v.parse::<i64>().ok())
                     .ok_or(Error::Invalid)?;
+                let zone = self.cover_zone.as_deref().ok_or(Error::Invalid)?;
+                let zone = jiff::tz::TimeZone::get(zone).map_err(|_| Error::Invalid)?;
                 let utc = |key: &str| -> Result<String> {
-                    let raw = input.get(key).ok_or(Error::Invalid)?;
-                    match raw.len() {
-                        16 => Ok(format!("{raw}:00Z")),
-                        19 => Ok(format!("{raw}Z")),
+                    let wall = input
+                        .get(key)
+                        .ok_or(Error::Invalid)?
+                        .parse::<jiff::civil::DateTime>()
+                        .map_err(|_| Error::Invalid)?;
+                    match zone.to_ambiguous_timestamp(wall).offset() {
+                        jiff::tz::AmbiguousOffset::Unambiguous { offset } => offset
+                            .to_timestamp(wall)
+                            .map(|at| at.to_string())
+                            .map_err(|_| Error::Invalid),
                         _ => Err(Error::Invalid),
                     }
                 };

@@ -149,8 +149,11 @@ pub struct InlineField {
     pub name: String,
     pub label: String,
     pub value: String,
+    pub comparison_value: Option<String>,
     /// Optional read text when the editor value has a native input format.
     pub display_value: Option<String>,
+    pub display_html: Option<Html>,
+    pub timezone: String,
     /// Native input type, defaulting to text for facts.
     pub input_type: &'static str,
     pub version: String,
@@ -180,7 +183,10 @@ impl InlineField {
             name: name.into(),
             label: label.into(),
             value: value.into(),
+            comparison_value: None,
             display_value: None,
+            display_html: None,
+            timezone: String::new(),
             input_type: "text",
             version: String::new(),
             save_event: "save_field".into(),
@@ -230,7 +236,7 @@ impl InlineField {
         self
     }
     pub fn rendered_status(&self) -> CommitStatus {
-        self.status_with_display(None)
+        self.status_with_display(self.display_html.as_ref())
     }
 
     pub fn rendered_choice_status(&self, display: &Html) -> CommitStatus {
@@ -250,7 +256,8 @@ impl InlineField {
                     return self.status.clone();
                 }
                 read.version = Some(self.version.clone());
-                if !self.editable || self.value == read.original {
+                let current = self.comparison_value.as_deref().unwrap_or(&self.value);
+                if !self.editable || current == read.original {
                     return self.status.clone();
                 }
                 read.conflict = true;

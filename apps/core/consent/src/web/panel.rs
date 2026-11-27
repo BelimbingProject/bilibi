@@ -250,13 +250,12 @@ impl Panel {
             None => format!("No decision ({})", default.label()),
         }
     }
-    fn provenance(display: &DisplayContext, current: &Current) -> String {
+    fn provenance(current: &Current) -> String {
         format!(
-            "{} · {} · v{} · {}",
+            "{} · {} · v{}",
             current.source.label(),
             current.captured_on.label(),
-            current.version,
-            when(display, current.recorded_at)
+            current.version
         )
     }
 
@@ -357,7 +356,7 @@ impl Panel {
                 let (text, hint) = match (current, inherited) {
                     (Some(c), _) => (
                         Self::read_text(Some(c), standing.default),
-                        Self::provenance(display, c),
+                        Self::provenance(c),
                     ),
                     (None, Some(any)) => (
                         format!(
@@ -368,7 +367,7 @@ impl Panel {
                     ),
                     (None, None) => (Self::read_text(None, standing.default), String::new()),
                 };
-                let value = if editable {
+                let mut value = if editable {
                     let draft = self
                         .draft
                         .as_ref()
@@ -396,6 +395,14 @@ impl Panel {
                     }
                     value
                 };
+                if let Some(c) = current {
+                    value.push(&Html::text(" · "));
+                    value.push(&when(
+                        display,
+                        &format!("{dom}-recorded-at"),
+                        c.recorded_at,
+                    )?);
+                }
                 cells.push((format!("{dom}-fact"), channel.label(), value));
             }
             let facts_id = format!("{}-p{index}-facts", self.anchor);
@@ -424,27 +431,26 @@ impl Panel {
         if versions.is_empty() {
             return Ok(Html::default());
         }
-        let rows: Vec<(String, String, String)> = versions
-            .iter()
-            .map(|d| {
-                let purpose = labels.get(&d.purpose).unwrap_or(&d.purpose);
-                let mut text = format!(
-                    "{} · {} on {} · {}",
-                    if d.granted { "Granted" } else { "Withdrawn" },
-                    d.source.label(),
-                    d.captured_on.label(),
-                    when(display, d.recorded_at)
-                );
-                if let Some(evidence) = &d.evidence {
-                    text.push_str(&format!(" · {evidence}"));
-                }
-                (
-                    format!("{}-history-{}", self.anchor, d.id),
-                    format!("{purpose} · {} · v{}", d.channel.label(), d.version),
-                    text,
-                )
-            })
-            .collect();
+        let mut rows = Vec::new();
+        for d in versions {
+            let purpose = labels.get(&d.purpose).unwrap_or(&d.purpose);
+            let id = format!("{}-history-{}", self.anchor, d.id);
+            let mut text = Html::text(&format!(
+                "{} · {} on {} · ",
+                if d.granted { "Granted" } else { "Withdrawn" },
+                d.source.label(),
+                d.captured_on.label()
+            ));
+            text.push(&when(display, &format!("{id}-at"), d.recorded_at)?);
+            if let Some(evidence) = &d.evidence {
+                text.push(&Html::text(&format!(" · {evidence}")));
+            }
+            rows.push((
+                id,
+                format!("{purpose} · {} · v{}", d.channel.label(), d.version),
+                text,
+            ));
+        }
         let body = render(Facts {
             id: &format!("{}-history-facts", self.anchor),
             items: rows
@@ -452,7 +458,7 @@ impl Panel {
                 .map(|(id, title, text)| Fact {
                     title,
                     id,
-                    value: Html::text(text),
+                    value: text.clone(),
                 })
                 .collect(),
         })?;
@@ -493,11 +499,15 @@ impl Panel {
         let mut items = Vec::new();
         for s in &standing.suppressions {
             let id = s.id.to_string();
-            let mut text = format!("Since {}", when(display, s.suppressed_at));
+            let mut value = Html::text("Since ");
+            value.push(&when(
+                display,
+                &format!("{}-suppression-{id}-at", self.anchor),
+                s.suppressed_at,
+            )?);
             if let Some(evidence) = &s.evidence {
-                text.push_str(&format!(" · {evidence}"));
+                value.push(&Html::text(&format!(" · {evidence}")));
             }
-            let mut value = Html::text(&text);
             if manage {
                 value.push(&Html::text(" "));
                 value.push(&render(IconButton {

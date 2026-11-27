@@ -178,7 +178,7 @@ pub(crate) struct Record {
     companies: Vec<Choice>,
     history: bool,
     /// When each member on the page joined, as the reader reads dates.
-    added: BTreeMap<i64, String>,
+    added: BTreeMap<i64, bilibi_ui::flex_table::Instant>,
 }
 /// The staff chosen in a dialog, kept on the server across searches.
 #[derive(Default)]

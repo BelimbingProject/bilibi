@@ -1,10 +1,10 @@
 //! The Domains and extensions tab of the Software page: one grid of what this
 //! server runs and what the catalogue offers, installed first, with search
 //! and filters in the address.
-use super::{render, safe_id, text};
+use super::{instant, render, safe_id, text, InstantCell};
 use askama::Template;
 use bilibi_database::{Error, Result};
-use bilibi_datetime::{DisplayContext, Format, Precision};
+use bilibi_datetime::DisplayContext;
 use bilibi_ui::{
     choices, flex_table::Cell, list_state::FILTERS_FORM, params, Alert, Badge, BadgeKind,
     BuiltinColumn, Card, ColumnsOutcome, Filter, FilterToolbar, FlexRow, FlexTable, Html,
@@ -34,8 +34,10 @@ struct Entry {
     description: String,
     /// The version in service; `None` when the module is not installed.
     installed: Option<String>,
+    installed_at: Option<bilibi_ui::flex_table::Instant>,
     commit: Option<String>,
     latest: String,
+    latest_at: Option<bilibi_ui::flex_table::Instant>,
     update: bool,
     compatibility: String,
     requested: bool,
@@ -43,40 +45,36 @@ struct Entry {
     commands: bool,
 }
 
-fn version_label(version: Option<&str>, at: Option<&str>, display: &DisplayContext) -> String {
-    let version = version.map(|v| format!("v{}", v.trim_start_matches('v')));
-    let date = at.and_then(|value| value.parse().ok()).map(|value| {
-        display
-            .render(value, Format::DateTime, Precision::Minute)
-            .text
-    });
-    match (version, date) {
-        (Some(v), Some(d)) => format!("{v} · {d}"),
-        (Some(v), None) => v,
-        (None, Some(d)) => d,
-        (None, None) => "Version unavailable".into(),
-    }
+fn version_label(version: Option<&str>) -> String {
+    version
+        .map(|v| format!("v{}", v.trim_start_matches('v')))
+        .unwrap_or_else(|| "Version unavailable".into())
 }
-
-fn latest_label(item: &Value, display: &DisplayContext) -> (String, Option<String>) {
+fn latest_label(
+    item: &Value,
+    display: &DisplayContext,
+) -> (
+    String,
+    Option<String>,
+    Option<bilibi_ui::flex_table::Instant>,
+) {
     let Some(version) = item["latest_version"]
         .as_str()
         .or_else(|| item["recommended_version"].as_str())
     else {
-        return ("—".into(), None);
+        return ("—".into(), None, None);
     };
     let release = item["versions"]
         .as_array()
         .and_then(|versions| versions.iter().find(|r| r["version"] == version));
     (
-        version_label(
-            Some(version),
-            release.and_then(|r| r["committed_at"].as_str()),
-            display,
-        ),
+        version_label(Some(version)),
         release
             .and_then(|r| r["commit"].as_str())
             .map(str::to_owned),
+        release
+            .and_then(|r| r["committed_at"].as_str())
+            .and_then(|at| instant(display, at)),
     )
 }
 
@@ -116,20 +114,22 @@ fn entries(
                 .into_iter()
                 .flatten()
                 .find(|module| module["id"] == id);
-            let (latest, latest_commit) = latest_label(item, display);
+            let (latest, latest_commit, latest_at) = latest_label(item, display);
             entries.push(Entry {
                 kind,
                 kind_word,
                 id: id.to_owned(),
                 name: item["name"].as_str().unwrap_or(id).to_owned(),
                 description: text(&item["description"]).to_owned(),
-                installed: installed.map(|m| {
-                    version_label(m["version"].as_str(), m["committed_at"].as_str(), display)
-                }),
+                installed: installed.map(|m| version_label(m["version"].as_str())),
+                installed_at: installed
+                    .and_then(|m| m["committed_at"].as_str())
+                    .and_then(|at| instant(display, at)),
                 commit: installed
                     .and_then(|m| m["commit"].as_str())
                     .map(str::to_owned),
                 latest,
+                latest_at,
                 latest_commit,
                 commands: has_commands(item),
                 update: item["status"] == "update_available",
@@ -152,13 +152,13 @@ fn entries(
                     .as_str()
                     .map(|code| format!("Code review: {code}"))
                     .unwrap_or_default(),
-                installed: Some(version_label(
-                    item["version"].as_str(),
-                    item["committed_at"].as_str(),
-                    display,
-                )),
+                installed: Some(version_label(item["version"].as_str())),
+                installed_at: item["committed_at"]
+                    .as_str()
+                    .and_then(|at| instant(display, at)),
                 commit: item["commit"].as_str().map(str::to_owned),
                 latest: "—".into(),
+                latest_at: None,
                 update: false,
                 compatibility: "Not in the catalogue".into(),
                 requested: false,
@@ -352,6 +352,13 @@ fn row(entry: &Entry) -> Result<FlexRow> {
         text: &entry.latest,
         commit: entry.latest_commit.as_deref(),
     })?;
+    if let Some(i) = &entry.latest_at {
+        latest.push(&Html::text(" · "));
+        latest.push(&render(InstantCell {
+            id: format!("software-{key}-latest-at"),
+            i: i.clone(),
+        })?);
+    }
     latest.push(&Html::text(" "));
     if entry.update {
         latest.push(&render(Badge::status(
@@ -362,13 +369,20 @@ fn row(entry: &Entry) -> Result<FlexRow> {
     let mut row = FlexRow::new(key.clone())
         .slot("name", name)
         .cell("kind", Cell::text(entry.kind_word))
-        .slot(
-            "installed",
-            render(BuildLabel {
+        .slot("installed", {
+            let mut value = render(BuildLabel {
                 text: entry.installed.as_deref().unwrap_or("Not installed"),
                 commit: entry.commit.as_deref(),
-            })?,
-        )
+            })?;
+            if let Some(i) = &entry.installed_at {
+                value.push(&Html::text(" · "));
+                value.push(&render(InstantCell {
+                    id: format!("software-{key}-installed-at"),
+                    i: i.clone(),
+                })?);
+            }
+            value
+        })
         .slot("latest", latest)
         .cell("compatibility", Cell::text(&entry.compatibility))
         .cell("description", Cell::text(&entry.description));
@@ -430,10 +444,9 @@ pub(super) fn commands_dialog(catalogue: &Value, kind: &str, id: &str) -> Result
         cancel_event: "cancel_dialog",
         width: ModalWidth::Wide,
         description: subject.trim(),
-        role: "",
         close_icon: true,
-        flash: None,
         body,
+        ..Modal::default()
     })
 }
 

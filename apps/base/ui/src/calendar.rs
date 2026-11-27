@@ -439,9 +439,10 @@ pub struct Calendar {
     pub focus_hour: Option<u8>,
     pub day_marks: Vec<DayMark>,
     /// The result of the last move, announced politely; a refusal is an error.
-    pub notice: Option<(StatusKind, String)>,
+    pub notice: Option<(StatusKind, Html)>,
     /// The item whose Move dialog is open.
     pub moving: Option<String>,
+    pub move_timezone: Option<String>,
     /// Errors of the open Move dialog's fields.
     pub move_errors: Vec<String>,
     /// The zone follows the viewer's browser (display mode `local`): the
@@ -477,6 +478,7 @@ impl Calendar {
             day_marks: Vec::new(),
             notice: None,
             moving: None,
+            move_timezone: None,
             move_errors: Vec::new(),
             follows_browser_zone: false,
             creatable: false,
@@ -502,10 +504,11 @@ pub struct CalendarMove {
 
 impl CalendarMove {
     /// Decodes [`MOVE`] (a drop or resize: `id`, `version`, `date`, `minute`,
-    /// `length`, optional `lane`; all-day items send `days` for `length`) or
-    /// [`MOVE_SUBMIT`] (the dialog's `move[...]` fields) in `zone`. A wall
-    /// clock time in a daylight-saving gap becomes the first valid instant, in
-    /// a fold the earlier. The `Err` is a sentence for the person.
+    /// `length`, `timezone`, optional `lane`; all-day items send `days` for
+    /// `length`) or [`MOVE_SUBMIT`] (the dialog's `move[...]` fields) in
+    /// `zone`. A wall-clock time in a daylight-saving gap becomes the first
+    /// valid instant, or the earlier instant in a fold.
+    /// The `Err` is a sentence for the person.
     pub fn from_event(payload: &serde_json::Value, zone: &str) -> Result<Self, String> {
         let invalid = || "Choose a valid date and time.".to_owned();
         let zone = TimeZone::get(zone).map_err(|_| invalid())?;
@@ -645,10 +648,10 @@ pub struct CalendarSlot {
 }
 
 impl CalendarSlot {
-    /// Decodes [`SLOT`] (`date`, `minute`, `length`, optional `lane`; a day
-    /// cell sends `all_day` instead of the minute and length) in `zone`. A
-    /// wall clock time in a daylight-saving gap becomes the first valid
-    /// instant. The `Err` is a sentence for the person.
+    /// Decodes [`SLOT`] (`date`, `minute`, `length`, `timezone`, optional
+    /// `lane`; a day cell sends `all_day` instead of the minute and length)
+    /// in `zone`. A wall-clock time in a daylight-saving gap becomes the
+    /// first valid instant. The `Err` is a sentence for the person.
     pub fn from_event(payload: &serde_json::Value, zone: &str) -> Result<Self, String> {
         let invalid = || "Choose a valid date and time.".to_owned();
         let zone = TimeZone::get(zone).map_err(|_| invalid())?;
@@ -841,6 +844,7 @@ struct ViewLink {
 struct View {
     id: String,
     view: &'static str,
+    timezone: String,
     title: String,
     zone_note: String,
     focus_hour: Option<u8>,
@@ -850,7 +854,7 @@ struct View {
     previous: NavLink,
     today: NavLink,
     next: NavLink,
-    notice: Option<(StatusKind, String)>,
+    notice: Option<(StatusKind, Html)>,
     follows_browser_zone: bool,
     too_many: bool,
     columns: Vec<ColumnView>,
@@ -1357,7 +1361,13 @@ impl View {
                 .items
                 .iter()
                 .find(|item| &item.id == id && item.movable)
-                .map(|item| Self::dialog(calendar, item, &zone))
+                .map(|item| {
+                    Self::dialog(
+                        calendar,
+                        item,
+                        calendar.move_timezone.as_deref().unwrap_or(&zone_name),
+                    )
+                })
                 .transpose()?,
             None => None,
         };
@@ -1369,6 +1379,7 @@ impl View {
         Ok(Self {
             id: calendar.id.clone(),
             view: state.view.name(),
+            timezone: zone_name.clone(),
             title,
             focus_hour: calendar.focus_hour.map(|hour| hour.min(23)),
             range_key: format!("{}-{first}-{last}-{zone_name}", state.view.name()),
@@ -1476,8 +1487,9 @@ impl View {
     }
 
     /// The Move dialog: the item's start and end in the display zone.
-    fn dialog(calendar: &Calendar, item: &CalendarItem, zone: &TimeZone) -> askama::Result<Html> {
-        let civil = Civil::of(item, zone);
+    fn dialog(calendar: &Calendar, item: &CalendarItem, timezone: &str) -> askama::Result<Html> {
+        let (zone, name) = tz(timezone);
+        let civil = Civil::of(item, &zone);
         let field = |key: &str, label: &str, kind: InputKind, value: String| {
             Field::in_form(MOVE_FORM, key)
                 .id(format!("{}-move-{key}", calendar.id))
@@ -1592,11 +1604,9 @@ impl View {
             title: &format!("Move {}", item.title),
             cancel_event: MOVE_CANCEL,
             width: ModalWidth::Narrow,
-            description: "Times are in the zone the calendar shows.",
-            role: "",
-            close_icon: false,
-            flash: None,
+            description: &format!("Times are in {name}."),
             body: form,
+            ..Modal::default()
         })
     }
 }

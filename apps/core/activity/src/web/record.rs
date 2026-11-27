@@ -35,6 +35,7 @@ const LIMIT: usize = 10_000;
 /// The Change series dialog: which occurrences, the values to give them,
 /// and what the last save refused.
 struct SeriesForm {
+    clock: Clock,
     values: HashMap<String, String>,
     errors: Vec<String>,
 }
@@ -56,6 +57,7 @@ impl SeriesForm {
             ),
         ]);
         Self {
+            clock: clock.clone(),
             values,
             errors: Vec::new(),
         }
@@ -64,7 +66,7 @@ impl SeriesForm {
         self.values.get(key).map_or("", String::as_str)
     }
     /// The patch: only the values that differ from this occurrence's.
-    fn patch(&self, a: &Activity, clock: &Clock) -> std::result::Result<Value, Vec<String>> {
+    fn patch(&self, a: &Activity) -> std::result::Result<Value, Vec<String>> {
         let mut patch = json!({});
         let mut errors = Vec::new();
         let title = self.value("title").trim();
@@ -82,7 +84,7 @@ impl SeriesForm {
                 "ends_at" => a.ends_at,
                 _ => a.due_at,
             };
-            match clock.parse(self.value(key)) {
+            match self.clock.parse(self.value(key)) {
                 Ok(at) if at != stored => {
                     patch[*key] = json!(at.map(|t| t.to_string()).unwrap_or_default())
                 }
@@ -195,8 +197,7 @@ impl Detail {
             dialog.values.insert(key, value);
         }
         let a = self.pages.activities.get(scope, self.id).await?;
-        let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-        let patch = match dialog.patch(&a, &clock) {
+        let patch = match dialog.patch(&a) {
             Ok(patch) => patch,
             Err(errors) => {
                 dialog.errors = errors;
@@ -357,10 +358,12 @@ impl Detail {
             .as_str()
             .and_then(|v| v.parse::<i64>().ok())
             .ok_or(Error::Invalid)?;
-        let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
         let mut patch = json!({});
         match field {
-            "starts_at" | "ends_at" | "due_at" | "start_at" => match clock.parse(submitted) {
+            "starts_at" | "ends_at" | "due_at" | "start_at" => match Clock::parse_in_zone(
+                value["timezone"].as_str().unwrap_or_default(),
+                submitted,
+            ) {
                 Ok(time) => patch[field] = json!(time.map(|t| t.to_string()).unwrap_or_default()),
                 Err(()) => {
                     self.statuses.put(
@@ -785,7 +788,6 @@ impl Detail {
             }
             "close_modal" => self.dialog = None,
             "save_event" => {
-                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {
                     return Ok(None);
@@ -793,10 +795,7 @@ impl Detail {
                 if dialog.submit_event() != name {
                     return Err(Error::Invalid);
                 }
-                if let Some(id) = dialog
-                    .submit(&pages, scope, credential, &clock, value)
-                    .await?
-                {
+                if let Some(id) = dialog.submit(&pages, scope, credential, value).await? {
                     let message = dialog.created_message();
                     self.dialog = None;
                     return Ok(Some(LiveBody {
@@ -892,9 +891,16 @@ impl Detail {
         let mut field = self
             .inline(words, a, key, clock.local(at), editable)
             .input_type("datetime-local");
-        if let Some(at) = at {
-            field = field.display_value(clock.text(at));
-        }
+        field.comparison_value = Some(at.map(|at| at.to_string()).unwrap_or_default());
+        field.timezone = if clock.ready {
+            clock.zone.clone()
+        } else {
+            String::new()
+        };
+        field.display_html = Some(match at {
+            Some(at) => clock.time("", at)?,
+            None => Html::text(field.display()),
+        });
         if matches!(key, "due_at" | "start_at") {
             field = field.allow_empty();
         }
@@ -1406,10 +1412,9 @@ impl Detail {
                 } else {
                     "email pending"
                 };
-                who.push(&Html::text(&format!(
-                    " Invited {} · {sent}",
-                    clock.text(at)
-                )));
+                who.push(&Html::text(" Invited "));
+                who.push(&clock.time(&format!("activity-guest-{}-invited", guest.id), at)?);
+                who.push(&Html::text(&format!(" · {sent}")));
             }
             if editable && guest.role != "assignee" {
                 who.push(&Html::text(" "));
@@ -1589,23 +1594,31 @@ impl Detail {
         }
         let ids: Vec<i64> = conflicts.iter().map(|c| c.user).collect();
         let names = self.pages.names(scope, &ids).await?;
-        let lines: Vec<String> = conflicts
-            .iter()
-            .map(|c| {
-                let what = c.title.as_deref().unwrap_or("another call or meeting");
-                format!(
-                    "{} has {what} from {} to {}.",
-                    names.get(&c.user).cloned().unwrap_or_default(),
-                    clock.text(c.starts_at),
-                    clock.text(c.ends_at)
+        let busy_time = |at: jiff::Timestamp| {
+            let minute = at
+                .round(
+                    jiff::TimestampRound::new()
+                        .smallest(jiff::Unit::Minute)
+                        .mode(jiff::RoundMode::Floor),
                 )
-            })
-            .collect();
+                .map_err(|_| Error::Internal)?;
+            clock.time("", minute)
+        };
+        let mut body = Html::text("This overlaps:");
+        for c in conflicts {
+            let what = c.title.as_deref().unwrap_or("another call or meeting");
+            let who = names.get(&c.user).map_or("", String::as_str);
+            body.push(&Html::text(&format!(" {who} has {what} from ")));
+            body.push(&busy_time(c.starts_at)?);
+            body.push(&Html::text(" to "));
+            body.push(&busy_time(c.ends_at)?);
+            body.push(&Html::text("."));
+        }
         render(Alert {
             kind: StatusKind::Warning,
             id: "activity-conflicts",
             class: "mt-6",
-            body: Html::text(&format!("This overlaps: {}", lines.join(" "))),
+            body,
         })
     }
 
@@ -1848,7 +1861,6 @@ impl Detail {
             body.push(&dialog.render(
                 &self.pages,
                 scope,
-                &clock,
                 &words,
                 "activity-new",
                 "close_modal",
@@ -1939,10 +1951,18 @@ fn series_dialog(a: &Activity, form: &SeriesForm) -> Result<Html> {
     ];
     match a.kind {
         Kind::Call | Kind::Meeting => {
-            fields.push(field("starts_at", "Starts").kind(InputKind::DatetimeLocal));
+            fields.push(
+                field("starts_at", "Starts")
+                    .kind(InputKind::DatetimeLocal)
+                    .hint(form.clock.hint()),
+            );
             fields.push(field("ends_at", "Ends").kind(InputKind::DatetimeLocal));
         }
-        Kind::Task => fields.push(field("due_at", "Due").kind(InputKind::DatetimeLocal)),
+        Kind::Task => fields.push(
+            field("due_at", "Due")
+                .kind(InputKind::DatetimeLocal)
+                .hint(form.clock.hint()),
+        ),
         Kind::Note => {}
     }
     if a.kind == Kind::Meeting {

@@ -196,7 +196,7 @@ Agents use `core.user.landing.read` for the reachable menu pages and current cho
   `version` (migration `008-accounts.sql`): a stale draft is refused rather
   than applied over another operator's save. The refusal is worded on the fact.
 - Person is an inline choice: `link_person` assigns it and `unlink` removes it. A changed Person ends the account's sessions. The same **Desks** panel used on the person's record appears on the account record.
-- Roles & Permissions panel over Authz: assignments in a shared flexible table, including their company, UTC dates, purpose and current state; a Roles picker with optional company/date bounds, filtered by the escalation guard (a role is
+- Roles & Permissions panel over Authz: assignments in a shared flexible table, including their company, purpose, current state and [validity dates](../../base/authz/README.md#company-and-engagement-assignments) under **Valid from** and **Valid until**; a Roles picker with optional company/date bounds, filtered by the escalation guard (a role is
   grantable only by an actor holding everything it grants;
   `bilibi_authz::roles::grants_of`), the Effective Permissions disclosure
   (`effective_capabilities_of`, grouped by domain; blue for a direct grant,

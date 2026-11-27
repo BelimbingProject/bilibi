@@ -131,11 +131,11 @@ impl Panel {
                     .await?
                     .into_iter()
                     .next();
-                self.dialog = Some(Dialog::new(kind, related));
+                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                self.dialog = Some(Dialog::new(kind, related, &clock));
             }
             "close_modal" => self.dialog = None,
             "save_event" => {
-                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {
                     return Ok(());
@@ -144,7 +144,7 @@ impl Panel {
                     return Err(Error::Invalid);
                 }
                 if dialog
-                    .submit(&pages, scope, credential, &clock, value)
+                    .submit(&pages, scope, credential, value)
                     .await?
                     .is_some()
                 {
@@ -377,7 +377,6 @@ impl Panel {
             content.push(&dialog.render(
                 &self.pages,
                 scope,
-                &clock,
                 &words,
                 &format!("{anchor}-new"),
                 "close_modal",
