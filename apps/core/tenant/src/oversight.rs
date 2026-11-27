@@ -163,15 +163,8 @@ impl WriteHandler for Update {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            // The door's own transaction when it gives one: a preview never
-            // asks the pool for a second connection.
-            match client.transaction() {
-                Some(tx) => self.preview_on(tx, scope, input).await,
-                None => {
-                    let pooled = facade()?.db.get().await.map_err(Error::from)?;
-                    self.preview_on(&**pooled, scope, input).await
-                }
-            }
+            self.preview_on(client.sql_client().await?, scope, input)
+                .await
         })
     }
     fn commit<'a>(
@@ -215,24 +208,24 @@ impl ReadHandler for Read {
     }
     fn call<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         _input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let f = facade()?;
-            let client = f.db.get().await.map_err(Error::from)?;
+            let client = client.sql_client().await?;
             Ok(match self {
                 Self::Given => {
-                    let mut grant=f.oversight.given(&**client,scope).await?;
-                    grant["latest_reads"]=activity(&**client,scope,false).await?;
+                    let mut grant=f.oversight.given(client,scope).await?;
+                    grant["latest_reads"]=activity(client,scope,false).await?;
                     grant
                 },
                 Self::Received => {
-                    let proof=f.oversight.prove(&**client,scope).await?;
-                    json!({"children":proof.children().iter().map(|g| json!({"tenant_id":g.tenant(),"name":g.name(),"version":g.version(),"tables":g.tables(),"active":true,"effective":true,"expires_at":g.expires_at()})).collect::<Vec<_>>(),"latest_reads":activity(&**client,scope,true).await?})
+                    let proof=f.oversight.prove(client,scope).await?;
+                    json!({"children":proof.children().iter().map(|g| json!({"tenant_id":g.tenant(),"name":g.name(),"version":g.version(),"tables":g.tables(),"active":true,"effective":true,"expires_at":g.expires_at()})).collect::<Vec<_>>(),"latest_reads":activity(client,scope,true).await?})
                 },
-                Self::Catalog => catalog(&**client,scope).await?,
+                Self::Catalog => catalog(client,scope).await?,
             }.into())
         })
     }

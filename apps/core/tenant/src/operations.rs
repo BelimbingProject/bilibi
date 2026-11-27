@@ -27,11 +27,11 @@ impl WriteHandler for Create {
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
-        Box::pin(async move { Ok(facade()?.review(scope, input).await?.into()) })
+        Box::pin(async move { Ok(facade()?.review(client, scope, input).await?.into()) })
     }
     fn commit<'a>(
         &'a self,
@@ -159,23 +159,26 @@ impl ReadHandler for Read {
     }
     fn call<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let facade = facade()?;
-            let proof = {
-                let client = facade.db.get().await.map_err(Error::from)?;
-                bilibi_authz::authorize_operator(&**client, scope, bilibi_tenancy::LIST).await?
-            };
+            let proof = bilibi_authz::authorize_operator(
+                client.sql_client().await?,
+                scope,
+                bilibi_tenancy::LIST,
+            )
+            .await?;
             match self {
                 Self::List => {
                     let page = input["page"].as_i64().unwrap_or(1);
                     let size = input["page_size"].as_i64().unwrap_or(25);
                     let (entries, total) = facade
                         .tenants
-                        .search(
+                        .search_on(
+                            client,
                             &proof,
                             input["search"].as_str().unwrap_or_default(),
                             page,
@@ -195,7 +198,11 @@ impl ReadHandler for Read {
                 Self::Get => {
                     let tenant = facade
                         .tenants
-                        .fetch(&proof, input["tenant_id"].as_i64().ok_or(Error::Invalid)?)
+                        .fetch_on(
+                            client,
+                            &proof,
+                            input["tenant_id"].as_i64().ok_or(Error::Invalid)?,
+                        )
                         .await?
                         .ok_or(bilibi_agent_api::Error::NotFound)?;
                     Ok(tenant_json(&tenant).into())
