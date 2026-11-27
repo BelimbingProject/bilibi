@@ -32,9 +32,10 @@ use bilibi_ui::page::{
     PageFuture, PageRequest,
 };
 use bilibi_ui::{
-    flex_table::Cell, params, Badge, BadgeKind, BuiltinColumn, Button, Choice, CreateButton,
-    ErrorSummary, Fact, Facts, Field, FlashMap, FlexRow, FlexTable, Html, IconButton, InputKind,
-    ListColumns, ListSpec, ListState, PageCounts, Pagination, StatusKind, TableEmpty, NO_FLASH,
+    flex_table::{Cell, Instant, InstantView},
+    params, Badge, BadgeKind, BuiltinColumn, Button, Choice, CreateButton, ErrorSummary, Fact,
+    Facts, Field, FlashMap, FlexRow, FlexTable, Html, IconButton, InputKind, ListColumns, ListSpec,
+    ListState, PageCounts, Pagination, StatusKind, TableEmpty, NO_FLASH,
 };
 use serde_json::{json, Value};
 use std::{
@@ -568,13 +569,24 @@ impl PortalPage {
             if let Some(at) = reset_requests.get(&row.id) {
                 let at = jiff::Timestamp::try_from(*at).map_err(|_| Error::Internal)?;
                 let time = display.render(at, Format::DateTime, Precision::Minute);
-                let label = format!("2FA reset requested · {}", time.text);
+                let instant = Instant::new(
+                    &time.iso,
+                    &time.text,
+                    &time.company,
+                    &time.utc,
+                    time.mode.as_str(),
+                );
+                let mut label = Html::text("2FA reset requested · ");
+                label.push(&render(InstantView {
+                    id: &format!("customer-account-reset-at-{}", row.id),
+                    instant: &instant,
+                })?);
                 let mut access = flex.slots.remove("access").unwrap_or_default();
                 access.push(&render(Badge {
                     kind: BadgeKind::Warning,
                     dot: false,
                     class: "",
-                    body: Html::text(&label),
+                    body: label,
                 })?);
                 flex.slots.insert("access".into(), access);
                 flex.actions.push(&render(IconButton {

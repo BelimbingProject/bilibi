@@ -1461,59 +1461,51 @@ impl View {
             }
         };
         let restores_backup = facts["restores_backup"] == true;
-        let title = if review.kind == Kind::Undo && !restores_backup {
-            text(&facts["loss"]).to_owned()
-        } else {
-            title
-        };
         let mut warnings: Vec<(StatusKind, Html)> = facts["warnings"]
             .as_array()
             .into_iter()
             .flatten()
             .map(|w| (StatusKind::Warning, Html::text(text(w))))
             .collect();
-        if review.kind == Kind::Undo && restores_backup {
-            let mut loss = Html::EMPTY;
+        let heading = if review.kind == Kind::Undo {
             if let Some(i) = facts["backup_at"]
                 .as_str()
+                .filter(|_| restores_backup)
                 .and_then(|at| instant(display, at))
             {
-                loss.push(&Html::text("Bilibi restores the backup from "));
-                loss.push(&render(InstantCell {
+                let mut heading = Html::text("Bilibi restores the backup from ");
+                heading.push(&render(InstantCell {
                     id: "software-review-backup-at".into(),
-                    i,
+                    i: i.clone(),
                 })?);
-                loss.push(&Html::text("; anything entered since then is lost."));
-            } else {
-                loss.push(&Html::text(text(&facts["loss"])));
-            }
-            warnings.insert(0, (StatusKind::Warning, loss));
-            if let (Some(count), Some(i)) = (
-                lost,
-                facts["backup_at"]
-                    .as_str()
-                    .and_then(|at| instant(display, at)),
-            ) {
-                let mut message = Html::text(&format!(
-                    "About {count} {} since ",
-                    if count == 1 {
-                        "change entered"
+                heading.push(&Html::text("; anything entered since then is lost."));
+                if let Some(count) = lost {
+                    let mut message = Html::text(&format!(
+                        "About {count} {} since ",
+                        if count == 1 {
+                            "change entered"
+                        } else {
+                            "changes entered"
+                        },
+                    ));
+                    message.push(&render(InstantCell {
+                        id: "software-review-loss-since".into(),
+                        i,
+                    })?);
+                    message.push(&Html::text(if count == 1 {
+                        " is lost (counted just now)."
                     } else {
-                        "changes entered"
-                    }
-                ));
-                message.push(&render(InstantCell {
-                    id: "software-review-loss-since".into(),
-                    i,
-                })?);
-                message.push(&Html::text(if count == 1 {
-                    " is lost (counted just now)."
-                } else {
-                    " are lost (counted just now)."
-                }));
-                warnings.insert(1, (StatusKind::Warning, message));
+                        " are lost (counted just now)."
+                    }));
+                    warnings.insert(0, (StatusKind::Warning, message));
+                }
+                heading
+            } else {
+                Html::text(text(&facts["loss"]))
             }
-        }
+        } else {
+            Html::text(&title)
+        };
         if matches!(review.kind, Kind::Install | Kind::Go)
             && instance.role == bilibi_system::Role::Production
         {
@@ -1592,7 +1584,8 @@ impl View {
             error,
         })?;
         render(
-            bilibi_ui::StepUpGate::action("Software", &title, body).map_err(|_| Error::Internal)?,
+            bilibi_ui::StepUpGate::action_with_heading("Software", heading, body)
+                .map_err(|_| Error::Internal)?,
         )
     }
 }
