@@ -28,7 +28,7 @@ use tokio_postgres::{Client, GenericClient};
 
 /// The audit record kind person changes use.
 const PERSON_KIND: &str = "person";
-const FIELDS: [&str; 4] = ["name", "code", "email", "phone"];
+const FIELDS: [&str; 5] = ["name", "code", "email", "phone", "custom"];
 /// The kind a kept document is listed under.
 const DOCUMENT_KIND: &str = "core.person document";
 
@@ -111,16 +111,32 @@ fn files_of(subject: &Subject) -> String {
     subject.person.get().to_string()
 }
 
+async fn optional_locate<T>(
+    tx: &tokio_postgres::Transaction<'_>,
+    read: impl std::future::Future<Output = Result<T>>,
+) -> Result<Option<T>> {
+    tx.batch_execute("SAVEPOINT person_locate_optional").await?;
+    let result = read.await;
+    if matches!(&result, Err(Error::Database(_))) {
+        tx.batch_execute("ROLLBACK TO SAVEPOINT person_locate_optional")
+            .await?;
+    }
+    tx.batch_execute("RELEASE SAVEPOINT person_locate_optional")
+        .await?;
+    Ok(result.ok())
+}
+
 struct People;
 static PEOPLE: People = People;
 impl Handler for People {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        tx: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = tx.client();
             let (emails, phones) = identifiers(subject);
             let row = client
                 .query_one(
@@ -137,29 +153,41 @@ impl Handler for People {
             let files = services()?;
             let id = files_of(subject);
             // Files are counted only when this reader may see them.
-            if let Ok(count) = files
-                .media
-                .count_attachments(
-                    client,
-                    scope,
-                    AttachmentSubject {
-                        kind: ATTACHMENT_SUBJECT,
-                        id: &id,
-                    },
-                )
-                .await
-            {
+            let attachments = async {
+                files
+                    .media
+                    .count_attachments(
+                        client,
+                        scope,
+                        AttachmentSubject {
+                            kind: ATTACHMENT_SUBJECT,
+                            id: &id,
+                        },
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        bilibi_media::Error::Postgres(error) => error.into(),
+                        other => media_error(other),
+                    })
+            };
+            if let Some(count) = optional_locate(tx, attachments).await? {
                 kinds.push(KindCount {
                     kind: ATTACHMENT_KIND.into(),
                     by_person: count,
                     by_identifier: 0,
                 });
             }
-            if let Ok(documents) = files
-                .artifacts
-                .subject_documents(client, scope, &FILES, &id)
-                .await
-            {
+            let documents = async {
+                files
+                    .artifacts
+                    .subject_documents(client, scope, &FILES, &id)
+                    .await
+                    .map_err(|error| match error {
+                        bilibi_artifacts::Error::Sql(error) => error.into(),
+                        other => artifact_error(other),
+                    })
+            };
+            if let Some(documents) = optional_locate(tx, documents).await? {
                 kinds.push(KindCount {
                     kind: DOCUMENT_KIND.into(),
                     by_person: documents.len() as i64,
@@ -250,7 +278,7 @@ impl Handler for People {
             let files = services()?;
             let id = grant.person().get().to_string();
             if let Some(public_id) = reference.strip_prefix("media:") {
-                let file = files
+                return files
                     .media
                     .disclosed_attachment(
                         &*client,
@@ -263,13 +291,7 @@ impl Handler for People {
                         public_id,
                     )
                     .await
-                    .map_err(media_error)?;
-                return Ok(File {
-                    content_type: file
-                        .mime_type
-                        .unwrap_or_else(|| "application/octet-stream".into()),
-                    bytes: file.bytes,
-                });
+                    .map_err(media_error);
             }
             let (company, document) = reference
                 .strip_prefix("artifact:")
@@ -286,7 +308,7 @@ impl Handler for People {
                 .read(client, document)
                 .await
                 .map_err(artifact_error)?;
-            Ok(File {
+            Ok(File::Read {
                 content_type: read.metadata.content_type,
                 bytes: read.bytes,
             })
@@ -310,7 +332,7 @@ impl Handler for People {
             }
             let id = old.id.get();
             let mut erased = Erased::default();
-            match holds.record(grant, PERSON_KIND, id).await? {
+            match holds.record(tx.sql(), grant, PERSON_KIND, id).await? {
                 Some(hold) => erased.kept.push(Kept::held(PERSON_KIND, id, hold)),
                 None => {
                     services()?
@@ -326,7 +348,8 @@ impl Handler for People {
                     let live = old.name != ERASED
                         || old.code != format!("erased-{id}")
                         || old.email.is_some()
-                        || old.phone.is_some();
+                        || old.phone.is_some()
+                        || !old.custom.is_empty();
                     if live || bilibi_audit::holds_values(tx, PERSON_KIND, id).await? {
                         let tenant = scope.tenant();
                         let before = old.json();
@@ -334,7 +357,7 @@ impl Handler for People {
                         Box::pin(async move {
                             let row = sql
                                 .query_one(
-                                    &format!("UPDATE persons SET name=$3,code='erased-'||id,email=NULL,phone=NULL,erased_at=coalesce(erased_at,now()),version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"),
+                                    &format!("UPDATE persons SET name=$3,code='erased-'||id,email=NULL,phone=NULL,custom_fields='{{}}'::jsonb,erased_at=coalesce(erased_at,now()),version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"),
                                     &[&tenant, &id, &ERASED],
                                 )
                                 .await?;
@@ -342,7 +365,11 @@ impl Handler for People {
                             let mut after = Person::from_row(&row)?.json();
                             // The code's new value is its `erased-<id>` stub.
                             for field in FIELDS.into_iter().filter(|f| *f != "code") {
-                                if !before[field].is_null() {
+                                let held = match &before[field] {
+                                    serde_json::Value::Object(values) => !values.is_empty(),
+                                    value => !value.is_null(),
+                                };
+                                if held {
                                     after[field] = json!(ERASED);
                                 }
                             }
@@ -437,7 +464,7 @@ impl Handler for People {
                 .erasable_documents(client, scope, grant, &FILES, &id)
                 .await
                 .map_err(artifact_error)?;
-            let person_hold = holds.person_hold(grant).await?;
+            let person_hold = holds.person_hold(&*client, grant).await?;
             for (company, document) in documents {
                 let kept = |reason, until, hold| Kept {
                     kind: DOCUMENT_KIND.into(),
@@ -450,7 +477,7 @@ impl Handler for People {
                 if let Some(hold) = person_hold {
                     step.kept
                         .push(kept(KeptReason::LegalHold, None, Some(hold)));
-                    progress.record(step).await?;
+                    progress.record(client, step).await?;
                     continue;
                 }
                 match files
@@ -471,7 +498,7 @@ impl Handler for People {
                     Err(error) => return Err(artifact_error(error)),
                 }
                 // Saved now: a failure on the next document keeps this one counted.
-                progress.record(step).await?;
+                progress.record(client, step).await?;
             }
             Ok(())
         })

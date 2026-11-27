@@ -4,7 +4,7 @@ I'm Kiat, a solo builder. I started Belimbing in 2025. It is named after Bukit B
 
 Bilibi is a rewrite of Belimbing, built in Rust. Belimbing was the first, in Laravel. Rust was chosen for low memory use and for a better AI agent contract. Talking to small business owners, I realized it is impractical to ask them to provision servers and maintain them. So Bilibi is multi-tenant from the ground up, and an IT service provider can run it as SaaS for their clients.
 
-Bilibi is MIT-licensed, like the earlier iterations. The architecture is the same four roots: Base, Core, Domains, and Extensions. Base and Core supply the shared foundation: companies, users, permissions, and audit. Domains are business areas, this is where the domain experts work with AI to build what they want. Extensions are company-specific changes, such as a custom report or a new feature. You own what you build, you can share it, sell it, or keep it to yourself. Bilibi is also the framework for building them: Domains and Extensions plug into its foundation and follow its rules.
+Bilibi is MIT-licensed, like the earlier iterations. The architecture is the same four roots: Base, Core, Domains, and Extensions. Base and Core contain shared modules for the app that you want to build. The difference between Base and Core is that Base has no business logic, whereas the modules in Core deal with business records, such as companies, people and products. Because every business is unique, Core modules are on demand: you take only the Core modules used by the Domains and Extensions in your app. This is where the [Bilibi app maker](https://github.com/BelimbingProject/bilibi-app-maker) comes in. It packages your Bilibi app into the smallest footprint possible, with no bloat, and serves exactly what you need. Domains are business areas, this is where the domain experts work with AI to build what they want. Extensions are company-specific changes, such as a custom report or a new feature. You own what you build, you can share it, sell it, or keep it to yourself. Bilibi is also the framework for building them: Domains and Extensions plug into its foundation and follow its rules.
 
 **Status:** version 0.1, in active development.
 
@@ -83,15 +83,17 @@ cd bilibi
 ./bilibi start
 ```
 
-`start` checks the tools, runs the existing setup when needed, activates newly installed Rust tools in the same shell, and launches local sources. Setup installs Rust, PostgreSQL 18, Caddy, mkcert and Node.js. You do not need a GitHub account. An AI agent follows these same steps.
+`start` checks the tools, runs the existing setup when needed, activates newly installed Rust tools in the same shell, and launches local sources. Setup installs the Rust version pinned in `rust-toolchain.toml`, PostgreSQL 18, Caddy, mkcert and Node.js 22 or newer (Node.js 24 when it installs it). You do not need a GitHub account. An AI agent follows these same steps.
 
-Bilibi opens in your browser at the sign-in page when it is ready. Sign in as `ai@agent.my` / `bilibi-dev` (development seed only). Later starts do not open another tab; open the address the launcher prints, or the tab you already have. If no browser opens, open that address too. To stop it opening a browser, set `BILIBI_OPEN_BROWSER=0`. To open one again, delete `.local/dev/browser-opened`. Every checkout defaults to <https://bilibi.localhost> and gets its own private database. To choose another address, put `BILIBI_DEV_HOST=<name>.localhost` in `.env` (see [Local launcher](#local-launcher)). If another checkout owns the address, startup stops and names that checkout. Follow the printed `BILIBI_DEV_HOST` line in your `.env`, then start again. Restart the launcher after changing the address; it releases its old name when it registers the new one. Setting `BILIBI_DEV_PORT` selects a backend port, without taking over another checkout's HTTPS address.
+Bilibi opens the staff sign-in page when it is ready. Sign in as `ai@agent.my` / `bilibi-dev` (development seed only). Every checkout gets two HTTPS names: staff at <https://bilibi.localhost> and public pages at <https://shop.bilibi.localhost>, plus its own private database. `BILIBI_DEV_HOST=<name>.localhost` changes the pair to `<name>.localhost` and `shop.<name>.localhost`. Caddy and local certificate trust are required because the two sites use hostname-bound secure cookies. If either name belongs to another checkout, startup stops and names the conflict.
 
 ### Supported environment
 
 Use apt-based Ubuntu or Debian, or Arch Linux and its derivatives (including Omarchy), with Git, Bash and network access. These distributions also work in WSL2. On Arch, setup performs a full system upgrade when it installs missing packages, as required by pacman. Installing missing packages needs root or sudo privileges. Setup may ask for your sudo password in the terminal; one command does not mean unattended installation.
 
-Python 3.11 or newer is required. Ubuntu 20.04 and 22.04, and Debian 11, ship older Python versions. Upgrade to Ubuntu 24.04 or newer, or Debian 12 or newer, before starting; setup does not replace the distribution's Python. If local HTTPS trust needs manual setup (including Windows trust in WSL2), use the printed loopback HTTP address. The launcher falls back to HTTP when local HTTPS is unavailable.
+On Arch/Omarchy, setup uses `pacman` and the Node.js 24 LTS package (`nodejs-lts-krypton`). Setup keeps an installed Node.js 22 or newer. Setup refuses a different PostgreSQL major. Rustup selects the pinned Rust version for this checkout without changing your global default.
+
+Python 3.11 or newer is required. Ubuntu 20.04 and 22.04, and Debian 11, ship older Python versions. Upgrade to Ubuntu 24.04 or newer, or Debian 12 or newer, before starting; setup does not replace the distribution's Python. Local Caddy and certificate trust are required, including Windows trust in WSL2: the launcher refuses an HTTP fallback because the staff and public sites use hostname-bound secure cookies.
 
 ### Commands in a Platform clone
 
@@ -100,7 +102,8 @@ Run commands from the clone's root. `./bilibi help` shows the same list. Your br
 | Command | What it does | When to use it |
 | --- | --- | --- |
 | `./bilibi start` | Installs anything missing, runs Bilibi, and opens it in your browser the first time you start this checkout | Every time you want to run Bilibi. Leave it running; it rebuilds when the code changes. |
-| `./bilibi add <name>` | Adds a Domain or Extension, such as `finance`. You can also paste the `add` command that the Software page shows. | When you want to try or develop a Domain or Extension. Run `start` again afterwards. |
+| `./bilibi stop` | Stops the Bilibi started from this clone, from any terminal: the launcher, cargo-watch, a build in progress and the app, then frees their ports. Says so when nothing is running. | When you want it off without finding its terminal. Closing the terminal, Ctrl-C and sending SIGTERM to the launcher also stop its children before it exits. |
+| `./bilibi add <name>` | Adds a Domain or Extension, such as `finance` | When you want to try or develop a Domain or Extension. Run `start` again afterwards. |
 | `./bilibi update` | Gets the latest Bilibi changes, and moves the Domains and Extensions you added to their newest recommended versions, plus those from repositories you trust | Any time, including while `./bilibi start` runs in another terminal; it rebuilds and reloads by itself |
 | `./bilibi status` | Lists Bilibi and what you added, with each one's branch and uncommitted changes | When you want to see what you have changed |
 | `./bilibi setup` | Installs the tools only, without starting Bilibi | When you want the tools ready in advance |
@@ -108,6 +111,8 @@ Run commands from the clone's root. `./bilibi help` shows the same list. Your br
 | `./bilibi help` | Shows the command list | Any time |
 
 `check`, `build` and `release` work only in an application; here they say how to make one.
+
+`start` prints `Started in N s` above the listening address, or `Start failed after N s` if the app never listened. `setup`, `add`, `update` and `new` end with how long they took, whether they passed or failed.
 
 `new` copies the [app maker](https://github.com/BelimbingProject/bilibi-app-maker). The [application workspace guide](docs/application-workspaces.md) covers the next step, Git ownership and migration; [ADR 03](docs/architecture/decisions/03-application-workspaces-one-front-door.md) records the decision. `./bilibi start` installs the tools and safeguards the app needs.
 
@@ -135,13 +140,15 @@ The launcher reads its settings from your shell first, then from an optional `.e
 
 | Line in `.env` | What it changes | Default |
 |----------------|-----------------|---------|
-| `BILIBI_DEV_HOST` | This instance's address, a name under `.localhost`, served over HTTPS | `bilibi.localhost` for every checkout |
-| `BILIBI_DEV_PORT` | The port Bilibi itself listens on behind Caddy | The first free port from 4300 |
+| `BILIBI_DEV_HOST` | The staff address under `.localhost`; the launcher also creates `shop.<name>` for public pages | `bilibi.localhost` and `shop.bilibi.localhost` |
+| `BILIBI_DEV_PORT` | The first of the two backend ports behind Caddy | The first free pair from 4300 |
 | `BILIBI_OPEN_BROWSER` | Open the sign-in page in your browser when the app is ready, on the first start of a checkout only, `1` or `0` | `1` |
 
 Servers never read `.env`: `install-server.sh` writes each server instance its own `env` file ([server installation](docs/server-install.md)).
 
-The launcher sets `BILIBI_ENV=development` unless you already set it, so the install seed identifies a fresh local copy as Dev. A saved role in Instance settings takes precedence. It starts a private database, builds, migrates, seeds and rebuilds on change. While the HTTPS app is down, its waiting page shows the current build step and elapsed time. A failed build shows the latest diagnostics; fix the error and save a file to rebuild. Cargo output stays in the terminal, and a previous successful build keeps serving until its replacement is ready. If a migration says it "requires a fresh database", the local database predates a clean-break change: stop Bilibi, delete `.local/postgres18` (or empty the database named by `DATABASE_URL`) and run `./bilibi start` again; back it up with `pg_dump` first if you need its data. Restart it after changing an environment variable.
+The launcher sets `BILIBI_ENV=development` unless you already set it, so the install seed identifies a fresh local copy as Dev. A saved role in Server Instance takes precedence. It starts a private database, builds, migrates, seeds and rebuilds on change. While the HTTPS app is down, its waiting page shows the current build step and elapsed time. A failed build shows the latest diagnostics; fix the error and save a file to rebuild. Cargo output stays in the terminal, and a previous successful build keeps serving until its replacement is ready. If a migration says it "requires a fresh database", the local database predates a clean-break change: stop Bilibi, delete `.local/postgres18` (or empty the database named by `DATABASE_URL`) and run `./bilibi start` again; back it up with `pg_dump` first if you need its data. Restart it after changing an environment variable.
+
+The launcher's Rust build ends with its elapsed time, the number of crates Cargo reported compiling, its exit code and the timing report at `target/cargo-timings/cargo-timing.html`. A start after stopping still asks Cargo to check the build; a successful build reporting `0 crates compiled` reused the compiled crates, even if that check took time.
 
 `./bilibi start` stores three keys for this checkout when they are not already set. `BILIBI_SETTINGS_KEY` is `.local/dev/settings.key`. `BILIBI_USER_SIGNING_KEY` is `.local/dev/user-signing.key`. `BILIBI_MEDIA_SIGNING_KEY` is `.local/dev/media-signing.key`. The first run creates a missing file as 64 hex characters (32 random bytes) with mode 0600. Later runs read that same file. The launcher leaves an existing key file as it is. Replacing `settings.key` would make every secret setting and authenticator key unreadable. `.local/` is not committed. Restart the launcher after you change one of these files.
 
@@ -150,18 +157,22 @@ The launcher sets `BILIBI_ENV=development` unless you already set it, so the ins
 | Variable | Use |
 |----------|-----|
 | `DATABASE_URL` | PostgreSQL 18. Unset: this checkout's private instance under `.local/postgres18`, on a port chosen once (5438 when free) and remembered in `.local/postgres18/port` |
-| `APP_ORIGIN` | The exact browser origin, no trailing slash. Staging and Production refuse to start unless it is HTTPS; see [HTTPS for OAuth](docs/server-install.md#https-for-oauth) |
-| `BIND_ADDR` | Listen address, default `127.0.0.1:3000` |
+| `APP_ORIGIN` | The exact staff origin, no trailing slash. Staging and Production refuse to start unless it is HTTPS; see [HTTPS for OAuth](docs/server-install.md#https-for-oauth) |
+| `BIND_ADDR` | Staff listen address, default `127.0.0.1:3000` |
+| `PUBLIC_ORIGIN` | The public listener's origin: its scheme and port. Each request's hostname names a workspace's public site (`base/public`; the launcher binds `shop.<name>.localhost` to tenant 1). Omit it together with `PUBLIC_BIND_ADDR` to serve no public routes |
+| `PUBLIC_BIND_ADDR` | Public listen address. Required with `PUBLIC_ORIGIN` and different from `BIND_ADDR` |
+| `DATABASE_POOL_SIZE` | Database connections one app process may hold, 1 to 1000, default 16. System Info shows it as Pool Size. Keep the total of every process under PostgreSQL's `max_connections` |
+| `DATABASE_POOL_WAIT_SECONDS` | How long a request or job waits for a free connection before it is refused (a page answers 503, a job retries), 1 to 300, default 5 |
 | `MAIL_HOST` | SMTP relay. Unset: write mail to `.local/mailbox/` |
 | `BILIBI_USER_SIGNING_KEY` | 64 hex characters, for email verification links. Unset: `./bilibi start` supplies one |
 | `BILIBI_SETTINGS_KEY` | 64 hex characters. Encrypts secret settings and authenticator keys. 2FA setup refuses without it. Unset: `./bilibi start` supplies one |
 | `BILIBI_MEDIA_SIGNING_KEY` | 64 hex characters, for signed file links. Unset: `./bilibi start` supplies one |
 | `BILIBI_SSO_ALLOW_PRIVATE_ENDPOINTS` | `1` lets company sign-in reach identity providers on private networks and literal-loopback HTTP. Unset: public HTTPS only. See [company sign-in](apps/core/user/sso.md) |
-| `BILIBI_ENV` | `development`, `staging` or `production`. Initial role for the install seed. Unset means `production`; `./bilibi start` defaults to `development`. Later role changes use Instance settings. Other values refuse installation |
+| `BILIBI_ENV` | `development`, `staging` or `production`. Initial role for the install seed. Unset means `production`; `./bilibi start` defaults to `development`. Later role changes use Server Instance. Other values refuse installation |
 
-Every page, consent page and agent answer says which Bilibi it is, so nobody mistakes a test copy for the live system. The status bar always shows the stored server role; Staging also shows a top-bar badge. Dev and Staging show a sign-in badge; reviews and agent plans name every instance, production included. The name and colour are the Instance settings (`instance.label`, `instance.colour`), read through `bilibi_base::system::Instance::resolve` ([Base System](apps/base/system/README.md)).
+Use [Server Instance](apps/base/system/README.md) to distinguish a test copy from the live system. To customise the staff interface for your installation, see [Change the installation brand](apps/base/branding/README.md#change-it).
 
-The stored server role also decides whether ordinary Base Step-up checks apply. Click the status-bar role to open Instance settings. A Core Administrator can change it with a fresh 2FA code; changing to or from Production carries a warning and every change is audited.
+The stored server role also decides whether ordinary Base Step-up checks apply. Click the status-bar role to open Server Instance. A Core Administrator can change it with a fresh 2FA code; every change is audited.
 
 | Server role | Step-up operations (declared by each module, set per tenant) |
 |--------------|--------------------------------------------------------------|
@@ -175,7 +186,7 @@ Terminate TLS at a reverse proxy, and keep the database on a private network: Bi
 
 ## Run it on a server
 
-`scripts/install-server.sh` sets up Dev, Staging and Production instances under `/opt/bilibi`, each with its own database, service and address, and puts releases into service. `bilibi-web create-owner` then creates the first account, the server owner, on the empty database. The install seed saves the initial `BILIBI_ENV` role in settings; later changes use the protected Instance settings page. Build software on your own machine, then install the tested release on any of them. See [`docs/server-install.md`](docs/server-install.md).
+`scripts/install-server.sh` sets up Dev, Staging and Production instances under `/opt/bilibi`, each with its own database, service and address, and puts releases into service. The install seed saves the initial `BILIBI_ENV` role in settings. Later changes use the protected Server Instance page. Build software on your own machine, then install the tested release on any of them. Follow the [server installation guide](docs/server-install.md) to set up an instance, its server owner and first owners of customer tenants. For a running server, see [reviewed updates and Undo](docs/server-install.md#putting-a-release-into-service). To let your own AI assistant install it, give it [the Install Bilibi skill](docs/install-with-ai/SKILL.md) ([guide](docs/install-with-ai/README.md)).
 
 ## Add a business area
 
@@ -189,7 +200,7 @@ A Domain such as Finance is its own repository, mounted as a real folder (not a 
 
 Commerce adds Products, Quotations and Sales orders under the Commerce menu.
 
-`add` uses the official repository's default branch. Repeating it keeps an existing checkout, branch and edits, and refreshes discovery and the working dependency lock. A conflicting destination or different origin is refused for you to inspect. Generated composition and lock changes stay local to Platform. Software's developer commands add `--kind`, `--source` and `--commit` so the clone is the exact repository and release commit it shows; an existing folder at another commit is left unchanged with the steps to move it.
+`add` uses the official repository's default branch. Repeating it keeps an existing checkout, branch and edits, and refreshes discovery and the working dependency lock. A conflicting destination or different origin is refused for you to inspect. Generated composition and lock changes stay local to Platform. To build from a recommended release commit, use the [installation commands in Software](apps/base/software/README.md#add-a-domain).
 
 Rules for manual mounting, private repositories and unmounting: [`apps/domains/AGENTS.md`](apps/domains/AGENTS.md) and [`apps/extensions/AGENTS.md`](apps/extensions/AGENTS.md). Extensions use the same `add` command and mount under `apps/extensions/`.
 
@@ -203,6 +214,28 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --release --locked
 ```
+
+### File length
+
+CI warns about a Rust file over 800 lines that is new or got longer in your pull request. It fails only when the pull request body gives no reason for a listed file.
+
+- Under `## File length` in the pull request body, add one line per listed file: `<path>: keep: <reason>` or `<path>: split: <what was split along which responsibility>`.
+- Split by responsibility (one screen, one job), never by line count and never into `part1`/`part2`.
+- Run `python3 scripts/file-length-ratchet.py` to see the list locally; it compares your branch with `origin/main`.
+- Files under `fixtures/`, `examples/`, `migrations/` and `generated/` are skipped.
+- CI runs it as `.github/workflows/file-length.yml`; editing the body re-runs it. The same script is copied unchanged into every Bilibi repository.
+
+### Guard rails
+
+The [contribution guard rails](CONTRIBUTING.md#guard-rails) describe the Clippy policy, escape-hatch ratchets and required PR explanations.
+
+### Shared helpers
+
+Base keeps one copy of the small helpers every module needs; [`apps/base/HELPERS.md`](apps/base/HELPERS.md) lists them.
+
+- Use a listed helper instead of writing your own reader, error, blank-text, money or badge function.
+- To add one, give a public Base function a one-line purpose and a `Shared helper:` example line in its doc comment, then run `python3 scripts/shared-helpers.py` to rebuild the list. CI fails when the list is out of date.
+- CI warns when a pull request adds a function with a listed helper's name. It never fails; to keep the copy, add `<path>: keep: <reason>` under `## Shared helpers` in the pull request body.
 
 ## Limits
 

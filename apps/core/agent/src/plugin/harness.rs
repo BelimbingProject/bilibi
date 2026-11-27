@@ -26,7 +26,7 @@ pub trait Harness: Sync {
     /// not show this; the exporter does.
     fn name(&self) -> &'static str;
     /// The download's file name, from the package's instance name
-    /// (`bilibi-staging-chatgpt-plugin.zip`).
+    /// (`try-bilibi-app-chatgpt-plugin.zip`).
     fn archive_name(&self, package: &Package) -> String;
     /// The manifest, MCP configuration and skills in this harness's layout.
     fn files(&self, package: &Package) -> Vec<PackageFile>;

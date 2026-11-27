@@ -3,6 +3,12 @@
 //! Pick-list codes, people, records and files are checked by `store`.
 use crate::Reference;
 use jiff::civil::Date;
+use serde_json::{Map, Value};
+
+/// The tenant's custom field values of one document: key to value. In a
+/// `Draft` or `Patch` it is a patch (an empty or null value clears a key);
+/// on a `Document` it is what is stored.
+pub type Custom = Map<String, Value>;
 
 /// Where a document's content lives. Fixed when the document is created.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -29,28 +35,47 @@ impl Source {
     }
 }
 
-/// Whether a revision's file was scanned. Every revision is `NotScanned`
-/// until upload scanning reaches artifacts (slice 2).
+/// The last durable scan verdict for an internal revision. Held states never
+/// expose bytes; an external link has no scan and stays `NotScanned`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ScanStatus {
     #[default]
     NotScanned,
+    Pending,
     Clean,
     Quarantined,
+    Failed,
+    Unscanned,
 }
 impl ScanStatus {
     pub fn code(self) -> &'static str {
         match self {
             Self::NotScanned => "not_scanned",
+            Self::Pending => "pending",
             Self::Clean => "clean",
             Self::Quarantined => "quarantined",
+            Self::Failed => "failed",
+            Self::Unscanned => "unscanned",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotScanned => "not scanned",
+            Self::Pending => "scan pending",
+            Self::Clean => "clean",
+            Self::Quarantined => "quarantined",
+            Self::Failed => "scan failed",
+            Self::Unscanned => "scanner unavailable",
         }
     }
     pub fn parse(code: &str) -> Option<Self> {
         match code {
             "not_scanned" => Some(Self::NotScanned),
+            "pending" => Some(Self::Pending),
             "clean" => Some(Self::Clean),
             "quarantined" => Some(Self::Quarantined),
+            "failed" => Some(Self::Failed),
+            "unscanned" => Some(Self::Unscanned),
             _ => None,
         }
     }
@@ -58,11 +83,18 @@ impl ScanStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldError {
-    pub field: &'static str,
+    /// A form field, or `cf_<key>` for a tenant's custom field.
+    pub field: String,
     pub message: String,
 }
 impl FieldError {
     pub(crate) fn new(field: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            field: field.to_owned(),
+            message: message.into(),
+        }
+    }
+    pub(crate) fn owned(field: String, message: impl Into<String>) -> Self {
         Self {
             field,
             message: message.into(),
@@ -86,6 +118,14 @@ pub struct Draft {
     pub sub_category: Option<String>,
     pub document_type: Option<String>,
     pub status: Option<String>,
+    /// When the document expires; a reminder task is kept for it.
+    pub expires_on: Option<Date>,
+    /// Values of the tenant's custom fields (`base/custom_fields`).
+    pub custom: Custom,
+    pub sync_id: Option<String>,
+    pub related_document_id: Option<i64>,
+    pub relation: Option<String>,
+    pub revision_label: Option<String>,
     /// The first revision's change log; "Document created" when omitted.
     pub change_log: Option<String>,
     /// Records the document relates to from the start.
@@ -103,6 +143,13 @@ pub struct Patch {
     pub sub_category: Option<Option<String>>,
     pub document_type: Option<Option<String>>,
     pub status: Option<String>,
+    /// `Some(None)` clears the expiry date.
+    pub expires_on: Option<Option<Date>>,
+    /// Custom values to set; an empty or null value clears a key.
+    pub custom: Custom,
+    pub sync_id: Option<Option<String>>,
+    pub related_document_id: Option<Option<i64>>,
+    pub relation: Option<Option<String>>,
 }
 impl Patch {
     pub fn is_empty(&self) -> bool {
@@ -112,6 +159,11 @@ impl Patch {
             && self.sub_category.is_none()
             && self.document_type.is_none()
             && self.status.is_none()
+            && self.expires_on.is_none()
+            && self.custom.is_empty()
+            && self.sync_id.is_none()
+            && self.related_document_id.is_none()
+            && self.relation.is_none()
     }
 }
 
@@ -123,6 +175,8 @@ pub struct RevisionInput {
     pub external_url: Option<String>,
     pub revision: Option<i32>,
     pub change_log: String,
+    pub label: Option<String>,
+    pub replaces_revision_id: Option<i64>,
 }
 
 /// Bytes to keep as a document file, before any document exists.
@@ -135,17 +189,11 @@ pub struct Upload<'a> {
 pub const NAME_MAX: usize = 255;
 pub const CODE_MAX: usize = 64;
 pub const CHANGE_LOG_MAX: usize = 2_000;
+pub const SYNC_ID_MAX: usize = 255;
+pub const REVISION_LABEL_MAX: usize = 100;
 pub const URL_MAX: usize = 2_000;
 /// The change log of a document's first revision when none is given.
 pub const FIRST_CHANGE_LOG: &str = "Document created";
-
-/// Trimmed, or `None` when blank.
-pub(crate) fn clean(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_owned)
-}
 
 /// A bounded single-line text: `None` when blank, an error when too long or
 /// holding control characters.
@@ -155,7 +203,7 @@ pub(crate) fn text(
     value: Option<&str>,
     max: usize,
 ) -> Option<String> {
-    let value = clean(value)?;
+    let value = bilibi_ui::params::blank_to_none(value)?;
     if value.chars().count() > max {
         errors.push(FieldError::new(
             field,
@@ -174,7 +222,7 @@ pub(crate) fn long_text(
     value: Option<&str>,
     max: usize,
 ) -> Option<String> {
-    let value = clean(value)?;
+    let value = bilibi_ui::params::blank_to_none(value)?;
     if value.chars().count() > max {
         errors.push(FieldError::new(
             field,
@@ -194,7 +242,7 @@ pub(crate) fn long_text(
 
 /// An `https` address with a host, at most `URL_MAX` bytes.
 pub(crate) fn https_url(errors: &mut Vec<FieldError>, value: Option<&str>) -> Option<String> {
-    let value = clean(value)?;
+    let value = bilibi_ui::params::blank_to_none(value)?;
     let valid = value.len() <= URL_MAX
         && url::Url::parse(&value).is_ok_and(|url| {
             url.scheme() == "https" && url.host_str().is_some_and(|h| !h.is_empty())

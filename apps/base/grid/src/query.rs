@@ -21,6 +21,11 @@ pub enum QueryError {
     Limit(&'static str),
     /// A read exceeded its execution time or planner cost bound.
     TooHeavy(&'static str),
+    AuditCommitUnknown,
+    AuditSummaryFailed {
+        prior: Box<QueryError>,
+        summary: Box<QueryError>,
+    },
     ForbiddenRoot,
     Column(String, ColumnError),
     /// A filter, grouping, measure or sort the column's type does not take.
@@ -32,6 +37,12 @@ impl fmt::Display for QueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Limit(why) | Self::TooHeavy(why) => write!(f, "grid projection limit: {why}"),
+            Self::AuditCommitUnknown => f.write_str(
+                "The oversight audit commit could not be confirmed. Check the audit trail before retrying.",
+            ),
+            Self::AuditSummaryFailed { prior, summary } => {
+                write!(f, "{prior} The parent oversight summary failed: {summary}")
+            }
             Self::ForbiddenRoot => write!(f, "grid table unavailable"),
             Self::Column(spec, why) => write!(f, "grid column {spec}: {why}"),
             Self::Unsupported(spec, why) => write!(f, "grid column {spec}: {why}"),
@@ -69,6 +80,16 @@ impl From<QueryError> for Error {
             | QueryError::Column(_, _)
             | QueryError::Unsupported(_, _) => Self::Invalid,
             QueryError::ForbiddenRoot => Self::Forbidden,
+            QueryError::AuditCommitUnknown => Self::refused(error),
+            QueryError::AuditSummaryFailed { ref prior, .. }
+                if matches!(
+                    **prior,
+                    QueryError::Database(Self::UnrecoveredTransaction(_))
+                ) =>
+            {
+                Self::UnrecoveredTransaction(error.to_string())
+            }
+            QueryError::AuditSummaryFailed { .. } => Self::refused(error),
             QueryError::Catalog(error) => error.into(),
             QueryError::Database(error) => error,
         }
@@ -160,30 +181,6 @@ pub async fn project<S: AsRef<str>>(
     project_lenses(db, scope, root, ids, specs, &Lenses::default()).await
 }
 
-/// [`project`] under the caller's [`Bounds`] (its statement timeout and cost
-/// bound) instead of the interactive ones: the report builder fills a page
-/// of keys it read under the same bounds, interactive or background.
-pub async fn project_within<S: AsRef<str>>(
-    db: &Db,
-    scope: &Scope,
-    root: &str,
-    ids: &[Value],
-    specs: &[S],
-    bounds: Bounds,
-) -> Result<Projection, QueryError> {
-    read(
-        db,
-        scope,
-        root,
-        ids,
-        specs,
-        &Lenses::default(),
-        bounds,
-        None,
-    )
-    .await
-}
-
 /// [`project`] plus each trend column's monthly series and each delta column's
 /// aggregate before the date, from the same statement under the same bounds.
 /// Months and dates are UTC calendar days (`TimeZone` is UTC for the read).
@@ -195,7 +192,16 @@ pub async fn project_lenses<S: AsRef<str>>(
     specs: &[S],
     lenses: &Lenses,
 ) -> Result<Projection, QueryError> {
-    read(db, scope, root, ids, specs, lenses, Bounds::default(), None).await
+    let mut client = db.get().await.map_err(Error::from)?;
+    let tx = client
+        .build_transaction()
+        .read_only(true)
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .start()
+        .await?;
+    let result = read_on(&tx, scope, root, ids, specs, lenses).await?;
+    tx.commit().await?;
+    Ok(result)
 }
 
 /// The full value of one masked field of one record (ADR 05): the same read
@@ -213,46 +219,6 @@ pub async fn reveal(
     field: &str,
     key: &Value,
 ) -> Result<Option<Value>, QueryError> {
-    grant
-        .check(scope, table, field)
-        .map_err(QueryError::Database)?;
-    {
-        let client = db.get().await.map_err(Error::from)?;
-        let catalog = Catalog::for_scope(&**client, scope).await?;
-        if !catalog.masked(table, field) {
-            return Err(QueryError::Database(Error::Forbidden));
-        }
-    }
-    let projection = read(
-        db,
-        scope,
-        table,
-        std::slice::from_ref(key),
-        &[field],
-        &Lenses::default(),
-        Bounds::default(),
-        Some((table, field)),
-    )
-    .await?;
-    Ok(projection
-        .rows
-        .into_iter()
-        .next()
-        .and_then(|mut row| row.cells.remove(field)))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn read<S: AsRef<str>>(
-    db: &Db,
-    scope: &Scope,
-    root: &str,
-    ids: &[Value],
-    specs: &[S],
-    lenses: &Lenses,
-    bounds: Bounds,
-    reveal: Option<(&str, &str)>,
-) -> Result<Projection, QueryError> {
-    bounds.check()?;
     let mut client = db.get().await.map_err(Error::from)?;
     let tx = client
         .build_transaction()
@@ -260,14 +226,74 @@ async fn read<S: AsRef<str>>(
         .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
         .start()
         .await?;
-    tx.batch_execute(&bounds.sql()).await?;
-    let catalog = match reveal {
-        Some((table, field)) => Catalog::revealing(&*tx, scope, table, field).await?,
-        None => Catalog::for_scope(&*tx, scope).await?,
-    };
-    let result = project_catalog(&tx, &catalog, root, ids, specs, lenses, bounds).await?;
+    let value = reveal_on(&tx, scope, grant, table, field, key).await?;
     tx.commit().await?;
-    Ok(result)
+    Ok(value)
+}
+
+/// Reveal on the caller's transaction, preserving its bounded read and scope.
+pub async fn reveal_on(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    grant: &bilibi_personal_data::Reveal,
+    table: &str,
+    field: &str,
+    key: &Value,
+) -> Result<Option<Value>, QueryError> {
+    grant
+        .check(scope, table, field)
+        .map_err(QueryError::Database)?;
+    let bounds = Bounds::default();
+    bounded(tx, bounds, async {
+        let catalog = Catalog::for_scope(tx, scope).await?;
+        if !catalog.masked(table, field) {
+            return Err(QueryError::Database(Error::Forbidden));
+        }
+        let catalog = Catalog::revealing(tx, scope, table, field).await?;
+        let projection = project_catalog(
+            tx,
+            &catalog,
+            table,
+            std::slice::from_ref(key),
+            &[field],
+            &Lenses::default(),
+            bounds,
+        )
+        .await?;
+        Ok(projection
+            .rows
+            .into_iter()
+            .next()
+            .and_then(|mut row| row.cells.remove(field)))
+    })
+    .await
+}
+
+/// Projects rows on the caller's transaction. Use repeatable read when an
+/// authorization check and the projection must share a snapshot.
+pub async fn project_on<S: AsRef<str>>(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    root: &str,
+    ids: &[Value],
+    specs: &[S],
+) -> Result<Projection, QueryError> {
+    read_on(tx, scope, root, ids, specs, &Lenses::default()).await
+}
+
+async fn read_on<S: AsRef<str>>(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    root: &str,
+    ids: &[Value],
+    specs: &[S],
+    lenses: &Lenses,
+) -> Result<Projection, QueryError> {
+    let bounds = Bounds::default();
+    bounds.check()?;
+    tx.batch_execute(&bounds.sql()).await?;
+    let catalog = Catalog::for_scope(tx, scope).await?;
+    project_catalog(tx, &catalog, root, ids, specs, lenses, bounds).await
 }
 
 pub(crate) async fn project_catalog<S: AsRef<str>>(
@@ -282,9 +308,6 @@ pub(crate) async fn project_catalog<S: AsRef<str>>(
     if ids.len() > MAX_ROWS {
         return Err(QueryError::Limit("page exceeds 100 IDs"));
     }
-    if specs.len() > MAX_COLUMNS {
-        return Err(QueryError::Limit("more than 32 column specs"));
-    }
     if ids
         .iter()
         .any(|id| !matches!(id, Value::Number(_) | Value::String(_)) || id.to_string().len() > 256)
@@ -293,12 +316,11 @@ pub(crate) async fn project_catalog<S: AsRef<str>>(
             "keys must be scalar numbers/strings up to 256 bytes",
         ));
     }
-    let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
-    let columns = catalog
-        .resolve_all(root, specs)
-        .map_err(|(spec, error)| QueryError::Column(spec, error))?;
-    if columns.iter().map(|c| c.depth).sum::<usize>() > MAX_HOPS {
-        return Err(QueryError::Limit("more than 128 total hops"));
+    let (root, mut columns) = projection_columns(catalog, root, specs)?;
+    for column in &mut columns {
+        if catalog.mask(column).is_some() {
+            column.reference = None;
+        }
     }
     let today = today();
     let months = trend_months(today);
@@ -335,12 +357,37 @@ pub(crate) async fn project_catalog<S: AsRef<str>>(
     let ids = Value::Array(ids.to_vec());
     let tenant = catalog.tenant();
     let user = catalog.user();
+    let company = catalog.company();
     let iso = |date: civil::Date| date.to_string();
     let trend_from = iso(months[0]);
     let trend_to = iso(today.first_of_month().saturating_add(1.month()));
     let since = iso(lenses.since.unwrap_or_else(|| default_since(today)));
-    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] =
-        &[&tenant, &user, &ids, &trend_from, &trend_to, &since];
+    let proof_head =
+        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company)";
+    let proof_rows = format!(
+        "FROM {} r CROSS JOIN actor WHERE {} IN (SELECT (id #>> '{{}}')::{cast} FROM jsonb_array_elements($4::jsonb) AS x(id))",
+        source(root),
+        field("r", root, root.key())
+    );
+    let subjects = crate::subject::proofs(
+        tx,
+        catalog,
+        root,
+        specs.iter().map(AsRef::as_ref),
+        (proof_head, &proof_rows, &[&tenant, &user, &company, &ids]),
+        bounds,
+    )
+    .await?;
+    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[
+        &tenant,
+        &user,
+        &company,
+        &ids,
+        &trend_from,
+        &trend_to,
+        &since,
+        &subjects,
+    ];
     let explain: Value = tx
         .query_one(&format!("EXPLAIN (FORMAT JSON) {sql}"), params)
         .await?
@@ -456,10 +503,14 @@ pub async fn stats<S: AsRef<str>>(
         .map(|i| format!("to_jsonb(min(c{i})), to_jsonb(max(c{i}))"))
         .collect::<Vec<_>>()
         .join(", ");
-    let sql = format!("WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr) SELECT {ranges} FROM (SELECT {values} FROM {} r CROSS JOIN actor) s", source(root));
+    let sql = format!(
+        "WITH actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company) SELECT {ranges} FROM (SELECT {values} FROM {} r CROSS JOIN actor) s",
+        source(root)
+    );
     let tenant = scope.tenant();
     let user = scope.user();
-    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[&tenant, &user];
+    let company = scope.current_company().map(|company| company.get());
+    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[&tenant, &user, &company];
     let explain: Value = tx
         .query_one(&format!("EXPLAIN (FORMAT JSON) {sql}"), params)
         .await?
@@ -497,13 +548,20 @@ pub async fn stats<S: AsRef<str>>(
 }
 
 /// Build an owner-list membership subquery over visible text paths. Execute
-/// immediately with the same scope, binding tenant/user/normalized search to
-/// $1/$2/$3, inside the owner's paginated SELECT and count. Unavailable paths
+/// immediately with the same scope, binding tenant/user/company/normalized
+/// search to $1/$2/$3/$4, inside the owner's paginated SELECT and count. Unavailable paths
 /// contribute no matches. Only catalog identifiers enter the returned SQL.
 /// Many-links search every value before list-cell truncation or aggregation.
 /// The caller owns its statement timeout and pagination, as for its own search.
+///
+/// Each path matches from its end: the rows whose field holds the term, then
+/// back through each link to the root keys they reach, all unioned. Nothing is
+/// correlated to a root row, so a search reads the rows that match (through a
+/// trigram index where the owner declares one) rather than testing every root
+/// row (#589). The term is a substring match, `LIKE` with `%`, `_` and `\`
+/// escaped, as `position` was.
 pub async fn text_search_sql(
-    client: &impl tokio_postgres::GenericClient,
+    client: &(impl tokio_postgres::GenericClient + Sync),
     scope: &Scope,
     root: &str,
     specs: &[&str],
@@ -513,7 +571,7 @@ pub async fn text_search_sql(
     }
     let catalog = Catalog::for_scope(client, scope).await?;
     let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
-    let mut predicates = Vec::new();
+    let mut matches = Vec::new();
     for spec in specs {
         let Ok(column) = catalog.resolve(root, spec) else {
             continue;
@@ -525,23 +583,67 @@ pub async fn text_search_sql(
         let Some(f) = column.field.filter(|f| f.ty == crate::FieldType::String) else {
             continue;
         };
-        let predicate = match walk(&catalog, root, &column) {
-            Some(w) => format!(
-                "EXISTS (SELECT 1 {} AND position($3::text in lower({}))>0)",
-                w.suffix,
-                field(&w.alias, w.table, f.id)
-            ),
-            None => format!("position($3::text in lower({}))>0", field("r", root, f.id)),
-        };
-        predicates.push(predicate);
+        matches.push(matching_keys(&catalog, root, &column, f.id));
     }
-    // Reference both scope parameters even for sources that only use tenant.
-    let predicate = if predicates.is_empty() {
+    let key = field("r", root, root.key());
+    // Reference every scope parameter even for sources that only use tenant.
+    let predicate = if matches.is_empty() {
         "false".into()
     } else {
-        predicates.join(" OR ")
+        format!("{key} IN ({})", matches.join(" UNION ALL "))
     };
-    Ok(format!("SELECT {} FROM {} r CROSS JOIN (SELECT $1::bigint AS tenant, $2::bigint AS usr) actor WHERE ({predicate})", field("r", root, root.key()), source(root)))
+    Ok(format!(
+        "SELECT {key} FROM {} r CROSS JOIN (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company) actor WHERE {predicate}",
+        source(root)
+    ))
+}
+
+/// The keys of `root` rows whose `column` path reaches a row whose field
+/// `field_id` holds the term ($4), built from the matching rows backwards.
+fn matching_keys(catalog: &Catalog, root: &Table, column: &Column, field_id: &str) -> String {
+    let links: Vec<&Link> = column
+        .hops
+        .iter()
+        .chain(column.many.iter())
+        .chain(column.tail.iter())
+        .collect();
+    let tables: Vec<&Table> = std::iter::once(root)
+        .chain(
+            links
+                .iter()
+                .map(|l| catalog.table(l.to()).expect("resolved target")),
+        )
+        .collect();
+    let last = tables[tables.len() - 1];
+    let mut keys = format!(
+        "SELECT {} FROM {} m WHERE lower({}) LIKE '%' || replace(replace(replace($4::text, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'",
+        field("m", last, last.key()),
+        source(last),
+        field("m", last, field_id)
+    );
+    for (i, link) in links.iter().enumerate().rev() {
+        let (parent, target) = (tables[i], tables[i + 1]);
+        let p = field("p", parent, parent.key());
+        keys = match link.decl.join {
+            Join::On {
+                from_field,
+                to_field,
+            } => format!(
+                "SELECT {p} FROM {} p WHERE {} IN (SELECT {} FROM {} t WHERE {} IN ({keys}))",
+                source(parent),
+                field("p", parent, from_field),
+                field("t", target, to_field),
+                source(target),
+                field("t", target, target.key())
+            ),
+            Join::Edge(edge) => format!(
+                "SELECT {p} FROM {} p WHERE {p} IN (SELECT e.from_key FROM ({}) e WHERE e.to_key IN ({keys}))",
+                source(parent),
+                edge.sql
+            ),
+        };
+    }
+    keys
 }
 
 /// A masked column's cell: each listed value, or the one value, as its
@@ -567,13 +669,14 @@ pub const BOUNDS: &str = "SET LOCAL statement_timeout = '2000ms'; SET LOCAL lock
 
 // Only catalog-owned identifiers enter SQL. Quote them even though declaration
 // validation limits them to lowercase ASCII. Values always use bind parameters.
-fn ident(name: &str) -> String {
+pub(crate) fn ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// A scalar path resolved under the caller's fresh scoped catalog. The owner
 /// executes this expression with its root row aliased `r`, binding the same
-/// tenant/user to $1/$2 as every catalog source. No caller SQL is accepted.
+/// tenant/user/company to $1/$2/$3 as every catalog source. No caller SQL is
+/// accepted.
 pub fn scalar_expression(catalog: &Catalog, root: &str, path: &str) -> Result<String, QueryError> {
     let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
     let column = catalog
@@ -588,6 +691,53 @@ pub fn scalar_expression(catalog: &Catalog, root: &str, path: &str) -> Result<St
     Ok(cell(catalog, root, &column))
 }
 
+pub fn scalar_access(catalog: &Catalog, root: &str, path: &str) -> Result<String, QueryError> {
+    let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
+    let column = catalog
+        .resolve(root, path)
+        .map_err(|error| QueryError::Column(path.into(), error))?;
+    if column.kind != crate::ColumnKind::Field || column.many.is_some() || column.agg.is_some() {
+        return Err(QueryError::Unsupported(
+            path.into(),
+            "a scalar field is required",
+        ));
+    }
+    let mut sources = Vec::new();
+    let mut conditions = Vec::new();
+    let mut access = Vec::new();
+    let mut parent = root;
+    let mut parent_alias = "r".to_owned();
+    for (i, link) in column.hops.iter().enumerate() {
+        let target = catalog.table(link.to()).ok_or(QueryError::ForbiddenRoot)?;
+        let alias = format!("a{i}");
+        conditions.push(condition(link, parent, target, &parent_alias, &alias));
+        if target.reach().is_some() {
+            let joined = |source: String| {
+                let mut sources = sources.clone();
+                sources.push(format!("{source} {alias}"));
+                format!(
+                    "EXISTS (SELECT 1 FROM {} WHERE {})",
+                    sources.join(","),
+                    conditions.join(" AND ")
+                )
+            };
+            access.push(format!(
+                "(NOT {} OR {})",
+                joined(format!("({})", target.source().sql)),
+                joined(source(target))
+            ));
+        }
+        sources.push(format!("{} {alias}", source(target)));
+        parent = target;
+        parent_alias = alias;
+    }
+    Ok(if access.is_empty() {
+        "true".into()
+    } else {
+        access.join(" AND ")
+    })
+}
+
 /// A declared scalar field reached through one Company-style `One` link,
 /// expressed as a single join rather than a correlated lookup per root row.
 #[derive(Clone, Debug)]
@@ -596,8 +746,9 @@ pub struct ScalarJoin {
     pub alias: String,
     /// The joined scalar value, using only catalog-validated identifiers.
     pub expression: String,
-    /// The `LEFT JOIN` clause for the alias. The caller binds the same `$1`/`$2`
-    /// tenant and user values used by the declared owner source.
+    /// The `LEFT JOIN` clause for the alias. The caller binds the same
+    /// `$1`/`$2`/`$3` tenant, user and selected company values used by the
+    /// declared owner source.
     pub clause: String,
 }
 
@@ -664,13 +815,26 @@ pub fn scalar_join(catalog: &Catalog, root: &str, path: &str) -> Result<ScalarJo
 }
 
 pub(crate) fn field(alias: &str, table: &Table, id: &str) -> String {
+    // A tenant custom field reads its value from the row's JSON column.
+    if let Some(sql) = table.custom_sql(id, alias) {
+        return sql;
+    }
     format!(
         "{alias}.{}",
         ident(table.field(id).expect("resolved field").source_key())
     )
 }
+fn subject_value(alias: &str, table: &Table, id: &str, resolve_subject: bool) -> String {
+    let raw = field(alias, table, id);
+    match table.report_subject(id).filter(|_| resolve_subject) {
+        Some(subject) => {
+            crate::subject::survivor(subject, table.field(id).expect("resolved field").ty, &raw)
+        }
+        None => raw,
+    }
+}
 pub(crate) fn source(table: &Table) -> String {
-    format!("({})", table.source().sql)
+    table.scoped_source()
 }
 fn condition(link: &Link, parent: &Table, target: &Table, p: &str, t: &str) -> String {
     match link.decl.join {
@@ -696,30 +860,57 @@ fn condition(link: &Link, parent: &Table, target: &Table, p: &str, t: &str) -> S
 // owner declaration returning two targets fails instead of silently inflating
 // aggregates. Edge duplicates are set membership, not duplicate business rows.
 pub(crate) fn cell(catalog: &Catalog, root: &Table, column: &Column) -> String {
+    column_value(catalog, root, column, false)
+}
+
+pub(crate) fn column_value(
+    catalog: &Catalog,
+    root: &Table,
+    column: &Column,
+    resolve_subject: bool,
+) -> String {
     let Some(Walked {
         suffix,
         alias: p,
         table: parent,
     }) = walk(catalog, root, column)
     else {
-        return field("r", root, column.field.expect("field column").id);
+        return subject_value(
+            "r",
+            root,
+            column.field.expect("field column").id,
+            resolve_subject,
+        );
     };
-    let value = column.field.map(|f| field(&p, parent, f.id));
+    let value = column
+        .field
+        .map(|f| subject_value(&p, parent, f.id, resolve_subject));
     match column.agg {
         None => format!("(SELECT {} {suffix})", value.unwrap()),
-        Some(Agg::Count) => format!("(SELECT {} {suffix})", aggregate(catalog, column, &p, parent)),
-        Some(Agg::Latest) => format!("(SELECT {} {suffix} ORDER BY {} DESC NULLS LAST, {} DESC LIMIT 1)", value.unwrap(), field(&p, parent, parent.time_field().unwrap()), field(&p, parent, parent.key())),
-        Some(Agg::List) => format!("(SELECT left(string_agg(v, ', ' ORDER BY v), 300) FROM (SELECT DISTINCT left(({})::text, 300) AS v {suffix} ORDER BY v LIMIT 301) listed)", value.unwrap()),
+        Some(Agg::Count) => format!(
+            "(SELECT {} {suffix})",
+            aggregate(catalog, column, &p, parent)
+        ),
+        Some(Agg::Latest) => format!(
+            "(SELECT {} {suffix} ORDER BY {} DESC NULLS LAST, {} DESC LIMIT 1)",
+            value.unwrap(),
+            field(&p, parent, parent.time_field().unwrap()),
+            field(&p, parent, parent.key())
+        ),
+        Some(Agg::List) => format!(
+            "(SELECT left(string_agg(v, ', ' ORDER BY v), 300) FROM (SELECT DISTINCT left(({})::text, 300) AS v {suffix} ORDER BY v LIMIT 301) listed)",
+            value.unwrap()
+        ),
         Some(agg) => format!("(SELECT {}({}) {suffix})", agg.key(), value.unwrap()),
     }
 }
 
 /// The links a column walks, as the `FROM .. WHERE` of a correlated subquery
 /// on the root row `r`, with the alias and table of the last one.
-struct Walked<'c> {
-    suffix: String,
-    alias: String,
-    table: &'c Table,
+pub(crate) struct Walked<'c> {
+    pub(crate) suffix: String,
+    pub(crate) alias: String,
+    pub(crate) table: &'c Table,
 }
 
 /// `count` of the many-link's rows or the column's aggregate of its field.
@@ -769,9 +960,15 @@ fn walk<'c>(catalog: &'c Catalog, root: &'c Table, column: &Column) -> Option<Wa
         .chain(column.many.iter())
         .chain(column.tail.iter())
         .collect();
-    if links.is_empty() {
-        return None;
-    }
+    (!links.is_empty()).then(|| walk_links(catalog, root, &links, true))
+}
+
+pub(crate) fn walk_links<'c>(
+    catalog: &'c Catalog,
+    root: &'c Table,
+    links: &[&Link],
+    authorize: bool,
+) -> Walked<'c> {
     let mut from = String::new();
     let mut parent = root;
     let mut p = "r".to_string();
@@ -779,33 +976,43 @@ fn walk<'c>(catalog: &'c Catalog, root: &'c Table, column: &Column) -> Option<Wa
     for (i, link) in links.iter().enumerate() {
         let target = catalog.table(link.to()).expect("resolved target");
         let t = format!("t{i}");
-        let predicate = if link.kind() == LinkKind::One {
+        let target_source = match authorize
+            .then(|| crate::subject::readable(target, "linked"))
+            .flatten()
+        {
+            Some(predicate) => format!(
+                "(SELECT linked.* FROM {} linked WHERE {predicate})",
+                source(target)
+            ),
+            None => source(target),
+        };
+        let predicate = if authorize && link.kind() == LinkKind::One {
             // For an edge, EXISTS/set membership alone could hide two distinct
             // targets; this scalar SELECT enforces the declared cardinality.
             format!(
                 "{} = (SELECT {} FROM {} lookup WHERE {})",
                 field(&t, target, target.key()),
                 field("lookup", target, target.key()),
-                source(target),
+                target_source,
                 condition(link, parent, target, &p, "lookup")
             )
         } else {
             condition(link, parent, target, &p, &t)
         };
         if i == 0 {
-            from = format!("{} {t}", source(target));
+            from = format!("{target_source} {t}");
             first_condition = predicate;
         } else {
-            from.push_str(&format!(" LEFT JOIN {} {t} ON {predicate}", source(target)));
+            from.push_str(&format!(" LEFT JOIN {target_source} {t} ON {predicate}"));
         }
         p = t;
         parent = target;
     }
-    Some(Walked {
+    Walked {
         suffix: format!("FROM {from} WHERE {first_condition}"),
         alias: p,
         table: parent,
-    })
+    }
 }
 fn statement(
     catalog: &Catalog,
@@ -834,5 +1041,66 @@ fn statement(
     // Cast input values to the server-described key type. This keeps the owner
     // key bare, allowing its index to bound the page lookup. Type identifiers
     // come from PostgreSQL metadata, never from a request.
-    format!("WITH input AS (SELECT (id #>> '{{}}')::{key_cast} AS key, min(ord) AS ord FROM jsonb_array_elements($3::jsonb) WITH ORDINALITY AS x(id,ord) GROUP BY 1), actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $4::text::date AS trend_from, $5::text::date AS trend_to, $6::text::date AS since) SELECT {select} FROM input JOIN {} r ON {} = input.key CROSS JOIN actor ORDER BY input.ord LIMIT 101", source(root), field("r", root, root.key()))
+    format!(
+        "WITH input AS (SELECT (id #>> '{{}}')::{key_cast} AS key, min(ord) AS ord FROM jsonb_array_elements($4::jsonb) WITH ORDINALITY AS x(id,ord) GROUP BY 1), actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company, $5::text::date AS trend_from, $6::text::date AS trend_to, $7::text::date AS since, $8::jsonb AS subjects) SELECT {select} FROM input JOIN {} r ON {} = input.key CROSS JOIN actor ORDER BY input.ord LIMIT 101",
+        source(root),
+        field("r", root, root.key())
+    )
+}
+
+/// Run a bounded read within a caller's transaction. The savepoint restores
+/// transaction-local limits and recovers SQL type errors a report preview
+/// must return as input refusals, without aborting its surrounding plan.
+pub(crate) async fn bounded<T>(
+    tx: &tokio_postgres::Transaction<'_>,
+    bounds: Bounds,
+    read: impl std::future::Future<Output = Result<T, QueryError>>,
+) -> Result<T, QueryError> {
+    bounds.check()?;
+    tx.batch_execute("SAVEPOINT grid_bounded_read")
+        .await
+        .map_err(Error::from)?;
+    let result = async {
+        tx.batch_execute(&bounds.sql()).await?;
+        read.await
+    }
+    .await;
+    tx.batch_execute(
+        "ROLLBACK TO SAVEPOINT grid_bounded_read; RELEASE SAVEPOINT grid_bounded_read",
+    )
+    .await
+    .map_err(Error::from)?;
+    result
+}
+
+fn projection_columns<'a, S: AsRef<str>>(
+    catalog: &'a Catalog,
+    root: &str,
+    specs: &[S],
+) -> Result<(&'a Table, Vec<Column>), QueryError> {
+    if specs.len() > MAX_COLUMNS {
+        return Err(QueryError::Limit("more than 32 column specs"));
+    }
+    let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
+    let columns = catalog
+        .resolve_all(root, specs)
+        .map_err(|(spec, error)| QueryError::Column(spec, error))?;
+    if columns.iter().map(|c| c.depth).sum::<usize>() > MAX_HOPS {
+        return Err(QueryError::Limit("more than 128 total hops"));
+    }
+    Ok((root, columns))
+}
+
+pub async fn validate_projection_on<S: AsRef<str>>(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    root: &str,
+    specs: &[S],
+    bounds: Bounds,
+) -> Result<(), QueryError> {
+    bounded(tx, bounds, async {
+        let catalog = Catalog::for_report(tx, scope).await?;
+        projection_columns(&catalog, root, specs).map(|_| ())
+    })
+    .await
 }

@@ -230,21 +230,21 @@ function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many || one + 
 // ---------------------------------------------------------------------------
 const ROLE_WORD = { development: 'Dev', staging: 'Staging', production: 'Production' };
 const ROLE_MESSAGE = {
-  development: 'Development server. Ask your developer to build and test updates on their computer before installing here.',
+  development: 'Development server. Test updates on your computer before installing them here.',
   staging: 'Test copy. Changes here do not affect production.',
-  production: 'Live system. Changes here change real data.',
 };
 function banner(instance) {
   const tone = instance.colour || 'info';
   document.getElementById('banner').replaceChildren(el('div', { class: 'banner', data: { tone }, id: 'instance-banner' }, [
     el('span', { class: 'role', text: ROLE_WORD[instance.role] || instance.role }),
     el('span', { class: 'label', text: instance.label }),
-    el('span', { class: 'message', text: ROLE_MESSAGE[instance.role] || '' }),
+    ROLE_MESSAGE[instance.role] ? el('span', { class: 'message', text: ROLE_MESSAGE[instance.role] }) : null,
   ]));
 }
 function instanceLine(instance) {
   return el('p', { class: 'small', id: 'review-instance', 'data-tone': instance.colour }, [
-    'On ', el('strong', { text: instance.label }), (ROLE_WORD[instance.role] || instance.role) === instance.label ? '. ' : ' (' + (ROLE_WORD[instance.role] || instance.role) + '). ', ROLE_MESSAGE[instance.role] || '',
+    'On ', el('strong', { text: instance.label }), (ROLE_WORD[instance.role] || instance.role) === instance.label ? '.' : ' (' + (ROLE_WORD[instance.role] || instance.role) + ').',
+    ROLE_MESSAGE[instance.role] ? ' ' + ROLE_MESSAGE[instance.role] : '',
   ]);
 }
 
@@ -322,10 +322,10 @@ function renderHome() {
 function installedLine() {
   const installed = state.data.installed || {};
   const platform = installed.platform || {};
-  const domains = (installed.domains || []).map((d) => d.id + ' ' + (d.version || '')).join(', ');
+  const components = [...(installed.domains || []), ...(installed.extensions || [])].map((item) => item.name + ' ' + item.build_label).join(', ');
   return el('p', { id: 'installed', class: 'small muted' }, [
     'Runs Bilibi ' + (platform.version || '?') + (platform.release ? ' (' + platform.release + ')' : ''),
-    domains ? ' with ' + domains : ' with no business modules',
+    components ? ' with ' + components : ' with no business modules',
     platform.pin !== 'pinned' ? '. This build has no exact module version list' : '',
     '.',
   ]);
@@ -383,16 +383,24 @@ function discoveryView() {
       cards.push(el('div', { class: 'card stack', id: kind + '-' + item.id }, [
         el('h3', { text: (item.name || item.id) + (requested ? ' · requested' : '') }),
         el('p', { class: 'small', text: item.description || '' }),
-        el('p', { class: 'small muted', text: 'Code for your developer: ' + (item.repository || '') }),
-        installed ? el('p', { class: 'small', text: 'Installed version: ' + (installed.version || 'Unknown') }) : null,
+        el('p', { class: 'small muted', text: 'Source: ' + (item.repository || '') }),
+        installed ? el('p', { class: 'small', text: 'Installed build: ' + installed.build_label }) : null,
         el('p', { class: 'small', text: item.official ? 'Status: ' + statusText(item) : 'Compatibility: ' + (item.compatibility || '') }),
-        item.local_steps ? el('div', {}, [el('p', { class: 'small', text: 'Developer commands' }), el('p', { class: 'small muted', text: 'Run these commands in the Bilibi code folder on your computer, then test it in the browser.' }), el('pre', { text: item.local_steps.join('\n') })]) : null,
+        item.local_steps ? el('div', {}, [el('p', { class: 'small', text: 'Installation commands' }), el('pre', { text: item.local_steps.join('\n') })]) : null,
+      ]));
+    }
+    for (const item of (catalogue.uncatalogued || {})[kind] || []) {
+      cards.push(el('div', { class: 'card stack', id: 'installed-' + kind + '-' + item.id }, [
+        el('h3', { text: item.name }),
+        el('p', { class: 'small', text: 'Installed, not in the catalogue' }),
+        el('p', { class: 'small', text: 'Installed build: ' + item.build_label }),
+        item.extension_code ? el('p', { class: 'small', text: 'Code review kind: ' + item.extension_code }) : null,
       ]));
     }
     sections.push(el('div', { class: 'stack', id: 'available-' + kind }, [
       el('h2', { text: kind === 'domains' ? 'Available domains' : 'Available extensions' }),
       el('p', { text: kind === 'domains' ? 'Domains add business features, such as Finance.' : 'Extensions adapt Bilibi or connect it to other software.' }),
-      el('p', { text: state.data.next_step || 'Ask your developer to add the modules you need, build Bilibi on their computer, and test it before installing it here.' }),
+      el('p', { text: state.data.next_step || 'Run the installation commands in a Bilibi code folder, test the build, then install its release here.' }),
       catalogue.available === false ? alertBox('warning', 'The catalogue is not available: ' + (catalogue.message || 'no reason given')) : null,
       catalogue.available !== false && !cards.length ? el('p', { class: 'small muted', text: 'No ' + kind + ' are listed in the catalogue.' }) : null,
       ...cards,
@@ -646,7 +654,7 @@ function renderJob() {
     backupView(),
     el('ol', { class: 'plain steps', id: 'job-steps' }, steps.map((s) => el('li', { data: { state: s.state } }, [el('span', { class: 'mark', text: MARK[s.state] || '·' }), el('span', { class: 'grow' }, [s.label, s.state !== 'pending' && detail(s) ? el('span', { class: 'detail', text: detail(s) }) : null])]))),
     !active && result.message ? alertBox(tone, result.message, 'job-result') : null,
-    !active && job.state === 'failed' && failedDetails(steps) ? el('details', {}, [el('summary', { text: 'Developer details' }), el('pre', { text: failedDetails(steps) })]) : null,
+    !active && job.state === 'failed' && failedDetails(steps) ? el('details', {}, [el('summary', { text: 'Details' }), el('pre', { text: failedDetails(steps) })]) : null,
     active ? el('p', { class: 'small muted', text: 'You can leave this chat. The work keeps going, and the result appears here and in your Bilibi notifications.' }) : null,
     el('div', { class: 'row' }, buttons),
   );

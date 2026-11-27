@@ -28,7 +28,9 @@ async fn main() -> Result<(), Box<dyn Failure>> {
     let auth = app
         .services
         .get::<Authentication>("base/tenancy.authentication")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let manager = auth.authenticate(&**client, 1, 1, String::new()).await?;
     let admin = auth.authenticate(&**client, 1, 4, String::new()).await?;
     let other = auth.authenticate(&**client, 2, 5, String::new()).await?;
@@ -63,10 +65,20 @@ async fn main() -> Result<(), Box<dyn Failure>> {
         && p.record_id() == person.id.get()
         && p.name == "Company 010"));
     grants
-        .set_direct(&admin, manager.user(), "admin.company.view", Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            "admin.company.view",
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     grants
-        .set_direct(&admin, manager.user(), bilibi_person::VIEW, Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            bilibi_person::VIEW,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     assert!(matches!(
         bilibi_person::read_person(&**client, &manager, person.id).await,

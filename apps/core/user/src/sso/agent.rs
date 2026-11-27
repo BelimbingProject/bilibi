@@ -17,7 +17,7 @@ fn users() -> bilibi_agent_api::Result<&'static UserService> {
 }
 struct Configure;
 fn schema() -> Value {
-    json!({"type":"object","required":["company_id","configuration"],"properties":{"company_id":{"type":"integer","minimum":1},"id":{"type":"integer"},"configuration":{"type":"string","maxLength":32768,"description":"IdentityConfiguration from core/user/sso.md. Provider secrets go only in client_secret."},"client_secret":{"type":"string","description":"Omit to keep the current encrypted secret. Never include in a review."}}})
+    json!({"type":"object","required":["company_id","configuration"],"properties":{"company_id":{"type":"integer","minimum":1},"id":{"type":"integer"},"configuration":{"type":"string","maxLength":32768,"description":"IdentityConfiguration from core/user/sso.md. Provider secrets go only in client_secret."},"client_secret":{"type":"string","writeOnly":true,"description":"Omit to keep the current encrypted secret. Never include in a review."}}})
 }
 fn output() -> Value {
     json!({"type":"object","description":"Company, connection ID and public sign-in link. No secret is returned."})

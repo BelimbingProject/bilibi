@@ -1,14 +1,21 @@
 //! Signed media stream: the one unauthenticated route that serves stored bytes.
 //! The token is the only credential; Media rechecks tenant, private-binding and
 //! storage on every request and the response is never cacheable or sniffable.
+//! Both media routes send the file as it is read, after the pooled connection
+//! went back, and answer 503 while Media's stream slots are all taken.
 use crate::{token, App};
 use axum::{
+    body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use bilibi_base::media::{Error, Media, StreamFile};
+use bilibi_base::media::{Error, FileStream, Media};
 use std::{collections::HashMap, time::Duration};
+use tokio::io::AsyncReadExt;
+
+/// Bytes read from disk per chunk sent.
+const CHUNK: usize = 64 * 1024;
 
 pub const STREAM: &str = "/media/assets/{id}/stream";
 pub const ATTACHMENT: &str = "/media/attachments/{public_id}";
@@ -28,18 +35,26 @@ pub async fn stream(
         return StatusCode::NOT_FOUND.into_response();
     };
     let result = async {
+        // The public site streams one image: its own logo.
+        if app.site == crate::Site::Public {
+            let site = app.public_scope().map_err(|_| Error::NotFound)?;
+            if !app.public.logo_matches(&site, id).await? {
+                return Err(Error::NotFound);
+            }
+        }
         let media = app
             .services
             .get::<Media>("base/media.store")
             .map_err(|_| Error::StorageUnavailable)?;
         let client = app.db.get().await.map_err(bilibi_database::Error::from)?;
         media
-            .read_signed_asset(&**client, id, query.get("token").map_or("", String::as_str))
+            .open_signed_asset(&**client, id, query.get("token").map_or("", String::as_str))
             .await
     }
     .await;
     match result {
         Ok(file) => delivered(file, false),
+        Err(Error::Busy) => busy(),
         Err(Error::InvalidToken | Error::ExpiredToken | Error::PrivateAsset) => {
             (StatusCode::FORBIDDEN, "Forbidden").into_response()
         }
@@ -63,12 +78,37 @@ fn held(error: &Error) -> bool {
 fn held_response(error: &Error) -> Response {
     (StatusCode::LOCKED, error.to_string()).into_response()
 }
+/// Every stream slot is taken: the browser may try again in a moment.
+fn busy() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        "Busy",
+    )
+        .into_response()
+}
 
 /// Stream bytes under Media's delivery rules; the file alone picks the headers.
-fn delivered(file: StreamFile, private: bool) -> Response {
+/// The body is read from disk as it is sent; its stream slot is freed when
+/// the body ends or the client goes away.
+fn delivered(file: FileStream, private: bool) -> Response {
     let delivery = file.delivery(private);
-    let mut response = (StatusCode::OK, file.bytes).into_response();
+    let length = file.len;
+    let chunks = futures_util::stream::unfold(Some(file.into_reader()), |reader| async move {
+        let mut reader = reader?;
+        let mut chunk = vec![0; CHUNK];
+        match reader.read(&mut chunk).await {
+            Ok(0) => None,
+            Ok(read) => {
+                chunk.truncate(read);
+                Some((Ok::<_, std::io::Error>(Bytes::from(chunk)), Some(reader)))
+            }
+            Err(error) => Some((Err(error), None)),
+        }
+    });
+    let mut response = (StatusCode::OK, Body::from_stream(chunks)).into_response();
     let headers = response.headers_mut();
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
     if let Ok(value) = HeaderValue::from_str(&delivery.content_type) {
         headers.insert(axum::http::header::CONTENT_TYPE, value);
     }
@@ -104,9 +144,7 @@ pub async fn attachment(
             .get::<Media>("base/media.store")
             .map_err(|_| Error::StorageUnavailable)?;
         let client = app.db.get().await.map_err(bilibi_database::Error::from)?;
-        let file = media
-            .download_attachment(&**client, &scope, &public_id)
-            .await?;
+        let file = media.open_attachment(&**client, &scope, &public_id).await?;
         // A download is user activity; the guard above never renewed the session.
         let _ = app.security.sessions.activity(&**client, &credential).await;
         Ok(file)
@@ -114,6 +152,7 @@ pub async fn attachment(
     .await;
     match result {
         Ok(file) => delivered(file, true),
+        Err(Error::Busy) => busy(),
         Err(Error::NotFound | Error::StorageUnavailable) => {
             (StatusCode::NOT_FOUND, "Not found").into_response()
         }
@@ -128,24 +167,28 @@ pub async fn attachment(
     }
 }
 
-/// `media-cleanup`: remove one tenant's abandoned attachment drafts. There is
-/// no automatic schedule; an operator or an external scheduler runs this.
+/// The installed services for a host command that runs without the server.
+fn services(db: &bilibi_database::Db) -> bilibi_database::Result<bilibi_module_registry::Services> {
+    let modules = crate::modules()?;
+    let mut services = bilibi_module_registry::Services::default();
+    services.provide("bootstrap.database", std::sync::Arc::new(db.clone()))?;
+    services.provide(
+        "bootstrap.composition",
+        std::sync::Arc::new(crate::composition()),
+    )?;
+    services.install(&modules)?;
+    Ok(services)
+}
+
+/// `media-cleanup`: remove one tenant's abandoned attachment drafts now. The
+/// `base/media-draft-cleanup` schedule does the same hourly in every tenant
+/// that allows it, once an operator enables it.
 pub async fn cleanup(
     db: &bilibi_database::Db,
     tenant: i64,
     hours: u64,
 ) -> bilibi_database::Result<()> {
-    let services = {
-        let modules = crate::modules()?;
-        let mut services = bilibi_module_registry::Services::default();
-        services.provide("bootstrap.database", std::sync::Arc::new(db.clone()))?;
-        services.provide(
-            "bootstrap.composition",
-            std::sync::Arc::new(crate::composition()),
-        )?;
-        services.install(&modules)?;
-        services
-    };
+    let services = services(db)?;
     let media = services.get::<Media>("base/media.store")?;
     let mut client = db.get().await?;
     let report = media
@@ -158,6 +201,38 @@ pub async fn cleanup(
     println!(
         "Removed {} abandoned attachment draft(s); {} file(s) need disk reconciliation.",
         report.removed, report.file_failures
+    );
+    Ok(())
+}
+
+/// `media-reconcile`: list the files on the media disks that no row needs and
+/// the stored assets whose file is gone, in every tenant. Changes nothing.
+pub async fn reconcile(db: &bilibi_database::Db) -> bilibi_database::Result<()> {
+    let media = services(db)?.get::<Media>("base/media.store")?;
+    let client = db.get().await?;
+    let found = media.reconcile(&**client).await.map_err(|error| {
+        eprintln!("Media reconciliation failed: {error}");
+        bilibi_database::Error::Invalid
+    })?;
+    for disk in &found.unreadable_disks {
+        println!(
+            "unreadable disk: {disk} (not mapped, not 0700, or a symlink in its path; not checked)"
+        );
+    }
+    for (disk, key) in &found.unneeded_files {
+        println!("file no row needs: {disk}:{key}");
+    }
+    for file in &found.missing_files {
+        println!(
+            "asset with no file: {} (tenant {}) {}:{}",
+            file.id, file.tenant, file.disk, file.key
+        );
+    }
+    println!(
+        "{} file(s) no row needs, {} asset(s) with no file, {} unreadable disk(s). Nothing was changed.",
+        found.unneeded_files.len(),
+        found.missing_files.len(),
+        found.unreadable_disks.len()
     );
     Ok(())
 }

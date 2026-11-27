@@ -202,6 +202,38 @@ fn join_classes(fixed: &str, extra: &str) -> String {
     }
 }
 
+/// A posted value as the shared typed box shows it: a `date` `yyyy-mm-dd`
+/// as "6 Nov 2026" (`bilibi_datetime`'s format), a `datetime-local`
+/// `yyyy-mm-ddTHH:MM` as "6 Nov 2026, 14:30" and a `time` as "14:30";
+/// anything else (a refused entry sent back with its error) as given.
+/// `DateInput` in `assets/hooks.js` writes the same.
+pub(crate) fn date_text(kind: &str, value: &str) -> String {
+    let shown = match kind {
+        "datetime-local" => jiff::civil::DateTime::strptime("%Y-%m-%dT%H:%M", value)
+            .or_else(|_| jiff::civil::DateTime::strptime("%Y-%m-%dT%H:%M:%S", value))
+            .ok()
+            .map(|at| at.strftime("%-d %b %Y, %H:%M").to_string()),
+        "time" => value
+            .get(..5)
+            .filter(|hm| hm.as_bytes().get(2) == Some(&b':'))
+            .map(str::to_owned),
+        _ => value
+            .parse::<jiff::civil::Date>()
+            .ok()
+            .map(|date| date.strftime("%-d %b %Y").to_string()),
+    };
+    shown.unwrap_or_else(|| value.to_owned())
+}
+
+/// The empty typed box's prompt for a date-like `kind` (an input type name).
+pub(crate) fn date_placeholder(kind: &str) -> &'static str {
+    match kind {
+        "datetime-local" => "d mmm yyyy, hh:mm",
+        "time" => "hh:mm",
+        _ => "d mmm yyyy",
+    }
+}
+
 /// The HTML `type` of an [`Field`]; `Select`, `Textarea`, `Checkbox` and
 /// `Hidden` render their own element.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -223,6 +255,8 @@ pub enum InputKind {
     File,
     Hidden,
     Checkbox,
+    /// An on/off form value, using the shared Toggle.
+    Switch,
     Select,
     Textarea,
 }
@@ -246,6 +280,7 @@ impl InputKind {
             Self::File => "file",
             Self::Hidden => "hidden",
             Self::Checkbox => "checkbox",
+            Self::Switch => "switch",
             Self::Select => "select",
             Self::Textarea => "textarea",
         }
@@ -253,6 +288,10 @@ impl InputKind {
 
     pub fn is_hidden(&self) -> bool {
         matches!(self, Self::Hidden)
+    }
+
+    pub fn is_switch(&self) -> bool {
+        matches!(self, Self::Switch)
     }
 
     pub fn is_checkbox(&self) -> bool {
@@ -270,6 +309,26 @@ impl InputKind {
     pub fn is_password(&self) -> bool {
         matches!(self, Self::Password)
     }
+
+    /// A date, a date and time, or a time: drawn as the shared typed box
+    /// (`DateInput` in `assets/hooks.js`), never the browser's own control.
+    pub fn is_date(&self) -> bool {
+        matches!(self, Self::Date | Self::DatetimeLocal | Self::Time)
+    }
+
+    /// What the typed box shows while empty, for a date-like kind.
+    pub fn date_placeholder(&self) -> &'static str {
+        date_placeholder(self.name())
+    }
+
+    /// The picker button's icon and name, for a date-like kind.
+    pub fn date_icon(&self) -> &'static str {
+        if matches!(self, Self::Time) {
+            "clock"
+        } else {
+            "calendar"
+        }
+    }
 }
 
 /// One option of a select, combobox, multi-select or radio group.
@@ -281,6 +340,8 @@ pub struct Choice {
     /// italic by a combobox in the box and in the list, and searched like
     /// the name. A native select ignores it.
     pub detail: String,
+    /// An instant displayed alongside a combobox option.
+    pub(crate) instant: Option<crate::flex_table::Instant>,
 }
 
 impl Choice {
@@ -289,7 +350,18 @@ impl Choice {
             label: label.into(),
             value: value.into(),
             detail: String::new(),
+            instant: None,
         }
+    }
+
+    pub(crate) fn with_instant(mut self, instant: Option<crate::flex_table::Instant>) -> Self {
+        self.instant = instant;
+        self
+    }
+
+    /// The instant carried by a picker option, if any.
+    pub fn instant(&self) -> Option<&crate::flex_table::Instant> {
+        self.instant.as_ref()
     }
 
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
@@ -420,7 +492,7 @@ fn push_attr(markup: &mut String, name: &str, value: &str) {
 }
 
 /// Whether a `password` input gets a show/hide control. `Hidden` keeps the
-/// value masked with no control, which is right for sign-in. `Secret` names
+/// value masked with no control. `Secret` names
 /// the value a secret; `Subject` is the noun the control's accessible name
 /// uses instead ("password", "API key"). Any other kind rejects it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -446,13 +518,14 @@ impl Reveal {
 /// `forms::input` macro renders it, as does `Html::render(&field)`.
 #[derive(Template, Clone, Debug, Default)]
 #[template(
-    source = r#"{% import "forms.html" as forms %}{% call forms::input(field=self) %}{% endcall %}"#,
+    source = r#"{% import "forms.html" as forms %}{% call forms::field_input(field=self) %}{% endcall %}"#,
     ext = "html"
 )]
 pub struct Field {
     pub id: String,
     pub name: String,
     pub label: String,
+    pub field: String,
     pub value: String,
     /// The selected values of a `multiple` select.
     pub values: Vec<String>,
@@ -474,6 +547,14 @@ pub struct Field {
 }
 
 impl Field {
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.field = identity.into();
+        self
+    }
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.field, &self.label)
+    }
+
     /// A field whose id is its name, as a field outside a form namespace.
     pub fn named(name: impl Into<String>) -> Self {
         let name = name.into();
@@ -679,9 +760,11 @@ impl Field {
             return LabelPlacement::Above;
         }
         match self.kind {
-            InputKind::Checkbox | InputKind::Hidden | InputKind::Color | InputKind::File => {
-                LabelPlacement::Above
-            }
+            InputKind::Switch
+            | InputKind::Checkbox
+            | InputKind::Hidden
+            | InputKind::Color
+            | InputKind::File => LabelPlacement::Above,
             InputKind::Select if self.multiple => LabelPlacement::Above,
             InputKind::Select
             | InputKind::Textarea
@@ -697,6 +780,14 @@ impl Field {
     /// Whether the label is drawn inside the box (floating or pinned).
     pub fn inset(&self) -> bool {
         self.placement() != LabelPlacement::Above
+    }
+
+    /// What the date box shows for this field's `yyyy-mm-dd` value: the one
+    /// date format, "6 Nov 2026" (`bilibi_datetime`'s `DATE`, and `DateInput`
+    /// in `assets/hooks.js`). A value that is not a date (a refused entry
+    /// sent back with its error) is shown as typed.
+    pub fn date_text(&self) -> String {
+        date_text(self.kind.name(), &self.value)
     }
 
     /// The placeholder an inset text field renders. `:placeholder-shown` is
@@ -976,10 +1067,12 @@ pub struct CodeInput {
     pub name: String,
     pub value: String,
     pub label: String,
+    pub label_hidden: bool,
     pub length: usize,
     pub group_size: Option<usize>,
     pub numeric: bool,
     pub optional: bool,
+    pub hint: bool,
     pub errors: Vec<String>,
 }
 
@@ -995,10 +1088,12 @@ impl CodeInput {
             name: name.into(),
             value: String::new(),
             label: label.into(),
+            label_hidden: false,
             length,
             group_size: None,
             numeric: false,
             optional: false,
+            hint: true,
             errors: Vec::new(),
         }
     }
@@ -1021,12 +1116,26 @@ impl CodeInput {
         self
     }
 
+    /// Omit the generic typing hint when the surrounding prompt already says
+    /// exactly what code to enter.
+    pub fn without_hint(mut self) -> Self {
+        self.hint = false;
+        self
+    }
+
+    /// Keep the field name for assistive technology when nearby copy already
+    /// identifies the code and a second visible label would repeat it.
+    pub fn hidden_label(mut self) -> Self {
+        self.label_hidden = true;
+        self
+    }
+
     pub fn invalid(&self) -> bool {
         !self.errors.is_empty()
     }
 
     pub fn described_by(&self) -> String {
-        described_by(&self.id, true, self.errors.len())
+        described_by(&self.id, self.hint, self.errors.len())
     }
 
     pub fn value(mut self, value: impl Into<String>) -> Self {
@@ -1185,6 +1294,7 @@ pub struct Combobox {
     pub id: String,
     pub name: String,
     pub label: String,
+    pub field: String,
     pub value: String,
     pub options: Vec<Choice>,
     pub placeholder: String,
@@ -1197,6 +1307,14 @@ pub struct Combobox {
 }
 
 impl Combobox {
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.field = identity.into();
+        self
+    }
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.field, &self.label)
+    }
+
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -1374,6 +1492,10 @@ pub struct MultiSelect {
     /// Allow chips to wrap; false keeps complete chips on one line with an ellipsis.
     pub wrap_chips: bool,
     pub remove_event: String,
+    /// Inside a record page's fact, which draws its label in the heading's
+    /// place: the heading keeps its space, unseen, and still names the
+    /// trigger through `aria-labelledby`.
+    pub in_fact: bool,
     pub attrs: Attrs,
 }
 
@@ -1401,12 +1523,21 @@ impl MultiSelect {
             chips: false,
             wrap_chips: false,
             remove_event: String::new(),
+            in_fact: false,
             attrs: Attrs::default(),
         }
     }
 
     pub fn in_form(form: &str, key: &str) -> Self {
         Self::new(format!("{form}_{key}"), format!("{form}[{key}]"))
+    }
+
+    /// The editor of a record page's fact (inside `InlineChoice`): the fact
+    /// shows the label where the heading sits, so the heading is read, not
+    /// drawn, and the chips show the choices.
+    pub fn in_fact(mut self) -> Self {
+        self.in_fact = true;
+        self
     }
 
     pub fn id(mut self, id: impl Into<String>) -> Self {
@@ -1717,11 +1848,20 @@ impl Restricted {
 pub struct RestrictedField {
     pub id: String,
     pub label: String,
+    pub field: String,
     pub reason: String,
     pub wrapper_class: String,
 }
 
 impl RestrictedField {
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.field = identity.into();
+        self
+    }
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.field, &self.label)
+    }
+
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),

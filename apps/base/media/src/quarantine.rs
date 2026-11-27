@@ -7,10 +7,11 @@
 //! recheck `admin.media.quarantine.manage` inside the caller's transaction.
 use crate::{
     scan::{verdict, ScanState},
-    storage, stored, Error, Media, Result, COLUMNS,
+    storage, stored, Error, Media, Result, ASSET_KIND, ATTACHMENT_KIND, COLUMNS,
 };
 use bilibi_authz::{authorize_key, authorize_proof};
 use bilibi_database::{Change, MutationTransaction};
+use bilibi_personal_data::RecordHolds;
 use bilibi_queue::{Execution, Handler, HandlerFuture, Outcome};
 use bilibi_tenancy::{ReadClient, Scope};
 use serde_json::{json, Value};
@@ -30,10 +31,14 @@ pub(crate) const HANDLER: &str = "base/media.purge";
 pub(crate) const MAX_ATTEMPTS: i32 = 12;
 /// Most rows one read returns, newest first.
 pub const MAX_LISTED: i64 = 1_000;
-const LISTED: &str = "a.id,a.original_filename,a.mime_type,a.file_size,a.scan_state,a.scanner,a.scanner_version,a.scan_signature,a.scan_reason,floor(extract(epoch FROM a.scanned_at))::bigint AS scanned_at,floor(extract(epoch FROM a.purge_requested_at))::bigint AS purge_requested_at,floor(extract(epoch FROM a.bytes_purged_at))::bigint AS purged_at,floor(extract(epoch FROM a.created_at))::bigint AS created_at,coalesce(t.uploaded_by_id,a.created_by_id) AS uploaded_by_id,t.subject_type,t.subject_id";
+/// The most matching files one read counts or skips. A larger result says so
+/// ([`QuarantinePage::more`]); older files are reached by narrowing the
+/// search or reading on from an id ([`QuarantineQuery::before`]), so no
+/// render of the page counts every file a tenant holds (issue 599).
+pub const LIST_CAP: i64 = 10_000;
+const LISTED: &str = "a.id,a.original_filename,a.mime_type,a.file_size,a.scan_state,a.scanner,a.scanner_version,a.scan_signature,a.scan_reason,floor(extract(epoch FROM a.scanned_at))::bigint AS scanned_at,floor(extract(epoch FROM a.purge_requested_at))::bigint AS purge_requested_at,floor(extract(epoch FROM a.bytes_purged_at))::bigint AS purged_at,floor(extract(epoch FROM a.created_at))::bigint AS created_at,coalesce(t.uploaded_by_id,a.created_by_id) AS uploaded_by_id,coalesce(t.uploaded_by_principal,a.created_by_principal) AS uploaded_by_principal,t.subject_type,t.subject_id";
 const FROM: &str = "FROM base_media_assets a LEFT JOIN base_media_attachments t ON t.media_asset_id=a.id AND t.tenant_id=a.tenant_id WHERE a.tenant_id=$1 AND a.disk<>'external'";
-const MATCHING: &str =
-    " AND a.scan_state=ANY($2) AND ($3::text IS NULL OR a.original_filename ILIKE $3)";
+const MATCHING: &str = " AND a.scan_state=ANY($2) AND ($3::text IS NULL OR a.original_filename ILIKE $3) AND ($4::bigint IS NULL OR a.id<$4)";
 
 /// One stored file that is not clean, as a quarantine manager sees it: never
 /// its disk, key or bytes.
@@ -58,6 +63,9 @@ pub struct QuarantinedFile {
     pub created_at: i64,
     /// The account that stored it, when known.
     pub uploaded_by_id: Option<i64>,
+    /// The system principal that stored it, when one did (`uploaded_by_id`
+    /// is then `None`).
+    pub uploaded_by_principal: Option<String>,
     /// The record a private attachment belongs to (`subject type`, `id`).
     pub subject: Option<(String, String)>,
 }
@@ -70,6 +78,7 @@ impl QuarantinedFile {
             "scanned_at": self.scanned_at, "purge_requested_at": self.purge_requested_at,
             "purged_at": self.purged_at, "created_at": self.created_at,
             "uploaded_by_id": self.uploaded_by_id,
+            "uploaded_by_principal": self.uploaded_by_principal,
             "subject": self.subject.as_ref().map(|(kind, id)| json!({"type": kind, "id": id})),
         })
     }
@@ -81,15 +90,23 @@ impl QuarantinedFile {
 pub struct QuarantineQuery<'a> {
     pub states: &'a [ScanState],
     pub search: &'a str,
+    /// Only files with a smaller id, such as the last id of the previous
+    /// window: reads on past [`LIST_CAP`] without skipping rows.
+    pub before: Option<i64>,
+    /// Matching files to skip; a window that starts at [`LIST_CAP`] or later
+    /// is empty.
     pub offset: i64,
     /// 1–1,000.
     pub limit: i64,
 }
-/// The files in a query's window, and how many match it in all.
+/// The files in a query's window, and how many match it.
 #[derive(Clone, Debug)]
 pub struct QuarantinePage {
     pub files: Vec<QuarantinedFile>,
+    /// Matching files, counted up to [`LIST_CAP`].
     pub total: i64,
+    /// More than [`LIST_CAP`] files match.
+    pub more: bool,
 }
 
 fn listed(row: &tokio_postgres::Row) -> QuarantinedFile {
@@ -108,6 +125,7 @@ fn listed(row: &tokio_postgres::Row) -> QuarantinedFile {
         purged_at: row.get("purged_at"),
         created_at: row.get("created_at"),
         uploaded_by_id: row.get("uploaded_by_id"),
+        uploaded_by_principal: row.get("uploaded_by_principal"),
         subject: row
             .get::<_, Option<String>>("subject_type")
             .zip(row.get::<_, Option<String>>("subject_id")),
@@ -133,8 +151,8 @@ fn containing(text: &str) -> Option<String> {
 
 impl Media {
     /// This tenant's stored files in the query's states whose name contains
-    /// its search, newest first, within its window, and how many match in
-    /// all. Needs `admin.media.quarantine.view`. Reads on the caller's
+    /// its search, newest first, within its window, and how many match, up
+    /// to [`LIST_CAP`]. Needs `admin.media.quarantine.view`. Reads on the caller's
     /// client: an agent operation passes the one its door hands it.
     pub async fn quarantine(
         &self,
@@ -148,28 +166,41 @@ impl Media {
         }
         let states: Vec<&str> = query.states.iter().map(|state| state.as_str()).collect();
         let search = containing(query.search);
-        let total = client
+        // Counted up to the cap and one more, never every file of the tenant.
+        let counted: i64 = client
             .query_opt(
-                &format!("SELECT count(*) {FROM}{MATCHING}"),
-                &[&scope.tenant(), &states, &search],
+                &format!(
+                    "SELECT count(*) FROM (SELECT 1 {FROM}{MATCHING} LIMIT {}) AS capped",
+                    LIST_CAP + 1
+                ),
+                &[&scope.tenant(), &states, &search, &query.before],
             )
             .await?
             .map_or(0, |row| row.get(0));
-        let rows = client
-            .query(
-                &format!("SELECT {LISTED} {FROM}{MATCHING} ORDER BY a.id DESC LIMIT $4 OFFSET $5"),
-                &[
-                    &scope.tenant(),
-                    &states,
-                    &search,
-                    &query.limit,
-                    &query.offset,
-                ],
-            )
-            .await?;
+        // A window past the cap holds nothing, so the skip is bounded too.
+        let rows = if query.offset >= LIST_CAP {
+            Vec::new()
+        } else {
+            client
+                .query(
+                    &format!(
+                        "SELECT {LISTED} {FROM}{MATCHING} ORDER BY a.id DESC LIMIT $5 OFFSET $6"
+                    ),
+                    &[
+                        &scope.tenant(),
+                        &states,
+                        &search,
+                        &query.before,
+                        &query.limit,
+                        &query.offset,
+                    ],
+                )
+                .await?
+        };
         Ok(QuarantinePage {
             files: rows.iter().map(listed).collect(),
-            total,
+            total: counted.min(LIST_CAP),
+            more: counted > LIST_CAP,
         })
     }
     /// One stored file of this tenant, whatever its state, for a review
@@ -295,11 +326,44 @@ impl Media {
     /// the row's lock. A failed removal or record retries, and bytes already
     /// gone count as removed, so a retry after a lost record finishes it.
     async fn remove_purged(&self, execution: &Execution, id: i64) -> Result<Outcome> {
-        let tenant = execution.tenant();
         let mut client = self.db.get().await.map_err(bilibi_database::Error::from)?;
-        let roots = self.disks(&**client).await?;
+        let (holds, mut hold_guard) = RecordHolds::acquire(&mut client, execution.tenant()).await?;
+        let client = hold_guard.client();
+        let removed = self.remove_unheld(client, execution, id, &holds).await;
+        hold_guard.release().await?;
+        removed
+    }
+    /// A legal hold on the file, or on the attachment it is bound to, keeps
+    /// its bytes: the job ends (`legal_hold`) and the file stays purging,
+    /// unreadable; a purge repeated once the hold is released removes them.
+    async fn remove_unheld(
+        &self,
+        client: &mut tokio_postgres::Client,
+        execution: &Execution,
+        id: i64,
+        holds: &RecordHolds,
+    ) -> Result<Outcome> {
+        let tenant = execution.tenant();
+        let bindings: Vec<i64> = client
+            .query(
+                "SELECT id FROM base_media_attachments WHERE tenant_id=$1 AND media_asset_id=$2",
+                &[&tenant, &id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        if !holds.records(&*client, ASSET_KIND, &[id]).await?.is_empty()
+            || !holds
+                .records(&*client, ATTACHMENT_KIND, &bindings)
+                .await?
+                .is_empty()
+        {
+            return Ok(Outcome::Cancel("legal_hold"));
+        }
+        let roots = self.disks(&*client).await?;
         // `begin` fences the lease and re-proves the principal's grant.
-        let mut tx = execution.begin(&mut client, "media.purge.removal").await?;
+        let mut tx = execution.begin(client, "media.purge.removal").await?;
         let row = self.lock_stored(&mut tx, tenant, id).await?;
         if row.purged || !row.purge_requested {
             tx.rollback().await?;

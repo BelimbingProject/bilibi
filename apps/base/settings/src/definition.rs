@@ -4,6 +4,10 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const DEFINITIONS: &str = "base/settings.definitions";
+/// Settings their owning modules explicitly let tenant administrators manage
+/// through the tenant-setting operation contracts. The contribution id is the
+/// exact setting key; wildcard definitions cannot be delegated.
+pub const TENANT_ADMIN: &str = "base/settings.tenant-admin";
 /// The catalog of rules over several settings:
 /// `Contribution::new(CONSTRAINTS, "<module>.<name>", provenance, &Constraint { .. })`.
 pub const CONSTRAINTS: &str = "base/settings.constraints";
@@ -42,7 +46,23 @@ pub struct Editor {
     pub label: &'static str,
     pub help: &'static str,
     pub capability: Option<&'static str>,
+    /// How long a revealed stored secret stays shown, 1,000 to 60,000 ms; or
+    /// [`NEVER_REVEALED`] for an encrypted value no one may see again.
     pub reveal_duration_ms: u32,
+}
+/// Marker payload for [`TENANT_ADMIN`]. The definition remains the source of
+/// the label, type, validation, capability and secret policy.
+pub struct TenantAdmin;
+/// `reveal_duration_ms` for an encrypted setting that is never shown back,
+/// not even through the stored-secret reveal: a credential whose holder
+/// should re-enter it rather than read it (such as an API key sent to an
+/// operator-chosen server).
+pub const NEVER_REVEALED: u32 = 0;
+impl Editor {
+    /// Whether a stored value may be revealed at all.
+    pub fn revealable(&self) -> bool {
+        self.reveal_duration_ms != NEVER_REVEALED
+    }
 }
 pub struct Definition {
     pub value_type: ValueType,
@@ -112,13 +132,40 @@ pub struct OwnedSetting {
 pub struct Definitions {
     entries: BTreeMap<&'static str, OwnedSetting>,
     constraints: Vec<&'static Constraint>,
+    tenant_admin: BTreeSet<&'static str>,
 }
 impl Definitions {
     pub fn from_catalog(catalog: &Catalog) -> bilibi_module_registry::Result<Self> {
         let mut definitions = Self::from_entries(catalog.entries::<Setting>(DEFINITIONS)?)?;
         definitions.constraints =
             definitions.constraints_from(catalog.entries::<Constraint>(CONSTRAINTS)?)?;
+        definitions.tenant_admin =
+            definitions.tenant_admin_from(catalog.entries::<TenantAdmin>(TENANT_ADMIN)?)?;
         Ok(definitions)
+    }
+    fn tenant_admin_from(
+        &self,
+        entries: &[Entry],
+    ) -> bilibi_module_registry::Result<BTreeSet<&'static str>> {
+        let mut delegated = BTreeSet::new();
+        for entry in entries {
+            let Some(owned) = self.entries.get(entry.id) else {
+                return Err(RegistryError::Contribution(format!(
+                    "tenant setting delegation {} at {}:{} names no exact setting",
+                    entry.id, entry.provenance.source, entry.provenance.line
+                )));
+            };
+            let valid = owned.owner == entry.provenance.module
+                && matches!(owned.setting, Setting::Definition(d)
+                    if d.scopes.contains(&ScopeKind::Tenant) && d.editor.is_some());
+            if !valid || !delegated.insert(entry.id) {
+                return Err(RegistryError::Contribution(format!(
+                    "tenant setting delegation {} at {}:{} must be unique, owned by the contributing module, tenant-scoped and editable",
+                    entry.id, entry.provenance.source, entry.provenance.line
+                )));
+            }
+        }
+        Ok(delegated)
     }
     fn constraints_from(
         &self,
@@ -200,7 +247,8 @@ impl Definitions {
                     if editor.group.is_empty()
                         || editor.label.is_empty()
                         || editor.help.is_empty()
-                        || !(1_000..=60_000).contains(&editor.reveal_duration_ms)
+                        || !((1_000..=60_000).contains(&editor.reveal_duration_ms)
+                            || d.encrypted && editor.reveal_duration_ms == NEVER_REVEALED)
                         || editor.capability.is_some_and(str::is_empty)
                     {
                         return Err(fail("invalid editor metadata"));
@@ -224,6 +272,15 @@ impl Definitions {
     }
     pub fn all(&self) -> impl Iterator<Item = &OwnedSetting> {
         self.entries.values()
+    }
+    /// Exact settings their owners delegated to tenant administrators.
+    pub fn tenant_admin(&self) -> impl Iterator<Item = &OwnedSetting> {
+        self.tenant_admin
+            .iter()
+            .filter_map(|key| self.entries.get(key))
+    }
+    pub fn is_tenant_admin(&self, key: &str) -> bool {
+        self.tenant_admin.contains(key)
     }
     pub fn lookup(&self, key: &str) -> bilibi_database::Result<&OwnedSetting> {
         if !valid_key(key) || key.contains('*') {
@@ -261,6 +318,16 @@ fn matches(pattern: &str, key: &str) -> bool {
 }
 inventory::submit! {
     Consumer::new::<Setting>(DEFINITIONS, "base/settings", |entries| Definitions::from_entries(entries).map(|_| ()))
+}
+inventory::submit! {
+    Consumer::new::<TenantAdmin>(TENANT_ADMIN, "base/settings", |entries| {
+        let mut keys = BTreeSet::new();
+        if entries.iter().all(|entry| valid_key(entry.id) && !entry.id.contains('*') && keys.insert(entry.id)) {
+            Ok(())
+        } else {
+            Err(RegistryError::Contribution("tenant setting delegations must have unique exact setting keys".into()))
+        }
+    })
 }
 // Checked against the definitions when the store is built.
 inventory::submit! {

@@ -37,30 +37,46 @@ mod instance;
 pub mod list_columns;
 pub mod list_state;
 pub mod lists;
+mod markdown;
+pub use markdown::Markdown;
+mod file_preview;
 mod live_transport;
+mod mail_frame;
+pub use file_preview::FilePreview;
 pub use live_transport::{LIVE_EVENT_LIMIT, LIVE_EVENT_TOO_LARGE};
+pub use mail_frame::MailFrame;
+mod field_labels;
 mod page_search;
 pub mod params;
+pub use field_labels::FieldLabels;
 mod record_fields;
 mod record_reference;
-pub use record_fields::RecordField;
-pub use record_reference::{PickerHit, RecordPicker, RecordState, RelatedRecord};
+pub use record_fields::{
+    record_field, PersonalDataClass, RecordField, RecordFieldType, RECORD_FIELDS,
+};
+pub use record_reference::{NamedKind, PickerHit, RecordPicker, RecordState, RelatedRecord};
 mod portal;
 mod search_multi;
 pub use search_multi::{SearchMultiOption, SearchMultiSelect};
+mod brand;
 mod section;
 mod settings;
 mod shell;
+mod softphone;
 mod specimen;
 mod statusbar;
+mod step_up_gate;
+mod wordmark;
+pub use brand::{Accent, Brand, PRODUCT};
+pub use softphone::{CallAction, CallPhase, PhoneHealth, Softphone, SoftphoneAction};
 pub mod upload;
 pub mod workspace;
 pub use portal::{
     PortalCard, PortalCardLink, PortalDocument, PortalForm, PortalLayout, PortalLink,
 };
 pub use shell::{
-    company_bar, navigation, navigation_unpinned, tenant_bar, tenant_changed, version_badges,
-    AppShell, CompanyChoice, DisplayPreferences, Framed, NavNode, ShellContext, StandaloneReview,
+    company_bar, navigation, navigation_unpinned, tenant_bar, tenant_changed, AppShell,
+    CompanyChoice, DisplayPreferences, Framed, NavNode, ShellContext, StandaloneReview,
     TenantChoice, VersionBadge,
 };
 
@@ -71,13 +87,15 @@ pub use auth::{
     RESET_LINK_INVALID, RESET_REQUESTED, SESSION_EXPIRED, SIGN_IN_THROTTLED, WORKSPACE_UNAVAILABLE,
 };
 pub use chart::{Chart, ChartKind, Series, MAX_CATEGORIES, MAX_SERIES, MAX_SLICES};
-pub use components::{button_class, card_body_class, card_flat, stat_strip_columns};
+pub use components::{
+    active_badge, button_class, card_body_class, card_flat, stat_strip_columns, status_badge,
+};
 pub use components::{
     ActionLink, AppFrame, BackLink, Badge, BadgeKind, Button, ButtonVariant, Card, Chrome,
     CreateButton, DayKind, DayMonth, DayTile, Fact, Facts, Fold, Header, Icon, IconButton,
-    IconContext, IconKind, IdentityImage, IdentityImageKind, IdentityImageSize, Page, PageVariant,
-    SectionHeading, StatItem, StatKind, StatStrip, Toggle, DEMOTED_ACTION_CLASS, NO_COUNT,
-    WEEKDAYS,
+    IconContext, IconKind, IdentityImage, IdentityImageKind, IdentityImageSize, LivePanelAnchor,
+    LivePanelStack, Page, PageVariant, RecordFacts, SectionHeading, StatItem, StatKind, StatStrip,
+    Toggle, DEMOTED_ACTION_CLASS, NO_COUNT, WEEKDAYS,
 };
 pub use error_page::{
     copy_for, debug_document, error_document, portal_copy_for, portal_error_document, DebugFrame,
@@ -90,8 +108,8 @@ pub use feedback::{
 };
 pub use feedback_specimen::FeedbackSpecimen;
 pub use flex_table::{
-    Cell, ColumnKind, ColumnType, Cost, FlexColumn, FlexRow, FlexTable, Instant, Lens, Plain,
-    RowMode, Scale, Selection, Typed,
+    Cell, ColumnKind, ColumnType, Cost, FlexColumn, FlexRow, FlexTable, Instant, InstantView, Lens,
+    Plain, RowMode, Scale, Selection, Typed, ViewLink, ViewsBar,
 };
 pub use forms::{
     choices, described_by, error_sentence, field_base_class, field_class, field_inset_class,
@@ -117,15 +135,20 @@ pub use page_search::{page_search, RecordGroup, RecordHit, SearchPage, SearchRec
 pub use settings::{SettingsTab, SETTINGS_LOCATION};
 pub use specimen::ComponentsSpecimen;
 pub use statusbar::StatusbarTag;
+pub use step_up_gate::StepUpGate;
 pub use upload::{
-    ChunkOutcome, ClientEntry, FileInput, Registration, UploadEntry, UploadError, UploadSpec,
-    UploadedFile, Uploads,
+    ChunkOutcome, ClientEntry, FileInput, Registration, UploadBudget, UploadEntry, UploadError,
+    UploadSpec, UploadedFile, Uploads,
 };
+pub use wordmark::WordmarkSize;
 
-/// The HTML document around a page. `title` is the page's own name, or the product name when a page has none.
+/// The HTML document around a page. `title` is the page's own name, or the brand's name when a page has none.
 #[derive(Template)]
 #[template(path = "document.html")]
 pub struct Document<'a> {
+    /// Whose name ends the tab title, whose logo is the tab icon and whose
+    /// accent the page is drawn in.
+    pub brand: &'a Brand,
     pub title: &'a str,
     pub body: &'a str,
     /// The account's explicit `light`/`dark` choice, stamped on `<html>` so the

@@ -11,3 +11,6 @@ serde.workspace = true
 serde_json.workspace = true
 bilibi-module-registry.workspace = true
 inventory.workspace = true
+
+[lints]
+workspace = true

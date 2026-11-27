@@ -198,14 +198,8 @@ struct Browser<'a> {
 impl PlanAuthority for Browser<'_> {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(Error::Unauthorized)?;
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.check(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })
@@ -935,11 +929,18 @@ async fn post(
     body: Value,
 ) -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let body = body.to_string();
-    let mut stream = tokio::net::TcpStream::connect(addr).await?;
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
+    request_json(addr, &request).await
+}
+
+async fn request_json(
+    addr: std::net::SocketAddr,
+    request: &str,
+) -> std::result::Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
     stream.write_all(request.as_bytes()).await?;
     let mut response = Vec::new();
     stream.read_to_end(&mut response).await?;
@@ -965,6 +966,38 @@ async fn post(
     };
     let status = head.lines().next().unwrap_or_default().to_owned();
     serde_json::from_str(&payload).map_err(|_| format!("{status}: no JSON answer").into())
+}
+
+async fn page_discovery(addr: std::net::SocketAddr, host: &str, token: &str) -> Outcome {
+    for (query, path, section) in [
+        (
+            "combobox",
+            "/system/design-library/components#component-combobox",
+            true,
+        ),
+        (
+            "combo",
+            "/system/design-library/components#component-combobox",
+            true,
+        ),
+        (
+            "combbox",
+            "/system/design-library/components#component-combobox",
+            true,
+        ),
+        ("custmr%20fields", "/admin/custom-fields", false),
+    ] {
+        let request = format!(
+            "GET /api/v1/search?q={query}&limit=1 HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+        );
+        let result = request_json(addr, &request).await?;
+        let page = &result["pages"][0];
+        if page["path"] != path || page["section"] != section {
+            return Err(format!("FAIL: {query} should find {path} first, got {page}").into());
+        }
+        println!("PASS: agent discovery finds {path} first for {query}");
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -1018,6 +1051,17 @@ async fn main() -> Outcome {
         .await?;
     let staff = authentication
         .authenticate(&**client, 1, 3, "records".into())
+        .await?;
+    // An agent connection is tied to the browser session that approved it and
+    // works only while that session is live, so give the two stand-in
+    // sign-ins that approve one (admin, manager) the session row a real
+    // sign-in writes: its id a token's digest, as `bilibi_session::session_id`
+    // stores. The scopes above carry the same CSRF value.
+    client
+        .execute(
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) SELECT encode(sha256(convert_to('records-'||u,'UTF8')),'hex'),1,u,'records',now()+interval '24 hours','portable' FROM unnest(ARRAY[4,1]::bigint[]) u ON CONFLICT (id) DO NOTHING",
+            &[],
+        )
         .await?;
     drop(client);
 
@@ -1083,8 +1127,9 @@ async fn main() -> Outcome {
         .to_owned();
     let served = tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
         listener,
-        bilibi_web::router(app.clone()),
+        bilibi_web::staff_router(app.clone()),
     )));
+    page_discovery(addr, &host, &token).await?;
     let resolved = call(addr, &host, &token, "base.records.resolve", json!({"references": [{"kind": "company", "id": "61"}, {"kind": "company", "id": "01"}, {"kind": "person", "id": "1"}, {"kind": "finance.receivables.document", "id": "7"}]})).await?;
     for r in resolved["result"]["references"]
         .as_array()
@@ -1297,7 +1342,7 @@ async fn main() -> Outcome {
     if let Ok(bind) = std::env::var("BIND_ADDR") {
         let listener = tokio::net::TcpListener::bind(bind).await?;
         println!("Records reference listening at {origin}/reference/notes");
-        axum::serve(listener, bilibi_web::router(app))
+        axum::serve(listener, bilibi_web::staff_router(app))
             .with_graceful_shutdown(async {
                 let _ = tokio::signal::ctrl_c().await;
             })

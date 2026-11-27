@@ -1,0 +1,13 @@
+{% import "components.html" as ui %}
+{% call ui::card(id=id, title="Call") %}
+<div class="space-y-3">
+  <div aria-live="polite" aria-atomic="true" class="space-y-1">
+    <p class="text-sm font-semibold text-ink">{{ phase.label() }}</p>
+    {% if !caller.is_empty() %}<p class="text-sm text-ink">{{ caller }}</p>{% endif %}
+    <p class="text-sm {% if health.unavailable() %}text-danger-ink{% else %}text-ink-muted{% endif %}">{% if health.unavailable() %}Phone unavailable. {% endif %}{{ health.message() }}</p>
+    {% if let Some(message) = notice %}<p role="alert" class="text-sm text-danger-ink">{{ message }}</p>{% endif %}
+  </div>
+  {% if !actions.is_empty() %}<div role="group" class="flex flex-wrap gap-2" aria-label="Call controls">{% for control in actions %}{% let control_id = "{}-{}"|format(id, control.action.code()) %}{% let reason_id = "{}-reason"|format(control_id) %}<div>{% call ui::button(id=control_id, button_type="button", name="action", value=control.action.code(), event=event, data_version=version, aria_describedby=reason_id, disabled=control.disabled_now() || health.unavailable(), working="Sending…") %}{{ control.action.label() }}{% endcall %}<p id="{{ reason_id }}" class="text-sm text-ink-muted">{% if let Some(reason) = control.unavailable_reason %}{{ reason }}{% else if health.unavailable() %}Phone unavailable.{% endif %}</p></div>{% endfor %}</div>{% endif %}
+  {% if !screen_pop.is_empty() %}<div>{{ screen_pop|safe }}</div>{% endif %}
+</div>
+{% endcall %}

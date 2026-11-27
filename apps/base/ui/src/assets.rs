@@ -126,9 +126,54 @@ fn catalogue() -> &'static [StaticAsset] {
                 &include_bytes!("../assets/static/fonts/OFL.txt")[..],
             ),
             (
+                "/fonts/lexend-wordmark.woff2",
+                "font/woff2",
+                &include_bytes!("../assets/static/fonts/lexend-wordmark.woff2")[..],
+            ),
+            (
+                "/fonts/OFL-Lexend.txt",
+                "text/plain; charset=utf-8",
+                &include_bytes!("../assets/static/fonts/OFL-Lexend.txt")[..],
+            ),
+            (
+                "/assets/mail-frame.css",
+                "text/css; charset=utf-8",
+                &include_bytes!("../assets/static/mail-frame.css")[..],
+            ),
+            (
                 "/assets/logo.svg",
                 "image/svg+xml",
                 &include_bytes!("../assets/static/logo.svg")[..],
+            ),
+            (
+                "/assets/brand-icon-lime.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-lime.svg")[..],
+            ),
+            (
+                "/assets/brand-icon-teal.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-teal.svg")[..],
+            ),
+            (
+                "/assets/brand-icon-cyan.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-cyan.svg")[..],
+            ),
+            (
+                "/assets/brand-icon-indigo.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-indigo.svg")[..],
+            ),
+            (
+                "/assets/brand-icon-violet.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-violet.svg")[..],
+            ),
+            (
+                "/assets/brand-icon-fuchsia.svg",
+                "image/svg+xml",
+                &include_bytes!("../assets/static/brand-icon-fuchsia.svg")[..],
             ),
             (
                 "/favicon.svg",

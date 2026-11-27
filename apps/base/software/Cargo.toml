@@ -17,14 +17,17 @@ bilibi-locale.workspace = true
 bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-notifications.workspace = true
+bilibi-schedule.workspace = true
 bilibi-settings.workspace = true
 bilibi-step-up.workspace = true
 bilibi-system.workspace = true
 bilibi-tenancy.workspace = true
 bilibi-ui.workspace = true
+data-encoding.workspace = true
 flate2.workspace = true
 inventory.workspace = true
 jiff.workspace = true
+jsonwebtoken.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -32,3 +35,6 @@ tar.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
 url.workspace = true
+
+[lints]
+workspace = true

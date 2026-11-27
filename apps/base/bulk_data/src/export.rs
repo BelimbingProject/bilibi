@@ -33,7 +33,8 @@ use bilibi_tenancy::Scope;
 use jiff::Timestamp;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, sync::Arc};
 use tokio_postgres::{GenericClient, Row};
 
 pub(crate) const SERVICE: &str = "base/bulk_data.export-job";
@@ -188,7 +189,7 @@ impl ExportRun {
 
 /// The person's own export.
 pub(crate) async fn load(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     id: i64,
     lock: bool,
@@ -210,8 +211,7 @@ pub(crate) async fn load(
 struct Seeing {
     held: std::collections::BTreeSet<&'static str>,
     catalog: bilibi_grid::Catalog,
-    /// Each table's restricted fields, sorted and joined.
-    restricted: std::collections::BTreeMap<&'static str, String>,
+    restricted: BTreeMap<String, BTreeMap<String, &'static str>>,
 }
 
 /// Why an export whose job ended first did not finish.
@@ -269,7 +269,7 @@ impl BulkData {
     /// capability and the Imports pages. Pages ask before showing Export.
     pub async fn may_export(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         key: &str,
     ) -> Result<bool> {
@@ -528,7 +528,23 @@ impl BulkData {
     /// The person's own export, marked as [`BulkData::mark`] says.
     pub async fn export(
         &self,
-        client: &impl GenericClient,
+        client: &mut tokio_postgres::Client,
+        scope: &Scope,
+        id: i64,
+    ) -> Result<ExportRun> {
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await?;
+        let run = self.export_in(&tx, scope, id).await?;
+        tx.commit().await?;
+        Ok(run)
+    }
+
+    async fn export_in(
+        &self,
+        client: &tokio_postgres::Transaction<'_>,
         scope: &Scope,
         id: i64,
     ) -> Result<ExportRun> {
@@ -546,7 +562,7 @@ impl BulkData {
     /// every export given.
     async fn mark(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         runs: &mut [ExportRun],
     ) -> Result<()> {
@@ -576,7 +592,7 @@ impl BulkData {
             run.state == ExportState::Completed && !run.expired && run.access.is_some()
         };
         if runs.iter().any(ready) {
-            let seeing = self.seeing(client, scope, runs).await?;
+            let seeing = self.seeing(client, scope).await?;
             for run in runs.iter_mut() {
                 if ready(run) {
                     run.downloadable = self.access(&seeing, run) == run.access;
@@ -586,34 +602,14 @@ impl BulkData {
         Ok(())
     }
 
-    /// What the person may see, read once for any number of exports: their
-    /// capabilities, Grid's catalog for them and the restricted fields of
-    /// each export's table.
-    async fn seeing(
-        &self,
-        client: &impl GenericClient,
-        scope: &Scope,
-        runs: &[ExportRun],
-    ) -> Result<Seeing> {
+    /// Read the person's capabilities, scoped Grid catalog and tenant-wide
+    /// restriction modes once for a set of export eligibility checks.
+    async fn seeing(&self, client: &(impl GenericClient + Sync), scope: &Scope) -> Result<Seeing> {
         let held = bilibi_authz::effective_capabilities(client, scope).await?;
         let catalog = bilibi_grid::Catalog::for_scope(client, scope)
             .await
             .map_err(|_| Error::Internal)?;
-        let mut restricted = std::collections::BTreeMap::new();
-        for run in runs {
-            let Ok((registered, _)) = self.exportable(&run.record_type) else {
-                continue;
-            };
-            let table = registered.definition.table;
-            if !restricted.contains_key(table) {
-                let mut fields: Vec<String> = bilibi_authz::restrictions_for(client, scope, table)
-                    .await?
-                    .into_iter()
-                    .collect();
-                fields.sort();
-                restricted.insert(table, fields.join(","));
-            }
-        }
+        let restricted = bilibi_authz::fields::restriction_modes(client, scope).await?;
         Ok(Seeing {
             held,
             catalog,
@@ -621,18 +617,17 @@ impl BulkData {
         })
     }
 
-    /// What the person may see of an export's columns, as text: `None` when
-    /// they no longer hold the Imports pages, the type's export capability
-    /// or its list contract's capability; else which columns Grid lets them
-    /// read and which of the type's fields are restricted for them. Taken
-    /// when the file is made and compared on every read of the export, so a
-    /// revoked grant or a newly restricted field refuses a file made before
-    /// it (Reports' prepared exports do the same).
+    /// A fixed-length fingerprint of column visibility, source field
+    /// restrictions and row reach. Returns `None` if the reader lacks a
+    /// required grant or the export's columns no longer resolve.
     fn access(&self, seeing: &Seeing, run: &ExportRun) -> Option<String> {
         let (registered, export) = self.exportable(&run.record_type).ok()?;
-        let list = self.jobs.readable(export.list).ok()?.definition.capability;
+        let list = self.jobs.readable(export.list).ok()?.definition;
         let held = &seeing.held;
-        if !(held.contains(VIEW) && held.contains(export.capability) && held.contains(list)) {
+        if !(held.contains(VIEW)
+            && held.contains(export.capability)
+            && held.contains(list.capability))
+        {
             return None;
         }
         let table = registered.definition.table;
@@ -641,10 +636,83 @@ impl BulkData {
             .iter()
             .map(|(_, visible)| if *visible { '1' } else { '0' })
             .collect();
-        Some(format!(
-            "{seen}:{}",
-            seeing.restricted.get(table).map_or("", String::as_str)
-        ))
+        let root = seeing.catalog.table(table)?;
+        let mut reach = std::collections::BTreeMap::new();
+        let mut include_reach = |source: &bilibi_grid::Table| {
+            if let Some(effective) = source.reach() {
+                reach.insert(source.id(), effective.code());
+            }
+        };
+        include_reach(root);
+        let mut masks = BTreeMap::new();
+        for spec in &run.columns {
+            if let Ok(column) = seeing.catalog.resolve(root, spec) {
+                if let Some(kind) = seeing.catalog.mask(&column) {
+                    masks.insert(spec, kind);
+                }
+                for link in column.hops.iter().chain(&column.many).chain(&column.tail) {
+                    include_reach(seeing.catalog.table(link.to())?);
+                }
+            }
+        }
+        let installed = bilibi_grid::installed().ok()?;
+        let mut tables = access_tables(
+            installed,
+            table,
+            run.columns.iter().map(String::as_str),
+            false,
+        )?;
+        let mut selection_reach = BTreeMap::new();
+        if run.ids.is_none() {
+            let bilibi_agent_api::Handler::Read(handler) = list.handler else {
+                return None;
+            };
+            if let Some((root, paths)) = handler.selection_grid_paths() {
+                let selection = access_tables(installed, root, paths.iter().copied(), true)?;
+                for table in &selection {
+                    selection_reach.insert(
+                        *table,
+                        seeing
+                            .catalog
+                            .table(table)
+                            .map(|table| [table.reach().map(|reach| reach.code())]),
+                    );
+                }
+                tables.extend(selection);
+            }
+        }
+        let restricted: BTreeMap<_, _> = tables
+            .iter()
+            .copied()
+            .map(|table| (table, seeing.restricted.get(table)))
+            .collect();
+        let aliases: Vec<_> = installed
+            .restricted_record_field_columns(|table, field| {
+                seeing
+                    .restricted
+                    .get(table)
+                    .is_some_and(|fields| fields.contains_key(field))
+            })
+            .filter(|&(root, record_field, table, field)| {
+                tables.contains(table) && (root, record_field) != (table, field)
+            })
+            .map(|(root, record_field, table, field)| {
+                (
+                    table,
+                    field,
+                    root,
+                    record_field,
+                    seeing.restricted[root][record_field],
+                )
+            })
+            .collect();
+        let access = json!([seen, masks, restricted, aliases, reach, selection_reach]).to_string();
+        Some(
+            Sha256::digest(access.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        )
     }
 
     /// The file of a finished export, read through Artifacts (audited), as
@@ -652,21 +720,30 @@ impl BulkData {
     pub async fn export_file(&self, scope: &Scope, id: i64) -> Result<(String, Vec<u8>)> {
         let mut object = self.db.get().await?;
         let client: &mut tokio_postgres::Client = &mut object;
-        let run = self.export(&*client, scope, id).await?;
-        let artifact = run.artifact.clone().ok_or(Error::NotFound)?;
-        if run.expired {
-            // Past its expiry the file is gone, or about to be purged.
-            return Err(Error::NotFound);
-        }
-        if !run.downloadable {
-            // What the person may see has changed since the file was made.
-            return Err(Error::Forbidden);
-        }
+        let run = load(client, scope, id, false).await?;
+        let artifact = run.artifact.as_deref().ok_or(Error::NotFound)?;
         let company = OrganisationId::new(run.company).map_err(|_| Error::Internal)?;
         let document = self
             .artifacts
             .for_owner(scope, company, &FILES)
-            .read(client, &artifact)
+            .read_checked(
+                client,
+                artifact,
+                &(self, scope, id, artifact),
+                |context, tx| {
+                    Box::pin(async move {
+                        let &(bulk, scope, id, artifact) = context;
+                        let run = bulk.export_in(tx, scope, id).await?;
+                        if run.expired || run.artifact.as_deref() != Some(artifact) {
+                            return Err(Error::NotFound);
+                        }
+                        if !run.downloadable {
+                            return Err(Error::Forbidden);
+                        }
+                        Ok(())
+                    })
+                },
+            )
             .await
             .map_err(crate::artifact)?;
         let stem: String = self
@@ -685,7 +762,7 @@ impl BulkData {
         // exit, including cancellation. Do not return a session lock to the
         // pool or consume a second pooled connection just to hold the guard:
         // concurrent exports still need pool capacity for Grid projections.
-        let mut connection = deadpool_postgres::Object::take(self.db.get().await?);
+        let mut connection = bilibi_database::Connection::take(self.db.get().await?);
         let client: &mut tokio_postgres::Client = &mut connection;
         let run = load(&*client, &scope, id, false).await?;
         client
@@ -788,7 +865,7 @@ impl BulkData {
     async fn build(
         &self,
         execution: &Execution,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         scope: &Scope,
         run: &ExportRun,
     ) -> Result<std::result::Result<(i32, Vec<u8>, String), Failed>> {
@@ -797,11 +874,14 @@ impl BulkData {
                 "This kind of record can no longer be exported.".into(),
             )));
         };
-        // Taken before the read: a grant revoked or a field restricted while
-        // it runs refuses the file at download either way.
-        let seeing = self
-            .seeing(client, scope, std::slice::from_ref(run))
+        let tx = client
+            .build_transaction()
+            .read_only(true)
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
             .await?;
+        let seeing = self.seeing(&tx, scope).await?;
+        tx.commit().await?;
         let Some(access) = self.access(&seeing, run) else {
             return Ok(Err(Failed(
                 "You no longer have permission to export these records.".into(),
@@ -842,6 +922,7 @@ impl BulkData {
                     &run.except,
                     max,
                     started,
+                    Some((scope, run, &access)),
                 )
                 .await?
             {
@@ -880,8 +961,20 @@ impl BulkData {
                 if started.elapsed() > BUDGET {
                     return Ok(Err(too_long()));
                 }
+                let tx = client
+                    .build_transaction()
+                    .read_only(true)
+                    .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+                    .start()
+                    .await?;
+                let current = self.seeing(&tx, scope).await?;
+                if self.access(&current, run).as_deref() != Some(access.as_str()) {
+                    return Ok(Err(Failed(
+                        "Your access changed while the list was being exported. Export the list again.".into(),
+                    )));
+                }
                 let projection =
-                    match bilibi_grid::project(&self.db, scope, table, batch, &visible).await {
+                    match bilibi_grid::project_on(&tx, scope, table, batch, &visible).await {
                         Ok(projection) => projection,
                         Err(bilibi_grid::QueryError::Database(error))
                             if !matches!(error, Error::Forbidden | Error::Unauthorized) =>
@@ -894,6 +987,7 @@ impl BulkData {
                             )))
                         }
                     };
+                tx.commit().await?;
                 let ids_of: std::collections::BTreeMap<&str, &str> = projection
                     .columns
                     .iter()
@@ -932,17 +1026,17 @@ impl BulkData {
     /// a gap. Edits that leave a record in the list do not count: the last
     /// read's versions are the snapshot, and a bulk update's version fence
     /// reports a record edited after it.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn read_list(
         &self,
         execution: &Execution,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         registered: &Registered,
         list: &str,
         filter: &Value,
         leave_out: &[String],
         max: i64,
         started: std::time::Instant,
+        access: Option<(&Scope, &ExportRun, &str)>,
     ) -> Result<std::result::Result<Listed, Failed>> {
         let id_property = registered.definition.import.id;
         // Records unticked after "Select all" are left out before the limit
@@ -962,7 +1056,23 @@ impl BulkData {
                 let mut input = filter.clone();
                 input["page"] = json!(page);
                 input["page_size"] = json!(PAGE);
-                let listed = match self.jobs.read(client, execution, list, &input).await {
+                let listed = if let Some((scope, run, expected)) = access {
+                    let tx = client
+                        .build_transaction()
+                        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+                        .start()
+                        .await?;
+                    let current = self.seeing(&tx, scope).await?;
+                    if self.access(&current, run).as_deref() != Some(expected) {
+                        return Ok(Err(Failed(
+                            "Your access changed while the list was being exported. Export the list again.".into(),
+                        )));
+                    }
+                    self.jobs.read_in(tx, execution, list, &input).await
+                } else {
+                    self.jobs.read(client, execution, list, &input).await
+                };
+                let listed = match listed {
                     Ok(listed) => listed,
                     Err(bilibi_agent_api::Error::Backend(error))
                         if !matches!(
@@ -1072,13 +1182,18 @@ impl BulkData {
     /// The person's newest exports, marked as their pages show them.
     pub async fn exports(
         &self,
-        client: &impl GenericClient,
+        client: &mut tokio_postgres::Client,
         scope: &Scope,
         limit: i64,
     ) -> Result<Vec<ExportRun>> {
-        bilibi_authz::authorize_key(client, scope, VIEW).await?;
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await?;
+        bilibi_authz::authorize_key(&tx, scope, VIEW).await?;
         let company = scope.current_company().ok_or(Error::Forbidden)?.get();
-        let mut runs = client
+        let mut runs = tx
             .query(
                 &format!("SELECT {COLUMNS} FROM base_bulk_data_exports WHERE tenant_id=$1 AND started_by=$2 AND company_id=$3 ORDER BY id DESC LIMIT $4"),
                 &[&scope.tenant(), &scope.user(), &company, &limit.clamp(1, 100)],
@@ -1087,9 +1202,48 @@ impl BulkData {
             .iter()
             .map(ExportRun::from_row)
             .collect::<Result<Vec<_>>>()?;
-        self.mark(client, scope, &mut runs).await?;
+        self.mark(&tx, scope, &mut runs).await?;
+        tx.commit().await?;
         Ok(runs)
     }
+}
+
+/// Grid tables whose fields can contribute to these columns: the root,
+/// resolved linked sources and extra tables declared by each source in use.
+fn access_tables<'a>(
+    installed: &bilibi_grid::Installed,
+    root: &str,
+    specs: impl IntoIterator<Item = &'a str>,
+    optional_paths: bool,
+) -> Option<std::collections::BTreeSet<&'static str>> {
+    let root = installed.table(root)?;
+    let mut tables = std::collections::BTreeSet::from([root.id()]);
+    let mut extra_tables = std::collections::BTreeSet::new();
+    for spec in specs {
+        let column = match bilibi_grid::column::resolve(spec, root, &|id| installed.table(id)) {
+            Ok(column) => column,
+            Err(_) if optional_paths => continue,
+            Err(_) => return None,
+        };
+        for link in column.hops.iter().chain(&column.many).chain(&column.tail) {
+            tables.insert(link.to());
+            if let bilibi_grid::Join::Edge(source) = link.decl.join {
+                extra_tables.extend(source.extra_tables.iter().copied());
+            }
+        }
+    }
+    for table in &tables {
+        extra_tables.extend(
+            installed
+                .table(table)?
+                .source()
+                .extra_tables
+                .iter()
+                .copied(),
+        );
+    }
+    tables.extend(extra_tables);
+    Some(tables)
 }
 
 /// Each column's label, from the installed catalog, and whether the person
@@ -1106,8 +1260,14 @@ fn shown(
     specs
         .iter()
         .map(|spec| {
-            let column = bilibi_grid::column::resolve(spec, all, &|id| installed.table(id))
+            let mut column = bilibi_grid::column::resolve(spec, all, &|id| installed.table(id))
                 .map_err(|_| spec.clone())?;
+            if let Some(word) = column
+                .field
+                .and_then(|field| catalog.field_name(column.table, field.id))
+            {
+                column.set_labels(Some(&word));
+            }
             let visible = seen.is_some_and(|root| catalog.resolve(root, spec).is_ok());
             Ok((column.label, visible))
         })

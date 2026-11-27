@@ -16,13 +16,7 @@ struct Browser<'a> {
 impl PlanAuthority for Browser<'_> {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(bilibi_database::Error::Unauthorized)?;
-            let scope = self.app.security.sessions.check(tx, self.token).await?;
+            let scope = self.app.security.sessions.hold(tx, self.token).await?;
             Ok(PlanIdentity {
                 scope,
                 credential_binding: format!("browser:{}", self.token),
@@ -110,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &admin,
             admin.user(),
             "base.agent-api.reference.update",
-            Some(false),
+            Some(bilibi_authz::grants::Direct::Deny),
         )
         .await?;
     attempt(&plans, &admin, &browser, &ops).await;

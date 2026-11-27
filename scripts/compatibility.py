@@ -16,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from catalogue import CATALOGUE, Refused, check, expect, load
+from catalogue import CATALOGUE, Refused, check, expect, load, release_tags, version_tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 # Files that cannot change what either workflow compiles or boots.
@@ -33,26 +33,25 @@ def builds(event_name, ref):
     return ['release']
 
 
-def matrix(event, event_name, ref):
+def branch_commit(remote, ref):
+    result = subprocess.run(
+        ['git', 'ls-remote', '--refs', remote, ref],
+        cwd=ROOT, capture_output=True, text=True, check=False)
+    expect(result.returncode == 0, f'cannot resolve {ref} in {remote}: {result.stderr.strip()}')
+    for line in result.stdout.splitlines():
+        commit, name = line.split('\t', 1)
+        if name == ref:
+            return commit
+    raise Refused(f'{remote} has no branch {ref}')
+
+
+def matrix(event, event_name, ref, domains_at):
     catalogue = load(CATALOGUE)
     check(catalogue)
-    entries = []
-    for role in ('domains', 'extensions'):
-        for container, facts in catalogue.get(role, {}).items():
-            repository = re.fullmatch(r'https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)', facts['repository'])
-            expect(repository, f'{role}/{container}: CI needs a GitHub repository URL')
-            for build in builds(event_name, ref):
-                entries.append({
-                    'role': role,
-                    'id': container,
-                    'repository': repository.group(1),
-                    'ref': 'refs/heads/main',
-                    'build': build,
-                })
 
     # Other event types ignore companion directives, including manual runs
     # whose payload might be copied from a pull request.
-    overrides = set()
+    overrides = {}
     if event_name == 'pull_request':
         for line in (event['pull_request'].get('body') or '').splitlines():
             if not line.strip().startswith('Bilibi-Companion:'):
@@ -60,16 +59,53 @@ def matrix(event, event_name, ref):
             match = re.fullmatch(r'Bilibi-Companion: (domains|extensions)/([a-z][a-z0-9]*(?:_[a-z0-9]+)*)=([A-Za-z0-9_./-]+)', line.strip())
             expect(match, 'write Bilibi-Companion: domains/finance=fix/platform-change (docs/versions.md)')
             role, container, branch = match.groups()
-            key = f'{role}/{container}'
-            expect(any(f"{entry['role']}/{entry['id']}" == key for entry in entries), f'{key}: companion is not listed in catalogue.json')
-            expect(key not in overrides, f'{key}: more than one companion branch')
+            key = (role, container)
+            label = f'{role}/{container}'
+            expect(container in catalogue.get(role, {}), f'{label}: companion is not listed in catalogue.json')
+            expect(key not in overrides, f'{label}: more than one companion branch')
             companion = f'refs/heads/{branch}'
             result = subprocess.run(['git', 'check-ref-format', companion], capture_output=True, check=False)
-            expect(result.returncode == 0, f'{key}: invalid companion branch {branch!r}')
-            for entry in entries:
-                if f"{entry['role']}/{entry['id']}" == key:
-                    entry['ref'] = companion
-            overrides.add(key)
+            expect(result.returncode == 0, f'{label}: invalid companion branch {branch!r}')
+            overrides[key] = companion
+
+    latest_release = ref.startswith('refs/tags/v') or domains_at == 'latest-release'
+    profiles = builds(event_name, ref)
+    entries = []
+    for role in ('domains', 'extensions'):
+        for container, facts in catalogue.get(role, {}).items():
+            url = facts['repository']
+            repository = re.fullmatch(r'https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)', url)
+            expect(repository, f'{role}/{container}: CI needs a GitHub repository URL')
+            finance = (role, container) == ('domains', 'finance')
+            selected_ref = overrides.get((role, container), 'refs/heads/main')
+            commit, error = '', ''
+            if finance:
+                try:
+                    if latest_release:
+                        tags = release_tags(repository.group(1))
+                        expect(tags, f'{url} has no release tag yet (docs/versions.md); tag one or run with domains_at=main')
+                        version = max(tags, key=version_tuple)
+                        selected_ref = f'refs/tags/v{version}'
+                        _, commit = tags[version]
+                    else:
+                        commit = branch_commit(url, selected_ref)
+                except Refused as refusal:
+                    error = str(refusal)
+
+            phases = [(build, 'build' if finance else 'all') for build in profiles]
+            if finance:
+                phases.append(('check', 'lint'))
+            entries.extend({
+                'role': role,
+                'id': container,
+                'repository': repository.group(1),
+                'ref': selected_ref,
+                'latest_release': latest_release and not finance,
+                'commit': commit,
+                'error': error,
+                'build': build,
+                'phase': phase,
+            } for build, phase in phases)
     return {'include': entries}
 
 
@@ -105,11 +141,11 @@ def affects_domains(path):
 
 
 def affects_platform(path):
-    """True when a pull request file can change the unmounted Rust gates."""
+    """True when a pull request file can change the unmounted Rust gates or the walkthrough runs."""
     if harmless(path):
         return False
     if path.startswith('.github/'):
-        return path == '.github/workflows/ci.yml'
+        return path in ('.github/workflows/ci.yml', '.github/workflows/walkthroughs.yml')
     return True
 
 
@@ -171,7 +207,11 @@ def affected_main(which):
 def matrix_main():
     try:
         event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
-        selected = matrix(event, os.environ['GITHUB_EVENT_NAME'], os.environ.get('GITHUB_REF', ''))
+        event_name = os.environ['GITHUB_EVENT_NAME']
+        selected = matrix(event, event_name, os.environ.get('GITHUB_REF', ''), os.environ.get('DOMAINS_AT', ''))
+        if event_name == 'pull_request' and any(row['phase'] == 'lint' for row in selected['include']):
+            base = event['pull_request']['base']['ref']
+            write_output('platform_base', branch_commit('origin', f'refs/heads/{base}'))
         encoded = json.dumps(selected, separators=(',', ':'))
         print(encoded)
         write_output('matrix', encoded)

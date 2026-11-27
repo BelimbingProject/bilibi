@@ -1,14 +1,15 @@
 //! Manual running-service walkthrough of data-subject requests (ADR 05):
 //! access and erasure through every mounted store, with the queue running.
 //! Explicit disposable DB only; prints real outcomes and durable state for
-//! inspection. No assertions or test harness.
+//! inspection. Invitation and action regressions also check the exported and persisted
+//! state, failing the executable on a contract violation; no test harness.
 use bilibi_artifacts::{Artifacts, Reference};
 use bilibi_authz::grants::Grants;
 use bilibi_base::media::{AttachmentSubject, Media, Rules, Upload};
 use bilibi_core::person as person_files;
-use bilibi_database::{pool, MutationBoundary};
+use bilibi_database::{pool, pool_with, MutationBoundary, PoolLimits};
 use bilibi_party_ids::{OrganisationId, PersonId};
-use bilibi_personal_data::Identifier;
+use bilibi_personal_data::{Identifier, Stores, Subject};
 use bilibi_privacy::{
     ConfirmedRecord, HoldTarget, NewRequest, Privacy, RequestKind, RequestView, SERVICE,
 };
@@ -24,8 +25,16 @@ bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[path = "support/audit_actions.rs"]
+mod audit_actions;
+#[path = "support/case_files.rs"]
+mod case_files;
 #[path = "support/erasure.rs"]
 mod erasure_approval;
+#[path = "support/invitations.rs"]
+mod invitations;
+#[path = "support/job_reads.rs"]
+mod job_reads;
 
 // The same browser-bound write authority as the masking/export walkthroughs.
 struct Browser<'a> {
@@ -38,14 +47,8 @@ impl bilibi_base::agent_api::plans::PlanAuthority for Browser<'_> {
         tx: &'a tokio_postgres::Transaction<'_>,
     ) -> bilibi_tenancy::ProofFuture<'a, bilibi_base::agent_api::plans::PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(bilibi_database::Error::Unauthorized)?;
             Ok(bilibi_base::agent_api::plans::PlanIdentity {
-                scope: self.app.security.sessions.check(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })
@@ -72,6 +75,19 @@ async fn write(
         )
         .await?;
     Ok(answer["result"].clone())
+}
+
+async fn read(
+    app: &bilibi_web::App,
+    client: &mut Client,
+    scope: &Scope,
+    key: &str,
+    input: Value,
+) -> Result<Value> {
+    let registry = app
+        .services
+        .get::<bilibi_base::agent_api::Registry>("base/agent_api.registry")?;
+    Ok(registry.call(client, scope, key, &input).await?["result"].clone())
 }
 
 /// The authenticator code for `key` (base32, as enrollment shows it) at
@@ -221,13 +237,25 @@ async fn main() -> Result<()> {
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
     bilibi_base::link();
     bilibi_core::link();
-    let db = pool(&std::env::var("DATABASE_URL")?)?;
+    let step = std::env::args().nth(1);
+    let database_url = std::env::var("DATABASE_URL")?;
+    let db = if step.as_deref() == Some("job-read") {
+        pool_with(
+            &database_url,
+            PoolLimits {
+                size: 1,
+                wait: Duration::from_secs(1),
+            },
+        )?
+    } else {
+        pool(&database_url)?
+    };
     let modules = bilibi_module_registry::discover()?;
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
     // Production seeds (the request flow) build their own app: run them first,
     // in their own process.
-    if std::env::args().nth(1).as_deref() == Some("seed") {
+    if step.as_deref() == Some("seed") {
         return Ok(bilibi_web::seed::production(&db).await?);
     }
     // File creation and background work require real desks (ADR 19). The
@@ -254,16 +282,21 @@ async fn main() -> Result<()> {
         .login("admin@example.test", bilibi_walkthrough_fixture::PASSWORD)
         .await?;
     let admin = app.security.guard(&admin_login.token).await?;
-    let second = login(&app, "ai@agent.my").await?;
-    let other = login(&app, "manager@other.example.test").await?;
     let privacy = app.services.get::<Privacy>(SERVICE)?;
     let boundary = app
         .services
         .get::<MutationBoundary>("base/database.mutations")?;
+    if step.as_deref() == Some("job-read") {
+        return job_reads::run(&app, &db, &admin, &privacy, &boundary).await;
+    }
+    let second = login(&app, "ai@agent.my").await?;
+    let other = login(&app, "manager@other.example.test").await?;
     let settings = app.services.get::<Settings>("base/settings.store")?;
     let media = app.services.get::<Media>("base/media.store")?;
     let artifacts = app.services.get::<Artifacts>("base/artifacts.store")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // The tenant 2 manager may read requests, so isolation shows as an empty
     // list and a missing request rather than a refusal.
     client
@@ -279,6 +312,8 @@ async fn main() -> Result<()> {
     let one = OrganisationId::new(1)?;
     let ada = PersonId::new(1)?;
     let kim = PersonId::new(2)?;
+    invitations::prepare(&app, &mut client, &admin, &boundary, &privacy).await?;
+    audit_actions::prepare(&mut client, &admin).await?;
 
     println!("== stage 7 regression: detached, shared and held addresses");
     use bilibi_core::address::{AddressInput, AddressService, AttachmentInput, PartyId};
@@ -334,23 +369,13 @@ async fn main() -> Result<()> {
     );
 
     println!("== stage 9 regression: real reset action stores no actor identity copy");
-    let manager_login = app
-        .user
-        .login("manager@example.test", bilibi_walkthrough_fixture::PASSWORD)
-        .await?;
-    let manager = app.security.guard(&manager_login.token).await?;
-    let manager_key = enroll(&app, &manager).await?;
     let staff = login(&app, "staff@example.test").await?;
     let _ = enroll(&app, &staff).await?;
-    let reset = write(
-        &app,
-        &manager_login.token,
-        &manager.clone().presenting_step_up(&code(&manager_key, 0)),
-        "core.user.two_factor.reset",
-        json!({"user_id":3}),
-    )
-    .await?;
-    println!("real reset result: {reset}");
+    let reset = app
+        .user
+        .reset_two_factor_by_email("staff@example.test")
+        .await?;
+    println!("installation reset result: {reset:?}");
     rows(&client, "reset target evidence", "SELECT new_values::text FROM base_audit_mutations WHERE tenant_id=1 AND auditable_type='user_two_factor_reset' AND auditable_id='3' ORDER BY id").await?;
 
     // A normalized, non-secret document on the existing subject account.
@@ -443,6 +468,88 @@ async fn main() -> Result<()> {
         attachment.public_id, document.id
     );
 
+    let people = Stores::installed()?
+        .get("core/person.people")
+        .ok_or("missing Person store")?
+        .1
+        .handler;
+    let subject = Subject {
+        person: ada,
+        identifiers: vec![],
+        confirmed: vec![],
+    };
+    for (break_lookup, missing, remaining) in [
+        (
+            "ALTER TABLE base_media_attachments RENAME TO walkthrough_missing_attachments",
+            "base/media/attachment",
+            "core.person document",
+        ),
+        (
+            "ALTER TABLE base_artifacts RENAME TO walkthrough_missing_artifacts",
+            "core.person document",
+            "base/media/attachment",
+        ),
+    ] {
+        let tx = client.transaction().await?;
+        tx.batch_execute(break_lookup).await?;
+        let located = people.locate(&tx, &admin, &subject).await?;
+        assert!(located.kinds.iter().all(|count| count.kind != missing));
+        for kind in ["person", remaining] {
+            assert!(
+                located
+                    .kinds
+                    .iter()
+                    .any(|count| count.kind == kind && count.by_person == 1),
+                "locate must retain the {kind} count after an optional query fails: {located:?}",
+            );
+        }
+        tx.query_one("SELECT 1", &[]).await?;
+        tx.rollback().await?;
+    }
+
+    println!("== case files: attachments on a record about a person (#478)");
+    case_files::install(&client, media.clone()).await?;
+    client
+        .batch_execute("INSERT INTO walkthrough_cases(tenant_id,id,person_id) VALUES(1,101,1),(1,202,2) ON CONFLICT DO NOTHING")
+        .await?;
+    for (case, filename, text) in [
+        ("101", "ada-case-note.txt", "Ada case note\n"),
+        ("202", "kim-case-note.txt", "Kim case note\n"),
+    ] {
+        let subject = AttachmentSubject {
+            kind: case_files::CASE,
+            id: case,
+        };
+        let file = media
+            .upload_attachment(
+                &mut client,
+                &admin,
+                subject,
+                Upload {
+                    filename: filename.into(),
+                    bytes: text.as_bytes().to_vec(),
+                },
+                Rules::default(),
+            )
+            .await?;
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                admin.mutation_context("privacy.walkthrough.case_file"),
+            )
+            .await?;
+        media
+            .submit_attachments(&mut tx, &admin, subject, &[file.public_id.as_str()])
+            .await?;
+        tx.commit().await?;
+        println!(
+            "case {case} ({}): attachment {} submitted on subject {}",
+            if case == "101" { "Ada" } else { "Kim" },
+            file.public_id,
+            case_files::CASE
+        );
+    }
+
     // Queue workers, as the app runs them.
     let executor = bilibi_base::queue::Executor::from_services(
         &app.services,
@@ -452,7 +559,7 @@ async fn main() -> Result<()> {
     let workers = tokio::spawn(executor.run(stopped));
 
     println!("== stage 8 regression: save a Contacts CSV before erasure");
-    use bilibi_base::bulk_data::{BulkData, ExportState};
+    use bilibi_base::bulk_data::{BulkData, ExportState, Pass};
     let bulk = app
         .services
         .get::<BulkData>(bilibi_base::bulk_data::SERVICE)?;
@@ -468,7 +575,7 @@ async fn main() -> Result<()> {
         .as_i64()
         .ok_or("export start returned no ID")?;
     for _ in 0..120 {
-        if bulk.export(&**client, &admin, saved_export).await?.state != ExportState::Running {
+        if bulk.export(&mut client, &admin, saved_export).await?.state != ExportState::Running {
             break;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -486,6 +593,83 @@ async fn main() -> Result<()> {
         String::from_utf8_lossy(&before_csv).contains("Ada Manager"),
         String::from_utf8_lossy(&before_csv).contains("ada@example.test")
     );
+
+    println!("== issue 571: a Contacts import and a child file hold Ada's data before erasure");
+    // One row that is refused (an unknown kind), so nothing is written and
+    // the run keeps her email as its source key, with the file whole.
+    let ada_import = bulk
+        .upload(
+            &admin,
+            "core/person.contacts",
+            "ada-contacts.csv",
+            b"Ref,Full name,Kind,E-mail\r\nada@example.test,Ada Manager,robot,ada@example.test\r\n",
+        )
+        .await?
+        .map_err(|why| format!("contacts upload refused: {why}"))?;
+    let fixed_value = "Ada Manager <ada@example.test>";
+    let personal_mapping = json!({"fields": [
+        {"field": "name", "value": fixed_value}, {"field": "kind", "column": "Kind"},
+        {"field": "email", "column": "E-mail"}
+    ], "source_key": "Ref", "duplicates": "skip"});
+    let saved_mapping = write(
+        &app,
+        &admin_login.token,
+        &admin,
+        "base.bulk_data.mapping.save",
+        json!({"record_type": "core/person.contacts", "name": "Ada fixed value", "mapping": personal_mapping}),
+    )
+    .await?;
+    let saved_mapping_id = saved_mapping["id"]
+        .as_i64()
+        .ok_or("saved mapping returned no ID")?;
+    let version = bulk.run(&**client, &admin, ada_import).await?.version;
+    write(
+        &app,
+        &admin_login.token,
+        &admin,
+        "base.bulk_data.import.start",
+        json!({"run_id": ada_import, "version": version, "mapping": personal_mapping}),
+    )
+    .await?;
+    for _ in 0..120 {
+        if !bulk
+            .run(&**client, &admin, ada_import)
+            .await?
+            .state
+            .working()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // A file of the child record type, uploaded and never run: its rows would
+    // name contacts, so the same erasure must reach it.
+    let child_import = bulk
+        .upload(
+            &admin,
+            "core/affiliation.affiliations",
+            "ada-affiliations.csv",
+            b"Email,Role\r\nada@example.test,Director\r\n",
+        )
+        .await?
+        .map_err(|why| format!("affiliations upload refused: {why}"))?;
+    let keyed: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_bulk_data_rows WHERE tenant_id=1 AND run_id=$1 AND source_key='ada@example.test'",
+            &[&ada_import],
+        )
+        .await?
+        .get(0);
+    show(
+        "failed rows of the import before erasure",
+        bulk.failed_rows(&admin, ada_import, Pass::Run)
+            .await
+            .map(|(_, bytes)| String::from_utf8_lossy(&bytes).contains("ada@example.test")),
+    );
+    println!("import {ada_import}: rows keyed by Ada's email={keyed}; fixed personal value and saved mapping stored; child file {child_import} uploaded");
+    if keyed != 1 {
+        return Err("the import did not record Ada's row before erasure".into());
+    }
 
     println!("== failed publication leaves durable, unreadable reservations");
     // Fail after Artifacts has synced the bytes, not before reservation or IO.
@@ -583,7 +767,17 @@ async fn main() -> Result<()> {
         )
         .await?;
     println!("received {} due {}", access.id, access.due_at);
-    for (store, label, located) in privacy.locate(&client, &admin, access.id).await? {
+    for (store, label, located) in privacy.locate(&admin, access.id).await? {
+        if store == "core/portal.invitations"
+            && (located.kinds.len() != 1
+                || located.kinds[0].by_person != 5
+                || located.kinds[0].by_identifier != 1
+                || !located.candidates.is_empty())
+        {
+            return Err(
+                "invitation locate lost linked rows or offered another Person's record".into(),
+            );
+        }
         println!("  locate {store} ({label}): {located:?}");
     }
     let access = privacy
@@ -621,12 +815,20 @@ async fn main() -> Result<()> {
                 zip.by_name("export.json")?.read_to_string(&mut text)?;
                 serde_json::from_str(&text).unwrap_or(Value::Null)
             };
+            invitations::disclosure(&bundle)?;
+            audit_actions::disclosure(&bundle)?;
             for store in bundle["stores"].as_array().into_iter().flatten() {
                 if store["store"] == "core/user.accounts" {
                     println!("SCIM access disclosure: {}", store["records"]["accounts"]);
                 }
                 if store["store"] == "core/address.addresses" {
                     println!("detached address disclosure: {}", store["records"]);
+                }
+                if store["store"] == "wt_cases/cases.files" {
+                    println!(
+                        "case files disclosure: {} files {}",
+                        store["records"], store["files"]
+                    );
                 }
             }
             let stores: Vec<String> =
@@ -665,6 +867,10 @@ async fn main() -> Result<()> {
          WHERE event='artifacts.read' ORDER BY id DESC LIMIT 2",
     )
     .await?;
+    println!(
+        "case files of another person, under Ada's grant: {:?}",
+        case_files::refused()
+    );
     println!("== a reader who sees a field masked needs a reason for the export");
     client
         .batch_execute("INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES(1,4,'persons','email','mask')")
@@ -694,6 +900,43 @@ async fn main() -> Result<()> {
         .await?;
 
     println!("== due notices: an open request due tomorrow");
+    let portable = privacy
+        .receive(
+            &mut client,
+            &admin,
+            NewRequest {
+                kind: RequestKind::Portability,
+                person: ada,
+                identifiers: Vec::new(),
+                company: one,
+            },
+        )
+        .await?;
+    let portable = privacy
+        .verify(
+            &mut client,
+            &admin,
+            portable.id,
+            portable.version,
+            "Identity checked",
+            &[],
+        )
+        .await?;
+    let portable = privacy
+        .approve(&mut client, &admin, portable.id, portable.version)
+        .await?;
+    let portable = settle(&privacy, &client, &admin, portable.id, 60).await?;
+    let (_, bytes, _) = privacy
+        .request_document(&mut client, &admin, portable.id, None)
+        .await?;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+    let bundle: Value = serde_json::from_reader(zip.by_name("export.json")?)?;
+    invitations::disclosure(&bundle)?;
+    audit_actions::disclosure(&bundle)?;
+    println!(
+        "invitation portability: linked invitation and registration exported without identifiers"
+    );
+
     let open = privacy
         .receive(
             &mut client,
@@ -812,7 +1055,8 @@ async fn main() -> Result<()> {
 
     println!("== erasure for person 1, with the affiliation store failing first");
     // Pause a real export at artifact publication, after it has read Contacts.
-    // The erasure must wait for this reader, then invalidate both saved copies.
+    // The erasure must not run beside this reader: it gives way and retries,
+    // then invalidates both saved copies.
     client.batch_execute("SELECT pg_advisory_lock(18203591); \
         CREATE FUNCTION walkthrough_export_gate() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
         IF NEW.owner_id='base.bulk_data' THEN PERFORM pg_advisory_xact_lock(18203591); END IF; RETURN NEW; END $$; \
@@ -876,7 +1120,7 @@ async fn main() -> Result<()> {
         )
         .await?
         .get(0);
-    for (store, _, located) in privacy.locate(&client, &admin, erasure.id).await? {
+    for (store, _, located) in privacy.locate(&admin, erasure.id).await? {
         if !located.candidates.is_empty() {
             println!(
                 "  candidates in {store}: {:?}",
@@ -954,9 +1198,18 @@ async fn main() -> Result<()> {
         true,
     )
     .await?;
-    for attempt in 0..120 {
-        let blocked: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a USING(pid) WHERE l.locktype='advisory' AND NOT l.granted AND a.query LIKE 'SELECT pg_advisory_xact_lock(hashtextextended%')", &[]).await?.get(0);
-        if blocked {
+    // Issue 572: the erasure asks for its guard for two seconds, then gives
+    // way with `conflict` for Queue to retry. It never waits on the export
+    // inside its own transaction, where Queue's row for its job is locked.
+    for attempt in 0..240 {
+        let gave_way: bool = client
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM base_privacy_request_stores WHERE tenant_id=1 AND request_id=$1 AND last_error='conflict')",
+                &[&erasure.id],
+            )
+            .await?
+            .get(0);
+        if gave_way {
             let original: bool = client
                 .query_one(
                     "SELECT name='Ada Manager' FROM persons WHERE tenant_id=1 AND id=1",
@@ -964,11 +1217,15 @@ async fn main() -> Result<()> {
                 )
                 .await?
                 .get(0);
-            println!("erasure waits for publishing export; source still original={original}");
+            let waiting: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a USING(pid) WHERE l.locktype='advisory' AND NOT l.granted AND a.query LIKE '%bulk-export-%')", &[]).await?.get(0);
+            println!("erasure gave way to the publishing export and will retry; source still original={original}; a session left waiting on the guard={waiting}");
+            if !original || waiting {
+                return Err("the erasure did not give way cleanly to the publishing export".into());
+            }
             break;
         }
-        if attempt == 119 {
-            return Err("erasure did not wait for publishing export".into());
+        if attempt == 239 {
+            return Err("erasure did not give way to the publishing export".into());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -1055,6 +1312,8 @@ async fn main() -> Result<()> {
     certificate(&privacy, &mut client, &admin, erasure.id).await?;
 
     println!("== state after erasure");
+    invitations::erased(&client).await?;
+    audit_actions::kept(&client, &erasure).await?;
     for row in &reservations {
         let id: String = row.get("public_id");
         let path = std::path::Path::new(row.get::<_, &str>("storage_root")).join(&id);
@@ -1079,6 +1338,134 @@ async fn main() -> Result<()> {
         );
     }
     rows(&client, "cached export files", "SELECT row_to_json(a)::text FROM (SELECT e.id,e.state,e.erased_for,a.deleted_at IS NOT NULL AS file_deleted FROM base_bulk_data_exports e JOIN base_artifacts a ON a.tenant_id=e.tenant_id AND a.owner_id='base.bulk_data' AND a.subject='export:'||e.id WHERE e.tenant_id=1 ORDER BY e.id,a.id) a").await?;
+    // Issue 600: the invalidations are audited under the documented kind,
+    // and an export an erasure has cleaned is marked so the next one skips it.
+    let misfiled: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_audit_mutations WHERE tenant_id=1 AND auditable_type='bulk_data_export'",
+            &[],
+        )
+        .await?
+        .get(0);
+    rows(&client, "exports after erasure", "SELECT row_to_json(e)::text FROM (SELECT id,state,erased_for,cleaned_at IS NOT NULL AS cleaned,(SELECT count(*) FROM base_audit_mutations m WHERE m.tenant_id=1 AND m.auditable_type='base/bulk_data.export' AND m.auditable_id=x.id::text) AS audited FROM base_bulk_data_exports x WHERE tenant_id=1 ORDER BY id) e").await?;
+    println!("export changes audited under the old kind: {misfiled}");
+    if misfiled != 0 {
+        return Err("an export invalidation was audited under the wrong kind".into());
+    }
+
+    println!("== issue 571: the imports hold nothing of Ada after erasure");
+    for id in [ada_import, child_import] {
+        let row = client
+            .query_one(
+                "SELECT r.state, r.erased_for::text, r.cleaned_at IS NOT NULL, r.source_artifact IS NULL, \
+                 (SELECT count(*) FROM base_bulk_data_rows w WHERE w.tenant_id=r.tenant_id AND w.run_id=r.id AND (w.source_key IS NOT NULL OR w.message IS NOT NULL OR w.record_version IS NOT NULL OR w.undo_message IS NOT NULL)), \
+                 (SELECT count(*) FROM base_artifacts a WHERE a.tenant_id=r.tenant_id AND a.owner_id='base.bulk_data' AND a.subject=r.id::text AND a.deleted_at IS NULL), \
+                 r.file_name, r.header='[]'::jsonb, r.mapping IS NULL \
+                 FROM base_bulk_data_runs r WHERE r.tenant_id=1 AND r.id=$1",
+                &[&id],
+            )
+            .await?;
+        let (cleaned, unlinked, details, files, file_name, header_empty, mapping_empty): (
+            bool,
+            bool,
+            i64,
+            i64,
+            String,
+            bool,
+            bool,
+        ) = (
+            row.get(2),
+            row.get(3),
+            row.get(4),
+            row.get(5),
+            row.get(6),
+            row.get(7),
+            row.get(8),
+        );
+        println!(
+            "import {id}: state={} erased_for={} cleaned={cleaned} file reference dropped={unlinked} rows still holding import or undo details={details} live files={files} file name={file_name} header empty={header_empty} mapping empty={mapping_empty}",
+            row.get::<_, String>(0),
+            row.get::<_, String>(1)
+        );
+        if !cleaned
+            || !unlinked
+            || details != 0
+            || files != 0
+            || file_name != "[erased]"
+            || !header_empty
+            || !mapping_empty
+        {
+            return Err(format!("import {id} still holds data after the erasure").into());
+        }
+    }
+    let failed_rows = bulk.failed_rows(&admin, ada_import, Pass::Run).await;
+    let refused = failed_rows.is_err();
+    show(
+        "download the failed rows of the erased import",
+        failed_rows.map(|(_, bytes)| bytes.len()),
+    );
+    let erased = bulk.run(&**client, &admin, ada_import).await?.erased;
+    println!("import {ada_import} reads as erased: {erased}");
+    if !refused || !erased {
+        return Err("the erased import still offers its file".into());
+    }
+    let erased_run = bulk.run(&**client, &admin, ada_import).await?;
+    let erased_undo = write(
+        &app,
+        &admin_login.token,
+        &admin,
+        "base.bulk_data.import.undo",
+        json!({"run_id":ada_import,"version":erased_run.version}),
+    )
+    .await;
+    let erased_undo_allowed = erased_undo.is_ok();
+    show("undo the erased import", erased_undo);
+    if erased_undo_allowed {
+        return Err("the erased import could be undone".into());
+    }
+    let import_get = read(
+        &app,
+        &mut client,
+        &admin,
+        "base.bulk_data.import.get",
+        json!({"run_id": ada_import}),
+    )
+    .await?;
+    let mapping_list = read(
+        &app,
+        &mut client,
+        &admin,
+        "base.bulk_data.mapping.list",
+        json!({"record_type": "core/person.contacts"}),
+    )
+    .await?;
+    println!("import.get after erasure: {import_get}");
+    println!("mapping.list after erasure: {mapping_list}");
+    if import_get["file_name"] != json!("[erased]")
+        || import_get["columns"] != json!([])
+        || !import_get["mapping"].is_null()
+        || import_get.to_string().contains(fixed_value)
+        || mapping_list.to_string().contains(fixed_value)
+        || mapping_list
+            .as_array()
+            .is_none_or(|saved| !saved.is_empty())
+    {
+        return Err("import.get or mapping.list still exposes erased import mapping data".into());
+    }
+    let mapping_deletions: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_audit_mutations WHERE tenant_id=1 AND auditable_type='base/bulk_data.mapping' AND auditable_id=$1::bigint::text AND event='deleted'",
+            &[&saved_mapping_id],
+        )
+        .await?
+        .get(0);
+    println!("saved mapping {saved_mapping_id}: audited deletions={mapping_deletions}");
+    if mapping_deletions != 1 {
+        return Err(
+            "the saved mapping erasure was not recorded once through MutationBoundary".into(),
+        );
+    }
+
     let fresh_export = write(
         &app,
         &admin_login.token,
@@ -1090,7 +1477,7 @@ async fn main() -> Result<()> {
         .as_i64()
         .ok_or("fresh export returned no ID")?;
     for _ in 0..120 {
-        if bulk.export(&**client, &admin, fresh_export).await?.state != ExportState::Running {
+        if bulk.export(&mut client, &admin, fresh_export).await?.state != ExportState::Running {
             break;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1138,6 +1525,16 @@ async fn main() -> Result<()> {
     rows(&client, "requests of person 1", "SELECT row_to_json(r)::text FROM (SELECT id,kind,status,identifiers,verification,refused_reason,export_artifact,erased_at IS NOT NULL AS erased FROM base_privacy_requests WHERE person_id=1 ORDER BY id) r").await?;
     let files = walk(std::path::Path::new(&root));
     println!("files under the media root containing the scan: {}", files);
+    rows(&client, "case attachment", "SELECT row_to_json(a)::text FROM (SELECT subject_id AS case_id,state,erased_at IS NOT NULL AS erased,bytes_removed_at IS NOT NULL AS bytes_removed,EXISTS (SELECT 1 FROM base_media_assets m WHERE m.id=a.media_asset_id) AS asset_row FROM base_media_attachments a WHERE a.subject_type='wt_cases.case' ORDER BY a.id) a").await?;
+    println!(
+        "files under the media root holding Ada's case note: {}, Kim's: {}",
+        holding(std::path::Path::new(&root), b"Ada case note"),
+        holding(std::path::Path::new(&root), b"Kim case note")
+    );
+    println!(
+        "case files of another person, under Ada's grants: {:?}",
+        case_files::refused()
+    );
 
     println!("== read-only search for erased values");
     search(
@@ -1305,6 +1702,61 @@ async fn main() -> Result<()> {
         .await?
         .get(0);
     let lea_id = lea.to_string();
+    // A custom person field with a value of Lea's, written through Core
+    // Person so her audit history holds it too: erasure clears both.
+    {
+        let fields = app
+            .services
+            .get::<bilibi_base::custom_fields::CustomFields>(bilibi_base::custom_fields::SERVICE)?;
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                admin.mutation_context("walkthrough.custom-field"),
+            )
+            .await?;
+        fields
+            .define(
+                &mut tx,
+                &admin,
+                &bilibi_base::custom_fields::NewField {
+                    record_type: "person".into(),
+                    key: "licence_note".into(),
+                    label: "Licence note".into(),
+                    kind: "text".into(),
+                    ..Default::default()
+                },
+            )
+            .await?
+            .map_err(|errors| format!("{errors:?}"))?;
+        tx.commit().await?;
+        let people = app
+            .services
+            .get::<bilibi_core::person::PersonService>(bilibi_core::person::SERVICE)?;
+        let held = people.read(&admin, PersonId::new(lea)?).await?;
+        people
+            .update(
+                &admin,
+                held.id,
+                &bilibi_core::person::Update {
+                    version: held.version,
+                    identity: bilibi_core::person::PersonInput {
+                        name: held.name.clone(),
+                        kind: held.kind,
+                        email: held.email.clone(),
+                        phone: None,
+                    },
+                    custom: [(
+                        "licence_note".to_owned(),
+                        json!("Licence LX-4471 seen in person"),
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            )
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        println!("Lea holds a custom licence note, written through Core Person");
+    }
     let lea_subject = AttachmentSubject {
         kind: person_files::ATTACHMENT_SUBJECT,
         id: &lea_id,
@@ -1402,7 +1854,13 @@ async fn main() -> Result<()> {
     rows(
         &client,
         "Lea",
-        &format!("SELECT row_to_json(p)::text FROM (SELECT name,code,email,erased_at IS NOT NULL AS erased FROM persons WHERE id={lea}) p"),
+        &format!("SELECT row_to_json(p)::text FROM (SELECT name,code,email,custom_fields,erased_at IS NOT NULL AS erased FROM persons WHERE id={lea}) p"),
+    )
+    .await?;
+    rows(
+        &client,
+        "Lea's custom values in her audit history (none may still read LX-4471)",
+        &format!("SELECT row_to_json(a)::text FROM (SELECT event,old_values->'custom' AS old_custom,new_values->'custom' AS new_custom FROM base_audit_mutations WHERE auditable_type='person' AND auditable_id='{lea}' ORDER BY id) a"),
     )
     .await?;
 
@@ -1412,7 +1870,7 @@ async fn main() -> Result<()> {
     client
         .batch_execute(
             "INSERT INTO persons(tenant_id,code,name,kind) VALUES(1,'elsewhere_reviewer','Elsewhere Reviewer','human'); \
-             WITH n AS (SELECT nextval(pg_get_serial_sequence('users','id'))::bigint AS user_id), source AS (SELECT i.password_hash FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.id=4), i AS (INSERT INTO user_identities(kind,email,password_hash,home_tenant_id,home_user_id,last_tenant_id) SELECT 'staff','elsewhere@example.test',source.password_hash,1,n.user_id,1 FROM n CROSS JOIN source RETURNING id,home_user_id) INSERT INTO users(id,tenant_id,identity_id,name,person_id) SELECT i.home_user_id,1,i.id,'Elsewhere Reviewer',p.id FROM i CROSS JOIN persons p WHERE p.code='elsewhere_reviewer' AND p.tenant_id=1; \
+             WITH n AS (SELECT nextval(pg_get_serial_sequence('users','id'))::bigint AS user_id), source AS (SELECT i.password_hash FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.id=4), i AS (INSERT INTO user_identities(kind,email,password_hash,last_tenant_id) SELECT 'staff','elsewhere@example.test',source.password_hash,1 FROM n CROSS JOIN source RETURNING id) INSERT INTO users(id,tenant_id,identity_id,name,person_id) SELECT n.user_id,1,i.id,'Elsewhere Reviewer',p.id FROM i CROSS JOIN n CROSS JOIN persons p WHERE p.code='elsewhere_reviewer' AND p.tenant_id=1; \
              INSERT INTO user_desks(tenant_id,person_id,company_id) SELECT 1,id,2 FROM persons WHERE tenant_id=1 AND code='elsewhere_reviewer'; \
              INSERT INTO principal_roles(tenant_id,user_id,role_id) SELECT 1,u.id,3 FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=1 AND i.email='elsewhere@example.test'; \
              INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(1,3,'privacy.request.view'),(1,3,'privacy.request.approve') ON CONFLICT DO NOTHING;",
@@ -1589,8 +2047,274 @@ async fn main() -> Result<()> {
     )
     .await?;
 
+    withheld_and_held(&privacy, &media, &boundary, &mut client, &admin, one, &root).await?;
+
     stop.send(true)?;
     let _ = workers.await;
+    Ok(())
+}
+
+/// Media keeps a file that has not cleared its malware check, or whose
+/// bytes are gone, out of an export without failing it (#567), and a legal
+/// hold keeps drafts and assets from discard, cleanup and deletion (#599).
+async fn withheld_and_held(
+    privacy: &Privacy,
+    media: &Media,
+    boundary: &MutationBoundary,
+    client: &mut Client,
+    admin: &Scope,
+    one: OrganisationId,
+    root: &str,
+) -> Result<()> {
+    println!("== an export lists a file that is not cleared, or gone, instead of failing (#567)");
+    let max: i64 = client
+        .query_one(
+            "INSERT INTO persons(tenant_id,code,name,kind,email) VALUES(1,'max_withheld','Max Withheld','human','max-withheld@example.test') RETURNING id",
+            &[],
+        )
+        .await?
+        .get(0);
+    let max_id = max.to_string();
+    let subject = AttachmentSubject {
+        kind: person_files::ATTACHMENT_SUBJECT,
+        id: &max_id,
+    };
+    let mut keys = Vec::new();
+    for name in [
+        "max-clean.txt",
+        "max-pending.txt",
+        "max-purged.txt",
+        "max-missing.txt",
+    ] {
+        let file = media
+            .upload_attachment(
+                client,
+                admin,
+                subject,
+                Upload {
+                    filename: name.into(),
+                    bytes: format!("Max file {name}\n").into_bytes(),
+                },
+                Rules::default(),
+            )
+            .await?;
+        let mut tx = boundary
+            .begin(client, admin.mutation_context("privacy.walkthrough.attach"))
+            .await?;
+        media
+            .submit_attachments(&mut tx, admin, subject, &[file.public_id.as_str()])
+            .await?;
+        tx.commit().await?;
+        let row = client
+            .query_one(
+                "SELECT m.id,m.storage_key FROM base_media_attachments a JOIN base_media_assets m ON m.id=a.media_asset_id WHERE a.public_id=$1",
+                &[&file.public_id],
+            )
+            .await?;
+        keys.push((row.get::<_, i64>(0), row.get::<_, String>(1)));
+    }
+    // Stand in for a scan still running, a scanner verdict a manager then
+    // purged, and bytes lost from the disk.
+    client
+        .execute(
+            "UPDATE base_media_assets SET scan_state='pending' WHERE id=$1",
+            &[&keys[1].0],
+        )
+        .await?;
+    client
+        .execute(
+            "UPDATE base_media_assets SET scan_state='infected',purge_requested_at=now(),bytes_purged_at=now() WHERE id=$1",
+            &[&keys[2].0],
+        )
+        .await?;
+    for (_, key) in &keys[2..] {
+        std::fs::remove_file(std::path::Path::new(root).join(key))?;
+    }
+    let request = privacy
+        .receive(
+            client,
+            admin,
+            NewRequest {
+                kind: RequestKind::Access,
+                person: PersonId::new(max)?,
+                identifiers: vec![],
+                company: one,
+            },
+        )
+        .await?;
+    let request = privacy
+        .verify(
+            client,
+            admin,
+            request.id,
+            request.version,
+            "Seen in person",
+            &[],
+        )
+        .await?;
+    let request = privacy
+        .approve(client, admin, request.id, request.version)
+        .await?;
+    let request = settle(privacy, client, admin, request.id, 60).await?;
+    summary(&request);
+    let (_, bytes, _) = privacy
+        .request_document(client, admin, request.id, None)
+        .await?;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+    let bundle: Value = serde_json::from_reader(zip.by_name("export.json")?)?;
+    let files: Vec<&Value> = bundle["stores"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|store| store["files"].as_array().into_iter().flatten())
+        .filter(|file| {
+            file["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("max-"))
+        })
+        .collect();
+    for file in &files {
+        println!("  export file {file}");
+    }
+    let entry = |name: &str| files.iter().find(|file| file["name"] == name).copied();
+    let clean = entry("max-clean.txt").and_then(|file| file["path"].as_str());
+    let clean_bytes = match clean {
+        Some(path) => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut zip.by_name(path)?, &mut text)?;
+            text
+        }
+        None => String::new(),
+    };
+    let reason = |name: &str| entry(name).and_then(|file| file["withheld"].as_str());
+    if request.status != "completed"
+        || clean_bytes != "Max file max-clean.txt\n"
+        || reason("max-pending.txt") != Some("not_cleared")
+        || reason("max-purged.txt") != Some("not_cleared")
+        || reason("max-missing.txt") != Some("missing")
+        || files
+            .iter()
+            .filter(|file| file.get("path").is_some())
+            .count()
+            != 1
+    {
+        return Err(format!(
+            "the export does not withhold Max's files as expected (status {})",
+            request.status
+        )
+        .into());
+    }
+    println!("export completed: the clean file is in the ZIP; pending and purged are not_cleared, the lost one missing");
+
+    println!(
+        "== a legal hold keeps a draft from discard and cleanup, and an asset from deletion (#599)"
+    );
+    let mut drafts = Vec::new();
+    for name in ["max-held-draft.txt", "max-loose-draft.txt"] {
+        drafts.push(
+            media
+                .upload_attachment(
+                    client,
+                    admin,
+                    subject,
+                    Upload {
+                        filename: name.into(),
+                        bytes: format!("Max draft {name}\n").into_bytes(),
+                    },
+                    Rules::default(),
+                )
+                .await?,
+        );
+    }
+    let held_row: i64 = client
+        .query_one(
+            "SELECT id FROM base_media_attachments WHERE public_id=$1",
+            &[&drafts[0].public_id],
+        )
+        .await?
+        .get(0);
+    let draft_hold = privacy
+        .place_hold(
+            client,
+            admin,
+            HoldTarget::Record {
+                kind: bilibi_base::media::ATTACHMENT_KIND.into(),
+                id: held_row,
+            },
+            "Draft under review",
+        )
+        .await?;
+    let discarded = media
+        .discard_draft(client, admin, &drafts[0].public_id)
+        .await;
+    println!("discard the held draft: {discarded:?}");
+    if !matches!(discarded, Err(bilibi_base::media::Error::Held)) {
+        return Err("a held draft was discarded".into());
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let cleaned = media
+        .cleanup_drafts(client, 1, Duration::from_secs(1))
+        .await?;
+    let mut left = Vec::new();
+    for draft in &drafts {
+        let found: i64 = client
+            .query_one(
+                "SELECT count(*) FROM base_media_attachments WHERE public_id=$1",
+                &[&draft.public_id],
+            )
+            .await?
+            .get(0);
+        left.push(found);
+    }
+    let (held_left, loose_left) = (left[0], left[1]);
+    println!("cleanup removed {} draft(s): the held one stays ({held_left}), the loose one goes ({loose_left})", cleaned.removed);
+    if held_left != 1 || loose_left != 0 {
+        return Err("cleanup did not respect the draft's hold".into());
+    }
+    privacy
+        .release_hold(client, admin, draft_hold.id, "Review done")
+        .await?;
+    let discarded = media
+        .discard_draft(client, admin, &drafts[0].public_id)
+        .await;
+    println!("after release, discard: {discarded:?}");
+    discarded?;
+
+    let asset = media
+        .put_upload(
+            client,
+            admin,
+            "local",
+            "walkthrough",
+            Upload {
+                filename: "max-public.txt".into(),
+                bytes: b"Max public note\n".to_vec(),
+            },
+            None,
+        )
+        .await?;
+    let asset_hold = privacy
+        .place_hold(
+            client,
+            admin,
+            HoldTarget::Record {
+                kind: bilibi_base::media::ASSET_KIND.into(),
+                id: asset.id,
+            },
+            "Asset under review",
+        )
+        .await?;
+    let deleted = media.delete_asset(client, admin, asset.id).await;
+    println!("delete the held asset: {deleted:?}");
+    if !matches!(deleted, Err(bilibi_base::media::Error::Held)) {
+        return Err("a held asset was deleted".into());
+    }
+    privacy
+        .release_hold(client, admin, asset_hold.id, "Review done")
+        .await?;
+    let deleted = media.delete_asset(client, admin, asset.id).await;
+    println!("after release, delete: {deleted:?}");
+    deleted?;
     Ok(())
 }
 /// Downloads a certificate and prints the readable lines of its PDF text.

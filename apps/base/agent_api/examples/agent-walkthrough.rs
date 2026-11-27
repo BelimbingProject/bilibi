@@ -39,8 +39,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let admin = app.security.guard(&admin_login.token).await?;
     let viewer = app.security.guard(&viewer_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
-    let client = db.get().await?;
-    let client: &tokio_postgres::Client = &client;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
+    let client: &mut tokio_postgres::Client = &mut client;
     let key = "base.agent_api.reference.read";
     let cap = "base.agent-api.reference.view";
     println!(
@@ -154,7 +156,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         registry.call(client, &viewer, key, &json!({})).await
     );
     grants
-        .set_direct(&admin, viewer.user(), cap, Some(true))
+        .set_direct(
+            &admin,
+            viewer.user(),
+            cap,
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
+        )
         .await?;
     println!(
         "viewer granted: {}",
@@ -170,7 +179,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         registry.call(client, &viewer, key, &json!({})).await
     );
     grants
-        .set_direct(&admin, admin.user(), cap, Some(false))
+        .set_direct(
+            &admin,
+            admin.user(),
+            cap,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     println!(
         "admin deny overrides grant_all: {:?}",

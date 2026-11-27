@@ -6,6 +6,21 @@ use bilibi_user::{IdentityConfiguration, UserService};
 use serde_json::json;
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
+async fn set_fixture_password(
+    db: &bilibi_database::Db,
+    user: i64,
+    password: &str,
+) -> bilibi_database::Result<()> {
+    let hash = bilibi_user::hash_password(password)?;
+    db.get()
+        .await?
+        .execute(
+            "UPDATE user_identities SET password_hash=$2 WHERE id=(SELECT identity_id FROM users WHERE id=$1)",
+            &[&user, &hash],
+        )
+        .await?;
+    Ok(())
+}
 // Extend only the disposable fixture's manager role, never product roles.
 inventory::submit! {bilibi_module_registry::Contribution::new(bilibi_authz::VOCABULARY,"walkthrough.sso",bilibi_module_registry::Provenance{module:"base/authz",source:file!(),line:line!()},&bilibi_authz::VocabularyContribution{domains:&[],verbs:&[],capabilities:&[],roles:&[bilibi_authz::RoleDefinition{code:"manager",name:"manager",description:"Walkthrough fixture role",grant_all:false,capabilities:&["admin.user.sso.manage","admin.authz.role.update","admin.authz.role.list"]}],system_principals:&[]})}
 #[tokio::main]
@@ -214,7 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .get(0);
             drop(client);
             let fallback = std::env::var("BILIBI_SSO_LOCAL_PASSWORD")?;
-            users.set_password(&scope, user, &fallback).await?;
+            set_fixture_password(&db, user, &fallback).await?;
             println!(
                 "linked password admitted: {}",
                 users
@@ -293,7 +308,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?
                 .get(0);
             let fallback = std::env::var("BILIBI_SSO_LOCAL_PASSWORD")?;
-            users.set_password(&scope, member, &fallback).await?;
+            set_fixture_password(&db, member, &fallback).await?;
             client
                 .execute(
                     "UPDATE user_identity_providers SET sealed_runtime='{\"version\":1}'::jsonb WHERE tenant_id=$1 AND id=1",
@@ -381,7 +396,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .token,
                 )
                 .await?;
-            users.delete_account(&admin, scope.user()).await?;
+            users.remove_membership(&admin, scope.user()).await?;
             let password = bilibi_walkthrough_fixture::PASSWORD;
             println!(
                 "company member password admitted: {}",

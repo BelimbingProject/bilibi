@@ -15,10 +15,7 @@ use bilibi_database::MutationTransaction;
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 static MEDIA: OnceLock<Arc<Media>> = OnceLock::new();
 /// Bound once at boot by the `base/media.agent` service.
@@ -29,19 +26,18 @@ fn media() -> bilibi_agent_api::Result<&'static Arc<Media>> {
     MEDIA.get().ok_or(bilibi_database::Error::Internal.into())
 }
 
-fn field_error(field: &str, message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([(field.into(), vec![message.into()])]))
-}
 /// A refusal in the words of the field it is about; other failures keep
 /// their shared meaning (forbidden, unavailable).
 pub(crate) fn refusal(error: Error) -> AgentError {
     match error {
-        Error::NotFound => field_error("file_id", "is not a stored file of this tenant"),
+        Error::NotFound => {
+            bilibi_agent_api::invalid("file_id", "is not a stored file of this tenant")
+        }
         Error::NoScanner
         | Error::AlreadyClean
         | Error::Purged
         | Error::NotPurgeable
-        | Error::InvalidRules => field_error("file_id", &error.to_string()),
+        | Error::InvalidRules => bilibi_agent_api::invalid("file_id", error.to_string()),
         Error::Database(error) => error.into(),
         _ => bilibi_database::Error::Internal.into(),
     }
@@ -68,7 +64,7 @@ fn file_id(input: &Value) -> bilibi_agent_api::Result<i64> {
     input["file_id"]
         .as_i64()
         .filter(|id| *id > 0)
-        .ok_or_else(|| field_error("file_id", "must be a positive integer"))
+        .ok_or_else(|| bilibi_agent_api::invalid("file_id", "must be a positive integer"))
 }
 
 struct List;
@@ -84,7 +80,7 @@ impl ReadHandler for List {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let states = states(input["state"].as_str().unwrap_or_default()).ok_or_else(|| {
-                field_error(
+                bilibi_agent_api::invalid(
                     "state",
                     "must be attention, infected, failed, pending, unscanned or all",
                 )
@@ -93,6 +89,7 @@ impl ReadHandler for List {
             let query = QuarantineQuery {
                 states: &states,
                 search: input["search"].as_str().unwrap_or_default(),
+                before: input["before"].as_i64(),
                 offset: input["offset"].as_i64().unwrap_or(0),
                 limit: input["limit"].as_i64().unwrap_or(100),
             };
@@ -103,6 +100,7 @@ impl ReadHandler for List {
             Ok(Output::Data(Data::Json(json!({
                 "scanner_installed": media.scanning(),
                 "total": page.total,
+                "more": page.more,
                 "files": page.files.iter().map(|file| file.to_json()).collect::<Vec<_>>(),
             }))))
         })
@@ -187,7 +185,8 @@ fn list_schema() -> Value {
     json!({"type":"object","properties":{
         "state":{"type":"string","enum":["attention","infected","failed","pending","unscanned","all"],"description":"attention (default): infected and failed files; or one state; or all files that are not clean"},
         "search":{"type":"string","maxLength":255,"description":"Part of the file name, any case"},
-        "offset":{"type":"integer","minimum":0,"description":"Matching files to skip, newest first, for the next page; default 0"},
+        "before":{"type":"integer","minimum":1,"description":"Only files with a smaller id: pass the last id of the previous page to read on, also past the first 10,000"},
+        "offset":{"type":"integer","minimum":0,"description":"Matching files to skip, newest first; default 0. Files past the first 10,000 are reached with before, not offset"},
         "limit":{"type":"integer","minimum":1,"maximum":MAX_LISTED,"description":"Newest first; default 100"}
     }})
 }
@@ -197,7 +196,7 @@ fn file_schema() -> Value {
     }})
 }
 fn list_output() -> Value {
-    json!({"type":"object","description":"scanner_installed, total (every matching file, not only this page), and each file: id, filename, type, size, scan_state, scanner and version, signature (infected), reason (failed or unscanned: too_large, scanner_unavailable, file_unavailable, scan_error), scanned_at, purge_requested_at (when a manager purged it), purged_at (when its contents were removed), created_at, uploaded_by_id and, for a private attachment, its subject."})
+    json!({"type":"object","description":"scanner_installed, total (every matching file, not only this page, counted up to 10,000), more (more than 10,000 match), and each file: id, filename, type, size, scan_state, scanner and version, signature (infected), reason (failed or unscanned: too_large, scanner_unavailable, file_unavailable, scan_error), scanned_at, purge_requested_at (when a manager purged it), purged_at (when its contents were removed), created_at, uploaded_by_id (the account that stored it) or uploaded_by_principal (the system principal that did) and, for a private attachment, its subject."})
 }
 fn write_output() -> Value {
     json!({"type":"object","description":"The file's scan facts after the write: scan_state, scanner, scanner_version, signature, reason, purge_requested (purged: nobody can open or rescan it, and its contents are removed right after the commit) and purged (its contents are gone)."})
@@ -213,5 +212,5 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/media", Provenance { m
         Operation { key:"base.media.quarantine.purge", title:"Purge a quarantined file", summary:"Remove the contents of a quarantined or failed file for good: from the commit nobody can open or rescan it, and its contents are removed right after. Its record, verdict and audit trail stay as evidence; a repeat does nothing once the contents are gone.", keywords:&["malware","quarantine","purge","delete","infected"], capability:MANAGE, input:file_schema, output:write_output, handler:Handler::SafeWrite(&PURGE), channels:Channels::Every, step_up:&[] },
     ],
     guides: &[Guide { key:"base.media.quarantine", title:"Quarantined files", summary:"Find files a malware scan held back, rescan or purge them.", keywords:&["malware","virus","scan","quarantine","upload"], capability:VIEW,
-        body:"When a malware scanner is installed, every uploaded file is scanned before anyone can open it. List the files that need attention with base.media.quarantine.list (state attention: infected and failed; search by file name, and page with offset while total is larger). An infected file failed the scan: purge its contents with base.media.quarantine.purge, or rescan it with base.media.quarantine.rescan if the scanner has since been corrected. A failed file could not be scanned (the scanner was down, or the file was larger than it accepts): rescan it once the scanner is back. Before turning on the required policy, list state unscanned and rescan those files, or nobody can open them. Plan, show the review to the person, then commit." }],
+        body:"When a malware scanner is installed, every uploaded file is scanned before anyone can open it. List the files that need attention with base.media.quarantine.list (state attention: infected and failed; search by file name, and read on with before set to the last id while a page comes back full). An infected file failed the scan: purge its contents with base.media.quarantine.purge, or rescan it with base.media.quarantine.rescan if the scanner has since been corrected. A failed file could not be scanned (the scanner was down, or the file was larger than it accepts): rescan it once the scanner is back. Before turning on the required policy, list state unscanned and rescan those files, or nobody can open them. Plan, show the review to the person, then commit." }],
 }) }

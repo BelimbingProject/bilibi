@@ -8,7 +8,8 @@ use bilibi_ui::{
     list_columns::ListColumns,
     Alert, BackLink, Badge, BadgeKind, Button, ButtonVariant, ConfirmDialog, CreateButton,
     EmptyState, Field, FilterToolbar, FlashGroup, FlashMap, Form, Header, Icon, IconButton,
-    IconKind, InputKind, PageCounts, Pagination, StatusKind, TableEmpty, ToolbarControl,
+    IconKind, InputKind, PageCounts, Pagination, RecordLink, StatusKind, TableEmpty,
+    ToolbarControl,
 };
 use serde_json::Value;
 
@@ -21,15 +22,6 @@ struct IndexView {
     table: Html,
     pagination: Html,
     confirm: Html,
-}
-#[derive(Template)]
-#[template(
-    source = r#"<a href="{{ href }}" class="font-medium text-action hover:underline">{{ name }}</a>"#,
-    ext = "html"
-)]
-struct QueryLink<'a> {
-    href: &'a str,
-    name: &'a str,
 }
 #[derive(Template)]
 #[template(
@@ -83,7 +75,6 @@ fn confirm(pending: bool, name: &str) -> Result<Html> {
         cancel_event: "cancel_delete",
     })
 }
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn index(
     pages: &Pages,
     scope: &Scope,
@@ -109,9 +100,13 @@ pub(super) async fn index(
         let mut result = FlexRow::new(&key)
             .slot(
                 "name",
-                fragment(&QueryLink {
+                fragment(&RecordLink {
+                    workspace: false,
+                    kind: "",
+                    record_id: &key,
                     href: &format!("{ROOT}/{}", query.slug),
-                    name: &query.name,
+                    class: "font-medium text-action hover:underline",
+                    body: Html::text(&query.name),
                 })?,
             )
             .slot(

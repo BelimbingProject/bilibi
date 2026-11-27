@@ -204,6 +204,31 @@ pub const DEMOTED_ACTION_CLASS: &str = "inline-flex items-center gap-1 whitespac
 /// The default `count` of `section_heading`: no badge.
 pub const NO_COUNT: Option<usize> = None;
 
+/// A live panel target for hosts that place a panel outside the section stack.
+/// The stable wrapper preserves the provider's fragment during parent patches.
+#[derive(Template, Debug)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::live_panel_anchor(id=id) %}{% endcall %}"#,
+    ext = "html"
+)]
+pub struct LivePanelAnchor<'a> {
+    pub id: &'a str,
+}
+
+/// Record sections followed by live panels, with the standard section gap.
+/// Pass only the bottom-stack `PanelSpec::id` values, once each, in display
+/// order. Render header and other standalone targets with `LivePanelAnchor`.
+/// See the panel layout contract in `docs/live-pages.md`.
+#[derive(Template, Debug)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::live_panel_stack(parts=parts, panel_ids=panel_ids) %}{% endcall %}"#,
+    ext = "html"
+)]
+pub struct LivePanelStack<'a> {
+    pub parts: &'a [Html],
+    pub panel_ids: &'a [&'a str],
+}
+
 fn class_tokens(class: &str) -> impl Iterator<Item = &str> {
     class.split_whitespace()
 }
@@ -423,6 +448,25 @@ impl Badge<'_> {
     }
 }
 
+/// Render a dotted status badge of `kind` showing `text`.
+///
+/// Shared helper: `.slot("status", bilibi_ui::status_badge(BadgeKind::Success, "Posted"))`
+pub fn status_badge(kind: BadgeKind, text: &str) -> Html {
+    // Only escaped text is written to a String, so rendering cannot fail.
+    Html::render(&Badge::status(kind, text)).unwrap_or(Html::EMPTY)
+}
+
+/// Render the Active (success) or Inactive (neutral) status badge.
+///
+/// Shared helper: `.slot("status", bilibi_ui::active_badge(account.active))`
+pub fn active_badge(active: bool) -> Html {
+    if active {
+        status_badge(BadgeKind::Success, "Active")
+    } else {
+        status_badge(BadgeKind::Neutral, "Inactive")
+    }
+}
+
 /// What a date is, as a day tile shows it: Belimbing's day-type vocabulary
 /// (Normal, Rest, Off, Holiday). Base UI keeps the four kinds itself so it
 /// imports no calendar module; a calendar maps its own type onto one.
@@ -508,7 +552,7 @@ pub struct DayMonth<'a> {
 /// shows while the click's round trip is in flight.
 #[derive(Template, Debug, Default)]
 #[template(
-    source = r#"{% import "components.html" as ui %}{% call ui::button(variant=variant, class=class, href=href, id=id, button_type=button_type, name=name, value=value, disabled=disabled, busy=busy, aria_busy=aria_busy, event=event, working=working, download=download) %}{{ body|safe }}{% endcall %}"#,
+    source = r#"{% import "components.html" as ui %}{% call ui::button(variant=variant, class=class, href=href, id=id, button_type=button_type, name=name, value=value, disabled=disabled, busy=busy, aria_busy=aria_busy, event=event, working=working, download=download, data_key=data_key) %}{{ body|safe }}{% endcall %}"#,
     ext = "html"
 )]
 pub struct Button<'a> {
@@ -529,6 +573,9 @@ pub struct Button<'a> {
     /// With `href`, the link saves its target under this file name instead
     /// of opening it (a `data:` text file the page itself built).
     pub download: &'a str,
+    /// Sent with the event as `key` (`data-value-key`): which of several
+    /// like controls raised it, such as the field a record picker serves.
+    pub data_key: &'a str,
     pub body: Html,
 }
 
@@ -758,6 +805,17 @@ pub struct Fact<'a> {
 pub struct Facts<'a> {
     pub id: &'a str,
     pub items: Vec<Fact<'a>>,
+}
+
+/// Read-only key facts contributed to a record page. Empty strips disappear.
+#[derive(Template, Debug, Default)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% if !items.is_empty() %}{% call ui::stat_strip(id=id, title="Key facts", items=items) %}{% endcall %}{% endif %}"#,
+    ext = "html"
+)]
+pub struct RecordFacts<'a> {
+    pub id: &'a str,
+    pub items: Vec<StatItem>,
 }
 
 /// A compact strip of related statistics; `href` makes it a quiet link.

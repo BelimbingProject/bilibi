@@ -23,6 +23,10 @@ pub struct Searchable {
     pub table: &'static str,
     /// The field a hit is named by; operators cannot restrict it.
     pub title: &'static str,
+    /// Match inside the protected title and accept close spellings. The
+    /// owner's Grid source must expose a title indexed with `lower(title)`
+    /// and `gin_trgm_ops` in the owner's migration.
+    pub title_trigrams: bool,
     /// Up to two fields shown under the title, each left out for a reader
     /// whose role restricts it.
     pub subtitle: &'static [&'static str],
@@ -36,12 +40,16 @@ pub struct Searchable {
     /// a hit is offered only to a reader that route admits.
     pub link: &'static str,
     /// Marks the records that are no longer current, which stay findable,
-    /// ranked after current ones and labelled with their state.
+    /// ranked after current ones in the same match tier and labelled with their state.
     pub state: Option<State>,
     /// The date or time the results page shows as Updated.
     pub updated: Option<&'static str>,
     /// Whether the kind is searched until an operator says otherwise.
     pub default_on: bool,
+    /// The hidden Grid field holding a stored `tsvector` of the row's tenant
+    /// custom values (`jsonb_to_tsvector` over `custom_fields`), GIN-indexed.
+    /// A record matches on it only through the tenant's active text fields.
+    pub custom: Option<&'static str>,
 }
 
 /// A field whose listed values mean the record is retired or archived.
@@ -61,6 +69,7 @@ impl Searchable {
         Self {
             table,
             title,
+            title_trigrams: false,
             subtitle: &[],
             vector,
             prefix: &[],
@@ -68,11 +77,18 @@ impl Searchable {
             state: None,
             updated: None,
             default_on: true,
+            custom: None,
         }
     }
     pub const fn subtitle(self, fields: &'static [&'static str]) -> Self {
         Self {
             subtitle: fields,
+            ..self
+        }
+    }
+    pub const fn title_trigrams(self) -> Self {
+        Self {
+            title_trigrams: true,
             ..self
         }
     }
@@ -91,6 +107,14 @@ impl Searchable {
     pub const fn updated(self, field: &'static str) -> Self {
         Self {
             updated: Some(field),
+            ..self
+        }
+    }
+    /// Also find records by the tenant's custom text fields, through the
+    /// hidden custom-values vector `field`.
+    pub const fn custom(self, field: &'static str) -> Self {
+        Self {
+            custom: Some(field),
             ..self
         }
     }
@@ -175,13 +199,10 @@ pub(crate) fn validate(entries: &[Entry]) -> Result<()> {
             .chain(decl.prefix.iter().copied())
             .chain(decl.state.map(|state| state.field))
             .chain(decl.updated);
-        if !bilibi_grid::model::id_valid(decl.table) {
+        if !bilibi_grid::id_valid(decl.table) {
             return Err(invalid(at, format!("invalid table id {}", decl.table)));
         }
-        if let Some(field) = fields
-            .clone()
-            .find(|field| !bilibi_grid::model::id_valid(field))
-        {
+        if let Some(field) = fields.clone().find(|field| !bilibi_grid::id_valid(field)) {
             return Err(invalid(at, format!("invalid field id {field}")));
         }
         if decl.subtitle.len() > MAX_SUBTITLE || decl.prefix.len() > MAX_PREFIX {
@@ -251,9 +272,6 @@ pub(crate) fn installed(catalog: &Catalog) -> Result<&'static [Kind]> {
             .find(|route| route.method == Method::Get && route.path == decl.link)
             .map(|route| route.access)
             .ok_or_else(|| invalid(at, format!("link {} is no page route", decl.link)))?;
-        if matches!(access.base(), Access::Public) {
-            return Err(invalid(at, format!("link {} is a public page", decl.link)));
-        }
         kinds.push(Kind {
             id: decl.table,
             label: table.label(),
@@ -282,11 +300,21 @@ fn check_fields(table: &Table, decl: &Searchable) -> std::result::Result<(), Str
             decl.title
         ));
     }
+    if decl.title_trigrams && title.ty != FieldType::String {
+        return Err(format!("trigram title {} must be text", decl.title));
+    }
     if !field(decl.vector)?.hidden {
         return Err(format!(
             "vector {} must be a hidden grid field",
             decl.vector
         ));
+    }
+    if let Some(custom) = decl.custom {
+        if !field(custom)?.hidden {
+            return Err(format!(
+                "custom vector {custom} must be a hidden grid field"
+            ));
+        }
     }
     for id in decl.subtitle {
         if field(id)?.hidden {

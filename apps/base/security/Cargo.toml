@@ -13,3 +13,6 @@ inventory.workspace = true
 bilibi-tenancy = { path = "../tenancy" }
 bilibi-session = { path = "../session" }
 bilibi-authz = { path = "../authz" }
+
+[lints]
+workspace = true

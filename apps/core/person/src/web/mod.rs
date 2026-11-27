@@ -1,5 +1,6 @@
 //! Person-owned screens. Contacts work independently of People or accounts.
 mod create;
+mod custom;
 mod detail;
 mod index;
 mod panels;
@@ -22,7 +23,7 @@ pub const SERVICE: &str = "core/person.pages";
 // Every write these pages make is a Person contract (ADR 01).
 inventory::submit! { bilibi_module_registry::Contribution::new(PAGE_WRITES, SERVICE, bilibi_module_registry::Provenance { module: "core/person", source: file!(), line: line!() }, &PageWrites {
     service: SERVICE,
-    contracts: &[("create", "core.person.create"), ("save_field", "core.person.update"), ("retire", "core.person.retire"),
+    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ("create", "core.person.create"), ("save_field", "core.person.update"), ("save_custom_field", "core.person.update"), ("pick_custom_reference", "core.person.update"), ("clear_custom_reference", "core.person.update"), ("retire", "core.person.retire"),
         ("reveal", "base.privacy.field.reveal"), ("export", "base.bulk_data.export.start"), ("export_selected", "base.bulk_data.export.start"), ("bulk_update", "base.bulk_data.update.start")],
     pending: Pending::None,
 }) }
@@ -188,21 +189,6 @@ fn id(values: &HashMap<String, String>) -> Result<PersonId> {
 fn render(template: impl Template) -> Result<Html> {
     Html::render(&template).map_err(|_| Error::Internal)
 }
-fn values(event: &Value) -> HashMap<String, String> {
-    event
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(key, value)| {
-            let value = match value {
-                Value::String(text) => text.clone(),
-                Value::Number(number) => number.to_string(),
-                _ => return None,
-            };
-            Some((key.clone(), value))
-        })
-        .collect()
-}
 fn event(event: &Value) -> Result<&str> {
     event
         .get("type")
@@ -297,11 +283,11 @@ impl LiveState<Scope, Error> for Reactive {
 }
 
 // Columns extend the list vocabulary.
-bilibi_ui::record_fields! { pub(crate) mod fields {
-    CODE: bilibi_ui::RecordField::new("code", "Code"),
-    NAME: bilibi_ui::RecordField::new("name", "Name"),
-    KIND: bilibi_ui::RecordField::new("kind", "Kind"),
-    IDENTITY: bilibi_ui::RecordField::new("identity", "Identity"),
-    EMAIL: bilibi_ui::RecordField::new("email", "Personal email"),
-    PHONE: bilibi_ui::RecordField::new("phone", "Personal phone"),
+bilibi_ui::record_fields! { "core/person", pub(crate) mod fields {
+    CODE: bilibi_ui::RecordField::new("code", "Code", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Identifier),
+    NAME: bilibi_ui::RecordField::new("name", "Name", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Name),
+    KIND: bilibi_ui::RecordField::new("kind", "Kind", bilibi_ui::RecordFieldType::Enum).choices(&["human", "agent"]),
+    IDENTITY: bilibi_ui::RecordField::new("identity", "Identity", bilibi_ui::RecordFieldType::String),
+    EMAIL: bilibi_ui::RecordField::new("email", "Personal email", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Email),
+    PHONE: bilibi_ui::RecordField::new("phone", "Personal phone", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Phone),
 } }

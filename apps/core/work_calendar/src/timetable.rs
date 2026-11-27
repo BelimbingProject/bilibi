@@ -4,7 +4,7 @@
 //! request sees a saved change.
 //!
 //! Periods are wall-clock minutes in the zone of the rule version in force,
-//! turned into UTC instants by `Period::bounds`' rules: a time in a
+//! turned into UTC instants by the owner's wall-clock rules: a time in a
 //! daylight-saving gap starts at the first valid instant, a time in a fold
 //! uses the earlier one. Business time is real elapsed time, so a period
 //! across a clock change is an hour longer or shorter.
@@ -15,7 +15,7 @@ use crate::{
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use jiff::{
-    civil::Date,
+    civil::{Date, DateTime},
     tz::{AmbiguousOffset, TimeZone},
     SignedDuration, Timestamp, ToSpan,
 };
@@ -24,14 +24,15 @@ use tokio_postgres::GenericClient;
 
 /// The widest window one load reads.
 pub const MAX_WINDOW_DAYS: i64 = 731;
-/// The furthest a search looks ahead.
+/// The furthest the first opening may lie from the start of a search, in
+/// either direction. Counting a budget is bounded by the loaded window.
 pub const SEARCH_DAYS: i64 = 366;
 
 /// Why an answer could not be given.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum TimeError {
-    /// The answer lies past the loaded window or 366 days ahead (or the
-    /// calendar has no working time at all). Load a later window.
+    /// The answer lies past the loaded window or the 366-day limit on the first
+    /// opening (or the calendar has no working time at all). Load the needed window.
     #[error("The answer lies beyond the loaded window or the search limit")]
     Beyond,
     #[error("The start is after the end")]
@@ -67,6 +68,9 @@ pub(crate) fn instant(tz: &TimeZone, date: Date, minutes: u16) -> Result<Timesta
         0,
         0,
     );
+    wall_time(tz, civil)
+}
+fn wall_time(tz: &TimeZone, civil: DateTime) -> Result<Timestamp> {
     let at = match tz.to_ambiguous_timestamp(civil).offset() {
         AmbiguousOffset::Unambiguous { offset } => offset.to_timestamp(civil),
         AmbiguousOffset::Fold { before, .. } => before.to_timestamp(civil),
@@ -158,7 +162,7 @@ impl Timetable {
             Ok(())
         }
     }
-    /// The furthest instant a search from `t` may reach.
+    /// The furthest instant the first opening of a search from `t` may be at.
     fn limit(window: &Window, t: Timestamp) -> Timestamp {
         t.checked_add(SignedDuration::from_hours(SEARCH_DAYS * 24))
             .map_or(window.end, |far| far.min(window.end))
@@ -190,7 +194,11 @@ impl Timetable {
 
     /// `d` of business time after `t`, counted from `t` or, if closed, from
     /// the next opening. A result exactly at a closing time stays there ("due
-    /// 18:00 today", not "09:00 tomorrow"); `add(t, 0)` is `t`.
+    /// 18:00 today", not "09:00 tomorrow"); `add(t, 0)` is `t`. The first
+    /// opening must lie within 366 days of `t`; counting then runs to the end
+    /// of the loaded window, so a budget beyond a year succeeds when the window
+    /// holds enough working time.
+    /// Negative durations are `Negative`; use `shift` for signed budgets.
     pub fn add(
         &self,
         t: Timestamp,
@@ -205,7 +213,6 @@ impl Timetable {
         let Some(window) = &self.window else {
             return t.checked_add(d).map_err(|_| TimeError::Beyond);
         };
-        let limit = Self::limit(window, t);
         let mut cursor = self.next_open(t)?;
         let mut index = window.open.partition_point(|(start, _)| *start <= cursor) - 1;
         let mut remaining = d;
@@ -213,22 +220,63 @@ impl Timetable {
             let (_, close) = window.open[index];
             let available = cursor.duration_until(close);
             if remaining <= available {
-                let due = cursor
-                    .checked_add(remaining)
-                    .map_err(|_| TimeError::Beyond)?;
-                return if due <= limit {
-                    Ok(due)
-                } else {
-                    Err(TimeError::Beyond)
-                };
+                return cursor.checked_add(remaining).map_err(|_| TimeError::Beyond);
             }
             remaining -= available;
             index += 1;
             match window.open.get(index) {
-                Some((start, _)) if *start < limit => cursor = *start,
-                _ => return Err(TimeError::Beyond),
+                Some((start, _)) => cursor = *start,
+                None => return Err(TimeError::Beyond),
             }
         }
+    }
+
+    /// Shift by signed business time. Positive and zero durations follow
+    /// `add`; negative durations count backwards from `t`, or from the
+    /// previous close when closed. An exact opening boundary stays there.
+    /// Either direction needs its first opening within 366 elapsed days of
+    /// `t` and counts the budget to the edge of the loaded window (at most 731
+    /// days), so a retained budget beyond a year succeeds when the window holds
+    /// the working time; a calendar without enough is `Beyond`. The clock
+    /// shifts by elapsed time, without a calendar search limit.
+    pub fn shift(
+        &self,
+        t: Timestamp,
+        d: SignedDuration,
+    ) -> std::result::Result<Timestamp, TimeError> {
+        if !d.is_negative() {
+            return self.add(t, d);
+        }
+        let Some(window) = &self.window else {
+            return t.checked_add(d).map_err(|_| TimeError::Beyond);
+        };
+        Self::inside(window, t)?;
+        let reach = t
+            .checked_sub(SignedDuration::from_hours(SEARCH_DAYS * 24))
+            .map_or(window.start, |far| far.max(window.start));
+        let mut cursor = t;
+        let mut remaining = d;
+        let mut counting = false;
+        for &(start, close) in window.open.iter().rev() {
+            if start >= cursor {
+                continue;
+            }
+            cursor = cursor.min(close);
+            // Only the previous close is held to 366 days; counting runs on.
+            if !counting && cursor <= reach {
+                break;
+            }
+            counting = true;
+            // Keep the remaining budget negative, including its minimum
+            // representable value: negating it could overflow.
+            let available = cursor.duration_until(start);
+            if remaining >= available {
+                return cursor.checked_add(remaining).map_err(|_| TimeError::Beyond);
+            }
+            remaining -= available;
+            cursor = start;
+        }
+        Err(TimeError::Beyond)
     }
 
     /// Business time in `[a, b)`.
@@ -289,6 +337,57 @@ impl Timetable {
             }
         }
         Err(TimeError::Beyond)
+    }
+
+    /// Add working dates using `add_working_days`, preserving `t`'s local
+    /// time (including subsecond precision) in the destination date's zone,
+    /// capped at that date's final close, which may be after midnight.
+    /// Before-open times and breaks stay as given. Gaps use the first valid
+    /// instant and folds the earlier one, just as opening periods do.
+    /// The source date is read in its own rule's zone; if a zone change
+    /// repeats a date boundary, the later matching date wins; if it skips
+    /// one, `t` moves to the first valid instant, the next date's start.
+    /// Zero follows the date operation (roll forward if non-working, cap at
+    /// close). The clock adds `n * 24` elapsed hours and preserves zero.
+    pub fn add_working_days_at(
+        &self,
+        t: Timestamp,
+        n: u32,
+    ) -> std::result::Result<Timestamp, TimeError> {
+        let Some(window) = &self.window else {
+            return t
+                .checked_add(SignedDuration::from_hours(i64::from(n) * 24))
+                .map_err(|_| TimeError::Beyond);
+        };
+        Self::inside(window, t)?;
+        let local = window
+            .days
+            .iter()
+            .rev()
+            .find_map(|day| {
+                let local = t.to_zoned(zone(&day.timezone).ok()?);
+                (local.date() == day.date).then_some(local)
+            })
+            .or_else(|| {
+                window.days.iter().find_map(|day| {
+                    let tz = zone(&day.timezone).ok()?;
+                    let start = instant(&tz, day.date, 0).ok()?;
+                    (start > t).then(|| start.to_zoned(tz))
+                })
+            })
+            .ok_or(TimeError::Beyond)?;
+        let date = self.add_working_days(local.date(), n)?;
+        let day = self.day(date).ok_or(TimeError::Beyond)?;
+        let tz = zone(&day.timezone).map_err(|_| TimeError::Beyond)?;
+        let close = day.periods.last().ok_or(TimeError::Beyond)?;
+        let close = instant(&tz, date, close.end).map_err(|_| TimeError::Beyond)?;
+        let due = wall_time(&tz, date.to_datetime(local.time()))
+            .map_err(|_| TimeError::Beyond)?
+            .min(close);
+        if due < window.start || due > window.end {
+            return Err(TimeError::Beyond);
+        }
+        Ok(due)
     }
 }
 

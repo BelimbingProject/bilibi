@@ -3,10 +3,10 @@ use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribu
 use bilibi_database::Error;
 use bilibi_grid::{Field, FieldType, GridContribution, Source, TableDecl};
 use bilibi_module_registry::contributions::{
-    Access, CompanyScope, Embed, EmbedContext, Method, PageWrites, Pending, Route, EMBEDS,
-    PAGE_WRITES, ROUTES,
+    Access, CompanyScope, CredentialPath, Embed, EmbedContext, Method, PageWrites, Pending, Route,
+    CREDENTIAL_PATHS, EMBEDS, PAGE_WRITES, ROUTES,
 };
-use bilibi_module_registry::{Contribution, Provenance};
+use bilibi_module_registry::Contribution;
 use bilibi_records::{Holder, RecordKind, RecordOwner};
 use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
 use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
@@ -35,18 +35,20 @@ pub const REMINDER_EMAIL: &str = "core.activity.reminder_email";
 
 macro_rules! provenance {
     () => {
-        Provenance {
-            module: MODULE,
+        $crate::contributions::Provenance {
+            module: $crate::MODULE,
             source: file!(),
             line: line!(),
         }
     };
 }
+pub(crate) use bilibi_module_registry::Provenance;
+pub(crate) use provenance;
 
 // `view` and `manage` are the Platform's verbs.
 inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &VocabularyContribution {
     domains: &["core"], verbs: &[],
-    capabilities: &[C::tenant(VIEW), C::tenant(VIEW_ALL), C::tenant(MANAGE), C::tenant(MANAGE_ALL)],
+    capabilities: &[C::tenant(VIEW), C::tenant(VIEW_ALL).with_reach(), C::tenant(MANAGE), C::tenant(MANAGE_ALL).with_reach(), C::tenant(crate::MANAGE_FEEDS), C::tenant(crate::SYSTEM_CREATE)],
     roles: &[RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: OWNER_CAPABILITIES }],
     system_principals: &[],
 }) }
@@ -78,6 +80,9 @@ inventory::submit! { Contribution::new(DEFINITIONS, REMINDER_EMAIL, provenance!(
 // Events, documents the payload.
 inventory::submit! { Contribution::new(bilibi_events::EVENTS, crate::HAPPENED, provenance!(), &bilibi_events::EventType { version: 1 }) }
 
+const LIST_PATH: &str = "/activities";
+pub(crate) const CALENDAR_ADDRESS: &str = "/activities?display=calendar";
+
 // Grid reads with the reader's account as `$2` and no other per-row rule, so
 // Reports see only the activities the reader takes part in (`store::MINE`).
 // Shared ones on records they may view need the owner's record check, which
@@ -106,7 +111,7 @@ static GRID: GridContribution = GridContribution {
             Field::new("created_at", "Created", FieldType::DateTime).protected(),
             Field::new("updated_at", "Updated", FieldType::DateTime).protected(),
             Field::new("closed_at", "Closed", FieldType::DateTime).protected(),
-        ]).label_field("subject").time_field("starts_at").record_types(&[crate::RECORD])],
+        ]).label_field("subject").time_field("starts_at").record_types(&[crate::RECORD]).list_address(LIST_PATH)],
     links: &[],
 };
 bilibi_grid::contribute!("core/activity", "core/activity.grid", &GRID);
@@ -151,9 +156,12 @@ bilibi_records::holder!(
     }
 );
 
+// Invitations: queued by Send invites, run as the person who sent them
+// (`invitations.rs`).
+
 // Pages: the list and the activity's record page.
 inventory::submit! { Contribution::new(ROUTES, "core/activity.list", provenance!(), &Route {
-    method: Method::Get, path: "/activities", service: crate::web::SERVICE, operation: "list",
+    method: Method::Get, path: LIST_PATH, service: crate::web::SERVICE, operation: "list",
     access: Access::Capability(VIEW), framed: true,
     company_scope: CompanyScope::Tenant,
 }) }
@@ -163,9 +171,27 @@ inventory::submit! { Contribution::new(ROUTES, "core/activity.detail", provenanc
     company_scope: CompanyScope::Tenant,
 }) }
 
+// The calendar feed: a read-only iCalendar link a person's calendar app
+// subscribes to, on the public site. The key in the path is the only
+// credential, so the host redacts it from logs and budgets each sender; the
+// owner proves the person and their rights on every read (`feed.rs`).
+// Calendar services fetch every subscriber's feed from a few addresses, so
+// the budget is sized for them.
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/activity.feed", provenance!(), &CredentialPath { path: crate::FEED_PATH }) }
+inventory::submit! { Contribution::new(bilibi_public::PUBLIC_LINKS, "core/activity.feed", provenance!(), &bilibi_public::PublicLink {
+    method: Method::Get, path: crate::FEED_PATH, service: crate::FEED_SERVICE, operation: "feed",
+    budget: bilibi_public::SenderBudget { per_minute: 600, per_hour: 10_000 },
+}) }
+// The person's own page for it, among their settings.
+inventory::submit! { Contribution::new(ROUTES, "core/activity.feed_settings", provenance!(), &Route {
+    method: Method::Get, path: "/settings/calendar-feed", service: crate::web::SERVICE, operation: "feed",
+    access: Access::Capability(VIEW), framed: true,
+    company_scope: CompanyScope::Tenant,
+}) }
+
 bilibi_menu::contribute!(
     "core/activity",
-    bilibi_menu::MenuItem::page("core.activity", "Activities", "/activities")
+    bilibi_menu::MenuItem::page("core.activity", "Calendar", CALENDAR_ADDRESS)
         .under("core")
         .icon("calendar")
         .requires(bilibi_menu::Requirement::Capability(VIEW))
@@ -195,15 +221,50 @@ inventory::submit! { Contribution::new(EMBEDS, "core/activity.record", provenanc
 inventory::submit! { Contribution::new(PAGE_WRITES, "core/activity.pages", provenance!(), &PageWrites {
     service: crate::web::SERVICE,
     contracts: &[
-        ("create_task", "core.activity.create_task"),
-        ("log_call", "core.activity.log_call"),
-        ("create_note", "core.activity.create_note"),
+        // One event form saves as whichever kind it holds.
+        ("save_event", "core.activity.create_task"),
+        ("save_event", "core.activity.log_call"),
+        ("save_event", "core.activity.create_meeting"),
+        ("save_event", "core.activity.create_note"),
+        // The calendar's compact draft saves as whichever kind it holds, so it
+        // lists every create contract one entry can begin.
+        ("slot_save", "core.activity.create_meeting"),
+        ("slot_save", "core.activity.log_call"),
+        ("slot_save", "core.activity.create_task"),
+        ("make_link", "core.activity.create_feed_key"),
+        ("replace_link", "core.activity.create_feed_key"),
+        ("revoke_link", "core.activity.revoke_feed_key"),
+        ("respond", "core.activity.respond"),
+        ("pick_guest", "core.activity.add_guest"),
+        ("add_guest_email", "core.activity.add_guest"),
+        ("remove_guest", "core.activity.remove_guest"),
+        ("send_invites", "core.activity.send_invites"),
+        ("create_person", "core.activity.create_person_guest"),
+        ("save_reminder_defaults", "core.activity.set_reminder_defaults"),
         ("save_field", "core.activity.update"),
+        // Adding a tag to the form's own list goes through Picklists' create.
+        ("tag_create", "base.picklists.value.create"),
         ("pick_related", "core.activity.update"),
         ("clear_related", "core.activity.update"),
         ("close", "core.activity.close"),
         ("close_and_new", "core.activity.close"),
         ("delete", "core.activity.delete"),
+        ("update_series", "core.activity.update_series"),
+        ("delete_series", "core.activity.delete_series"),
+        // Delete on an occurrence asks which: "only this one" is the plain delete.
+        ("delete_series", "core.activity.delete"),
+        // The calendar's drag, resize and Move dialog reschedule through
+        // the same change contract.
+        (bilibi_ui::calendar::MOVE, "core.activity.update"),
+        (bilibi_ui::calendar::MOVE_SUBMIT, "core.activity.update"),
+        // The status tiles' drop and Move dialog set a task's status through it too.
+        (bilibi_ui::board::MOVE, "core.activity.update"),
+        (bilibi_ui::board::MOVE_SUBMIT, "core.activity.update"),
     ],
     pending: Pending::None,
+}) }
+
+// Bounds only; each tenant explicitly grants the watchers principal this key.
+inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "watchers:core/activity", provenance!(), &bilibi_authz::OfferedCapabilities {
+    principal: "watchers", capabilities: &[crate::SYSTEM_CREATE],
 }) }

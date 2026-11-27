@@ -6,9 +6,10 @@
 //! result beside it. A pass works in bounded slices: when its time is up it
 //! queues its own continuation from the next unrecorded row, so it fits the
 //! Queue's attempt timeout, and a retried attempt never records a row twice.
+use crate::stats::Written;
 use crate::{
     csv, files::FILES, mapping::convert, record::Registered, store, BulkData, Field, Mapping,
-    Outcome, Pass, Policy, Run, WORKER,
+    Outcome, Pass, Policy, Run, RunState, WORKER,
 };
 use bilibi_agent_api::Error as ContractError;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
@@ -82,13 +83,23 @@ enum Planned {
     Refused(String),
 }
 
+type Answer = (
+    Outcome,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Vec<crate::ResultLink>,
+);
+
 /// One row's recorded result.
 struct Recorded {
     row: i32,
     outcome: Outcome,
     record: Option<String>,
+    version: Option<i64>,
     key: Option<String>,
     message: Option<String>,
+    links: Vec<crate::ResultLink>,
 }
 
 /// One pass's working state.
@@ -104,6 +115,8 @@ struct Work<'a> {
     pass: Pass,
     company: i64,
     found: HashMap<(String, String), std::result::Result<String, String>>,
+    /// Rows the real pass has written in this slice, per table.
+    written: Written,
 }
 
 /// A refusal one row can carry, in words; `None` when the cause is the
@@ -131,6 +144,7 @@ pub(crate) fn refusal(error: &ContractError, offered: &[Field]) -> Option<String
         ContractError::Backend(Error::Conflict) => {
             "The record changed after it was matched, so it was not overwritten.".into()
         }
+        ContractError::Backend(Error::Refused(message)) => message.clone(),
         ContractError::Backend(Error::Invalid) => "The record was refused.".into(),
         ContractError::Backend(Error::StepUpRequired { .. }) => {
             "This change needs a confirmation code, which an import cannot give.".into()
@@ -167,7 +181,11 @@ impl Work<'_> {
     }
 
     /// The row as the create contract's input, or why it cannot be.
-    async fn plan(&mut self, client: &tokio_postgres::Client, cells: &[String]) -> Result<Planned> {
+    async fn plan(
+        &mut self,
+        client: &mut tokio_postgres::Client,
+        cells: &[String],
+    ) -> Result<Planned> {
         let mut input = Map::new();
         let mut problems = Vec::new();
         for entry in self.mapping.fields.clone() {
@@ -177,6 +195,10 @@ impl Work<'_> {
                 .find(|field| field.name == entry.field)
                 .cloned()
             else {
+                problems.push(format!(
+                    "{}: is no longer available for import",
+                    entry.field
+                ));
                 continue;
             };
             let text = match (&entry.column, &entry.value) {
@@ -205,10 +227,21 @@ impl Work<'_> {
             return Ok(Planned::Refused(problems.join("; ")));
         }
         let import = &self.registered.definition.import;
-        let create = |input: Map<String, Value>| Planned::Write {
-            contract: import.create,
-            input: Value::Object(input),
-            outcome: Outcome::Create,
+        let custom = self
+            .registered
+            .custom
+            .map(|_| crate::custom::take(&mut input));
+        let create = |mut input: Map<String, Value>| {
+            if let (Some(binding), Some(custom)) = (self.registered.custom, &custom) {
+                if !custom.is_empty() {
+                    input.insert(binding.create_field.into(), json!(custom));
+                }
+            }
+            Planned::Write {
+                contract: import.create,
+                input: Value::Object(input),
+                outcome: Outcome::Create,
+            }
         };
         let Some(duplicates) = &import.duplicates else {
             return Ok(create(input));
@@ -259,6 +292,9 @@ impl Work<'_> {
                 }
                 let mut fields = Map::new();
                 for name in &self.registered.update_fields {
+                    if self.registered.custom.is_some_and(|binding| binding.update_field == name) {
+                        continue;
+                    }
                     let value = input.get(name).cloned().or_else(|| {
                         candidate
                             .get(name)
@@ -276,6 +312,11 @@ impl Work<'_> {
                     update.extend(fields);
                 } else {
                     update.insert(duplicates.update_fields.into(), Value::Object(fields));
+                }
+                if let (Some(binding), Some(custom)) = (self.registered.custom, custom) {
+                    if !custom.is_empty() {
+                        update.insert(binding.update_field.into(), json!(custom));
+                    }
                 }
                 Ok(Planned::Write {
                     contract: duplicates.update,
@@ -303,7 +344,7 @@ impl Work<'_> {
         }
         let rows = client
             .query(
-                "SELECT r.record_id FROM base_bulk_data_rows r JOIN base_bulk_data_runs p ON p.tenant_id=r.tenant_id AND p.id=r.run_id WHERE r.tenant_id=$1 AND r.run_id=$2 AND r.pass='run' AND r.source_key=$3 AND r.record_id IS NOT NULL AND p.started_by=$4 AND p.company_id=$5 AND p.state='completed' LIMIT 2",
+                "SELECT r.record_id FROM base_bulk_data_rows r JOIN base_bulk_data_runs p ON p.tenant_id=r.tenant_id AND p.id=r.run_id WHERE r.tenant_id=$1 AND r.run_id=$2 AND r.pass='run' AND r.source_key=$3 AND r.record_id IS NOT NULL AND p.started_by=$4 AND p.company_id=$5 AND p.state='completed' AND cardinality(p.erased_for)=0 LIMIT 2",
                 &[&self.scope.tenant(), &parent, &key, &self.scope.user(), &self.company],
             )
             .await?;
@@ -319,7 +360,7 @@ impl Work<'_> {
     /// The one record a lookup read finds for the cell's value.
     async fn lookup(
         &mut self,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         field: &Field,
         text: &str,
     ) -> Result<std::result::Result<Option<Value>, String>> {
@@ -396,15 +437,24 @@ fn id_value(field: &Field, id: String) -> std::result::Result<Option<Value>, Str
     }
 }
 
-/// Locks the run and says whether this pass may still record.
+/// Locks the run (no counts: `store::lock`); may this pass still record?
+/// Only for the job the run names: a pass cancelled and started again has a
+/// new job, and the old one may still hold rows planned with the mapping it
+/// began with.
 async fn current(
     tx: &MutationTransaction<'_>,
     scope: &Scope,
     run: i64,
     pass: Pass,
+    job: i64,
 ) -> Result<Option<Run>> {
-    let run = store::load(tx.sql(), scope, run, true).await?;
-    Ok((run.state.working() && run.pass == Some(pass)).then_some(run))
+    let run = store::lock(tx.sql(), scope, run).await?;
+    Ok(
+        (matches!(run.state, RunState::Previewing | RunState::Running)
+            && run.pass == Some(pass)
+            && run.job_id == Some(job))
+        .then_some(run),
+    )
 }
 
 async fn record(
@@ -419,7 +469,7 @@ async fn record(
         Box::pin(async move {
             let mut changes = Vec::with_capacity(results.len());
             for result in results {
-                let id: i64 = sql.query_one("INSERT INTO base_bulk_data_rows(tenant_id,run_id,pass,row_number,outcome,record_id,source_key,message) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id", &[&tenant, &run, &pass.as_str(), &result.row, &result.outcome.as_str(), &result.record, &result.key, &result.message]).await?.get(0);
+                let id: i64 = sql.query_one("INSERT INTO base_bulk_data_rows(tenant_id,run_id,pass,row_number,outcome,record_id,record_version,source_key,message,links) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id", &[&tenant, &run, &pass.as_str(), &result.row, &result.outcome.as_str(), &result.record, &result.version, &result.key, &result.message, &json!(result.links)]).await?.get(0);
                 changes.push(Change { kind: "base/bulk_data.row".into(), id, old: Value::Null, new: json!({"run": run, "pass": pass.as_str(), "row": result.row, "outcome": result.outcome.as_str(), "record_id": result.record}) });
             }
             sql.execute("UPDATE base_bulk_data_runs SET next_row=$3,updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2", &[&tenant, &run, &next]).await?;
@@ -438,7 +488,10 @@ impl BulkData {
         let mut object = self.db.get().await?;
         let client: &mut tokio_postgres::Client = &mut object;
         let run = store::load(&*client, &scope, id, false).await?;
-        if !run.state.working() || run.pass != Some(pass) {
+        if !matches!(run.state, RunState::Previewing | RunState::Running)
+            || run.pass != Some(pass)
+            || run.job_id != Some(execution.job_id)
+        {
             return Ok(());
         }
         let registered = self
@@ -468,6 +521,7 @@ impl BulkData {
             pass,
             company: run.company,
             found: HashMap::new(),
+            written: Written::default(),
         };
         let started = Instant::now();
         let mut next = usize::try_from(run.next_row).map_err(|_| Error::Internal)?;
@@ -475,11 +529,11 @@ impl BulkData {
         while next < parsed.rows.len() && started.elapsed() < SLICE {
             let cells = &parsed.rows[next];
             let row = next as i32 + 1;
-            let planned = work.plan(&*client, cells).await?;
+            let planned = work.plan(client, cells).await?;
             let key = work.source_key(cells);
             match pass {
                 Pass::Preview => {
-                    batch.push(work.check(&*client, planned, row, key).await?);
+                    batch.push(work.check(client, planned, row, key).await?);
                     next += 1;
                     if batch.len() == BATCH
                         && !self
@@ -498,12 +552,14 @@ impl BulkData {
                 }
                 Pass::Run => {
                     if !work.write(client, planned, row, key).await? {
+                        work.written.analyze(client).await;
                         return Ok(());
                     }
                     next += 1;
                 }
             }
         }
+        std::mem::take(&mut work.written).analyze(client).await;
         if !batch.is_empty()
             && !self
                 .flush(execution, client, &scope, &work, batch, next)
@@ -531,7 +587,7 @@ impl BulkData {
         let mut tx = execution
             .begin(client, "base.bulk_data.import.check")
             .await?;
-        let Some(run) = current(&tx, scope, work.run, work.pass).await? else {
+        let Some(run) = current(&tx, scope, work.run, work.pass, execution.job_id).await? else {
             return Ok(false);
         };
         let first = results.first().map_or(0, |result| result.row - 1);
@@ -565,7 +621,10 @@ impl BulkData {
         let mut tx = execution
             .begin(client, "base.bulk_data.import.continue")
             .await?;
-        if current(&tx, scope, id, pass).await?.is_none() {
+        if current(&tx, scope, id, pass, execution.job_id)
+            .await?
+            .is_none()
+        {
             return Ok(());
         }
         let job = self
@@ -600,7 +659,7 @@ impl BulkData {
         let mut tx = execution
             .begin(client, "base.bulk_data.import.finish")
             .await?;
-        let Some(old) = current(&tx, scope, id, pass).await? else {
+        let Some(old) = current(&tx, scope, id, pass, execution.job_id).await? else {
             return Ok(());
         };
         let state = match pass {
@@ -622,10 +681,15 @@ impl BulkData {
             store::count(tx.sql(), tenant, &mut counted).await?;
             let run = &counted[0];
             let counts = run.run;
+            let actions = if self.reports_actions(&run.record_type) || counts.action > 0 {
+                format!(" {} actions completed,", counts.action)
+            } else {
+                String::new()
+            };
             let notice = Notice::new(format!("Import of {} finished", run.file_name))
                 .kind("bulk_data.import")
                 .body(format!(
-                    "{} created, {} updated, {} skipped, {} not imported.",
+                    "{} created, {} updated,{actions} {} skipped, {} not imported.",
                     counts.create, counts.update, counts.skip, counts.error
                 ))
                 .url(format!("/imports/{id}"));
@@ -640,20 +704,74 @@ impl BulkData {
 }
 
 impl Work<'_> {
+    /// Interpret the actual answer, never a previously saved preview.
+    fn answer(
+        &self,
+        contract: &str,
+        outcome: Outcome,
+        answer: &Value,
+        preview: bool,
+    ) -> Result<Answer> {
+        let created_version = |outcome| -> Result<Option<i64>> {
+            if preview || outcome != Outcome::Create {
+                return Ok(None);
+            }
+            let Some(undo) = self.registered.undo else {
+                return Ok(None);
+            };
+            answer["result"][undo.created_version]
+                .as_i64()
+                .filter(|version| *version > 0)
+                .map(Some)
+                .ok_or(Error::Internal)
+        };
+        if contract == self.registered.definition.import.create {
+            if let Some(results) = self.registered.results {
+                let result = (results.interpret)(&answer["result"])?;
+                result.validate()?;
+                let outcome = match result.outcome {
+                    crate::ImportOutcome::Create => Outcome::Create,
+                    crate::ImportOutcome::Update => Outcome::Update,
+                    crate::ImportOutcome::Action => Outcome::Action,
+                };
+                return Ok((
+                    outcome,
+                    result.record_id,
+                    created_version(outcome)?,
+                    result.message,
+                    result.links,
+                ));
+            }
+        }
+        Ok((
+            outcome,
+            if preview {
+                None
+            } else {
+                text_id(&answer["result"][self.registered.definition.import.id])
+            },
+            created_version(outcome)?,
+            None,
+            Vec::new(),
+        ))
+    }
+
     /// A dry-run row: the owner's preview of the write, nothing written.
     async fn check(
         &self,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         planned: Planned,
         row: i32,
         key: Option<String>,
     ) -> Result<Recorded> {
-        let (outcome, record, message) = match planned {
-            Planned::Refused(message) => (Outcome::Error, None, Some(message)),
+        let (outcome, record, version, message, links) = match planned {
+            Planned::Refused(message) => (Outcome::Error, None, None, Some(message), Vec::new()),
             Planned::Skip(id) => (
                 Outcome::Skip,
                 Some(id),
+                None,
                 Some("Matches an existing record, which is left alone.".into()),
+                Vec::new(),
             ),
             Planned::Write {
                 contract,
@@ -666,9 +784,9 @@ impl Work<'_> {
                     .preview(client, self.execution, contract, &input)
                     .await
                 {
-                    Ok(_) => (outcome, None, None),
+                    Ok(answer) => self.answer(contract, outcome, &answer, true)?,
                     Err(error) => match refusal(&error, &self.offered) {
-                        Some(message) => (Outcome::Error, None, Some(message)),
+                        Some(message) => (Outcome::Error, None, None, Some(message), Vec::new()),
                         None => return Err(error_of(error)),
                     },
                 }
@@ -678,15 +796,17 @@ impl Work<'_> {
             row,
             outcome,
             record,
+            version,
             key,
             message: message.map(bounded),
+            links,
         })
     }
 
     /// A real row: the owner's write and its result in one transaction.
     /// False when the run was cancelled or ended meanwhile.
     async fn write(
-        &self,
+        &mut self,
         client: &mut tokio_postgres::Client,
         planned: Planned,
         row: i32,
@@ -698,7 +818,9 @@ impl Work<'_> {
             _ => "base.bulk_data.import.row",
         };
         let mut tx = self.execution.begin(client, action).await?;
-        let Some(run) = current(&tx, &self.scope, self.run, self.pass).await? else {
+        let Some(run) =
+            current(&tx, &self.scope, self.run, self.pass, self.execution.job_id).await?
+        else {
             return Ok(false);
         };
         if run.next_row >= row {
@@ -720,6 +842,8 @@ impl Work<'_> {
                 row,
                 outcome: Outcome::Error,
                 record: None,
+                version: None,
+                links: Vec::new(),
                 key,
                 message: Some(format!(
                     "You no longer have permission to import {}.",
@@ -732,6 +856,8 @@ impl Work<'_> {
                     row,
                     outcome: Outcome::Error,
                     record: None,
+                    version: None,
+                    links: Vec::new(),
                     key,
                     message: Some(bounded(message)),
                 },
@@ -739,6 +865,8 @@ impl Work<'_> {
                     row,
                     outcome: Outcome::Skip,
                     record: Some(id),
+                    version: None,
+                    links: Vec::new(),
                     key,
                     message: Some("Matched an existing record, which was left alone.".into()),
                 },
@@ -753,15 +881,19 @@ impl Work<'_> {
                         .commit(&mut tx, self.execution, contract, &input)
                         .await
                     {
-                        Ok(answer) => Recorded {
-                            row,
-                            outcome,
-                            record: text_id(
-                                &answer["result"][self.registered.definition.import.id],
-                            ),
-                            key,
-                            message: None,
-                        },
+                        Ok(answer) => {
+                            let (outcome, record, version, message, links) =
+                                self.answer(contract, outcome, &answer, false)?;
+                            Recorded {
+                                row,
+                                outcome,
+                                record,
+                                version,
+                                key,
+                                message,
+                                links,
+                            }
+                        }
                         Err(error) => {
                             let Some(message) = refusal(&error, &self.offered) else {
                                 return Err(error_of(error));
@@ -773,7 +905,14 @@ impl Work<'_> {
                                 .execution
                                 .begin(client, "base.bulk_data.import.row")
                                 .await?;
-                            let Some(run) = current(&tx, &self.scope, self.run, self.pass).await?
+                            let Some(run) = current(
+                                &tx,
+                                &self.scope,
+                                self.run,
+                                self.pass,
+                                self.execution.job_id,
+                            )
+                            .await?
                             else {
                                 return Ok(false);
                             };
@@ -784,6 +923,8 @@ impl Work<'_> {
                                 row,
                                 outcome: Outcome::Error,
                                 record: None,
+                                version: None,
+                                links: Vec::new(),
                                 key,
                                 message: Some(bounded(message)),
                             }
@@ -793,6 +934,7 @@ impl Work<'_> {
             }
         };
         record(&mut tx, tenant, self.run, self.pass, vec![result], row).await?;
+        self.written.add(tx.sql()).await?;
         tx.commit().await?;
         self.bulk.wake(tenant, self.scope.user());
         Ok(true)

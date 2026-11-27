@@ -1,22 +1,19 @@
-//! Account administration (K16): the writes behind `/users/new` and
-//! `/users/{id}` and the signed-in account's own profile. Every command takes
+//! Account administration: the tenant-owned writes behind `/users/{id}` and
+//! the signed-in person's own profile. Every command takes
 //! the sealed scope, re-proves the actor, authorizes its capability inside one
 //! `MutationTransaction`, and honours the Company → Person → User lock order
-//! for creation with a first desk. Passwords
-//! arrive in plaintext from the trusted administrator form and are hashed
-//! here; a hash is never an input and never an output.
+//! for tenant membership changes. Shared identity credentials are never an
+//! administrator input.
 use crate::{
-    contributions::{CREATE, DELETE, UPDATE},
-    identity::{read_account, Account, AccountLinks, LinkError},
-    password::{self, check_policy},
+    contributions::{DELETE, UPDATE},
+    identity::{read_account, Account, LinkError},
+    password::check_policy,
     reset::normalize_email,
     UserService,
 };
 use bilibi_database::{Change, Error, MutationTransaction, Result};
-use bilibi_party_ids::{OrganisationId, PersonId};
 use bilibi_security::Scope;
 use bilibi_settings::Target;
-use bilibi_tenancy::AccountKind;
 use serde_json::json;
 use std::collections::BTreeSet;
 use tokio_postgres::GenericClient;
@@ -27,7 +24,6 @@ pub const NAME_MAX: usize = 255;
 const BLANK: &str = "can't be blank";
 const EMAIL_FORMAT: &str = "must be an email address";
 pub(crate) const EMAIL_TAKEN: &str = "has already been taken";
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldError {
     pub field: &'static str,
@@ -54,8 +50,16 @@ pub enum AccountError {
     PersonMismatch,
     #[error("has changed since this edit began")]
     Conflict,
-    #[error("You cannot delete your own account")]
+    #[error("You cannot remove your own membership")]
     OwnAccount,
+    /// The account holds a permission the actor does not
+    /// (`bilibi_authz::holds_everything_of`).
+    #[error("This account has permissions you do not have")]
+    Outranked,
+    /// The request comes from an impersonated session: creating, changing
+    /// and removing memberships is never done while viewing as someone else.
+    #[error("Accounts cannot be changed while viewing as someone else")]
+    Impersonating,
     #[error(transparent)]
     Access(#[from] Error),
 }
@@ -83,36 +87,15 @@ impl From<tokio_postgres::Error> for AccountError {
     }
 }
 
-/// What the create form submits. A selected Person is linked; otherwise the
-/// service creates one from the account name and email. The company is the
-/// Person's first desk.
-#[derive(Clone, Debug, Default)]
-pub struct AccountInput {
-    pub name: String,
-    pub email: String,
-    pub password: String,
-    pub person: Option<PersonId>,
-    pub company: Option<OrganisationId>,
-}
-
-/// The two text facts an administrator edits in place.
+/// The tenant-owned fact an administrator edits in place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccountField {
     Name,
-    Email,
 }
 impl AccountField {
     pub fn key(self) -> &'static str {
         match self {
             Self::Name => "name",
-            Self::Email => "email",
-        }
-    }
-    pub fn parse(key: &str) -> Option<Self> {
-        match key {
-            "name" => Some(Self::Name),
-            "email" => Some(Self::Email),
-            _ => None,
         }
     }
 }
@@ -155,16 +138,6 @@ pub(crate) fn validate_password(password: &str) -> Option<FieldError> {
     }
 }
 
-/// The create form's live validation: the same rules `create_account` applies,
-/// without touching the database.
-pub fn validate_input(input: &AccountInput) -> Vec<FieldError> {
-    let mut errors = Vec::new();
-    errors.extend(validate_name(&input.name));
-    errors.extend(validate_email(&input.email).err());
-    errors.extend(validate_password(&input.password));
-    errors
-}
-
 /// A staff login email is unique platform-wide (`user_identities_staff_email_idx`);
 /// the check runs inside the transaction so the index refusal is the backstop.
 pub(crate) async fn email_taken(
@@ -196,157 +169,9 @@ pub struct LandingPage {
 }
 
 impl UserService {
-    /// Creates an account: `admin.user.create`.
-    /// The account names one proved Person, and that Person receives an
-    /// explicit first desk in the selected live company.
-    pub async fn create_account(
-        &self,
-        scope: &Scope,
-        input: &AccountInput,
-    ) -> std::result::Result<Account, AccountError> {
-        let mut errors = Vec::new();
-        errors.extend(validate_name(&input.name));
-        let email = match validate_email(&input.email) {
-            Ok(email) => Some(email),
-            Err(error) => {
-                errors.push(error);
-                None
-            }
-        };
-        errors.extend(validate_password(&input.password));
-        if !errors.is_empty() {
-            return Err(AccountError::Validation(errors));
-        }
-        let email = email.expect("validated");
-        let name = input.name.trim().to_owned();
-        let hash = password::hash(&input.password).await?;
-        let mut client = self.db.get().await.map_err(Error::from)?;
-        let mut tx = self
-            .mutations
-            .begin(&mut client, scope.mutation_context("user.create"))
-            .await?;
-        let first_desk = input.company.or(scope.current_company()).ok_or_else(|| {
-            AccountError::Validation(vec![field_error(
-                "company_id",
-                "Choose a first desk for this account.",
-            )])
-        })?;
-        bilibi_company::lock_work_context_and_target(tx.sql(), scope, first_desk).await?;
-        let scope = self.fresh(tx.sql(), scope).await?;
-        bilibi_authz::authorize_key(tx.sql(), &scope, CREATE).await?;
-        bilibi_company::authorize_target(
-            tx.sql(),
-            &scope,
-            first_desk.get(),
-            bilibi_company::UPDATE,
-        )
-        .await?;
-        bilibi_company::require_writable(tx.sql(), &scope, first_desk.get(), true).await?;
-        let mut links = self.prove_links(&tx, &scope, input.person).await?;
-        if links.person.is_none() {
-            let person = self
-                .persons
-                .create_in(
-                    &mut tx,
-                    &scope,
-                    &bilibi_person::PersonInput {
-                        name: name.clone(),
-                        kind: bilibi_person::PersonKind::Human,
-                        email: Some(email.clone()),
-                        phone: None,
-                    },
-                )
-                .await
-                .map_err(|_| AccountError::Access(Error::Invalid))?;
-            links.person = Some(person.id);
-        }
-        if email_taken(tx.sql(), &email, None).await? {
-            return Err(AccountError::Validation(vec![field_error(
-                "email",
-                EMAIL_TAKEN,
-            )]));
-        }
-        let tenant = scope.tenant();
-        let (insert_name, insert_email) = (name.clone(), email.clone());
-        let id: i64 = tx
-            .mutate(move |sql| {
-                Box::pin(async move {
-                    let created = crate::sign_in_identity::create(
-                        sql,
-                        tenant,
-                        AccountKind::Staff,
-                        &insert_email,
-                        &hash,
-                        false,
-                    )
-                    .await?;
-                    sql.execute(
-                        "INSERT INTO users(id,tenant_id,identity_id,name,person_id) VALUES($1,$2,$3,$4,$5)",
-                        &[
-                            &created.user,
-                            &tenant,
-                            &created.identity,
-                            &insert_name,
-                            &links.person.map(PersonId::get),
-                        ],
-                    )
-                    .await?;
-                    let id = created.user;
-                    Ok((
-                        id,
-                        vec![
-                            created.change,
-                            Change {
-                                kind: "user".into(),
-                                id,
-                                old: json!(null),
-                                new: json!({
-                                    "name": insert_name,
-                                    "identity_id": created.identity,
-                                    "person_id": links.person.map(PersonId::get),
-                                }),
-                            },
-                        ],
-                    ))
-                })
-            })
-            .await?;
-        if let Some(person) = links.person {
-            crate::desks::set(&mut tx, &scope, first_desk.get(), person.get()).await?;
-        }
-        let account = read_account(tx.sql(), &scope, id, false)
-            .await?
-            .ok_or(AccountError::NotFound)?;
-        tx.commit().await?;
-        Ok(account)
-    }
-
-    /// Proves the requested Person through its owner and keeps the stored
-    /// account-link shape separate from the first desk.
-    async fn prove_links(
-        &self,
-        tx: &MutationTransaction<'_>,
-        scope: &Scope,
-        person: Option<PersonId>,
-    ) -> std::result::Result<AccountLinks, AccountError> {
-        if let Some(person) = person {
-            let person = bilibi_person::lock_for_account_binding(tx, scope, person)
-                .await
-                .map_err(|error| match error {
-                    Error::NotFound => AccountError::NotFound,
-                    other => AccountError::Access(other),
-                })?
-                .id();
-            return Ok(AccountLinks {
-                person: Some(person),
-            });
-        }
-        Ok(AccountLinks::default())
-    }
-
     /// Opens the administrative write on one tenant-owned account: checks the
     /// capability, locks the row and verifies its optional version.
-    async fn open_account_write(
+    pub(crate) async fn open_account_write(
         &self,
         tx: &MutationTransaction<'_>,
         scope: &Scope,
@@ -364,8 +189,23 @@ impl UserService {
         Ok(account)
     }
 
-    /// Replaces the name or email an administrator edited in place.
-    /// A changed email is unverified again, so `email_verified_at` is cleared.
+    /// Refuses a write that would hand the actor more than they hold: the
+    /// account's credentials, or its removal, stay with someone who holds
+    /// everything it holds.
+    async fn require_covered(
+        tx: &MutationTransaction<'_>,
+        scope: &Scope,
+        user: i64,
+    ) -> std::result::Result<(), AccountError> {
+        if bilibi_authz::holds_everything_of(tx.sql(), scope, user).await? {
+            Ok(())
+        } else {
+            Err(AccountError::Outranked)
+        }
+    }
+
+    /// Replaces a tenant-owned account name. The installation-owned sign-in
+    /// address is never an account-administration field.
     pub async fn update_account(
         &self,
         scope: &Scope,
@@ -374,15 +214,15 @@ impl UserService {
         field: AccountField,
         value: &str,
     ) -> std::result::Result<Account, AccountError> {
+        if scope.impersonator().is_some() {
+            return Err(AccountError::Impersonating);
+        }
         let value = match field {
             AccountField::Name => {
                 if let Some(error) = validate_name(value) {
                     return Err(AccountError::Validation(vec![error]));
                 }
                 value.trim().to_owned()
-            }
-            AccountField::Email => {
-                validate_email(value).map_err(|error| AccountError::Validation(vec![error]))?
             }
         };
         let mut client = self.db.get().await.map_err(Error::from)?;
@@ -394,58 +234,26 @@ impl UserService {
         let account = self
             .open_account_write(&tx, &scope, user, Some(version), UPDATE)
             .await?;
-        if field == AccountField::Email
-            && !crate::sign_in_identity::identity_and_home(tx.sql(), scope.tenant(), user)
-                .await?
-                .1
-        {
-            return Err(AccountError::Access(Error::Forbidden));
-        }
-        let current = match field {
-            AccountField::Name => account.name.clone(),
-            AccountField::Email => account.email.clone(),
-        };
+        let current = account.name.clone();
         if current == value {
             tx.rollback().await?;
             return Ok(account);
         }
-        if field == AccountField::Email && email_taken(tx.sql(), &value, Some(user)).await? {
-            return Err(AccountError::Validation(vec![field_error(
-                "email",
-                EMAIL_TAKEN,
-            )]));
-        }
         let tenant = scope.tenant();
-        let identity = crate::sign_in_identity::id(tx.sql(), tenant, user).await?;
         let (new_value, old_value) = (value.clone(), current);
         tx.mutate(move |sql| {
             Box::pin(async move {
-                let statement = match field {
-                    AccountField::Name => "UPDATE users SET name=$3,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2",
-                    AccountField::Email => "UPDATE user_identities SET email=$3,email_verified_at=NULL,updated_at=now() WHERE id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2)",
-                };
-                sql.execute(statement, &[&tenant, &user, &new_value]).await?;
-                if field == AccountField::Email {
-                    sql.execute(
-                        "UPDATE users SET version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2",
-                        &[&tenant, &user],
-                    )
-                    .await?;
-                }
-                let mut changes = vec![Change {
+                sql.execute(
+                    "UPDATE users SET name=$3,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2",
+                    &[&tenant, &user, &new_value],
+                )
+                .await?;
+                let changes = vec![Change {
                         kind: "user".into(),
                         id: user,
-                        old: if field == AccountField::Name { json!({"name": old_value.clone()}) } else { json!({"version": version}) },
-                        new: if field == AccountField::Name { json!({"name": new_value.clone()}) } else { json!({"version": version + 1}) },
+                        old: json!({"name": old_value}),
+                        new: json!({"name": new_value}),
                     }];
-                if field == AccountField::Email {
-                    changes.push(Change {
-                        kind: "user_identity".into(),
-                        id: identity,
-                        old: json!({"email": old_value}),
-                        new: json!({"email": new_value}),
-                    });
-                }
                 Ok(((), changes))
             })
         })
@@ -457,78 +265,54 @@ impl UserService {
         Ok(account)
     }
 
-    /// Sets a new password for another account: no current password is asked, every session
-    /// of the account ends, and the audit row carries a marker, never a hash.
-    pub async fn set_password(
+    pub async fn send_password_recovery(
         &self,
         scope: &Scope,
         user: i64,
-        new_password: &str,
     ) -> std::result::Result<(), AccountError> {
-        if let Some(error) = validate_password(new_password) {
-            return Err(AccountError::Validation(vec![error]));
+        if scope.impersonator().is_some() {
+            return Err(AccountError::Impersonating);
         }
-        let hash = password::hash(new_password).await?;
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let mut tx = self
+        let tx = self
             .mutations
-            .begin(&mut client, scope.mutation_context("user.password_reset"))
+            .begin(
+                &mut client,
+                scope.mutation_context("user.recovery_requested"),
+            )
             .await?;
         let scope = self.fresh(tx.sql(), scope).await?;
-        self.open_account_write(&tx, &scope, user, None, UPDATE)
+        let account = self
+            .open_account_write(&tx, &scope, user, None, UPDATE)
             .await?;
-        let tenant = scope.tenant();
-        let (identity, home) =
-            crate::sign_in_identity::identity_and_home(tx.sql(), tenant, user).await?;
-        if !home {
-            return Err(AccountError::Access(Error::Forbidden));
+        if account.status != "active" || !account.email_verified {
+            return Err(AccountError::Access(Error::Invalid));
         }
-        tx
-            .mutate(move |sql| {
-                Box::pin(async move {
-                    sql.execute(
-                        "UPDATE user_identities SET password_hash=$3,password_version=password_version+1,updated_at=now() WHERE id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2)",
-                        &[&tenant, &user, &hash],
-                    )
-                    .await?;
-                    sql.execute(
-                        "UPDATE users SET version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2",
-                        &[&tenant, &user],
-                    )
-                    .await?;
-
-                    Ok(((), vec![
-                        Change {
-                            kind: "user".into(),
-                            id: user,
-                            old: json!({"version": "previous"}),
-                            new: json!({"version": "advanced"}),
-                        },
-                        Change {
-                            kind: "user_identity".into(),
-                            id: identity,
-                            old: json!({"password_hash": "previous"}),
-                            new: json!({"password_hash": "replaced"}),
-                        },
-                    ]))
-                })
-            })
+        tx.rollback().await?;
+        drop(client);
+        self.reset_mail()
+            .mail_with_reset_link(
+                scope.tenant(),
+                user,
+                "Recover your sign-in",
+                "Your workspace administrator requested a recovery email for you.",
+                true,
+            )
             .await?;
-        let ended = self.sessions.revoke(&mut tx, user, None).await?;
-        let sessions = self.sessions.clone();
-        tx.after_commit(move || sessions.announce(ended));
-        tx.commit().await?;
         Ok(())
     }
 
-    /// Deletes an account: `admin.user.delete`, never
-    /// the actor's own. An outside membership retires only this tenant's row.
-    /// Deleting the home account also closes the shared sign-in.
-    pub async fn delete_account(
+    /// Removes a membership: `admin.user.delete`, never the actor's own nor one
+    /// holding a permission the actor lacks. It always retires only this
+    /// tenant membership; customer administrators never delete a shared identity.
+    pub async fn remove_membership(
         &self,
         scope: &Scope,
         user: i64,
     ) -> std::result::Result<(), AccountError> {
+        if scope.impersonator().is_some() {
+            return Err(AccountError::Impersonating);
+        }
         if scope.user() == user {
             return Err(AccountError::OwnAccount);
         }
@@ -541,12 +325,18 @@ impl UserService {
         let account = self
             .open_account_write(&tx, &scope, user, None, DELETE)
             .await?;
+        Self::require_covered(&tx, &scope, user).await?;
         let tenant = scope.tenant();
-        let (identity, home) =
-            crate::sign_in_identity::identity_and_home(tx.sql(), tenant, user).await?;
         tx
             .mutate(move |sql| {
                 Box::pin(async move {
+                    let identity: i64 = sql
+                        .query_one(
+                            "SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                            &[&tenant, &user],
+                        )
+                        .await?
+                        .get(0);
                     sql.execute(
                         "UPDATE users SET deleted_at=now(),status='deleted',version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2",
                         &[&tenant, &user],
@@ -558,33 +348,15 @@ impl UserService {
                         old: json!({"email": account.email, "deleted_at": null}),
                         new: json!({"email": account.email, "deleted_at": "now"}),
                     }];
-                    if home {
-                        sql.execute(
-                            "DELETE FROM password_reset_tokens WHERE identity_id=$1",
-                            &[&identity],
-                        )
-                        .await?;
-                        sql.execute(
-                            "UPDATE user_identities SET status='deleted',deleted_at=now(),updated_at=now() WHERE id=$1",
-                            &[&identity],
-                        )
-                        .await?;
-                        changes.push(Change {
-                            kind: "user_identity".into(),
-                            id: identity,
-                            old: json!({"status": "active"}),
-                            new: json!({"status": "deleted"}),
-                        });
+                    if let Some(change) =
+                        crate::identity_lifecycle::mark_orphaned(sql, identity).await?
+                    {
+                        changes.push(change);
                     }
                     Ok(((), changes))
                 })
             })
             .await?;
-        if home {
-            self.step_up
-                .lifecycle(&mut tx, user, bilibi_step_up::Lifecycle::Delete)
-                .await?;
-        }
         let ended = self.sessions.revoke(&mut tx, user, None).await?;
         let sessions = self.sessions.clone();
         tx.after_commit(move || sessions.announce(ended));
@@ -592,9 +364,10 @@ impl UserService {
         Ok(())
     }
 
-    /// The signed-in account's own name and email.
+    /// The signed-in account's own name and portable identity email.
     /// The account is the session's, never a submitted id, and no capability
-    /// applies. A changed email is unverified again.
+    /// applies. A changed email is unverified again and requires portable
+    /// authentication authority.
     pub async fn update_profile(
         &self,
         token: &str,
@@ -634,12 +407,10 @@ impl UserService {
             tx.rollback().await?;
             return Ok(ProfileOutcome { email_changed });
         }
-        if email_changed
-            && !crate::sign_in_identity::identity_and_home(tx.sql(), scope.tenant(), user)
-                .await?
-                .1
-        {
-            return Err(AccountError::Access(Error::Forbidden));
+        if email_changed {
+            self.sessions
+                .require_portable_authority(tx.sql(), &scope)
+                .await?;
         }
         if email_changed && email_taken(tx.sql(), &email, Some(user)).await? {
             return Err(AccountError::Validation(vec![field_error(
@@ -712,45 +483,57 @@ impl UserService {
         Ok(resolved.value.as_str().unwrap_or("").to_owned())
     }
 
-    /// Stores the landing choice; an empty value clears the override so the
-    /// default resolves again. A page the actor cannot open is refused.
-    pub async fn save_landing(
+    /// Prepare the account's landing choice using its reachable menu.
+    pub(crate) async fn check_landing(
         &self,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         value: &str,
-    ) -> std::result::Result<(), AccountError> {
-        let mut client = self.db.get().await.map_err(Error::from)?;
-        let scope = self.fresh(&**client, scope).await?;
+    ) -> Result<()> {
+        if scope.impersonator().is_some() {
+            return Err(Error::Forbidden);
+        }
         if !value.is_empty()
             && !self
-                .landing_pages(&**client, &scope)
+                .landing_pages(client, scope)
                 .await?
                 .iter()
                 .any(|page| page.id == value)
         {
-            return Err(AccountError::Validation(vec![field_error(
-                "landing_menu_id",
-                "is not a page you can open",
-            )]));
+            return Err(Error::Invalid);
         }
-        let mut tx = self
-            .mutations
-            .begin(
-                &mut client,
-                scope.mutation_context("user.preference.landing"),
+        Ok(())
+    }
+
+    pub(crate) async fn lock_landing(
+        tx: &bilibi_database::MutationTransaction<'_>,
+        scope: &Scope,
+    ) -> Result<()> {
+        let lock = format!("core/user:landing:{}:{}", scope.tenant(), scope.user());
+        tx.sql()
+            .execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                &[&lock],
             )
             .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn apply_landing(
+        &self,
+        tx: &mut bilibi_database::MutationTransaction<'_>,
+        scope: &Scope,
+        value: &str,
+    ) -> Result<()> {
+        self.check_landing(tx.sql(), scope, value).await?;
         let own = Target::User { company: None };
         if value.is_empty() {
+            self.settings.delete(tx, scope, own, LANDING_KEY).await?;
+        } else if self.landing_choice(tx.sql(), scope).await? != value {
             self.settings
-                .delete(&mut tx, &scope, own, LANDING_KEY)
-                .await?;
-        } else {
-            self.settings
-                .put(&mut tx, &scope, own, LANDING_KEY, json!(value))
+                .put(tx, scope, own, LANDING_KEY, json!(value))
                 .await?;
         }
-        tx.commit().await?;
         Ok(())
     }
 

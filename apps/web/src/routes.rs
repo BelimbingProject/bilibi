@@ -11,7 +11,10 @@ use axum::{
 };
 use bilibi_database::{Error, Result};
 use bilibi_module_registry::{
-    contributions::{Access, Download, Method, Moved, Route, DOWNLOADS, MOVED, ROUTES},
+    contributions::{
+        Access, Download, Method, Moved, PageSection, Route, DOWNLOADS, MOVED, PAGE_SECTIONS,
+        ROUTES,
+    },
     RegistryError, Services,
 };
 use bilibi_tenancy::PortalScope;
@@ -27,6 +30,7 @@ type PortalDownloadService = bilibi_ui::download::DownloadService<PortalScope, E
 pub struct BoundRoute {
     pub route: &'static Route,
     pub page: Arc<PageService>,
+    pub sections: Vec<&'static PageSection>,
 }
 /// A `Download` contribution with its owner service. Downloads share the page
 /// routes' path rules and may not intersect a page or a host path.
@@ -50,6 +54,7 @@ pub struct BoundPortalDownload {
     pub service: Arc<PortalDownloadService>,
 }
 /// Every discovered page, staff and portal, which share one pattern space.
+/// Anonymous pages are `base/public`'s (`crate::public`), never a route.
 pub struct Pages {
     pub staff: Vec<BoundRoute>,
     pub portal: Vec<BoundPortalRoute>,
@@ -58,8 +63,12 @@ pub struct Downloads {
     pub staff: Vec<BoundDownload>,
     pub portal: Vec<BoundPortalDownload>,
 }
+pub struct MovedRoutes {
+    pub staff: Vec<&'static Moved>,
+    pub public: Vec<&'static Moved>,
+}
 impl Pages {
-    fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
+    pub(crate) fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
         self.staff
             .iter()
             .map(|bound| (bound.route.method, bound.route.path))
@@ -71,7 +80,7 @@ impl Pages {
     }
 }
 impl Downloads {
-    fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
+    pub(crate) fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
         self.staff
             .iter()
             .map(|bound| bound.download.path)
@@ -133,6 +142,7 @@ pub fn bind(services: &Services) -> Result<Pages> {
             bound.staff.push(BoundRoute {
                 route,
                 page: services.get(route.service)?,
+                sections: Vec::new(),
             });
         }
     }
@@ -159,7 +169,53 @@ pub fn bind(services: &Services) -> Result<Pages> {
             }
         }
     }
+    bind_page_sections(services, &mut bound.staff)?;
     Ok(bound)
+}
+
+fn bind_page_sections(services: &Services, staff: &mut [BoundRoute]) -> Result<()> {
+    let catalog = services.catalog()?;
+    let routes = catalog.entries::<Route>(ROUTES)?;
+    for entry in catalog.entries::<PageSection>(PAGE_SECTIONS)? {
+        let section = entry.get::<PageSection>()?;
+        let route = routes
+            .iter()
+            .find(|route| {
+                route.id == section.route && route.provenance.module == entry.provenance.module
+            })
+            .map(|route| route.get::<Route>())
+            .transpose()?;
+        let page = staff.iter_mut().find(|page| {
+            page.route.method == Method::Get
+                && route.is_some_and(|route| std::ptr::eq(route, page.route))
+        });
+        let Some(page) = page.filter(|page| {
+            page.route.framed
+                && !page.route.path.contains('{')
+                && page.page.0.redirect(page.route.operation).is_none()
+        }) else {
+            return Err(invalid(format!(
+                "page section {} at {}:{} must name an owned, framed staff GET page with a fixed path",
+                entry.id, entry.provenance.source, entry.provenance.line
+            )));
+        };
+        if let Some(query) = section.query {
+            if query.is_empty()
+                || query.starts_with('?')
+                || query.contains('#')
+                || format!("{}?{query}", page.route.path)
+                    .parse::<axum::http::uri::PathAndQuery>()
+                    .is_err()
+            {
+                return Err(invalid(format!(
+                    "page section {} at {}:{} has an invalid tab query",
+                    entry.id, entry.provenance.source, entry.provenance.line
+                )));
+            }
+        }
+        page.sections.push(section);
+    }
+    Ok(())
 }
 
 /// Downloads are bound after the pages and checked against them: a download
@@ -191,7 +247,7 @@ pub fn bind_downloads(services: &Services, pages: &Pages) -> Result<Downloads> {
     Ok(bound)
 }
 
-fn validate_host_free(entry: &bilibi_module_registry::Entry, path: &str) -> Result<()> {
+pub(crate) fn validate_host_free(entry: &bilibi_module_registry::Entry, path: &str) -> Result<()> {
     validate_pattern(path)?;
     if crate::api::reserved(path) {
         return Err(invalid(format!(
@@ -210,8 +266,8 @@ fn validate_host_free(entry: &bilibi_module_registry::Entry, path: &str) -> Resu
     Ok(())
 }
 /// Step-up wraps a signed-in access once, for an operation some module
-/// declared: a public page has no session to step up, a nested wrapper would
-/// mean nothing more, and an undeclared key could never be configured.
+/// declared: a nested wrapper would mean nothing more, and an undeclared key
+/// could never be configured.
 fn validate_access(
     services: &Services,
     entry: &bilibi_module_registry::Entry,
@@ -224,9 +280,9 @@ fn validate_access(
         "{} at {}:{}",
         entry.id, entry.provenance.source, entry.provenance.line
     );
-    if matches!(inner, Access::Public | Access::StepUp { .. }) {
+    if matches!(inner, Access::StepUp { .. }) {
         return Err(invalid(format!(
-            "{at} steps up a public or already stepped-up access"
+            "{at} steps up an already stepped-up access"
         )));
     }
     let step_up: Arc<bilibi_base::step_up::StepUp> = services.get(bilibi_base::step_up::SERVICE)?;
@@ -278,7 +334,7 @@ fn intersects(a: &str, b: &str) -> bool {
             .zip(b)
             .all(|(a, b)| a == &b || parameter(a) || parameter(b))
 }
-fn validate_pair(other: (Method, &str), route: (Method, &str)) -> Result<()> {
+pub(crate) fn validate_pair(other: (Method, &str), route: (Method, &str)) -> Result<()> {
     let (other_method, other_path) = other;
     let (method, path) = route;
     // Axum shares parameter nodes even for disjoint methods and suffixes.
@@ -309,7 +365,11 @@ fn validate_pair(other: (Method, &str), route: (Method, &str)) -> Result<()> {
     Ok(())
 }
 
-pub fn install(mut router: Router<App>, routes: &Pages, downloads: &Downloads) -> Router<App> {
+pub fn install_public(
+    mut router: Router<App>,
+    routes: &Pages,
+    downloads: &Downloads,
+) -> Router<App> {
     for bound in &downloads.portal {
         let bound = bound.clone();
         router = router.route(
@@ -342,6 +402,14 @@ pub fn install(mut router: Router<App>, routes: &Pages, downloads: &Downloads) -
             ),
         );
     }
+    router
+}
+
+pub fn install_staff(
+    mut router: Router<App>,
+    routes: &Pages,
+    downloads: &Downloads,
+) -> Router<App> {
     for bound in &downloads.staff {
         let bound = bound.clone();
         router = router.route(
@@ -364,19 +432,29 @@ pub fn install(mut router: Router<App>, routes: &Pages, downloads: &Downloads) -
             on(
                 method_filter(bound.route.method),
                 move |State(app): State<App>,
+                      method: axum::http::Method,
                       uri: Uri,
                       headers: HeaderMap,
                       Path(path): Path<HashMap<String, String>>,
                       Query(query): Query<HashMap<String, String>>,
                       body: Bytes| {
-                    dispatch(app, bound, uri, headers, path, query, body)
+                    dispatch(
+                        app,
+                        bound,
+                        uri,
+                        headers,
+                        path,
+                        query,
+                        body,
+                        method == axum::http::Method::HEAD,
+                    )
                 },
             ),
         );
     }
     router
 }
-fn method_filter(method: Method) -> MethodFilter {
+pub(crate) fn method_filter(method: Method) -> MethodFilter {
     match method {
         Method::Get => MethodFilter::GET,
         Method::Post => MethodFilter::POST,
@@ -386,15 +464,16 @@ fn method_filter(method: Method) -> MethodFilter {
     }
 }
 
-/// Retired page paths, bound after the pages and downloads: each claims no
-/// host path, collides with no page or download, and lands on a GET page whose
+/// Retired page paths, bound after the pages, downloads and public routes:
+/// each claims no host path, collides with none of them, and lands on a GET page whose
 /// pattern is exactly its `to`, so a rename that drops the new page fails boot
 /// instead of redirecting into a 404.
 pub fn bind_moved(
     services: &Services,
     pages: &Pages,
     downloads: &Downloads,
-) -> Result<Vec<&'static Moved>> {
+    public: &crate::public::PublicRoutes,
+) -> Result<MovedRoutes> {
     let mut bound: Vec<&'static Moved> = Vec::new();
     for entry in services.catalog()?.entries::<Moved>(MOVED)? {
         let moved = entry.get::<Moved>()?;
@@ -403,13 +482,15 @@ pub fn bind_moved(
         let taken = pages
             .patterns()
             .chain(downloads.patterns())
+            .chain(public.patterns())
             .chain(bound.iter().map(|other| (Method::Get, other.from)));
         for other in taken {
             validate_pair(other, (Method::Get, moved.from))?;
         }
-        if !pages
-            .patterns()
-            .any(|(method, path)| method == Method::Get && path == moved.to)
+        if !public.serves(moved.to)
+            && !pages
+                .patterns()
+                .any(|(method, path)| method == Method::Get && path == moved.to)
         {
             return Err(invalid(format!(
                 "{} at {}:{} moves to {}, which no page serves",
@@ -418,7 +499,23 @@ pub fn bind_moved(
         }
         bound.push(moved);
     }
-    Ok(bound)
+    let mut routes = MovedRoutes {
+        staff: Vec::new(),
+        public: Vec::new(),
+    };
+    for moved in bound {
+        let is_public = public.serves(moved.to)
+            || pages
+                .portal
+                .iter()
+                .any(|page| page.route.method == Method::Get && page.route.path == moved.to);
+        if is_public {
+            routes.public.push(moved);
+        } else {
+            routes.staff.push(moved);
+        }
+    }
+    Ok(routes)
 }
 
 /// Each moved path answers a GET with a permanent redirect to its page,
@@ -465,7 +562,7 @@ fn moved_destination(moved: &Moved, uri: &Uri) -> String {
 
 /// What a request's access check concluded.
 pub enum Admission {
-    /// Through, with the proven scope (none for a public route).
+    /// Through, with the proven scope.
     Admitted(Option<bilibi_security::Scope>),
     /// A step-up route outside development, and this session has not
     /// confirmed access within the window: a GET goes to the prompt first.
@@ -506,9 +603,6 @@ async fn check_base(
     access: Access,
     credential: Option<&str>,
 ) -> Result<Option<bilibi_security::Scope>> {
-    if matches!(access, Access::Public) {
-        return Ok(None);
-    }
     let scope = app
         .security
         .guard(credential.ok_or(Error::Unauthorized)?)
@@ -531,7 +625,6 @@ async fn check_base(
         Access::StepUp { .. } => return Err(Error::Internal),
         // Portal pages are bound apart; a staff session never opens one.
         Access::Portal(_) => return Err(Error::Forbidden),
-        Access::Public => unreachable!(),
     }
     Ok(Some(scope))
 }
@@ -550,6 +643,100 @@ async fn step_up_redirect(
     Ok(axum::response::Redirect::to(&destination).into_response())
 }
 
+/// A local prompt address split into its discovered path and decoded query.
+/// Providers already validate and return a local address; the host still
+/// refuses fragments and non-root paths before resolving it.
+pub(crate) fn local_address(address: &str) -> Result<(&str, HashMap<String, String>)> {
+    let (path, query) = address.split_once('?').unwrap_or((address, ""));
+    if !path.starts_with('/') || path.starts_with("//") || address.contains('#') {
+        return Err(Error::Forbidden);
+    }
+    Ok((
+        path,
+        url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect(),
+    ))
+}
+
+pub(crate) const STEP_UP_HEADER: &str = "x-bilibi-step-up";
+
+/// Draws the factor provider's prompt over placeholders inside the requested
+/// page's shell. The protected page service is deliberately not called.
+async fn step_up_page(
+    app: &App,
+    requested: &BoundRoute,
+    requested_path: &HashMap<String, String>,
+    scope: &bilibi_security::Scope,
+    credential: &str,
+    uri: &Uri,
+    framed: bool,
+) -> Result<Response> {
+    let return_to = uri
+        .path_and_query()
+        .map_or(uri.path(), |address| address.as_str());
+    let destination = app.step_up.prompt(scope, return_to).await?;
+    let (prompt_path, prompt_query) = local_address(&destination)?;
+    let (prompt, prompt_params) = resolve(app, prompt_path)?;
+    match admit(
+        app,
+        prompt.route.access,
+        Some(credential),
+        Some(prompt_path),
+    )
+    .await?
+    {
+        Admission::Admitted(_) => {}
+        Admission::StepUp(_) => return Err(Error::Forbidden),
+    }
+    let page = crate::render_fields(
+        app,
+        Some(scope),
+        prompt.page.0.render(PageRequest {
+            operation: prompt.route.operation,
+            scope: Some(scope),
+            path: &prompt_params,
+            query: &prompt_query,
+            body: &[],
+            framed,
+        }),
+    )
+    .await?;
+    let title = requested
+        .page
+        .0
+        .step_up_title(requested.route.operation, requested_path)
+        .unwrap_or_else(|| "Protected page".to_owned());
+    let gate = bilibi_ui::Html::render(&bilibi_ui::StepUpGate::rendered_page(
+        destination,
+        return_to,
+        title.clone(),
+        page.html,
+    ))
+    .map_err(|_| Error::Internal)?;
+    let shell = crate::shell::render(
+        app,
+        Some(scope),
+        uri.path(),
+        if framed {
+            PageChrome::Framed
+        } else {
+            requested.page.0.chrome(requested.route.operation)
+        },
+        true,
+        gate.as_str(),
+        bilibi_ui::Html::EMPTY,
+    )
+    .await?;
+    let mut response =
+        crate::document_themed(&title, &shell.html, shell.theme, &shell.brand)?.into_response();
+    response
+        .headers_mut()
+        .insert(STEP_UP_HEADER, HeaderValue::from_static("required"));
+    *response.status_mut() = StatusCode::OK;
+    Ok(response)
+}
+
 async fn dispatch(
     app: App,
     bound: BoundRoute,
@@ -558,8 +745,16 @@ async fn dispatch(
     path: HashMap<String, String>,
     query: HashMap<String, String>,
     body: Bytes,
+    head: bool,
 ) -> std::result::Result<Response, HttpError> {
     let credential = token(&headers).ok();
+    let framed = matches!(
+        headers.get("sec-fetch-dest").and_then(|h| h.to_str().ok()),
+        Some("iframe" | "frame")
+    );
+    if framed && !bound.route.framed {
+        return Err(Error::Forbidden.into());
+    }
     let scope = match admit(
         &app,
         bound.route.access,
@@ -576,7 +771,8 @@ async fn dispatch(
             ))
         }
         Ok(Admission::StepUp(scope)) if bound.route.method == Method::Get => {
-            return Ok(step_up_redirect(&app, &scope, &uri).await?)
+            let credential = credential.as_deref().ok_or(Error::Unauthorized)?;
+            return Ok(step_up_page(&app, &bound, &path, &scope, credential, &uri, framed).await?);
         }
         Ok(Admission::StepUp(_)) => return Err(Error::Forbidden.into()),
         Ok(Admission::Admitted(scope)) => scope,
@@ -592,32 +788,27 @@ async fn dispatch(
             }
         }
     }
-    let framed = matches!(
-        headers.get("sec-fetch-dest").and_then(|h| h.to_str().ok()),
-        Some("iframe" | "frame")
-    );
-    if framed && !bound.route.framed {
-        return Err(Error::Forbidden.into());
-    }
-    let rendered = bound
-        .page
-        .0
-        .render(PageRequest {
+    let rendered = crate::render_fields(
+        &app,
+        scope.as_ref(),
+        bound.page.0.render(PageRequest {
             operation: bound.route.operation,
             scope: scope.as_ref(),
             path: &path,
             query: &query,
             body: &body,
             framed,
-        })
-        .await;
+        }),
+    )
+    .await;
     let page = match rendered {
         // The page's own facade asked for step-up while rendering.
         Err(Error::StepUpRequired { reason, .. })
             if bound.route.method == Method::Get && reason != "impersonating" =>
         {
             let scope = scope.as_ref().ok_or(Error::Forbidden)?;
-            return Ok(step_up_redirect(&app, scope, &uri).await?);
+            let credential = credential.as_deref().ok_or(Error::Unauthorized)?;
+            return Ok(step_up_page(&app, &bound, &path, scope, credential, &uri, framed).await?);
         }
         Err(Error::NotFound) if bound.route.method == Method::Get => {
             return match crate::auth::missing_record_redirect(&app, bound.route.path) {
@@ -655,13 +846,13 @@ async fn dispatch(
         .title
         .as_deref()
         .or_else(|| bound.page.0.title(bound.route.operation))
-        .unwrap_or("Bilibi");
+        .unwrap_or(shell.brand.product());
     // A missing record or a refused action elsewhere sent the visitor here with
     // its message (a one-shot cookie), or a live action redirected here with a
     // success of its own (held by `landing`).
-    let waiting = crate::auth::waiting_flash(&headers).filter(|_| !framed);
+    let waiting = crate::auth::waiting_flash(&headers).filter(|_| !framed && !head);
     let landed = match (&waiting, credential.as_deref()) {
-        (None, Some(credential)) if !framed && crate::auth::navigating(&headers) => {
+        (None, Some(credential)) if !framed && !head && crate::auth::navigating(&headers) => {
             app.landing.take(credential, uri.path())
         }
         _ => None,
@@ -671,7 +862,8 @@ async fn dispatch(
         (None, Some((kind, message))) => flash_group(&shell.html, *kind, message)?,
         (None, None) => shell.html,
     };
-    let mut response = crate::document_themed(title, &html, shell.theme)?.into_response();
+    let mut response =
+        crate::document_themed(title, &html, shell.theme, &shell.brand)?.into_response();
     if waiting.is_some() {
         crate::auth::clear_flash(&mut response);
     }
@@ -753,6 +945,10 @@ async fn download(
 /// The page with one flash group after it, the outlet for a message that
 /// arrived with the visitor.
 fn flash_group(page: &str, kind: StatusKind, message: &str) -> Result<String> {
+    Ok(format!("{page}{}", redirect_flash(kind, message)?))
+}
+
+pub(crate) fn redirect_flash(kind: StatusKind, message: &str) -> Result<bilibi_ui::Html> {
     let mut flash = bilibi_ui::FlashMap::default();
     match kind {
         StatusKind::Error => flash.error = message,
@@ -760,12 +956,11 @@ fn flash_group(page: &str, kind: StatusKind, message: &str) -> Result<String> {
         StatusKind::Success => flash.success = message,
         StatusKind::Info => flash.info = message,
     }
-    let group = bilibi_ui::Html::render(&bilibi_ui::FloatingFlashGroup {
+    bilibi_ui::Html::render(&bilibi_ui::FloatingFlashGroup {
         id: "flash-redirect",
         flash,
     })
-    .map_err(|_| Error::Internal)?;
-    Ok(format!("{page}{group}"))
+    .map_err(|_| Error::Internal)
 }
 
 /// Resolve the same discovered GET routes as HTTP, with literal siblings first.

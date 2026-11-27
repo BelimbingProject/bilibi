@@ -1,6 +1,6 @@
 // Browser behaviour for the shared form controls in templates/forms.html:
 // CodeInput, ColourInput, Combobox, SecretReveal, SecretClear, SecretStored and
-// DisclosureDismiss, MultiSelect, LocationAction (plus the dashboard's DashboardSort and the form Fold).
+// DisclosureDismiss, MultiSelect, LocationAction, FilterSheet, DateInput (plus the dashboard's DashboardSort and the form Fold).
 // The LiveView JS commands are folded into the hooks.
 // Each registers with the shared `data-hook` runtime in ui.js
 // (BilibiUI.registerHook), which mounts a control when it enters the
@@ -11,6 +11,67 @@
 // `bilibi:event` CustomEvent, and hears a server push as a `window` event
 // `bilibi:<name>` with the payload in detail. ui.js must load first.
 (() => {
+  window.BilibiUI.registerHook("StepUpGate", {
+    mounted() {
+      this.card = this.el.querySelector("#step-up-card")
+      this.controls = () => [...this.card.querySelectorAll(
+        'a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]'
+      )].filter(control => control.tabIndex >= 0 && !control.matches(":disabled") && control.getClientRects().length)
+      this.focusCode = () => {
+        if (!this.el.isConnected) return
+        const controls = this.controls()
+        const target = controls.find(control => control.matches("input")) || controls[0] || this.card
+        target.focus()
+      }
+      this.keydown = async event => {
+        if (event.key === "Escape") {
+          event.preventDefault()
+          if (this.leaving) return
+          this.leaving = true
+          const navigation = window.navigation
+          const current = navigation?.currentEntry
+          const previous = navigation?.entries().find(entry => entry.index === current?.index - 1)
+          const here = location.origin + location.pathname + location.search
+          if (previous?.url && new URL(previous.url).origin === location.origin && previous.url.split("#")[0] !== here) {
+            const response = await fetch(previous.url, {method: "HEAD", cache: "no-store"}).catch(() => null)
+            if (!this.el.isConnected || navigation.currentEntry !== current) {
+              this.leaving = false
+              return
+            }
+            if (response?.ok && !response.headers.has("x-bilibi-step-up")) {
+              history.back()
+              return
+            }
+          }
+          location.assign(this.el.closest('[data-live-socket="/portal/live"]') ? "/portal" : "/")
+          return
+        }
+        if (event.key !== "Tab") return
+        const controls = this.controls()
+        const active = controls.indexOf(document.activeElement)
+        if (active < 0 || (event.shiftKey ? active === 0 : active === controls.length - 1)) {
+          event.preventDefault()
+          const target = (event.shiftKey ? controls.at(-1) : controls[0]) || this.card
+          target.focus()
+        }
+      }
+      this.focusin = event => {
+        if (!this.card.contains(event.target)) this.focusCode()
+      }
+      document.addEventListener("keydown", this.keydown, true)
+      document.addEventListener("focusin", this.focusin)
+      this.focusCode()
+    },
+    updated() {
+      this.card = this.el.querySelector("#step-up-card")
+      if (!this.card.contains(document.activeElement)) this.focusCode()
+    },
+    destroyed() {
+      document.removeEventListener("keydown", this.keydown, true)
+      document.removeEventListener("focusin", this.focusin)
+    },
+  })
+
   // The server owns opening/closing; this hook owns keyboard and focus only.
   window.BilibiUI.registerHook("InlineForm", {
     mounted() {
@@ -281,8 +342,13 @@
     }
   }
 
-  // Client-side filtering and keyboard interaction for the combobox.
+  // Shared popup and keyboard interaction for both combobox modes.
+  // RecordPicker's server-search mode lets the named query bubble to the
+  // owner's debounced form and emits its existing pick event. Results carry
+  // the query that produced them, so an older reply cannot offer stale picks.
+  // It keeps the typed query on close; the owner renders the chosen pill.
   //
+  // The ordinary combobox filters its fixed vocabulary locally:
   // The server owns the hidden form value and the option vocabulary. This hook
   // owns only the transient query, open state and active option, so typing
   // does not cause a round trip or lose the caret: the filter input's own
@@ -295,6 +361,7 @@
   const Combobox = {
     mounted() {
       this.input = this.el.querySelector('[role="combobox"]')
+      this.serverSearch = this.el.hasAttribute("data-server-search")
       this.valueInput = document.getElementById(this.el.dataset.valueId)
       this.listbox = this.el.querySelector('[role="listbox"]')
       this.noMatches = this.el.querySelector('[id$="-no-matches"]')
@@ -310,6 +377,7 @@
       this.filteredOptions = () => this.options().filter(option => !option.hidden)
 
       this.setOpen = open => {
+        if (this.serverSearch && !this.input.value.trim()) open = false
         this.open = open
         this.input.setAttribute("aria-expanded", String(open))
         this.listbox.hidden = !open
@@ -327,13 +395,22 @@
         const options = this.options()
 
         options.forEach(option => {
+          if (this.serverSearch) {
+            option.hidden = this.input.value !== this.el.dataset.searchQuery
+            return
+          }
           const label = option.dataset.label.toLocaleLowerCase()
           const value = option.dataset.value.toLocaleLowerCase()
           option.hidden = query !== "" && !label.includes(query) && !value.includes(query)
         })
 
         const filtered = this.filteredOptions()
-        this.noMatches.hidden = options.length === 0 || filtered.length !== 0
+        this.noMatches.hidden = this.serverSearch || options.length === 0 || filtered.length !== 0
+        if (this.serverSearch) {
+          const empty = this.el.querySelector('[id$="-empty"]')
+          if (empty) empty.hidden = this.input.value !== this.el.dataset.searchQuery
+          if (this.open && this.activeIndex < 0 && filtered.length) this.activeIndex = 0
+        }
 
         if (this.activeIndex >= filtered.length) this.activeIndex = filtered.length - 1
         this.renderActive()
@@ -361,7 +438,7 @@
         if (!this.open) {
           this.setOpen(true)
           this.activeIndex = -1
-          if (selectQuery) this.input.select()
+          if (selectQuery && !this.serverSearch) this.input.select()
         }
 
         this.applyFilter()
@@ -392,6 +469,7 @@
       }
 
       this.restore = () => {
+        if (this.serverSearch) return
         this.selectedValue = this.valueInput?.value || ""
         const selected = this.options().find(option => option.dataset.value === this.selectedValue)
         this.selectedLabel = selected?.dataset.label || ""
@@ -407,6 +485,11 @@
       this.commit = option => {
         if (!option) return
 
+        if (this.serverSearch) {
+          this.setOpen(false)
+          this.emit(this.el.dataset.pickEvent, {record: option.dataset.value, key: this.el.dataset.key})
+          return
+        }
         this.selectedValue = option.dataset.value
         this.selectedLabel = option.dataset.label
         this.input.value = this.selectedLabel
@@ -427,13 +510,13 @@
       }
 
       this.onInput = event => {
-        event.stopPropagation()
+        if (!this.serverSearch) event.stopPropagation()
         this.setEditing(true)
         if (!this.open) this.setOpen(true)
         this.activeIndex = 0
         this.applyFilter()
       }
-      this.onChange = event => event.stopPropagation()
+      this.onChange = event => { if (!this.serverSearch) event.stopPropagation() }
       this.onFocus = () => this.openList(true)
       this.onKeyDown = event => {
         const filtered = this.filteredOptions()
@@ -578,8 +661,15 @@
         if (focused) this.input.setSelectionRange(selectionStart, selectionEnd)
       }
 
+      // A shown secret goes back to a password box as its form submits, so
+      // the browser offers to save it as a password and never keeps it in
+      // its text-field history.
+      this.form = this.input.form
+      this.onSubmit = () => this.input.setAttribute("type", "password")
+
       this.el.addEventListener("mousedown", this.onMouseDown)
       this.el.addEventListener("click", this.onClick)
+      this.form?.addEventListener("submit", this.onSubmit, true)
 
       this.masking = new MutationObserver(this.sync)
       this.masking.observe(this.input, {attributeFilter: ["type"]})
@@ -593,6 +683,7 @@
 
     destroyed() {
       this.masking.disconnect()
+      this.form?.removeEventListener("submit", this.onSubmit, true)
       this.el.removeEventListener("mousedown", this.onMouseDown)
       this.el.removeEventListener("click", this.onClick)
     },
@@ -703,11 +794,24 @@
       this.onPointerDown = () => (this.pressing = true)
       this.onPressEnd = () => (this.pressing = false)
 
+      // Escape closes only this open list: a dialog or inline editor around
+      // it keeps its draft and closes on the next Escape.
       this.onKeyDown = e => {
         if (e.key !== "Escape") return
 
-        if (this.el.contains(document.activeElement)) this.escape()
-        else this.dismiss()
+        if (this.el.contains(document.activeElement)) {
+          e.preventDefault()
+          e.stopPropagation()
+          window.addEventListener("keyup", this.onEscapeUp, true)
+          this.escape()
+        } else this.dismiss()
+      }
+
+      this.onEscapeUp = e => {
+        if (e.key !== "Escape") return
+        e.preventDefault()
+        e.stopPropagation()
+        window.removeEventListener("keyup", this.onEscapeUp, true)
       }
 
       this.onClickAway = e => {
@@ -734,10 +838,10 @@
         this.listening = open
 
         if (open) {
-          window.addEventListener("keydown", this.onKeyDown)
+          window.addEventListener("keydown", this.onKeyDown, true)
           if (this.clickAway) document.addEventListener("click", this.onClickAway)
         } else {
-          window.removeEventListener("keydown", this.onKeyDown)
+          window.removeEventListener("keydown", this.onKeyDown, true)
           document.removeEventListener("click", this.onClickAway)
         }
       }
@@ -756,10 +860,11 @@
 
     destroyed() {
       this.expansion.disconnect()
+      window.removeEventListener("keyup", this.onEscapeUp, true)
       this.trigger.removeEventListener("click", this.toggle)
       this.el.removeEventListener("pointerdown", this.onPointerDown)
       this.el.removeEventListener("focusout", this.onFocusOut)
-      window.removeEventListener("keydown", this.onKeyDown)
+      window.removeEventListener("keydown", this.onKeyDown, true)
       document.removeEventListener("click", this.onClickAway)
       window.removeEventListener("pointerup", this.onPressEnd)
       window.removeEventListener("pointercancel", this.onPressEnd)
@@ -774,7 +879,7 @@
       this.paintChips = () => {
         const row = this.el.querySelector("[data-chip-row]")
         if (!row || !row.clientWidth) return
-        const chips = [...row.querySelectorAll("[data-selected-chip]")]
+        const chips = [...row.querySelectorAll("[data-selected-chip]")].filter(chip => !chip.hidden)
         const marker = row.querySelector("[data-chip-overflow]")
         const gap = parseFloat(getComputedStyle(row).columnGap) || 0
         const widths = chips.map(chip => chip.getBoundingClientRect().width)
@@ -822,6 +927,21 @@
         input.dispatchEvent(new Event("change", {bubbles: true}))
         this.trigger.focus()
       }
+      // A tick shows or hides its server-rendered chip and the count at once,
+      // also where no server render follows (an inline editor, a plain form).
+      this.followTick = event => {
+        const box = event.target
+        if (!(box instanceof HTMLInputElement) || box.type !== "checkbox") return
+        const chip = [...this.el.querySelectorAll("[data-selected-chip]")].find(item => item.dataset.selectedChip === box.value)
+        if (chip && chip.hidden === box.checked) chip.hidden = !box.checked
+        const ticked = [...this.el.querySelectorAll('input[type="checkbox"]')].filter(item => item.checked).length
+        const count = this.el.querySelector("[data-selected-count]")
+        if (count && count.textContent !== `(${ticked} selected)`) count.textContent = `(${ticked} selected)`
+        const placeholder = this.el.querySelector("[data-chip-placeholder]")
+        if (placeholder && placeholder.hidden !== ticked > 0) placeholder.hidden = ticked > 0
+        this.scheduleChips()
+      }
+      this.el.addEventListener("change", this.followTick)
       this.el.addEventListener("click", this.removeChip)
       this.chipResize = new ResizeObserver(this.scheduleChips)
       this.chipResize.observe(this.el)
@@ -833,6 +953,7 @@
       this.chipResize.disconnect()
       cancelAnimationFrame(this.chipFrame)
       this.el.removeEventListener("click", this.removeChip)
+      this.el.removeEventListener("change", this.followTick)
     },
   }
 
@@ -1186,136 +1307,246 @@
 })();
 
 ;(() => {
-// Keeps every rendered instant on the saved display mode.
-//
-// A mode change has to reach timestamps that are already on screen, including
-// rows a LiveView stream handed to the DOM and never re-renders. So the shell
-// publishes the live mode on #app-shell and this hook re-applies it in place.
-//
-// The server decides `company` and `utc` and writes both strings onto the
-// element, so those two modes are a copy, never a re-format: the browser
-// cannot disagree with the server about a string it did not produce. `local`
-// is the one mode the server cannot decide — it does not know the browser's
-// zone — so it is formatted here, in the reader's own locale and hour cycle.
-const SHELL = "#app-shell"
+  // DateInput (the date, date-and-time and time kinds of forms::input, and
+  // forms::date_box): one text box that reads and shows the shared formats,
+  // "6 Nov 2026", "6 Nov 2026, 14:30" and "14:30", on every browser. A native
+  // date or time input draws the browser's own order and clock (mm/dd/yyyy,
+  // 02:30 PM on an American system), so it is never the visible box here.
+  // The box has no name; its hidden sibling posts what the server always
+  // read (yyyy-mm-dd, yyyy-mm-ddTHH:MM or HH:MM), kept in step on every
+  // keystroke, so a change, Enter or a submit button carries what the box
+  // shows. A date may be typed "6 Nov 2026", "6/11/2026" (day first),
+  // "2026-11-06" or "Nov 6 2026"; a time "14:30", "2:30 pm" or "1430". Text
+  // it cannot read is posted as typed, so the server's own validation
+  // answers it. The icon button opens the browser's picker on a hidden
+  // native input (showPicker), which carries min and max.
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+  const monthOf = (word) => {
+    const key = word.toLowerCase()
+    if (key.length < 3) return 0
+    return MONTHS.findIndex((month) => key.startsWith(month.toLowerCase())) + 1
+  }
+  const pad = (n) => String(n).padStart(2, "0")
+  const isoDate = (y, m, d) => {
+    if (y < 100) y += 2000
+    const date = new Date(Date.UTC(y, m - 1, d))
+    if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return null
+    return `${y}-${pad(m)}-${pad(d)}`
+  }
+  const parseDate = (text) => {
+    const value = text.trim()
+    let match
+    if ((match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(value))) return isoDate(+match[1], +match[2], +match[3])
+    if ((match = /^(\d{1,2})[/.\-\s](\d{1,2})[/.\-\s](\d{2}|\d{4})$/.exec(value))) return isoDate(+match[3], +match[2], +match[1])
+    const words = value.replace(/,/g, " ").split(/[\s/.\-]+/).filter(Boolean)
+    if (words.length !== 3 || !/^\d{2}(\d{2})?$/.test(words[2])) return null
+    const year = +words[2]
+    if (/^\d{1,2}$/.test(words[0]) && monthOf(words[1])) return isoDate(year, monthOf(words[1]), +words[0])
+    if (monthOf(words[0]) && /^\d{1,2}$/.test(words[1])) return isoDate(year, monthOf(words[0]), +words[1])
+    return null
+  }
+  const parseTime = (text) => {
+    const match = /^(\d{1,2})(?:[:.h]?(\d{2}))?(?::\d{2})?\s*(?:([ap])\.?m?\.?)?$/i.exec(text.trim())
+    if (!match) return null
+    let hour = +match[1]
+    const minute = match[2] === undefined ? 0 : +match[2]
+    const meridiem = match[3]?.toLowerCase()
+    if (meridiem) {
+      if (hour < 1 || hour > 12) return null
+      hour = (hour % 12) + (meridiem === "p" ? 12 : 0)
+    }
+    if (hour > 23 || minute > 59) return null
+    return `${pad(hour)}:${pad(minute)}`
+  }
+  // The value the server reads for the box's text, or null.
+  const parse = (kind, text) => {
+    if (kind === "time") return parseTime(text)
+    if (kind !== "datetime-local") return parseDate(text)
+    const value = text.trim()
+    const split = /^(\d{4}-\d{1,2}-\d{1,2})[T\s]+(.+)$/.exec(value) || /^(.*\d{4})[,\s]+(.+)$/.exec(value)
+    if (!split) return null
+    const date = parseDate(split[1]), time = parseTime(split[2])
+    return date && time ? `${date}T${time}` : null
+  }
+  // The box's text for a posted value, in the shared format.
+  const show = (kind, value) => {
+    if (!value) return ""
+    if (kind === "time") return /^\d{2}:\d{2}/.test(value) ? value.slice(0, 5) : value
+    const match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}:\d{2}))?/.exec(value)
+    if (!match) return value
+    const date = `${+match[3]} ${MONTHS[+match[2] - 1]} ${match[1]}`
+    return kind === "datetime-local" && match[4] ? `${date}, ${match[4]}` : date
+  }
 
-// Every mounted instant, so one shell change repaints all of them without
-// each element observing the shell separately.
-const instances = new Set()
+  const syncPicker = (picker, parsed) => {
+    if (!picker) return
+    const inside = parsed && (!picker.min || parsed >= picker.min) && (!picker.max || parsed <= picker.max)
+    picker.value = inside ? parsed : ""
+  }
 
-// One observer for the whole page, armed on the first mount. It re-arms if the
-// shell element is ever replaced rather than patched, so a stale observer
-// cannot leave every timestamp silently frozen on the previous mode.
-let observer = null
-let observed = null
-
-const shell = () => document.querySelector(SHELL)
-
-const liveMode = () => shell()?.dataset.displayMode || null
-
-const observeShell = () => {
-  const el = shell()
-  if (!el || observed === el) return
-  observer?.disconnect()
-  observer = new MutationObserver(() => {
-    for (const hook of instances) hook.renderDateTime()
+  window.BilibiUI.registerHook("DateInput", {
+    mounted() {
+      this.kind = () => this.el.dataset.dateKind || "date"
+      this.box = () => this.el.querySelector('input[type="text"]')
+      this.value = () => this.el.querySelector("input[data-date-value]")
+      this.picker = () => this.el.querySelector("input[data-date-picker]")
+      // Runs on the wrapper, before live.js reads the form at the document,
+      // so the posted value always matches the box.
+      this.onInput = (event) => {
+        const box = this.box(), value = this.value(), picker = this.picker(), kind = this.kind()
+        if (!box || !value) return
+        if (event.target === picker) {
+          if (!picker.value) return
+          value.value = picker.value
+          box.value = show(kind, picker.value)
+          return
+        }
+        if (event.target !== box) return
+        const parsed = parse(kind, box.value)
+        value.value = parsed ?? box.value.trim()
+        syncPicker(picker, parsed)
+        // On leaving the box (change), show what was understood.
+        if (event.type === "change" && parsed) box.value = show(kind, parsed)
+      }
+      this.onClick = (event) => {
+        const button = event.target instanceof Element ? event.target.closest("button") : null
+        const picker = this.picker()
+        if (!button || button.disabled || !picker) return
+        event.preventDefault()
+        try {
+          picker.showPicker()
+        } catch {
+          // A browser without showPicker still has the typed box.
+          this.box()?.focus()
+        }
+      }
+      // An inline editor opening on a value (or on the first key typed)
+      // hands it here, so the box shows it in the shared format.
+      this.onValue = (event) => {
+        const box = this.box(), value = this.value(), picker = this.picker(), given = event.detail?.value ?? ""
+        if (!box || !value) return
+        const parsed = parse(this.kind(), given) ?? (/^\d{4}-\d{2}-\d{2}/.test(given) ? given : null)
+        value.value = parsed ?? given
+        syncPicker(picker, parsed)
+        box.value = show(this.kind(), parsed ?? given)
+      }
+      this.el.addEventListener("input", this.onInput)
+      this.el.addEventListener("change", this.onInput)
+      this.el.addEventListener("click", this.onClick)
+      this.el.addEventListener("bilibi:date-value", this.onValue)
+    },
+    destroyed() {
+      this.el.removeEventListener("input", this.onInput)
+      this.el.removeEventListener("change", this.onInput)
+      this.el.removeEventListener("click", this.onClick)
+      this.el.removeEventListener("bilibi:date-value", this.onValue)
+    },
   })
-  observer.observe(el, {attributes: true, attributeFilter: ["data-display-mode"]})
-  observed = el
-}
+})();
 
-// `local` renders the instant the way the reader's own device would: their
-// locale orders the fields and chooses the hour cycle. The zone is named on
-// `datetime` only, where the label qualifies a full date and time.
-const formatLocal = (value, timeZone, format, precision) => {
-  const options = {timeZone}
+;(() => {
+  // FilterSheet (the filter toolbar of templates/lists.html): below `sm` the
+  // filters other than search sit in a <dialog> sheet. This hook only opens
+  // and closes it and resets a filter whose chip is removed; the filters
+  // themselves stay ordinary form controls, so a change posts with the form
+  // and the server's reply re-renders the count and the chips. The patcher
+  // keeps the dialog's `open`, so the sheet stays up while filters apply.
+  const WIDE = window.matchMedia("(min-width: 40rem)")
 
-  if (format !== "time") {
-    Object.assign(options, {day: "2-digit", month: "2-digit", year: "numeric"})
+  // A removed chip puts its filter back to the first choice (a select's
+  // "All"), unticks a multi-select and empties a date, then raises one
+  // change, which live.js turns into the toolbar's event.
+  const reset = (control) => {
+    let changed = null
+    for (const el of control.querySelectorAll("select, input")) {
+      if (el.disabled) continue
+      if (el.tagName === "SELECT") {
+        const first = el.options[0]?.value ?? ""
+        if (el.value !== first) { el.value = first; changed = el }
+      } else if (el.type === "checkbox" || el.type === "radio") {
+        if (el.checked) { el.checked = false; changed = el }
+      } else if (el.type !== "hidden" || el.name) {
+        if (el.value !== "") { el.value = ""; changed = el }
+      }
+    }
+    changed?.dispatchEvent(new Event("change", {bubbles: true}))
   }
 
-  if (format !== "date") {
-    Object.assign(options, {hour: "2-digit", minute: "2-digit"})
-    if (precision === "second") options.second = "2-digit"
-  }
+  window.BilibiUI.registerHook("FilterSheet", {
+    mounted() {
+      const id = this.el.id
+      this.sheet = () => this.el.querySelector(`#${CSS.escape(id)}-filters`)
+      this.onClick = (event) => {
+        const sheet = this.sheet()
+        if (!sheet) return
+        const button = event.target instanceof Element ? event.target.closest("button") : null
+        if (event.target === sheet && sheet.open) {
+          // A click on the backdrop lands on the dialog itself.
+          const box = sheet.getBoundingClientRect()
+          const inside = event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top && event.clientY <= box.bottom
+          if (!inside) sheet.close()
+          return
+        }
+        if (!button) return
+        if (button.id === `${id}-filters-open`) {
+          if (!sheet.open) sheet.showModal()
+        } else if (button.id === `${id}-filters-close` || button.id === `${id}-filters-done`) {
+          sheet.close()
+        } else if (button.id.startsWith(`${id}-chip-`) && button.id.endsWith("-remove")) {
+          const control = this.el.querySelector(`[data-filter-control="${CSS.escape(button.value)}"]`)
+          if (control) reset(control)
+        }
+      }
+      // Widening past `sm` draws the filters in the row again, so a sheet
+      // left open would hold the top layer with nothing to show.
+      this.onWide = () => {
+        const sheet = this.sheet()
+        if (WIDE.matches && sheet?.open) sheet.close()
+      }
+      this.el.addEventListener("click", this.onClick)
+      WIDE.addEventListener("change", this.onWide)
+    },
+    destroyed() {
+      this.el.removeEventListener("click", this.onClick)
+      WIDE.removeEventListener("change", this.onWide)
+    },
+  })
+})()
 
-  if (format === "datetime") options.timeZoneName = "short"
-
-  return new Intl.DateTimeFormat(undefined, options).format(value)
-}
-
-const DateTime = {
-  mounted() {
-    instances.add(this)
-    observeShell()
-    this.renderDateTime()
-  },
-
-  updated() {
-    this.renderDateTime()
-  },
-
-  destroyed() {
-    instances.delete(this)
-
-    // With nothing left to repaint, stop observing. Otherwise the observer
-    // keeps a strong reference to a detached #app-shell — the root of the
-    // whole previous page — after navigating to a screen that carries no
-    // instants and so mounts no hook to re-arm it.
-    //
-    // Conditioned on the set being empty rather than on destroyed() alone:
-    // during LiveView navigation the incoming view's hooks mount BEFORE the
-    // outgoing view's are destroyed, so live instances are still registered
-    // here and an observer they depend on is never torn down underneath them.
-    if (instances.size === 0) {
-      observer?.disconnect()
-      observer = null
-      observed = null
-    }
-  },
-
-  renderDateTime() {
-    const value = new Date(this.el.dateTime)
-
-    if (Number.isNaN(value.getTime())) return
-
-    // An instant given an explicit display context follows that context, not
-    // the shell: the caller has already decided what it is showing.
-    const shellMode = this.el.dataset.followShell === "true" ? liveMode() : null
-    const mode = shellMode || this.el.dataset.mode || "local"
-
-    if (mode === "company" || mode === "utc") {
-      // The server already rendered both. Copy, never re-format.
-      const text = mode === "company" ? this.el.dataset.textCompany : this.el.dataset.textUtc
-      this.showServerText(text)
-      return
-    }
-
-    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-    let text
-
-    try {
-      text = formatLocal(value, timeZone, this.el.dataset.format, this.el.dataset.precision)
-    } catch {
-      // A browser that cannot format this zone falls back to the server's
-      // stored-UTC text. Keeping whatever is there would leave the previous
-      // mode's string under a control that now reports a different mode.
-      this.showServerText(this.el.dataset.textUtc)
-      return
-    }
-
-    if (this.el.textContent !== text) this.el.textContent = text
-    this.el.dataset.timezone = timeZone
-    this.el.title = `Rendered in ${timeZone}`
-  },
-
-  showServerText(text) {
-    if (text && this.el.textContent !== text) this.el.textContent = text
-    delete this.el.dataset.timezone
-    this.el.removeAttribute("title")
-  },
-}
-
-window.BilibiUI.registerHook('DateTime', DateTime)
-
+// A form switch keeps its boolean in the named hidden input, so normal forms
+// and InlineChoice send the same value through their ordinary save contract.
+;(() => {
+  window.BilibiUI.registerHook('SwitchInput', {
+    mounted() {
+      this.abort = new AbortController();
+      this.el.addEventListener('bilibi:switch-value', () => this.paint(), {signal: this.abort.signal});
+      this.el.querySelector('[role="switch"]').addEventListener('click', () => {
+        const input = this.el.querySelector('input');
+        input.value = input.value === 'true' ? 'false' : 'true';
+        this.paint();
+        input.dispatchEvent(new Event('change', {bubbles: true}));
+      }, {signal: this.abort.signal});
+      this.paint();
+    },
+    updated() { this.paint(); },
+    paint() {
+      const button = this.el.querySelector('[role="switch"]');
+      const on = this.el.querySelector('input').value === 'true';
+      button.setAttribute('aria-checked', String(on));
+      button.classList.toggle('text-success-ink', on);
+      button.classList.toggle('text-ink-muted', !on);
+      const track = button.firstElementChild;
+      track.classList.toggle('border-success-line', on);
+      track.classList.toggle('bg-success-surface', on);
+      track.classList.toggle('border-line', !on);
+      track.classList.toggle('bg-surface-sunken', !on);
+      const thumb = track.firstElementChild;
+      thumb.classList.toggle('translate-x-4', on);
+      thumb.classList.toggle('bg-success-ink', on);
+      thumb.classList.toggle('bg-ink-muted', !on);
+      const label = on ? 'On' : 'Off';
+      if (button.lastElementChild.textContent !== label) button.lastElementChild.textContent = label;
+    },
+    destroyed() { this.abort.abort(); },
+  });
 })();

@@ -74,14 +74,17 @@ fn parse(input: &Value) -> bilibi_agent_api::Result<(NewCompany, crate::CompanyF
     Ok((new, fields))
 }
 
-/// The agent's `custom` input: a list of `{key, value}` pairs (the input
-/// dialect has no free-form object, and each tenant's keys differ), folded into
-/// the key-to-value object the rest of Company works with.
+/// The agent's `custom` input: a list of `{key, value, values}` pairs (the
+/// input dialect has no free-form object, gives each property one type, and
+/// each tenant's keys differ), folded into the key-to-value object the rest of
+/// Company works with. A pair carries exactly one of `value` (a string, or
+/// null to clear) and `values` (a several-choices field's codes, empty to
+/// clear); the definitions' check decides whether that shape suits the field.
 fn custom_object(value: &Value) -> bilibi_agent_api::Result<Value> {
     let pairs = value.as_array().ok_or_else(|| {
         invalid(vec![FieldError::new(
             "custom",
-            "must be a list of {key, value} pairs",
+            "must be a list of {key, value} or {key, values} pairs",
         )])
     })?;
     let mut object = serde_json::Map::new();
@@ -90,10 +93,22 @@ fn custom_object(value: &Value) -> bilibi_agent_api::Result<Value> {
             .as_str()
             .filter(|key| !key.is_empty())
             .ok_or_else(|| invalid(vec![FieldError::new("custom", "each pair needs a key")]))?;
-        if object
-            .insert(key.to_owned(), pair["value"].clone())
-            .is_some()
-        {
+        let refuse = |message: &'static str| {
+            invalid(vec![FieldError::new_owned(
+                crate::field_contributions::custom_name(key),
+                message,
+            )])
+        };
+        let held = match (pair.get("value"), pair.get("values")) {
+            (Some(value), None) => value.clone(),
+            (None, Some(Value::Array(codes))) if codes.iter().all(Value::is_string) => {
+                Value::Array(codes.clone())
+            }
+            (None, Some(_)) => return Err(refuse("takes its values as a list of codes")),
+            (Some(_), Some(_)) => return Err(refuse("takes value or values, not both")),
+            (None, None) => return Err(refuse("needs value or values")),
+        };
+        if object.insert(key.to_owned(), held).is_some() {
             return Err(invalid(vec![FieldError::new_owned(
                 crate::field_contributions::custom_name(key),
                 "is given twice",
@@ -116,21 +131,44 @@ impl ReadHandler for List {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let query = SearchQuery {
-                search: input["search"].as_str().unwrap_or_default().to_owned(),
-                status: input["status"].as_str().unwrap_or_default().to_owned(),
+                search: bilibi_agent_api::text_field(input, "search"),
+                status: bilibi_agent_api::text_field(input, "status"),
                 page: input["page"].as_i64().unwrap_or(1),
                 page_size: input["page_size"].as_i64().unwrap_or(25),
             };
-            let client = db()?.get().await.map_err(bilibi_database::Error::from)?;
-            let page = organisation::search(&**client, scope, &query).await?;
-            let ids = page
-                .entries
-                .iter()
-                .map(|entry| entry.company.id)
-                .collect::<Vec<_>>();
-            let extension_values = crate::field_contributions::read(&**client, scope, &ids).await?;
-            let restricted =
-                crate::field_contributions::effective_restrictions(&**client, scope).await?;
+            // Grid's bounds, as the page list reads under: a search the
+            // server cannot finish in time ends as unavailable, never as a
+            // pooled connection held for as long as it takes. Not read-only:
+            // the capability check logs its decision, kept unless the
+            // database itself failed.
+            let mut pooled = db()?.get().await.map_err(bilibi_database::Error::from)?;
+            let client: &mut tokio_postgres::Client = &mut pooled;
+            let tx = client
+                .build_transaction()
+                .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+                .start()
+                .await
+                .map_err(bilibi_database::Error::from)?;
+            tx.batch_execute(bilibi_grid::BOUNDS)
+                .await
+                .map_err(bilibi_database::Error::from)?;
+            let read = async {
+                let page = organisation::search(&tx, scope, &query).await?;
+                let ids = page
+                    .entries
+                    .iter()
+                    .map(|entry| entry.company.id)
+                    .collect::<Vec<_>>();
+                let extension_values = crate::field_contributions::read(&tx, scope, &ids).await?;
+                let restricted =
+                    crate::field_contributions::effective_restrictions(&tx, scope).await?;
+                Ok::<_, bilibi_database::Error>((page, extension_values, restricted))
+            }
+            .await;
+            if !matches!(read, Err(bilibi_database::Error::Database(_))) {
+                tx.commit().await.map_err(bilibi_database::Error::from)?;
+            }
+            let (page, extension_values, restricted) = read?;
             let entries = page
                 .entries
                 .into_iter()
@@ -198,7 +236,7 @@ impl ReadHandler for Get {
     }
     fn call<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
@@ -206,38 +244,44 @@ impl ReadHandler for Get {
             let id = input["company_id"]
                 .as_i64()
                 .ok_or(bilibi_database::Error::Invalid)?;
-            let client = db()?.get().await.map_err(bilibi_database::Error::from)?;
-            bilibi_authz::authorize_key(&**client, scope, VIEW).await?;
+            let client = client.sql_client().await?;
+            bilibi_authz::authorize_key(client, scope, VIEW).await?;
             let (company, masked) =
-                crate::detail(&**client, scope, id)
+                crate::detail(client, scope, id)
                     .await
                     .map_err(|error| match error {
                         bilibi_database::Error::NotFound => bilibi_agent_api::Error::NotFound,
                         other => other.into(),
                     })?;
-            let primary = crate::primary::is_primary(&**client, scope, id).await?;
-            let extension_values =
-                crate::field_contributions::read(&**client, scope, &[id]).await?;
+            let primary = crate::primary::is_primary(client, scope, id).await?;
+            let extension_values = crate::field_contributions::read(client, scope, &[id]).await?;
             let mut value = company.to_json();
             if let Some(fields) = extension_values.get(&id) {
                 for (field, field_value) in fields {
                     value_map_insert(&mut value, field, field_value.clone());
                 }
             }
-            let held = crate::field_contributions::custom_read(&**client, scope, &[id]).await?;
+            let held = crate::field_contributions::custom_read(client, scope, &[id]).await?;
             let held = held.get(&id);
             value["custom"] = Value::Array(
                 crate::field_contributions::custom_fields()?
-                    .active(&**client, scope, crate::field_contributions::CUSTOM_RECORD_TYPE)
+                    .active(client, scope, crate::field_contributions::CUSTOM_RECORD_TYPE)
                     .await?
                     .into_iter()
                     .map(|field| {
-                        json!({
+                        // The stored JSON as it is (a several-choices field's
+                        // codes as an array, a record field's id); agents name
+                        // a record with base.records.resolve.
+                        let mut listed = json!({
                             "key": field.key,
                             "label": field.label,
                             "type": field.kind.as_str(),
                             "value": held.and_then(|held| held.get(&field.key)).cloned().unwrap_or(Value::Null),
-                        })
+                        });
+                        if let Some(target) = &field.target {
+                            listed["target"] = json!(target);
+                        }
+                        listed
                     })
                     .collect(),
             );
@@ -263,14 +307,19 @@ impl ReadHandler for Lookup {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let client = db()?.get().await.map_err(bilibi_database::Error::from)?;
+            let mut client = db()?.get().await.map_err(bilibi_database::Error::from)?;
             let value = match self {
                 Self::Duplicates => {
                     let query = serde_json::from_value(input.clone())
                         .map_err(|_| bilibi_database::Error::Invalid)?;
-                    serde_json::to_value(
-                        crate::duplicates::duplicates(&**client, scope, &query).await?,
-                    )
+                    // In a transaction, so matching runs under its timeout.
+                    let raw: &mut tokio_postgres::Client = &mut client;
+                    let tx = raw
+                        .transaction()
+                        .await
+                        .map_err(bilibi_database::Error::from)?;
+                    let found = crate::duplicates::duplicates(&tx, scope, &query).await;
+                    serde_json::to_value(crate::duplicates::settle(tx, found).await?)
                 }
                 Self::Hierarchy => serde_json::to_value(
                     crate::hierarchy::hierarchy(
@@ -290,8 +339,8 @@ impl ReadHandler for Lookup {
 }
 fn duplicates_schema() -> Value {
     json!({"type":"object","properties":{
-        "name":{"type":"string","maxLength":160}, "website":text(), "email":{"type":"string","maxLength":254},
-        "phone":{"type":"string","maxLength":64},"registration_number":text(),
+        "name":crate::web::fields::NAME.input(json!({"maxLength":160})), "website":crate::web::fields::WEBSITE.input(json!({"maxLength":255})), "email":crate::web::fields::EMAIL.input(json!({"maxLength":254})),
+        "phone":{"type":"string","maxLength":64},"registration_number":crate::web::fields::REGISTRATION_NUMBER.input(json!({"maxLength":255})),
         "except_id":{"type":"integer","minimum":1}, "limit":{"type":"integer","minimum":1,"maximum":100}
     }})
 }
@@ -372,7 +421,11 @@ impl WriteHandler for Create {
             changes.extend(
                 crate::field_contributions::custom_patch(&custom_values)
                     .iter()
-                    .filter(|(_, value)| !value.is_null() && value.as_str() != Some(""))
+                    .filter(|(_, value)| {
+                        !value.is_null()
+                            && value.as_str() != Some("")
+                            && value.as_array().is_none_or(|codes| !codes.is_empty())
+                    })
                     .map(|(key, value)| json!({"field":crate::field_contributions::custom_name(key),"from":null,"to":value})),
             );
             Ok(json!({"summary":"Create company","changes":changes,"duplicate_candidates":matches.candidates,"duplicates_likely":matches.likely,"create_anyway":new.create_anyway}).into())
@@ -601,13 +654,10 @@ async fn authorize_update_target(
     Ok(row.get(0))
 }
 
-fn text() -> Value {
-    json!({"type":"string","maxLength":255})
-}
 fn list_schema() -> Value {
     json!({"type":"object","properties":{
-        "search":{"type":"string","maxLength":200,"description":"Words matched against name, code, legal name, email and jurisdiction."},
-        "status":{"type":"string","enum":STATUSES},
+        "search":{"type":"string","maxLength":200,"description":"Words, each matched as the start of a word in the name, code or legal name; all must match. A full name or code with dots, dashes or slashes (amazon.com, PO-2024-001) also matches as typed; \"a phrase\" matches in order and -word excludes."},
+        "status":crate::web::fields::STATUS.input(json!({"enum":STATUSES})),
         "page":{"type":"integer","minimum":1},
         "page_size":{"type":"integer","minimum":1,"maximum":100}
     }})
@@ -617,16 +667,16 @@ fn get_schema() -> Value {
 }
 fn create_schema() -> Value {
     let mut schema = json!({"type":"object","required":["name"],"properties":{
-        "name":{"type":"string","maxLength":160},
-        "code":{"type":"string","maxLength":255,"description":"Propose a code of at most 12 characters from whole name words, except truncate the first word to fit the limit. Omit company-only (M) markers and trailing legal forms such as Sdn Bhd, Berhad, Pte, Ltd, PLT, Inc, LLC and Corp; append _2, _3 and so on for collisions within 12 characters. The person may choose another code, including a longer one."},"legal_name":text(),"registration_number":text(),
-        "tax_id":{"type":"string","maxLength":64},
-        "jurisdiction":{"type":"string","maxLength":2},
-        "email":{"type":"string","maxLength":254},
+        "name":crate::web::fields::NAME.input(json!({"maxLength":160})),
+        "code":crate::web::fields::CODE.input(json!({"maxLength":255,"description":"Propose a code of at most 12 characters from whole name words, except truncate the first word to fit the limit. Omit company-only (M) markers and trailing legal forms such as Sdn Bhd, Berhad, Pte, Ltd, PLT, Inc, LLC and Corp; append _2, _3 and so on for collisions within 12 characters. The person may choose another code, including a longer one."})),"legal_name":crate::web::fields::LEGAL_NAME.input(json!({"maxLength":255})),"registration_number":crate::web::fields::REGISTRATION_NUMBER.input(json!({"maxLength":255})),
+        "tax_id":crate::web::fields::TAX_ID.input(json!({"maxLength":64})),
+        "jurisdiction":crate::web::fields::JURISDICTION.input(json!({"maxLength":2})),
+        "email":crate::web::fields::EMAIL.input(json!({"maxLength":254})),
         "phone":{"type":"string","maxLength":64},
-        "website":text(),
-        "status":{"type":"string","enum":INITIAL_STATUSES},
-        "parent_id":{"type":"integer","minimum":1,"title":"Parent company","x-bilibi-reference":"company"},
-        "legal_entity_type_id":{"type":"integer","minimum":1},
+        "website":crate::web::fields::WEBSITE.input(json!({"maxLength":255})),
+        "status":crate::web::fields::STATUS.input(json!({"enum":INITIAL_STATUSES})),
+        "parent_id":crate::web::fields::PARENT_ID.input(json!({"minimum":1,"x-bilibi-reference":"company"})),
+        "legal_entity_type_id":crate::web::fields::LEGAL_ENTITY_TYPE_ID.input(json!({"minimum":1})),
         "create_anyway":{"type":"object","required":["candidate_ids","reason"],"properties":{
             "candidate_ids":{"type":"array","items":{"type":"integer","minimum":1}},
             "reason":{"type":"string","maxLength":500}
@@ -656,10 +706,11 @@ fn create_schema() -> Value {
 /// value is checked against the tenant's active definitions at preview and
 /// commit.
 fn custom_schema() -> Value {
-    json!({"type":"array","description":"The organisation's own custom fields as {key, value} pairs: text, a number as written (12.5), a date as YYYY-MM-DD, or a pick-list code. Find the keys with base.custom_fields.list (record_type company). An empty value clears it.",
+    json!({"type":"array","description":"The organisation's own custom fields as {key, value} or {key, values} pairs: value is text, a number as written (12.5), a date as YYYY-MM-DD, true or false, a pick-list code, or a record field's record ID; values holds a several-choices field's pick-list codes. Find the keys, types, pick-lists and record kinds with base.custom_fields.list (record_type company). An empty or null value, or an empty values list, clears it.",
     "items":{"type":"object","required":["key"],"properties":{
         "key":{"type":"string","maxLength":40},
-        "value":{"type":"string","maxLength":10000,"nullable":true}
+        "value":{"type":"string","maxLength":10000,"nullable":true,"description":"Every field but several choices: the text, number, date, true or false, pick-list code, or record ID. Null clears it."},
+        "values":{"type":"array","items":{"type":"string","maxLength":64},"description":"For a several-choices field, the pick-list codes; an empty list clears it."}
     }}})
 }
 
@@ -711,7 +762,7 @@ fn empty_schema() -> Value {
     json!({"type":"object","properties":{}})
 }
 fn reachable_output() -> Value {
-    json!({"type":"array","description":"Workplaces assigned through desks, each with id, name and status. This list does not grant Company-record administration."})
+    json!({"type":"array","description":"Workplaces assigned through desks, each with id, name and status. An archived one stays listed: its records read, and every write into it is refused. This list does not grant Company-record administration."})
 }
 fn create_output() -> Value {
     json!({"type":"object","description":"Created company and its Bilibi URL."})
@@ -723,9 +774,9 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/company.agent", Proven
         Operation { key: "core.company.hierarchy", title: "Read a company hierarchy", summary: "Read a bounded parent chain and subsidiary tree.", keywords: &["parent", "subsidiary", "tree"], capability: VIEW, input: get_schema, output: hierarchy_output, handler: Handler::Read(&Lookup::Hierarchy), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.create", title: "Create a company", summary: "Create an organisation in your tenant after searching for an existing company.", keywords: &["add", "organisation", "business"], capability: CREATE, input: create_schema, output: create_output, handler: Handler::SafeWrite(&Create), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.update", title: "Update contributed Company fields", summary: "Review and update static Extension-contributed fields on the current Company, or with tenant-wide administration reach.", keywords: &["edit", "update", "segment", "renewal", "choice"], capability: UPDATE, input: update_schema, output: update_output, handler: Handler::SafeWrite(&Update), channels: Channels::Every, step_up: &[] },
-        Operation { key: "core.company.list", title: "List companies", summary: "Find companies of your tenant by name, code, legal name, email or jurisdiction, one page at a time, with the fields you may see.", keywords: &["find", "search", "browse", "organisation", "business", "firm"], capability: LIST, input: list_schema, output: list_output, handler: Handler::Read(&List), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.company.list", title: "List companies", summary: "Find companies of your tenant by words of their name, code or legal name, one page at a time, with the fields you may see.", keywords: &["find", "search", "browse", "organisation", "business", "firm"], capability: LIST, input: list_schema, output: list_output, handler: Handler::Read(&List), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.get", title: "Read a company", summary: "One company of your tenant by id, with the fields you may see.", keywords: &["show", "detail", "organisation", "business", "firm"], capability: VIEW, input: get_schema, output: get_output, handler: Handler::Read(&Get), channels: Channels::Every, step_up: &[] },
-        Operation { key: "core.company.reachable", title: "List the companies you may work in", summary: "The live workplaces assigned to you through desks. Work access does not grant Company-record administration.", keywords: &["current", "switch", "context", "my company", "organisation"], capability: VIEW, input: empty_schema, output: reachable_output, handler: Handler::Read(&Reachable), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.company.reachable", title: "List the companies you may work in", summary: "The workplaces assigned to you through desks; an archived one is read-only. Work access does not grant Company-record administration.", keywords: &["current", "switch", "context", "my company", "organisation"], capability: VIEW, input: empty_schema, output: reachable_output, handler: Handler::Read(&Reachable), channels: Channels::Every, step_up: &[] },
     ],
     guides: &[Guide { key: "core.company", title: "Companies", summary: "What a company is in this tenant, and how to find, read and create one.", keywords: &["organisation", "business", "firm", "status"], capability: LIST, body:"Postal addresses are saved and linked through core.address, not a scalar field here. Search address or read guide core.address. Use core.address.company.list or core.address.person.list to find existing addresses; create_and_attach or attach links an office, billing or other address to its company or contact. Use one ordered plan for new companies, contacts, affiliations and addresses, with {\"$ref\":\"1.id\"} for the record created by step 1; review_entries accepts operations for linked steps.\n\nA company is an organisation recorded in your tenant. A company may have a parent company, and one company is the tenant's primary company.\n\nBefore creating, call core.company.duplicates with the known name, website, email, phone or registration_number. It returns scored candidates and matched facts, including archived companies. Use an existing company or supply create_anyway with candidate_ids and a reason of 1–500 characters. The create transaction rechecks these facts. core.company.hierarchy returns the parent chain and descendants up to the configured depth and 1,000 nodes; truncated means more relatives exist. Reuse the existing company rather than making a duplicate. Company roles are relationships, never legal entity types or access grants: a related company assigned vendor supplies the source company, and a company may hold customer and vendor roles at once as separate links. Discover core.company.relationship.* and core.company.relationship_role.* for list, read and reviewed writes (guide core.company.relationship). Contacts use core.affiliation.contact.create, never an HR employee record. Reuse an existing employer, or create it in an earlier step of the same plan and refer to its new ID. Use core.company.create through a dry run and explicit review before the write. Propose a code of at most 12 characters from whole name words, except truncate the first word to fit the limit. Omit company-only (M) markers and trailing legal forms such as Sdn Bhd, Berhad, Pte, Ltd, PLT, Inc, LLC and Corp; append _2, _3 and so on for collisions within 12 characters. The person may choose another, longer code. A missing code is generated and shown in the preview. Do not invent legal identifiers or a jurisdiction from a phone number; ask when the source is unclear.\n\nA company's status is one of pending, active, suspended or archived. Status changes only through the lifecycle actions on the company's page, never through an edit of its fields.\n\nTo find companies, call core.company.list with search words. To read one, call core.company.get with its id. To update contributed fields, first read the current version with core.company.get, then use core.company.update through a dry run and explicit review before the write. The operation changes only the supplied contributed fields; null clears an optional field. It rechecks current-company or tenant-wide administration reach, restrictions, version and values at commit. Use core.company.get for readback. core.company.reachable lists workplaces assigned through desks; extra desks do not widen Company-record administration. A field an administrator restricted reads as {\"restricted\": true}: the company has a value there, and you may not see it." }],
 }) }

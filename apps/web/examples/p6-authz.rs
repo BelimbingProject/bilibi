@@ -57,7 +57,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let grants = app.services.get::<Grants>("base/authz.grants")?;
     grants.reconcile().await?;
     grants.reconcile().await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &Client = &client;
     let manager = auth.authenticate(client, 1, 1, String::new()).await?;
     let admin = auth.authenticate(client, 1, 4, String::new()).await?;
@@ -72,11 +74,23 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     show(client, &manager, "companies.update").await?;
     show(client, &viewer, "companies.update").await?;
     grants
-        .set_direct(&admin, viewer.user(), "companies.update", Some(true))
+        .set_direct(
+            &admin,
+            viewer.user(),
+            "companies.update",
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
+        )
         .await?;
     show(client, &viewer, "companies.update").await?;
     grants
-        .set_direct(&admin, admin.user(), "companies.update", Some(false))
+        .set_direct(
+            &admin,
+            admin.user(),
+            "companies.update",
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     show(client, &admin, "companies.update").await?;
     grants.reconcile().await?;
@@ -93,7 +107,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let row=client.query_one("INSERT INTO roles(tenant_id,name) VALUES(1,'P6 reference') ON CONFLICT(tenant_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id",&[]).await?;
     let custom: i64 = row.get(0);
     grants
-        .set_role_capability(&admin, custom, "reference.records.view", true)
+        .set_role_capability(
+            &admin,
+            custom,
+            "reference.records.view",
+            Some(bilibi_authz::Reach::All),
+        )
         .await?;
     grants
         .assign_role(&admin, manager.user(), custom, true)
@@ -130,7 +149,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     show(client, &admin, "reference.platform.view").await?;
     show(client, &manager, "reference.platform.view").await?;
     grants
-        .set_direct(&admin, admin.user(), "reference.platform.view", Some(false))
+        .set_direct(
+            &admin,
+            admin.user(),
+            "reference.platform.view",
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     show(client, &admin, "reference.platform.view").await?;
     grants
@@ -173,7 +197,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("== Audit failure prevents grant commit");
     client.batch_execute("CREATE OR REPLACE FUNCTION p6_refuse_action() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event='authz.principal_capability.set' THEN RAISE EXCEPTION 'P6 demonstration refuses action capture'; END IF; RETURN NEW; END $$; CREATE TRIGGER p6_refuse_action BEFORE INSERT ON base_audit_actions FOR EACH ROW EXECUTE FUNCTION p6_refuse_action()").await?;
     let failed = grants
-        .set_direct(&admin, viewer.user(), "companies.update", Some(true))
+        .set_direct(
+            &admin,
+            viewer.user(),
+            "companies.update",
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
+        )
         .await;
     // Remove the fixture before inspecting the result, even on unexpected success.
     client

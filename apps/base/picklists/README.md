@@ -1,5 +1,9 @@
 # Base Picklists
 
+**Use it for:** value lists each tenant curates (categories, sources, reasons), stored on records by a stable code.
+
+**Not for:** values your logic branches on (a Rust enum or a `base/workflow` status), or a lookup table or admin page of your own.
+
 Value lists a module declares and each tenant curates: case categories, industries, loss reasons, lead sources. A record stores a value's stable code, so renaming or retiring the value never breaks it. The rules generalise `core/company` relationship roles.
 
 - **The module builds no table, seed logic or admin page for a list.** It declares the list and calls the facade.

@@ -32,3 +32,6 @@ bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-base = { path = ".." }
 bilibi-core = { path = "../../core" }
 tokio.workspace = true
+
+[lints]
+workspace = true

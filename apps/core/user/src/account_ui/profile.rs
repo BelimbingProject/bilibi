@@ -3,12 +3,33 @@
 //! else: no id is taken from the request, no capability applies, and the
 //! landing choice is validated against the menu this account can open.
 use super::*;
-use crate::{accounts::FieldError, AccountError, LandingPage};
+use crate::{
+    accounts::FieldError,
+    preference_operations::{LANDING_READ, LANDING_RESTORE, LANDING_SET},
+    AccountError, LandingPage,
+};
+use bilibi_agent_api::{page::Call, Error as OperationError};
 use bilibi_ui::{
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
     Button, ButtonVariant, Card, Choice, Field, FlashGroup, Form, Header, IdentityImage, InputKind,
     UploadSpec, Uploads,
 };
+use serde_json::json;
+
+pub(crate) const SERVICE: &str = "core/user.profile";
+
+inventory::submit! { bilibi_module_registry::Contribution::new(
+    bilibi_module_registry::contributions::PAGE_WRITES, SERVICE,
+    bilibi_module_registry::Provenance { module: "core/user", source: file!(), line: line!() },
+    &bilibi_module_registry::contributions::PageWrites {
+        service: SERVICE,
+        contracts: &[("save_profile", LANDING_SET), ("save_profile", LANDING_RESTORE)],
+        pending: bilibi_module_registry::contributions::Pending::Events {
+            events: &["save_profile", "save_profile_image", "remove_profile_image"],
+            reason: "Name, email and picture writes use the User facade. The landing choice uses the reviewed operations in the same profile save.",
+        },
+    },
+) }
 
 const PROFILE_IMAGE_UPLOAD: &str = "profile_image";
 const PROFILE_IMAGE_TYPES: [&str; 7] = [
@@ -38,6 +59,8 @@ pub(crate) struct Profile {
     name: String,
     email: String,
     landing: String,
+    saved_landing: String,
+    landing_version: String,
     errors: Vec<FieldError>,
     flash: Flash,
     loaded: bool,
@@ -50,6 +73,8 @@ impl Profile {
             name: String::new(),
             email: String::new(),
             landing: String::new(),
+            saved_landing: String::new(),
+            landing_version: String::new(),
             errors: Vec::new(),
             flash: Flash::default(),
             loaded: false,
@@ -73,7 +98,27 @@ impl Profile {
             .ok_or(Error::Unauthorized)?;
         self.name = row.get(0);
         self.email = row.get(1);
-        self.landing = self.pages.users.landing_choice(&**client, scope).await?;
+        drop(client);
+        let landing = self
+            .pages
+            .contracts
+            .read(scope, LANDING_READ, &json!({}))
+            .await
+            .map_err(|error| match error {
+                OperationError::Backend(error) => error,
+                OperationError::Forbidden => Error::Forbidden,
+                _ => Error::Internal,
+            })?;
+        let landing = &landing["result"];
+        self.saved_landing = landing["menu_id"]
+            .as_str()
+            .ok_or(Error::Internal)?
+            .to_owned();
+        self.landing.clone_from(&self.saved_landing);
+        self.landing_version = landing["version"]
+            .as_str()
+            .ok_or(Error::Internal)?
+            .to_owned();
         self.loaded = true;
         Ok(())
     }
@@ -100,9 +145,6 @@ impl Profile {
                 ("email", "has already been taken") => {
                     "This email address is already in use.".into()
                 }
-                ("landing_menu_id", "is not a page you can open") => {
-                    "Choose a page you can open.".into()
-                }
                 _ => bilibi_ui::error_sentence(label, &e.message),
             })
             .collect()
@@ -112,13 +154,14 @@ impl Profile {
             self.load(scope).await?;
         }
         let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "users").await?;
         let pages: Vec<LandingPage> = self.pages.users.landing_pages(&**client, scope).await?;
         let image_url = self.pages.users.profile_image_url(&**client, scope).await;
         drop(client);
         let name = render(
             &Field::in_form("profile", "name")
                 .id("profile-name")
-                .label("Name")
+                .label(words.get(&crate::record_fields::get("name")))
                 .value(&self.name)
                 .autocomplete("name")
                 .errors(self.errors_for("name"))
@@ -128,7 +171,7 @@ impl Profile {
             &Field::in_form("profile", "email")
                 .id("profile-email")
                 .kind(InputKind::Email)
-                .label("Email")
+                .label(words.get(&crate::record_fields::get("email")))
                 .value(&self.email)
                 .autocomplete("email")
                 .hint("Changing your email marks it as unverified.")
@@ -221,12 +264,14 @@ impl Profile {
             heading: "Profile",
             subheading: "",
             image_card: render(&Card {
-                title: "Profile picture",
+                id: crate::contributions::PROFILE_PICTURE.anchor,
+                title: crate::contributions::PROFILE_PICTURE.title,
                 body: image_form,
                 ..Card::default()
             })?,
             profile_card: render(&Card {
-                title: "Profile details",
+                id: crate::contributions::PROFILE_DETAILS.anchor,
+                title: crate::contributions::PROFILE_DETAILS.title,
                 body: profile_form,
                 ..Card::default()
             })?,
@@ -272,8 +317,6 @@ impl Profile {
     }
     async fn save(&mut self, request: &LiveRequest<'_, Scope>) -> Result<()> {
         let previous = self.email.clone();
-        // The submitted choice, kept across the reload of the stored facts.
-        let landing = self.landing.clone();
         let outcome = self
             .pages
             .users
@@ -286,8 +329,33 @@ impl Profile {
             .await;
         match outcome {
             Ok(saved) => {
+                let landing = if self.landing == self.saved_landing {
+                    Ok(())
+                } else {
+                    let mut input = json!({"version":self.landing_version});
+                    let contract = if self.landing.is_empty() {
+                        LANDING_RESTORE
+                    } else {
+                        input["menu_id"] = json!(self.landing);
+                        LANDING_SET
+                    };
+                    self.pages
+                        .contracts
+                        .submit(
+                            &Call {
+                                scope: request.scope,
+                                credential: request.credential,
+                                service: SERVICE,
+                                event: "save_profile",
+                                contract,
+                            },
+                            input,
+                        )
+                        .await
+                        .map(|_| ())
+                };
                 self.load(request.scope).await?;
-                match self.pages.users.save_landing(request.scope, &landing).await {
+                match landing {
                     Ok(()) => {
                         self.flash
                             .success(if saved.email_changed && self.email != previous {
@@ -296,23 +364,20 @@ impl Profile {
                                 "Profile saved."
                             })
                     }
-                    Err(AccountError::Validation(errors)) => {
-                        let message = errors
-                            .first()
-                            .map(|e| e.message.clone())
-                            .unwrap_or_default();
-                        self.errors = errors;
-                        self.flash
-                            .error(format!("Your name and email were saved, but your page after sign-in was not: {message}"));
+                    Err(OperationError::InvalidInput(fields)) => {
+                        self.errors = fields.into_values().flatten().map(|message| FieldError {
+                            field: "landing_menu_id",
+                            message,
+                        }).collect();
+                        self.flash.error("Your name and email were saved. Choose a valid page after sign-in.");
                     }
-                    Err(AccountError::Access(Error::Unauthorized)) => {
+                    Err(OperationError::Backend(Error::Unauthorized)) => {
                         return Err(Error::Unauthorized)
                     }
                     Err(_) => self
                         .flash
                         .error("Your name and email were saved, but your page after sign-in was not. Reload and try again."),
                 }
-                self.load(request.scope).await?;
             }
             Err(AccountError::Validation(errors)) => self.errors = errors,
             Err(AccountError::Access(Error::Unauthorized)) => return Err(Error::Unauthorized),
@@ -378,7 +443,7 @@ impl Profile {
                 self.flash.success("Profile picture removed.");
             }
             Err(bilibi_media::Error::Database(Error::Unauthorized)) => {
-                return Err(Error::Unauthorized)
+                return Err(Error::Unauthorized);
             }
             Err(_) => self
                 .flash

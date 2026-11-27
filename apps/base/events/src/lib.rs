@@ -10,15 +10,19 @@
 //! `domain-events` system principal, at least once, in recording order per
 //! subject, and each subscriber's effects commit with its receipt and audit
 //! in one transaction. Nothing is broadcast in process: the outbox rows are
-//! the source of truth.
+//! the source of truth. A daily job deletes events older than the tenant's
+//! `events.retention_days` once nothing is owed for them (`retention`).
 mod agent;
 mod catalog;
 mod delivery;
 mod operator;
 mod privacy;
 pub use privacy::{PersonalEvent, PERSONAL_EVENTS};
+mod retention;
+pub use retention::RETENTION_DAYS;
+mod watermark;
 mod web;
-pub use operator::{Delivered, DeliveryState, Replay, ReplayFrom, SubscriberState};
+pub use operator::{Delivered, DeliveryState, Replay, ReplayFrom, SubscriberState, MISSED_CAP};
 
 use bilibi_authz::{
     CapabilityDefinition, SystemPrincipalDefinition, SystemScope, VocabularyContribution,
@@ -78,6 +82,15 @@ pub struct Subscriber {
     pub handler: &'static dyn Subscribe,
 }
 pub type SubscriberFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<Change>>> + Send + 'a>>;
+/// Work a subscriber hands to its own Queue worker after [`Subscribe::handle`]:
+/// enqueued in the delivery transaction as the subscriber module's own named
+/// principal, so it commits with the receipt or not at all, and runs after
+/// that commit under the principal's own grants.
+pub struct Handoff {
+    pub worker: &'static str,
+    pub principal: &'static str,
+    pub args: Value,
+}
 /// Implement on the subscriber's own type. Write only in the supplied
 /// transaction and return every mutation; the receipt commits with them.
 /// Never open or commit a second transaction and never do network or file IO
@@ -91,6 +104,20 @@ pub trait Subscribe: Send + Sync {
         scope: &'a SystemScope,
         event: &'a Event,
     ) -> SubscriberFuture<'a>;
+    /// Events read beyond [`Subscriber::events`], named by another catalog
+    /// at boot (Base Watchers reads the events its triggers name); `None` (the
+    /// default) when the subscriber reads only what it lists. They pass the
+    /// same boot checks as the listed ones. `Some` of nothing, with nothing
+    /// listed, leaves the subscriber inert: no owner offers it an event yet.
+    fn reads(&self, _catalog: &Catalog) -> RegistryResult<Option<Vec<&'static On>>> {
+        Ok(None)
+    }
+    /// Work to hand to this module's own Queue worker once `handle` returned
+    /// `changes`, enqueued in the delivery transaction ([`Handoff`]). The
+    /// worker and the principal must both be this subscriber module's.
+    fn handoff(&self, _event: &Event, _changes: &[Change]) -> Option<Handoff> {
+        None
+    }
 }
 
 /// A recorded event as a subscriber receives it. The publisher's actor is not
@@ -109,6 +136,10 @@ pub struct Event {
     pub recorded_at: String,
     /// This subscriber's attempt at this event, from 1.
     pub attempt: i32,
+    /// What a Platform edge named as the cause of the recording transaction
+    /// ([`Events::cause`]), such as `base/watchers.run:42`; `None` for an
+    /// ordinary write. Evidence of causation, never authority.
+    pub cause: Option<String>,
 }
 /// What a publisher records. `subject` is the record the event is about
 /// (`goods_receipt:42`); delivery keeps one subject's events in recording
@@ -142,11 +173,28 @@ pub struct Events {
     boundary: Arc<MutationBoundary>,
     queue: Arc<Queue>,
     step_up: Arc<bilibi_step_up::StepUp>,
+    settings: Arc<bilibi_settings::Settings>,
+    authentication: Arc<bilibi_tenancy::Authentication>,
     /// Event name → (publisher module, current version).
     types: BTreeMap<&'static str, (&'static str, u16)>,
     subscribers: BTreeMap<&'static str, &'static Subscriber>,
 }
+/// The transaction setting [`Events::cause`] writes and `record` reads.
+const CAUSE: &str = "bilibi.events.cause";
 impl Events {
+    /// Names `cause` (1–200 bytes, no control characters) as the cause of every
+    /// event recorded later in `tx`: a Platform edge acting for a recorded
+    /// cause, such as Base Watchers running a rule's action, so a subscriber can
+    /// follow the chain (`Event::cause`). It lasts until `tx` ends.
+    pub async fn cause(&self, tx: &mut MutationTransaction<'_>, cause: &str) -> Result<()> {
+        if !text(cause) {
+            return Err(Error::Invalid);
+        }
+        tx.sql()
+            .execute("SELECT set_config($1, $2, true)", &[&CAUSE, &cause])
+            .await?;
+        Ok(())
+    }
     /// Records `event` in the owner's transaction. The name must be an event
     /// type a mounted module declares; the audit row carries no payload.
     pub async fn record(
@@ -180,8 +228,8 @@ impl Events {
         let listed = subscribers.clone();
         let id = tx.mutate(move |sql| Box::pin(async move {
             let id: i64 = sql.query_one(
-                "INSERT INTO base_events(tenant_id,publisher,name,version,subject,event_key,payload,trace_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
-                &[&tenant, &publisher, &name, &i32::from(version), &subject, &key, &payload, &trace],
+                "INSERT INTO base_events(tenant_id,publisher,name,version,subject,event_key,payload,trace_id,cause) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF(current_setting($9, true), '')) RETURNING id",
+                &[&tenant, &publisher, &name, &i32::from(version), &subject, &key, &payload, &trace, &CAUSE],
             ).await?.get(0);
             sql.execute(
                 "INSERT INTO base_events_deliveries(event_id,subscriber) SELECT $1,unnest($2::text[])",
@@ -270,6 +318,8 @@ fn build(services: &bilibi_module_registry::Services) -> RegistryResult<Events> 
         boundary: services.get("base/database.mutations")?,
         queue: services.get("base/queue.store")?,
         step_up: services.get(bilibi_step_up::SERVICE)?,
+        settings: services.get("base/settings.store")?,
+        authentication: services.get("base/tenancy.authentication")?,
         types,
         subscribers,
     })
@@ -302,15 +352,25 @@ inventory::submit! { Contribution::new(bilibi_module_registry::contributions::PA
 inventory::submit! {
     Module {
         id: "base/events", layer: Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/step_up", "base/agent_api", "base/ui", "base/menu", "base/datetime", "base/locale", "base/personal_data"],
+        dependencies: &["base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/schedule", "base/settings", "base/step_up", "base/agent_api", "base/ui", "base/menu", "base/datetime", "base/locale", "base/personal_data"],
         migrations: &[
             ("base-events-001", include_str!("../migrations/001-events.sql")),
             ("base-events-002-erased", include_str!("../migrations/002-erased.sql")),
+            ("base-events-003-delivered-index", include_str!("../migrations/003-delivered-index.sql")),
+            ("base-events-004-retention", include_str!("../migrations/004-retention.sql")),
+            ("base-events-005-cause", include_str!("../migrations/005-cause.sql")),
+            ("base-events-006-name-recorded", include_str!("../migrations/006-name-recorded.sql")),
         ],
         services: &[
             Service { id: SERVICE, factory: |services| Ok(Arc::new(build(services)?)) },
             Service { id: DELIVERY, factory: |services| {
                 Ok(Arc::new(HandlerService(Arc::new(delivery::Delivery { events: services.get(SERVICE)? }))))
+            } },
+            Service { id: retention::SERVICE, factory: |services| {
+                Ok(Arc::new(HandlerService(Arc::new(retention::Retention {
+                    events: services.get(SERVICE)?,
+                    schedule: services.get("base/schedule.store")?,
+                }))))
             } },
             Service { id: "base/events.agent", factory: |services| {
                 if !agent::bind(services.get(SERVICE)?) {

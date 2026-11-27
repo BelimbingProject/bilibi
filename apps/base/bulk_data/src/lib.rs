@@ -1,7 +1,7 @@
 //! CSV import for any module that opts in (issue 133).
 //!
 //! A module contributes a `RecordType` naming its write contracts; a person
-//! uploads a CSV file, maps its columns to the create contract's fields,
+//! uploads a CSV file, maps its columns to the offered fields,
 //! checks it in a dry run and runs it in the background. Every row is one
 //! call to the owner's contract as that person, from a queued job
 //! (`bilibi_agent_api::job`, ADR 10), each in its own short transaction with
@@ -13,16 +13,21 @@
 mod agent;
 mod contributions;
 mod csv;
+mod custom;
 mod export;
 mod files;
 mod import;
 mod mapping;
 mod privacy;
 mod record;
+mod result;
+mod stats;
 mod store;
+mod undo;
 mod update;
 mod web;
 
+pub use custom::{CustomImport, CUSTOM_IMPORTS};
 pub use export::{ExportRun, ExportState, EXPORTED};
 pub use files::{RunFiles, ARTIFACT_OWNER, FILES};
 pub use mapping::{FieldMap, Mapping, Policy};
@@ -30,7 +35,11 @@ pub use record::{
     BulkUpdate, Duplicates, Export, Field, Import, Kind, Lookup, RecordType, Reference,
     RECORD_TYPES,
 };
-pub use store::{Counts, Outcome, Pass, RowResult, Run, RunState, SavedMapping};
+pub use result::{ImportOutcome, ImportResult, ImportResults, ResultLink, IMPORT_RESULTS};
+pub use store::{
+    Counts, Outcome, Pass, RowResult, Run, RunState, SavedMapping, UndoCounts, UndoOutcome,
+};
+pub use undo::{ImportUndo, IMPORT_UNDO};
 pub use update::{Offers, UpdateRow, UpdateRun, UpdateState};
 
 use bilibi_agent_api::job::JobContracts;
@@ -64,6 +73,8 @@ pub const EXPORT_MAX_ROWS: &str = "bulk_data.export_max_rows";
 pub const FILE_DAYS: &str = "bulk_data.file_days";
 /// The most records one bulk update takes.
 pub const UPDATE_MAX_RECORDS: &str = "bulk_data.update_max_records";
+/// Days after a completed import during which its created records may be removed.
+pub const UNDO_DAYS: &str = "bulk_data.import_undo_days";
 pub(crate) const WORKER: &str = "base/bulk_data-import";
 
 /// A record type the person may import, with what they may fill.
@@ -78,6 +89,7 @@ pub struct TypeInfo {
     pub restricted: Vec<String>,
     /// The fields a row is matched on, when the type finds duplicates.
     pub matches: Vec<&'static str>,
+    pub undo: bool,
 }
 
 /// A refused write, typed for the contracts and pages.
@@ -152,6 +164,11 @@ pub enum Action {
         run: i64,
         version: i64,
     },
+    /// Remove untouched records this completed run created.
+    Undo {
+        run: i64,
+        version: i64,
+    },
     /// Save a mapping by name for a record type, shared in the company.
     SaveMapping {
         record_type: String,
@@ -216,6 +233,7 @@ pub struct BulkData {
     db: Db,
     boundary: Arc<MutationBoundary>,
     settings: Arc<Settings>,
+    custom_fields: Arc<bilibi_custom_fields::CustomFields>,
     artifacts: Arc<Artifacts>,
     queue: Arc<Queue>,
     jobs: Arc<JobContracts>,
@@ -263,6 +281,18 @@ impl BulkData {
             .get(key)
             .and_then(|registered| registered.definition.path)
     }
+    /// Whether a record type's owner reports business actions.
+    pub(crate) fn reports_actions(&self, key: &str) -> bool {
+        self.types
+            .get(key)
+            .is_some_and(|registered| registered.results.is_some())
+    }
+    /// Whether any mounted record type's owner reports business actions.
+    pub(crate) fn any_reports_actions(&self) -> bool {
+        self.types
+            .values()
+            .any(|registered| registered.results.is_some())
+    }
     /// What a record type's records are called; its key when unmounted.
     pub fn label<'a>(&'a self, key: &'a str) -> &'a str {
         self.types
@@ -273,21 +303,29 @@ impl BulkData {
     /// The fields this person may fill, and those restricted for them.
     async fn offered(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         registered: &Registered,
     ) -> Result<(Vec<Field>, Vec<Field>)> {
         let restricted =
             bilibi_authz::restrictions_for(client, scope, registered.definition.table).await?;
-        Ok(registered
-            .fields
-            .iter()
-            .cloned()
+        let mut fields = registered.fields.clone();
+        if let Some(binding) = registered.custom {
+            fields.extend(
+                self.custom_fields
+                    .active(client, scope, binding.record_type)
+                    .await?
+                    .into_iter()
+                    .map(custom::field),
+            );
+        }
+        Ok(fields
+            .into_iter()
             .partition(|field| !restricted.contains(&field.name)))
     }
     async fn info(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         registered: &Registered,
     ) -> Result<TypeInfo> {
@@ -305,11 +343,16 @@ impl BulkData {
                 .as_ref()
                 .map(|duplicates| duplicates.fields.to_vec())
                 .unwrap_or_default(),
+            undo: registered.undo.is_some(),
         })
     }
 
     /// The record types this person may import, by label.
-    pub async fn types(&self, client: &impl GenericClient, scope: &Scope) -> Result<Vec<TypeInfo>> {
+    pub async fn types(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<Vec<TypeInfo>> {
         bilibi_authz::authorize_key(client, scope, VIEW).await?;
         let held = bilibi_authz::effective_capabilities(client, scope).await?;
         let mut types = Vec::new();
@@ -324,7 +367,7 @@ impl BulkData {
     /// One record type the person may import.
     pub async fn record_type(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         key: &str,
     ) -> Result<TypeInfo> {
@@ -509,7 +552,6 @@ impl BulkData {
         store::list(client, scope, offset, limit.clamp(1, 100)).await
     }
     /// One pass's row results of the person's run.
-    #[allow(clippy::too_many_arguments)]
     pub async fn rows(
         &self,
         client: &impl GenericClient,
@@ -517,20 +559,32 @@ impl BulkData {
         run: i64,
         pass: Pass,
         outcome: Option<Outcome>,
+        undo: Option<&str>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<RowResult>, i64)> {
         let run = self.run(client, scope, run).await?;
-        store::rows(
+        let (mut rows, total) = store::rows(
             client,
             scope.tenant(),
             run.id,
             pass,
             outcome,
-            offset.max(0),
-            limit.clamp(1, 100),
+            undo,
+            (offset.max(0), limit.clamp(1, 100)),
         )
-        .await
+        .await?;
+        if run.erased {
+            // Blank from the moment the run is marked, not only once the
+            // erasure's clean-up has reached these rows.
+            for row in &mut rows {
+                row.source_key = None;
+                row.message = None;
+                row.record_version = None;
+                row.undo_message = None;
+            }
+        }
+        Ok((rows, total))
     }
     /// Mappings saved for a record type in the current workplace; with a
     /// header, only those whose columns the file has.
@@ -750,6 +804,15 @@ impl BulkData {
                     json!({"summary": format!("Stop {} of {}; rows already written stay", if run.state == RunState::Running { "the import" } else { "the check" }, run.file_name), "run_id": run.id, "version": run.version, "done": run.next_row, "rows": run.row_count}),
                 )
             }
+            Action::Undo { run, version } => {
+                let run = self.ready_undo(client, scope, *run, *version).await?;
+                Ok(json!({
+                    "summary": format!("{} the undo of {}; only records it created and nobody changed are removed", if run.state == RunState::Undoing { "Resume" } else { "Start" }, run.file_name),
+                    "run_id": run.id,
+                    "version": run.version,
+                    "created": run.run.create,
+                }))
+            }
             Action::SaveMapping {
                 record_type,
                 name,
@@ -902,6 +965,22 @@ impl BulkData {
                 })).await?;
                 run.json(&label)
             }
+            Action::Undo { run, version } => {
+                let old = self.ready_undo(tx.sql(), scope, *run, *version).await?;
+                let resuming = old.state == RunState::Undoing;
+                let job = self
+                    .queue
+                    .enqueue_for(tx, scope, undo::WORKER, json!({"run": old.id}))
+                    .await?;
+                let id = old.id;
+                let label = self.label(&old.record_type).to_owned();
+                let run = tx.mutate(move |sql| Box::pin(async move {
+                    let row = sql.query_one(&format!("UPDATE base_bulk_data_runs SET state='undoing',undo_next_row=CASE WHEN $4 THEN undo_next_row ELSE 0 END,job_id=$3,undo_started_at=CASE WHEN $4 THEN undo_started_at ELSE clock_timestamp() END,undo_finished_at=NULL,version=version+1,updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 RETURNING {}", store::COLUMNS), &[&tenant, &id, &job.id(), &resuming]).await?;
+                    let run = Run::from_row(&row)?;
+                    Ok((run.clone(), vec![Change { kind: "base/bulk_data.run".into(), id, old: evidence(&old), new: evidence(&run) }]))
+                })).await?;
+                run.json(&label)
+            }
             Action::SaveMapping {
                 record_type,
                 name,
@@ -953,7 +1032,7 @@ impl BulkData {
     /// stored, the type is theirs to import and the mapping fits.
     async fn ready(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         run: &Run,
         version: i64,
@@ -1016,14 +1095,14 @@ impl BulkData {
         if run.version != version {
             return Err(WriteError::Stale);
         }
-        if !run.state.working() {
+        if !matches!(run.state, RunState::Previewing | RunState::Running) {
             return Err(refused("run_id", "is not being checked or imported"));
         }
         Ok(())
     }
     async fn saveable(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         record_type: &str,
         name: &str,
@@ -1126,23 +1205,28 @@ pub(crate) use provenance;
 
 inventory::submit! { bilibi_module_registry::Module {
     id: "base/bulk_data", layer: bilibi_module_registry::Layer::Base,
-    dependencies: &["base/module_registry", "base/agent_api", "base/artifacts", "base/authz", "base/database", "base/datetime", "base/grid", "base/locale", "base/menu", "base/notifications", "base/personal_data", "base/queue", "base/schedule", "base/settings", "base/system", "base/tenancy", "base/ui"],
+    dependencies: &["base/module_registry", "base/agent_api", "base/artifacts", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/menu", "base/notifications", "base/personal_data", "base/queue", "base/schedule", "base/settings", "base/system", "base/tenancy", "base/ui"],
     migrations: &[
         ("base-bulk-data-001-imports", include_str!("../migrations/001-imports.sql")),
         ("base-bulk-data-002-exports", include_str!("../migrations/002-exports.sql")),
         ("base-bulk-data-003-updates", include_str!("../migrations/003-updates.sql")),
         ("base-bulk-data-004-export-erasure", include_str!("../migrations/004-export-erasure.sql")),
+        ("base-bulk-data-005-import-results", include_str!("../migrations/005-import-results.sql")),
+        ("base-bulk-data-006-import-erasure", include_str!("../migrations/006-import-erasure.sql")),
+        ("base-bulk-data-007-import-undo", include_str!("../migrations/007-import-undo.sql")),
     ],
     services: &[
         bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let jobs = services.get::<JobContracts>(bilibi_agent_api::job::SERVICE)?;
             let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
-            let types = record::register(&catalog, &jobs)?;
+            let mut types = record::register(&catalog, &jobs)?;
+            custom::register(&catalog, &jobs, &mut types)?;
             files::bind(services.get::<PartyProofs>("base/tenancy.parties")?)?;
             let bulk = Arc::new(BulkData {
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
                 boundary: services.get("base/database.mutations")?,
                 settings: services.get("base/settings.store")?,
+                custom_fields: services.get(bilibi_custom_fields::SERVICE)?,
                 artifacts: services.get("base/artifacts.store")?,
                 queue: services.get("base/queue.store")?,
                 jobs,
@@ -1155,6 +1239,9 @@ inventory::submit! { bilibi_module_registry::Module {
         }},
         bilibi_module_registry::Service { id: import::SERVICE, factory: |services| {
             Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(import::ImportJob(services.get(SERVICE)?)))))
+        }},
+        bilibi_module_registry::Service { id: undo::SERVICE, factory: |services| {
+            Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(undo::UndoJob(services.get(SERVICE)?)))))
         }},
         bilibi_module_registry::Service { id: export::SERVICE, factory: |services| {
             Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(export::ExportJob(services.get(SERVICE)?)))))

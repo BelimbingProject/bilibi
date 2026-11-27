@@ -1,5 +1,5 @@
 //! Self-registration (issue 137, behaviour 7): where a tenant allows it,
-//! someone asks for a customer account at `/portal/register/{address}` with a
+//! someone asks for a customer account at `/portal/register` with a
 //! name, an email and an optional company name; an emailed link verifies the
 //! address; staff then approve the request, which sends the ordinary
 //! invitation to the Person they choose, or reject it. Nothing is written to
@@ -9,7 +9,7 @@
 use crate::{
     facade::{
         digest, field, new_token, normalize_email, token_shaped, Checked, FieldError, Invitation,
-        InvitationInput, PortalService, Site, PRINCIPAL, SITE_COLUMNS,
+        InvitationInput, PortalService, Site, PRINCIPAL, SITE_SELECT,
     },
     MANAGE, REGISTRATION_DAYS_KEY, VIEW,
 };
@@ -107,33 +107,32 @@ impl From<Error> for RegisterError {
     }
 }
 
-/// The site at `address` while it is on and takes requests, and its tenant
-/// is active.
-async fn open_site(client: &(impl GenericClient + Sync), address: &str) -> Result<Option<Site>> {
-    if !crate::address_shaped(address) {
-        return Ok(None);
-    }
-    let columns = SITE_COLUMNS
-        .split(',')
-        .map(|column| format!("s.{column}"))
-        .collect::<Vec<_>>()
-        .join(",");
+/// The portal of the public site `site` while it is on and takes requests,
+/// and its tenant is active.
+async fn open_site(
+    client: &(impl GenericClient + Sync),
+    site: &bilibi_public::PublicScope,
+) -> Result<Option<Site>> {
     Ok(client
         .query_opt(
-            &format!("SELECT {columns} FROM customer_portal_sites s JOIN tenants t ON t.id=s.tenant_id WHERE s.address=$1 AND s.enabled AND s.registration AND t.deleted_at IS NULL AND t.status='active'"),
-            &[&address],
+            &format!("{SITE_SELECT} JOIN tenants t ON t.id=s.tenant_id WHERE s.tenant_id=$1 AND s.enabled AND o.registration AND t.deleted_at IS NULL AND t.status='active'"),
+            &[&site.tenant()],
         )
         .await?
         .map(|row| Site::from_row(&row)))
 }
 
 impl PortalService {
-    /// Whether the portal at `address` takes requests for an account; its
-    /// register page answers 404 otherwise.
-    pub async fn registration_site(&self, address: &str) -> Result<Option<Site>> {
+    /// Whether the portal of the public site a request reached takes
+    /// requests for an account; its register page answers 404 otherwise.
+    pub async fn registration_site(
+        &self,
+        site: &bilibi_public::PublicScope,
+    ) -> Result<Option<Site>> {
         let client = self.db.get().await?;
-        let site = open_site(&**client, address).await?;
-        Ok(self.with_logo(site).await)
+        let found = open_site(&**client, site).await?;
+        drop(client);
+        Ok(self.with_logo(found).await)
     }
 
     /// Takes a request for an account and emails its verification link,
@@ -143,13 +142,18 @@ impl PortalService {
     /// replaced. The caller answers the same in every case.
     pub async fn register(
         &self,
-        address: &str,
+        public: &bilibi_public::PublicScope,
         name: &str,
         email: &str,
         company: &str,
+        sender: &str,
     ) -> std::result::Result<(), RegisterError> {
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let Some(site) = open_site(&**client, address).await? else {
+        let Some(site) = open_site(&**client, public).await? else {
+            return Err(RegisterError::Closed);
+        };
+        let tenant = site.tenant;
+        let Some(origin) = self.public_origin(&**client, tenant).await? else {
             return Err(RegisterError::Closed);
         };
         let mut errors = Vec::new();
@@ -186,6 +190,7 @@ impl PortalService {
         let token = new_token()?;
         let hash = digest(&token);
         let tenant = site.tenant;
+        self.purge_expired(&mut client, tenant, &email).await?;
         let mut tx = self
             .mutations
             .begin(
@@ -193,70 +198,49 @@ impl PortalService {
                 Context::system(tenant, PRINCIPAL, "core.portal.registration.request"),
             )
             .await?;
-        let (insert_name, insert_email, insert_company) =
-            (name.clone(), email.clone(), company.clone());
-        let created = tx
-            .mutate(move |sql| {
-                Box::pin(async move {
-                    let mut changes = Vec::new();
-                    for row in sql
-                        .query(
-                            "DELETE FROM customer_registrations WHERE tenant_id=$1 AND email=$2 AND decision IS NULL AND verified_at IS NULL AND expires_at<=now() RETURNING id",
-                            &[&tenant, &insert_email],
-                        )
-                        .await?
-                    {
-                        changes.push(Change {
-                            kind: "portal.registration".into(),
-                            id: row.get(0),
-                            old: json!({"status": "unverified"}),
-                            new: json!(null),
-                        });
-                    }
-                    // The open-recipient unique index arbitrates concurrent
-                    // callers, even when no row existed for either to lock.
-                    let inserted = sql
-                        .query_opt(
-                            "INSERT INTO customer_registrations(tenant_id,name,email,company_name,token_hash,expires_at) VALUES($1,$2,$3,$4,$5,now()+make_interval(days => $6::int)) ON CONFLICT (tenant_id,email) WHERE decision IS NULL DO NOTHING RETURNING id",
-                            &[&tenant, &insert_name, &insert_email, &insert_company, &hash, &days],
-                        )
-                        .await?;
-                    let Some(inserted) = inserted else {
-                        // Suppression made no write. Refuse this mutation and
-                        // roll it back below, rather than invent an audit Change.
-                        return Err(Error::Conflict);
-                    };
-                    let id: i64 = inserted.get(0);
-                    changes.push(Change {
-                        kind: "portal.registration".into(),
-                        id,
-                        old: json!(null),
-                        new: json!({"name": insert_name, "email": insert_email, "company_name": insert_company, "status": "unverified"}),
-                    });
-                    Ok(((), changes))
-                })
-            })
-            .await;
-        match created {
-            Ok(()) => {}
-            Err(Error::Conflict) => {
+        let admission = self
+            .admit_registration(
+                &mut tx,
+                crate::registration_limits::NewRegistration {
+                    tenant,
+                    name: name.clone(),
+                    email: email.clone(),
+                    company: company.clone(),
+                    token_hash: hash.clone(),
+                    days,
+                    sender: sender.to_owned(),
+                },
+            )
+            .await?;
+        if !admission.created {
+            if admission.changed {
+                tx.commit().await?;
+            } else {
                 tx.rollback().await?;
-                return Ok(());
             }
-            Err(error) => return Err(error.into()),
+            return Ok(());
         }
+        let days_text = days.to_string();
+        let wording = self.templates.platform_wording(
+            crate::wording::REGISTRATION,
+            &[
+                ("site_title", bilibi_templates::Value::Text(&site.title)),
+                ("days", bilibi_templates::Value::Text(&days_text)),
+            ],
+        )?;
+        let link = format!("{origin}/portal/verify/{token}");
         let message = Message::text(
-                Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
-                format!("Confirm your request for {}", site.title),
-                format!(
-                    "You asked for an account on {}.\n\nOpen this link to confirm your email address:\n\n{}/portal/verify/{}/{token}\n\nThe link expires in {days} day(s). {} will then review your request. If you did not ask for this, you can ignore this email.\n",
-                    site.title, self.origin, site.address, site.title
-                ),
-            );
+            Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
+            wording["subject"].clone(),
+            crate::wording::around_link(&wording, &link),
+        );
         let mailer = self.mailer.clone();
         tx.after_commit(move || {
             tokio::spawn(async move {
-                if let Err(error) = mailer.deliver(&message).await {
+                if let Err(error) = mailer
+                    .deliver_linked_for(tenant, &message, Some(&link))
+                    .await
+                {
                     eprintln!("mail: a registration verification was not delivered: {error}");
                 }
             });
@@ -265,14 +249,92 @@ impl PortalService {
         Ok(())
     }
 
-    /// Whether a verification link on the portal at `address` is open, for
-    /// its page; unknown, used and expired links are all `false`.
-    pub async fn verification_open(&self, address: &str, token: &str) -> Result<bool> {
+    /// Deletes expired unconfirmed requests unless a legal hold names them,
+    /// the one for `email` first, so abandoned names and addresses do not
+    /// wait for an operator to turn on the privacy sweep.
+    async fn purge_expired(
+        &self,
+        client: &mut tokio_postgres::Client,
+        tenant: i64,
+        email: &str,
+    ) -> Result<()> {
+        let ids: Vec<i64> = client
+            .query(
+                "SELECT id FROM customer_registrations WHERE tenant_id=$1 AND decision IS NULL AND verified_at IS NULL AND expires_at<=now() ORDER BY email=$2 DESC,id LIMIT 100",
+                &[&tenant, &email],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let (holds, mut hold_guard) =
+            bilibi_personal_data::RecordHolds::acquire(client, tenant).await?;
+        let client = hold_guard.client();
+        let held = holds.records(&*client, crate::privacy::KIND, &ids).await?;
+        let ids: Vec<i64> = ids
+            .into_iter()
+            .filter(|id| !held.contains_key(id))
+            .collect();
+        let purged = if ids.is_empty() {
+            Ok(())
+        } else {
+            self.purge_in(client, tenant, ids).await
+        };
+        hold_guard.release().await?;
+        purged
+    }
+
+    async fn purge_in(
+        &self,
+        client: &mut tokio_postgres::Client,
+        tenant: i64,
+        ids: Vec<i64>,
+    ) -> Result<()> {
+        let mut tx = self
+            .mutations
+            .begin(
+                client,
+                Context::system(tenant, PRINCIPAL, "core.portal.registration.expire"),
+            )
+            .await?;
+        tx.mutate(move |sql| {
+            Box::pin(async move {
+                let changes = sql
+                    .query(
+                        "DELETE FROM customer_registrations WHERE tenant_id=$1 AND id=ANY($2) AND decision IS NULL AND verified_at IS NULL AND expires_at<=now() RETURNING id",
+                        &[&tenant, &ids],
+                    )
+                    .await?
+                    .iter()
+                    .map(|row| Change {
+                        kind: "portal.registration".into(),
+                        id: row.get(0),
+                        old: json!({"status": "unverified"}),
+                        new: json!(null),
+                    })
+                    .collect();
+                Ok(((), changes))
+            })
+        })
+        .await?;
+        tx.commit().await
+    }
+
+    /// Whether a verification link on the public site a request reached is
+    /// open, for its page; unknown, used and expired links are all `false`.
+    pub async fn verification_open(
+        &self,
+        public: &bilibi_public::PublicScope,
+        token: &str,
+    ) -> Result<bool> {
         if !token_shaped(token) {
             return Ok(false);
         }
         let client = self.db.get().await?;
-        let Some(site) = open_site(&**client, address).await? else {
+        let Some(site) = open_site(&**client, public).await? else {
             return Ok(false);
         };
         Ok(client
@@ -286,12 +348,12 @@ impl PortalService {
 
     /// Confirms the address of the request a link names: it then waits for
     /// staff and no longer expires. A link works once.
-    pub async fn verify(&self, address: &str, token: &str) -> Result<bool> {
+    pub async fn verify(&self, public: &bilibi_public::PublicScope, token: &str) -> Result<bool> {
         if !token_shaped(token) {
             return Ok(false);
         }
         let mut client = self.db.get().await?;
-        let Some(site) = open_site(&**client, address).await? else {
+        let Some(site) = open_site(&**client, public).await? else {
             return Ok(false);
         };
         let tenant = site.tenant;
@@ -474,6 +536,24 @@ impl PortalService {
             })
         })
         .await?;
+        // A fact for other modules (a CRM's contact source, say): which
+        // Person, and which company if any, came in through this request.
+        self.events
+            .record(
+                tx,
+                bilibi_events::NewEvent {
+                    name: crate::REGISTRATION_APPROVED,
+                    subject: &format!("portal.registration:{id}"),
+                    key: &id.to_string(),
+                    payload: json!({
+                        "registration": id,
+                        "person": invitation.person.get(),
+                        "organisation": invitation.organisation,
+                        "approved_by": decider,
+                    }),
+                },
+            )
+            .await?;
         Ok(Ok(invitation))
     }
     /// The request as it stands before a rejection: `MANAGE`, no write.

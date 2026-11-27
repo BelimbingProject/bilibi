@@ -8,18 +8,18 @@
               <p class="text-sm text-ink-muted">App shell, page widths and page header. Not shown yet: sign-in shell, side panel, full index, form and detail pages.</p>
             </div>
             <section id="component-shell" class="grid gap-3 lg:grid-cols-2">
-              {% call ui::card(id="component-display-controls", title="Display controls", inner_class="space-y-2 p-3") %}
+              {% call ui::card(id=crate::sections::COMPONENT_DISPLAY_CONTROLS.anchor, title=crate::sections::COMPONENT_DISPLAY_CONTROLS.title, inner_class="space-y-2 p-3") %}
                 <p class="text-xs text-ink-muted">Clock and theme live in the top bar and save to your settings. This time updates when you change the clock.</p>
                 <p class="text-sm">{{ self.control("library-shell-time")? }}</p>
               {% endcall %}
-              {% call ui::card(id="component-account-menu", title="Account menu", inner_class="p-3") %}
+              {% call ui::card(id=crate::sections::COMPONENT_ACCOUNT_MENU.anchor, title=crate::sections::COMPONENT_ACCOUNT_MENU.title, inner_class="p-3") %}
                 <p class="text-xs text-ink-muted">The circle at the bottom left opens your name, company, tenant, settings and sign out. The top-left toggle hides the menu.</p>
               {% endcall %}
             </section>
-            {% call ui::card(id="component-tile-controls", title="Workspace tile controls", inner_class="space-y-2 p-3") %}{{ self.card_component_tile_controls()? }}{% endcall %}
-            {% call ui::card(id="component-record-link", title="Record link", inner_class="space-y-2 p-3") %}{{ self.card_component_record_link()? }}{% endcall %}
-            {% call ui::card(id="component-split-handle", title="Workspace split handle", inner_class="space-y-2 p-3") %}{{ self.card_component_split_handle()? }}{% endcall %}
-            {% call ui::card(id="component-page", title="Page widths", inner_class="space-y-2 p-3") %}{{ self.card_component_page()? }}{% endcall %}
-            {% call ui::card(id="component-header", title="Page header", inner_class="space-y-3 p-3") %}{{ self.card_component_header()? }}{% endcall %}
-            {% call ui::card(id="component-section-heading", title="Section heading", inner_class="space-y-3 p-3") %}{{ self.card_component_section_heading()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_TILE_CONTROLS.anchor, title=crate::sections::COMPONENT_TILE_CONTROLS.title, inner_class="space-y-2 p-3") %}{{ self.card_component_tile_controls()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_RECORD_LINK.anchor, title=crate::sections::COMPONENT_RECORD_LINK.title, inner_class="space-y-2 p-3") %}{{ self.card_component_record_link()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_SPLIT_HANDLE.anchor, title=crate::sections::COMPONENT_SPLIT_HANDLE.title, inner_class="space-y-2 p-3") %}{{ self.card_component_split_handle()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_PAGE.anchor, title=crate::sections::COMPONENT_PAGE.title, inner_class="space-y-2 p-3") %}{{ self.card_component_page()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_HEADER.anchor, title=crate::sections::COMPONENT_HEADER.title, inner_class="space-y-3 p-3") %}{{ self.card_component_header()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_SECTION_HEADING.anchor, title=crate::sections::COMPONENT_SECTION_HEADING.title, inner_class="space-y-3 p-3") %}{{ self.card_component_section_heading()? }}{% endcall %}
           </section>

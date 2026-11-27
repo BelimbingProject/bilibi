@@ -22,7 +22,7 @@ Agents can find, save and link the same addresses shown on company and contact p
 | Company links | `core.address.company.attach`, `.create_and_attach`, `.update_attachment`, `.detach` |
 | Person links | `core.address.person.attach`, `.create_and_attach`, `.update_attachment`, `.detach` |
 
-Write inputs nest facts under `address` or link settings under `attachment`. Owner writes name `company_id` or `person_id`; attaching an existing address requires its `address_version`, checked after locking; edits and deletion require the current record's `version`. Updates replace visible optional facts; omitted visible fields clear, while an omitted restricted phone stays stored. Timestamps in operation output are ISO UTC strings, and withheld phones use the restricted marker.
+Write inputs nest facts under `address` or link settings under `attachment`. Owner writes name `company_id` or `person_id`; attaching an existing address requires its `address_version`, checked after locking; edits and deletion require the current record's `version`. Updates replace visible optional facts; omitted visible fields clear, except the phone: `core.address.update` keeps an omitted or null phone, visible or restricted, and clears it only for `""`, so a plan built while the phone was hidden keeps it even when the restriction is lifted before the plan commits. `AddressService::update` still keeps only a restricted phone. Timestamps in operation output are ISO UTC strings, and withheld phones use the restricted marker.
 
 All doors use [reviewed writes](../../base/agent_api/README.md#reviewed-safe-writes). The handler calls the Address facade on the plan's transaction; existing owner locks, version fences, field restrictions, audit changes and after-commit notifications apply. Attachment contracts use the owner's update capability, matching the panels; they cannot cross owner kinds. A review that shows an existing address (attach, update, delete) also needs `admin.address.view` and applies the same field restrictions as a read. A create-and-attach starts a manual, unverified address and its date default appears in the preview. No additional sensitive action or step-up policy is introduced.
 
@@ -110,7 +110,10 @@ the live operator tenant's primary company, its first address (primary, then
 priority, then id) and that country's Geonames name, languages and currency.
 Any missing step is `None`, never an error. Base Locale does not query Core:
 the service factory binds `bootstrap::Source` as Locale's `BootstrapSource`
-(K15), so every `Locales::resolve(.., None)` infers from these facts until a
+(K15), which reads on the caller's own connection (never a second pooled one,
+which would deadlock the pool under load) and the same for the Geonames
+country read (`bilibi_geonames::country_summary`), so every
+`Locales::resolve(.., None)` infers from these facts until a
 global locale is stored; `adopt_inferred` persists them once under operator
 proof; the shell does so on the first operator page that finds these facts
 (`adopt_installation_locale` in `apps/web/src/shell.rs`).

@@ -1,9 +1,6 @@
 //! The panel's forms: the in-row kinds editor, the attach dialog and the
 //! create-and-attach dialog. Controls are the shared form models.
-use super::{
-    super::location::{Ids, LABELS},
-    *,
-};
+use super::{super::location::Ids, *};
 use bilibi_ui::{Button, ButtonVariant, Field, InputKind, Modal, ModalWidth, RestrictedField};
 
 const CREATE_IDS: Ids = Ids {
@@ -176,6 +173,7 @@ impl Panel {
     pub(super) async fn create_modal(&self, scope: &Scope) -> Result<Html> {
         let draft = self.create.as_ref().ok_or(Error::Internal)?;
         let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "addresses").await?;
         let masked = bilibi_authz::restrictions_for(&**client, scope, "addresses").await?;
         drop(client);
         let errors = |key: &str| -> Vec<String> {
@@ -186,21 +184,24 @@ impl Panel {
                 .map(|e| e.message.clone())
                 .collect()
         };
-        let field = |key: &str, label: &str, value: &Option<String>| {
+        let field = |key: &str, value: &Option<String>| {
             Field::in_form("address", key)
                 .id(format!("create-address-{key}"))
-                .label(label)
+                .label(words.get(&super::super::fields::get(key)))
                 .value(value.clone().unwrap_or_default())
                 .attr("data-debounce", "300")
                 .errors(errors(key))
         };
         let i = &draft.input;
-        let mut contact = vec![field("label", "Label", &i.label)];
+        let mut contact = vec![field("label", &i.label)];
         let mut restricted = Vec::new();
         if masked.contains("phone") {
-            restricted.push(RestrictedField::new("create-address-phone", "Phone"));
+            restricted.push(RestrictedField::new(
+                "create-address-phone",
+                words.get(&super::super::fields::PHONE),
+            ));
         } else {
-            contact.push(field("phone", "Phone", &i.phone).kind(InputKind::Tel));
+            contact.push(field("phone", &i.phone).kind(InputKind::Tel));
         }
         let mut priority = Field::in_form("address", "priority")
             .id("create-address-priority")
@@ -210,23 +211,22 @@ impl Panel {
             .errors(errors("priority"));
         priority.attrs.min = Some("0".into());
         let labels = super::super::location::Labels {
-            admin1: "State / Province",
             admin1_prompt: "Select state...",
-            ..LABELS
         };
         let body = render(CreateForm {
             notice: self.notice_html()?,
             contact,
             restricted,
             lines: vec![
-                field("line1", "Address Line 1", &i.line1),
-                field("line2", "Address Line 2", &i.line2),
-                field("line3", "Address Line 3", &i.line3),
+                field("line1", &i.line1),
+                field("line2", &i.line2),
+                field("line3", &i.line3),
             ],
             location: draft.location.render(
                 "address",
                 &CREATE_IDS,
                 &labels,
+                &words,
                 &self.countries,
                 &draft.errors,
             )?,

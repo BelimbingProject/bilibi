@@ -21,8 +21,9 @@ use bilibi_authz::effective_capabilities;
 use bilibi_database::{Db, Error, Result};
 use bilibi_datetime::{DisplayContext, DisplayPolicy, Format, Precision};
 use bilibi_locale::Locales;
-use bilibi_personal_data::Identifier;
-use bilibi_tenancy::{PartyProofs, Scope};
+use bilibi_party_ids::OrganisationId;
+use bilibi_personal_data::{Identifier, Located};
+use bilibi_tenancy::{OrganisationSearch, PartyProofs, Scope};
 use bilibi_ui::{
     download::{Download, DownloadFuture, DownloadRequest, FileBody},
     forms::{Choice, Field, Form, InputKind},
@@ -33,8 +34,9 @@ use bilibi_ui::{
     },
     params, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ColumnsOutcome,
     ConfirmDialog, CreateButton, Fact, Facts, FilterToolbar, FlashMap, FlexRow, FlexTable, Header,
-    Html, IconButton, IconKind, ListColumns, ListSpec, ListState, Modal, PageCounts, Pagination,
-    RecordLink, SectionHeading, StatusKind, TableEmpty, ToolbarControl, NO_FLASH,
+    Html, IconButton, IconKind, ListColumns, ListSpec, ListState, Modal, NamedKind, PageCounts,
+    Pagination, RecordLink, RecordPicker, SectionHeading, StatusKind, TableEmpty, ToolbarControl,
+    NO_FLASH,
 };
 use serde_json::{json, Value};
 use std::{
@@ -49,6 +51,22 @@ pub(crate) const SERVICE: &str = "base/privacy.pages";
 pub(crate) const DOWNLOADS: &str = "base/privacy.downloads";
 const PAGE_SIZES: [u64; 3] = [25, 50, 100];
 const REQUEST_FORM: &str = "request";
+/// Companies as the request dialog's picker names them.
+const COMPANY: NamedKind<'static> = NamedKind {
+    kind: "core/company",
+    prefix: "company",
+    label: "Company",
+    page: Some("/companies"),
+};
+/// The company a picker hit raised (`record=company:<id>`).
+fn get_company(value: &Value) -> Result<OrganisationId> {
+    value
+        .get("record")
+        .and_then(Value::as_str)
+        .and_then(|record| COMPANY.picked(record))
+        .and_then(|id| OrganisationId::new(id).ok())
+        .ok_or(Error::Invalid)
+}
 const HOLD_FORM: &str = "hold";
 const NOTE_FORM: &str = "note";
 const REVEAL_FORM: &str = "reveal";
@@ -121,6 +139,7 @@ fn status_badge(request: &RequestView) -> Result<Html> {
     let kind = match request.status.as_str() {
         "completed" => BadgeKind::Success,
         "refused" => BadgeKind::Neutral,
+        "failed" => BadgeKind::Danger,
         _ if request.late => BadgeKind::Danger,
         "running" => BadgeKind::Warning,
         _ => BadgeKind::Neutral,
@@ -131,13 +150,16 @@ fn status_badge(request: &RequestView) -> Result<Html> {
         "approved" => "Approved",
         "running" if request.late => "Running · late",
         "running" => "Running",
+        "failed" => "Failed",
         "completed" => "Completed",
         "refused" => "Refused",
         _ => "Unknown",
     };
     let label = if request.late
-        && !matches!(request.status.as_str(), "running" | "completed" | "refused")
-    {
+        && !matches!(
+            request.status.as_str(),
+            "running" | "failed" | "completed" | "refused"
+        ) {
         format!("{label} · late")
     } else {
         label.to_owned()
@@ -225,7 +247,10 @@ fn request_columns() -> Vec<BuiltinColumn> {
 struct RequestDialog {
     values: HashMap<String, String>,
     errors: BTreeMap<String, Vec<String>>,
-    companies: Vec<Choice>,
+    /// The chosen company, reproved as selectable on each view.
+    company: Option<OrganisationId>,
+    /// The company search text; its hits are read on each view.
+    company_query: String,
 }
 
 struct Requests {
@@ -258,40 +283,58 @@ impl Requests {
             .and_then(Value::as_str)
             .ok_or(Error::Invalid)?
         {
-            "filters" => self
-                .state
-                .apply_filters(&params::form_values(value, FILTERS_FORM)),
+            "filters" => self.state.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
             "page" => self
                 .state
                 .put_page(value.get("page").and_then(Value::as_str)),
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },
             "clear-flash" => clear_flash(&mut self.flash, value),
             "new_request" => {
-                let client = self.pages.db.get().await?;
-                let companies = self
-                    .pages
-                    .parties
-                    .selectable_organisations(&**client, scope, REQUEST_RECEIVE)
-                    .await?
-                    .into_iter()
-                    .filter(|company| !company.archived)
-                    .map(|company| Choice::new(company.name, company.id.get().to_string()))
-                    .collect();
                 self.flash = None;
-                self.dialog = Some(RequestDialog {
-                    companies,
-                    ..RequestDialog::default()
-                });
+                self.dialog = Some(RequestDialog::default());
+            }
+            "request_change" => {
+                let Some(dialog) = self.dialog.as_mut() else {
+                    return Ok(());
+                };
+                let values = params::form_values_checked(value, REQUEST_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
+                dialog.company_query = values.get("company_id_search").cloned().unwrap_or_default();
+                dialog.company = values
+                    .get("company_id")
+                    .and_then(|id| id.parse().ok())
+                    .and_then(|id| OrganisationId::new(id).ok());
+                dialog.values = values;
+            }
+            "pick_request_company" => {
+                if let Some(dialog) = self.dialog.as_mut() {
+                    let id = get_company(value)?;
+                    dialog.company = Some(id);
+                    dialog.company_query.clear();
+                    dialog.errors.remove("company_id");
+                }
+            }
+            "change_request_company" => {
+                if let Some(dialog) = self.dialog.as_mut() {
+                    dialog.company = None;
+                }
             }
             "close_modal" => self.dialog = None,
             "create" => {
                 let Some(dialog) = self.dialog.as_mut() else {
                     return Ok(());
                 };
-                let values = params::form_values(value, REQUEST_FORM);
+                let values = params::form_values_checked(value, REQUEST_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 let list = |key: &str| -> Vec<String> {
                     values.get(key).map_or_else(Vec::new, |text| {
                         text.split([',', ';', '\n'])
@@ -468,6 +511,53 @@ impl Requests {
             body: list,
             ..Card::default()
         })?);
+        let (company_chosen, company_hits) = match &self.dialog {
+            Some(dialog) => {
+                let named = |companies: Vec<bilibi_tenancy::NamedOrganisation>| {
+                    companies
+                        .into_iter()
+                        .filter(|company| !company.archived)
+                        .map(|company| (company.id.get(), company.name))
+                        .collect::<Vec<_>>()
+                };
+                let chosen = match dialog.company {
+                    Some(id) => {
+                        let ids = [id];
+                        named(
+                            pages
+                                .parties
+                                .selectable_organisations(
+                                    &**client,
+                                    scope,
+                                    REQUEST_RECEIVE,
+                                    OrganisationSearch::among(&ids),
+                                )
+                                .await?,
+                        )
+                        .into_iter()
+                        .next()
+                    }
+                    None => None,
+                };
+                let hits = if chosen.is_none() && !dialog.company_query.trim().is_empty() {
+                    named(
+                        pages
+                            .parties
+                            .selectable_organisations(
+                                &**client,
+                                scope,
+                                REQUEST_RECEIVE,
+                                OrganisationSearch::text(&dialog.company_query),
+                            )
+                            .await?,
+                    )
+                } else {
+                    Vec::new()
+                };
+                (chosen, hits)
+            }
+            None => (None, Vec::new()),
+        };
         let dialog = match &self.dialog {
             Some(dialog) => {
                 let field = |key: &str, label: &str| {
@@ -497,14 +587,20 @@ impl Requests {
                         .hint("The person's ID from Contacts.")
                         .required(),
                 )?);
-                fields.push(&render(
-                    field("company_id", "Filed under company")
-                        .kind(InputKind::Select)
-                        .prompt("Choose a company")
-                        .options(dialog.companies.clone())
-                        .hint("The export or certificate is kept under this company.")
-                        .required(),
-                )?);
+                fields.push(&render(RecordPicker::named(
+                    COMPANY,
+                    "privacy-request-company-id",
+                    REQUEST_FORM,
+                    "company_id",
+                    "Filed under company (keeps the export or certificate)",
+                    &dialog.company_query,
+                    &company_hits,
+                    company_chosen
+                        .as_ref()
+                        .map(|(id, name)| (*id, name.as_str())),
+                    ("pick_request_company", "change_request_company"),
+                    dialog.errors.get("company_id").cloned().unwrap_or_default(),
+                ))?);
                 fields.push(&render(
                     field("emails", "Emails the person gave").hint("Separate several with commas."),
                 )?);
@@ -525,13 +621,16 @@ impl Requests {
                     body: Html::text("Record request"),
                     ..Button::default()
                 })?);
-                let form = render(Form {
+                let form = Form {
                     id: "privacy-request-form",
-                    event: "create",
+                    event: "request_change",
+                    change: true,
                     body: fields,
                     actions,
                     ..Form::default()
-                })?;
+                }
+                .submit_event("create")
+                .map_err(|_| Error::Internal)?;
                 render(Modal {
                     id: "privacy-request-modal",
                     title: "New request",
@@ -603,6 +702,24 @@ enum Dialog {
         errors: BTreeMap<String, Vec<String>>,
     },
     Approve,
+    RunAgain,
+}
+/// What a request's `finish_error` means for the operator, and what to do.
+fn finish_reason(code: &str) -> String {
+    match code {
+        crate::documents::PDF_ENGINE_UNAVAILABLE => "no Chromium was found to print the certificate; set PDF Chromium executable in Settings".into(),
+        crate::documents::PDF_RENDER_TIMED_OUT => "printing the certificate timed out; check PDF Chromium executable, or raise PDF browser start timeout or PDF render timeout in Settings".into(),
+        code => code.replace('_', " "),
+    }
+}
+/// Why a request's background work stopped, in plain words, from its code
+/// (`cancelled_actor_refused`, `discarded_store_failed`, …).
+fn stopped_because(code: &str) -> &'static str {
+    match code {
+        "cancelled_actor_refused" => "the person it runs as is no longer allowed to run it",
+        code if code.starts_with("discarded_") => "a step kept failing until its retries ran out",
+        _ => "its background work was stopped",
+    }
 }
 struct RequestPage {
     pages: Pages,
@@ -615,6 +732,11 @@ struct RequestPage {
     flash: Option<(StatusKind, String)>,
     /// The reason given for this export download, once.
     export_reason: Option<String>,
+    /// What every store holds, located once per mounted page while the
+    /// request is open (#565): a store's email and phone match can scan all
+    /// it keeps, and the page renders after every input. A write from this
+    /// page, or Find again, locates again.
+    located: Option<Vec<(String, String, Located)>>,
 }
 fn summary(result: &Option<Value>) -> String {
     let Some(result) = result else {
@@ -645,6 +767,15 @@ fn summary(result: &Option<Value>) -> String {
     {
         parts.push(format!("{files} files listed"));
     }
+    if let Some(left) = result
+        .get("unconfirmed")
+        .and_then(Value::as_i64)
+        .filter(|n| *n > 0)
+    {
+        parts.push(format!(
+            "{left} found only by email or phone left unconfirmed"
+        ));
+    }
     if let Some(deferral) = result.get("deferral").filter(|d| !d.is_null()) {
         parts.push(format!(
             "deferred until {}",
@@ -673,6 +804,7 @@ impl RequestPage {
             dialog: None,
             flash: None,
             export_reason: None,
+            located: None,
         })
     }
     fn version(&self) -> i64 {
@@ -685,21 +817,27 @@ impl RequestPage {
             .and_then(Value::as_str)
             .ok_or(Error::Invalid)?
         {
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },
             "clear-flash" => clear_flash(&mut self.flash, value),
+            "locate_again" => self.located = None,
             "open_verify" => {
-                let client = self.pages.db.get().await?;
+                if self.located.is_none() {
+                    self.located = Some(self.pages.privacy.locate(scope, id).await?);
+                }
                 let mut candidates = Vec::new();
-                for (store, label, found) in self.pages.privacy.locate(&client, scope, id).await? {
-                    for candidate in found.candidates {
+                for (store, label, found) in self.located.iter().flatten() {
+                    for candidate in &found.candidates {
                         candidates.push((
                             ConfirmedRecord {
                                 store: store.clone(),
-                                kind: candidate.kind,
-                                id: candidate.id,
+                                kind: candidate.kind.clone(),
+                                id: candidate.id.clone(),
                             },
                             format!("{label}: {}", candidate.summary),
                         ));
@@ -721,7 +859,8 @@ impl RequestPage {
                 })
             }
             "export_reason" => {
-                let values = params::form_values(value, REVEAL_FORM);
+                let values = params::form_values_checked(value, REVEAL_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 let reason = values.get("reason").map(|r| r.trim()).unwrap_or("");
                 if reason.is_empty() || reason.chars().count() > 255 {
                     self.dialog = Some(Dialog::Export {
@@ -743,10 +882,12 @@ impl RequestPage {
                 })
             }
             "request_approve" => self.dialog = Some(Dialog::Approve),
-            "close_modal" | "cancel_approve" => self.dialog = None,
+            "request_run_again" => self.dialog = Some(Dialog::RunAgain),
+            "close_modal" | "cancel_approve" | "cancel_run_again" => self.dialog = None,
             "verify" | "refuse" => {
                 let verify = value["type"] == "verify";
-                let values = params::form_values(value, NOTE_FORM);
+                let values = params::form_values_checked(value, NOTE_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 let note = values.get("note").cloned().unwrap_or_default();
                 let confirm: Vec<&ConfirmedRecord> = match &self.dialog {
                     Some(Dialog::Verify { candidates, .. }) if verify => candidates
@@ -780,6 +921,7 @@ impl RequestPage {
                 {
                     Ok(_) => {
                         self.dialog = None;
+                        self.located = None;
                         let erasure = self
                             .request
                             .as_ref()
@@ -831,6 +973,7 @@ impl RequestPage {
                     .await
                 {
                     Ok(_) => {
+                        self.located = None;
                         self.flash = Some((
                             StatusKind::Success,
                             "Approved. Every store is being answered in the background.".into(),
@@ -845,10 +988,48 @@ impl RequestPage {
                     }
                 }
             }
+            "run_again" => {
+                if !matches!(self.dialog.take(), Some(Dialog::RunAgain)) {
+                    return Ok(());
+                }
+                let input = json!({"id": id, "version": self.version()});
+                match self
+                    .pages
+                    .contracts
+                    .submit(
+                        &call(
+                            scope,
+                            credential,
+                            "run_again",
+                            "base.privacy.request.run_again",
+                        ),
+                        input,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        self.located = None;
+                        self.flash = Some((
+                            StatusKind::Success,
+                            "Running again. Every store that had not answered is asked again in the background.".into(),
+                        ))
+                    }
+                    Err(error) => {
+                        self.flash = Some(refusal(
+                            error,
+                            "You cannot run this request again.",
+                            "The request could not be run again.",
+                        )?)
+                    }
+                }
+            }
             "submit" => {
                 let input = json!({"id": id, "version": self.version()});
                 match self.pages.contracts.submit(&call(scope, credential, "submit", "base.privacy.erasure.submit"), input).await {
-                    Ok(_) => self.flash = Some((StatusKind::Success, "Sent for approval. Someone independent of this request decides on Waiting for my approval.".into())),
+                    Ok(_) => {
+                        self.located = None;
+                        self.flash = Some((StatusKind::Success, "Sent for approval. Someone independent of this request decides on Waiting for my approval.".into()));
+                    }
                     Err(error) => {
                         self.flash = Some(refusal(
                             error,
@@ -881,6 +1062,7 @@ impl RequestPage {
         // all when withheld), never in full past a mask.
         let contact_masks = bilibi_authz::fields::masks_for(&**client, scope, "persons").await?;
         let contact_restricted = restrictions.get("persons").cloned().unwrap_or_default();
+        drop(client);
         let shown = |field: &str, value: &str| match contact_masks.get(field) {
             Some(kind) => bilibi_authz::fields::partial(kind, value),
             None if contact_restricted.contains(field) => "restricted".to_owned(),
@@ -903,11 +1085,18 @@ impl RequestPage {
         let open = matches!(request.status.as_str(), "received" | "verified")
             && !request.approval_awaiting;
         let erasure = request.kind == RequestKind::Erasure;
-        let located = if open {
-            pages.privacy.locate(&client, scope, self.id).await?
-        } else {
-            Vec::new()
-        };
+        if open && self.located.is_none() {
+            self.located = Some(match pages.privacy.locate(scope, self.id).await {
+                Ok(found) => found,
+                Err(_) => {
+                    self.flash = Some((
+                        StatusKind::Warning,
+                        "The stores could not be searched for this person just now. Select Find again to retry.".into(),
+                    ));
+                    Vec::new()
+                }
+            });
+        }
         let mut rows: BTreeMap<String, StoreRow> = BTreeMap::new();
         for (store, label) in pages.privacy.stores() {
             rows.insert(
@@ -923,7 +1112,7 @@ impl RequestPage {
                 },
             );
         }
-        for (store, _, found) in &located {
+        for (store, _, found) in self.located.iter().flatten().filter(|_| open) {
             if let Some(row) = rows.get_mut(store) {
                 row.found = Some(found.kinds.iter().map(|k| k.by_person).sum());
                 row.matched = Some(found.kinds.iter().map(|k| k.by_identifier).sum());
@@ -942,6 +1131,14 @@ impl RequestPage {
                     attempts: 0,
                 });
             row.state = match progress.state.as_str() {
+                "pending" if request.status == "failed" => match progress.last_error.as_deref() {
+                    Some(code)
+                        if code.starts_with("cancelled_") || code.starts_with("discarded_") =>
+                    {
+                        format!("Stopped: {}", stopped_because(code))
+                    }
+                    _ => "Not answered yet".into(),
+                },
                 "pending" if progress.attempts > 0 => format!(
                     "Retrying ({})",
                     progress.last_error.as_deref().unwrap_or("failed")
@@ -949,9 +1146,13 @@ impl RequestPage {
                 "pending" => "Working".into(),
                 "answered" => "Answered".into(),
                 "deferred" => "Deferred".into(),
+                "unmounted" => "Not asked: no longer installed".into(),
                 other => other.into(),
             };
-            row.result = summary(&progress.result);
+            row.result = match summary(&progress.result) {
+                text if progress.state == "unmounted" && text == "Nothing held" => "—".into(),
+                text => text,
+            };
             row.attempts = progress.attempts;
         }
         self.rows = rows.into_values().collect();
@@ -974,6 +1175,15 @@ impl RequestPage {
                 event: "request_approve",
                 id: "privacy-approve",
                 body: Html::text("Approve"),
+                ..Button::default()
+            })?);
+        }
+        if can_approve && request.status == "failed" {
+            actions.push(&render(Button {
+                variant: ButtonVariant::Primary,
+                event: "request_run_again",
+                id: "privacy-run-again",
+                body: Html::text("Run again"),
                 ..Button::default()
             })?);
         }
@@ -1126,11 +1336,15 @@ impl RequestPage {
                         &request.finish_error,
                     ) {
                         (Some(reason), _, _) => format!("Refused: {reason}"),
+                        _ if request.failure.is_some() => format!(
+                            "Failed: {}. Fix the cause, then run it again.",
+                            stopped_because(request.failure.as_deref().unwrap_or_default())
+                        ),
                         (None, Some(at), _) => format!("Completed {}", when(&display, Some(at))),
                         (None, None, Some(code)) => format!(
-                            "Finishing failed {} time(s) ({}); it is retried",
+                            "Finishing failed {} time(s): {}. It is retried.",
                             request.finish_attempts,
-                            code.replace('_', " ")
+                            finish_reason(code)
                         ),
                         _ => "Open".into(),
                     }),
@@ -1142,14 +1356,27 @@ impl RequestPage {
             body: facts,
             ..Card::default()
         })?;
+        let find_again = if open {
+            render(Button {
+                event: "locate_again",
+                id: "privacy-locate-again",
+                body: Html::text("Find again"),
+                ..Button::default()
+            })?
+        } else {
+            Html::EMPTY
+        };
         body.push(&render(SectionHeading {
             title: "Stores",
             id: "privacy-request-stores-heading",
             description: if open {
-                "What each store holds about the person. Verifying confirms the email and phone matches; approving runs every store."
+                "What each store held about the person when last searched; Find again searches now. Verifying confirms the email and phone matches; approving runs every store."
+            } else if request.status == "failed" {
+                "Run again asks every store that has not answered, and any store installed since; the others keep their answers."
             } else {
-                "Every store mounted on this server must answer before the request completes."
+                "Every store the request runs in must answer before it completes."
             },
+            actions: find_again,
             ..SectionHeading::default()
         })?);
         let mut table_rows = Vec::with_capacity(self.rows.len());
@@ -1330,6 +1557,28 @@ impl RequestPage {
                 )?,
                 ..Modal::default()
             })?,
+            Some(Dialog::RunAgain) => {
+                let (consequence, detail) = if request.kind == RequestKind::Erasure {
+                    (
+                        format!("Continue erasing person {}'s data?", request.person.get()),
+                        "Every store that has not answered erases what is approved, in the background, as you. Records under a legal hold are kept. This cannot be undone.".to_owned(),
+                    )
+                } else {
+                    (
+                        format!("Ask again for person {}'s data?", request.person.get()),
+                        "Every store that has not answered adds its records, in the background, as you.".to_owned(),
+                    )
+                };
+                render(ConfirmDialog {
+                    id: "privacy-run-again-confirm",
+                    consequence: &consequence,
+                    detail: &detail,
+                    confirm: "Run again",
+                    working: "Starting…",
+                    confirm_event: "run_again",
+                    cancel_event: "cancel_run_again",
+                })?
+            }
             Some(Dialog::Approve) => {
                 let (consequence, detail) = if request.kind == RequestKind::Erasure {
                     (
@@ -1427,13 +1676,17 @@ impl Holds {
             .and_then(Value::as_str)
             .ok_or(Error::Invalid)?
         {
-            "filters" => self
-                .state
-                .apply_filters(&params::form_values(value, FILTERS_FORM)),
+            "filters" => self.state.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
             "page" => self
                 .state
                 .put_page(value.get("page").and_then(Value::as_str)),
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },
@@ -1467,7 +1720,8 @@ impl Holds {
             }
             "close_modal" => self.dialog = None,
             "place" => {
-                let values = params::form_values(value, HOLD_FORM);
+                let values = params::form_values_checked(value, HOLD_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 let number = |key: &str| {
                     values
                         .get(key)
@@ -1512,7 +1766,8 @@ impl Holds {
                     return Ok(());
                 };
                 let hold = *hold;
-                let values = params::form_values(value, NOTE_FORM);
+                let values = params::form_values_checked(value, NOTE_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 let input =
                     json!({"id": hold, "reason": values.get("note").cloned().unwrap_or_default()});
                 match self
@@ -1840,13 +2095,17 @@ impl Retention {
             .and_then(Value::as_str)
             .ok_or(Error::Invalid)?
         {
-            "filters" => self
-                .state
-                .apply_filters(&params::form_values(value, FILTERS_FORM)),
+            "filters" => self.state.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
             "page" => self
                 .state
                 .put_page(value.get("page").and_then(Value::as_str)),
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },

@@ -1,12 +1,20 @@
 # Grid catalog, page projections, lenses and page columns (G1–G4)
 
+**Use it for:** declaring your tables so lists get pickable columns, lenses and saved arrangements, named list views people share with everyone or a role; reports and search read the same catalog.
+
+**Not for:** a column picker or per-list join code of your own.
+
 ## Parent oversight
 
-`OversightQueries` (`base/grid.oversight`) accepts Tenancy's sealed `OversightScope`, never a supplied child ID or invented child actor. `catalog(proof, grant, rows)` intersects one child's consent with the parent's live catalog; `builder_catalog(scope, rows)` intersects fields across children granting each table. `read(proof, root, OversightSpec)` re-proves consent, runs bounded read-only child queries, then audits before returning each answer. `OversightResult` has explicit per-child outcomes and grant versions and composable totals; no child record links are returned. `RowsSummary` computes totals only for row-level grants; `Rows.offsets` allows callers to compose globally bounded pages, without widening the proven directory. `latest` and `list` values stay per child, with null combined cells.
+`OversightQueries` (`base/grid.oversight`) accepts Tenancy's sealed `OversightScope`, never a supplied child ID or invented child actor. `catalog(proof, grant, rows)` intersects one child's consent with the parent's live catalog; `builder_catalog(scope, rows)` intersects fields across children granting each table. `read(proof, root, OversightSpec)` re-proves consent, runs bounded read-only child queries, then audits before returning each answer. `OversightResult` has explicit per-child outcomes and grant versions and composable totals; no child record links are returned. `RowsSummary` computes totals only for row-level grants; `Rows.pages` supplies each child’s `(offset, limit)` for a globally bounded page; children absent from the map return only counts, without reading or projecting row keys. The map never widens the proven directory. `latest` and `list` values stay per child, with null combined cells.
+
+Both the consent editor and oversight reads admit only table sources that take the tenant alone. This keeps company-scoped sources and sources requiring a child user out of parent oversight.
 
 **Unknown classification denies the whole source.** Every field in the complete original `TableDecl` must be explicitly marked `.personal(kind)` or `.non_personal()` by its owner before the table can enter either the consent or oversight catalog. Hidden/derived fields and fields removed by parent restrictions or child withholding still count. Absence of a personal mark is unknown, never evidence of non-personal data. `.personal` still requires the owning module's personal-data store contract; do not label unknown production fields non-personal to bypass it. Core Contacts, accounts, affiliations, addresses and companies remain unavailable to oversight until their owners complete classification and the required privacy/store contracts. Existing grants and explicit personal selections cannot enable an unclassified source. This does not remove ordinary same-tenant access. Only Grid's non-business reference sources are fully classified here.
 
 Global operator settings `tenancy.oversight.max_children` (50), `concurrency` (4), `child_timeout_ms` (2,000), `total_timeout_ms` (10,000) and `cache_seconds` (60; 0 disables) have settings-editor controls. Cache entries are bounded, in memory and keyed by reader, query, grant version and live catalog; every hit requires fresh authorization and audit. A revoked, withheld, masked, expired or unauditable answer cannot survive through the cache.
+
+Source description caching follows [The scoped catalog](#the-scoped-catalog); live capabilities, masks and consent are always rechecked.
 
 Grid owns flexible columns on list pages: the catalog every module declares its
 tables into, the paths a person walks through it to pick columns without writing
@@ -29,10 +37,15 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
   audit views; one table claims a type).
 - a `Source`: static SQL for **the rows a scope may read**, with the owner's own
   tenant, soft-delete and company filters applied. A tenant source takes bigint
-  `$1` (tenant) and may take `$2` (user); a `Source::global` takes none. The grid
+  `$1` (tenant) and may take bigint `$2` (user). A `Source::company` requires all
+  three bigint parameters: `$1` (tenant), `$2` (user) and `$3` (the selected company
+  from the sealed scope). A `Source::global` takes none. Grid
   wraps it in a subquery, so every hop of a path carries its owner's boundary and
   Grid never adds a tenant predicate. It must be one `SELECT`/`WITH` statement
-  that references `$1` exactly when it is tenant-scoped.
+  that references every parameter its scope requires. A request never supplies
+  the company parameter. When projected values use fields from another Grid
+  table, declare that table with `.reads(&["table_id"])`, then map each derived field to every upstream input with `.derives(&[DerivedColumn::new("projected_field", "table_id", "source_field")])`. The names are Grid field ids, never SQL fragments. The default is none. Every declared upstream table needs at least one mapping.
+  `.reads` also applies to link edge sources when their joins depend on fields from another Grid table; edge sources have no projected fields and do not declare `.derives`. Discovery refuses unknown extra tables, undeclared input tables, unknown field ids, protected outputs and repeated output/table/field mappings. See [Bulk Data export access](../bulk_data/README.md#an-export) for how exports use this declaration.
 - `Field`s: `Field::new`/`choice`; `column` names the source key when it differs
   from the id; `hidden` fields exist only for joins; `protected` keeps a field
   out of operator restriction (the key, label, time, hidden and join fields are
@@ -41,22 +54,63 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
   contributes a personal-data store (`apps/base/personal_data/README.md`).
 - `LinkDecl`s: `One` (a foreign key to the target's **key**, or an edge yielding at
   most one row per parent) or `Many` (the reverse, or an attachment table), joined
-  `on` two declared fields or through an edge `Source` selecting `from_key` and
+  `on` two declared fields or through a tenant-wide edge `Source` selecting `from_key` and
   `to_key`. A link may start at another module's table, because the module that
   owns the edge knows it; it must own one end.
 
 Contributions are validated at discovery (duplicate ids, unknown link ends, bad
 joins, a link id that shadows a field, wrong source shape, claimed record types)
-and the Ready check refuses a table naming a capability Authz does not declare.
+and the Ready check refuses a table naming a capability Authz does not declare
+or whose company-scoped capability flag differs from the source.
 Nothing executes a source at boot.
+
+## Record reach
+
+A table whose capability supports record reach (`CapabilityDefinition::with_reach`, `apps/base/authz/README.md`, "Record reach") names the integer field holding each row's owner, and optionally its Core team: `TableDecl::new(...).owner("owner_user_id").team("team_id")`.
+
+- The scoped catalog reads the reader's reach on the table's capability (`effective_grants`) with its grants. When it is narrower than all, every read wraps the source in `Reach::predicate` on those fields: projections, row pages, summaries, stats, lenses, scalar joins, text search, Base Search and Base Records. `Table::reach` says which; `Table::scoped_source` is the statement. Put `scoped_source()`, never `source().sql`, into a statement that reads rows.
+- Boot refuses a table read under a key with reach that names no owner field, and an owner field on a table whose key has none.
+- A child table guarded by the same key (lines of a deal) selects its parent's owner, or every line would show.
+- A parent's oversight read skips a table it reaches only partly.
+
+## Record subjects
+
+A table whose rows are each about one record of another kind (a case about a customer) names the field holding that record's id and its Base Records kind: `TableDecl::new(...).subject("customer_id", "company")`. Reports over the table then count per record, not per stored id, and show a reader only the rows about records they may read (#877).
+
+- **Merges:** the field reads as the record its stored id names now, in report grouping and filtering. Rows stored under a record merged since group and filter under its survivor; no row is rewritten. Base Records owns merges and binds the lookup (`bind_survivors`); Grid never reads its storage by name.
+- **Readable subjects only:** Reports resolve canonical IDs before following redirects. Report summaries, pages and linked reads apply the Base Records owner's read rule to each distinct survivor on the same transaction as the report query. Rows with a null subject remain. Unknown record kinds admit no non-null subjects. Subject field masks and naming still follow the scoped Grid and Base Records restrictions.
+- **Declaration:** one subject per table; an integer or text field other than the key, on a tenant source. The kind is the audit kind its owner registers with [Base Records](../records/README.md); boot refuses a malformed declaration. The field is a record field in reports: it filters by `equals`, `one_of`, `empty` and `not_empty` and accepts count as its only aggregate.
+- **Ordinary Grid reads** use stored values and keep their own access rules. Oversight excludes subject-declaring sources from its catalog and refuses a report built on one.
+- **Bounds:** Grid refuses a report when subject candidates within filters independent of subject authorization or selected page keys, including reachable links, or owner decisions exceed its read bounds or require checking more than 1,000 distinct records.
+
+
+Proof: `BILIBI_REPORT_SUBJECTS=disposable cargo run -p bilibi-web --example report-subjects` on an empty disposable database (`scripts/run-walkthroughs.sh report-subjects`).
+
+## Tenant custom fields
+
+A tenant's custom fields (`base/custom_fields`, ADR 21) are data, not declarations, so Grid adds them to each fresh scoped catalog through one hook (`bind_custom_columns`, a `CustomColumns` that `base/custom_fields` binds at boot). Grid does not depend on that module.
+
+- The owner selects its `custom_fields` JSON column in the table's source, declares it as a hidden text field and contributes a `bilibi_custom_fields::GridSource` naming the table and that field ([Custom Fields](../custom_fields/README.md#offer-custom-fields-on-a-record-type)).
+- Each active field becomes `cf_<key>` on that table, with the tenant's current label (`Table::field_label`; the `Field` itself carries the id as its label, so read labels through the table or the resolved `Column`). It resolves, projects, filters, groups and sorts like any field of the table, also through links (`work.company.cf_segment:list`), under the table's capability, reach and tenant predicate. An operator may withhold it from roles (Field Restrictions, `cf_<key>`); a scoped catalog then leaves it out for that reader. It is never masked. `Table::custom_watcher_condition` says whether the tenant offered it to Base Watchers conditions, and `custom_tables` reads the tenant's fields whatever the reader's grants, for a caller that pins them (Watchers' approval fingerprint).
+- Its value is SQL over the hidden field that `base/custom_fields` builds from the validated key and no request text. A record field projects only its stored id; `Table::custom_reference` and `Column::reference` carry its Base Records kind. [Reports](../reports/README.md#the-rule) owns permission-aware naming of cells and groups. The column remains available to readers of its root table. Only equals, one_of, empty and not_empty filters are accepted, comparing stored ids. List column pickers, saved list paths and related list paths exclude record fields; owners show their record fields as pills.
+- `Table::custom_search_values` gives Base Search the tenant's searchable text fields. `Table::is_custom` tells a page that draws its own `cf_` columns which fields are tenant fields.
+- Keys never change and are never reused, so each distinct `cf_<key>` id is kept once for the process; labels are not.
+
+## Shared label rendering
+
+The Web host calls `render_labels` for initial pages, mounts and live fragments. Grid maps tenant overrides to visible Grid identities and registered record-field vocabulary through each field's declared column path. Shared controls consume the resulting map through [UI's tenant field labels](../ui/README.md#tenant-field-labels).
+
+`Catalog::resolve` applies the tenant's field overrides automatically. The lower-level `column::resolve` resolves structural paths with module defaults; use `Catalog::resolve` for tenant words. Built-in list columns whose IDs match Grid fields resolve overrides even without `RecordFields`.
+
+For fact titles, inline editors and other labels outside shared controls, load `RecordWords::load(client, scope, table)` once per render. `words.get(&field)` looks up the registered vocabulary, then the field ID, and falls back to `field.label`. `words.field(id, default)` handles a Grid field without record vocabulary. Load words for the owning table, including when a page contains another table's fields; DOM IDs and input names are not field identities.
 
 ## Detail fields become columns
 
-A scalar field shown on a record can also be added to its list, under the same label.
+A scalar field shown on a record can also be added to its list, under the same label. Tenant renaming is owned by [Labels](../labels/README.md); rendering uses the integration above.
 
 For example, Contacts calls its email **Personal email** in both places. Work email comes from the Affiliations panel and becomes a Contacts column through that panel's Grid contribution.
 
-- Declare the vocabulary once with `bilibi_ui::record_fields!`. Use its named fields or `get` for detail labels and `RecordField::fact` for a complete fact.
+- Declare the vocabulary once with `bilibi_ui::record_fields!`, including the owning module, key, label, type, choices or pick-list, and personal-data class; see [the vocabulary contract](../ui/README.md#record-field-vocabulary). Resolve detail titles through [shared label rendering](#shared-label-rendering). Build corresponding Grid fields with `Field::record(fields::NAME)` and operation input properties with `fields::NAME.input(...)`, so boot can refuse disagreement. SQL source keys and read protection remain Grid declarations.
 - Add `RecordFields { table, fields: fields::ALL }` to the owning `GridContribution.record_fields`. A panel may contribute fields to the table at its link's start. `PageColumns` collects them automatically.
 - An Extension that owns a scalar Company field contributes its own Grid table and a `One` link starting at `companies`, then contributes `RecordFields` on `companies` with a path through that link. Company reads the value through the Extension facade for its own page slots; Grid resolves the path for optional list columns. The Extension remains the only owner of its table and tenant predicate.
 - Use `.path("parent.name")` for a related readable value. Grid resolves the path against the reader's fresh catalog before offering or loading it.
@@ -77,17 +131,16 @@ unknown one. Platform capabilities need the operator identity. A system identity
 has no `Scope` and reads nothing. Build the catalog again wherever the page
 refreshes its own capabilities; there is no cache of grants.
 
-The first catalog for a source asks PostgreSQL to describe (not run) its
-statement and keeps the selected keys for the process, since the SQL is static.
-A declared field its source does not select, a placeholder that is not bigint, or
-an edge without `from_key`/`to_key` fails with `CatalogError::Misdeclared`
-naming the table and field (the owner must fix it; callers' `?` maps it to an
-internal error and logs the cause).
+A restriction on any mapped input withholds a derived field, even when that input is masked on its own table. The scoped catalog follows chains of declared derivations and withholds the affected fields before lists, records, reports, exports and agent reads resolve them. Privacy reveals cannot expose a field withheld through a derivation.
+
+Company sources enter the catalog only when the sealed scope has a selected company and the actor holds the table's company-scoped capability there. Every projection, count, summary, search and agent read binds that same selected company; URL and operation input cannot choose another one. Tenant sources keep their tenant-wide behavior.
+
+The first catalog for a source asks PostgreSQL to describe (not run) its statement and keeps the selected keys and parameter count for the process, keyed by static SQL and tenant/company scope. Ordinary and oversight catalogs reuse these descriptions across calls and children. A declared field its source does not select, a placeholder that is not bigint, or an edge without `from_key`/`to_key` fails with `CatalogError::Misdeclared` naming the table and field (the owner must fix it; callers' `?` maps it to an internal error and logs the cause).
 
 `restriction_catalog` and `restrictable` give the Authz screens the protected-field
 catalog as **data**: Authz does not depend on Grid. Each field carries its personal kind, so only personal fields can be masked.
 
-**Masked fields (ADR 05) stay in the scoped catalog, with partial values.** A field restricted in mask mode for the actor (`authz::fields::masked`) is not removed: projected cells show its partial value by kind (`a•••@example.com`, `•••• 1234`), a `list` rollup masks each item, and a count is unchanged. A sum or average of a masked field does not resolve (`MaskedAggregate`): over one linked row it is the hidden value, and narrow rollups give it away. Trend and change-since lenses add nothing to a masked column. `Catalog::mask(column)` names a column's mask. Text search skips masked fields, so a match cannot say what one holds. Grouped summaries and filtered row pages refuse a masked field as a grouping, filter, sort or value aggregate (`Unsupported`); only its count is allowed. `query::reveal(db, scope, &Reveal, table, field, key)` reads one masked field of one record in full, through the same scoped source; a withheld or unrestricted field is `Forbidden`. It needs a sealed `Reveal` grant for that reader and field, which only `base/privacy` issues, after the capability, reason and Step-up, recording the reveal.
+**Direct field masks (ADR 05) preserve partial values for account readers.** The scoped catalog reads effective modes once through `authz::fields::restriction_modes` and uses them for direct fields, record-field aliases and derived fields. Where a masked field remains visible, projected cells show its partial value by kind (`a•••@example.com`, `•••• 1234`), a `list` rollup masks each item, and a count is unchanged. A sum or average of a masked field does not resolve (`MaskedAggregate`): over one linked row it is the hidden value, and narrow rollups give it away. Trend and change-since lenses add nothing to a masked column. `Catalog::mask(column)` names a column's mask. Text search skips masked fields, so a match cannot say what one holds. Grouped summaries and filtered row pages refuse a masked field as a grouping, filter, sort or value aggregate (`Unsupported`); only its count is allowed. `query::reveal(db, scope, &Reveal, table, field, key)` reads one masked field of one record in full, through the same scoped source; a withheld or unrestricted field is `Forbidden`. It needs a sealed `Reveal` grant for that reader and field, which only `base/privacy` issues, after the capability, reason and Step-up, recording the reveal.
 
 ## Column paths
 
@@ -104,9 +157,9 @@ at most).
 
 ### Owner scalar sorting
 
-`scalar_expression(&catalog, root, path)` resolves a scalar path under a fresh scoped catalog and returns its expression, using Grid's existing owner sources and one-link cardinality rules. The caller aliases its root row `r`, binds the same tenant/user to `$1`/`$2`, and executes immediately in that scope's bounded transaction. Rollups and many-links are refused; SQL identifiers come only from validated catalog declarations. Use it where a per-root scalar lookup is appropriate; Company uses `scalar_join` for list sort and filter queries across many companies.
+`scalar_expression(&catalog, root, path)` resolves a scalar path under a fresh scoped catalog and returns its expression, using Grid's existing owner sources and one-link cardinality rules. The caller aliases its root row `r`, binds the same tenant, user and optional company to `$1`, `$2` and `$3`, and executes immediately in that scope's bounded transaction. Rollups and many-links are refused; SQL identifiers come only from validated catalog declarations. Use it where a per-root scalar lookup is appropriate; Company uses `scalar_join` for list sort and filter queries across many companies.
 
-`scalar_join(&catalog, root, path)` is for an owner list that reads many root rows by a field on one direct `One` link. It returns a catalog-derived alias, the field expression and one `LEFT JOIN` against the target owner's scoped source. Deduplicate clauses by alias when several fields use the same link. It accepts only a direct `On` join and a scalar target field; other paths use `scalar_expression` or a bounded Grid projection. The owner's `One` declaration guarantees no root row multiplication.
+`scalar_join(&catalog, root, path)` is for an owner list that reads many root rows by a field on one direct `One` link. It returns a catalog-derived alias, the field expression and one `LEFT JOIN` against the target owner's scoped source. Use the same scope bindings as for `scalar_expression`. Deduplicate clauses by alias when several fields use the same link. It accepts only a direct `On` join and a scalar target field; other paths use `scalar_expression` or a bounded Grid projection. The owner's `One` declaration guarantees no root row multiplication.
 
 `PageColumns::with_scalar_sorts` opts in a map from supported Grid paths to the owner's list sort keys. Eligible headings carry those keys and sort events recheck the scoped path; owners must also revalidate before querying. Other projected columns remain display-only.
 
@@ -119,10 +172,11 @@ chained one-link after a many-link, an enum, decimals, dates, and a restrictable
 field (`reference_items.unit_cost`). Managers, viewers and staff gain the
 capability through the contributed role extension; run `authz-reconcile` after
 deploying. The tables are empty unless a walkthrough or fixture fills them.
+`reference_tasks` (`base_grid_ref_tasks`, capability `grid.reference.task.view`, which supports reach) has an owner and a team for the record reach walkthrough; no role holds it.
 
 ## Running evidence
 
-No unit tests. On a disposable migrated database:
+No unit tests. On a disposable migrated database, seeded first (`BILIBI_ENV=development cargo run -p bilibi-web --locked -- seed-production` stores the Dev instance role; grant changes otherwise ask for a second factor nobody enrolled):
 
 ```sh
 BILIBI_GRID_DEMO=disposable cargo run -p bilibi-web --example g1-grid
@@ -142,9 +196,7 @@ Call `bilibi_grid::project(&db, &scope, "reference_items", &ids, &specs)` after
 paging through the owner's list API. IDs are JSON number/string values; specs
 are paths such as `group.name` or `movements.delta:sum`. Do not build SQL or pass
 previously resolved `Column`s: `project` builds a fresh catalog and resolves specs
-in its own read-only, repeatable-read transaction. Owner sources on the root,
-every link target and every edge receive the same tenant/user bindings. The host
-still validates the live session/actor before calling the module API.
+in its own read-only, repeatable-read transaction. The query uses the [scoped catalog](#the-scoped-catalog) for the root and every link. The host still validates the live session/actor before calling the module API.
 
 The result has resolved typed `columns`, page-ordered `rows` (`key` plus `cells`
 keyed by column DOM id), and PostgreSQL's `estimated_cost`. Duplicate IDs/specs
@@ -175,7 +227,7 @@ The query returns typed `QueryError`s and converts to the shared database error
 for page handlers. It does not sort/filter walked columns or persist layouts (G4); `page_keys` does the sorting and filtering (G5).
 
 Run the live projection walkthrough against a **disposable** migrated
-PostgreSQL database:
+PostgreSQL database, migrated and seeded as above:
 
 ```sh
 BILIBI_GRID_DEMO=disposable cargo run -p bilibi-web --example g2-grid
@@ -188,9 +240,23 @@ edges and global text keys; then demonstrates cardinality refusal, input bounds,
 cost rejection, timeout and a successful projection after failure. It removes its
 reference rows on success. No unit tests or test runner are involved.
 
+## Reads inside an existing transaction
+
+Use `project_on` to project rows on the transaction you already hold. Use repeatable read to share a snapshot with an earlier authorization check. Grid sets its local query bounds on that transaction.
+
+Use `validate_projection_on`, `validate_page_on` and `validate_summary_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction. Report pages and summaries use repeatable read and allow authorization decision logs.
+
+`OversightQueries::builder_catalog_on` and `probe_on` validate saved oversight questions on the caller's transaction. The probe runs bounded child reads serially and returns whether the question is supported, with no child data in the result. Abort the caller's transaction if savepoint setup or recovery cannot be confirmed.
+
+The probe requires a second pool connection, even for a standalone check. It refuses immediately if the pool has no slot for the named `oversight audit` checkout. That connection writes only audit evidence. Committed child actions and the parent `tenancy.oversight.query` summary survive the caller's rollback.
+
+- The parent summary records each attempted child. Its deadline is the later of the total probe deadline and one child timeout from the start of the summary attempt. If the fan-out exhausts the total deadline, the probe reports the timeout after a successful summary.
+- If a child audit commit cannot be confirmed, the probe stops the fan-out, marks that child `outcome unknown` in the parent summary and counts only confirmed rows. The caller receives the uncertainty even when the summary commits.
+- If the audit connection is discarded before sending the parent summary's commit, one replacement checkout gives the summary another chance. The checkout is bounded by the configured pool wait, or the child timeout if the pool has no wait limit. If checkout fails, the probe logs the complete parent summary at error level and reports the checkout failure. If the parent commit itself is uncertain, the probe reports that uncertainty and does not attempt the summary again. A summary failure is reported alongside any earlier probe failure.
+
 ## Grouped summaries and row pages (G5)
 
-The report builder's reads, in `src/summary.rs`, with `project`'s rules: a fresh scoped catalog, a read-only repeatable-read transaction, owner sources with tenant and user bindings, the `EXPLAIN` bound of 100,000 and the 2 s and 500 ms timeouts.
+The report builder's reads in `src/summary.rs` use the same rules as `project`, including a fresh scoped catalog, a read-only repeatable-read transaction, the `EXPLAIN` bound of 100,000 and the 2 s and 500 ms timeouts.
 
 | Call | Returns |
 | --- | --- |
@@ -200,7 +266,7 @@ The report builder's reads, in `src/summary.rs`, with `project`'s rules: a fresh
 - **Columns** are specs, resolved against the reader's catalog: a field, a linked field or a rollup. A restricted or unreadable column is refused (`QueryError::Column`), so it can neither be shown nor filtered on.
 - **Filters** (`Test`): `Equals`, `OneOf` (up to 100 values), `Contains` (text and choices), `Range` (numbers, or `YYYY-MM-DD` days for dates and date-times), `Within(Period)` (today, this week, last 7 or 30 days, this month, quarter or year), `Empty`, `NotEmpty`. At most 16. A type mismatch is `QueryError::Unsupported`.
 - **Groupings**: at most 2. A date or date-time groups only by a `Bucket` (day, week from Monday, month, quarter, year) and returns the bucket's first day; anything else groups by value.
-- **Measures**: at most 8. `count` (rows with a value), `sum` and `avg` (numbers), `min` and `max` (ordered values and text).
+- **Measures**: at most 8. `count` (rows with a value), `sum` and `avg` (numbers), `min` and `max` (ordered values and text). A record-reference field supports only `count`; value aggregates are refused with `QueryError::Unsupported`, so stored ids never become summary values. Reference-field rollups through many-links are refused during column resolution.
 - **Time zone**: the reader's IANA zone (`bilibi_datetime::valid_timezone`). Date-time buckets and day filters use the reader's local days; a day range on an instant compares against the instants those days start and end at, so the owner's index still applies.
 - **Bounds**: `max_groups` 1 to 1,000; above it the read is refused, never truncated. Pages hold 1 to 100 rows and start within the first 10,000; up to 3 sorts, the root key breaking ties.
 
@@ -211,7 +277,7 @@ BILIBI_GRID_DEMO=disposable cargo run -p bilibi-web --example g5-grid-summary
 ```
 
 
-Both specs carry `bounds` (`Bounds { statement_ms, max_cost }`), and `project_within` is `project` under a caller's `Bounds`, so a page of keys is filled under the bounds it was read under: `Default` is the interactive bound every other Grid read uses (2 s, `MAX_ESTIMATED_COST`); a background caller may pass a larger pair, up to `MAX_STATEMENT_MS` and `MAX_COST_BOUND`. Cost and statement-time bound refusals are `QueryError::TooHeavy`, not database faults or structural `Limit`s; callers distinguish them by variant, never by message text.
+Both specs carry `bounds` (`Bounds { statement_ms, max_cost }`), and `report_page` applies the same bounds and scoped snapshot to key selection, counting, cell projection and totals: `Default` is the interactive bound every other Grid read uses (2 s, `MAX_ESTIMATED_COST`); a background caller may pass a larger pair, up to `MAX_STATEMENT_MS` and `MAX_COST_BOUND`. Cost and statement-time bound refusals are `QueryError::TooHeavy`, not database faults or structural `Limit`s; callers distinguish them by variant, never by message text.
 
 Equals and one-of compare typed values: each value is checked against the column's type (a number for a number column, yes/no, text, a `YYYY-MM-DD` date, or a date-time with its offset) and refused as `Unsupported` otherwise, so a wrong type is an answer in words rather than an empty result, and `…+00:00` and `…Z` name the same instant. A float compares in its column's own type (`real` or `double precision`; the value is bound as text with no cast, as a literal would be), never through `numeric` or a wider float, so a stored value matches itself and not a near neighbour. An operand a `real` cannot hold (`1e100`, `1e-100`) compares as `float8`, so it matches no `real` value and orders correctly as a range bound, rather than failing in PostgreSQL. Days and instants before year 1, which PostgreSQL cannot read, are refused the same way. The owner's source SQL is copied into each statement untouched.
 ## Record references
@@ -220,7 +286,7 @@ A table that claims an audit kind in `record_types` and names a `label_field` ca
 
 ## Searching related text
 
-`query::text_search_sql(client, scope, root, paths)` builds a membership subquery for an owner's paginated search and count. Execute it immediately under the same scope, binding tenant, user and normalized search text to `$1`, `$2` and `$3`. The owner retains its pagination and statement timeout. Paths resolve against a fresh catalog; unavailable tables and restricted fields contribute no matches. Many-links search every text value before cell truncation, so a value beyond the displayed rollup still matches.
+`query::text_search_sql(client, scope, root, paths)` builds a membership subquery for an owner's paginated search and count. Execute it immediately under the same scope, binding tenant, user, selected company and normalized search text to `$1`, `$2`, `$3` and `$4`. The owner retains its pagination and statement timeout. Paths resolve against a fresh catalog; unavailable tables and restricted fields contribute no matches. Many-links search every text value before cell truncation, so a value beyond the displayed rollup still matches. Each path matches from its end, uncorrelated: the rows whose field contains the term (`lower(field) LIKE '%term%'`, with `%`, `_` and `\` taken literally), then back through each link to the root keys they reach. A search therefore reads the rows that match, through a trigram index when the field's owner declares one ([ADR 29](../../../docs/architecture/decisions/29-pg-trgm-is-allowed.md)), never every root row. Index a searched text field with `gin (lower(field) gin_trgm_ops)`.
 
 ## Lenses (G3)
 
@@ -247,7 +313,7 @@ A host reads lenses in three steps:
    the FlexTable's heavy-query warning above 20,000.
 3. `lens::cell(value, column, range, lens, Extras { series, before }, &display)`
    per cell. Pass the request's `DisplayContext`: a date becomes a zone-free
-   `Typed::Date` (`dd/mm/yyyy`) and a timestamp a `Typed::Instant` with both
+   `Typed::Date` (`6 Nov 2026`) and a timestamp a `Typed::Instant` with both
    server clock texts, so a clock change re-renders it through every lens. Do
    not format a date into text yourself. Numbers position on the range (dates
    as days, timestamps as seconds; equal ends are 0.5), sequential bands are
@@ -293,18 +359,11 @@ The page holds one `PageColumns` in its live state and:
    rows' keys as JSON scalars and the request's `DisplayContext`;
 4. renders `flex_table(id, rows)` over `rows` (a clone of
    `PageColumns::rows`, each row's slots filled for the built-in ids);
-5. delegates its `grid` event to `handle(scope, values)`: after
+5. delegates its `grid` event to `handle(scope, values, caller)`: after
    `Outcome::Patch` it loads again and returns the merged query; `Sort(key)`
    is a built-in's sort for the page's `ListState`; `Update` re-renders.
 
-`View` is what a person arranged, as one value that round-trips through the
-URL (`cols`, `lens`, `z`, `since`; defaults left out) and the stored JSON
-(`columns`, `lenses`, `zoom`, `since`). An address that carries any of those
-keys wins over memory, so a shared link shows what its sender saw and changes
-nobody's memory until the reader arranges something. An address that carries
-none opens the page the way the account left it (`PageViews::fetch`, read
-afresh every time, never from a copy held in the page), and as the page's own
-columns when the account arranged nothing.
+`View` is what a person arranged, as one value that round-trips through the URL (`cols`, `lens`, `z`, `since`) and the stored JSON (`columns`, `lenses`, `zoom`, `since`). An address that carries any of those keys wins over memory, so a shared link shows what its sender saw and changes nobody's memory until the reader arranges something. An address that carries none opens the page the way the account left it (`PageViews::fetch`, read afresh every time, never from a copy held in the page), and as the page's own columns when the account arranged nothing. `View::to_params` omits defaults; `PageColumns::params` preserves a row-height marker for explicit URL arrangements so canonicalization keeps the address authoritative even at the defaults.
 
 `PageViews` keeps the arrangement per account and per page in the
 user-scoped `ui.grid.page_columns` setting, one `{page, view}` entry per
@@ -345,3 +404,30 @@ memory alone. Reset forgets the page. The restriction switch restricts
 `unit_cost` for the signed-in account's roles and lifts it again, so a walked
 `unit_cost` column disappears from the table, the address and the add box
 while restricted.
+
+## Shared list views (#686)
+
+A person saves the list they see as a named view (columns, lenses, row height, change-since date, and the page's own sort, search and filters) and shares it with everyone or a role. The primary table that restores `PageColumns::from_params` gets the strip of views above its table and, for readers with sharing permission, the save form in the notch; do not build a second saved-filters feature.
+
+- **A view is a link, not access.** It is stored as JSON in `base_grid_shared_views` (+ `base_grid_shared_view_roles`) and opened as `?<query>` on the page's own address (`SharedView::query`), so the page applies the reader's own grants, field restrictions and reach, prunes what they may not see, and leaves their remembered arrangement alone (an address that names the arrangement wins, as for any shared link). The row height is always named so a view with the page's own columns still wins over a reader's memory.
+- **The page's own query** comes from the host's current canonical server state when the queued save is processed (`ViewCaller::query`), so preceding filter and sort events are included even while their response is in flight. `clean_params` omits Grid and pagination keys and rejects unsupported sizes without truncation; the page restores the saved query through its existing params handling.
+- **Who sees one:** its owner, everyone when shared that way, or the holders of a shared role (`effective_principal_roles`). Saving a view needs `grid.views.share`; the owner always sees their saved views. A tenant-wide role assignment receives the view in every company; an assignment limited to one company receives it only while that company is selected. Owners can delete their own views after losing sharing permission; deleting another owner’s view requires `grid.views.share`. Deletion asks for confirmation in the strip; at most 100 views per page per tenant and one name per page, whatever its case. The save transaction serializes both checks and insertion per tenant/page.
+- **Writes** go through the mutation boundary (`PageViews::save_shared`, `delete_shared`) and are audited as kind `grid.shared_view`. Pages and agents call `base.grid.view.save` and `base.grid.view.delete` through the normal audited operation transaction. Each host declares both contracts for its Grid event in `PAGE_WRITES` and supplies `ViewCaller` with its page service, event, session credential, canonical query and `PageContracts`.
+
+Call `PageColumns::refresh_views(scope)` on every render, independently of row projection, and use `PageColumns::event_values` for the Grid event payload. A secondary table without query restoration has no named-view controls.
+
+Agents use `base.grid.view.pages` to list the pages they may open with their visible `saved_views` and whether they can save another view; it also feeds the **Shared list views** [customisation section](../labels/README.md#what-can-be-changed-agents). Agents use `base.grid.view.fields` to discover permitted columns and the filters and search supported by the page. Walked columns are bounded pages, with `next_offset`. Page-owned columns appear on the first page. List and get require both the registered page's access grant and view visibility. Readers without sharing permission see a generic role audience label. Agent reads return the arrangement and page parameters. The browser builds the shared link from them.
+
+A save review uses the [shared audience preview](../agent_api/README.md#audience-previews) to name the audience and show the caller's visible columns. The saved arrangement uses the browser's query parser. Agent saves require a registered page key and its access grant. The result includes the saved view read back in the same transaction. Pages without metadata can still save from the browser. The operation returns the saved ID and has no column preview for those pages.
+
+Declare the canonical list address on `TableDecl::list_address` for the tables whose labels the list uses, including lists without shared views. A shared-view list with no Grid table supplies its address in `PageMetadata`. Lists contribute `PageMetadata` through `contribute_page_metadata!` reusing their `PageColumns` construction and the actual `ListSpec` when the table has search and filters. Supply dynamic filter details on the same client and scope when the page has tenant-specific filters. Declare query keys that live outside `ListState` as extra filters. Keep the contribution beside the page's construction so discovery and parsing change together.
+
+[Setup packs](../setup_packs/README.md) transfer registered shared views through the same Grid save. Use portable filters when exporting. Customisations can remove a visible view when its owner or a viewer with sharing permission confirms the removal.
+
+The `g6-shared-views` walkthrough (`scripts/run-walkthroughs.sh grid-shared-views`) proves role visibility when switching companies, tenant-wide and owner visibility, Grid and Labels operation writes with a one-connection pool, concurrent saves at the view limit, owner deletion without sharing permission, saving filters after queued changes, and refusal of an employee email search saved on the Users page when a reader lacks the page grant.
+
+`scripts/run-walkthroughs.sh grid-company-bulk` runs the [company-scoped Grid and Bulk Data walkthrough](../bulk_data/README.md#walkthrough).
+
+## Scalar access predicates
+
+`scalar_access(catalog, root, path)` returns a predicate for the root row aliased `r`, using the same scope bindings as `scalar_expression`. It permits absent optional links and refuses a linked record excluded by the scoped catalog’s record reach at any hop. Combine it with the scoped root source when historical evidence or automation must distinguish absence from denied access.

@@ -33,9 +33,6 @@ async fn main() -> Result<(), Error> {
     bilibi_walkthrough_fixture::install(&db).await?;
     let app = bilibi_web::App::new(db.clone(), "https://core-product-build.localhost")?;
     let products = app.services.get::<Products>(bilibi_product::SERVICE)?;
-    let currencies = app
-        .services
-        .get::<bilibi_currency::Currencies>(bilibi_currency::SERVICE)?;
     let records = app.services.get::<Records>(bilibi_records::SERVICE)?;
     let boundary = app
         .services
@@ -44,7 +41,6 @@ async fn main() -> Result<(), Error> {
         .services
         .get::<bilibi_authz::grants::Grants>("base/authz.grants")?;
     grants.reconcile().await?;
-    let admin = login(&app, "admin@example.test").await?;
     let manager = login(&app, "manager@example.test").await?;
     let viewer = login(&app, "viewer@example.test").await?;
     let other = login(&app, "manager@other.example.test").await?;
@@ -73,16 +69,7 @@ async fn main() -> Result<(), Error> {
         "cross-tenant product: {:?}",
         products.get(&**client, &other, product.id).await
     );
-    for code in ["MYR", "JPY", "KWD"] {
-        let mut tx = boundary
-            .begin(&mut client, admin.mutation_context("currency.walkthrough"))
-            .await?;
-        currencies
-            .set_enabled(&mut tx, &admin, code, true)
-            .await?
-            .map_err(|e| format!("currency refused: {e:?}"))?;
-        tx.commit().await?;
-    }
+    // Nothing to switch on: the first price in a currency marks it used.
     let price = PriceInput {
         product: product.id,
         selling_company: 1,

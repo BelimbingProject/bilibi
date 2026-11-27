@@ -17,10 +17,7 @@ use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_tenancy::Scope;
 use jiff::Timestamp;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 static EVENTS: OnceLock<Arc<Events>> = OnceLock::new();
 /// Bound once at boot by the `base/events.agent` service.
@@ -29,10 +26,6 @@ pub(crate) fn bind(events: Arc<Events>) -> bool {
 }
 fn events() -> bilibi_agent_api::Result<&'static Arc<Events>> {
     EVENTS.get().ok_or(Error::Internal.into())
-}
-
-fn field_error(field: &str, message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([(field.into(), vec![message.into()])]))
 }
 
 fn time(at: Timestamp) -> String {
@@ -52,6 +45,7 @@ fn subscriber_json(state: &SubscriberState) -> Value {
         "failing": state.failing,
         "first_pending": state.first_pending,
         "missed": state.missed,
+        "missed_more": state.missed_more,
         "first_missed": state.first_missed,
         "gap_from": state.gap_from(),
     })
@@ -73,10 +67,10 @@ impl ReadHandler for Read {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let events = events()?;
-            let client = events.db.get().await.map_err(Error::from)?;
+            let mut client = events.db.get().await.map_err(Error::from)?;
             let data = match self {
                 Self::Subscribers => {
-                    let states = events.subscriber_states(&**client, scope).await?;
+                    let states = events.subscriber_states(&mut client, scope).await?;
                     json!({"subscribers": states.iter().map(subscriber_json).collect::<Vec<_>>()})
                 }
                 Self::Deliveries => {
@@ -108,14 +102,13 @@ fn replay_input(input: &Value) -> bilibi_agent_api::Result<(&str, ReplayFrom, i6
     let subscriber = input["subscriber"].as_str().unwrap_or_default();
     let from = match (input.get("from_event"), input.get("from_time")) {
         (Some(id), None) => ReplayFrom::Event(id.as_i64().unwrap_or_default()),
-        (None, Some(at)) => ReplayFrom::Time(
-            at.as_str()
-                .unwrap_or_default()
-                .parse()
-                .map_err(|_| field_error("from_time", "must be a date-time with an offset"))?,
-        ),
+        (None, Some(at)) => {
+            ReplayFrom::Time(at.as_str().unwrap_or_default().parse().map_err(|_| {
+                bilibi_agent_api::invalid("from_time", "must be a date-time with an offset")
+            })?)
+        }
         _ => {
-            return Err(field_error(
+            return Err(bilibi_agent_api::invalid(
                 "from_event",
                 "give exactly one of from_event or from_time",
             ))
@@ -125,50 +118,69 @@ fn replay_input(input: &Value) -> bilibi_agent_api::Result<(&str, ReplayFrom, i6
 }
 fn refusal(error: Error) -> AgentError {
     match error {
-        Error::NotFound => field_error("subscriber", "is not a mounted subscriber"),
+        Error::NotFound => bilibi_agent_api::invalid("subscriber", "is not a mounted subscriber"),
         error => error.into(),
     }
 }
 
 struct Replay;
+impl Replay {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let (subscriber, from, limit) = replay_input(input)?;
+        let events = events()?;
+        let review = events
+            .replay_review(client, scope, subscriber, from, limit)
+            .await
+            .map_err(refusal)?;
+        let mut facts = review.to_json();
+        facts["subscriber"] = json!(subscriber);
+        let erased = if review.erased > 0 {
+            format!(
+                "; {} events a personal-data erasure changed are left out",
+                review.erased
+            )
+        } else {
+            String::new()
+        };
+        facts["summary"] = json!(if review.pending == 0 {
+            format!(
+                "Nothing to replay to {subscriber}: every event in the batch is delivered{erased}"
+            )
+        } else {
+            format!(
+                "Hand {} events to {subscriber} ({} new deliveries); delivered events are skipped{erased}",
+                review.pending, review.created
+            )
+        });
+        facts["step_up"] = json!([STEP_UP_REPLAY]);
+        Ok(facts.into())
+    }
+}
 impl WriteHandler for Replay {
     fn owner(&self) -> &'static str {
         "base/events"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let (subscriber, from, limit) = replay_input(input)?;
-            let events = events()?;
-            let client = events.db.get().await.map_err(Error::from)?;
-            let review = events
-                .replay_review(&**client, scope, subscriber, from, limit)
-                .await
-                .map_err(refusal)?;
-            let mut facts = review.to_json();
-            facts["subscriber"] = json!(subscriber);
-            let erased = if review.erased > 0 {
-                format!(
-                    "; {} events a personal-data erasure changed are left out",
-                    review.erased
-                )
-            } else {
-                String::new()
-            };
-            facts["summary"] = json!(if review.pending == 0 {
-                format!("Nothing to replay to {subscriber}: every event in the batch is delivered{erased}")
-            } else {
-                format!(
-                    "Hand {} events to {subscriber} ({} new deliveries); delivered events are skipped{erased}",
-                    review.pending, review.created
-                )
-            });
-            facts["step_up"] = json!([STEP_UP_REPLAY]);
-            Ok(facts.into())
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = events()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
+                }
+            }
         })
     }
     fn commit<'a>(
@@ -209,7 +221,7 @@ fn replay_schema() -> Value {
     }})
 }
 fn subscribers_output() -> Value {
-    json!({"type":"object","description":"Each subscriber: key, mounted, event names it reads, last delivered event, pending and failing deliveries, missed events (no delivery at all) and gap_from, the event a replay closing the gap starts at."})
+    json!({"type":"object","description":"Each subscriber: key, mounted, event names it reads, last delivered event, pending and failing deliveries, missed events (no delivery at all; missed_more when the count stopped early, so there are at least that many) and gap_from, the event a replay closing the gap starts at."})
 }
 fn deliveries_output() -> Value {
     json!({"type":"object","description":"Deliveries in event then subscriber order: event, version, subject, key, subscriber, mounted, attempts, last failure code and receipt time."})

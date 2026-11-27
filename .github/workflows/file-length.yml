@@ -1,0 +1,28 @@
+# Warns about Rust files over 800 lines that are new or grew; fails only when the
+# pull request body gives no keep/split line for one (scripts/file-length-ratchet.py).
+# Its own workflow so it is vendored unchanged into every Bilibi repository,
+# re-runs when the body is edited, and runs without compiling.
+name: File length
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: file-length-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  file-length:
+    name: File length
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: python3 scripts/file-length-ratchet.py --base "origin/${{ github.base_ref }}"
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}

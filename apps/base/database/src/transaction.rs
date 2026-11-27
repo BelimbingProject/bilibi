@@ -156,6 +156,19 @@ impl MutationBoundary {
         crate::page_write::check(&context.action)?;
         self.begin_view_state(client, context).await
     }
+    pub fn adopt_deployment<'a>(
+        &self,
+        tx: Transaction<'a>,
+        context: Context,
+    ) -> Result<MutationTransaction<'a>> {
+        if context.actor.kind != "system" {
+            return Err(Error::Forbidden);
+        }
+        crate::page_write::check(&context.action)?;
+        let capture = self.capture.get().cloned().ok_or(Error::Internal)?;
+        context.validate()?;
+        Ok(MutationTransaction::from_transaction(tx, context, capture))
+    }
     /// A person's own view state (list columns, layouts), not business data:
     /// a page may write it without an operation contract (`page_write`).
     pub async fn begin_view_state<'a>(
@@ -187,14 +200,18 @@ impl<'a> MutationTransaction<'a> {
     ) -> Result<Self> {
         context.validate()?;
         let tx = crate::timing::timed(client.transaction()).await?;
-        Ok(Self {
+        Ok(Self::from_transaction(tx, context, capture))
+    }
+
+    fn from_transaction(tx: Transaction<'a>, context: Context, capture: Arc<dyn Capture>) -> Self {
+        Self {
             tx,
             context,
             capture,
             callbacks: std::sync::Mutex::new(Vec::new()),
             poisoned: false,
             continuation_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        })
+        }
     }
     pub fn context(&self) -> &Context {
         &self.context
@@ -308,19 +325,40 @@ impl<'a> MutationTransaction<'a> {
             .push(Box::new(callback));
     }
     pub async fn rollback(self) -> Result<()> {
-        self.tx.rollback().await?;
-        Ok(())
-    }
-    pub async fn commit(self) -> Result<()> {
         if self.poisoned
             || self
                 .continuation_failed
                 .load(std::sync::atomic::Ordering::Acquire)
         {
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(250), self.tx.rollback())
+                    .await,
+                Ok(Ok(()))
+            ) {
+                return Err(Error::UnrecoveredTransaction(
+                    "Transaction rollback could not be confirmed.".into(),
+                ));
+            }
+        } else {
             self.tx.rollback().await?;
+        }
+        Ok(())
+    }
+    pub async fn commit(self) -> Result<()> {
+        self.commit_checked(|| Ok(())).await
+    }
+
+    pub async fn commit_checked(self, before_commit: impl FnOnce() -> Result<()>) -> Result<()> {
+        if self.poisoned
+            || self
+                .continuation_failed
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.rollback().await?;
             return Err(Error::Internal);
         }
         crate::timing::timed(self.capture.action(&self.tx, &self.context)).await?;
+        before_commit()?;
         crate::timing::timed(self.tx.commit()).await?;
         let callbacks = self
             .callbacks

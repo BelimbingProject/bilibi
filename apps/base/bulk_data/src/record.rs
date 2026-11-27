@@ -133,11 +133,25 @@ pub struct Lookup {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
+    /// Tenant-defined values retain their exact string representation.
+    Custom(bilibi_custom_fields::Kind),
     Text,
     Date,
     Integer,
     Number,
     Boolean,
+}
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Custom(kind) => kind.as_str(),
+            Self::Text => "text",
+            Self::Date => "date",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+        }
+    }
 }
 
 /// A field a column (or a fixed value) can fill.
@@ -153,9 +167,12 @@ pub struct Field {
 
 /// A record type as boot accepted it.
 pub(crate) struct Registered {
+    pub custom: Option<&'static crate::CustomImport>,
     pub key: &'static str,
     pub definition: &'static RecordType,
     pub fields: Vec<Field>,
+    pub results: Option<&'static crate::ImportResults>,
+    pub undo: Option<&'static crate::ImportUndo>,
     /// The update contract's field properties.
     pub update_fields: Vec<String>,
     /// The fields a bulk update may set, and every field property of its
@@ -306,11 +323,16 @@ pub(crate) fn register(
 ) -> bilibi_module_registry::Result<BTreeMap<&'static str, Registered>> {
     let vocabulary = bilibi_authz::vocabulary::Vocabulary::from_catalog(catalog)?;
     let entries = catalog.entries::<RecordType>(RECORD_TYPES)?;
+    let grid = bilibi_grid::installed()?;
     let mut types = BTreeMap::new();
     for entry in entries {
         shape(entry)?;
         let record = entry.get::<RecordType>()?;
         let module = entry.provenance.module;
+        let table = grid
+            .table(record.table)
+            .ok_or_else(|| invalid(entry, format!("names unknown Grid table {}", record.table)))?;
+        let company_scoped = table.source().company_scoped;
         let own = |operation: &RegisteredOperation, what: &str| {
             if operation.provenance.module == module {
                 Ok(())
@@ -339,23 +361,29 @@ pub(crate) fn register(
                 )
             })
         };
-        let capability = |key: &str| {
-            match vocabulary.capabilities.get(key) {
+        let capability = |key: &str, company_scoped: bool| match vocabulary.capabilities.get(key) {
             Some(owned)
                 if owned.provenance.module == module
-                    && owned.definition.audience == bilibi_authz::Audience::Tenant =>
+                    && owned.definition.audience == bilibi_authz::Audience::Tenant
+                    && owned.definition.company_scoped == company_scoped =>
             {
                 Ok(())
             }
             _ => Err(invalid(
                 entry,
-                format!("names capability {key}, which {module} does not declare as a tenant capability"),
+                format!(
+                    "names capability {key}, which {module} does not declare as a {} capability",
+                    if company_scoped {
+                        "company-scoped"
+                    } else {
+                        "tenant-wide"
+                    }
+                ),
             )),
-        }
         };
-        capability(record.import.capability)?;
+        capability(record.import.capability, company_scoped)?;
         if let Some(export) = &record.export {
-            capability(export.capability)?;
+            capability(export.capability, company_scoped)?;
             let list = readable(export.list)?;
             own(list, "list contract")?;
             if !paged(list) {
@@ -448,7 +476,13 @@ pub(crate) fn register(
         }
         let (mut bulk_fields, mut bulk_update_fields) = (Vec::new(), Vec::new());
         if let Some(bulk) = &record.bulk_update {
-            capability(bulk.capability)?;
+            if company_scoped {
+                return Err(invalid(
+                    entry,
+                    "bulk update requires a tenant-wide Grid table",
+                ));
+            }
+            capability(bulk.capability, false)?;
             let list = readable(bulk.list)?;
             own(list, "bulk update list contract")?;
             if !paged(list) {
@@ -550,15 +584,83 @@ pub(crate) fn register(
         types.insert(
             entry.id,
             Registered {
+                custom: None,
                 key: entry.id,
                 definition: record,
                 fields,
+                results: None,
+                undo: None,
                 update_fields,
                 bulk_fields,
                 bulk_update_fields,
                 limited,
             },
         );
+    }
+    for entry in catalog.entries::<crate::ImportResults>(crate::IMPORT_RESULTS)? {
+        let registered = types
+            .get_mut(entry.id)
+            .ok_or_else(|| crate::result::invalid(entry))?;
+        if catalog
+            .entries::<RecordType>(RECORD_TYPES)?
+            .iter()
+            .find(|record| record.id == entry.id)
+            .is_none_or(|record| record.provenance.module != entry.provenance.module)
+        {
+            return Err(crate::result::invalid(entry));
+        }
+        registered.results = Some(entry.get::<crate::ImportResults>()?);
+    }
+    let record_entries = catalog.entries::<RecordType>(RECORD_TYPES)?;
+    for entry in catalog.entries::<crate::ImportUndo>(crate::IMPORT_UNDO)? {
+        let undo = crate::undo::check(entry)?;
+        let registered = types
+            .get_mut(entry.id)
+            .ok_or_else(|| crate::undo::invalid(entry, "does not name an import record type"))?;
+        if record_entries
+            .iter()
+            .find(|record| record.id == entry.id)
+            .is_none_or(|record| record.provenance.module != entry.provenance.module)
+        {
+            return Err(crate::undo::invalid(
+                entry,
+                "must name a record type of the same module",
+            ));
+        }
+        let operation = jobs.writable(undo.delete).map_err(|error| {
+            crate::undo::invalid(
+                entry,
+                format!(
+                    "names {}, which a queued job cannot call ({error})",
+                    undo.delete
+                ),
+            )
+        })?;
+        if operation.provenance.module != entry.provenance.module {
+            return Err(crate::undo::invalid(
+                entry,
+                format!("names removal operation {} of another module", undo.delete),
+            ));
+        }
+        let input = properties(&operation.input).ok_or_else(|| {
+            crate::undo::invalid(
+                entry,
+                "names a removal operation whose input has no properties",
+            )
+        })?;
+        if !input.contains_key("run_id")
+            || !input.contains_key(undo.delete_id)
+            || !input.contains_key(undo.delete_version)
+        {
+            return Err(crate::undo::invalid(
+                entry,
+                format!(
+                    "names run_id, id or version properties that {} does not take",
+                    undo.delete
+                ),
+            ));
+        }
+        registered.undo = Some(undo);
     }
     for registered in types.values() {
         for reference in registered.definition.import.references {

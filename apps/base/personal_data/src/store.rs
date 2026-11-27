@@ -38,8 +38,10 @@ pub struct PersonalData {
     /// declared by a [`RecordKind`]; holds name records by these kinds.
     pub kinds: &'static [&'static str],
     /// File subject kinds (a Media attachment subject, an Artifacts owner)
-    /// whose subject ID is the person ID. A grant reaches files only of these
-    /// kinds, and only the grant's own person's.
+    /// whose subject ID is the person ID: a grant reaches them only for its
+    /// own person's ID. Any other subject is reached only when its owner
+    /// vouches it is that person's (Media `SubjectOwner::person_subject`,
+    /// Artifacts `Owner::erasure_subject`).
     pub person_subjects: &'static [&'static str],
     pub handler: &'static dyn Handler,
 }
@@ -177,10 +179,33 @@ pub struct FileRef {
     pub name: String,
     pub content_type: String,
 }
-/// One file's bytes, read through its owner.
-pub struct File {
-    pub content_type: String,
-    pub bytes: Vec<u8>,
+/// One file a store's export listed, read through its owner: its bytes, or
+/// why its owner keeps them back. A withheld file is listed in the bundle
+/// with its reason and no bytes, so it never fails the export.
+pub enum File {
+    Read {
+        content_type: String,
+        bytes: Vec<u8>,
+    },
+    Withheld(Withheld),
+}
+/// Why a listed file's bytes are not in the bundle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Withheld {
+    /// It has not cleared its malware check (still being checked,
+    /// quarantined, failed, purged, or unscanned while scanning is required):
+    /// no file leaves the system before it is readable.
+    NotCleared,
+    /// Its bytes are no longer stored.
+    Missing,
+}
+impl Withheld {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotCleared => "not_cleared",
+            Self::Missing => "missing",
+        }
+    }
 }
 
 /// What an erasure did.
@@ -284,6 +309,9 @@ pub enum KeptReason {
     LegalMinimum,
     /// The record also belongs to another party (a company's address).
     Shared,
+    /// Immutable related-record evidence that the owning store must retain,
+    /// with no end the store can promise; no cleanup is owed for it.
+    Evidence,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Deferral {
@@ -295,7 +323,7 @@ pub struct Deferral {
 /// Where a store's `after_erase` records each step as it goes, so a retry
 /// after a failure still reports what earlier attempts did.
 pub trait Progress: Send + Sync {
-    fn record<'a>(&'a self, step: Erased) -> HandlerFuture<'a, ()>;
+    fn record<'a>(&'a self, client: &'a mut Client, step: Erased) -> HandlerFuture<'a, ()>;
 }
 
 /// Implement on the store owner's own type. `base/privacy` checks the
@@ -307,7 +335,7 @@ pub trait Progress: Send + Sync {
 pub trait Handler: Send + Sync {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located>;
@@ -320,7 +348,8 @@ pub trait Handler: Send + Sync {
         subject: &'a Subject,
         grant: &'a Disclosure,
     ) -> HandlerFuture<'a, Exported>;
-    /// One file the store's export listed, read through its owner.
+    /// One file the store's export listed, read through its owner, or
+    /// [`File::Withheld`] when its owner keeps the bytes back.
     fn file<'a>(
         &'a self,
         _client: &'a mut Client,

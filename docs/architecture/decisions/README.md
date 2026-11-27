@@ -3,7 +3,7 @@
 **Document Type:** Index of architecture decision records
 **Status:** Active
 **Scope:** Decisions that shape Bilibi's architecture
-**Last Updated:** 2026-11-05
+**Last Updated:** 2026-11-24
 
 Each record states one decision, its context and its consequences. The architecture overview is [`../README.md`](../README.md).
 
@@ -54,12 +54,20 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | Record | Status |
 | --- | --- |
 | [01 Agent-first operations: one contract, four doors](./01-agent-first-operations.md) | Accepted |
+| [33 Pages for business actions and customisations](./33-pages-for-business-actions-and-customisations.md) | Accepted |
 | [21 AI connections need a live browser-session switch](./21-ai-connections-need-live-session-switch.md) | Accepted; implemented |
+| [34 One-shot model calls through configured providers](./34-one-shot-model-calls-through-configured-providers.md) | Accepted; implemented |
 | [10 Queued jobs call operation contracts, and modules opt in to CSV import, export and bulk updates](./10-queued-jobs-call-contracts.md) | Proposed |
 
 ### Scheduled work
 
 | [17 One global schedule, fanned out under per-tenant consent](./17-per-tenant-scheduled-work.md) | Accepted |
+
+### Background work
+
+| Record | Status |
+| --- | --- |
+| [32 Live connections are held by resident readers, outside the queue, one owner per key](./32-resident-readers.md) | Accepted; implemented |
 
 ### Software delivery
 
@@ -68,6 +76,7 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | [02 Build in development and keep everything in step](./02-build-in-development-keep-everything-in-step.md) | Accepted |
 | [03 Application workspaces: one front door](./03-application-workspaces-one-front-door.md) | Accepted; implemented |
 | [25 An application links only the Core modules it uses](./25-core-modules-on-demand.md) | Accepted; implemented |
+| [35 Server release proof follows installation trust](./35-server-release-proof-follows-installation-trust.md) | Accepted |
 
 ### Identity
 
@@ -76,9 +85,17 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | [04 Provider-neutral single sign-on](./04-provider-neutral-single-sign-on.md) | Accepted; implemented |
 | [19 Company work access, page scope and background work](./19-company-work-access-and-page-scope.md) | Accepted; implemented |
 | [20 Company and date bounds belong to role assignments](./20-company-role-assignments.md) | Accepted; implemented |
-| [21 One sign-in owns credentials over separate tenant memberships](./21-one-sign-in-several-tenant-memberships.md) | Accepted; implementation in progress |
+| [21 One portable identity, tenant-bound memberships and SSO](./21-one-sign-in-several-tenant-memberships.md) | Accepted; implemented |
 | [09 The current company is a session choice, never a grant](./09-current-company-is-a-session-choice.md) | Superseded by ADR 19 |
-| [16 Customer accounts are a kind of account, kept out of the staff application by three barriers](./16-customer-accounts-and-portal.md) | Proposed |
+| [27 A public visitor session is its own credential, bound to an origin and a Domain's records](./27-visitor-sessions-are-a-separate-credential.md) | Proposed |
+| [30 Record reach is part of a role's grant, applied by the record's owner through Grid](./30-record-reach-on-grants.md) | Proposed |
+| [16 Customer accounts are a kind of account, kept out of the staff application by four barriers](./16-customer-accounts-and-portal.md) | Accepted |
+
+### Web boundary
+
+| Record | Status |
+| --- | --- |
+| [34 Staff and public pages are separate sites, and the listener is the boundary](./34-two-sites-listener-boundary.md) | Accepted |
 
 ### Personal data
 
@@ -86,11 +103,18 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | --- | --- |
 | [05 Personal-data registry, data-subject requests and audit erasure](./05-personal-data-registry.md) | Proposed |
 
+### Communication
+
+| Record | Status |
+| --- | --- |
+| [26 Communication consent is an on-demand Core record](./26-communication-consent-in-core.md) | Accepted; implemented |
+
 ### Search
 
 | Record | Status |
 | --- | --- |
 | [06 Record search at query time, in the owner's source](./06-query-time-record-search.md) | Proposed |
+| [29 PostgreSQL's `pg_trgm` extension is allowed](./29-pg-trgm-is-allowed.md) | Accepted |
 
 ### Data
 
@@ -100,6 +124,9 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | [08 Currencies as Core master data, and conversion always names its rate](./08-currencies-as-core-master-data.md) | Accepted; implemented |
 | [11 Record references across modules](./11-record-references.md) | Proposed |
 | [21 Tenant-defined custom fields stay "lite" and live in the owner's row](./21-tenant-defined-custom-fields.md) | Accepted; implemented |
+| [28 Tenant customisation on shared servers](./28-tenant-customisation-is-data-on-shared-servers.md) | Accepted |
+| [34 Tenant scripts run through operation contracts](./34-tenant-scripts-run-through-operation-contracts.md) | Accepted |
+| [31 Tenant watchers run after commit as one bounded principal that owners offer their own keys to](./31-tenant-watchers-run-after-commit-as-one-bounded-principal.md) | Proposed |
 | [22 Shared products in Core, selling rules in Domains](./22-shared-products-in-core.md) | Accepted |
 | [23 Shared documents in Core, business workflows in Domains](./23-shared-documents-in-core.md) | Accepted |
 | [24 Shared activities in Core, private by default, reminded in the same module](./24-shared-activities-in-core.md) | Accepted; implemented |

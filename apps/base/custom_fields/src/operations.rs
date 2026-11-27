@@ -27,14 +27,27 @@ use std::{
 struct Bound {
     db: Db,
     fields: Arc<CustomFields>,
+    dependencies: Vec<&'static crate::ReceiptDependency>,
 }
 static BOUND: OnceLock<Bound> = OnceLock::new();
 pub(crate) fn bind(db: Db, fields: Arc<CustomFields>) -> bilibi_module_registry::Result<()> {
-    BOUND.set(Bound { db, fields }).map_err(|_| {
-        bilibi_module_registry::RegistryError::Service(
-            "duplicate custom-field agent binding".into(),
-        )
-    })
+    let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
+    let dependencies = catalog
+        .entries::<crate::ReceiptDependency>(crate::RECEIPT_DEPENDENCIES)?
+        .iter()
+        .map(|entry| entry.get::<crate::ReceiptDependency>())
+        .collect::<Result<Vec<_>, _>>()?;
+    BOUND
+        .set(Bound {
+            db,
+            fields,
+            dependencies,
+        })
+        .map_err(|_| {
+            bilibi_module_registry::RegistryError::Service(
+                "duplicate custom-field agent binding".into(),
+            )
+        })
 }
 fn bound() -> bilibi_agent_api::Result<&'static Bound> {
     BOUND.get().ok_or(Error::Internal.into())
@@ -55,9 +68,6 @@ fn found(error: Error) -> bilibi_agent_api::Error {
         other => other.into(),
     }
 }
-fn text(input: &Value, field: &str) -> String {
-    input[field].as_str().unwrap_or_default().to_owned()
-}
 fn version(input: &Value) -> bilibi_agent_api::Result<i64> {
     input["version"]
         .as_i64()
@@ -66,18 +76,21 @@ fn version(input: &Value) -> bilibi_agent_api::Result<i64> {
 }
 fn new_field(input: &Value) -> NewField {
     NewField {
-        record_type: text(input, "record_type"),
-        key: text(input, "key"),
-        label: text(input, "label"),
+        record_type: bilibi_agent_api::text_field(input, "record_type"),
+        key: bilibi_agent_api::text_field(input, "key"),
+        label: bilibi_agent_api::text_field(input, "label"),
         help: input["help"].as_str().map(str::to_owned),
-        kind: text(input, "kind"),
+        kind: bilibi_agent_api::text_field(input, "kind"),
         picklist: input["picklist"].as_str().map(str::to_owned),
+        target: input["target"].as_str().map(str::to_owned),
+        watcher_condition: input["watcher_condition"].as_bool().unwrap_or(false),
     }
 }
 fn update(input: &Value) -> bilibi_agent_api::Result<FieldUpdate> {
     Ok(FieldUpdate {
-        label: text(input, "label"),
+        label: bilibi_agent_api::text_field(input, "label"),
         help: input["help"].as_str().map(str::to_owned),
+        watcher_condition: input["watcher_condition"].as_bool(),
         version: version(input)?,
     })
 }
@@ -98,26 +111,45 @@ impl ReadHandler for Read {
     }
     fn call<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let bound = bound()?;
-            let client = bound.db.get().await.map_err(Error::from)?;
+            // The connection the caller handed over, never a second one.
+            let client = client.sql_client().await?;
             let value = match self {
                 Self::RecordTypes => {
-                    bilibi_authz::authorize_key(&**client, scope, VIEW).await?;
+                    bilibi_authz::authorize_key(client, scope, VIEW).await?;
+                    let installed = bilibi_grid::installed().map_err(|_| Error::Internal)?;
+                    let mut record_types = Vec::new();
+                    for record in bound.fields.record_types() {
+                        let table = bound
+                            .fields
+                            .sources
+                            .iter()
+                            .find(|source| source.record_type == record.id)
+                            .and_then(|source| installed.table(source.table));
+                        let path = table.and_then(bilibi_grid::Table::list_address);
+                        let mut kinds = vec![record.id];
+                        if let Some(table) = table {
+                            kinds.extend(table.record_kinds().filter(|kind| *kind != record.id));
+                        }
+                        record_types.push(json!({"id": record.id, "label": record.label, "path": path, "record_kinds": kinds}));
+                    }
                     json!({
-                        "record_types": bound.fields.record_types().map(|record| json!({"id": record.id, "label": record.label})).collect::<Vec<_>>(),
+                        "record_types": record_types,
+                        "max_fields": bound.fields.limit(client, scope).await?,
                         "pick_lists": bound.fields.choice_lists().into_iter().map(|(key, label)| json!({"key": key, "label": label})).collect::<Vec<_>>(),
+                        "record_kinds": bound.fields.reference_kinds().into_iter().map(|(key, label)| json!({"key": key, "label": label})).collect::<Vec<_>>(),
                     })
                 }
                 Self::List => to_json(
                     bound
                         .fields
                         .definitions(
-                            &**client,
+                            client,
                             scope,
                             input["record_type"].as_str(),
                             input["include_archived"].as_bool().unwrap_or(false),
@@ -131,11 +163,141 @@ impl ReadHandler for Read {
     }
 }
 
+pub(crate) fn receipt_fields<'a>(
+    client: &'a dyn OperationClient,
+    scope: &'a Scope,
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let sql = client.sql_client().await?;
+        let fields = bound()?
+            .fields
+            .definitions(sql, scope, None, true)
+            .await
+            .map_err(found)?;
+        Ok(Output::Data(record(to_json(fields))))
+    })
+}
+
 enum Write {
     Define,
     Update,
     Archive,
     Restore,
+}
+impl Write {
+    async fn receipt_dependencies(
+        &self,
+        sql: &tokio_postgres::Client,
+        scope: &Scope,
+        input: &Value,
+        write: bool,
+    ) -> bilibi_agent_api::Result<()> {
+        if input["receipt_undo"] != true {
+            return Ok(());
+        }
+        bilibi_authz::authorize_key(sql, scope, bilibi_labels::CUSTOMISATIONS_VIEW).await?;
+        bilibi_authz::authorize_key(sql, scope, VIEW).await?;
+        bilibi_authz::authorize_key(sql, scope, MANAGE).await?;
+        if !(matches!(self, Self::Archive)
+            || matches!(self, Self::Update) && input["watcher_condition"] == false)
+        {
+            return Ok(());
+        }
+        let bound = bound()?;
+        let record_type = input["record_type"].as_str().ok_or(Error::Invalid)?;
+        let Some(table) = bound
+            .fields
+            .sources
+            .iter()
+            .find(|source| source.record_type == record_type)
+        else {
+            return Ok(());
+        };
+        let key = input["key"].as_str().ok_or(Error::Invalid)?;
+        if !bound
+            .fields
+            .defined(sql, scope, record_type)
+            .await?
+            .iter()
+            .any(|field| field.key == key && field.watcher_condition)
+        {
+            return Ok(());
+        }
+        let mut affected = Vec::new();
+        for dependency in &bound.dependencies {
+            affected.extend((dependency.approved)(sql, scope, table.table, key, write).await?);
+        }
+        if !affected.is_empty() {
+            return Err(bilibi_agent_api::invalid(
+                "key",
+                format!(
+                    "Approved watchers depend on this field: {}.",
+                    affected.join(", ")
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let bound = bound()?;
+        let fields = &bound.fields;
+        let record_type = input["record_type"].as_str().unwrap_or_default();
+        let key = input["key"].as_str();
+        let value = match self {
+            Self::Define => {
+                let field = checked(
+                    fields
+                        .preview_define(client, scope, &new_field(input))
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":format!("Add the {} field “{}” ({}) to {}", field.kind, field.label, field.key, field.record_type),"field":field})
+            }
+            Self::Update => {
+                let key = key.ok_or(Error::Invalid)?;
+                let (before, after) = checked(
+                    fields
+                        .preview_update(client, scope, record_type, key, &update(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":if input["receipt_undo"] == true && !before.watcher_condition
+                    && after.watcher_condition == Some(true)
+                {
+                    format!("Offer {key} on {record_type} to watchers again. Watchers already marked for review still need reapproval.")
+                } else { format!("Change {key} on {record_type}; its key and type stay") },"before":before,"after":after})
+            }
+            Self::Archive => {
+                let key = key.ok_or(Error::Invalid)?;
+                let before = checked(
+                    fields
+                        .preview_archive(client, scope, record_type, key, version(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":format!("Archive {key} on {record_type}; records keep its values"),"before":before})
+            }
+            Self::Restore => {
+                let key = key.ok_or(Error::Invalid)?;
+                let before = checked(
+                    fields
+                        .preview_restore(client, scope, record_type, key, version(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":if input["receipt_undo"] == true && before.watcher_condition {
+                    format!("Restore {key} on {record_type}. Watchers already marked for review still need reapproval.")
+                } else { format!("Restore {key} on {record_type}") },"before":before})
+            }
+        };
+        Ok(value.into())
+    }
 }
 impl WriteHandler for Write {
     fn owner(&self) -> &'static str {
@@ -143,59 +305,26 @@ impl WriteHandler for Write {
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let bound = bound()?;
-            let fields = &bound.fields;
-            let client = bound.db.get().await.map_err(Error::from)?;
-            let client = &**client;
-            let record_type = input["record_type"].as_str().unwrap_or_default();
-            let key = input["key"].as_str();
-            let value = match self {
-                Self::Define => {
-                    let field = checked(
-                        fields
-                            .preview_define(client, scope, &new_field(input))
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Add the {} field “{}” ({}) to {}", field.kind, field.label, field.key, field.record_type),"field":field})
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => {
+                    self.receipt_dependencies(tx.client(), scope, input, false)
+                        .await?;
+                    self.preview_on(tx, scope, input).await
                 }
-                Self::Update => {
-                    let key = key.ok_or(Error::Invalid)?;
-                    let (before, after) = checked(
-                        fields
-                            .preview_update(client, scope, record_type, key, &update(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Change {key} on {record_type}; its key and type stay"),"before":before,"after":after})
+                None => {
+                    let pooled = bound()?.db.get().await.map_err(Error::from)?;
+                    self.receipt_dependencies(&pooled, scope, input, false)
+                        .await?;
+                    self.preview_on(&**pooled, scope, input).await
                 }
-                Self::Archive => {
-                    let key = key.ok_or(Error::Invalid)?;
-                    let before = checked(
-                        fields
-                            .preview_archive(client, scope, record_type, key, version(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Archive {key} on {record_type}; records keep its values"),"before":before})
-                }
-                Self::Restore => {
-                    let key = key.ok_or(Error::Invalid)?;
-                    let before = checked(
-                        fields
-                            .preview_restore(client, scope, record_type, key, version(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Restore {key} on {record_type}"),"before":before})
-                }
-            };
-            Ok(value.into())
+            }
         })
     }
     fn commit<'a>(
@@ -205,6 +334,8 @@ impl WriteHandler for Write {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
+            self.receipt_dependencies(tx.sql().client(), scope, input, true)
+                .await?;
             let fields = &bound()?.fields;
             let record_type = input["record_type"].as_str().unwrap_or_default();
             let key = input["key"].as_str();
@@ -270,6 +401,7 @@ fn text_properties() -> Value {
     json!({
         "label":{"type":"string","maxLength":LABEL_MAX,"description":"What people see beside the value."},
         "help":{"type":"string","maxLength":HELP_MAX,"description":"Optional help text; blank removes it."},
+        "watcher_condition":{"type":"boolean","description":"Offer the field to Base Watchers conditions (text, number, date, choice and boolean fields only). A watcher never reads a field that is not offered; withdrawing it, or archiving the field, stops every watcher that reads it until a new version is approved. Omit on update to keep it."},
     })
 }
 fn record_types_schema() -> Value {
@@ -283,7 +415,8 @@ fn define_schema() -> Value {
     properties["record_type"] = record_type_schema();
     properties["key"] = key_schema();
     properties["kind"] = json!({"type":"string","enum":Kind::ALL.map(Kind::as_str),"description":"What the field holds; it never changes. A number is kept exactly as written."});
-    properties["picklist"] = json!({"type":"string","maxLength":128,"description":"For a choice field, the pick-list key from base.custom_fields.record_types; omit for any other kind."});
+    properties["picklist"] = json!({"type":"string","maxLength":128,"description":"For a choice or choices field, the pick-list key from base.custom_fields.record_types; omit for any other kind."});
+    properties["target"] = json!({"type":"string","maxLength":128,"description":"For a reference field, the kind of record it points at, a record_kinds key from base.custom_fields.record_types; omit for any other kind."});
     json!({"type":"object","required":["record_type","key","label","kind"],"properties":properties})
 }
 fn update_schema() -> Value {
@@ -291,31 +424,32 @@ fn update_schema() -> Value {
     properties["record_type"] = record_type_schema();
     properties["key"] = key_schema();
     properties["version"] = version_schema();
+    properties["receipt_undo"] = json!({"type":"boolean"});
     json!({"type":"object","required":["record_type","key","label","version"],"properties":properties})
 }
 fn status_schema() -> Value {
-    json!({"type":"object","required":["record_type","key","version"],"properties":{"record_type":record_type_schema(),"key":key_schema(),"version":version_schema()}})
+    json!({"type":"object","required":["record_type","key","version"],"properties":{"record_type":record_type_schema(),"key":key_schema(),"version":version_schema(),"receipt_undo":{"type":"boolean"}}})
 }
 fn record_types_output() -> Value {
-    json!({"type":"object","description":"record_types (id and label) that offer custom fields, and pick_lists (key and label) a choice field may use."})
+    json!({"type":"object","description":"record_types (id, label, path if registered and record_kinds) that offer custom fields, max_fields (active fields allowed per record type), pick_lists (key and label) a choice or choices field may use, and record_kinds (key and label) a reference field may point at."})
 }
 fn list_output() -> Value {
-    json!({"type":"array","description":"The tenant's fields: id, record_type, key, label, help, kind, picklist, position, archived_on and version."})
+    json!({"type":"array","description":"The tenant's fields: id, record_type, key, label, help, kind, picklist, target, position, archived_on and version."})
 }
 fn field_output() -> Value {
-    json!({"type":"object","description":"A field: id, record_type, key, label, help, kind, picklist, position, archived_on and version."})
+    json!({"type":"object","description":"A field: id, record_type, key, label, help, kind, picklist, target, position, archived_on and version."})
 }
 
 const MODULE: &str = "base/custom_fields";
 inventory::submit! { Contribution::new(DEFINITIONS, "base/custom_fields.agent", Provenance { module: MODULE, source: file!(), line: line!() }, &Definitions {
     operations: &[
-        Operation { key: "base.custom_fields.record_types", title: "List the records that take custom fields", summary: "The kinds of record whose organisation can add its own fields, and the pick-lists a choice field may use.", keywords: &["custom", "field", "attribute", "extra"], capability: VIEW, input: record_types_schema, output: record_types_output, handler: Handler::Read(&Read::RecordTypes), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.custom_fields.record_types", title: "List the records that take custom fields", summary: "The kinds of record whose organisation can add its own fields, the pick-lists a choice field may use and the kinds of record a reference field may point at.", keywords: &["custom", "field", "attribute", "extra"], capability: VIEW, input: record_types_schema, output: record_types_output, handler: Handler::Read(&Read::RecordTypes), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.custom_fields.list", title: "List custom fields", summary: "The organisation's own fields on a kind of record, with their key, type, label and status; archived ones on request.", keywords: &["custom", "field", "attribute", "extra"], capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
-        Operation { key: "base.custom_fields.define", title: "Add a custom field", summary: "Add a text, number, date or pick-list field to a kind of record. Its key and type never change.", keywords: &["custom", "field", "attribute", "add", "create"], capability: MANAGE, input: define_schema, output: field_output, handler: Handler::SafeWrite(&Write::Define), channels: Channels::Every, step_up: &[] },
-        Operation { key: "base.custom_fields.update", title: "Change a custom field", summary: "Rename a field or rewrite its help text using its current version; its key and type never change.", keywords: &["custom", "field", "rename", "help"], capability: MANAGE, input: update_schema, output: field_output, handler: Handler::SafeWrite(&Write::Update), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.custom_fields.define", title: "Add a custom field", summary: "Add a typed custom field to a kind of record. Its key and type never change.", keywords: &["custom", "field", "attribute", "add", "create"], capability: MANAGE, input: define_schema, output: field_output, handler: Handler::SafeWrite(&Write::Define), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.custom_fields.update", title: "Change a custom field", summary: "Rename a field, rewrite its help text or offer it to watcher conditions using its current version; its key and type never change.", keywords: &["custom", "field", "rename", "help"], capability: MANAGE, input: update_schema, output: field_output, handler: Handler::SafeWrite(&Write::Update), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.custom_fields.archive", title: "Archive a custom field", summary: "Hide a field from forms, columns and agents; records keep the values already stored under it.", keywords: &["custom", "field", "archive", "hide", "retire"], capability: MANAGE, input: status_schema, output: field_output, handler: Handler::SafeWrite(&Write::Archive), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.custom_fields.restore", title: "Restore a custom field", summary: "Bring an archived field back with the values its records kept.", keywords: &["custom", "field", "restore", "unarchive"], capability: MANAGE, input: status_schema, output: field_output, handler: Handler::SafeWrite(&Write::Restore), channels: Channels::Every, step_up: &[] },
     ],
     guides: &[Guide { key: "base.custom_fields", title: "Custom fields", summary: "How an organisation adds its own fields to records: types, stable keys, pick-lists and archiving.", keywords: &["custom", "field", "attribute", "extra"], capability: VIEW,
-        body: "A custom field is a typed value an organisation adds to a kind of record, such as a Segment on a company, without a software release. Find the kinds of record that take them, and the pick-lists a choice field may use, with base.custom_fields.record_types; read the fields with base.custom_fields.list.\n\nA field has a stable key (a lower-case letter, then letters, digits and underscores), a label, optional help text and a type: text, number, date or pick-list. The key and the type never change and a key is never reused, even after the field is archived, so decide them with care. A number is kept exactly as written. A pick-list field stores the code of a value from one of the organisation's pick-lists.\n\nArchive a field with base.custom_fields.archive rather than deleting it: forms, columns and agents stop showing it and records keep their values, and base.custom_fields.restore brings it back. Updates, archives and restorations need the version you read. A record type may have a limited number of active fields, set by the organisation's administrators. Defining and changing fields needs base.custom-fields.manage; reading them needs base.custom-fields.view. For each write, run the dry-run check, show the complete preview, wait for explicit approval, then commit the unchanged operations." }],
+        body: "A custom field is a typed value an organisation adds to a kind of record, such as a Segment on a company, without a software release. Find the kinds of record that take them, and the pick-lists a choice field may use, with base.custom_fields.record_types; read the fields with base.custom_fields.list.\n\nA field has a stable key (a lower-case letter, then letters, digits and underscores), a label, optional help text and a type: text, number, date, pick-list (choice), several choices (choices), yes/no, long text, link, phone, email or record (reference). The key and the type never change and a key is never reused, even after the field is archived, so decide them with care. A number is kept exactly as written. A pick-list field stores the code of a value from one of the organisation's pick-lists; a several-choices field stores a list of such codes. Yes/no stores true or false as text. A record field points at one record of a fixed kind (its target, such as company) and stores that record's id; a record the person cannot see is refused when chosen and shown as unavailable when held. Long text uses a multiline editor. Links must start with http:// or https://. Phone and email fields check their values before saving.\n\nArchive a field with base.custom_fields.archive rather than deleting it: forms, columns and agents stop showing it and records keep their values, and base.custom_fields.restore brings it back. Updates, archives and restorations need the version you read. A record type may have a limited number of active fields, set by the organisation's administrators. Defining and changing fields needs base.custom-fields.manage; reading them needs base.custom-fields.view. For each write, run the dry-run check, show the complete preview, wait for explicit approval, then commit the unchanged operations." }],
 }) }

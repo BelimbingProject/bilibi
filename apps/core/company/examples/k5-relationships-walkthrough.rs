@@ -12,9 +12,8 @@ use bilibi_agent_api::{
     Registry,
 };
 use bilibi_company::{
-    assign_relationship, ensure_default_relationship_roles, CompanyService, CreateOutcome,
-    NewCompany, RelationshipEntry, RelationshipRoleUpdate, RelationshipUpdate, TypeOutcome,
-    SERVICE,
+    assign_relationship, CompanyService, CreateOutcome, NewCompany, RelationshipEntry,
+    RelationshipRoleUpdate, RelationshipUpdate, TypeOutcome, SERVICE,
 };
 use bilibi_database::{pool, MutationBoundary};
 use bilibi_party::{
@@ -36,19 +35,18 @@ struct Browser<'a> {
 impl PlanAuthority for Browser<'_> {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(bilibi_database::Error::Unauthorized)?;
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.check(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })
     }
 }
+/// More links than this walkthrough makes, so one page holds them all.
+const FIRST_PAGE: bilibi_company::RelationshipWindow = bilibi_company::RelationshipWindow {
+    page: 1,
+    page_size: 100,
+};
 fn show(label: &str, value: impl std::fmt::Debug) {
     println!("{label}: {value:?}");
 }
@@ -161,8 +159,10 @@ async fn main() -> Result<(), Error> {
     let staff = app.security.guard(&staff_login.token).await?;
     let viewer = app.security.guard(&viewer_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
-    let client = db.get().await?;
-    let client: &tokio_postgres::Client = &client;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
+    let client: &mut tokio_postgres::Client = &mut client;
     // Re-runs start from the fixture state.
     client.batch_execute("DELETE FROM company_relationships WHERE source_organisation_id IN (SELECT id FROM companies WHERE code LIKE 'k5\\_%') OR role_id IN (SELECT id FROM company_relationship_roles WHERE code LIKE 'wt\\_%'); DELETE FROM company_relationship_roles WHERE code LIKE 'wt\\_%'; DELETE FROM companies WHERE code LIKE 'k5\\_%'; DELETE FROM persons WHERE name LIKE 'K5 %'").await?;
 
@@ -183,10 +183,6 @@ async fn main() -> Result<(), Error> {
             .iter()
             .map(|r| r.code.clone())
             .collect::<Vec<_>>(),
-    );
-    show(
-        "second read inserts nothing",
-        ensure_default_relationship_roles(client, 1).await?,
     );
     let role = |code: &str| {
         roles
@@ -532,43 +528,48 @@ async fn main() -> Result<(), Error> {
         "source company page",
         summary(
             &companies
-                .company_relationships(&manager, source, false)
-                .await?,
+                .company_relationships(&manager, source, false, "", FIRST_PAGE)
+                .await?
+                .entries,
         ),
     );
     show(
         "supplier page (incoming, inverse labels)",
         summary(
             &companies
-                .company_relationships(&manager, supplier, false)
-                .await?,
+                .company_relationships(&manager, supplier, false, "", FIRST_PAGE)
+                .await?
+                .entries,
         ),
     );
     show(
         "person page",
         summary(
             &companies
-                .person_relationships(&manager, contact.id, false)
-                .await?,
+                .person_relationships(&manager, contact.id, false, "", FIRST_PAGE)
+                .await?
+                .entries,
         ),
     );
     show(
         "viewer reads the same page",
         companies
-            .company_relationships(&viewer, source, false)
+            .company_relationships(&viewer, source, false, "", FIRST_PAGE)
             .await
-            .map(|entries| entries.len()),
+            .map(|links| links.entries.len()),
     );
     show(
         "other tenant cannot read the company",
         companies
-            .company_relationships(&other, source, false)
+            .company_relationships(&other, source, false, "", FIRST_PAGE)
             .await
-            .map(|entries| entries.len()),
+            .map(|links| links.entries.len()),
     );
 
     println!("== retirement waits for an in-flight assignment, then refuses new ones");
-    let mut first_connection = db.get().await?;
+    let mut first_connection = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = mutations
         .begin(
             &mut first_connection,
@@ -636,8 +637,9 @@ async fn main() -> Result<(), Error> {
         "existing link keeps the retired role",
         summary(
             &companies
-                .company_relationships(&manager, source, false)
-                .await?,
+                .company_relationships(&manager, source, false, "", FIRST_PAGE)
+                .await?
+                .entries,
         )
         .into_iter()
         .filter(|line| line.contains("wt_reseller"))
@@ -690,8 +692,9 @@ async fn main() -> Result<(), Error> {
         "ended link still on the current page",
         summary(
             &companies
-                .company_relationships(&manager, source, false)
-                .await?,
+                .company_relationships(&manager, source, false, "", FIRST_PAGE)
+                .await?
+                .entries,
         )
         .iter()
         .any(|line| line.starts_with(&format!("#{} ", ended.id))),
@@ -713,16 +716,18 @@ async fn main() -> Result<(), Error> {
         "history view",
         summary(
             &companies
-                .company_relationships(&manager, source, true)
-                .await?,
+                .company_relationships(&manager, source, true, "", FIRST_PAGE)
+                .await?
+                .entries,
         ),
     );
     show(
         "person history",
         summary(
             &companies
-                .person_relationships(&manager, contact.id, true)
-                .await?,
+                .person_relationships(&manager, contact.id, true, "", FIRST_PAGE)
+                .await?
+                .entries,
         ),
     );
     show(

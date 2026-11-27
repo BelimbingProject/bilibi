@@ -2,23 +2,32 @@
 //! page per socket.
 mod agent_targets;
 mod api;
+mod api_gate;
+mod application_version;
 mod auth;
 mod composition;
 mod create_owner;
 mod errors;
+mod identity_lifecycle;
 mod impersonation;
 mod landing;
 mod live;
 mod mcp;
 mod media;
+mod page_search;
 mod pdf;
 mod perf;
 mod portal;
 mod portal_auth;
+mod provision;
+mod proxies;
+mod public;
 mod routes;
 mod scim;
 mod shell;
+mod software_update;
 mod two_factor_reset;
+mod visitor;
 mod webhooks;
 use askama::Template;
 use axum::{
@@ -35,15 +44,32 @@ use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
 pub use create_owner::create_owner;
+pub use identity_lifecycle::{
+    delete as delete_identity, recover as recover_identity, retention as retain_identities,
+};
+pub use provision::provision;
+pub use software_update::software_update;
 pub use two_factor_reset::two_factor_reset;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Site {
+    Staff,
+    Public,
+}
+pub const STAFF_COOKIE: &str = "__Host-bilibi_session";
 
 #[derive(Clone)]
 pub struct App {
     routes: Arc<routes::Pages>,
     downloads: Arc<routes::Downloads>,
-    moved: Arc<Vec<&'static bilibi_module_registry::contributions::Moved>>,
+    public_routes: Arc<public::PublicRoutes>,
+    /// The public site's listener budget and scope (`base/public`).
+    public: Arc<bilibi_base::public::Public>,
+    moved: Arc<routes::MovedRoutes>,
+    credential_paths: Arc<CredentialPaths>,
     pub db: Db,
     pub origin: Arc<str>,
+    pub site: Site,
     settings: Arc<bilibi_base::settings::Settings>,
     pub step_up: Arc<bilibi_base::step_up::StepUp>,
     /// The host the server listens on, shown in the status bar;
@@ -52,6 +78,8 @@ pub struct App {
     pub services: Arc<bilibi_module_registry::Services>,
     pub company: Arc<bilibi_company::CompanyService>,
     pub user: Arc<bilibi_user::UserService>,
+    /// The installation's own name, logo and accent, or Bilibi's.
+    pub branding: Arc<bilibi_base::branding::Branding>,
     pub security: Arc<bilibi_security::Security>,
     pub renderer: Arc<bilibi_ui::Renderer>,
     pub menu: Arc<bilibi_base::menu::Menu>,
@@ -64,6 +92,8 @@ pub struct App {
     pub(crate) live: Arc<live::Limits>,
     api: Arc<api::Edge>,
     webhooks: Arc<webhooks::Boundary>,
+    visitor: Arc<visitor::Boundary>,
+    proxies: Arc<proxies::Proxies>,
 }
 impl App {
     /// Which instance this is, with the operator's label and colour
@@ -106,9 +136,10 @@ impl App {
         let company = services.get("core/company.companies")?;
         let user = services.get("core/user.accounts")?;
         let security = services.get("base/security.guard")?;
+        let branding = services.get(bilibi_base::branding::SERVICE)?;
         let step_up: Arc<bilibi_base::step_up::StepUp> =
             services.get(bilibi_base::step_up::SERVICE)?;
-        let settings = services.get("base/settings.store")?;
+        let settings: Arc<bilibi_base::settings::Settings> = services.get("base/settings.store")?;
         let renderer = services.get("base/ui.renderer")?;
         for entry in services
             .catalog()?
@@ -128,20 +159,35 @@ impl App {
         }
         let routes = Arc::new(routes::bind(&services)?);
         let downloads = Arc::new(routes::bind_downloads(&services, &routes)?);
-        let moved = Arc::new(routes::bind_moved(&services, &routes, &downloads)?);
+        let public_routes = Arc::new(public::bind(&services, &routes, &downloads)?);
+        let moved = Arc::new(routes::bind_moved(
+            &services,
+            &routes,
+            &downloads,
+            &public_routes,
+        )?);
+        let public = services.get(bilibi_base::public::SERVICE)?;
+        let credential_paths = Arc::new(CredentialPaths::from_catalog(services.catalog()?)?);
         let api = Arc::new(api::Edge::new(&services)?);
         let webhooks = Arc::new(webhooks::Boundary::bind(&services)?);
+        let visitor = Arc::new(visitor::Boundary::bind(&services)?);
+        let proxies = Arc::new(proxies::Proxies::new(&settings));
         Ok(Self {
             routes,
             downloads,
+            public_routes,
+            public,
             moved,
+            credential_paths,
             db,
             origin: origin.into(),
+            site: Site::Staff,
             settings,
             step_up,
             listen_address: None,
             company,
             user,
+            branding,
             security,
             renderer,
             menu: Arc::new(menu),
@@ -152,8 +198,33 @@ impl App {
             live: Arc::default(),
             api,
             webhooks,
+            visitor,
+            proxies,
             services: Arc::new(services),
         })
+    }
+
+    /// The public site the request being served reached, found by its
+    /// hostname at the public listener's door (`public_host`); none on the
+    /// staff listener.
+    fn public_scope(&self) -> Result<bilibi_base::public::PublicScope> {
+        public::site()
+    }
+    /// The browser origin of the public site the request reached: this
+    /// listener's scheme and port with the request's own hostname, which the
+    /// door already proved names a live site.
+    fn public_origin(&self, headers: &HeaderMap) -> Option<String> {
+        let scheme = self.origin.split_once("://")?.0;
+        let host = headers.get(header::HOST)?.to_str().ok()?;
+        Some(format!("{scheme}://{host}"))
+    }
+
+    /// The public listener's app: `origin` gives its scheme and port; each
+    /// request's hostname names the tenant's site (`base/public`).
+    pub fn at_public_site(mut self, origin: &str) -> Self {
+        self.site = Site::Public;
+        self.origin = origin.into();
+        self
     }
 }
 
@@ -168,11 +239,42 @@ pub fn modules() -> Result<Vec<&'static bilibi_module_registry::Module>> {
 /// The product binary's boot check: the linked Domain and Extension descriptors
 /// must be exactly the mounted crates discovery found. Examples that link their
 /// own reference Extensions call `modules` instead.
-pub fn verify_composition() -> Result<()> {
+pub async fn verify_composition(db: &bilibi_database::Db) -> Result<()> {
+    use bilibi_base::settings::{Definitions, Encryption, Settings};
+
+    verify_descriptors()?;
+    let modules = modules()?;
+    // Preflight reads only a non-secret global setting. Installing application
+    // services here would bind process-wide services again during dispatch.
+    let catalog = bilibi_module_registry::Catalog::discover(&modules)?;
+    let settings = Settings::new(
+        Definitions::from_catalog(&catalog)?,
+        Encryption::from_hex(None),
+        Arc::default(),
+    );
+    let mut client = db.get().await?;
+    let tx = client.transaction().await?;
+    tx.execute(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))",
+        &[&"base/system.installation-mode"],
+    )
+    .await?;
+    let mode = bilibi_base::system::InstallationMode::resolve(&settings, &*tx).await?;
     Ok(bilibi_module_registry::verify_composition(
+        &modules,
+        bilibi_domains::MODULES,
+        bilibi_extensions::MODULES,
+        bilibi_extensions::CODE,
+        mode.as_str(),
+    )?)
+}
+
+pub fn verify_descriptors() -> Result<()> {
+    Ok(bilibi_module_registry::verify_descriptors(
         &modules()?,
         bilibi_domains::MODULES,
         bilibi_extensions::MODULES,
+        bilibi_extensions::CODE,
     )?)
 }
 
@@ -229,8 +331,12 @@ pub fn status() -> String {
                 (None, Some(commit)) => format!("untagged, commit {commit}"),
                 (_, None) => "unpinned".to_owned(),
             };
+            let code = container
+                .extension_code
+                .map(|code| format!(", code: {}", code.as_str()))
+                .unwrap_or_default();
             text.push_str(&format!(
-                "  {} {at}, modules: {}\n",
+                "  {} {at}{code}, modules: {}\n",
                 container.id,
                 container.modules.join(", ")
             ));
@@ -243,85 +349,22 @@ pub async fn migrate(db: &Db) -> Result<bilibi_database::Migrated> {
     bilibi_database::migrate(db, &modules()?).await
 }
 
-/// `tenant-provision` and `platform-provision` commands:
-/// `--tenant-name`, `--company-name` and `--company-code`, the tenant name
-/// defaulting to the company name for the platform operator. Ids are
-/// generated by PostgreSQL; re-running the platform command resolves the
-/// existing operator and company instead of creating a second one.
-pub async fn provision(db: &Db, command: &str, args: &[String]) -> Result<()> {
-    use bilibi_company::{self as primary, NewCompany, ProvisionOutcome};
-    let mut options: HashMap<&str, String> = HashMap::new();
-    let mut pairs = args.iter();
-    while let Some(flag) = pairs.next() {
-        let value = pairs.next().map(|value| value.trim().to_owned());
-        match (flag.as_str(), value) {
-            (key @ ("--tenant-name" | "--company-name" | "--company-code"), Some(value))
-                if !value.is_empty() =>
-            {
-                options.insert(key, value);
-            }
-            _ => {
-                eprintln!("usage: bilibi-web {command} [--tenant-name NAME] --company-name NAME --company-code CODE");
-                return Err(Error::Invalid);
-            }
-        }
-    }
-    let company = NewCompany {
-        name: options.remove("--company-name").unwrap_or_default(),
-        code: options.remove("--company-code"),
-        ..NewCompany::default()
-    };
-    let tenant_name = options.remove("--tenant-name").unwrap_or_default();
-    if company.name.is_empty()
-        || company.code.is_none()
-        || (command == "tenant-provision" && tenant_name.is_empty())
-    {
-        eprintln!("usage: bilibi-web {command} [--tenant-name NAME] --company-name NAME --company-code CODE");
-        return Err(Error::Invalid);
-    }
-    let outcome = if command == "tenant-provision" {
-        primary::provision_tenant(db, &tenant_name, &company).await?
-    } else {
-        primary::provision_platform_operator(db, &tenant_name, &company).await?
-    };
-    match outcome {
-        ProvisionOutcome::Provisioned(result) => {
-            let state = |created: bool| if created { "created" } else { "existing" };
-            println!(
-                "{}: tenant {} ({}), primary company {} “{}” ({}).",
-                if command == "tenant-provision" {
-                    "Tenant ready"
-                } else {
-                    "Platform operator ready"
-                },
-                result.tenant.id,
-                state(result.tenant_created),
-                result.company.id,
-                result.company.name,
-                state(result.company_created)
-            );
-            Ok(())
-        }
-        ProvisionOutcome::Refused(errors) => {
-            for error in errors {
-                eprintln!("{}: {}", error.field, error.message);
-            }
-            Err(Error::Invalid)
-        }
-    }
-}
-
 /// `media-cleanup` command: one tenant's abandoned private attachment drafts.
 pub async fn media_cleanup(db: &Db, tenant: i64, hours: u64) -> Result<()> {
     media::cleanup(db, tenant, hours).await
 }
 
-pub fn router(app: App) -> Router {
+/// `media-reconcile` command: files no row needs and assets whose file is gone.
+pub async fn media_reconcile(db: &Db) -> Result<()> {
+    media::reconcile(db).await
+}
+
+pub fn staff_router(app: App) -> Router {
+    debug_assert_eq!(app.site, Site::Staff);
     let perf = app.perf.clone();
-    let pages = routes::install(Router::new(), &app.routes, &app.downloads);
-    routes::install_moved(pages, &app.moved)
+    let pages = routes::install_staff(Router::new(), &app.routes, &app.downloads);
+    let router = routes::install_moved(pages, &app.moved.staff)
         .merge(api::router(app.clone()))
-        .merge(webhooks::router())
         .merge(scim::router())
         .route("/", get(auth::home).post(auth::login))
         .route("/login", get(auth::home).post(auth::login))
@@ -341,6 +384,7 @@ pub fn router(app: App) -> Router {
             "/accept/{token}",
             get(auth::invitation_page).post(auth::accept_invitation),
         )
+        .route("/accept/{token}/resend", post(auth::resend_invitation))
         .route("/login/sso/{provider}/start", get(auth::sso_start))
         .route("/login/sso/callback", get(auth::sso_callback))
         .route(
@@ -348,37 +392,6 @@ pub fn router(app: App) -> Router {
             post(auth::sso_backchannel),
         )
         .route("/logout", post(logout))
-        .route("/portal/sign-in", get(portal_auth::sign_in_root))
-        .route(
-            "/portal/sign-in/{site}",
-            get(portal_auth::sign_in_page).post(portal_auth::sign_in),
-        )
-        .route(
-            "/portal/sign-in/{site}/challenge",
-            get(portal_auth::challenge_page).post(portal_auth::challenge),
-        )
-        .route(
-            "/portal/forgot/{site}",
-            get(portal_auth::forgot_page).post(portal_auth::forgot),
-        )
-        .route(
-            "/portal/reset/{site}/{token}",
-            get(portal_auth::reset_page).post(portal_auth::reset),
-        )
-        .route(
-            "/portal/accept/{site}/{token}",
-            get(portal_auth::accept_page).post(portal_auth::accept),
-        )
-        .route(
-            "/portal/register/{site}",
-            get(portal_auth::register_page).post(portal_auth::register),
-        )
-        .route(
-            "/portal/verify/{site}/{token}",
-            get(portal_auth::verify_page).post(portal_auth::verify),
-        )
-        .route("/portal/sign-out", post(portal::sign_out))
-        .route("/portal/live", get(portal::upgrade))
         .route(impersonation::LEAVE, post(impersonation::leave))
         .route(impersonation::ENTER, post(impersonation::enter))
         .route("/preferences", post(shell::save))
@@ -397,10 +410,64 @@ pub fn router(app: App) -> Router {
         .route("/assets/ui-components.html", get(components_specimen))
         .route("/assets/ui-feedback.html", get(feedback_specimen))
         .route("/favicon.svg", get(embedded_asset))
-        .route("/favicon.ico", get(embedded_asset))
+        .route("/favicon.ico", get(embedded_asset));
+    finish_router(router, app, perf)
+}
+
+pub fn public_router(app: App) -> Router {
+    debug_assert_eq!(app.site, Site::Public);
+    let perf = app.perf.clone();
+    let pages = routes::install_public(Router::new(), &app.routes, &app.downloads);
+    let pages = public::install(pages, &app.public_routes);
+    let router = routes::install_moved(pages, &app.moved.public)
+        .merge(webhooks::router())
+        .merge(visitor::router())
+        .route(
+            "/portal/sign-in",
+            get(portal_auth::sign_in_page).post(portal_auth::sign_in),
+        )
+        .route(
+            "/portal/sign-in/challenge",
+            get(portal_auth::challenge_page).post(portal_auth::challenge),
+        )
+        .route(
+            "/portal/forgot",
+            get(portal_auth::forgot_page).post(portal_auth::forgot),
+        )
+        .route(
+            "/portal/reset/{token}",
+            get(portal_auth::reset_page).post(portal_auth::reset),
+        )
+        .route(
+            "/portal/accept/{token}",
+            get(portal_auth::accept_page).post(portal_auth::accept),
+        )
+        .route(
+            "/portal/register",
+            get(portal_auth::register_page).post(portal_auth::register),
+        )
+        .route(
+            "/portal/verify/{token}",
+            get(portal_auth::verify_page).post(portal_auth::verify),
+        )
+        .route(media::STREAM, get(media::stream))
+        .route("/portal/sign-out", post(portal::sign_out))
+        .route("/portal/live", get(portal::upgrade))
+        .route("/fonts/{name}", get(embedded_asset))
+        .route("/assets/{name}", get(embedded_asset))
+        .route("/favicon.svg", get(embedded_asset))
+        .route("/favicon.ico", get(embedded_asset));
+    finish_router(router, app, perf)
+}
+
+fn finish_router(router: Router<App>, app: App, perf: Arc<bilibi_base::perf::Recorder>) -> Router {
+    let router = router
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), errors::pages))
-        .layer(middleware::from_fn(response_headers))
+        .layer(middleware::from_fn_with_state(
+            app.clone(),
+            response_headers,
+        ))
         .layer(
             tower_http::compression::CompressionLayer::new()
                 .quality(tower_http::CompressionLevel::Precise(4))
@@ -409,8 +476,54 @@ pub fn router(app: App) -> Router {
                     is_textual,
                 )),
         )
-        .layer(middleware::from_fn_with_state(perf, perf::requests))
-        .with_state(app)
+        .layer(middleware::from_fn_with_state(perf, perf::requests));
+    // Outermost last. The staff door checks its one host first. The public
+    // one first finds the client behind a trusted proxy, then looks the
+    // hostname up, a database lookup spending the sender's lookup budget so
+    // a flood of made-up hostnames is bounded before it reaches the
+    // database, on every path; then the listener budget counts the visitor.
+    let router = match app.site {
+        Site::Staff => router
+            .layer(middleware::from_fn_with_state(
+                app.clone(),
+                proxies::resolve,
+            ))
+            .layer(middleware::from_fn_with_state(app.clone(), host_guard)),
+        Site::Public => router
+            .layer(middleware::from_fn_with_state(
+                app.clone(),
+                public::listener,
+            ))
+            .layer(middleware::from_fn_with_state(app.clone(), public::door))
+            .layer(middleware::from_fn_with_state(
+                app.clone(),
+                proxies::resolve,
+            )),
+    };
+    router.with_state(app)
+}
+
+async fn host_guard(
+    State(app): State<App>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let expected = app.origin.parse::<axum::http::Uri>().ok().and_then(|uri| {
+        uri.authority()
+            .map(|authority| authority.as_str().to_owned())
+    });
+    let given = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    if expected
+        .as_deref()
+        .zip(given)
+        .is_none_or(|(expected, given)| !expected.eq_ignore_ascii_case(given))
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(request).await
 }
 
 /// Only text pages and assets compress; any response with a
@@ -497,14 +610,22 @@ async fn embedded_asset(
 /// do with a sandboxing CSP, keeps it.
 /// A server-side failure is also logged here with its request line: the
 /// page shows only the error's public text.
-async fn response_headers(request: axum::extract::Request, next: Next) -> Response {
+async fn response_headers(
+    State(app): State<App>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
     let path = request.uri().path();
-    let line = format!("{} {}", request.method(), redacted(path));
+    let line = format!(
+        "{} {}",
+        request.method(),
+        redacted(&app.credential_paths, path)
+    );
     // A credential link's page never sends its path on: `strict-origin`
     // names only this origin. Not `no-referrer`, which would make the
     // browser post the page's own form with `Origin: null`, which the
     // origin check refuses.
-    let referrer = if credential_path(path) {
+    let referrer = if credential_path(&app.credential_paths, path) {
         "strict-origin"
     } else {
         "same-origin"
@@ -513,30 +634,53 @@ async fn response_headers(request: axum::extract::Request, next: Next) -> Respon
     if let Some(Failure(cause)) = response.extensions_mut().remove::<Failure>() {
         eprintln!("error: {line} failed: {cause}");
     }
-    for (key,value) in [
-        ("cache-control","no-store"),
-        ("x-content-type-options","nosniff"),
-        ("referrer-policy",referrer),
-        ("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; form-action 'self'; base-uri 'none'"),
-    ] { response.headers_mut().entry(axum::http::HeaderName::from_static(key)).or_insert(HeaderValue::from_static(value)); }
+    let frame_ancestors = match app.site {
+        Site::Staff => "'self'",
+        Site::Public => "'none'",
+    };
+    let csp = format!("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors {frame_ancestors}; form-action 'self'; base-uri 'none'");
+    for (key, value) in [
+        ("cache-control", "no-store"),
+        ("x-content-type-options", "nosniff"),
+        ("referrer-policy", referrer),
+    ] {
+        response
+            .headers_mut()
+            .entry(axum::http::HeaderName::from_static(key))
+            .or_insert(HeaderValue::from_static(value));
+    }
+    if !response
+        .headers()
+        .contains_key(header::CONTENT_SECURITY_POLICY)
+    {
+        if let Ok(value) = HeaderValue::from_str(&csp) {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_SECURITY_POLICY, value);
+        }
+    }
     response
 }
 
-/// The emailed credential links (a password reset, a portal invitation, a
-/// request's confirmation): the
-/// `{token}` segment is a bearer secret, so it is never logged, shown in a
-/// debug report or sent on as a referrer.
-const CREDENTIAL_PATHS: [&str; 5] = [
-    "/reset-password/{token}",
-    "/accept/{token}",
-    "/portal/reset/{site}/{token}",
-    "/portal/accept/{site}/{token}",
-    "/portal/verify/{site}/{token}",
-];
+struct CredentialPaths(Vec<&'static str>);
+impl CredentialPaths {
+    fn from_catalog(
+        catalog: &bilibi_module_registry::Catalog,
+    ) -> bilibi_module_registry::Result<Self> {
+        use bilibi_module_registry::contributions::{CredentialPath, CREDENTIAL_PATHS};
+        Ok(Self(
+            catalog
+                .entries::<CredentialPath>(CREDENTIAL_PATHS)?
+                .iter()
+                .map(|entry| entry.get::<CredentialPath>().map(|path| path.path))
+                .collect::<bilibi_module_registry::Result<_>>()?,
+        ))
+    }
+}
 /// `path` with a credential link's token replaced; any other path as it is.
-pub(crate) fn redacted(path: &str) -> std::borrow::Cow<'_, str> {
+fn redacted<'a>(paths: &CredentialPaths, path: &'a str) -> std::borrow::Cow<'a, str> {
     let given: Vec<&str> = path.split('/').collect();
-    for pattern in CREDENTIAL_PATHS {
+    for pattern in &paths.0 {
         let shape: Vec<&str> = pattern.split('/').collect();
         let matches = shape.len() == given.len()
             && shape
@@ -561,9 +705,9 @@ pub(crate) fn redacted(path: &str) -> std::borrow::Cow<'_, str> {
     }
     path.into()
 }
-/// Whether `path` is an emailed credential link.
-pub(crate) fn credential_path(path: &str) -> bool {
-    matches!(redacted(path), std::borrow::Cow::Owned(_))
+/// Whether `path` is a contributed bearer credential path.
+fn credential_path(paths: &CredentialPaths, path: &str) -> bool {
+    matches!(redacted(paths, path), std::borrow::Cow::Owned(_))
 }
 
 /// A failed request. API clients read the status and text; `errors::pages`
@@ -608,11 +752,21 @@ impl IntoResponse for HttpError {
 fn render<T: Template>(template: T) -> Result<String> {
     template.render().map_err(|_| Error::Internal)
 }
-fn document_titled(title: &str, body: &str) -> Result<Html<String>> {
-    document_themed(title, body, "system")
+fn document_titled(title: &str, body: &str, brand: &bilibi_ui::Brand) -> Result<Html<String>> {
+    document_themed(title, body, "system", brand)
 }
-fn document_themed(title: &str, body: &str, theme: &str) -> Result<Html<String>> {
-    Ok(Html(render(Document { title, body, theme })?))
+fn document_themed(
+    title: &str,
+    body: &str,
+    theme: &str,
+    brand: &bilibi_ui::Brand,
+) -> Result<Html<String>> {
+    Ok(Html(render(Document {
+        brand,
+        title,
+        body,
+        theme,
+    })?))
 }
 fn token(headers: &HeaderMap) -> Result<String> {
     headers
@@ -622,7 +776,8 @@ fn token(headers: &HeaderMap) -> Result<String> {
             h.split(';').find_map(|cookie| {
                 cookie
                     .trim()
-                    .strip_prefix("bilibi_session=")
+                    .strip_prefix(STAFF_COOKIE)
+                    .and_then(|rest| rest.strip_prefix('='))
                     .map(str::to_owned)
             })
         })
@@ -630,7 +785,12 @@ fn token(headers: &HeaderMap) -> Result<String> {
         .ok_or(Error::Unauthorized)
 }
 fn origin(app: &App, headers: &HeaderMap) -> Result<()> {
-    if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) == Some(&app.origin) {
+    let expected = match app.site {
+        Site::Staff => Some(app.origin.to_string()),
+        Site::Public => app.public_origin(headers),
+    };
+    let given = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    if given.is_some() && given == expected.as_deref() {
         Ok(())
     } else {
         Err(Error::Forbidden)
@@ -667,7 +827,9 @@ async fn logout(
     };
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("bilibi_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"),
+        HeaderValue::from_static(
+            "__Host-bilibi_session=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0",
+        ),
     );
     Ok(response)
 }
@@ -719,3 +881,18 @@ async fn upgrade(
 }
 
 pub mod seed;
+
+pub async fn render_fields<T>(
+    app: &App,
+    scope: Option<&bilibi_tenancy::Scope>,
+    render: impl std::future::Future<Output = bilibi_database::Result<T>>,
+) -> bilibi_database::Result<T> {
+    let words = match scope {
+        Some(scope) => {
+            let client = app.db.get().await?;
+            bilibi_base::grid::render_labels(&**client, scope).await?
+        }
+        None => bilibi_ui::FieldLabels::default(),
+    };
+    words.during(render).await
+}

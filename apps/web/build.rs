@@ -12,6 +12,21 @@
 //! Bilibi-specific composition contract.
 use std::{env, fs, path::Path, path::PathBuf, process::Command};
 
+type ParsedContainer = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+type ResolvedContainer = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let root =
@@ -42,13 +57,13 @@ fn pinned(text: &str, root: &Path) -> String {
     let mut platform_commit = None;
     let mut platform_version = None;
     let mut platform_tag = None;
-    let mut containers: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+    let mut containers: Vec<ParsedContainer> = Vec::new();
     for line in text.lines().map(str::trim) {
         if let Some(name) = line
             .strip_prefix("[containers.\"")
             .and_then(|rest| rest.strip_suffix("\"]"))
         {
-            containers.push((name.to_owned(), None, None));
+            containers.push((name.to_owned(), None, None, None, None));
             continue;
         }
         let Some((key, value)) = line.split_once(" = ") else {
@@ -61,6 +76,8 @@ fn pinned(text: &str, root: &Path) -> String {
             (None, "platform_tag") => platform_tag = Some(value),
             (Some(container), "head") => container.1 = Some(value),
             (Some(container), "version") => container.2 = Some(value),
+            (Some(container), "branch") => container.3 = Some(value),
+            (Some(container), "committed_at") => container.4 = Some(value),
             _ => {}
         }
     }
@@ -69,10 +86,10 @@ fn pinned(text: &str, root: &Path) -> String {
     };
     let containers: Vec<_> = containers
         .into_iter()
-        .map(|(name, head, version)| {
+        .map(|(name, head, version, branch, committed_at)| {
             let head =
                 head.unwrap_or_else(|| panic!("{name} in the pin has no head; run --pin again"));
-            (name, head, version)
+            (name, head, version, branch, committed_at)
         })
         .collect();
     if let Some(reason) = drift(root, &commit, &containers) {
@@ -83,9 +100,9 @@ fn pinned(text: &str, root: &Path) -> String {
     let mut code = format!(
         "pub const PIN: Option<Pin> = Some(Pin {{ platform_commit: {commit:?}, platform_version: {version:?}, platform_tag: {platform_tag:?}, containers: &[\n"
     );
-    for (name, head, version) in containers {
+    for (name, head, version, branch, committed_at) in containers {
         code.push_str(&format!(
-            "    PinnedContainer {{ name: {name:?}, commit: {head:?}, version: {version:?} }},\n"
+            "    PinnedContainer {{ name: {name:?}, commit: {head:?}, version: {version:?}, branch: {branch:?}, committed_at: {committed_at:?} }},\n"
         ));
     }
     code.push_str("] });\npub const PIN_STALE: Option<&str> = None;\npub const BUILT_FROM: Option<&str> = None;\npub const BUILT_CONTAINERS: &[PinnedContainer] = &[];\n");
@@ -94,11 +111,7 @@ fn pinned(text: &str, root: &Path) -> String {
 
 /// What differs between the pin and the checkouts being compiled, if Git can
 /// tell. Without Git (or outside a Git checkout of the Platform) the pin is trusted.
-fn drift(
-    root: &Path,
-    platform_commit: &str,
-    containers: &[(String, String, Option<String>)],
-) -> Option<String> {
+fn drift(root: &Path, platform_commit: &str, containers: &[ResolvedContainer]) -> Option<String> {
     watch_head(root);
     let head = git(root, &["rev-parse", "HEAD"])?;
     if head != platform_commit {
@@ -108,7 +121,7 @@ fn drift(
             short(platform_commit)
         ));
     }
-    for (name, pinned, _) in containers {
+    for (name, pinned, _, _, _) in containers {
         let folder = root.join("apps").join(name);
         watch_head(&folder);
         let own = git(&folder, &["rev-parse", "--show-toplevel"])
@@ -143,19 +156,17 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Rerun when HEAD moves: the HEAD file, the branch file it points at, the
-/// packed refs, and the HEAD reflog. A packed branch has no loose file until
-/// its next commit and the symbolic HEAD does not change, but Git appends to
-/// `logs/HEAD` on every commit, checkout, reset and merge. A missing path would
-/// rerun every build, so only existing paths are watched.
 fn watch_head(dir: &Path) {
-    let branch = git(dir, &["symbolic-ref", "-q", "HEAD"]);
-    for path in ["HEAD", "logs/HEAD", "packed-refs"]
+    let branch = git(dir, &["symbolic-ref", "-q", "HEAD"])
+        .and_then(|name| git(dir, &["rev-parse", "--git-path", &name]))
+        .map(|path| dir.join(path));
+    let packed = branch.as_ref().is_some_and(|path| !path.is_file());
+    for path in ["HEAD", "refs/heads"]
         .into_iter()
-        .chain(branch.as_deref())
+        .chain(packed.then_some("packed-refs"))
         .filter_map(|name| git(dir, &["rev-parse", "--git-path", name]))
         .map(|path| dir.join(path))
-        .filter(|path| path.is_file())
+        .filter(|path| path.exists())
     {
         println!("cargo:rerun-if-changed={}", path.display());
     }
@@ -187,8 +198,10 @@ fn unpinned(root: &Path) -> String {
                 &["describe", "--tags", "--exact-match", "--match", "v*"],
             )
             .map(|tag| tag.trim_start_matches('v').to_owned());
+            let branch = git(&dir, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
+            let committed_at = git(&dir, &["show", "-s", "--format=%cI", &head]);
             found.push_str(&format!(
-                "    PinnedContainer {{ name: \"{layer}/{name}\", commit: {head:?}, version: {version:?} }},\n"
+                "    PinnedContainer {{ name: \"{layer}/{name}\", commit: {head:?}, version: {version:?}, branch: {branch:?}, committed_at: {committed_at:?} }},\n"
             ));
         }
     }

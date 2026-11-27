@@ -20,7 +20,7 @@
 use crate::{
     form::{self, Field, Plan, Step},
     reveal::{self, Refusal, Reveal},
-    ImageSetting, COMPANY_MANAGE, GLOBAL_MANAGE,
+    ImageSetting, StagedImage, COMPANY_MANAGE, GLOBAL_MANAGE,
 };
 use askama::Template;
 use bilibi_authz::authorize_operator;
@@ -28,7 +28,7 @@ use bilibi_database::{Db, Error, MutationBoundary, Result};
 use bilibi_party_ids::OrganisationId;
 use bilibi_settings::{Settings, Target, ValueType};
 use bilibi_step_up::StepUp;
-use bilibi_tenancy::{NamedOrganisation, PartyProofs, Scope};
+use bilibi_tenancy::{NamedOrganisation, OrganisationSearch, PartyProofs, Scope};
 use bilibi_ui::{
     choices,
     forms::{Field as Control, InputKind},
@@ -58,6 +58,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
         default_sort: Some("setting".into()),
         filters: [
             ("company".into(), Filter::string(GLOBAL)),
+            ("company_search".into(), Filter::string("")),
             ("area".into(), Filter::string("")),
             ("module".into(), Filter::string("")),
         ]
@@ -149,6 +150,7 @@ pub struct Core {
     pub step_up: Arc<StepUp>,
     pub media: Arc<bilibi_media::Media>,
     pub images: HashMap<&'static str, &'static ImageSetting>,
+    pub staged_images: HashMap<&'static str, &'static StagedImage>,
 }
 pub struct Pages(Arc<Core>);
 impl Pages {
@@ -168,12 +170,12 @@ struct Editor {
     columns: ListColumns,
     editing: Option<String>,
     row_status: CommitStatus,
-    reveal_pending: Option<String>,
+    pending_proof: Option<Value>,
     draft: Option<String>,
     uploads: Uploads,
 }
 
-const IMAGE_UPLOAD: &str = "identity_image";
+pub(super) const IMAGE_UPLOAD: &str = "identity_image";
 const IMAGE_TYPES: [&str; 7] = [
     ".png",
     ".jpg",
@@ -192,6 +194,13 @@ impl Editor {
             .map(|image| image.max_bytes)
             .max()
             .unwrap_or(1);
+        let uploads = Uploads::new(
+            std::iter::once(UploadSpec::new(IMAGE_UPLOAD, upload_limit).accept(IMAGE_TYPES)).chain(
+                core.staged_images.values().map(|stage| {
+                    UploadSpec::new(stage.input, stage.image.max_bytes).accept(IMAGE_TYPES)
+                }),
+            ),
+        );
         Ok(Self {
             core,
             flash: None,
@@ -209,11 +218,9 @@ impl Editor {
             .map_err(|_| Error::Internal)?,
             editing: None,
             row_status: CommitStatus::None,
-            reveal_pending: None,
+            pending_proof: None,
             draft: None,
-            uploads: Uploads::new(
-                [UploadSpec::new(IMAGE_UPLOAD, upload_limit).accept(IMAGE_TYPES)],
-            ),
+            uploads,
         })
     }
     fn flash(&mut self, kind: StatusKind, message: impl Into<String>) {
@@ -233,6 +240,7 @@ impl Editor {
         self.editing = None;
         self.flash = None;
         self.pending_restore = None;
+        self.pending_proof = None;
         self.uploads.clear(IMAGE_UPLOAD);
     }
     async fn plan(&self, scope: &Scope) -> Result<Plan> {
@@ -348,7 +356,21 @@ impl Editor {
 
     async fn event(&mut self, scope: &Scope, payload: &Value) -> Result<()> {
         let get = |key: &str| payload.get(key).and_then(Value::as_str);
-        match get("type").ok_or(Error::Invalid)? {
+        let event = get("type").ok_or(Error::Invalid)?;
+        if let Some(pending) = &self.pending_proof {
+            if event != "cancel_setting"
+                && (pending["type"].as_str() != Some(event) || get("code").is_none())
+            {
+                return Err(Error::Invalid);
+            }
+        } else if get("code").is_some() {
+            return Err(Error::Invalid);
+        }
+        let code = get("code").unwrap_or_default();
+        let held = self.pending_proof.take();
+        let payload = held.as_ref().unwrap_or(payload);
+        let get = |key: &str| payload.get(key).and_then(Value::as_str);
+        match event {
             "clear-flash" => self.flash = None,
             "filters" => {
                 self.list.apply_filters(
@@ -375,7 +397,6 @@ impl Editor {
             }
             "edit_setting" => {
                 self.draft = None;
-                self.reveal_pending = None;
                 self.uploads.clear(IMAGE_UPLOAD);
                 let plan = self.plan(scope).await?;
                 if let Some(field) = plan.field(get("key").unwrap_or_default()) {
@@ -384,18 +405,18 @@ impl Editor {
                 }
             }
             "cancel_setting" => {
+                self.pending_restore = None;
                 self.draft = None;
-                self.reveal_pending = None;
                 self.editing = None;
                 self.row_status = CommitStatus::None;
                 self.uploads.clear(IMAGE_UPLOAD);
             }
             "save_settings" => {
                 self.row_status = CommitStatus::None;
-                let presented = scope
-                    .clone()
-                    .presenting_step_up(get("code").unwrap_or_default());
-                self.save(&presented, payload).await?;
+                let presented = scope.clone().presenting_step_up(code);
+                if let Err(error) = self.save(&presented, payload).await {
+                    return self.proof_refused(error, payload);
+                }
                 if let Some((kind, message)) = &self.flash {
                     if *kind == StatusKind::Error {
                         self.row_status = CommitStatus::Error(message.clone());
@@ -429,7 +450,12 @@ impl Editor {
                 }
             }
             "cancel_restore" => self.pending_restore = None,
-            "restore_defaults" => self.restore(scope).await?,
+            "restore_defaults" => {
+                let presented = scope.clone().presenting_step_up(code);
+                if let Err(error) = self.restore(&presented).await {
+                    return self.proof_refused(error, payload);
+                }
+            }
             "switch_scope" => match get("scope[company_id]") {
                 Some(GLOBAL) => self.pick(Picked::Global),
                 Some(TENANT) => self.pick(Picked::Tenant),
@@ -440,16 +466,15 @@ impl Editor {
                 let key = get("key").unwrap_or_default();
                 let plan = self.plan(scope).await?;
                 let client = self.core.db.get().await?;
-                let offered = plan
-                    .field(key)
-                    .is_some_and(|field| field.encrypted() && field.stored_secret);
+                let offered = plan.field(key).is_some_and(Field::revealable);
                 if offered
                     && reveal::available(&**client, &plan, &self.core.settings, scope).await?
                 {
-                    let presented = scope
-                        .clone()
-                        .presenting_step_up(get("code").unwrap_or_default());
-                    self.reveal(&presented, &plan, key).await?;
+                    drop(client);
+                    let presented = scope.clone().presenting_step_up(code);
+                    if let Err(error) = self.reveal(&presented, &plan, key).await {
+                        return self.proof_refused(error, payload);
+                    }
                 } else {
                     // Even a forged request is recorded as a refused reveal.
                     reveal::refuse(&**client, scope, key).await?;
@@ -467,18 +492,27 @@ impl Editor {
             return Ok(());
         }
         let plan = self.plan(scope).await?;
-        let Some(field) = plan.field(key) else {
-            return Ok(());
+        let mut client = self.core.db.get().await?;
+        let staged = self.core.staged_images.get(key).copied();
+        let (field, upload, image) = if let Some(stage) = staged {
+            if !matches!(self.picked, Picked::Global)
+                || !plan.capabilities.contains(stage.capability)
+            {
+                return Ok(());
+            }
+            authorize_operator(&**client, scope, stage.capability).await?;
+            (Err(stage.noun), stage.input, &stage.image)
+        } else {
+            let (Some(field), Some(&image)) = (plan.field(key), self.core.images.get(key)) else {
+                return Ok(());
+            };
+            (Ok(field), IMAGE_UPLOAD, image)
         };
-        let Some(image) = self.core.images.get(field.key) else {
-            return Ok(());
-        };
-        let Some(file) = self.uploads.consume(IMAGE_UPLOAD).into_iter().next() else {
+        let Some(file) = self.uploads.consume(upload).into_iter().next() else {
             self.flash(StatusKind::Error, "Choose a PNG, JPEG or WebP image first.");
             self.row_status = CommitStatus::Error("Choose a PNG, JPEG or WebP image first.".into());
             return Ok(());
         };
-        let mut client = self.core.db.get().await?;
         let stored = self
             .core
             .media
@@ -512,6 +546,19 @@ impl Editor {
             Err(_) => {
                 self.flash(StatusKind::Error, "The image could not be stored.");
                 self.row_status = CommitStatus::Error("The image could not be stored.".into());
+                return Ok(());
+            }
+        };
+        let field = match field {
+            Ok(field) => field,
+            Err(noun) => {
+                self.flash(
+                    StatusKind::Success,
+                    format!(
+                        "{noun} stored. Use asset ID {} in the reviewed operation.",
+                        asset.id
+                    ),
+                );
                 return Ok(());
             }
         };
@@ -627,7 +674,10 @@ impl Editor {
         }
         for (field, _) in &steps {
             if let Err(error) = self.require_change_step_up(scope, field).await {
-                return self.step_up_refused(error, field);
+                return match error {
+                    Error::StepUpRequired { .. } | Error::Unauthorized => Err(error),
+                    error => self.refused(error, Some(field)),
+                };
             }
         }
         let (mut written, mut cleared) = (0, 0);
@@ -677,12 +727,13 @@ impl Editor {
     }
 
     async fn restore(&mut self, scope: &Scope) -> Result<()> {
-        let Some(held) = self.pending_restore.take() else {
-            return Ok(());
-        };
         if !self.writable(scope).await? {
+            self.pending_restore = None;
             return Ok(());
         }
+        let Some(held) = &self.pending_restore else {
+            return Ok(());
+        };
         // Asked now, not read off the page: a save since the dialog opened may
         // already have cleared one, and a revoked field is no longer shown.
         let plan = self.plan(scope).await?;
@@ -699,6 +750,7 @@ impl Editor {
                 };
             }
         }
+        self.pending_restore = None;
         if !fields.is_empty() {
             let target = self.target();
             let action = format!("settings.{}.restore", self.picked.audit_name());
@@ -731,8 +783,7 @@ impl Editor {
         Ok(())
     }
 
-    /// A protected field asks for the holder's code before any write. The row
-    /// presents the proof on this request; restore retains the host prompt.
+    /// A protected field asks for the holder's code before any write.
     async fn require_change_step_up(&self, scope: &Scope, field: &Field) -> Result<()> {
         let Some(guard) = self.core.step_up.guarding_setting(field.key) else {
             return Ok(());
@@ -746,22 +797,36 @@ impl Editor {
             )
             .await
     }
-    fn step_up_refused(&mut self, error: Error, field: &Field) -> Result<()> {
-        match error {
-            Error::Unauthorized => Err(error),
-            Error::StepUpRequired { reason, .. } => {
-                let message = match reason {
-                    "invalid_code" => "That code was not accepted. Enter the current code from your authenticator app.",
-                    "locked" => "Too many wrong codes. Wait a while, then try again with a fresh code.",
-                    "not_enrolled" => "Set up 2FA before changing this setting.",
-                    "impersonating" => "This setting cannot be changed while viewing as someone else.",
-                    _ => "Enter the current 6-digit code from your authenticator app.",
-                };
-                self.flash(StatusKind::Error, message);
-                Ok(())
+    fn proof_refused(&mut self, error: Error, input: &Value) -> Result<()> {
+        let Error::StepUpRequired { reason, .. } = error else {
+            return Err(error);
+        };
+        let message = match reason {
+            "invalid_code" => "That code was not accepted. Enter a current 2FA code.",
+            "locked" => "Too many wrong codes. Wait a while, then try again with a fresh code.",
+            "impersonating" => "This action is unavailable while viewing as someone else.",
+            "unavailable" => "No 2FA method is available.",
+            _ => "",
+        };
+        if matches!(reason, "impersonating" | "unavailable") {
+            self.flash(StatusKind::Error, message);
+        } else {
+            let event = input["type"].as_str().ok_or(Error::Internal)?;
+            let mut pending = json!({"type": event});
+            match event {
+                "save_settings" => {
+                    let key = self.editing.as_deref().ok_or(Error::Internal)?;
+                    let field = format!("settings[{key}]");
+                    pending[field.as_str()] = input.get(&field).cloned().ok_or(Error::Internal)?;
+                }
+                "request_secret_reveal" => pending["key"] = input["key"].clone(),
+                "restore_defaults" => {}
+                _ => return Err(Error::Internal),
             }
-            error => self.refused(error, Some(field)),
+            self.pending_proof = Some(pending);
+            self.flash = (!message.is_empty()).then(|| (StatusKind::Error, message.into()));
         }
+        Ok(())
     }
 
     /// A refused or failed write is a flash, never a page-clearing error; only
@@ -793,8 +858,7 @@ impl Editor {
         Ok(())
     }
 
-    /// Shows one stored secret after Base Step-up; a required check stays in
-    /// the cell, without releasing plaintext or losing the current editor.
+    /// Shows one stored secret after Base Step-up.
     async fn reveal(&mut self, scope: &Scope, plan: &Plan, key: &str) -> Result<()> {
         let client = self.core.db.get().await?;
         let reveal = Reveal {
@@ -807,7 +871,7 @@ impl Editor {
                     .field(key)
                     .map_or(10_000, |field| field.editor.reveal_duration_ms);
                 self.flash = None;
-                self.reveal_pending = None;
+                self.editing = Some(key.into());
                 self.row_status = CommitStatus::None;
                 self.events.push((
                     "secret:reveal",
@@ -815,14 +879,8 @@ impl Editor {
                 ));
             }
             Err(Refusal::StepUp(error)) => {
-                if let Some(field) = plan.field(key) {
-                    self.editing = Some(key.into());
-                    self.reveal_pending = Some(key.into());
-                    self.step_up_refused(error, field)?;
-                    if let Some((_, message)) = &self.flash {
-                        self.row_status = CommitStatus::Error(message.clone());
-                    }
-                }
+                self.editing = Some(key.into());
+                return Err(error);
             }
             Err(Refusal::AuditUnavailable) => self.flash(
                 StatusKind::Error,
@@ -835,7 +893,57 @@ impl Editor {
         Ok(())
     }
 
+    async fn render_proof(&self, scope: &Scope, input: &Value) -> Result<String> {
+        let methods = self
+            .core
+            .step_up
+            .enrolled_methods(scope)
+            .await?
+            .into_iter()
+            .map(|m| bilibi_ui::ProofMethod::new(m.id, m.label, m.code_length, m.numeric))
+            .collect::<Vec<_>>();
+        let mut step = bilibi_ui::StepUp::new(!methods.is_empty(), "/system/settings");
+        step.code = render(bilibi_ui::ProofInput::new(
+            "settings-action-code",
+            "code",
+            methods,
+        ))?;
+        step.actions = render(Button {
+            button_type: "submit",
+            variant: ButtonVariant::Primary,
+            body: Html::text("Confirm"),
+            ..Button::default()
+        })?;
+        step.secondary_actions = render(Button {
+            button_type: "button",
+            event: "cancel_setting",
+            body: Html::text("Cancel"),
+            ..Button::default()
+        })?;
+        let mut body = Html::EMPTY;
+        if let Some((kind, message)) = &self.flash {
+            body.push(&render(bilibi_ui::Alert {
+                kind: *kind,
+                body: Html::text(message),
+                ..Default::default()
+            })?);
+        }
+        body.push(&render(step)?);
+        let form = render(Form {
+            id: "settings-action-proof",
+            event: input["type"].as_str().ok_or(Error::Internal)?,
+            body,
+            ..Default::default()
+        })?;
+        let gate = bilibi_ui::StepUpGate::action("Settings", "Confirm access", form)
+            .map_err(|_| Error::Internal)?;
+        Ok(render(gate)?.to_string())
+    }
+
     async fn render(&mut self, scope: &Scope) -> Result<String> {
+        if let Some(input) = &self.pending_proof {
+            return self.render_proof(scope, input).await;
+        }
         self.list
             .filters
             .insert("company".into(), self.picked.value());
@@ -845,15 +953,7 @@ impl Editor {
         let keyed = self.core.settings.encryption_available();
         // Below Global, restoring clears overrides so the values inherit.
         let inherits = !matches!(self.picked, Picked::Global);
-        let methods = self
-            .core
-            .step_up
-            .enrolled_methods(scope)
-            .await?
-            .into_iter()
-            .map(|m| bilibi_ui::ProofMethod::new(m.id, m.label, m.code_length, m.numeric))
-            .collect::<Vec<_>>();
-        let enrolled = !methods.is_empty();
+        let enrolled = self.core.step_up.enrolled(scope).await?;
         let mut protected_override = false;
         let mut rows = Vec::new();
         let wanted = self.list.search.trim().to_lowercase();
@@ -912,7 +1012,6 @@ impl Editor {
         let counts = page.counts;
         for field in page.entries {
             let editing = self.editing.as_deref() == Some(field.key);
-            let revealing = editing && self.reveal_pending.as_deref() == Some(field.key);
             let image = self.core.images.get(field.key).copied();
             let control = if image.is_some() {
                 let url = match field.value.as_i64() {
@@ -947,13 +1046,7 @@ impl Editor {
             let save = render(Button {
                 variant: ButtonVariant::Primary,
                 button_type: "submit",
-                body: Html::text(if image.is_some() {
-                    "Upload"
-                } else if revealing {
-                    "Show stored value"
-                } else {
-                    "Save"
-                }),
+                body: Html::text(if image.is_some() { "Upload" } else { "Save" }),
                 ..Button::default()
             })?;
             let cancel = render(Button {
@@ -975,36 +1068,13 @@ impl Editor {
                     })
                 })
                 .transpose()?;
-            let protected = revealing
-                || if let Some(guard) = self.core.step_up.guarding_setting(field.key) {
-                    self.core
-                        .step_up
-                        .required(scope, guard.operation.key)
-                        .await?
-                } else {
-                    false
-                };
-            let (body, actions) = if protected {
-                let mut step = bilibi_ui::StepUp::new(enrolled, "/system/settings");
-                step.body = control;
-                step.code = render(bilibi_ui::ProofInput::new(
-                    format!("code-{}", field.dom()),
-                    "code",
-                    methods.clone(),
-                ))?;
-                step.actions = save;
-                step.secondary_actions = cancel;
-                (render(step)?, Html::EMPTY)
-            } else {
-                let mut actions = vec![save];
-                if let Some(remove) = remove {
-                    actions.push(remove);
-                }
-                actions.push(cancel);
-                (control, actions.into_iter().collect())
-            };
+            let mut actions = vec![save];
+            if let Some(remove) = remove {
+                actions.push(remove);
+            }
+            actions.push(cancel);
             let form_id = format!("form-{}", field.dom());
-            let mut body = body;
+            let mut body = control;
             body.push(&render(
                 Control::named("key")
                     .kind(InputKind::Hidden)
@@ -1014,14 +1084,12 @@ impl Editor {
                 id: &form_id,
                 event: if image.is_some() {
                     "save_image_setting"
-                } else if revealing {
-                    "request_secret_reveal"
                 } else {
                     "save_settings"
                 },
                 class: "ui-compact-controls",
                 body,
-                actions,
+                actions: actions.into_iter().collect(),
                 ..Form::default()
             })?;
             let cell = render(InlineForm {
@@ -1144,16 +1212,33 @@ impl Editor {
             ("Global".to_owned(), GLOBAL.to_owned()),
             ("This tenant".to_owned(), TENANT.to_owned()),
         ];
+        // The scope select offers the companies its search finds, never every
+        // company of the tenant; the picked one stays offered.
+        let company_search = self.list.filters["company_search"].clone();
         let companies = if plan.capabilities.contains(COMPANY_MANAGE) {
             Some(
                 self.core
                     .parties
-                    .selectable_organisations(&**client, scope, COMPANY_MANAGE)
+                    .selectable_organisations(
+                        &**client,
+                        scope,
+                        COMPANY_MANAGE,
+                        OrganisationSearch::text(&company_search),
+                    )
                     .await?,
             )
         } else {
             None
         };
+        if let Some(company) = self.picked.company() {
+            if !companies
+                .iter()
+                .flatten()
+                .any(|found| found.id == company.id)
+            {
+                options.push((company.name.clone(), company.id.get().to_string()));
+            }
+        }
         options.extend(
             companies
                 .iter()
@@ -1171,8 +1256,17 @@ impl Editor {
             &self.picked.value(),
             choices(&options),
         ));
+        if companies.is_some() {
+            controls.push(ToolbarControl::search(
+                "settings-company-search",
+                "company_search",
+                "Find a company",
+                &company_search,
+                "Find a company…",
+            ));
+        }
         let scopes = if let Some(companies) = companies {
-            if companies.is_empty() {
+            if companies.is_empty() && company_search.trim().is_empty() {
                 render(Withheld {
                     state: EmptyState::missing(
                         "No companies are available to manage.",
@@ -1217,7 +1311,37 @@ impl Editor {
             Some((k, text)) if *k == kind => text.as_str(),
             _ => "",
         };
+        let mut staged_uploads = Html::EMPTY;
+        if matches!(self.picked, Picked::Global) {
+            let mut images: Vec<_> = self.core.staged_images.iter().collect();
+            images.sort_unstable_by_key(|(key, _)| **key);
+            for (&key, stage) in images {
+                if !plan.capabilities.contains(stage.capability) {
+                    continue;
+                }
+                let mut body = render(self.uploads.input(stage.input, format!("stage-{key}"))
+                    .label(format!("Upload {}", stage.noun.to_lowercase()))
+                    .hint("PNG, JPEG or WebP, up to 1 MiB. The upload returns an asset ID for review."))?;
+                body.push(&render(
+                    Control::named("key").kind(InputKind::Hidden).value(key),
+                )?);
+                staged_uploads.push(&render(Form {
+                    id: &format!("stage-form-{key}"),
+                    event: "save_image_setting",
+                    class: "ui-compact-controls",
+                    body,
+                    actions: render(Button {
+                        variant: ButtonVariant::Primary,
+                        button_type: "submit",
+                        body: Html::text("Upload"),
+                        ..Button::default()
+                    })?,
+                    ..Form::default()
+                })?);
+            }
+        }
         let view = SettingsView {
+            staged_uploads,
             flash: FlashMap {
                 error: message(StatusKind::Error),
                 warning: message(StatusKind::Warning),
@@ -1287,7 +1411,7 @@ fn control(field: &Field, can_reveal: bool, keyed: bool, draft: Option<&str>) ->
             .wrapper_class("mb-0");
         if field.stored_secret {
             secret = secret.stored();
-            if can_reveal {
+            if can_reveal && field.revealable() {
                 secret = secret.stored_reveal("request_secret_reveal", field.key);
             }
         }
@@ -1318,6 +1442,7 @@ struct SettingsView<'a> {
     flash: FlashMap<'a>,
     header: Html,
     scopes: Html,
+    staged_uploads: Html,
     table: Html,
     toolbar: Html,
     pagination: Html,
@@ -1387,6 +1512,8 @@ impl LiveState<Scope, Error> for Editor {
             match request.input {
                 LiveInput::Refresh => {}
                 LiveInput::Params(values) => {
+                    self.pending_proof = None;
+                    self.pending_restore = None;
                     self.list = list(values)?;
                     self.apply_scope(request.scope).await?;
                 }

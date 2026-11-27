@@ -5,24 +5,26 @@ use std::{
     fs, io,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 /// The files the installer copies with a release, when the build wrote them
 /// (`release.json`) or the release came as a file (`bundle.json`). Add-ons
 /// that travel with the release are the `plugins/` folder beside them.
-const RELEASE_FILES: [&str; 6] = [
+const RELEASE_FILES: [&str; 7] = [
     "bilibi-web",
     "SHA256SUMS",
     "manifest.txt",
     "Cargo.lock",
     "release.json",
     "bundle.json",
+    "admission.json",
 ];
 const PLUGINS_DIR: &str = "plugins";
 /// The add-ons a release switches on, included by the local build in the
 /// release's `plugins/` folder.
 const PLUGINS_ENABLED: &str = "enabled.json";
+const INSTALLER_JOBS_DIR: &str = "installer-jobs";
 
 #[derive(Clone, Debug)]
 pub struct Layout {
@@ -65,6 +67,122 @@ impl Layout {
     }
     pub fn backups(&self) -> PathBuf {
         self.dir.join("backups")
+    }
+    fn installer_jobs(&self) -> PathBuf {
+        self.dir.join("incoming").join(INSTALLER_JOBS_DIR)
+    }
+    /// Ready markers present before an idle check. Only these may be removed
+    /// after the final database scan, so a job queued during that check keeps
+    /// its newer marker and systemd activates the service again.
+    pub fn activation_markers(&self) -> Vec<PathBuf> {
+        fs::read_dir(self.installer_jobs())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.path().is_file())
+                    .filter_map(|entry| {
+                        let name = entry.file_name();
+                        let name = name.to_str()?;
+                        let number = name.strip_prefix("job-")?.strip_suffix(".ready")?;
+                        (!number.is_empty()
+                            && number.len() <= 20
+                            && number.bytes().all(|byte| byte.is_ascii_digit()))
+                        .then(|| entry.path())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    pub fn remove_activation_markers(&self, markers: &[PathBuf]) {
+        for marker in markers {
+            if marker.parent() == Some(self.installer_jobs().as_path()) {
+                let _ = fs::remove_file(marker);
+            }
+        }
+    }
+    fn server_root(&self) -> Result<&Path, String> {
+        self.dir
+            .parent()
+            .ok_or_else(|| format!("{} has no Bilibi server folder", self.dir.display()))
+    }
+    pub fn check_release(&self, source: &serde_json::Value) -> Result<(), String> {
+        let helper = self.server_root()?.join("release-proof.py");
+        let output = Command::new("python3")
+            .arg(&helper)
+            .args(["check-admission", "--trust"])
+            .arg(self.dir.join("trust/release.json"))
+            .args(["--source", &source.to_string()])
+            .output();
+        proof_result(output)?;
+        proof_result(
+            Command::new("python3")
+                .arg(helper)
+                .args(["check-replay", "--state"])
+                .arg(self.dir.join("trust/release-state.json"))
+                .args([
+                    "--tag",
+                    source["tag"].as_str().unwrap_or(""),
+                    "--digest",
+                    source["digest"].as_str().unwrap_or(""),
+                ])
+                .output(),
+        )
+        .map(|_| ())
+    }
+
+    pub fn consumed_tag(&self, source: &serde_json::Value) -> bool {
+        // The replay record keeps one highest tag and digest per channel
+        // (setup or nightly), keyed by the tag's own channel.
+        let channel = match source["tag"].as_str() {
+            Some(tag) if tag.starts_with("nightly-") => "nightly",
+            Some(tag) if tag.starts_with("setup-v") => "setup",
+            _ => return false,
+        };
+        fs::read(self.dir.join("trust/release-state.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|state| {
+                state["highest"][channel]["tag"] == source["tag"]
+                    && state["highest"][channel]["digest"] == source["digest"]
+            })
+    }
+
+    pub fn record_release(&self, source: &serde_json::Value) -> Result<(), String> {
+        self.write_trust(serde_json::json!({"operation": "admit", "source": source}))?;
+        Ok(())
+    }
+
+    pub fn replace_release_trust(
+        &self,
+        requested_by: i64,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let output = self.write_trust(serde_json::json!({
+            "operation": "replace", "actor": requested_by, "policy": request,
+        }))?;
+        serde_json::from_slice(&output.stdout)
+            .map_err(|_| "the release proof verifier returned no trust facts".into())
+    }
+
+    fn write_trust(&self, request: serde_json::Value) -> Result<std::process::Output, String> {
+        let mut child = Command::new("sudo")
+            .args(["-n", "/usr/bin/python3", "-I"])
+            .arg(self.server_root()?.join("release-proof.py"))
+            .args(["write-instance", &self.name])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("could not start the privileged release verifier: {error}"))?;
+        let sent = child
+            .stdin
+            .take()
+            .map(|stdin| serde_json::to_writer(stdin, &request));
+        let output = proof_result(child.wait_with_output())?;
+        match sent {
+            Some(Ok(())) => Ok(output),
+            _ => Err("could not send the privileged release request".into()),
+        }
     }
     /// Where the program puts a release that came from another machine or
     /// from an uploaded file, for this installer to take (`base/software`,
@@ -130,8 +248,8 @@ impl Layout {
     /// What to tell the owner when `converted` is false.
     pub fn conversion_advice(&self) -> String {
         format!(
-            "{} still has the older folder layout, so a release cannot be switched here. Run `sudo scripts/install-server.sh installer <bilibi-installer>` (or `create {}`) on the server to convert it, then start again.",
-            self.name, self.name
+            "{} still has the older folder layout, so a release cannot be switched here. Run `sudo scripts/install-server.sh installer {} <bilibi-installer>` (or `create {}`) on the server to convert it, then start again.",
+            self.name, self.name, self.name
         )
     }
     /// One value from the instance's `env` file (`BIND_ADDR`, `APP_ORIGIN`).
@@ -141,11 +259,6 @@ impl Layout {
             .filter_map(|line| line.split_once('='))
             .find(|(name, _)| name.trim() == key)
             .map(|(_, value)| value.trim().to_owned())
-    }
-    /// The local port the instance's program listens on, from `BIND_ADDR`.
-    pub fn port(&self) -> Option<u16> {
-        let bind = self.env_value("BIND_ADDR")?;
-        bind.rsplit_once(':')?.1.parse().ok()
     }
     /// The systemd unit that runs this instance.
     pub fn unit(&self) -> String {
@@ -192,6 +305,26 @@ pub fn verify_checksum(dir: &Path) -> Result<String, String> {
         ));
     }
     Ok(sha.to_ascii_lowercase())
+}
+
+pub fn release_command(limit: &str) -> Result<Command, String> {
+    let user = std::env::var("BILIBI_RELEASE_USER")
+        .map_err(|_| "the installer has no unprivileged release account".to_owned())?;
+    let mut command = Command::new("sudo");
+    command.args(["-n", "-E", "-u", &user, "--", "/usr/bin/timeout", limit]);
+    Ok(command)
+}
+
+fn proof_result(output: io::Result<std::process::Output>) -> Result<std::process::Output, String> {
+    let output =
+        output.map_err(|error| format!("could not run the release proof verifier: {error}"))?;
+    if output.status.success() {
+        return Ok(output);
+    }
+    Err(String::from_utf8_lossy(&output.stderr)
+        .trim()
+        .trim_start_matches("release-proof: ")
+        .to_owned())
 }
 
 /// Copies a release folder's files, and its add-ons, into `dst` and

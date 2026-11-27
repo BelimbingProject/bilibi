@@ -15,38 +15,71 @@ pub async fn state(
     query: &HashMap<String, String>,
     confirm: bool,
 ) -> Result<Box<dyn LiveState<Scope, Error>>, Error> {
-    let back = query.get("return").and_then(|p| crate::safe_return(p));
-    let methods = users
-        .step_up
-        .methods(scope, back.as_deref().unwrap_or(""))
-        .await?;
+    let portal = scope.actor().kind() == bilibi_tenancy::AccountKind::Customer;
+    let back = query
+        .get("return")
+        .and_then(|path| crate::safe_return(path))
+        .filter(|path| !portal || two_factor_ui::portal_path(path));
+    let mut choices = Choices {
+        users,
+        back,
+        confirm,
+        portal,
+        redirect_method: None,
+    };
+    let methods = choices.methods(scope).await?;
     let selected = query
         .get("method")
         .map(String::as_str)
-        .or_else(|| (methods.len() == 1).then(|| methods[0].method.id));
+        .or_else(|| match methods.as_slice() {
+            [method]
+                if !confirm || (method.enrolled && method.method.id == two_factor::METHOD.id) =>
+            {
+                Some(method.method.id)
+            }
+            _ => None,
+        });
     if selected == Some(two_factor::METHOD.id) {
         return Ok(if confirm {
-            Box::new(two_factor_ui::ConfirmPage::new(users, scope, query).await?)
+            Box::new(two_factor_ui::ConfirmPage::new(choices.users, scope, query).await?)
         } else {
-            Box::new(two_factor_ui::TwoFactorPage::new(users, scope, query).await?)
+            Box::new(two_factor_ui::TwoFactorPage::new(choices.users, scope, query).await?)
         });
     }
     if selected.is_some_and(|id| !methods.iter().any(|m| m.method.id == id)) {
         return Err(Error::Invalid);
     }
-    Ok(Box::new(Choices {
-        users,
-        back,
-        confirm,
-        redirect_method: selected.map(str::to_owned),
-    }))
+    choices.redirect_method = selected.map(str::to_owned);
+    Ok(Box::new(choices))
 }
 
 struct Choices {
     users: Arc<UserService>,
     back: Option<String>,
     confirm: bool,
+    portal: bool,
     redirect_method: Option<String>,
+}
+impl Choices {
+    fn destination<'a>(&self, method: &'a bilibi_step_up::MethodChoice) -> &'a str {
+        if self.confirm && method.enrolled {
+            &method.prompt
+        } else {
+            &method.setup
+        }
+    }
+
+    async fn methods(&self, scope: &Scope) -> Result<Vec<bilibi_step_up::MethodChoice>, Error> {
+        let mut methods = self
+            .users
+            .step_up
+            .methods(scope, self.back.as_deref().unwrap_or(""))
+            .await?;
+        if self.portal {
+            methods.retain(|method| two_factor_ui::portal_path(self.destination(method)));
+        }
+        Ok(methods)
+    }
 }
 #[derive(Template)]
 #[template(path = "factor_choices.html")]
@@ -64,24 +97,16 @@ impl LiveState<Scope, Error> for Choices {
             if !matches!(request.input, LiveInput::Refresh) {
                 return Err(Error::Invalid);
             }
-            let methods = self
-                .users
-                .step_up
-                .methods(request.scope, self.back.as_deref().unwrap_or(""))
-                .await?;
+            let methods = self.methods(request.scope).await?;
             let mut choices = Vec::new();
             let mut redirect = None;
             for method in methods {
-                let destination = if self.confirm && method.enrolled {
-                    method.prompt
-                } else {
-                    method.setup
-                };
+                let destination = self.destination(&method);
                 if self.redirect_method.as_deref() == Some(method.method.id) {
-                    redirect = Some(destination.clone());
+                    redirect = Some(destination.to_owned());
                 }
                 choices.push(render(&Button {
-                    href: &destination,
+                    href: destination,
                     variant: ButtonVariant::Secondary,
                     body: Html::text(&format!(
                         "{}{}",

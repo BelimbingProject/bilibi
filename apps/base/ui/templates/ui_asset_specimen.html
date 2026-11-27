@@ -11,9 +11,9 @@
 <button disabled class="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 border-high-contrast-line bg-surface text-ink shadow-xs">Disabled</button>
 </div>
 <div class="flex flex-wrap gap-2">
-<span data-badge class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium capitalize bg-success-surface text-success-ink"><span class="size-1.5 rounded-full bg-current opacity-70"></span>Success</span>
-<span data-badge class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium capitalize bg-warning-surface text-warning-ink">Warning</span>
-<span data-badge class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium capitalize bg-danger-surface text-danger-ink">Danger</span>
+<span data-badge class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium bg-success-surface text-success-ink"><span class="size-1.5 rounded-full bg-current opacity-70"></span><span class="inline-block first-letter:uppercase">Success</span></span>
+<span data-badge class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium bg-warning-surface text-warning-ink"><span class="inline-block first-letter:uppercase">Warning</span></span>
+<span data-badge class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium bg-danger-surface text-danger-ink"><span class="inline-block first-letter:uppercase">Danger</span></span>
 </div>
 <div class="flex items-center gap-4 text-ink-muted" aria-label="Outline, solid, mini and micro icons">{% call ui::icon(name="building-library", class="") %}{% endcall %}{% call ui::icon(name="bell-solid", class="") %}{% endcall %}{% call ui::icon(name="chevron-down-mini", class="") %}{% endcall %}{% call ui::icon(name="chevron-double-up-micro", class="") %}{% endcall %}</div>
 </section>

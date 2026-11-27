@@ -441,12 +441,15 @@ async fn owner_companies(
 /// An address an archived company uses is part of that company's record and
 /// stays as it is. Persons do not freeze it: a
 /// Person has no employer in the party model, and an address can be shared.
+/// `keep_phone` keeps the stored phone whatever `input` holds: the
+/// `core.address.update` contract when its input leaves the phone out.
 pub async fn update(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
     id: AddressId,
     version: i64,
     input: &ValidAddress,
+    keep_phone: bool,
 ) -> WriteResult<Address> {
     check_context(tx, scope)?;
     authorize_key(tx.sql(), scope, UPDATE).await?;
@@ -466,7 +469,7 @@ pub async fn update(
     if owner_companies(tx.sql(), scope, id).await? != companies {
         return Err(WriteError::Stale);
     }
-    if masked.contains("phone") {
+    if keep_phone || masked.contains("phone") {
         input.phone.clone_from(&old.address.phone);
     }
     let tenant = scope.tenant();
@@ -719,7 +722,7 @@ pub async fn detach(
 // Address write guards, also used by operation previews. Commit
 // still uses the locking guards above; a review is never a concurrency guard.
 pub(crate) async fn preview_address(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     id: AddressId,
     version: i64,

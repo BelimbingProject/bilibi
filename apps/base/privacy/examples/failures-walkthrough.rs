@@ -1,7 +1,7 @@
 //! Manual running-service walkthrough of the failure rules (ADR 05, the
 //! second #187 review): an export never publishes a value an erasure removed,
-//! a repeat erasure acts on current values, holds and every company's legal
-//! minimum bind the due-evidence sweep, held data is cleaned up once released,
+//! a repeat erasure acts on current values, holds and the strictest company's
+//! legal minimum bind the due-evidence sweep, held data is cleaned up once released,
 //! no erasable text reaches Workflow history, the Workflow engine cannot
 //! complete a request by itself, the database refuses an erasure with a
 //! made-up cause or field, the hash chain links rows as they commit, a
@@ -33,7 +33,10 @@ bilibi_walkthrough_fixture::walkthrough_module_roles!();
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 // Shared with requests-walkthrough, which also recalls a round.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the shared erasure support module serves several walkthroughs, and each uses a different part of it"
+)]
 #[path = "support/erasure.rs"]
 mod erasure_approval;
 
@@ -355,19 +358,18 @@ async fn company_put(
         .await?;
     tx.commit().await
 }
-/// Inserts one evidence row of `person` for `company`, `age` old.
+/// Inserts one evidence row of `person`, `age` old.
 async fn evidence(
     client: &impl tokio_postgres::GenericClient,
     person: PersonId,
-    company: i64,
     age: &str,
     email: &str,
 ) -> Result<i64> {
     Ok(client
         .query_one(
-            "INSERT INTO base_audit_mutations(company_id,tenant_id,actor_type,actor_id,auditable_type,auditable_id,event,old_values,new_values,trace_id,occurred_at) \
-             VALUES($1,1,'user',4,'person',$2,'updated',jsonb_build_object('email',$3::text),jsonb_build_object('email','changed'),'walkthrough-evidence',clock_timestamp()-$4::text::interval) RETURNING id",
-            &[&company, &person.get().to_string(), &email, &age],
+            "INSERT INTO base_audit_mutations(tenant_id,actor_type,actor_id,auditable_type,auditable_id,event,old_values,new_values,trace_id,occurred_at) \
+             VALUES(1,'user',4,'person',$1,'updated',jsonb_build_object('email',$2::text),jsonb_build_object('email','changed'),'walkthrough-evidence',clock_timestamp()-$3::text::interval) RETURNING id",
+            &[&person.get().to_string(), &email, &age],
         )
         .await?
         .get(0))
@@ -409,7 +411,9 @@ async fn main() -> Result<()> {
     let search = app
         .services
         .get::<bilibi_base::search::Search>(bilibi_base::search::SERVICE)?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     println!(
         "erasure approval rules published for company 1: policy {}",
         erasure_approval::publish_rules(&app, &mut client, &admin.scope, 1).await?
@@ -518,7 +522,7 @@ async fn main() -> Result<()> {
     let walk = new_person(&client, "Chain Probe", "chain-probe@example.test").await?;
     let row = {
         let tx = client.transaction().await?;
-        let row = evidence(&*tx, walk, 1, "0 seconds", "chain-probe@example.test").await?;
+        let row = evidence(&*tx, walk, "0 seconds", "chain-probe@example.test").await?;
         let before: Option<i64> = tx
             .query_one(
                 "SELECT chain_seq FROM base_audit_mutations WHERE id=$1",
@@ -548,7 +552,7 @@ async fn main() -> Result<()> {
             .execute("DELETE FROM base_audit_mutations WHERE id=$1", &[&row])
             .await,
     );
-    for report in bilibi_audit_verify(&client).await? {
+    for report in bilibi_audit_verify(&boundary, &mut client, &admin.scope).await? {
         println!("verify: {report}");
     }
 
@@ -701,16 +705,16 @@ async fn main() -> Result<()> {
     let ann_user: i64 = client
         .query_one(
             "WITH n AS (SELECT nextval(pg_get_serial_sequence('users','id'))::bigint AS user_id), \
-             i AS (INSERT INTO user_identities(kind,email,password_hash,home_tenant_id,home_user_id,last_tenant_id) SELECT 'staff','ann-account@example.test','walkthrough',1,user_id,1 FROM n RETURNING id,home_user_id) \
-             INSERT INTO users(id,tenant_id,identity_id,name,person_id) SELECT home_user_id,1,id,'Ann Race',$1 FROM i RETURNING id",
+             i AS (INSERT INTO user_identities(kind,email,password_hash,last_tenant_id) SELECT 'staff','ann-account@example.test','walkthrough',1 FROM n RETURNING id) \
+             INSERT INTO users(id,tenant_id,identity_id,name,person_id) SELECT n.user_id,1,i.id,'Ann Race',$1 FROM i CROSS JOIN n RETURNING id",
             &[&ann.get()],
         )
         .await?
         .get(0);
     client
         .execute(
-            "INSERT INTO user_sign_ins(tenant_id,user_id,identity_id,token_hash,csrf,credential_hash,state,expires_at) \
-             SELECT 1,$1,identity_id,sha256('walkthrough sign-in'::bytea),'walkthrough',sha256('walkthrough credential'::bytea),'pending',now()+interval '5 minutes' FROM users WHERE tenant_id=1 AND id=$1",
+            "INSERT INTO user_sign_ins(tenant_id,user_id,identity_id,token_hash,csrf,credential_hash,state,expires_at,authentication_authority) \
+             SELECT 1,$1,identity_id,sha256('walkthrough sign-in'::bytea),'walkthrough',sha256('walkthrough credential'::bytea),'pending',now()+interval '5 minutes','portable' FROM users WHERE tenant_id=1 AND id=$1",
             &[&ann_user],
         )
         .await?;
@@ -800,7 +804,9 @@ async fn main() -> Result<()> {
     )
     .await?;
     // Hold the request's finish guard so the export is staged but not built.
-    let guard = db.get().await?;
+    let guard = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     guard
         .execute(
             "SELECT pg_advisory_lock(841331,$1::bigint::int)",
@@ -891,23 +897,38 @@ async fn main() -> Result<()> {
     summary(&settle(&privacy, &client, &admin.scope, again.id, 180).await?);
     person(&client, "after the repeat erasure", ben).await?;
 
-    println!("== B3b: each company's legal minimum binds its own evidence");
-    show(
-        "company 2 audit legal minimum 90 days",
-        company_put(
-            &boundary,
-            &settings,
-            &mut client,
-            &admin.scope,
-            2,
-            AUDIT_MINIMUM,
-            json!(90),
+    println!("== B3b: the strictest company's legal minimum binds all the tenant's evidence");
+    // Evidence names no company (#601): no ledger has the column.
+    let named: i64 = client
+        .query_one(
+            "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' \
+             AND column_name='company_id' AND table_name IN ('base_audit_mutations','base_audit_actions','base_audit_capture_failures')",
+            &[],
         )
-        .await,
-    );
+        .await?
+        .get(0);
+    println!("ledgers with a company column: {named}");
+    if named != 0 {
+        return Err("an audit ledger still has a company_id column".into());
+    }
+    for (company, days) in [(2, 90), (3, 30)] {
+        show(
+            &format!("company {company} audit legal minimum {days} days"),
+            company_put(
+                &boundary,
+                &settings,
+                &mut client,
+                &admin.scope,
+                company,
+                AUDIT_MINIMUM,
+                json!(days),
+            )
+            .await,
+        );
+    }
     let cleo = new_person(&client, "Cleo Minimum", "cleo-minimum@example.test").await?;
-    let of_one = evidence(&**client, cleo, 1, "10 days", "cleo-minimum@example.test").await?;
-    let of_two = evidence(&**client, cleo, 2, "10 days", "cleo-minimum@example.test").await?;
+    let recent = evidence(&**client, cleo, "10 days", "cleo-minimum@example.test").await?;
+    let old = evidence(&**client, cleo, "100 days", "cleo-minimum@example.test").await?;
     let erasure = received(
         &privacy,
         &mut client,
@@ -928,18 +949,44 @@ async fn main() -> Result<()> {
     )
     .await?;
     summary(&settle(&privacy, &client, &admin.scope, erasure.id, 180).await?);
-    rows(
-        &client,
-        "evidence",
-        &format!("SELECT id||' company='||company_id||' old='||old_values::text FROM base_audit_mutations WHERE id IN ({of_one},{of_two}) ORDER BY id"),
-    )
-    .await?;
-    rows(
-        &client,
-        "deferral",
-        &format!("SELECT 'person='||coalesce(person_id::text,'-')||' due in '||date_part('day', due_at-clock_timestamp())::int||' days' FROM base_audit_erasure_deferrals WHERE auditable_type='person' AND auditable_id='{}' AND done_at IS NULL", cleo.get()),
-    )
-    .await?;
+    // 90 days, not 30: the 10-day row stays about 80 more days, and the
+    // 100-day row, past every minimum, is erased.
+    let kept = client
+        .query_one(
+            &format!(
+                "SELECT (SELECT old_values->>'email' FROM base_audit_mutations WHERE id={recent}), \
+                        (SELECT old_values->>'email' FROM base_audit_mutations WHERE id={old}), \
+                        (SELECT date_part('day', due_at-clock_timestamp())::int FROM base_audit_erasure_deferrals \
+                          WHERE auditable_type='person' AND auditable_id='{}' AND done_at IS NULL)",
+                cleo.get()
+            ),
+            &[],
+        )
+        .await?;
+    let (recent, old, due): (Option<String>, Option<String>, Option<i32>) =
+        (kept.get(0), kept.get(1), kept.get(2));
+    println!(
+        "evidence 10 days old: {recent:?}; 100 days old: {old:?}; deferral due in {due:?} days"
+    );
+    if recent.as_deref() != Some("cleo-minimum@example.test")
+        || old.as_deref() != Some("[erased]")
+        || !matches!(due, Some(79..=80))
+    {
+        return Err("the strictest company's legal minimum did not bind the evidence".into());
+    }
+    // The minimums come off again, so later evidence is not kept.
+    for company in [2, 3] {
+        company_put(
+            &boundary,
+            &settings,
+            &mut client,
+            &admin.scope,
+            company,
+            AUDIT_MINIMUM,
+            Value::Null,
+        )
+        .await?;
+    }
 
     println!("== B3a: the due-evidence sweep honours a hold on the person");
     show(
@@ -956,14 +1003,7 @@ async fn main() -> Result<()> {
         .await,
     );
     let dee = new_person(&client, "Dee Due", "dee-due@example.test").await?;
-    let due = evidence(
-        &**client,
-        dee,
-        3,
-        "1 day -20 seconds",
-        "dee-due@example.test",
-    )
-    .await?;
+    let due = evidence(&**client, dee, "1 day -20 seconds", "dee-due@example.test").await?;
     let erasure = received(
         &privacy,
         &mut client,
@@ -1020,6 +1060,16 @@ async fn main() -> Result<()> {
         &client,
         "evidence",
         &format!("SELECT old_values::text FROM base_audit_mutations WHERE id={due}"),
+    )
+    .await?;
+    company_put(
+        &boundary,
+        &settings,
+        &mut client,
+        &admin.scope,
+        3,
+        AUDIT_MINIMUM,
+        Value::Null,
     )
     .await?;
 
@@ -1111,6 +1161,92 @@ async fn main() -> Result<()> {
         "download after the cleanup: {}",
         export_text(&privacy, &mut client, &admin.scope, access.id).await
     );
+
+    println!("== B5: a person hold keeps what their requests recorded and their exports (#563)");
+    let fay = new_person(&client, "Fay Held", "fay-held@example.test").await?;
+    let access = received(
+        &privacy,
+        &mut client,
+        &second.scope,
+        RequestKind::Access,
+        fay,
+        "fay-held@example.test",
+    )
+    .await?;
+    let access = privacy
+        .approve(&mut client, &admin.scope, access.id, access.version)
+        .await?;
+    let access = settle(&privacy, &client, &admin.scope, access.id, 180).await?;
+    let export = access
+        .export_artifact
+        .clone()
+        .ok_or("the access request filed no export")?;
+    let hold = privacy
+        .place_hold(
+            &mut client,
+            &admin.scope,
+            HoldTarget::Person { person: fay },
+            "Dispute about request handling",
+        )
+        .await?;
+    let erasure = received(
+        &privacy,
+        &mut client,
+        &admin.scope,
+        RequestKind::Erasure,
+        fay,
+        "fay-held@example.test",
+    )
+    .await?;
+    let erasure = erasure_approval::decide(
+        &app,
+        &privacy,
+        &mut client,
+        &admin.scope,
+        &second.step_up().await,
+        &erasure,
+        true,
+    )
+    .await?;
+    let erasure = settle(&privacy, &client, &admin.scope, erasure.id, 180).await?;
+    summary(&erasure);
+    // `kept`: requests remember what was given, the export stands and the
+    // cleanup is owed. `forgotten`: the opposite, once the hold is released.
+    let requests = vec![access.id, erasure.id];
+    let state = "SELECT \
+        (SELECT bool_and(identifiers <> '[]'::jsonb AND erased_at IS NULL) FROM base_privacy_requests WHERE id = ANY($1)) \
+        AND EXISTS(SELECT 1 FROM base_artifacts WHERE public_id=$2 AND deleted_at IS NULL) \
+        AND EXISTS(SELECT 1 FROM base_privacy_resumptions WHERE request_id=$3 AND done_at IS NULL), \
+        (SELECT bool_and(identifiers = '[]'::jsonb AND erased_at IS NOT NULL) FROM base_privacy_requests WHERE id = ANY($1)) \
+        AND NOT EXISTS(SELECT 1 FROM base_artifacts WHERE public_id=$2 AND deleted_at IS NULL) \
+        AND EXISTS(SELECT 1 FROM base_privacy_resumptions WHERE request_id=$3 AND done_at IS NOT NULL)";
+    let held = client
+        .query_one(state, &[&requests, &export, &erasure.id])
+        .await?;
+    if erasure.status != "completed" || !held.get::<_, bool>(0) {
+        return Err("completing an erasure under a person hold forgot the person's requests or deleted their export".into());
+    }
+    println!("erasure under a person hold: completed; request text and export kept; cleanup owed");
+    privacy
+        .release_hold(&mut client, &admin.scope, hold.id, "Dispute settled")
+        .await?;
+    sweep(
+        &app,
+        &mut client,
+        &admin.scope,
+        "sweep after the person hold is released",
+    )
+    .await?;
+    let released = client
+        .query_one(state, &[&requests, &export, &erasure.id])
+        .await?;
+    if !released.get::<_, bool>(1) {
+        return Err(
+            "the owed cleanup did not forget the requests and delete the export after release"
+                .into(),
+        );
+    }
+    println!("after release: the owed cleanup forgot the request text and deleted the export");
 
     println!("== S1: Search neither matches nor shows a masked field");
     let probe = new_person(&client, "Search Probe", "probe-unique@example.test").await?;
@@ -1308,7 +1444,7 @@ async fn main() -> Result<()> {
     let in_savepoint = {
         let tx = client.transaction().await?;
         tx.batch_execute("SAVEPOINT store_write").await?;
-        evidence(&*tx, rita, 1, "0 seconds", "rita-retained@example.test").await?;
+        evidence(&*tx, rita, "0 seconds", "rita-retained@example.test").await?;
         tx.batch_execute("RELEASE SAVEPOINT store_write").await?;
         let outcome = tx
             .execute(&probe_sql(erasure.id, rita.get(), rita.get()), &[])
@@ -1324,7 +1460,7 @@ async fn main() -> Result<()> {
     // request's to clear (probed, then rolled back).
     let other_person = {
         let tx = client.transaction().await?;
-        evidence(&*tx, dee, 1, "0 seconds", "dee@example.test").await?;
+        evidence(&*tx, dee, "0 seconds", "dee@example.test").await?;
         let outcome = tx
             .execute(&probe_sql(erasure.id, rita.get(), dee.get()), &[])
             .await;
@@ -1379,8 +1515,8 @@ async fn main() -> Result<()> {
         .get(0);
         client
         .execute(
-            "INSERT INTO base_audit_mutations(company_id,tenant_id,actor_type,actor_id,auditable_type,auditable_id,event,old_values,new_values,trace_id,occurred_at) \
-             VALUES(1,1,'user',4,'affiliation',$1,'updated',jsonb_build_object('work_email','edna-work@example.test','work_phone','+60 3 5550 0101'), \
+            "INSERT INTO base_audit_mutations(tenant_id,actor_type,actor_id,auditable_type,auditable_id,event,old_values,new_values,trace_id,occurred_at) \
+             VALUES(1,'user',4,'affiliation',$1,'updated',jsonb_build_object('work_email','edna-work@example.test','work_phone','+60 3 5550 0101'), \
              jsonb_build_object('work_email',NULL,'work_phone',NULL),'walkthrough-edit',clock_timestamp())",
             &[&affiliation.to_string()],
         )
@@ -1598,8 +1734,8 @@ async fn main() -> Result<()> {
     let gil_user: i64 = client
         .query_one(
             "WITH n AS (SELECT nextval(pg_get_serial_sequence('users','id'))::bigint AS user_id), \
-             i AS (INSERT INTO user_identities(kind,email,password_hash,home_tenant_id,home_user_id,last_tenant_id) SELECT 'staff','gil-provisioned@example.test','!walkthrough',1,user_id,1 FROM n RETURNING id,home_user_id) \
-             INSERT INTO users(id,tenant_id,identity_id,name,person_id) SELECT home_user_id,1,id,'Gil Provisioned',$1 FROM i RETURNING id",
+             i AS (INSERT INTO user_identities(kind,email,password_hash,last_tenant_id) SELECT 'staff','gil-provisioned@example.test','!walkthrough',1 FROM n RETURNING id) \
+             INSERT INTO users(id,tenant_id,identity_id,name,person_id) SELECT n.user_id,1,i.id,'Gil Provisioned',$1 FROM i CROSS JOIN n RETURNING id",
             &[&gil.get()],
         )
         .await?
@@ -1721,8 +1857,8 @@ async fn main() -> Result<()> {
     let hana_user: i64 = client
         .query_one(
             "WITH n AS (SELECT nextval(pg_get_serial_sequence('users','id'))::bigint AS user_id), \
-             i AS (INSERT INTO user_identities(kind,email,password_hash,home_tenant_id,home_user_id,last_tenant_id) SELECT 'staff','hana-linked@example.test','!walkthrough',1,user_id,1 FROM n RETURNING id,home_user_id) \
-             INSERT INTO users(id,tenant_id,identity_id,name,person_id) SELECT home_user_id,1,id,'Hana Linked',$1 FROM i RETURNING id",
+             i AS (INSERT INTO user_identities(kind,email,password_hash,last_tenant_id) SELECT 'staff','hana-linked@example.test','!walkthrough',1 FROM n RETURNING id) \
+             INSERT INTO users(id,tenant_id,identity_id,name,person_id) SELECT n.user_id,1,i.id,'Hana Linked',$1 FROM i CROSS JOIN n RETURNING id",
             &[&hana.get()],
         )
         .await?
@@ -1809,7 +1945,7 @@ async fn main() -> Result<()> {
             },
         )
         .await?;
-    let found = privacy.locate(&client, &second.scope, request.id).await?;
+    let found = privacy.locate(&second.scope, request.id).await?;
     let candidates: Vec<String> = found
         .iter()
         .flat_map(|(store, _, located)| {
@@ -1885,7 +2021,7 @@ async fn main() -> Result<()> {
             },
         )
         .await?;
-    for (store, _, located) in privacy.locate(&client, &second.scope, request.id).await? {
+    for (store, _, located) in privacy.locate(&second.scope, request.id).await? {
         if store == "core/person.people" {
             for kind in located.kinds {
                 println!(
@@ -2151,6 +2287,26 @@ async fn main() -> Result<()> {
         erasure.status, erasure.approval_request
     );
     let target = format!("approval:{}", erasure.approval_request.unwrap_or_default());
+    let refused_audits: i64 = client.query_one(
+        "SELECT count(*) FROM base_audit_actions WHERE event='step_up.refused' AND payload->>'target'=$1",
+        &[&target],
+    ).await?.get(0);
+    assert!(
+        refused_audits > 0,
+        "step-up refusal audit must survive the approval rollback"
+    );
+    let invalid_scope = admin.scope.clone().presenting_step_up("invalid");
+    assert!(erasure_approval::vote(&app, &invalid_scope, &erasure, true)
+        .await
+        .is_err());
+    let failed_audits: i64 = client.query_one(
+        "SELECT count(*) FROM base_audit_actions WHERE event='step_up.failed' AND payload->>'target'=$1",
+        &[&target],
+    ).await?.get(0);
+    assert!(
+        failed_audits > 0,
+        "failed-code audit must survive the approval rollback"
+    );
     // The browser's Step-up page: a fresh code marks the web session.
     let code = admin.code().await;
     show(
@@ -2232,9 +2388,9 @@ async fn main() -> Result<()> {
         let user: i64 = client
             .query_one(
                 "WITH n AS (SELECT nextval(pg_get_serial_sequence('users','id'))::bigint AS user_id), \
-                 i AS (INSERT INTO user_identities(kind,tenant_id,email,password_hash,status,home_tenant_id,home_user_id,last_tenant_id,deleted_at) SELECT CASE WHEN $5::bigint IS NULL THEN 'staff' ELSE 'customer' END,CASE WHEN $5::bigint IS NULL THEN NULL ELSE 1 END,$2,'!walkthrough','deleted',1,user_id,1,now()-interval '10 days' FROM n RETURNING id,home_user_id) \
+                 i AS (INSERT INTO user_identities(kind,tenant_id,email,password_hash,status,last_tenant_id,deleted_at) SELECT CASE WHEN $5::bigint IS NULL THEN 'staff' ELSE 'customer' END,CASE WHEN $5::bigint IS NULL THEN NULL ELSE 1 END,$2,'!walkthrough','deleted',1,now()-interval '10 days' FROM n RETURNING id) \
                  INSERT INTO users(id,tenant_id,identity_id,name,person_id,affiliation_id,organisation_id,kind,status,deleted_at) \
-                 SELECT home_user_id,1,id,$1,$3,$4,$5,CASE WHEN $5::bigint IS NULL THEN 'staff' ELSE 'customer' END,'deleted',now()-interval '10 days' FROM i RETURNING id",
+                 SELECT n.user_id,1,i.id,$1,$3,$4,$5,CASE WHEN $5::bigint IS NULL THEN 'staff' ELSE 'customer' END,'deleted',now()-interval '10 days' FROM i CROSS JOIN n RETURNING id",
                 &[&name, &email, &person.get(), &affiliation, &company],
             )
             .await?
@@ -2261,7 +2417,7 @@ async fn main() -> Result<()> {
              SET session_replication_role = origin;",
         )
         .await?;
-    for report in bilibi_audit_verify(&client).await? {
+    for report in bilibi_audit_verify(&boundary, &mut client, &admin.scope).await? {
         println!("verify: {report}");
     }
 
@@ -2274,8 +2430,8 @@ async fn main() -> Result<()> {
 async fn history(client: &Client, kind: &str, id: i64, old: Value, new: Value) -> Result<()> {
     client
         .execute(
-            "INSERT INTO base_audit_mutations(company_id,tenant_id,actor_type,actor_id,auditable_type,auditable_id,event,old_values,new_values,trace_id,occurred_at) \
-             VALUES(1,1,'user',4,$1,$2,'updated',$3,$4,'walkthrough-history',clock_timestamp())",
+            "INSERT INTO base_audit_mutations(tenant_id,actor_type,actor_id,auditable_type,auditable_id,event,old_values,new_values,trace_id,occurred_at) \
+             VALUES(1,'user',4,$1,$2,'updated',$3,$4,'walkthrough-history',clock_timestamp())",
             &[&kind, &id.to_string(), &old, &new],
         )
         .await?;
@@ -2315,9 +2471,27 @@ async fn search_everywhere(client: &Client, needle: &str) -> Result<Vec<String>>
     Ok(hits)
 }
 
-async fn bilibi_audit_verify(client: &Client) -> Result<Vec<String>> {
-    Ok(bilibi_base::audit::verify(client)
-        .await?
+/// One verification, started as the page starts it and stepped here as its
+/// queued job steps it.
+async fn bilibi_audit_verify(
+    boundary: &MutationBoundary,
+    client: &mut Client,
+    scope: &Scope,
+) -> Result<Vec<String>> {
+    let mut tx = boundary
+        .begin(client, scope.mutation_context("audit.chain.verify"))
+        .await?;
+    let id = bilibi_base::audit::request_verification(&mut tx, scope).await?;
+    tx.commit().await?;
+    let who = bilibi_base::audit::Attribution::from_scope(scope);
+    let run = loop {
+        let run = bilibi_base::audit::advance_verification(client, id, &who).await?;
+        if !run.running() {
+            break run;
+        }
+    };
+    Ok(run
+        .reports
         .into_iter()
         .map(|report| {
             format!(
@@ -2325,7 +2499,7 @@ async fn bilibi_audit_verify(client: &Client) -> Result<Vec<String>> {
                 report.chain,
                 report.checked,
                 report.unsealed,
-                report.break_at.map(|b| (b.seq, b.reason))
+                report.break_at.map(|b| (b.tenant, b.seq, b.row, b.reason))
             )
         })
         .collect())

@@ -111,8 +111,17 @@ impl WorkCalendars {
             .iter()
             .map(|row| row.get(0))
             .collect();
+        if tenants.is_empty() {
+            return Ok(0);
+        }
         let mut failed = 0;
-        let mut fenced = self.db.get().await?;
+        let mut fenced = self
+            .db
+            .try_get_detached(
+                "Queue's fence keeps the job row locked on this connection while each tenant's \
+                 transaction commits on the other; one pair per Queue slot running this handler",
+            )
+            .await?;
         for tenant in tenants {
             // Queue's fence: the job's row stays locked while this tenant's
             // transaction commits, so a cancelled, expired or replaced claim

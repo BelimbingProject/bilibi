@@ -4,11 +4,10 @@
 //! Serves the checked-in `sample/` payloads from a local HTTP fixture with
 //! ETags (cities zipped on the fly, as GeoNames ships them) and runs the real
 //! importer through: first import, 304 revalidation, local-name preservation
-//! across an upstream change, 503 and unreachable fallbacks, `force` refusing
-//! fallback, a payload with no valid rows, a database failure in a late batch,
+//! across an upstream change, an Admin1 division moved to another code, 503
+//! and unreachable fallbacks, `force` refusing fallback, a payload with no valid rows, a database failure in a late batch,
 //! the ETag-less cache lifetime and the capability-gated screen entry point.
 #[path = "support/fixture.rs"]
-#[allow(dead_code)]
 mod fixture;
 
 use bilibi_database::{pool, Error, Result};
@@ -66,7 +65,7 @@ async fn main() -> Result<()> {
     let importer = services.get::<ReferenceImport>(IMPORT_SERVICE)?;
     let geo = services.get::<Geonames>(SERVICE)?;
     db.get().await?
-        .batch_execute("TRUNCATE address_attachments, addresses, geonames_postcode_overrides, geonames_cities, geonames_postcodes, geonames_admin1, geonames_countries RESTART IDENTITY")
+        .batch_execute("TRUNCATE address_person_subjects, address_attachments, addresses, geonames_postcode_overrides, geonames_cities, geonames_postcodes, geonames_admin1, geonames_countries RESTART IDENTITY")
         .await?;
 
     let (port, fixture) = fixture::start().await.map_err(|_| Error::Internal)?;
@@ -167,6 +166,34 @@ async fn main() -> Result<()> {
     println!(
         "  MY.14: {:?}",
         geo.get_admin1("MY.14").await?.map(|a| (a.name, a.alt_name))
+    );
+
+    println!("== upstream moves Penang from MY.09 to MY.15, keeping its GeoNames ID");
+    {
+        let mut f = fixture.lock().unwrap();
+        let admin1 = String::from_utf8(f.files["admin1CodesASCII.txt"].clone())
+            .unwrap()
+            .replace("MY.09\tPenang", "MY.15\tPenang");
+        f.files
+            .insert("admin1CodesASCII.txt".into(), admin1.into_bytes());
+    }
+    run(
+        "a re-import adds the new code; the old code stays and gives up the ID",
+        &importer,
+        &ImportOptions {
+            datasets: vec![Dataset::Admin1],
+            ..options.clone()
+        },
+        &fixture,
+    )
+    .await;
+    println!(
+        "  MY Admin1: {:?}",
+        geo.list_admin1("MY")
+            .await?
+            .iter()
+            .map(|a| (a.code.clone(), a.name.clone(), a.geoname_id))
+            .collect::<Vec<_>>()
     );
 
     fixture.lock().unwrap().status = Some(503);
@@ -290,7 +317,9 @@ async fn main() -> Result<()> {
 
     println!("== the screen entry point checks admin.geonames.update (platform) on every call");
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client.execute("INSERT INTO platform_operator(singleton,tenant_id) VALUES(true,1) ON CONFLICT DO NOTHING", &[]).await?;
     let admin = authentication
         .authenticate(&**client, 1, 4, "walkthrough".into())

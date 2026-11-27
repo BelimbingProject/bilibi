@@ -301,7 +301,7 @@ pub(super) struct Rows {
 }
 
 pub(super) async fn rows(
-    client: &mut deadpool_postgres::Object,
+    client: &mut bilibi_database::Connection,
     table: &Table,
     columns: &[Projected<'_>],
     query: &RowQuery<'_>,

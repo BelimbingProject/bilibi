@@ -118,7 +118,7 @@ static GRID: GridContribution = GridContribution {
             Field::choice("substitute", "Holiday substitution", &["none", "rest", "rest_and_off"]).protected(),
             Field::new("timezone", "Zone", FieldType::String).protected(),
             Field::new("holiday_sets", "Holiday sets", FieldType::String).protected(),
-        ]).label_field("name")],
+        ]).label_field("name").list_address(CALENDARS_PATH)],
     links: &[],
 };
 bilibi_grid::contribute!("core/work_calendar", "work_calendar.grid", &GRID);

@@ -1,5 +1,5 @@
 use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribution, VOCABULARY};
-use bilibi_grid::{Field, FieldType, GridContribution, PersonalKind, Source, TableDecl};
+use bilibi_grid::{Field, FieldType, GridContribution, Source, TableDecl};
 use bilibi_module_registry::{Contribution, Provenance};
 
 pub const LIST: &str = "admin.person.list";
@@ -42,8 +42,8 @@ const fn role(
     }
 }
 inventory::submit! { Contribution::new(VOCABULARY, "core/person", Provenance { module: "core/person", source: file!(), line: line!() }, &VocabularyContribution {
-    domains: &[], verbs: &["retire"],
-    capabilities: &[C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(RETIRE), C::platform(SYSTEM_MANAGE), C::tenant(IMPORT), C::tenant(EXPORT), C::tenant(BULK_UPDATE)],
+    domains: &["core"], verbs: &["retire"],
+    capabilities: &[C::portal(crate::PORTAL), C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(RETIRE), C::platform(SYSTEM_MANAGE), C::tenant(IMPORT), C::tenant(EXPORT), C::tenant(BULK_UPDATE)],
     roles: &[role("tenant_owner", "Tenant Owner", CAPS)],
     system_principals: &[],
 }) }
@@ -53,34 +53,41 @@ inventory::submit! { Contribution::new(VOCABULARY, "core/person", Provenance { m
 static GRID: GridContribution = GridContribution {
     record_fields: &[bilibi_grid::RecordFields { table: "persons", fields: crate::web::fields::ALL }],
     tables: &[TableDecl::new("persons", "Contacts", LIST,
-        Source::tenant("SELECT id,code,name,kind,CASE WHEN retired_at IS NULL THEN 'current' ELSE 'retired' END AS identity,email,phone,system_key,retired_at,version,created_at,updated_at,search_vector FROM persons WHERE tenant_id=$1"), "id", &[
+        Source::tenant("SELECT id,code,name,kind,CASE WHEN retired_at IS NULL THEN 'current' ELSE 'retired' END AS identity,email,phone,system_key,retired_at,version,created_at,updated_at,search_vector,custom_fields,custom_search_vector FROM persons WHERE tenant_id=$1"), "id", &[
             Field::new("id", "ID", FieldType::Integer).protected(),
-            Field::new("name", "Name", FieldType::String).protected().personal(PersonalKind::Name),
+            Field::record(crate::web::fields::NAME).protected(),
             // Generated from the name, so as personal as the name (ADR 05).
-            Field::new("code", "Code", FieldType::String).protected().personal(PersonalKind::Identifier),
-            Field::new("identity", "Identity", FieldType::String).protected(),
-            Field::choice("kind", "Kind", &["human", "agent"]).protected(),
-            Field::new("email", "Personal email", FieldType::String).personal(PersonalKind::Email),
-            Field::new("phone", "Personal phone", FieldType::String).personal(PersonalKind::Phone),
+            Field::record(crate::web::fields::CODE).protected(),
+            Field::record(crate::web::fields::IDENTITY).protected(),
+            Field::record(crate::web::fields::KIND).protected(),
+            Field::record(crate::web::fields::EMAIL),
+            Field::record(crate::web::fields::PHONE),
             Field::new("system_key", "System identity", FieldType::String).protected(),
             Field::new("retired_at", "Retired", FieldType::DateTime).protected(),
             Field::new("version", "Version", FieldType::Integer).protected(),
             Field::new("created_at", "Created", FieldType::DateTime).protected(),
             Field::new("updated_at", "Updated", FieldType::DateTime).protected(),
             Field::new("search_vector", "Search terms", FieldType::String).hidden(),
-        ]).label_field("name").time_field("created_at").record_types(&["person"])],
+            // The tenant's custom values; Grid adds each active field as `cf_<key>`.
+            Field::new("custom_fields", "Custom fields", FieldType::String).hidden(),
+            Field::new("custom_search_vector", "Custom search terms", FieldType::String).hidden(),
+        ]).label_field("name").time_field("created_at").record_types(&["person"]).list_address("/contacts")],
     links: &[],
 };
 bilibi_grid::contribute!("core/person", "person.grid", &GRID);
+inventory::submit! { Contribution::new(bilibi_custom_fields::GRID_SOURCES, "person", Provenance { module: "core/person", source: file!(), line: line!() },
+&bilibi_custom_fields::GridSource { record_type: "person", table: "persons", column: "custom_fields" }) }
 
 // Global search finds contacts by name/code, and by the start of a code, email or phone
 // for a reader no held role restricts them for (as the Contacts search does).
 static SEARCH: bilibi_search::Searchable =
     bilibi_search::Searchable::new("persons", "name", "search_vector", "/contacts/{id}")
+        .title_trigrams()
         .subtitle(&["code", "email"])
         .prefix(&["code", "email", "phone"])
         .state("identity", &["retired"])
-        .updated("updated_at");
+        .updated("updated_at")
+        .custom("custom_search_vector");
 bilibi_search::contribute!("core/person", "person.search", &SEARCH);
 
 // Contacts import from CSV through the person contracts (issue 133). A row
@@ -101,8 +108,15 @@ inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/per
         fields: &["kind"],
     }),
 }) }
+inventory::submit! { Contribution::new(bilibi_bulk_data::IMPORT_UNDO, "core/person.contacts", Provenance { module: "core/person", source: file!(), line: line!() }, &bilibi_bulk_data::ImportUndo {
+    delete: "core.person.import.undo", delete_id: "person_id", delete_version: "version", created_version: "version",
+}) }
 
 // Core has a contact directory, with no employee-type or employment controls.
+inventory::submit! { Contribution::new(bilibi_bulk_data::CUSTOM_IMPORTS, "core/person.contacts", Provenance { module: "core/person", source: file!(), line: line!() }, &bilibi_bulk_data::CustomImport {
+    record_type: "person", create_field: "custom", update_field: "custom",
+}) }
+
 macro_rules! page {
     ($id:literal, $path:literal, $operation:literal, $cap:expr) => {
         inventory::submit! { Contribution::new(

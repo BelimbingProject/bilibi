@@ -3,7 +3,7 @@
 //! unavailable), and the `RecordPicker` live control finds one by name.
 //! `base/records` resolves names and hits with the reader's permissions; this
 //! module only draws them, so a page writes no markup of its own.
-use crate::{forms::InputKind, Button, Field, Html, Restricted};
+use crate::{forms::InputKind, Button, Choice, Combobox, Field, Html, Restricted};
 use askama::Template;
 
 /// How a reference reads for this viewer.
@@ -71,25 +71,39 @@ impl RelatedRecord {
     }
 }
 
-/// A picker hit's text: one line within the button, ending in "…" when long,
-/// with the whole text as its title (a button is one fixed height).
-#[derive(Template)]
-#[template(
-    source = r#"<span class="min-w-0 truncate" title="{{ text }}">{{ text }}</span>"#,
-    ext = "html"
-)]
-struct HitLabel {
-    text: String,
-}
-
 /// One record a picker offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PickerHit {
     /// `kind:id`, what choosing it raises.
     pub value: String,
     pub label: String,
-    /// The kind's name for people, such as "Contact" or "Company".
+    /// The singular kind name for a search across kinds ("Company").
+    /// Empty when the field searches only one kind.
     pub kind_label: String,
+    /// An instant that distinguishes this hit in the reader's time display.
+    pub instant: Option<crate::flex_table::Instant>,
+}
+
+/// One kind of record a [`RecordPicker::named`] offers: its Base Records kind,
+/// the prefix a hit raises (`<prefix>:<id>`), its name for people and, when it
+/// has one, the page a chosen record links to (`<page>/<id>`).
+#[derive(Clone, Copy, Debug)]
+pub struct NamedKind<'a> {
+    pub kind: &'a str,
+    pub prefix: &'a str,
+    pub label: &'a str,
+    pub page: Option<&'a str>,
+}
+impl NamedKind<'_> {
+    /// The id a hit of this kind raised as `record`, if it is one.
+    pub fn picked(&self, record: &str) -> Option<i64> {
+        record
+            .strip_prefix(self.prefix)?
+            .strip_prefix(':')?
+            .parse()
+            .ok()
+            .filter(|id| *id > 0)
+    }
 }
 
 /// A live type-ahead over the kinds a field allows. It sits in the owner's
@@ -102,12 +116,10 @@ pub struct PickerHit {
 #[template(
     source = r#"{%- import "forms.html" as forms -%}<div id="{{ id }}" data-record-picker class="space-y-1">
 {%- if let Some(pill) = selected -%}
-<div class="flex flex-wrap items-center gap-2"><span class="text-xs text-ink-muted">{{ label }}</span>{{ pill }}{{ clear }}</div>{{ hidden }}{% call forms::errors(id=id, errors=errors) %}{% endcall %}
+<div class="flex flex-wrap items-center gap-2"><span class="{% if in_fact %}sr-only{% else %}text-xs text-ink-muted{% endif %}">{{ label }}</span>{{ pill }}{{ self.clear() }}</div>{{ hidden }}{% call forms::errors(id=id, errors=errors) %}{% endcall %}
 {%- else -%}
-{{ search }}
-{%- if !hits.is_empty() -%}<ul id="{{ id }}-hits" aria-label="{{ label }}" class="space-y-1">{% for hit in hits %}<li>{{ hit }}</li>{% endfor %}</ul>
-{%- else if !query.is_empty() -%}<p id="{{ id }}-none" class="text-xs text-ink-muted">No matching record you may see.</p>
-{%- endif -%}
+{%- let combo = self.search_combobox() -%}
+{% call forms::combobox(combo=combo, server_search=true, query=query, pick_event=pick_event, key=key) %}{% endcall %}
 {%- endif -%}
 </div>"#,
     ext = "html"
@@ -117,17 +129,43 @@ pub struct RecordPicker {
     pub label: String,
     query: String,
     selected: Option<Html>,
-    search: Html,
+    search: Combobox,
     hidden: Html,
-    clear: Html,
-    hits: Vec<Html>,
+    clear_id: String,
+    clear_event: String,
+    clear_label: &'static str,
+    in_fact: bool,
+    pick_event: String,
+    /// Each hit's `kind:id` and text.
+    hits: Vec<PickerHit>,
+    /// Sent with a pick or a clear as `key`: the field this picker serves.
+    key: String,
     /// Shown under the chosen record; while searching, the search field shows them.
     errors: Vec<String>,
 }
 impl RecordPicker {
+    pub fn search_name(mut self, name: impl Into<String>) -> Self {
+        self.search.name = name.into();
+        self
+    }
+    fn search_combobox(&self) -> Combobox {
+        self.search
+            .clone()
+            .options(
+                self.hits
+                    .iter()
+                    .map(|hit| {
+                        Choice::new(&hit.label, &hit.value)
+                            .detail(&hit.kind_label)
+                            .with_instant(hit.instant.clone())
+                    })
+                    .collect(),
+            )
+            .errors(self.errors.clone())
+    }
+
     /// `form` and `key` name the posted fields: the typed text as
     /// `{form}[{key}_search]`, the choice as `{form}[{key}]`.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: &str,
         form: &str,
@@ -140,37 +178,11 @@ impl RecordPicker {
         errors: Vec<String>,
     ) -> Self {
         let (pick_event, clear_event) = events;
-        let search = Field::in_form(form, &format!("{key}_search"))
-            .id(format!("{id}-search"))
+        let search = Combobox::new(format!("{id}-search"), format!("{form}[{key}_search]"))
             .label(label)
-            .kind(InputKind::Search)
-            .value(query)
-            .attr("data-debounce", "300")
-            .autocomplete("off")
-            .hint("Type part of a name.")
             .errors(errors.clone());
-        let hits = hits
-            .iter()
-            .enumerate()
-            .map(|(index, hit)| {
-                let body = Html::render(&HitLabel {
-                    text: format!("{} · {}", hit.label, hit.kind_label),
-                })
-                .unwrap_or(Html::EMPTY);
-                Html::render(&Button {
-                    id: &format!("{id}-hit-{index}"),
-                    button_type: "button",
-                    event: pick_event,
-                    name: "record",
-                    value: &hit.value,
-                    class: "w-full min-w-0 justify-start",
-                    body,
-                    ..Button::default()
-                })
-                .unwrap_or(Html::EMPTY)
-            })
-            .collect();
-        let (selected, hidden, clear) = match selected {
+        let hits = hits.to_vec();
+        let (selected, hidden) = match selected {
             Some((value, pill)) => (
                 Some(Html::render(&pill).unwrap_or(Html::EMPTY)),
                 Html::render(
@@ -180,27 +192,102 @@ impl RecordPicker {
                         .value(value),
                 )
                 .unwrap_or(Html::EMPTY),
-                Html::render(&Button {
-                    id: &format!("{id}-clear"),
-                    button_type: "button",
-                    event: clear_event,
-                    body: Html::text("Change"),
-                    ..Button::default()
-                })
-                .unwrap_or(Html::EMPTY),
             ),
-            None => (None, Html::EMPTY, Html::EMPTY),
+            None => (None, Html::EMPTY),
         };
         Self {
             id: id.into(),
             label: label.into(),
             query: query.into(),
             selected,
-            search: Html::render(&search).unwrap_or(Html::EMPTY),
+            search,
             hidden,
-            clear,
+            clear_id: format!("{id}-clear"),
+            clear_event: clear_event.into(),
+            clear_label: "Change",
+            in_fact: false,
+            pick_event: pick_event.into(),
             hits,
+            key: String::new(),
             errors,
         }
+    }
+    /// The picker is a record page's fact, which already names it and saves
+    /// a pick or a clear at once: the label beside the chosen record is for
+    /// screen readers only, and the clear button says "Remove" rather than
+    /// "Change", a change it would not make by itself.
+    pub fn in_fact(mut self) -> Self {
+        self.in_fact = true;
+        self.clear_label = "Remove";
+        self
+    }
+    /// One page holding several pickers under the same events (a record's
+    /// custom fields): each pick and clear also sends `key`, so the events
+    /// stay fixed names a page can declare.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = key.into();
+        self
+    }
+    fn clear(&self) -> Html {
+        Html::render(&Button {
+            id: &self.clear_id,
+            button_type: "button",
+            event: &self.clear_event,
+            data_key: &self.key,
+            body: Html::text(self.clear_label),
+            ..Button::default()
+        })
+        .unwrap_or(Html::EMPTY)
+    }
+    /// A picker whose hits and choice the owner names itself, as `(id, name)`
+    /// pairs of one `kind` (a directory search rather than Base Records): each
+    /// hit raises `record=<prefix>:<id>` and the chosen record posts its bare
+    /// id as `{form}[{key}]`.
+    pub fn named(
+        kind: NamedKind<'_>,
+        id: &str,
+        form: &str,
+        key: &str,
+        label: &str,
+        query: &str,
+        hits: &[(i64, String)],
+        chosen: Option<(i64, &str)>,
+        events: (&str, &str),
+        errors: Vec<String>,
+    ) -> Self {
+        let hits: Vec<PickerHit> = hits
+            .iter()
+            .map(|(record, name)| PickerHit {
+                value: format!("{}:{record}", kind.prefix),
+                label: name.clone(),
+                kind_label: String::new(),
+                instant: None,
+            })
+            .collect();
+        let chosen = chosen.map(|(record, name)| {
+            let pill = RelatedRecord::new(
+                format!("{id}-pill"),
+                kind.kind,
+                record.to_string(),
+                RecordState::Named {
+                    label: name.to_owned(),
+                    href: kind.page.map(|page| format!("{page}/{record}")),
+                },
+            );
+            (record.to_string(), pill)
+        });
+        Self::new(
+            id,
+            form,
+            key,
+            label,
+            query,
+            &hits,
+            chosen
+                .as_ref()
+                .map(|(value, pill)| (value.as_str(), pill.clone())),
+            events,
+            errors,
+        )
     }
 }

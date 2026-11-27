@@ -22,7 +22,10 @@ impl Run {
             .filter(|c| c.outcome != "ok")
             .collect();
         Some(if excluded.is_empty() {
-            format!("Read-only parent oversight: {} consenting children included. No child record links.",self.oversight.len())
+            format!(
+                "Read-only parent oversight: {} consenting children included. No child record links.",
+                self.oversight.len()
+            )
         } else {
             format!(
                 "Partial: {} of {} consenting children not included. {}.",
@@ -52,7 +55,7 @@ impl Reports {
                 .map_err(grid)
         } else {
             let client = self.db.get().await.map_err(Error::from)?;
-            Catalog::for_scope(&**client, scope)
+            Catalog::for_report(&**client, scope)
                 .await
                 .map_err(|e| ReportError::Database(e.into()))
         }
@@ -64,6 +67,9 @@ impl Reports {
         report: Report,
         input: &RunInput,
     ) -> Outcome<Run> {
+        self.oversight
+            .check_source(&report.record_type)
+            .map_err(grid)?;
         if input.background {
             return Err(ReportError::Refused("Oversight results are live reads. Download them directly; they cannot be retained or scheduled in the parent.".into()));
         }
@@ -152,7 +158,7 @@ impl Reports {
                             limit: 1,
                         },
                         columns: vec![],
-                        offsets: BTreeMap::new(),
+                        pages: BTreeMap::new(),
                     },
                 )
                 .await
@@ -187,10 +193,7 @@ impl Reports {
                             limit: page_size,
                         },
                         columns: columns.iter().map(|c| c.spec.clone()).collect(),
-                        offsets: selected
-                            .iter()
-                            .map(|(id, (offset, _))| (*id, *offset))
-                            .collect(),
+                        pages: selected,
                     },
                 )
                 .await
@@ -230,11 +233,7 @@ impl Reports {
                 }) = child.data
                 {
                     total += count;
-                    for row in projection
-                        .rows
-                        .into_iter()
-                        .take(selected.get(&child.tenant).map_or(0, |(_, take)| *take))
-                    {
+                    for row in projection.rows {
                         let mut cells = vec![json!(child.name)];
                         cells.extend(
                             columns
@@ -248,7 +247,7 @@ impl Reports {
             let totals = if definition.totals && !input.as_rows {
                 let numeric: Vec<_> = columns
                     .iter()
-                    .filter(|c| c.ty.number() && c.spec != root.key())
+                    .filter(|c| c.reference.is_none() && c.ty.number() && c.spec != root.key())
                     .collect();
                 let mut sums = BTreeMap::new();
                 for chunk in numeric.chunks(bilibi_grid::MAX_MEASURES) {
@@ -394,6 +393,7 @@ impl Reports {
             )
         };
         Ok(Run {
+            reference_names: Vec::new(),
             report,
             oversight: outcomes,
             left_out,

@@ -91,6 +91,8 @@ pub trait NotificationSink: Send + Sync {
         recipients: &'a [i64],
         notice: &'a Notice,
     ) -> RecordFuture<'a>;
+    /// Resolve the active installation owner inside this transaction.
+    fn installation_owner<'a>(&'a self, tx: &'a MutationTransaction<'_>) -> OwnerFuture<'a>;
     /// Called once after commit; delivery wakes only these recipients.
     fn committed(&self, tenant: i64, recipients: &[i64]);
     /// Which of `recipients` `record` would accept now in the transaction's
@@ -104,6 +106,7 @@ pub trait NotificationSink: Send + Sync {
         Box::pin(async move { Ok(recipients.to_vec()) })
     }
 }
+pub type OwnerFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<i64>>> + Send + 'a>>;
 pub type EligibleFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<i64>>> + Send + 'a>>;
 
 /// Bind exactly once during service installation. An unbound sink fails boot;
@@ -122,6 +125,7 @@ pub struct TodoItem {
 /// One owner's bounded, live-authorized worklist.
 #[derive(Default)]
 pub struct TodoList {
+    pub label: String,
     pub items: Vec<TodoItem>,
     pub count: usize,
     pub more: bool,
@@ -210,6 +214,10 @@ impl NotificationBoundary {
             bilibi_module_registry::RegistryError::Service("unbound notification sink".into())
         })
     }
+    /// Sole recipient of installation-wide notices, when active in this tenant.
+    pub async fn installation_owner(&self, tx: &MutationTransaction<'_>) -> Result<Option<i64>> {
+        self.sink()?.installation_owner(tx).await
+    }
     /// The recipients among `recipients` that can be notified now, sorted
     /// and without repeats.
     pub async fn eligible(
@@ -229,13 +237,18 @@ impl NotificationBoundary {
         }
         self.sink()?.eligible(tx, &wanted).await
     }
-    /// Tells the acting account about its own write.
+    /// Tells the acting account about its own write. A named principal has no
+    /// account to notify; owners can still notify explicit people with notify.
     pub async fn record(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         title: &str,
     ) -> Result<()> {
+        if scope.principal().is_some() {
+            Notice::new(title).validate()?;
+            return Ok(());
+        }
         self.notify(tx, scope, &[scope.user()], &Notice::new(title))
             .await
     }

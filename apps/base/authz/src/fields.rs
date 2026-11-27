@@ -24,6 +24,43 @@ pub async fn restricted(
     };
     Ok(restriction_rows(rows))
 }
+pub async fn restriction_modes(
+    client: &impl GenericClient,
+    scope: &Scope,
+) -> Result<BTreeMap<String, BTreeMap<String, &'static str>>> {
+    let tenant = scope.tenant();
+    let rows = if scope.principal().is_some() {
+        client
+            .query(
+                "SELECT table_id,field_id,bool_and(mode='mask') FROM field_restrictions WHERE tenant_id=$1 GROUP BY table_id,field_id",
+                &[&tenant],
+            )
+            .await?
+    } else {
+        let mut users = vec![scope.user()];
+        users.extend(scope.impersonator().map(|operator| operator.user()));
+        client
+            .query(
+                "SELECT f.table_id,f.field_id,bool_and(f.mode='mask') FROM field_restrictions f JOIN effective_principal_roles p ON p.tenant_id=f.tenant_id AND p.role_id=f.role_id WHERE f.tenant_id=$1 AND p.user_id=ANY($2) GROUP BY f.table_id,f.field_id",
+                &[&tenant, &users],
+            )
+            .await?
+    };
+    let mut result = BTreeMap::<String, BTreeMap<String, &'static str>>::new();
+    for row in rows {
+        let mode = if row.get(2) {
+            crate::restrictions::Mode::Mask
+        } else {
+            crate::restrictions::Mode::Withhold
+        };
+        result
+            .entry(row.get(0))
+            .or_default()
+            .insert(row.get(1), mode.as_str());
+    }
+    Ok(result)
+}
+
 /// The same live restrictions on a reviewed operation's read connection.
 /// Queries stay on the caller's connection, including an uncommitted transaction.
 pub async fn restricted_read(
@@ -59,7 +96,7 @@ fn restriction_rows(rows: Vec<tokio_postgres::Row>) -> BTreeMap<String, HashSet<
 /// nothing withheld is absent; an identity outside the catalog reaches no
 /// audit kind.
 pub async fn withheld_by_record_type(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     types: &[&str],
 ) -> Result<BTreeMap<String, HashSet<String>>> {
@@ -68,7 +105,10 @@ pub async fn withheld_by_record_type(
     if restricted.is_empty() || types.is_empty() {
         return Ok(result);
     }
-    let catalog = crate::field_catalog::field_catalog()?;
+    // The tenant's own fields (custom fields) are restrictable too, so read
+    // the tenant catalog: a table whose only restrictable fields are custom
+    // still reaches its audit kinds.
+    let catalog = crate::field_catalog::tenant_catalog(client, scope).await?;
     for table in catalog.tables() {
         for kind in table
             .record_types
@@ -81,7 +121,7 @@ pub async fn withheld_by_record_type(
         for field in &table.fields {
             let owner_restricted = restricted
                 .get(table.id)
-                .is_some_and(|fields| fields.contains(field.id));
+                .is_some_and(|fields| fields.contains(field.id.as_ref()));
             let alias_restricted = field.restriction_aliases.iter().any(|alias| {
                 restricted
                     .get(alias.table)
@@ -98,7 +138,7 @@ pub async fn withheld_by_record_type(
                 result
                     .entry((*kind).to_owned())
                     .or_default()
-                    .insert(field.id.to_owned());
+                    .insert(field.id.to_string());
             }
             for alias in &field.restriction_aliases {
                 for kind in alias

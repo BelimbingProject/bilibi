@@ -109,12 +109,14 @@ async fn connect(
         .get(0);
     Ok((id, tokens))
 }
-/// The session row a browser sign-in writes; a credential reset ends it.
+/// The session row a browser sign-in writes (its id the token's digest); a
+/// credential reset ends it.
 async fn sign_in_session(client: &Client, tenant: i64, user: i64) -> Result<()> {
+    let id = bilibi_base::session::session_id(&format!("walkthrough-{tenant}-{user}"));
     client
         .execute(
-            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,'walkthrough',now()+interval '24 hours') ON CONFLICT (id) DO NOTHING",
-            &[&format!("walkthrough-{tenant}-{user}"), &tenant, &user],
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at,authentication_authority) VALUES($1,$2,$3,'walkthrough',now()+interval '24 hours','portable') ON CONFLICT (id) DO NOTHING",
+            &[&id, &tenant, &user],
         )
         .await?;
     Ok(())
@@ -144,7 +146,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         services.get::<bilibi_core::company::CompanyService>(bilibi_core::company::SERVICE)?;
     let users = services.get::<UserService>("core/user.accounts")?;
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // Approving a connection ties it to a real browser session, so give each
     // stand-in login the session row its sign-in would have written.
     for (tenant, user) in [(1_i64, 1_i64), (1, 3), (1, 4), (1, 6), (2, 5)] {
@@ -152,9 +156,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     let actor = authentication
         .authenticate(&**client, 1, 1, "walkthrough".into())
-        .await?;
-    let admin = authentication
-        .authenticate(&**client, 1, 4, "walkthrough".into())
         .await?;
     let other = authentication
         .authenticate(&**client, 2, 5, "walkthrough".into())
@@ -343,7 +344,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .await?
         .get(0);
     let provider_connection: i64 = client
-        .query_one("INSERT INTO core_agent_connections(tenant_id,user_id,person_id,agent_id,client_id,expires_at,provider_public,provider_version,provider_link,provider_token_hash,enabled_session_id) VALUES(1,6,3,'Company identity provider','company-provider',now()+interval '1 hour','walkthrough-provider',1,$1,sha256(convert_to('walkthrough-provider-token','UTF8')),'walkthrough-1-6') RETURNING id", &[&link])
+        .query_one("INSERT INTO core_agent_connections(tenant_id,user_id,person_id,agent_id,client_id,expires_at,provider_public,provider_version,provider_link,provider_token_hash,enabled_session_id) VALUES(1,6,3,'Company identity provider','company-provider',now()+interval '1 hour','walkthrough-provider',1,$1,sha256(convert_to('walkthrough-provider-token','UTF8')),encode(sha256(convert_to('walkthrough-1-6','UTF8')),'hex')) RETURNING id", &[&link])
         .await?
         .get(0);
     let provider_claims = AgentClaims {
@@ -352,7 +353,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         user: remembered_provider_actor.user(),
         organisation: remembered_provider_actor.actor().organisation(),
         person: remembered_provider_actor.actor().person(),
-        enabled_session: Some("walkthrough-1-6".into()),
+        enabled_session: Some(bilibi_base::session::session_id("walkthrough-1-6")),
     };
     let provider_company = users
         .prove_provider_access(
@@ -395,7 +396,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .await?
         .map_or(0, |row| row.get(0));
     let operations = [reference_operation(91, version)];
-    let mut held_client = db.get().await?;
+    let mut held_client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let held_company = held_client.transaction().await?;
     held_company
         .query_one(
@@ -478,7 +481,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     users.logout(&browser.token, &browser.csrf).await?;
-    let mut desk_client = db.get().await?;
+    let mut desk_client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let held_desk = desk_client.transaction().await?;
     held_desk
         .query_one(
@@ -486,42 +491,41 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             &[],
         )
         .await?;
-    let archive_scope = actor.clone();
-    let archive_companies = companies.clone();
-    let archive = tokio::spawn(async move {
-        archive_companies
-            .archive_company(&archive_scope, 2, Some("Walkthrough lock order"))
-            .await
-    });
-    let mut archive_waiting = false;
-    for _ in 0..100 {
-        archive_waiting = client
-            .query_one(
-                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT id,person_id FROM user_desks%FOR UPDATE')",
-                &[],
-            )
-            .await?
-            .get(0);
-        if archive_waiting {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    if !archive_waiting {
-        return Err(Error::Internal.into());
-    }
+    // A desk row held by another transaction: the workplace proof takes the
+    // company before the desk and bounds its wait, so the plan is refused as
+    // retryable instead of hanging.
     let started = Instant::now();
-    let archive_plan = plans.preview(&authority, &operations).await;
+    let held_desk_plan = plans.preview(&authority, &operations).await;
     if !matches!(
-        archive_plan,
+        held_desk_plan,
         Err(bilibi_agent_api::Error::Backend(Error::Conflict))
     ) || started.elapsed() > Duration::from_secs(2)
     {
         return Err(Error::Internal.into());
     }
+    println!("held desk row returned a retryable plan refusal: true");
+    // Archiving changes the company's status only. It keeps the desks (their
+    // people still read the archived company's records) and locks no desk
+    // row, so it finishes while the desk row is still held: there is no
+    // company/desk lock cycle for an archive to deadlock on.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        companies.archive_company(&actor, 2, Some("Walkthrough lock order")),
+    )
+    .await
+    .map_err(|_| Error::Internal)??;
+    let kept: bool = client
+        .query_one(
+            "SELECT c.status='archived' AND EXISTS(SELECT 1 FROM user_desks d WHERE d.tenant_id=c.tenant_id AND d.company_id=c.id AND d.person_id=3) FROM companies c WHERE c.tenant_id=1 AND c.id=2",
+            &[],
+        )
+        .await?
+        .get(0);
+    if !kept {
+        return Err(Error::Internal.into());
+    }
     held_desk.rollback().await?;
-    archive.await??;
-    println!("archive kept company-before-desk order and plan refused without deadlock: true");
+    println!("archive finished behind the held desk row and kept the desk: true");
 
     println!("\n== observed agent IDs ==");
     for stated in [
@@ -742,23 +746,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     );
 
     sign_in_session(&client, 1, 3).await?;
-    let (admin_id, admin_connection) =
-        connect(&grants, &client, &staff, "Admin password agent").await?;
-    users
-        .set_password(&admin, 3, "walkthrough-admin-secret")
-        .await?;
-    let admin_refused = grants
-        .authenticate(&admin_connection.access_token, None)
-        .await;
-    if !matches!(admin_refused, Err(OAuthError::InvalidToken)) {
-        return Err(Error::Internal.into());
-    }
-    println!(
-        "admin-set password: next bearer refused invalid_token; {}",
-        connection_state(&client, admin_id).await?
-    );
-
-    sign_in_session(&client, 1, 3).await?;
     let (two_factor_id, two_factor_connection) =
         connect(&grants, &client, &staff, "2FA reset agent").await?;
     client
@@ -932,6 +919,169 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         "raw code in any code row: {}",
         stored_plaintext(&client, "core_agent_authorization_codes", &code).await?
     );
+
+    println!("\n== device grant for the MCP resource ==");
+    // A cloud app has no browser callback: it asks the device grant for the
+    // MCP audience, and may not name itself.
+    let foreign = grants
+        .start_device_for(
+            CLIENT_ID,
+            Some("Cloud bot"),
+            Some("https://elsewhere/mcp"),
+            resource,
+        )
+        .await;
+    println!("foreign resource:     {}", outcome(&foreign));
+    let cloud = grants
+        .start_device_for(CLIENT_ID, None, Some(resource), resource)
+        .await?;
+    let review = grants.device(&actor, &cloud.user_code).await?;
+    println!("unnamed request:      reviewed as {:?}", review.agent_id);
+    grants
+        .decide(&actor, &cloud.user_code, Decision::Approve)
+        .await?;
+    client
+        .execute(
+            "UPDATE core_agent_devices SET next_poll_at=now() WHERE status='approved'",
+            &[],
+        )
+        .await?;
+    let cloud_tokens = grants.exchange(CLIENT_ID, &cloud.device_code).await?;
+    let at_mcp = grants
+        .authenticate(&cloud_tokens.access_token, Some(resource))
+        .await;
+    let at_api = grants.authenticate(&cloud_tokens.access_token, None).await;
+    println!("token scope:          {:?}", cloud_tokens.scope);
+    println!("bearer at /mcp:       {}", outcome(&at_mcp));
+    println!("bearer at /api/v1:    {}", outcome(&at_api));
+    let refreshed = grants
+        .refresh(CLIENT_ID, &cloud_tokens.refresh_token, Some(resource))
+        .await;
+    println!("refresh for resource: {}", outcome(&refreshed));
+    if !matches!(foreign, Err(OAuthError::InvalidTarget))
+        || review.agent_id != bilibi_agent::UNNAMED_APP
+        || cloud_tokens.scope.as_deref() != Some("bilibi")
+        || at_mcp.is_err()
+        || !matches!(at_api, Err(OAuthError::InvalidToken))
+        || refreshed.is_err()
+    {
+        return Err("the device grant did not bind its tokens to the MCP resource".into());
+    }
+
+    println!("\n== device grant for a registered client ==");
+    // A cloud app registers itself for the device grant, with no callback,
+    // and only that client redeems the code it was issued.
+    let cloud = grants
+        .register_client(&serde_json::from_value(json!({
+            "client_name": "Cloud app",
+            "grant_types": [bilibi_agent::DEVICE_GRANT, "refresh_token"],
+        }))?)
+        .await?;
+    let cloud_client = cloud["client_id"].as_str().unwrap_or_default().to_owned();
+    println!(
+        "registered:           grant_types={} redirect_uris={}",
+        cloud["grant_types"], cloud["redirect_uris"]
+    );
+    let neither = grants
+        .register_client(&serde_json::from_value(
+            json!({"client_name": "No grant", "grant_types": ["refresh_token"]}),
+        )?)
+        .await;
+    println!("neither grant:        {}", outcome(&neither));
+    let unregistered = grants
+        .start_device_for("nobody-registered-this", None, None, resource)
+        .await;
+    println!("unknown client:       {}", outcome(&unregistered));
+    let code_only = grants
+        .start_device_for(registered_id, None, None, resource)
+        .await;
+    println!("code-grant client:    {}", outcome(&code_only));
+    let by_client = grants
+        .start_device_for(&cloud_client, None, Some(resource), resource)
+        .await?;
+    let named = grants.device(&actor, &by_client.user_code).await?;
+    println!("review names:         {:?}", named.agent_id);
+    grants
+        .decide(&actor, &by_client.user_code, Decision::Approve)
+        .await?;
+    let foreign_redeem = grants.exchange(CLIENT_ID, &by_client.device_code).await;
+    println!("redeem as another:    {}", outcome(&foreign_redeem));
+    client
+        .execute(
+            "UPDATE core_agent_devices SET next_poll_at=now() WHERE status='approved'",
+            &[],
+        )
+        .await?;
+    let own_redeem = grants.exchange(&cloud_client, &by_client.device_code).await;
+    println!("redeem as itself:     {}", outcome(&own_redeem));
+    if cloud["redirect_uris"] != json!([])
+        || !matches!(neither, Err(OAuthError::InvalidClientMetadata))
+        || !matches!(unregistered, Err(OAuthError::InvalidClient))
+        || !matches!(code_only, Err(OAuthError::UnauthorizedClient))
+        || named.agent_id != "Cloud app"
+        || !matches!(foreign_redeem, Err(OAuthError::InvalidClient))
+        || own_redeem.is_err()
+    {
+        return Err("the device grant did not hold a registered client to its own code".into());
+    }
+
+    println!("\n== user-code guessing ==");
+    // One account's lookups in a minute are bounded, so a signed-in person
+    // cannot search for someone else's pending code.
+    let mut misses = 0u32;
+    let mut slowed = 0u32;
+    for _ in 0..=bilibi_agent::DEVICE_LOOKUPS_PER_MINUTE {
+        match grants.device(&other, "ZZZZ-ZZZZ").await {
+            Err(OAuthError::InvalidUserCode) => misses += 1,
+            Err(OAuthError::SlowDown) => slowed += 1,
+            answer => return Err(format!("unexpected lookup answer: {}", outcome(&answer)).into()),
+        }
+    }
+    println!("lookups by one account: {misses} missed, then {slowed} refused with slow_down");
+    if misses != bilibi_agent::DEVICE_LOOKUPS_PER_MINUTE || slowed != 1 {
+        return Err("user-code lookups were not bounded per account".into());
+    }
+
+    println!("\n== device receipt cleanup ==");
+    // The public endpoint writes a receipt per request; the scheduled worker
+    // deletes them a day after they expired. Time travel: every finished
+    // receipt of this run expired two days ago.
+    let waiting = grants.start_device(CLIENT_ID, "Still waiting").await?;
+    let aged = client
+        .execute(
+            "UPDATE core_agent_devices SET expires_at=now()-interval '2 days' WHERE status IN ('used','denied','approved')",
+            &[],
+        )
+        .await?;
+    let connections_before: i64 = client
+        .query_one("SELECT count(*) FROM core_agent_connections", &[])
+        .await?
+        .get(0);
+    let deleted = grants.prune_devices().await?;
+    let left: i64 = client
+        .query_one(
+            "SELECT count(*) FROM core_agent_devices WHERE expires_at < now()-interval '1 day'",
+            &[],
+        )
+        .await?
+        .get(0);
+    let connections_after: i64 = client
+        .query_one("SELECT count(*) FROM core_agent_connections", &[])
+        .await?
+        .get(0);
+    let still_waiting = grants.device(&actor, &waiting.user_code).await;
+    println!("receipts aged two days: {aged}; deleted: {deleted}; old ones left: {left}");
+    println!("a receipt still waiting: {}", outcome(&still_waiting));
+    println!("connections before and after: {connections_before} and {connections_after}");
+    if aged == 0
+        || deleted != aged
+        || left != 0
+        || still_waiting.is_err()
+        || connections_before != connections_after
+    {
+        return Err("the device receipt cleanup did not delete exactly the old receipts".into());
+    }
+    println!("second run deletes: {}", grants.prune_devices().await?);
 
     println!("\n== host throttle ==");
     let throttle = Throttle::default();

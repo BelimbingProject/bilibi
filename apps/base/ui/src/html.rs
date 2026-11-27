@@ -2,7 +2,7 @@
 //!
 //! Only shared fragments bypass escaping: an `Html` value comes from a
 //! template's own output ([`Html::render`]) or from text escaped here
-//! ([`Html::text`]). [`Html::raw`] exists for shared components that assemble
+//! ([`Html::text`]) or from the filtered parser output in [`crate::Markdown`]. [`Html::raw`] exists for shared components that assemble
 //! markup; page code never builds an `Html` from request data with it.
 use std::fmt;
 

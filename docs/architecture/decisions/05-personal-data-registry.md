@@ -48,7 +48,7 @@ Without a shared contract, each Domain (a CRM first) would build its own export,
 - `Subject` is a `bilibi_party_ids::PersonId` plus listed identifiers (email, phone). It never carries free text from the requester.
 - `locate` returns counts per record kind, split into matches by Person and matches only by identifier.
 - `export` returns JSON plus file references (media and artifact IDs). Base resolves the files; the handler never copies bytes.
-- `erase` anonymises in place, or deletes records with no business value, and returns counts per record kind plus records kept, each with a reason (`legal_hold`, `retained_until`, `legal_minimum`, `deferred`) and a date when known.
+- `erase` anonymises in place, or deletes records with no business value, and returns counts per record kind plus records kept, each with a reason (`legal_hold`, `retained_until`, `legal_minimum`, `shared`, `evidence`, `deferred`) and a date when known.
 - Every call is idempotent: a retried job that finds work already done returns the same counts.
 - `erase` writes through `MutationBoundary` like any other owner write. Its `Change` names the erased fields with the value `[erased]`.
 

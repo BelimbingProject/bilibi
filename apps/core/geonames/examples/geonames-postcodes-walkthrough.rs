@@ -9,7 +9,6 @@
 //! record, a no-valid-rows payload with the cache restored, a country not
 //! imported, a malformed `--postcodes`, and the audit trail of the sidecar.
 #[path = "support/fixture.rs"]
-#[allow(dead_code)]
 mod fixture;
 
 use bilibi_database::{pool, Error, Result};
@@ -97,9 +96,11 @@ async fn main() -> Result<()> {
     services.install(&modules)?;
     let importer = services.get::<ReferenceImport>(IMPORT_SERVICE)?;
     let geo = services.get::<Geonames>(SERVICE)?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client
-        .batch_execute("TRUNCATE address_attachments, addresses, geonames_postcode_overrides, geonames_cities, geonames_postcodes, geonames_admin1, geonames_countries RESTART IDENTITY")
+        .batch_execute("TRUNCATE address_person_subjects, address_attachments, addresses, geonames_postcode_overrides, geonames_cities, geonames_postcodes, geonames_admin1, geonames_countries RESTART IDENTITY")
         .await?;
 
     let (port, fixture) = fixture::start().await.map_err(|_| Error::Internal)?;

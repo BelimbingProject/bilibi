@@ -112,11 +112,48 @@ pub(super) fn code_only(sql: &str) -> String {
         })
         .collect()
 }
+/// Every name the text can use for a table or function: unquoted words
+/// folded to lower case, then quoted identifiers as written. A Unicode-escaped
+/// identifier (`U&"..."`) is `None`: it is not decoded, so a caller refuses it.
+/// A word inside a literal or comment is not a name.
+pub(super) fn names(sql: &str) -> Vec<Option<String>> {
+    let (mask, quoted) = lex(sql);
+    let b = sql.as_bytes();
+    let code: String = b
+        .iter()
+        .zip(&mask)
+        .map(|(byte, code)| {
+            if *code && (byte.is_ascii_alphanumeric() || *byte == b'_') {
+                char::from(byte.to_ascii_lowercase())
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let mut names: Vec<Option<String>> = code
+        .split_whitespace()
+        .map(|word| Some(word.to_owned()))
+        .collect();
+    for (start, end) in quoted {
+        let unicode =
+            start >= 2 && b[start - 1] == b'&' && b[start - 2].eq_ignore_ascii_case(&b'u');
+        // An unclosed identifier is a syntax error; it is not read either.
+        let closed = end >= start + 2 && b[end - 1] == b'"';
+        names.push((closed && !unicode).then(|| sql[start + 1..end - 1].replace("\"\"", "\"")));
+    }
+    names
+}
 /// Masks literals, identifiers, nested block comments and dollar quotes without
 /// changing byte offsets. E'...' backslash escapes are respected.
 fn code_mask(sql: &str) -> Vec<bool> {
+    lex(sql).0
+}
+/// [`code_mask`], and the span of each double-quoted identifier, quotes
+/// included.
+fn lex(sql: &str) -> (Vec<bool>, Vec<(usize, usize)>) {
     let b = sql.as_bytes();
     let mut mask = vec![true; b.len()];
+    let mut quoted = Vec::new();
     let mut i = 0;
     while i < b.len() {
         let start = i;
@@ -140,6 +177,9 @@ fn code_mask(sql: &str) -> Vec<bool> {
                 } else {
                     i += 1;
                 }
+            }
+            if quote == b'"' {
+                quoted.push((start, i));
             }
         } else if b[i..].starts_with(b"--") {
             while i < b.len() && b[i] != b'\n' {
@@ -190,5 +230,5 @@ fn code_mask(sql: &str) -> Vec<bool> {
         }
         mask[start..i].fill(false);
     }
-    mask
+    (mask, quoted)
 }

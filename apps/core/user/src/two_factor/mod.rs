@@ -2,8 +2,7 @@
 //! second-factor provider behind Base Step-up (`provider.rs`).
 //! The flow follows GitHub's: re-enter the password, scan
 //! a QR code, confirm with a current code. There are no recovery codes. A
-//! person who loses their phone asks an admin to reset 2FA
-//! ([`RESET_KEY`], `agent.rs`), or the server owner runs
+//! person who loses their phone asks the installation owner, who runs
 //! `bilibi-web two-factor-reset`. This module knows nothing of what step-up
 //! guards: it checks the account holder, opens the browser session's window
 //! ([`CONFIRM_PATH`]) and spends a code an agent carries, for whatever
@@ -16,13 +15,21 @@
 //! (`Settings::seal_owned`) and never leaves the server except inside the
 //! enrollment page, once, after the password was re-entered.
 mod agent;
+pub(crate) use agent::lock_reset_target;
 mod provider;
 mod qr;
+pub(crate) mod recovery;
 mod totp;
 
-pub(crate) use agent::bind;
+pub(crate) fn bind(users: std::sync::Arc<UserService>) -> bilibi_module_registry::Result<()> {
+    agent::bind(users.clone())?;
+    recovery::bind(users)
+}
 pub use agent::{TwoFactorEmailError, TwoFactorEmailReset};
 pub use provider::{Authenticator, METHOD};
+pub use recovery::{
+    customer_reset_requests, recovery_customer_account, RequestOutcome, RESET as RESET_OPERATION,
+};
 
 use crate::{credential_attempts, password, UserService};
 use bilibi_audit::{record_action, Attribution};
@@ -36,14 +43,16 @@ use tokio_postgres::GenericClient;
 pub const SETTINGS_PATH: &str = "/settings/two-factor";
 /// The step-up prompt a browser is sent to (Base Step-up's web proof).
 pub const CONFIRM_PATH: &str = "/settings/two-factor/confirm";
-/// An admin resets another person's 2FA. Declared `.always()`: their own
-/// current authenticator code, every time.
-pub(crate) const RESET_KEY: &str = "core.user.two_factor.reset";
-/// The account page event that calls [`RESET_KEY`].
-pub(crate) const RESET_EVENT: &str = "reset-two-factor";
-/// The page service that owns [`RESET_EVENT`].
-pub(crate) const PAGES: &str = "core/user.pages";
-/// The record the sealed secret is bound to (`Settings::seal_owned`).
+/// A customer's authenticator page on the portal. Core Portal mounts it; the
+/// path is named here because the provider sends a customer who owes a
+/// step-up and has no authenticator to it.
+pub const PORTAL_SETTINGS_PATH: &str = "/portal/account/two-factor";
+/// A customer's step-up prompt on the portal, mounted by Core Portal.
+pub const PORTAL_CONFIRM_PATH: &str = "/portal/account/two-factor/confirm";
+/// Why checking a code takes its connection detached.
+const STEP_UP_CONNECTION: &str = "step-up proof and failure evidence must survive the caller's rollback; refuse immediately if the pool is full";
+/// The owner the sealed secret is bound to (`Settings::seal_owned`), with
+/// installation scope `0` and the identity id ([`SignIn`]).
 const OWNER: &str = "core/user.two_factor";
 const KIND: &str = "user_two_factor";
 /// The two-factor counter: five failed checks within fifteen minutes lock
@@ -145,11 +154,12 @@ pub fn safe_return(path: &str) -> Option<String> {
         && path.len() <= MAX_RETURN
         && !path.contains('\\')
         && !path.chars().any(char::is_control)
-        && !path.starts_with(SETTINGS_PATH))
+        && !path.starts_with(SETTINGS_PATH)
+        && !path.starts_with(PORTAL_SETTINGS_PATH))
     .then(|| path.to_owned())
 }
 
-fn with_return(base: &str, return_to: Option<&str>) -> String {
+pub(crate) fn with_return(base: &str, return_to: Option<&str>) -> String {
     match return_to.and_then(safe_return) {
         Some(path) => format!(
             "{base}?return={}",
@@ -184,12 +194,6 @@ impl UserService {
         })
     }
 
-    /// Whether any registered method is enrolled for `user` in this tenant.
-    pub async fn account_two_factor_on(&self, scope: &Scope, user: i64) -> Result<bool> {
-        let client = self.db.get().await?;
-        self.step_up.enrolled_for(&**client, scope, user).await
-    }
-
     /// Where a step-up guard sends a browser that has not confirmed access:
     /// the prompt, or enrollment for an account with no authenticator yet.
     /// Either brings it back to `return_to` afterwards.
@@ -205,38 +209,45 @@ impl UserService {
         if !self.settings.encryption_available() {
             return Err(TwoFactorError::Unavailable);
         }
-        self.unlocked(scope).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
-        let client = self.db.get().await.map_err(Error::from)?;
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        self.sessions
+            .require_portable_authority(&**client, scope)
+            .await?;
+        self.unlocked(&**client, scope).await?;
         let row = client
             .query_opt(
-                "SELECT i.password_hash,i.email FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND u.deleted_at IS NULL",
+                "SELECT i.password_hash,i.email,i.id FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND u.deleted_at IS NULL",
                 &[&tenant, &user],
             )
             .await
             .map_err(Error::from)?
             .ok_or(Error::Unauthorized)?;
         let (stored, email): (String, String) = (row.get(0), row.get(1));
+        let sign_in = SignIn {
+            identity: row.get(2),
+        };
         let matched = current.len() <= password::MAX_LENGTH
             && password::verify(current, Some(&stored)).await?;
         if !matched {
-            self.failed(scope, "password").await?;
+            self.failed(&mut client, scope, "password").await?;
             return Err(TwoFactorError::IncorrectPassword);
         }
-        let issuer = self.issuer(&**client).await?;
-        drop(client);
+        let issuer = self.issuer()?;
         let secret = totp::generate_secret()?;
         let encoded = totp::encode_secret(&secret);
         let sealed = self
             .settings
-            .seal_owned(OWNER, tenant, user, &json!(encoded))?;
-        let mut client = self.db.get().await.map_err(Error::from)?;
+            .seal_owned(OWNER, 0, sign_in.identity, &json!(encoded))?;
         let mut tx = self
             .mutations
             .begin(
                 &mut client,
                 scope.mutation_context("user.two_factor.enrollment_started"),
             )
+            .await?;
+        self.sessions
+            .require_portable_authority(tx.sql(), scope)
             .await?;
         let started = tx
             .mutate(move |sql| {
@@ -272,12 +283,15 @@ impl UserService {
     /// and counts as this session's step-up.
     pub async fn confirm_two_factor(&self, scope: &Scope, code: &str) -> Outcome<()> {
         refuse_impersonation(scope)?;
-        self.unlocked(scope).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
-        let client = self.db.get().await.map_err(Error::from)?;
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        self.sessions
+            .require_portable_authority(&**client, scope)
+            .await?;
+        self.unlocked(&**client, scope).await?;
         let row = client
             .query_opt(
-                "SELECT secret,confirmed_at IS NOT NULL,last_step FROM user_two_factor WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2)",
+                "SELECT f.secret,f.confirmed_at IS NOT NULL,f.last_step,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2)",
                 &[&tenant, &user],
             )
             .await
@@ -286,14 +300,12 @@ impl UserService {
         if row.get::<_, bool>(1) {
             return Err(TwoFactorError::AlreadyEnabled);
         }
-        let secret = self.open_secret(tenant, user, &row.get(0))?;
+        let secret = self.open_secret(SignIn::of(&row, 3), &row.get(0))?;
         let step = totp::verify(&secret, code, now_unix(&**client).await?, row.get(2))?;
-        drop(client);
         let Some(step) = step else {
-            self.failed(scope, "authenticator").await?;
+            self.failed(&mut client, scope, "authenticator").await?;
             return Err(TwoFactorError::InvalidCode);
         };
-        let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
             .begin(
@@ -303,6 +315,9 @@ impl UserService {
             .await?;
         let sessions = self.sessions.clone();
         let scope_for_tx = scope.clone();
+        self.sessions
+            .require_portable_authority(tx.sql(), scope)
+            .await?;
         let enabled = tx
             .mutate(move |sql| {
                 Box::pin(async move {
@@ -343,8 +358,10 @@ impl UserService {
     /// Step-up: a current authenticator code marks this session as having
     /// confirmed access just now.
     pub async fn step_up(&self, scope: &Scope, code: &str) -> Outcome<()> {
-        let step = self.prove(scope, code).await?;
-        self.consume(scope, step, Spend::StepUp).await
+        refuse_impersonation(scope)?;
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        let step = self.prove(&mut client, scope, code).await?;
+        self.consume(&mut client, scope, step, Spend::StepUp).await
     }
 
     /// Step one of moving to a new phone: a current code from the old
@@ -355,17 +372,10 @@ impl UserService {
         if !self.settings.encryption_available() {
             return Err(TwoFactorError::Unavailable);
         }
-        let step = self.prove(scope, code).await?;
-        self.consume(
-            scope,
-            step,
-            Spend::Purpose {
-                operation: "core.user.two_factor.move".into(),
-                channel: "web",
-            },
-        )
-        .await?;
-        let client = self.db.get().await.map_err(Error::from)?;
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        self.sessions
+            .require_portable_authority(&**client, scope)
+            .await?;
         let email: String = client
             .query_opt(
                 "SELECT i.email FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND u.deleted_at IS NULL",
@@ -375,8 +385,18 @@ impl UserService {
             .map_err(Error::from)?
             .ok_or(Error::Unauthorized)?
             .get(0);
-        let issuer = self.issuer(&**client).await?;
-        drop(client);
+        let issuer = self.issuer()?;
+        let step = self.prove(&mut client, scope, code).await?;
+        self.consume(
+            &mut client,
+            scope,
+            step,
+            Spend::Purpose {
+                operation: "core.user.two_factor.move".into(),
+                channel: "web",
+            },
+        )
+        .await?;
         let encoded = totp::encode_secret(&totp::generate_secret()?);
         Ok(Enrollment::new(issuer, email, encoded)?)
     }
@@ -385,25 +405,38 @@ impl UserService {
     /// The old phone stops working. Audited as `user.two_factor.moved`.
     pub async fn confirm_move(&self, scope: &Scope, to: &Enrollment, code: &str) -> Outcome<()> {
         refuse_impersonation(scope)?;
-        self.unlocked(scope).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
         let secret = data_encoding::BASE32_NOPAD
             .decode(to.secret.as_bytes())
             .map_err(|_| Error::Internal)?;
-        let client = self.db.get().await.map_err(Error::from)?;
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        self.sessions
+            .require_portable_authority(&**client, scope)
+            .await?;
+        self.unlocked(&**client, scope).await?;
         let step = totp::verify(&secret, code, now_unix(&**client).await?, None)?;
-        drop(client);
+        let sign_in = client
+            .query_opt(
+                "SELECT i.id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2",
+                &[&tenant, &user],
+            )
+            .await
+            .map_err(Error::from)?
+            .map(|row| SignIn::of(&row, 0))
+            .ok_or(Error::Unauthorized)?;
         let Some(step) = step else {
-            self.failed(scope, "authenticator").await?;
+            self.failed(&mut client, scope, "authenticator").await?;
             return Err(TwoFactorError::InvalidCode);
         };
         let sealed = self
             .settings
-            .seal_owned(OWNER, tenant, user, &json!(to.secret))?;
-        let mut client = self.db.get().await.map_err(Error::from)?;
+            .seal_owned(OWNER, 0, sign_in.identity, &json!(to.secret))?;
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("user.two_factor.moved"))
+            .await?;
+        self.sessions
+            .require_portable_authority(tx.sql(), scope)
             .await?;
         let moved = tx
             .mutate(move |sql| {
@@ -439,42 +472,41 @@ impl UserService {
         }
     }
 
-    /// The name the authenticator app lists this server under, from the
-    /// instance identity (Base System): `Bilibi <name> (<role>)`, or
-    /// `Bilibi <role>` when the instance still carries its role's own name.
-    async fn issuer(&self, client: &(impl GenericClient + Sync)) -> Result<String> {
-        let instance = bilibi_system::Instance::resolve(&self.settings, client).await?;
-        let role = instance.role.label();
-        let name = instance.label.replace(':', " ");
-        Ok(if name.trim().eq_ignore_ascii_case(role) {
-            format!("Bilibi {role}")
-        } else {
-            format!("Bilibi {} ({role})", name.trim())
-        })
+    /// The public installation host distinguishes entries in authenticator apps.
+    fn issuer(&self) -> Result<String> {
+        let origin = url::Url::parse(&self.origin).map_err(|_| Error::Invalid)?;
+        let issuer = match origin.host().ok_or(Error::Invalid)? {
+            url::Host::Domain(host) if !host.contains(':') => host,
+            _ => "Bilibi",
+        };
+        Ok(issuer.to_owned())
     }
 
     /// Checks a code against the confirmed authenticator without consuming
     /// it. A miss counts as a failure.
-    async fn prove(&self, scope: &Scope, code: &str) -> Outcome<i64> {
+    async fn prove(
+        &self,
+        client: &mut tokio_postgres::Client,
+        scope: &Scope,
+        code: &str,
+    ) -> Outcome<i64> {
         refuse_impersonation(scope)?;
-        self.unlocked(scope).await?;
+        self.unlocked(&*client, scope).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
-        let client = self.db.get().await.map_err(Error::from)?;
         let row = client
             .query_opt(
-                "SELECT secret,last_step FROM user_two_factor WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND confirmed_at IS NOT NULL",
+                "SELECT f.secret,f.last_step,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND f.confirmed_at IS NOT NULL",
                 &[&tenant, &user],
             )
             .await
             .map_err(Error::from)?
             .ok_or(TwoFactorError::NotEnabled)?;
-        let secret = self.open_secret(tenant, user, &row.get(0))?;
-        let step = totp::verify(&secret, code, now_unix(&**client).await?, row.get(1))?;
-        drop(client);
+        let secret = self.open_secret(SignIn::of(&row, 2), &row.get(0))?;
+        let step = totp::verify(&secret, code, now_unix(&*client).await?, row.get(1))?;
         match step {
             Some(step) => Ok(step),
             None => {
-                self.failed(scope, "code").await?;
+                self.failed(client, scope, "code").await?;
                 Err(TwoFactorError::InvalidCode)
             }
         }
@@ -483,7 +515,13 @@ impl UserService {
     /// Spends a proved step inside one audited transaction with what it was
     /// for. The step moves forward by compare-and-set, so a racing reuse of
     /// the same code loses, and failures reset.
-    async fn consume(&self, scope: &Scope, step: i64, spend: Spend) -> Outcome<()> {
+    async fn consume(
+        &self,
+        client: &mut tokio_postgres::Client,
+        scope: &Scope,
+        step: i64,
+        spend: Spend,
+    ) -> Outcome<()> {
         let (tenant, user) = (scope.tenant(), scope.user());
         let event = "user.two_factor.verified";
         let purpose = match &spend {
@@ -492,10 +530,9 @@ impl UserService {
         };
         let sessions = self.sessions.clone();
         let session = scope.clone();
-        let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
-            .begin(&mut client, scope.mutation_context(event))
+            .begin(client, scope.mutation_context(event))
             .await?;
         let spent = tx
             .mutate(move |sql| {
@@ -523,7 +560,7 @@ impl UserService {
             Ok(()) => Ok(tx.commit().await?),
             Err(Error::Conflict) => {
                 tx.rollback().await?;
-                self.failed(scope, "code").await?;
+                self.failed(client, scope, "code").await?;
                 Err(TwoFactorError::InvalidCode)
             }
             Err(error) => Err(error.into()),
@@ -531,10 +568,9 @@ impl UserService {
     }
 
     /// Refuses while the account's checks are locked, recording the refusal.
-    async fn unlocked(&self, scope: &Scope) -> Outcome<()> {
-        let client = self.db.get().await.map_err(Error::from)?;
+    async fn unlocked(&self, client: &impl GenericClient, scope: &Scope) -> Outcome<()> {
         let remaining = credential_attempts::locked(
-            &**client,
+            client,
             scope.tenant(),
             scope.user(),
             credential_attempts::Kind::StepUp,
@@ -544,7 +580,7 @@ impl UserService {
             return Ok(());
         };
         record_action(
-            &**client,
+            client,
             &Attribution::from_scope(scope),
             None,
             "user.two_factor.refused",
@@ -561,15 +597,16 @@ impl UserService {
     /// code), audited as `user.two_factor.failed`; the failure that
     /// reaches the limit then locks the account's checks, audited as
     /// `user.two_factor.locked`. The shared rule is `credential_attempts`.
-    async fn failed(&self, scope: &Scope, check: &'static str) -> Result<()> {
+    async fn failed(
+        &self,
+        client: &mut tokio_postgres::Client,
+        scope: &Scope,
+        check: &'static str,
+    ) -> Result<()> {
         let (tenant, user) = (scope.tenant(), scope.user());
-        let mut client = self.db.get().await?;
         let mut tx = self
             .mutations
-            .begin(
-                &mut client,
-                scope.mutation_context("user.two_factor.failed"),
-            )
+            .begin(client, scope.mutation_context("user.two_factor.failed"))
             .await?;
         let counted = tx
             .mutate(move |sql| {
@@ -601,15 +638,13 @@ impl UserService {
         }
         let mut tx = self
             .mutations
-            .begin(
-                &mut client,
-                scope.mutation_context("user.two_factor.locked"),
-            )
+            .begin(client, scope.mutation_context("user.two_factor.locked"))
             .await?;
         tx.mutate(move |sql| {
             Box::pin(async move {
-                let (until, _) =
-                    credential_attempts::lock(sql, tenant, user, STEP_UP, LIMITS).await?;
+                let until = credential_attempts::lock(sql, tenant, user, STEP_UP, LIMITS)
+                    .await?
+                    .until;
                 Ok((
                     (),
                     vec![credential_attempts::change(
@@ -625,15 +660,32 @@ impl UserService {
         tx.commit().await
     }
 
-    fn open_secret(&self, tenant: i64, user: i64, sealed: &serde_json::Value) -> Outcome<Vec<u8>> {
+    fn open_secret(&self, sign_in: SignIn, sealed: &serde_json::Value) -> Outcome<Vec<u8>> {
         if !self.settings.encryption_available() {
             return Err(TwoFactorError::Unavailable);
         }
-        let opened = self.settings.open_owned(OWNER, tenant, user, sealed)?;
+        let opened = self
+            .settings
+            .open_owned(OWNER, 0, sign_in.identity, sealed)?;
         let encoded = opened.as_str().ok_or(Error::Internal)?;
         Ok(data_encoding::BASE32_NOPAD
             .decode(encoded.as_bytes())
             .map_err(|_| Error::Internal)?)
+    }
+}
+
+/// What the sealed secret is bound to: the installation-owned sign-in, not a
+/// customer tenant account, so one authenticator opens in each membership.
+#[derive(Clone, Copy)]
+struct SignIn {
+    identity: i64,
+}
+impl SignIn {
+    /// Reads the identity id from `row` at `at`.
+    fn of(row: &tokio_postgres::Row, at: usize) -> Self {
+        Self {
+            identity: row.get(at),
+        }
     }
 }
 

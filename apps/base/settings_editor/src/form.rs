@@ -38,6 +38,11 @@ impl Field {
     pub fn encrypted(&self) -> bool {
         self.definition.encrypted
     }
+    /// A stored secret whose definition allows the stored-secret reveal
+    /// (not `NEVER_REVEALED`).
+    pub fn revealable(&self) -> bool {
+        self.encrypted() && self.stored_secret && self.editor.revealable()
+    }
 }
 pub fn dom(key: &str) -> String {
     key.replace('.', "-")

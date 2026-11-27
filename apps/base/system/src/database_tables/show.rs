@@ -306,10 +306,9 @@ impl Show {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn data_tab(
         &mut self,
-        client: &mut deadpool_postgres::Object,
+        client: &mut bilibi_database::Connection,
         table: &catalog::Table,
         found: &[catalog::Column],
         masks: &[Mask],

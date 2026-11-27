@@ -1,23 +1,12 @@
-//! Reset another person's 2FA (`core.user.two_factor.reset`) and the server
-//! command that does the same with no signed-in admin. The page and every
-//! agent door share this contract. The command is a system action: there is
-//! no session to present a code.
-use super::{RESET_KEY, SETTINGS_PATH};
+//! Installation-owner recovery for a lost second factor. Customer tenant
+//! administrators have no operation or page control over the shared factor.
+use super::SETTINGS_PATH;
 use crate::{notifications, reset::normalize_email, UserService};
-use bilibi_agent_api::{
-    Channels, Definitions, Error as AgentError, Guide, Handler, Operation, OperationClient,
-    OperationFuture, WriteHandler, DEFINITIONS,
-};
 use bilibi_database::{Context, Error, MutationTransaction};
 use bilibi_mail::{Address, Message};
-use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_notifications::Notice;
-use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 static USERS: OnceLock<Arc<UserService>> = OnceLock::new();
 
@@ -28,10 +17,6 @@ pub(crate) fn bind(users: Arc<UserService>) -> Result<(), bilibi_module_registry
         )
     })
 }
-fn users() -> bilibi_agent_api::Result<&'static Arc<UserService>> {
-    USERS.get().ok_or(Error::Internal.into())
-}
-
 /// What `bilibi-web two-factor-reset` did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TwoFactorEmailReset {
@@ -42,7 +27,7 @@ pub enum TwoFactorEmailReset {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum TwoFactorEmailError {
-    #[error("No account uses that email.")]
+    #[error("No staff account uses that email.")]
     NotFound,
     #[error("That email address is not valid.")]
     Invalid,
@@ -50,22 +35,16 @@ pub enum TwoFactorEmailError {
     Other(#[from] Error),
 }
 
-struct Account {
-    id: i64,
-    tenant: i64,
-    name: String,
-    email: String,
-    active: bool,
-    home: bool,
+pub(super) struct Account {
+    pub(super) id: i64,
+    pub(super) tenant: i64,
+    pub(super) name: String,
+    pub(super) email: String,
+    pub(super) active: bool,
 }
 
-fn field(message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([("user_id".into(), vec![message.into()])]))
-}
-
-/// Staff accounts only: a customer's factor is not a staff reset (ADR 16).
 const TARGET_SQL: &str =
-    "SELECT u.id, u.tenant_id, u.name, i.email, u.status='active',i.home_tenant_id=u.tenant_id AND i.home_user_id=u.id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.kind='staff'";
+    "SELECT DISTINCT ON (i.id) u.id,u.tenant_id,u.name,i.email,u.status='active' FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.kind='staff'";
 
 fn account_from(row: &tokio_postgres::Row) -> Account {
     Account {
@@ -74,46 +53,11 @@ fn account_from(row: &tokio_postgres::Row) -> Account {
         name: row.get(2),
         email: row.get(3),
         active: row.get(4),
-        home: row.get(5),
     }
 }
 
-async fn target_in(
-    client: &dyn OperationClient,
-    scope: &Scope,
-    user: i64,
-) -> bilibi_agent_api::Result<Account> {
-    let rows = client
-        .query(
-            &format!("{TARGET_SQL} AND u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL"),
-            &[&scope.tenant(), &user],
-        )
-        .await?;
-    rows.first().map(account_from).ok_or(AgentError::NotFound)
-}
-
-fn user_id(input: &Value) -> i64 {
-    input["user_id"].as_i64().unwrap_or(0)
-}
-
-fn refuse(scope: &Scope, account: &Account, enrolled: bool) -> Result<(), AgentError> {
-    if scope.impersonator().is_some() {
-        return Err(field("Leave impersonation before resetting 2FA."));
-    }
-    if scope.user() == account.id {
-        return Err(field("You cannot reset your own 2FA."));
-    }
-    if !account.home {
-        return Err(field("This workspace cannot reset this member's 2FA."));
-    }
-    if !enrolled {
-        return Err(field("2FA is not on for this account."));
-    }
-    Ok(())
-}
-
-fn reset_notice(body: &str) -> Result<Notice, Error> {
-    let notice = Notice::new("Your 2FA was reset")
+pub(super) fn reset_notice(body: &str) -> Result<Notice, Error> {
+    let notice = Notice::new(crate::wording::TWO_FACTOR_SUBJECT)
         .kind("two_factor_reset")
         .body(body)
         .url(SETTINGS_PATH);
@@ -121,36 +65,65 @@ fn reset_notice(body: &str) -> Result<Notice, Error> {
     Ok(notice)
 }
 
-fn reset_mail(origin: &str, name: &str, email: &str, body: &str) -> Option<Message> {
+/// The packaged reset email; `slot` says who reset it. The
+/// reset stands without it, so a mail that cannot be built is only logged.
+pub(super) fn reset_mail(service: &UserService, account: &Account, slot: &str) -> Option<Message> {
+    let to = Address::new(Some(&account.name), &account.email).ok()?;
+    let wording = service
+        .templates
+        .platform_wording(crate::wording::TWO_FACTOR_RESET, &[])
+        .map_err(|error| {
+            eprintln!(
+                "mail: 2FA reset notice for user {} was not written: {error}",
+                account.id
+            )
+        })
+        .ok()?;
     Some(Message::text(
-        Address::new(Some(name), email).ok()?,
-        "Your 2FA was reset",
-        format!("{body}\n\n{origin}{SETTINGS_PATH}\n"),
+        to,
+        wording["subject"].clone(),
+        format!("{}\n\n{}{SETTINGS_PATH}\n", wording[slot], service.origin),
     ))
 }
 
-const ADMIN_BODY: &str =
-    "An admin turned off your 2FA methods and disconnected your AI apps. Sign in and set up 2FA again in Settings.";
-const SYSTEM_BODY: &str =
-    "A server administrator turned off your 2FA methods and disconnected your AI apps. Sign in and set up 2FA again in Settings.";
+pub(crate) async fn lock_reset_target(
+    tx: &MutationTransaction<'_>,
+    tenant: i64,
+    user: i64,
+) -> Result<(), Error> {
+    if tx.context().tenant != tenant {
+        return Err(Error::Forbidden);
+    }
+    // Serialize resets and membership removal through the owning account row.
+    tx.sql()
+        .query_opt(
+            "SELECT id FROM users WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE",
+            &[&tenant, &user],
+        )
+        .await?
+        .ok_or(Error::NotFound)?;
+    let identity = crate::sign_in_identity::id(tx.sql(), tenant, user).await?;
+    tx.sql()
+        .query_one(
+            "SELECT id FROM user_identities WHERE id=$1 FOR UPDATE",
+            &[&identity],
+        )
+        .await?;
+    Ok(())
+}
 
-/// Deletes the confirmed authenticator, ends every session of that account
-/// and records who did it. Returns the ended session ids for announce after
-/// commit. Session ids are not written into the audit payload.
-async fn clear_confirmed(
+/// Deletes the confirmed authenticator, ends every session of the portable
+/// identity across its memberships and records who did it. Returns the ended
+/// session ids for announce after commit. Session ids are not written into
+/// the audit payload.
+pub(super) async fn clear_confirmed(
     service: &UserService,
     tx: &mut MutationTransaction<'_>,
     account: &Account,
     by: Value,
-) -> Result<Vec<String>, Error> {
-    // Serialize resets and deletion through the owning account row.
-    tx.sql()
-        .query_opt(
-            "SELECT id FROM users WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE",
-            &[&tx.context().tenant, &account.id],
-        )
-        .await?
-        .ok_or(Error::NotFound)?;
+    actor: Option<i64>,
+) -> Result<(Vec<String>, usize), Error> {
+    let identity = crate::sign_in_identity::id(tx.sql(), account.tenant, account.id).await?;
     if !service.step_up.account_enrolled(tx, account.id).await? {
         return Err(Error::Conflict);
     }
@@ -171,22 +144,14 @@ async fn clear_confirmed(
         new: after,
     })
     .await?;
-    service.sessions.revoke(tx, account.id, None).await
+    let closed = super::recovery::close_requests(tx, identity, actor).await?;
+    let ended =
+        crate::sign_in_identity::end_everywhere(&service.sessions, tx, identity, account.id, None)
+            .await?;
+    Ok((ended, closed))
 }
 
-async fn notify_target(
-    tx: &mut MutationTransaction<'_>,
-    scope: &Scope,
-    account: &Account,
-    body: &str,
-) -> Result<(), Error> {
-    if !account.active {
-        return Ok(());
-    }
-    notifications::record(tx, scope, &[account.id], &reset_notice(body)?).await
-}
-
-fn wake(
+pub(super) fn wake(
     service: &UserService,
     tenant: i64,
     user: i64,
@@ -200,85 +165,14 @@ fn wake(
     };
     let mailer = service.mailer.clone();
     tokio::spawn(async move {
-        if let Err(error) = mailer.deliver(&message).await {
+        if let Err(error) = mailer.deliver_for(tenant, &message).await {
             eprintln!("mail: 2FA reset notice for user {user} was not delivered: {error}");
         }
     });
 }
 
-struct Reset;
-impl WriteHandler for Reset {
-    fn owner(&self) -> &'static str {
-        "core/user"
-    }
-    fn preview<'a>(
-        &'a self,
-        client: &'a dyn OperationClient,
-        scope: &'a Scope,
-        input: &'a Value,
-    ) -> OperationFuture<'a> {
-        Box::pin(async move {
-            let account = target_in(client, scope, user_id(input)).await?;
-            refuse(
-                scope,
-                &account,
-                users()?
-                    .step_up
-                    .enrolled_for(client, scope, account.id)
-                    .await?,
-            )?;
-            Ok(json!({
-                "user_id": account.id,
-                "name": account.name,
-                "email": account.email,
-                "summary": format!("Turn off 2FA for {}, sign them out and disconnect their AI apps. They set it up again in Settings.", account.name),
-                "step_up": [RESET_KEY],
-            })
-            .into())
-        })
-    }
-    fn commit<'a>(
-        &'a self,
-        tx: &'a mut MutationTransaction<'_>,
-        scope: &'a Scope,
-        input: &'a Value,
-    ) -> OperationFuture<'a> {
-        Box::pin(async move {
-            let service = users()?;
-            bilibi_authz::authorize_key(tx.sql(), scope, crate::contributions::UPDATE).await?;
-            let account = target_in(tx.sql(), scope, user_id(input)).await?;
-            refuse(
-                scope,
-                &account,
-                service.step_up.account_enrolled(tx, account.id).await?,
-            )?;
-
-            // Spend the admin's own code before locking the target's row.
-            service
-                .step_up
-                .require_code(scope, RESET_KEY, &format!("user:{}", account.id))
-                .await?;
-            // Attribution is an ID, not a personal copy on another account's
-            // evidence, which would outlive erasure of the administrator.
-            let by = json!({"reset_by_user_id":scope.user()});
-            let ended = clear_confirmed(service, tx, &account, by)
-                .await
-                .map_err(|error| match error {
-                    Error::Conflict => field("2FA is not on for this account."),
-                    other => other.into(),
-                })?;
-            notify_target(tx, scope, &account, ADMIN_BODY).await?;
-            let mail = reset_mail(&service.origin, &account.name, &account.email, ADMIN_BODY);
-            let (tenant, user) = (account.tenant, account.id);
-            let service = Arc::clone(service);
-            tx.after_commit(move || wake(&service, tenant, user, ended, mail));
-            Ok(json!({"user_id": user, "reset": true}).into())
-        })
-    }
-}
-
 impl UserService {
-    /// Turns off the confirmed authenticator for the one non-deleted account
+    /// Turns off the confirmed authenticator for the one non-deleted staff identity
     /// with this email. Already off is success and writes nothing. The audit
     /// actor is the system principal `two-factor-reset`.
     pub async fn reset_two_factor_by_email(
@@ -289,7 +183,7 @@ impl UserService {
         let client = self.db.get().await.map_err(Error::from)?;
         let rows = client
             .query(
-                &format!("{TARGET_SQL} AND lower(i.email)=$1 AND u.deleted_at IS NULL AND i.home_tenant_id=u.tenant_id AND i.home_user_id=u.id"),
+                &format!("{TARGET_SQL} AND lower(i.email)=$1 AND u.deleted_at IS NULL ORDER BY i.id,(u.tenant_id=i.last_tenant_id) DESC,u.tenant_id"),
                 &[&email],
             )
             .await
@@ -308,15 +202,17 @@ impl UserService {
                 Context::system(account.tenant, "two-factor-reset", "user.two_factor.reset"),
             )
             .await?;
+        lock_reset_target(&tx, account.tenant, account.id).await?;
         let ended = match clear_confirmed(
             self,
             &mut tx,
             &account,
             json!({"reset_by":"system", "reset_by_name":"two-factor-reset"}),
+            None,
         )
         .await
         {
-            Ok(ended) => ended,
+            Ok((ended, _)) => ended,
             Err(Error::Conflict) => {
                 tx.rollback().await?;
                 return Ok(TwoFactorEmailReset::AlreadyOff);
@@ -324,11 +220,11 @@ impl UserService {
             Err(error) => return Err(error.into()),
         };
         if account.active {
-            let notice = reset_notice(SYSTEM_BODY)?;
+            let notice = reset_notice(crate::wording::TWO_FACTOR_SYSTEM_BODY)?;
             notifications::record_in_tenant(&mut tx, account.tenant, &[account.id], &notice)
                 .await?;
         }
-        let mail = reset_mail(&self.origin, &account.name, &account.email, SYSTEM_BODY);
+        let mail = reset_mail(self, &account, "by_server_admin");
         let (tenant, user) = (account.tenant, account.id);
         // Live pages subscribe to the service bound at boot, which is this one.
         let service = USERS.get().cloned().ok_or(Error::Internal)?;
@@ -337,23 +233,3 @@ impl UserService {
         Ok(TwoFactorEmailReset::Reset)
     }
 }
-
-fn reset_schema() -> Value {
-    json!({"type":"object","required":["user_id"],"properties":{"user_id":{"type":"integer","minimum":1,"description":"The account whose 2FA to turn off. Not the caller's own account."}}})
-}
-fn reset_output() -> Value {
-    json!({"type":"object","description":"The account, whether 2FA was on, and a summary. The commit reports user_id and reset true. The account holder is signed out, their AI apps are disconnected, and they are notified."})
-}
-
-inventory::submit! { Contribution::new(DEFINITIONS, "core/user", Provenance { module: "core/user", source: file!(), line: line!() }, &Definitions {
-    operations: &[
-        Operation { key: RESET_KEY, title: "Reset a person's 2FA", summary: "Turn off another person's 2FA, sign them out and disconnect their AI apps. They set it up again in Settings. You confirm with your own current 2FA code. You cannot reset your own.", keywords: &["2fa", "two-factor", "authenticator", "reset", "phone", "lost"], capability: crate::contributions::UPDATE, input: reset_schema, output: reset_output, handler: Handler::SafeWrite(&Reset), channels: Channels::Every, step_up: &[RESET_KEY] },
-    ],
-    guides: &[Guide { key: "core.user.two_factor", title: "Reset 2FA", summary: "Turn off another person's 2FA when they have lost their phone.", keywords: &["2fa", "two-factor", "reset", "authenticator"], capability: crate::contributions::UPDATE,
-        body: "There are no recovery codes. To turn off someone else's 2FA, plan core.user.two_factor.reset with their user_id. Show them the review, then commit with the current code from your own 2FA methods. You cannot reset your own 2FA this way. The person is signed out, their AI apps are disconnected and they are notified, and they set the app up again in Settings. A server owner with no other admin runs bilibi-web two-factor-reset --email on the server." }],
-}) }
-
-bilibi_step_up::declare!(
-    "core/user",
-    bilibi_step_up::Operation::new(RESET_KEY, "Reset another person's 2FA").always()
-);

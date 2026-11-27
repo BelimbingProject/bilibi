@@ -17,6 +17,8 @@ bilibi-agent-api = { path = "../../base/agent_api" }
 bilibi-artifacts = { path = "../../base/artifacts" }
 bilibi-authz = { path = "../../base/authz" }
 bilibi-bulk-data.workspace = true
+bilibi-custom-fields.workspace = true
+bilibi-picklists.workspace = true
 bilibi-database.workspace = true
 bilibi-grid = { path = "../../base/grid" }
 bilibi-search.workspace = true
@@ -42,4 +44,8 @@ tokio-postgres.workspace = true
 [dev-dependencies]
 axum.workspace = true
 bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
+bilibi-user.workspace = true
 bilibi-web = { path = "../../web" }
+
+[lints]
+workspace = true

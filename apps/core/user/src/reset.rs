@@ -5,17 +5,107 @@
 use crate::{
     identity::Audience,
     password::{self, check_policy},
+    sign_in::PRINCIPAL,
     CredentialError, UserService,
 };
-use bilibi_database::{Change, Context, Error};
-use bilibi_mail::{Address, Message};
-use serde_json::json;
+use bilibi_agent_api::{
+    Channels, Handler, Operation, OperationClient, OperationFuture, WriteHandler,
+};
+use bilibi_database::{Change, Context, Db, Error, MutationBoundary, MutationTransaction};
+use bilibi_mail::{Address, Mailer, Message};
+use bilibi_module_registry::{Contribution, Provenance};
+use bilibi_settings::{Definition, ScopeKind, Setting, Settings, Target, ValueType, DEFINITIONS};
+use bilibi_templates::Value as Fact;
+use bilibi_tenancy::{ReadClient, Scope};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, OnceLock};
 use subtle::ConstantTimeEq;
-use tokio_postgres::GenericClient;
 
-/// A reset link stays valid this long and a new one may be requested this often.
-const RESET_LIFETIME_SECONDS: f64 = 3600.0;
+const RESET_LIFETIME: &str = "user.password_reset_minutes";
+pub(crate) const MANAGE_LIFETIME: &str = "admin.user.password-reset-lifetime.manage";
+const MIN_MINUTES: i64 = 15;
+const MAX_MINUTES: i64 = 10080;
+inventory::submit! { Contribution::new(DEFINITIONS, RESET_LIFETIME, Provenance { module: "core/user", source: file!(), line: line!() }, &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(4320),
+    nullable: false, encrypted: false, minimum: Some(MIN_MINUTES as f64), maximum: Some(MAX_MINUTES as f64), validator: None,
+    editor: None,
+})) }
+
+static SETTINGS: OnceLock<Arc<Settings>> = OnceLock::new();
+
+pub(crate) fn bind(settings: Arc<Settings>) -> bilibi_module_registry::Result<()> {
+    SETTINGS.set(settings).map_err(|_| {
+        bilibi_module_registry::RegistryError::Service("duplicate reset settings binding".into())
+    })
+}
+
+struct SetLifetime;
+
+fn lifetime_minutes(input: &Value) -> Result<i64, Error> {
+    input["minutes"]
+        .as_i64()
+        .filter(|minutes| (MIN_MINUTES..=MAX_MINUTES).contains(minutes))
+        .ok_or(Error::Invalid)
+}
+
+impl WriteHandler for SetLifetime {
+    fn owner(&self) -> &'static str {
+        "core/user"
+    }
+
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            bilibi_authz::authorize_proof(client, scope, MANAGE_LIFETIME).await?;
+            let minutes = lifetime_minutes(input)?;
+            Ok(json!({
+                "summary": "Set how long newly issued password reset links can be used",
+                "minutes": minutes
+            })
+            .into())
+        })
+    }
+
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            bilibi_authz::authorize_operator(tx.sql(), scope, MANAGE_LIFETIME).await?;
+            let minutes = lifetime_minutes(input)?;
+            SETTINGS
+                .get()
+                .ok_or(Error::Internal)?
+                .put(tx, scope, Target::Global, RESET_LIFETIME, json!(minutes))
+                .await?;
+            Ok(json!({"minutes": minutes}).into())
+        })
+    }
+}
+
+inventory::submit! { Contribution::new(bilibi_agent_api::DEFINITIONS, "core/user.reset-settings", Provenance { module: "core/user", source: file!(), line: line!() }, &bilibi_agent_api::Definitions {
+    operations: &[Operation {
+        key: "core.user.password_reset_lifetime.set",
+        title: "Set the password reset link lifetime",
+        summary: "Set how long newly issued staff and portal password reset links can be used across the installation.",
+        keywords: &["password", "reset", "recovery", "expiry"],
+        capability: MANAGE_LIFETIME,
+        input: || json!({"type":"object","required":["minutes"],"properties":{"minutes":{"type":"integer","minimum":MIN_MINUTES,"maximum":MAX_MINUTES}}}),
+        output: || json!({"type":"object","properties":{"minutes":{"type":"integer"}}}),
+        handler: Handler::SafeWrite(&SetLifetime),
+        channels: Channels::Every,
+        step_up: &[],
+    }],
+    guides: &[],
+}) }
+/// A new link may be requested once a minute.
 const RESET_THROTTLE_SECONDS: f64 = 60.0;
 
 pub(crate) fn normalize_email(email: &str) -> Result<String, Error> {
@@ -34,31 +124,292 @@ pub(crate) fn random_token() -> Result<String, Error> {
 fn digest(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
-/// A new one-time reset token for the account, stored hashed, unless one was
-/// issued within the throttle (one a minute); expired rows are swept here,
-/// which keeps storage bounded without a scheduler.
-async fn issue_reset_token(
-    client: &impl GenericClient,
-    tenant: i64,
-    user: i64,
-) -> Result<Option<String>, Error> {
-    let token = random_token()?;
-    let claimed = client
-        .query_opt(
-            "INSERT INTO password_reset_tokens(identity_id,token_hash,created_at,expires_at) SELECT identity_id,$3,now(),now()+make_interval(secs => $4::double precision) FROM users WHERE tenant_id=$1 AND id=$2 ON CONFLICT (identity_id) DO UPDATE SET token_hash=excluded.token_hash,created_at=excluded.created_at,expires_at=excluded.expires_at WHERE password_reset_tokens.created_at<=now()-make_interval(secs => $5::double precision) RETURNING identity_id",
-            &[&tenant, &user, &digest(&token), &RESET_LIFETIME_SECONDS, &RESET_THROTTLE_SECONDS],
-        )
-        .await?;
-    if claimed.is_none() {
-        return Ok(None);
+/// Everything a reset mail needs, owned, so a mail can be issued from a
+/// task that outlives the request (the sign-in lock notice is).
+#[derive(Clone)]
+pub(crate) struct ResetMail {
+    pub(crate) db: Db,
+    pub(crate) mutations: Arc<MutationBoundary>,
+    mailer: Arc<Mailer>,
+    settings: Arc<bilibi_settings::Settings>,
+    templates: Arc<bilibi_templates::Templates>,
+    origin: String,
+}
+
+impl ResetMail {
+    /// A new one-time reset token for the account, stored hashed, unless one
+    /// was issued within the throttle (one a minute). A sign-in has one slot
+    /// (`password_reset_tokens` is keyed by identity), so storage stays
+    /// bounded; an expired token only fails to redeem until it is replaced.
+    /// Audited as `user.reset_requested` by the `sign-in` principal; the
+    /// token and its digest never enter the change.
+    async fn issue_token(
+        &self,
+        tenant: i64,
+        user: i64,
+        address: &str,
+        verified: bool,
+    ) -> Result<Option<String>, Error> {
+        let token = random_token()?;
+        let hash = digest(&token);
+        let mut client = self.db.get().await?;
+        let mut tx = self
+            .mutations
+            .begin(
+                &mut client,
+                Context::system(tenant, PRINCIPAL, "user.reset_requested"),
+            )
+            .await?;
+        let lifetime = self
+            .settings
+            .get_global(tx.sql(), RESET_LIFETIME)
+            .await?
+            .as_i64()
+            .ok_or(Error::Internal)? as f64
+            * 60.0;
+        let address = address.to_owned();
+        let issued = tx
+            .mutate(move |sql| {
+                Box::pin(async move {
+                    let identity: i64 = sql
+                        .query_opt(
+                            "INSERT INTO password_reset_tokens(identity_id,token_hash,created_at,expires_at) SELECT i.id,$3,now(),now()+make_interval(secs => $4::double precision) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active' AND i.deleted_at IS NULL AND i.status='active' AND i.email=$6 AND (NOT $7 OR i.email_verified_at IS NOT NULL) ON CONFLICT (identity_id) DO UPDATE SET token_hash=excluded.token_hash,created_at=excluded.created_at,expires_at=excluded.expires_at WHERE password_reset_tokens.created_at<=now()-make_interval(secs => $5::double precision) RETURNING identity_id",
+                            &[&tenant, &user, &hash, &lifetime, &RESET_THROTTLE_SECONDS, &address, &verified],
+                        )
+                        .await?
+                        .ok_or(Error::Conflict)?
+                        .get(0);
+                    Ok((
+                        (),
+                        vec![token_change(identity, "issued")],
+                    ))
+                })
+            })
+            .await;
+        match issued {
+            Ok(()) => {
+                tx.commit().await?;
+                Ok(Some(token))
+            }
+            // Throttled: a token issued within the last minute stands.
+            Err(Error::Conflict) => {
+                tx.rollback().await?;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
-    client
-        .execute(
-            "DELETE FROM password_reset_tokens WHERE expires_at<now()",
-            &[],
-        )
-        .await?;
-    Ok(Some(token))
+
+    /// Delivers `message` after the caller returns; a failed delivery
+    /// withdraws the token it carried (audited as
+    /// `user.reset_withdrawn`), which releases the throttle so the person
+    /// can ask again.
+    fn deliver(&self, tenant: i64, user: i64, message: Message, reset: Option<(&str, String)>) {
+        let mail = self.clone();
+        let (hash, action) = match reset {
+            Some((token, link)) => (Some(digest(token)), Some(link)),
+            None => (None, None),
+        };
+        tokio::spawn(async move {
+            let Err(error) = mail
+                .mailer
+                .deliver_linked_for(tenant, &message, action.as_deref())
+                .await
+            else {
+                return;
+            };
+            eprintln!("mail: reset link for user {user} was not delivered: {error}");
+            if let Some(hash) = hash {
+                if let Err(error) = mail.withdraw(tenant, user, hash).await {
+                    eprintln!("mail: reset link for user {user} was not withdrawn: {error}");
+                }
+            }
+        });
+    }
+
+    async fn withdraw(&self, tenant: i64, user: i64, hash: Vec<u8>) -> Result<(), Error> {
+        let mut client = self.db.get().await?;
+        let mut tx = self
+            .mutations
+            .begin(
+                &mut client,
+                Context::system(tenant, PRINCIPAL, "user.reset_withdrawn"),
+            )
+            .await?;
+        let withdrawn = tx
+            .mutate(move |sql| {
+                Box::pin(async move {
+                    let identity: i64 = sql
+                        .query_opt(
+                            "DELETE FROM password_reset_tokens WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND token_hash=$3 RETURNING identity_id",
+                            &[&tenant, &user, &hash],
+                        )
+                        .await?
+                        .ok_or(Error::NotFound)?
+                        .get(0);
+                    Ok(((), vec![token_change(identity, "withdrawn")]))
+                })
+            })
+            .await;
+        match withdrawn {
+            Ok(()) => tx.commit().await,
+            // Already redeemed or replaced: nothing to withdraw.
+            Err(Error::NotFound) => tx.rollback().await,
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Tells the account its sign-in is locked for about `minutes`, with a
+    /// reset link appended when a token can be issued now (a request within
+    /// the last minute already holds one; the mail then points to "Forgot
+    /// your password?"). A failed delivery releases the token, as for a
+    /// requested reset.
+    pub(crate) async fn mail_lock_notice(
+        &self,
+        tenant: i64,
+        user: i64,
+        minutes: i64,
+    ) -> Result<(), Error> {
+        let client = self.db.get().await?;
+        let Some(row) = client
+            .query_opt(
+                "SELECT u.name,i.email FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active'",
+                &[&tenant, &user],
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        drop(client);
+        let (name, address): (String, String) = (row.get(0), row.get(1));
+        let duration = format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" });
+        let wording = self.templates.platform_wording(
+            crate::wording::SIGN_IN_LOCKED,
+            &[("duration", Fact::Text(&duration))],
+        )?;
+        let token = self.issue_token(tenant, user, &address, false).await?;
+        let reset = token
+            .as_deref()
+            .map(|token| (token, reset_link(&self.origin, &address, token)));
+        let link = match &reset {
+            Some((_, url)) => format!("{}\n\n{url}\n", wording["reset_with_link"]),
+            None => format!("{}\n", wording["reset_without_link"]),
+        };
+        let message = Message::text(
+            Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
+            wording["subject"].clone(),
+            format!("{}\n\n{link}", wording["intro"]),
+        );
+        self.deliver(tenant, user, message, reset);
+        Ok(())
+    }
+
+    /// Mails `text` to the verified account with a reset link appended. A
+    /// failed delivery releases the token, as for a requested reset.
+    pub(crate) async fn mail_with_reset_link(
+        &self,
+        tenant: i64,
+        user: i64,
+        subject: &str,
+        text: &str,
+        verified: bool,
+    ) -> Result<(), Error> {
+        let client = self.db.get().await?;
+        let Some(row) = client
+            .query_opt(
+                "SELECT u.name,i.email FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active' AND (NOT $3 OR i.email_verified_at IS NOT NULL)",
+                &[&tenant, &user, &verified],
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        drop(client);
+        let (name, address): (String, String) = (row.get(0), row.get(1));
+        let token = self.issue_token(tenant, user, &address, verified).await?;
+        let reset = token
+            .as_deref()
+            .map(|token| (token, reset_link(&self.origin, &address, token)));
+        let link = match &reset {
+            Some((_, url)) => format!("Reset your password with this link:\n\n{url}\n"),
+            None => {
+                "Reset your password with \"Forgot your password?\" on the sign-in page.\n".into()
+            }
+        };
+        let message = Message::text(
+            Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
+            subject,
+            format!("{text}\n\n{link}"),
+        );
+        self.deliver(tenant, user, message, reset);
+        Ok(())
+    }
+
+    /// Mails the server owner the one-time link that claims the account: the
+    /// owner chooses its password there, so only the holder of the address
+    /// can sign in. Waits for delivery so the server command can report it.
+    /// A link issued within the last minute stands ([`ClaimMail::RecentlySent`]);
+    /// a failed delivery withdraws the token so a retry can send again.
+    pub(crate) async fn mail_owner_claim(
+        &self,
+        tenant: i64,
+        user: i64,
+        name: &str,
+        address: &str,
+    ) -> Result<ClaimMail, Error> {
+        let Some(token) = self.issue_token(tenant, user, address, false).await? else {
+            return Ok(ClaimMail::RecentlySent);
+        };
+        let origin = &self.origin;
+        let link = reset_link(origin, address, &token);
+        let message = Message::text(
+            Address::new(Some(name), address).map_err(|_| Error::Invalid)?,
+            "Claim your Bilibi server",
+            format!(
+                "You are the owner of the Bilibi server at {origin}.\n\n\
+                 1. Choose your password with this link:\n\n{link}\n\n\
+                 2. Sign in, then set up two-factor authentication with your phone:\n\n{origin}/settings/two-factor?method=core.user.authenticator\n\n\
+                 The server is yours once both are done. The link works once. If you did not expect this email, ignore it: nobody can sign in as you without it.\n",
+            ),
+        );
+        match self
+            .mailer
+            .deliver_linked_for(tenant, &message, Some(&link))
+            .await
+        {
+            Ok(_) => Ok(ClaimMail::Sent),
+            Err(error) => {
+                self.withdraw(tenant, user, digest(&token)).await?;
+                Ok(ClaimMail::NotDelivered(error.to_string()))
+            }
+        }
+    }
+}
+
+/// What [`ResetMail::mail_owner_claim`] did.
+pub(crate) enum ClaimMail {
+    Sent,
+    RecentlySent,
+    /// The transport refused; the detail is for the operator.
+    NotDelivered(String),
+}
+
+/// The audit change of a reset token: only that it was issued or withdrawn.
+fn token_change(identity: i64, reset_token: &str) -> Change {
+    Change {
+        kind: "user_identity".into(),
+        id: identity,
+        old: json!({}),
+        new: json!({"reset_token": reset_token}),
+    }
+}
+
+/// Where the emailed link points; the reset page reads both values.
+fn reset_link(origin: &str, email: &str, token: &str) -> String {
+    format!(
+        "{origin}/reset-password/{token}?email={}",
+        encode_component(email)
+    )
 }
 
 async fn finish_reset_request() -> Result<(), CredentialError> {
@@ -67,6 +418,13 @@ async fn finish_reset_request() -> Result<(), CredentialError> {
     password::verify("", None).await?;
     Ok(())
 }
+/// The account a forgotten-password request mails and its link redeems for:
+/// per sign-in under the address, the one `identity::password_identity`
+/// signs in to (last used, then the lowest live tenant), so a removed
+/// or suspended last tenant never strands the request. Columns: account,
+/// tenant, account name, address, identity, live token digest.
+const RESET_ACCOUNT: &str = "SELECT DISTINCT ON (i.id) u.id,u.tenant_id,u.name,i.email,i.id,r.token_hash FROM user_identities i JOIN users u ON u.identity_id=i.id JOIN tenants t ON t.id=u.tenant_id LEFT JOIN password_reset_tokens r ON r.identity_id=i.id AND r.expires_at>now() WHERE lower(i.email)=$1 AND i.kind=$2 AND u.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' ORDER BY i.id,(u.tenant_id=i.last_tenant_id) DESC,u.tenant_id LIMIT 2";
+
 fn encode_component(value: &str) -> String {
     value
         .bytes()
@@ -79,13 +437,19 @@ fn encode_component(value: &str) -> String {
         .collect()
 }
 
-/// Whether `site` can be a portal address segment, so a reset link never
-/// carries anything else into a path.
-pub(crate) fn site_shaped(site: &str) -> bool {
-    (1..=63).contains(&site.len())
-        && site
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+/// Whether `origin` is a bare `https://host[:port]` (or `http://` for a
+/// development copy), so a reset link never carries anything else.
+pub(crate) fn origin_shaped(origin: &str) -> bool {
+    url::Url::parse(origin).is_ok_and(|url| {
+        matches!(url.scheme(), "https" | "http")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && !origin.ends_with('/')
+    })
 }
 
 impl UserService {
@@ -106,6 +470,9 @@ impl UserService {
         if scope.csrf != csrf {
             return Err(Error::Forbidden.into());
         }
+        self.sessions
+            .require_portable_authority(&**client, &scope)
+            .await?;
         check_policy(new).map_err(CredentialError::Policy)?;
         let (tenant, user) = (scope.tenant(), scope.user());
         let credential = client
@@ -124,6 +491,9 @@ impl UserService {
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("user.change_password"))
+            .await?;
+        self.sessions
+            .require_portable_authority(tx.sql(), &scope)
             .await?;
         tx.mutate(move |sql| {
             Box::pin(async move {
@@ -156,7 +526,14 @@ impl UserService {
         })
         .await?;
         // Other live pages of this account hear it once the change is committed.
-        let ended = self.sessions.revoke(&mut tx, user, Some(token)).await?;
+        let ended = crate::sign_in_identity::end_everywhere(
+            &self.sessions,
+            &mut tx,
+            identity,
+            user,
+            Some(token),
+        )
+        .await?;
         let sessions = self.sessions.clone();
         tx.after_commit(move || sessions.announce(ended));
         tx.commit().await?;
@@ -171,24 +548,29 @@ impl UserService {
         self.request_reset(Audience::Staff, None, email).await
     }
     /// [`UserService::request_password_reset`] for one audience; a customer's
-    /// link opens its portal's reset page at `site`.
+    /// link opens the portal's reset page on the public site at `origin`,
+    /// the one the request came to.
     pub(crate) async fn request_reset(
         &self,
         audience: Audience,
-        site: Option<&str>,
+        origin: Option<&str>,
         email: &str,
     ) -> Result<(), CredentialError> {
         let email = normalize_email(email)?;
+        let public = origin;
         let client = self.db.get().await.map_err(Error::from)?;
+        // The account sign-in would choose (`identity::password_identity`):
+        // last used, then the lowest live membership. Ambiguity (two
+        // sign-ins under one address, possible only for customers) is
+        // treated as unknown rather than guessed; a frozen account
+        // (archived company, retired identity) is unknown here too.
         let candidates = client
             .query(
-                "SELECT u.id,u.tenant_id,u.name,i.email FROM user_identities i JOIN users u ON u.identity_id=i.id AND u.tenant_id=i.last_tenant_id JOIN tenants t ON t.id=u.tenant_id WHERE lower(i.email)=$1 AND i.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' LIMIT 2",
+                RESET_ACCOUNT,
                 &[&email, &audience.kind().as_str(), &audience.tenant()],
             )
             .await
             .map_err(Error::from)?;
-        // Ambiguity is treated as unknown rather than guessed; a frozen account
-        // (archived company, retired identity) is unknown here too.
         let [account] = &candidates[..] else {
             return finish_reset_request().await;
         };
@@ -204,113 +586,70 @@ impl UserService {
         ) {
             return finish_reset_request().await;
         }
-        let Some(token) = issue_reset_token(&**client, tenant, user).await? else {
+        drop(client);
+        let mail = self.reset_mail();
+        let wording = self
+            .templates
+            .platform_wording(crate::wording::PASSWORD_RESET, &[])?;
+        let Some(token) = mail.issue_token(tenant, user, &address, false).await? else {
             return finish_reset_request().await;
         };
-        let link = match site {
-            Some(site) => self.portal_reset_link(site, &address, &token),
+        let link = match public {
+            Some(origin) => format!(
+                "{origin}/portal/reset/{token}?email={}",
+                encode_component(&address)
+            ),
             None => self.reset_link(&address, &token),
         };
         let message = Message::text(
             Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
-            "Reset your Bilibi password",
-            format!(
-                "Reset your Bilibi password by opening this link:\n\n{link}\n\nIf you did not request this, you can ignore this email.\n"
-            ),
+            wording["subject"].clone(),
+            crate::wording::around_link(&wording, &link),
         );
-        let (mailer, db, hash) = (self.mailer.clone(), self.db.clone(), digest(&token));
-        tokio::spawn(async move {
-            if let Err(error) = mailer.deliver(&message).await {
-                eprintln!("mail: password reset for user {user} was not delivered: {error}");
-                // Release the throttle so the person can ask again.
-                if let Ok(client) = db.get().await {
-                    let _ = client
-                        .execute(
-                            "DELETE FROM password_reset_tokens WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND token_hash=$3",
-                            &[&tenant, &user, &hash],
-                        )
-                        .await;
-                }
-            }
-        });
+        mail.deliver(tenant, user, message, Some((&token, link)));
         finish_reset_request().await
     }
 
-    /// Mails `text` to the account with a reset link appended, when a token
-    /// can be issued now (a request within the last minute already holds
-    /// one; the mail then points to "Forgot your password?"). A failed
-    /// delivery releases the token, as for a requested reset.
-    pub(crate) async fn mail_with_reset_link(
-        &self,
-        tenant: i64,
-        user: i64,
-        subject: &str,
-        text: &str,
-    ) -> Result<(), Error> {
-        let client = self.db.get().await?;
-        let Some(row) = client
-            .query_opt(
-                "SELECT u.name,i.email FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active'",
-                &[&tenant, &user],
-            )
-            .await?
-        else {
-            return Ok(());
-        };
-        let (name, address): (String, String) = (row.get(0), row.get(1));
-        let token = issue_reset_token(&**client, tenant, user).await?;
-        let link = match &token {
-            Some(token) => format!(
-                "Reset your password with this link:\n\n{}\n",
-                self.reset_link(&address, token)
-            ),
-            None => {
-                "Reset your password with \"Forgot your password?\" on the sign-in page.\n".into()
-            }
-        };
-        let message = Message::text(
-            Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
-            subject,
-            format!("{text}\n\n{link}"),
-        );
-        let (mailer, db, hash) = (
-            self.mailer.clone(),
-            self.db.clone(),
-            token.as_deref().map(digest),
-        );
-        tokio::spawn(async move {
-            if let Err(error) = mailer.deliver(&message).await {
-                eprintln!("mail: notice for user {user} was not delivered: {error}");
-                if let (Some(hash), Ok(client)) = (hash, db.get().await) {
-                    let _ = client
-                        .execute(
-                            "DELETE FROM password_reset_tokens WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND token_hash=$3",
-                            &[&tenant, &user, &hash],
-                        )
-                        .await;
-                }
-            }
-        });
-        Ok(())
+    /// The owned handles a reset mail is issued and delivered with.
+    pub(crate) fn reset_mail(&self) -> ResetMail {
+        ResetMail {
+            db: self.db.clone(),
+            mutations: self.mutations.clone(),
+            mailer: self.mailer.clone(),
+            settings: self.settings.clone(),
+            templates: self.templates.clone(),
+            origin: self.origin.clone(),
+        }
     }
 
     /// Where the emailed link points; the reset page reads both values.
     pub fn reset_link(&self, email: &str, token: &str) -> String {
-        format!(
-            "{}/reset-password/{token}?email={}",
-            self.origin,
-            encode_component(email)
-        )
+        reset_link(&self.origin, email, token)
     }
 
-    /// Where a portal's emailed link points: the host's reset page of the
-    /// portal at `site` (ADR 16).
-    pub(crate) fn portal_reset_link(&self, site: &str, email: &str, token: &str) -> String {
-        format!(
-            "{}/portal/reset/{site}/{token}?email={}",
-            self.origin,
-            encode_component(email)
-        )
+    /// Check a staff reset link before asking for a new password. Redemption
+    /// repeats this check inside its mutation, so concurrent use still loses.
+    pub async fn reset_link_valid(&self, email: &str, token: &str) -> Result<bool, Error> {
+        self.reset_link_valid_for(Audience::Staff, email, token)
+            .await
+    }
+
+    pub(crate) async fn reset_link_valid_for(
+        &self,
+        audience: Audience,
+        email: &str,
+        token: &str,
+    ) -> Result<bool, Error> {
+        let Ok(email) = normalize_email(email) else {
+            return Ok(false);
+        };
+        if token.is_empty() || token.len() > 128 {
+            return Ok(false);
+        }
+        let client = self.db.get().await?;
+        Ok(reset_account(&**client, audience, &email, &digest(token))
+            .await?
+            .is_some())
     }
 
     /// Consumes the one-time token, replaces the password and ends every
@@ -337,38 +676,13 @@ impl UserService {
             return Err(CredentialError::InvalidOrExpiredToken);
         }
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let account = client
-            .query(
-                "SELECT u.id,u.tenant_id,i.id,r.token_hash FROM user_identities i JOIN users u ON u.identity_id=i.id AND u.tenant_id=i.last_tenant_id JOIN tenants t ON t.id=u.tenant_id LEFT JOIN password_reset_tokens r ON r.identity_id=i.id AND r.expires_at>now() WHERE lower(i.email)=$1 AND i.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' LIMIT 2",
-                &[&email, &audience.kind().as_str(), &audience.tenant()],
-            )
-            .await
-            .map_err(Error::from)?;
         let presented = digest(token);
-        let user = match &account[..] {
-            [row] => row
-                .get::<_, Option<Vec<u8>>>(3)
-                .filter(|stored| bool::from(stored.ct_eq(&presented)))
-                .map(|_| {
-                    (
-                        row.get::<_, i64>(0),
-                        row.get::<_, i64>(1),
-                        row.get::<_, i64>(2),
-                    )
-                }),
-            _ => None,
-        };
-        let Some((user, tenant, identity)) = user else {
+        let Some((user, tenant, identity)) =
+            reset_account(&**client, audience, &email, &presented).await?
+        else {
             password::verify("", None).await?;
             return Err(CredentialError::InvalidOrExpiredToken);
         };
-        // A frozen account cannot redeem a link either; same answer as unknown.
-        if !matches!(
-            crate::identity::standing(&**client, tenant, user).await?,
-            crate::identity::Standing::Live(_)
-        ) {
-            return Err(CredentialError::InvalidOrExpiredToken);
-        }
         check_policy(new).map_err(CredentialError::Policy)?;
         let replacement = password::hash(new).await?;
         let mut tx = self
@@ -418,7 +732,14 @@ impl UserService {
             .await;
         match claimed {
             Ok(()) => {
-                let ended = self.sessions.revoke(&mut tx, user, None).await?;
+                let ended = crate::sign_in_identity::end_everywhere(
+                    &self.sessions,
+                    &mut tx,
+                    identity,
+                    user,
+                    None,
+                )
+                .await?;
                 let sessions = self.sessions.clone();
                 tx.after_commit(move || sessions.announce(ended));
                 Ok(tx.commit().await?)
@@ -427,4 +748,33 @@ impl UserService {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+async fn reset_account(
+    client: &dyn ReadClient,
+    audience: Audience,
+    email: &str,
+    presented: &[u8],
+) -> Result<Option<(i64, i64, i64)>, Error> {
+    let accounts = client
+        .query(
+            RESET_ACCOUNT,
+            &[&email, &audience.kind().as_str(), &audience.tenant()],
+        )
+        .await?;
+    let [account] = &accounts[..] else {
+        return Ok(None);
+    };
+    let stored: Option<Vec<u8>> = account.get(5);
+    if !stored.is_some_and(|stored| bool::from(stored.ct_eq(presented))) {
+        return Ok(None);
+    }
+    let (user, tenant) = (account.get(0), account.get(1));
+    if !matches!(
+        crate::identity::standing(client, tenant, user).await?,
+        crate::identity::Standing::Live(_)
+    ) {
+        return Ok(None);
+    }
+    Ok(Some((user, tenant, account.get(4))))
 }

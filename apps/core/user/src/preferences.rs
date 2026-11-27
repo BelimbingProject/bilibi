@@ -7,12 +7,12 @@
 //! `ui.locale`); pins are rows of `user_pins` keyed by the current tenant and
 //! account IDs. Neither touches account membership.
 use crate::UserService;
-use bilibi_database::{Change, Error, Result};
+use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_datetime::Mode;
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_security::Scope;
 use bilibi_settings::{Definition, ScopeKind, Setting, Target, Validator, ValueType, DEFINITIONS};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_postgres::GenericClient;
 
@@ -240,7 +240,7 @@ pub fn normalize_url(url: &str) -> Option<String> {
         path.pop();
     }
     // `//host/x` is a link to another site, never a page of this one.
-    if path.starts_with("//") {
+    if path.starts_with("//") || path.contains('\\') || path.chars().any(char::is_control) {
         return None;
     }
     let sorted = query
@@ -278,9 +278,151 @@ pub async fn list_pins(client: &impl GenericClient, scope: &Scope) -> Result<Vec
         .collect())
 }
 
+/// Whether a normalized pin URL names a page this deployment serves; a route
+/// pattern's `{param}` segments match any one segment. A pin to a page that is
+/// gone stays stored but is not drawn.
+pub fn pin_route_is_served(routes: &[&str], url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or("");
+    let actual: Vec<_> = path.split('/').collect();
+    if path != "/"
+        && actual.iter().skip(1).any(|segment| {
+            segment.is_empty()
+                || matches!(
+                    segment.to_ascii_lowercase().as_str(),
+                    "." | ".." | "%2e" | ".%2e" | "%2e." | "%2e%2e"
+                )
+        })
+    {
+        return false;
+    }
+    routes.iter().any(|route| {
+        let pattern: Vec<_> = route.split('/').collect();
+        pattern.len() == actual.len()
+            && pattern
+                .iter()
+                .zip(&actual)
+                .all(|(p, a)| (p.starts_with('{') && !a.is_empty()) || p == a)
+    })
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PinDraft {
+    pub label: String,
+    pub url: String,
+    pub icon: Option<String>,
+}
+
+impl PinDraft {
+    pub(crate) fn clean(label: &str, url: &str, icon: Option<&str>) -> Result<Self> {
+        let label = normalize_label(label);
+        let icon = icon.filter(|icon| !icon.is_empty());
+        if url.len() > 8192
+            || label.is_empty()
+            || label.chars().count() > 150
+            || icon
+                .is_some_and(|icon| icon.chars().count() > 100 || !bilibi_ui::Icons::is_known(icon))
+        {
+            return Err(Error::Invalid);
+        }
+        let url = normalize_url(url)
+            .filter(|url| url.len() <= 8192)
+            .ok_or(Error::Invalid)?;
+        Ok(Self {
+            label,
+            url,
+            icon: icon.map(str::to_owned),
+        })
+    }
+}
+
+impl From<&Pin> for PinDraft {
+    fn from(pin: &Pin) -> Self {
+        Self {
+            label: pin.label.clone(),
+            url: pin.url.clone(),
+            icon: pin.icon.clone(),
+        }
+    }
+}
+
+/// Every pin writer locks the account before reading the list it will edit.
+pub(crate) async fn lock_pins(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<()> {
+    if scope.impersonator().is_some() {
+        return Err(Error::Forbidden);
+    }
+    tx.sql()
+        .query_one(
+            "SELECT id FROM users WHERE tenant_id=$1 AND id=$2 FOR NO KEY UPDATE",
+            &[&scope.tenant(), &scope.user()],
+        )
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn apply_pins(
+    tx: &mut MutationTransaction<'_>,
+    scope: &Scope,
+    before: Vec<Pin>,
+    after: Vec<PinDraft>,
+) -> Result<Vec<Pin>> {
+    if after.len() > usize::try_from(MAX_PINS).map_err(|_| Error::Internal)? {
+        return Err(Error::Invalid);
+    }
+    let (tenant, user) = (scope.tenant(), scope.user());
+    tx.mutate(move |sql| Box::pin(async move {
+        let mut changes = Vec::new();
+        for pin in &before {
+            if after.iter().any(|next| next.url == pin.url) {
+                continue;
+            }
+            sql.execute("DELETE FROM user_pins WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
+                &[&tenant,&user,&pin.id]).await?;
+            changes.push(Change { kind:"user_pin".into(), id:pin.id, old:json!(pin), new:Value::Null });
+        }
+        for (index, next) in after.into_iter().enumerate() {
+            let order = i32::try_from(index).map_err(|_| Error::Invalid)?;
+            let old = before.iter().find(|pin| pin.url == next.url);
+            if old.is_some_and(|pin| pin.sort_order == order && PinDraft::from(pin) == next) {
+                continue;
+            }
+            let id = match old {
+                Some(pin) => {
+                    sql.execute(
+                        "UPDATE user_pins SET label=$4,icon=$5,sort_order=$6,updated_at=now() WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
+                        &[&tenant,&user,&pin.id,&next.label,&next.icon,&order],
+                    ).await?;
+                    pin.id
+                }
+                None => sql.query_one(
+                    "INSERT INTO user_pins(tenant_id,user_id,label,url,url_hash,icon,sort_order) VALUES($1,$2,$3,$4,md5($4),$5,$6) RETURNING id",
+                    &[&tenant,&user,&next.label,&next.url,&next.icon,&order],
+                ).await?.get(0),
+            };
+            let new = Pin { id, label: next.label, url: next.url, icon: next.icon, sort_order: order };
+            changes.push(Change {kind:"user_pin".into(),id,old:json!(old),new:json!(new)});
+        }
+        Ok(((), changes))
+    })).await?;
+    list_pins(tx.sql(), scope).await
+}
+
+fn check_pin_session(scope: &Scope, csrf: &str) -> std::result::Result<(), PreferenceError> {
+    if scope.csrf != csrf {
+        return Err(Error::Forbidden.into());
+    }
+    if scope.impersonator().is_some() {
+        return Err(PreferenceError::Impersonating);
+    }
+    Ok(())
+}
+
 impl UserService {
-    /// Pins the page when it is not pinned and unpins it when it is; returns
-    /// whether it is now pinned, and the account's pins.
+    pub fn pin_routes(&self) -> &[&'static str] {
+        &self.pin_routes
+    }
+
+    /// Toggle the signed-in account's pin and return the resulting list.
     pub async fn toggle_pin(
         &self,
         token: &str,
@@ -289,100 +431,34 @@ impl UserService {
         url: &str,
         icon: Option<&str>,
     ) -> std::result::Result<(bool, Vec<Pin>), PreferenceError> {
-        let label = normalize_label(label);
-        let icon = icon.filter(|icon| !icon.is_empty()).map(str::to_owned);
-        if url.len() > 8192
-            || label.is_empty()
-            || label.chars().count() > 150
-            || icon
-                .as_ref()
-                .is_some_and(|icon| icon.chars().count() > 100 || !bilibi_ui::Icons::is_known(icon))
-        {
-            return Err(PreferenceError::Invalid);
-        }
-        let url = normalize_url(url)
-            .filter(|url| url.len() <= 8192)
-            .ok_or(PreferenceError::Invalid)?;
+        let draft = PinDraft::clean(label, url, icon).map_err(|_| PreferenceError::Invalid)?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let scope = self.sessions.activity(&**client, token).await?;
-        if scope.csrf != csrf {
-            return Err(Error::Forbidden.into());
-        }
-        if scope.impersonator().is_some() {
-            return Err(PreferenceError::Impersonating);
-        }
+        check_pin_session(&scope, csrf)?;
         let mut tx = self
             .mutations
             .begin_view_state(&mut client, scope.mutation_context("user.pin.toggle"))
             .await?;
-        let (tenant, user) = (scope.tenant(), scope.user());
-        // Serialize this account's pin writes: two toggles of one page must
-        // not both insert, and the cap must hold under concurrency.
-        tx.sql()
-            .query_one(
-                "SELECT id FROM users WHERE tenant_id=$1 AND id=$2 FOR NO KEY UPDATE",
-                &[&tenant, &user],
-            )
-            .await?;
-        let pinned = tx
-            .mutate(move |sql| {
-                Box::pin(async move {
-                    let existing = sql
-                        .query_opt(
-                            "DELETE FROM user_pins WHERE tenant_id=$1 AND user_id=$2 AND url_hash=md5($3) RETURNING id,label,url",
-                            &[&tenant, &user, &url],
-                        )
-                        .await?;
-                    if let Some(row) = existing {
-                        let change = Change {
-                            kind: "user_pin".into(),
-                            id: row.get(0),
-                            old: json!({"label": row.get::<_, String>(1), "url": row.get::<_, String>(2)}),
-                            new: json!({}),
-                        };
-                        return Ok((false, vec![change]));
-                    }
-                    let held: i64 = sql
-                        .query_one(
-                            "SELECT count(*) FROM user_pins WHERE tenant_id=$1 AND user_id=$2",
-                            &[&tenant, &user],
-                        )
-                        .await?
-                        .get(0);
-                    if held >= MAX_PINS {
-                        return Err(Error::Invalid);
-                    }
-                    let row = sql
-                        .query_one(
-                            "INSERT INTO user_pins(tenant_id,user_id,label,url,url_hash,icon,sort_order) VALUES($1,$2,$3,$4,md5($4),$5,COALESCE((SELECT max(sort_order)+1 FROM user_pins WHERE tenant_id=$1 AND user_id=$2),0)) RETURNING id",
-                            &[&tenant, &user, &label, &url, &icon],
-                        )
-                        .await?;
-                    Ok((
-                        true,
-                        vec![Change {
-                            kind: "user_pin".into(),
-                            id: row.get(0),
-                            old: json!({}),
-                            new: json!({"label": label, "url": url}),
-                        }],
-                    ))
-                })
-            })
-            .await
-            .map_err(|error| match error {
-                Error::Invalid => PreferenceError::Invalid,
-                other => other.into(),
-            })?;
-        let pins = list_pins(tx.sql(), &scope).await?;
+        lock_pins(&tx, &scope).await?;
+        let before = list_pins(tx.sql(), &scope).await?;
+        let mut after: Vec<_> = before.iter().map(PinDraft::from).collect();
+        let pinned = if let Some(index) = after.iter().position(|pin| pin.url == draft.url) {
+            after.remove(index);
+            false
+        } else {
+            if after.len() as i64 >= MAX_PINS || !pin_route_is_served(self.pin_routes(), &draft.url)
+            {
+                return Err(PreferenceError::Invalid);
+            }
+            after.push(draft);
+            true
+        };
+        let pins = apply_pins(&mut tx, &scope, before, after).await?;
         tx.commit().await?;
         Ok((pinned, pins))
     }
 
-    /// Renumbers the listed pins in the order given. The order is a display
-    /// preference of the account's own, not a business fact, so it is a plain
-    /// write rather than an audited mutation (pinning and unpinning stay
-    /// audited). Ids that are not the account's are ignored.
+    /// Apply the account's requested order. Unlisted pins keep their relative order.
     pub async fn reorder_pins(
         &self,
         token: &str,
@@ -394,28 +470,22 @@ impl UserService {
         }
         let mut client = self.db.get().await.map_err(Error::from)?;
         let scope = self.sessions.activity(&**client, token).await?;
-        if scope.csrf != csrf {
-            return Err(Error::Forbidden.into());
-        }
-        if scope.impersonator().is_some() {
-            return Err(PreferenceError::Impersonating);
-        }
-        let tx = client.transaction().await?;
-        let (tenant, user) = (scope.tenant(), scope.user());
-        tx.query_one(
-            "SELECT id FROM users WHERE tenant_id=$1 AND id=$2 FOR NO KEY UPDATE",
-            &[&tenant, &user],
-        )
-        .await?;
-        for (index, id) in ordered.iter().enumerate() {
-            let index = index as i32;
-            tx.execute(
-                "UPDATE user_pins SET sort_order=$4,updated_at=now() WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
-                &[&tenant, &user, id, &index],
-            )
+        check_pin_session(&scope, csrf)?;
+        let mut tx = self
+            .mutations
+            .begin_view_state(&mut client, scope.mutation_context("user.pin.reorder"))
             .await?;
-        }
-        let pins = list_pins(tx.client(), &scope).await?;
+        lock_pins(&tx, &scope).await?;
+        let before = list_pins(tx.sql(), &scope).await?;
+        let mut seen = std::collections::HashSet::new();
+        let after = ordered
+            .iter()
+            .filter_map(|id| before.iter().find(|pin| pin.id == *id))
+            .chain(before.iter())
+            .filter(|pin| seen.insert(pin.id))
+            .map(PinDraft::from)
+            .collect();
+        let pins = apply_pins(&mut tx, &scope, before, after).await?;
         tx.commit().await?;
         Ok(pins)
     }

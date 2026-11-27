@@ -1,5 +1,9 @@
 # bilibi-events
 
+**Use it for:** reacting, later and in your own transaction, to something another Domain or Extension did.
+
+**Not for:** asking another module a question now (use `base/ports`), or calling or reading another Domain directly.
+
 Events (`base/events`) let a module react to something that happened in another Domain or Extension, without either module knowing the other exists.
 
 ## What is an event?
@@ -134,6 +138,18 @@ You might be wondering why the handler doesn't get the publisher's user. **An ev
 > [!WARNING]
 > A handler must never open or commit another transaction, and must never do network or file IO. If you need either, put the work in your own outbox and key it by `Event::key`.
 
+### Reading events another catalog names
+
+A Base subscriber that reacts to whatever owners offer it (Base Watchers' `base/watchers.triggers`) lists no events itself: its handler's `Subscribe::reads(catalog)` returns `Some` of the `On`s its own catalog holds (each owner's `Trigger`). They join `Subscriber::events` at boot and pass the same checks below. While its catalog names nothing (no owner mounted), it reads nothing and gets no deliveries.
+
+### Handing work to your own worker
+
+A handler that must do more than write its copy (run as its own principal, take its own transaction) returns a `Handoff` from `Subscribe::handoff(event, changes)`: a worker of the subscriber's own module, a principal and arguments. Events enqueues it in the delivery transaction (`Queue::enqueue_system_within`), so the job commits with the receipt or not at all, and runs after that commit under the principal's own grants. A worker or principal another module owns is refused.
+
+### The cause of an event
+
+`Event::cause` says what a Platform edge named as the cause of the transaction that recorded the event, or `None` for an ordinary write. Base Watchers names its run (`Events::cause(tx, "base/watchers.run:42")`) before an action's commit, so the next run knows its chain; the cause lasts until that transaction ends (column `cause`, migration `base-events-005-cause`). It is evidence, never authority.
+
 ### What boot checks
 
 Boot refuses to start when:
@@ -141,6 +157,7 @@ Boot refuses to start when:
 - a subscriber or event type has a key outside the contributing module;
 - an event name isn't `<name>/<module>.<snake_case name>` (`<name>` is the publisher's Domain or Extension, or `base` or `core`);
 - a module subscribes to an event from its own Domain or Extension;
+- a subscriber lists no event and reads none through its catalog (`Subscribe::reads` answers `None`);
 - a contributor doesn't depend on `base/events`;
 - a subscriber reads from a mounted publisher that doesn't declare that event, or doesn't record a version the subscriber reads.
 
@@ -223,15 +240,32 @@ For each subscriber, `subscriber_states` reports:
 - its missed events (those with no delivery at all);
 - `gap_from`, where the gap starts.
 
+`subscriber_states` takes a `&mut tokio_postgres::Client` and reads in a transaction of its own. It never reads the tenant's whole event history without a bound:
+
+- **Pending and failing** come from the pending rows only (the partial index `base_events_pending`). So a subscriber that is not mounted is listed only while it has pending deliveries.
+- **Last delivered** is one newest-first read per subscriber (index `base_events_delivered`, migration 003).
+- **Missed** is counted from the subscriber's watermark on (see below), 2,000 events a statement, until the newest event. The count stops early at `MISSED_CAP` (10,000) missed events or at the time limit; `missed_more` is then true: there are at least that many. The first missed event is always found, because it is the first event after the watermark.
+- **Time limit.** Each statement may run five seconds. A last-delivered read that runs longer is left out instead of failing the page: `last_delivered` is `None`. After ten seconds of these reads, the remaining last-delivered reads are left out and the missed counts stop early.
+
+### The watermark
+
+**Each subscriber has a watermark in each tenant: it has a delivery for every event it reads up to that event.** The delivery may be done or still pending; an erased event counts too, since a replay never hands it over.
+
+- Each delivery moves the watermark forward, in the same transaction as its receipt.
+- The watermark stops before the first missed event. So it is not the last delivered event: a newer delivery never hides an older gap.
+- A replay creates the missing deliveries, and the next delivery carries the watermark past them.
+
+The missed count starts at the watermark, so it never reads the events before it. The rows are in `base_events_watermarks` (migration 004).
+
 ### Replaying from the page
 
 Open **Administration › System › Events** (`/system/events`, which needs `admin.events.view`). Its list follows the Sessions page. Each subscriber gets one row:
 
-- its status: Up to date, Gap or Not mounted;
+- its status: Up to date, Gap, Not mounted, or Not checked when the missed count stopped early before it found anything;
 - the events it reads;
 - its last delivered event, and when it was delivered;
 - its pending deliveries, and how many are failing;
-- its missed events, and which event they start from.
+- its missed events, and which event they start from ("or more" when the count stopped early).
 
 A row with a gap shows a Replay button, for people with `admin.events.replay`. It asks for confirmation through `ConfirmDialog`. It then calls the `base.events.replay` contract from `gap_from` (`PageContracts::submit`, ADR 01). The owner rechecks the capability and the step-up policy. If a step-up is needed, the browser goes to the check and comes back.
 
@@ -244,6 +278,39 @@ A row with a gap shows a Replay button, for people with `admin.events.replay`. I
 | `base.events.replay` | Reviewed write (`subscriber`, exactly one of `from_event` or `from_time`, `limit`) | `admin.events.replay`, step-up `base.events.replay` |
 
 The guide `base.events` walks an agent through finding a gap and closing it.
+
+## Retention
+
+**A daily job deletes an event, with its deliveries, once it is older than the tenant's keep time and nothing is owed for it.**
+
+The keep time is the setting `events.retention_days`: 90 days by default, from 7 to 3,650. A tenant's own value wins over the global one. Change it on the System Settings page (`/system/settings`), group Events, under Global or This tenant (the field needs `admin.events.replay`).
+
+An event older than the keep time is deleted when both of these are true:
+
+- none of its deliveries is pending or failing, for any subscriber, mounted or not;
+- every mounted subscriber that reads its name has a delivery for it.
+
+So nothing a subscriber is still owed is lost. Here is what that means case by case:
+
+| Event older than the keep time | What happens |
+| --- | --- |
+| Delivered to every mounted subscriber that reads it | Deleted |
+| No mounted subscriber reads its name | Deleted |
+| A delivery is pending or failing | Kept until it is delivered |
+| A mounted subscriber missed it (no delivery at all) | Kept until a replay delivers it |
+| Erased by a personal-data request | Deleted: a replay never hands it over |
+| Named by a legal hold | Kept while the hold lasts |
+
+> [!WARNING]
+> A subscriber mounted later can replay only the events still kept. An event deleted before the subscriber was mounted is gone for it. Mount a new subscriber and replay within the keep time if it needs the history.
+
+How the job runs:
+
+- **Schedule.** The definition `base/events-retention` runs daily at 03:47 UTC. Like every scheduled task, it does nothing until an operator reviews and enables it on the Schedule board.
+- **Batches.** It visits each active tenant and reads its old events oldest first, 500 at a time (index `base_events_recorded`, migration 004). A kept event is passed, not read again in the same run.
+- **Safe beside a replay.** Each batch locks its events and tests them again before deleting, so a replay running at the same moment never loses a delivery.
+- **Audit.** Each batch writes one `base/events.retention` change as the `scheduler` principal, with the number deleted, the first and last event, and the keep time.
+- **From code.** The job calls `Events::prune(client, now)`, which answers how many events it deleted. A second call finds nothing.
 
 ## Personal data
 
@@ -261,11 +328,11 @@ inventory::submit! { Contribution::new(PERSONAL_EVENTS, "supply_chain/receiving.
 
 ## Tables
 
-This module owns `base_events` and `base_events_deliveries`.
+This module owns `base_events`, `base_events_deliveries` and `base_events_watermarks`.
 
 ## Seeing it work
 
-The example `apps/web/examples/events-reference.rs` runs everything above on a fresh disposable database. Its header lists four compositions to run in order. It uses two reference Domains: the publisher `fixtures/containers/event_publisher` and the subscriber `fixtures/containers/event_subscriber`. They are never mounted in the Platform and never name each other.
+The example `apps/web/examples/events-reference.rs` runs everything above on a fresh disposable database, migrated and seeded first (`bilibi-web migrate`, then `BILIBI_ENV=development bilibi-web seed-production`, which stores the Dev instance role; its grant steps otherwise fail with `StepUpRequired { reason: "not_enrolled" }`). Its header lists four compositions to run in order. It uses two reference Domains: the publisher `fixtures/containers/event_publisher` and the subscriber `fixtures/containers/event_subscriber`. They are never mounted in the Platform and never name each other.
 
 Here is what you'll see:
 
@@ -285,6 +352,8 @@ The remount case also runs on the real Domains:
 2. Send an order while Finance is unmounted.
 3. Remount Finance. The Events page shows `finance/payables.purchase_orders` with a gap.
 4. Replay it. A bill naming that order line is now accepted and posts.
+
+Retention and the watermark have their own example, `apps/web/examples/events-retention.rs`. It mounts no Domain: it contributes a reference event type and subscriber of its own. You'll see an event deleted one second past the keep time and one kept one second inside it, a failing delivery and a missed event kept well past the keep time, a second run that deletes nothing, the tenant's own keep time used, and the missed count read from the watermark before and after a replay.
 
 ## Where to go next
 

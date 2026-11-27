@@ -1,17 +1,27 @@
 //! Dry-run reviews and writes, with same-request record references.
 //! Owners validate/lock reference facts and write through the outer audit transaction.
-use crate::{Error, Handler, Registry, Result, CONTENT_NOTICE};
-use bilibi_database::{Db, MutationBoundary};
+use crate::{Error, Handler, Registry, Result, WriteHandler, CONTENT_NOTICE};
+use bilibi_database::{Connection, Context, Db, MutationBoundary};
 use bilibi_party_ids::OrganisationId;
 use bilibi_settings::Settings;
 use bilibi_system::Instance;
-use bilibi_tenancy::{reaches_work_company, Authentication, Channel, ProofFuture, Scope};
+use bilibi_tenancy::{
+    reaches_work_company, Authentication, Channel, ProofFuture, ReadClient, Scope,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{future::Future, sync::Arc};
 use tokio_postgres::Transaction;
 
 const WORKPLACE_PROOF_BOUNDS: &str = "SET LOCAL lock_timeout = '150ms'";
+
+pub(super) async fn max_operations(settings: &Settings, client: &dyn ReadClient) -> Result<u64> {
+    settings
+        .get_global(client, "agent_api.plan_max_operations")
+        .await?
+        .as_u64()
+        .ok_or(bilibi_database::Error::Invalid.into())
+}
 
 /// Wire input is bounded before handlers run. Ordering and exact JSON types are
 /// part of the contract; unknown keys and non-object inputs are refused.
@@ -63,6 +73,51 @@ impl Plans {
             settings,
             authentication,
         }
+    }
+    fn transaction_context(
+        &self,
+        scope: &Scope,
+        operations: &[PlannedOperation],
+        action: impl Into<String>,
+    ) -> Result<Context> {
+        let mut selected = None;
+        let mut selects_tenant = false;
+        let mut uses_default = false;
+        for operation in operations {
+            let registered = self
+                .registry
+                .operations
+                .get(operation.key.as_str())
+                .ok_or(Error::UnknownOperation)?;
+            let Handler::SafeWrite(owner) = registered.definition.handler else {
+                return Err(Error::WritesNotEnabled);
+            };
+            match owner.transaction_tenant(scope, &operation.input)? {
+                Some(tenant) if tenant > 0 => {
+                    selects_tenant = true;
+                    if selected.is_some_and(|current| current != tenant) {
+                        return Err(Error::InvalidInput(std::collections::BTreeMap::from([(
+                            "operations".into(),
+                            vec!["must use one transaction tenant per plan".into()],
+                        )])));
+                    }
+                    selected = Some(tenant);
+                }
+                Some(_) => return Err(bilibi_database::Error::Invalid.into()),
+                None => uses_default = true,
+            }
+        }
+        if selects_tenant && uses_default {
+            return Err(Error::InvalidInput(std::collections::BTreeMap::from([(
+                "operations".into(),
+                vec!["cannot mix tenant-selected and ordinary writes".into()],
+            )])));
+        }
+        let mut context = scope.mutation_context(action);
+        if let Some(tenant) = selected {
+            context.tenant = tenant;
+        }
+        Ok(context)
     }
     async fn plan_scope(
         &self,
@@ -126,12 +181,7 @@ impl Plans {
     }
     pub(crate) async fn review_settings(&self) -> Result<ReviewSettings> {
         let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
-        let max_operations = self
-            .settings
-            .get_global(&**client, "agent_api.plan_max_operations")
-            .await?
-            .as_u64()
-            .ok_or(bilibi_database::Error::Invalid)?;
+        let max_operations = max_operations(&self.settings, &**client).await?;
         let requests_per_minute = self
             .settings
             .get_global(&**client, crate::mcp::REQUESTS_PER_MINUTE)
@@ -144,12 +194,7 @@ impl Plans {
         })
     }
     async fn shape(&self, tx: &Transaction<'_>, operations: &[PlannedOperation]) -> Result<String> {
-        let max = self
-            .settings
-            .get_global(tx, "agent_api.plan_max_operations")
-            .await?
-            .as_u64()
-            .ok_or(bilibi_database::Error::Invalid)?;
+        let max = max_operations(&self.settings, tx).await?;
         if operations.is_empty()
             || operations.len() as u64 > max
             || operations
@@ -285,8 +330,31 @@ impl Plans {
         authority: &dyn PlanAuthority,
         operations: &[PlannedOperation],
     ) -> Result<Value> {
+        self.on_connection(async |client| self.preview_on(client, authority, operations).await)
+            .await
+    }
+    async fn on_connection<T>(
+        &self,
+        work: impl AsyncFnOnce(&mut tokio_postgres::Client) -> Result<T>,
+    ) -> Result<T> {
         let mut client = self.db.get().await.map_err(bilibi_database::Error::from)?;
-        let client: &mut tokio_postgres::Client = &mut client;
+        let result = work(&mut client).await;
+        if matches!(
+            result,
+            Err(Error::Backend(
+                bilibi_database::Error::UnrecoveredTransaction(_)
+            ))
+        ) {
+            drop(Connection::take(client));
+        }
+        result
+    }
+    async fn preview_on(
+        &self,
+        client: &mut tokio_postgres::Client,
+        authority: &dyn PlanAuthority,
+        operations: &[PlannedOperation],
+    ) -> Result<Value> {
         let tx = client
             .transaction()
             .await
@@ -302,7 +370,22 @@ impl Plans {
             .await?;
         let (results, valid) = self.previews(&tx, &plan_scope, operations).await?;
         let instance = Instance::resolve(&self.settings, &tx).await?;
-        let response = json!({"valid":valid,"instance":instance.agent_json(),"work_company_id":plan_scope.current_company().map(OrganisationId::get),"operations":operations,"results":results,"meta":{"content_notice":CONTENT_NOTICE}});
+        let mut shown_operations = json!(operations);
+        if let Some(items) = shown_operations.as_array_mut() {
+            for (index, operation) in items.iter_mut().enumerate() {
+                if results[index]["valid"] != true {
+                    operation["input"] = json!({});
+                    continue;
+                }
+                if let Some(registered) = operation["key"]
+                    .as_str()
+                    .and_then(|key| self.registry.operations.get(key))
+                {
+                    crate::schema::scrub_write_only(&registered.input, &mut operation["input"]);
+                }
+            }
+        }
+        let response = json!({"valid":valid,"instance":instance.agent_json(),"work_company_id":plan_scope.current_company().map(OrganisationId::get),"operations":shown_operations,"results":results,"meta":{"content_notice":CONTENT_NOTICE}});
         tx.commit().await.map_err(bilibi_database::Error::from)?;
         Ok(response)
     }
@@ -314,11 +397,23 @@ impl Plans {
         authority: &dyn PlanAuthority,
         operations: &[PlannedOperation],
     ) -> Result<Value> {
-        let mut client = self.db.get().await.map_err(bilibi_database::Error::from)?;
-        let mut tx = self
-            .boundary
-            .begin(&mut client, scope.mutation_context("base.agent_api.write"))
-            .await?;
+        let prepared = self.prepared(scope, authority, operations).await?;
+        self.on_connection(async |client| {
+            self.commit_on(client, scope, authority, operations, &prepared)
+                .await
+        })
+        .await
+    }
+    async fn commit_on(
+        &self,
+        client: &mut tokio_postgres::Client,
+        scope: &Scope,
+        authority: &dyn PlanAuthority,
+        operations: &[PlannedOperation],
+        prepared: &[Option<Value>],
+    ) -> Result<Value> {
+        let context = self.transaction_context(scope, operations, "base.agent_api.write")?;
+        let mut tx = self.boundary.begin(client, context).await?;
         let identity = self
             .workplace_proof(tx.sql(), async {
                 authority.verify(tx.sql()).await.map_err(Error::from)
@@ -348,7 +443,9 @@ impl Plans {
             };
             let input = crate::plan_references::resolve(&op.input, &committed)?;
             crate::schema::validate(&registered.input, &input).map_err(Error::InvalidInput)?;
-            let result = owner.commit(&mut tx, &work_scope, &input).await?;
+            let result = owner
+                .commit_prepared(&mut tx, &work_scope, &input, prepared[index].as_ref())
+                .await?;
             committed.push(json!({"index":index,"key":op.key,"created":owner.creates(),"result":result.envelope(&op.key)}));
         }
         // Reprove the credential and workplace after owner execution, including
@@ -395,11 +492,23 @@ impl Plans {
         authority: &dyn PlanAuthority,
         op: &PlannedOperation,
     ) -> Result<Value> {
-        let mut client = self.db.get().await.map_err(bilibi_database::Error::from)?;
-        let mut tx = self
-            .boundary
-            .begin(&mut client, scope.mutation_context(op.key.clone()))
-            .await?;
+        let prepared = self.prepared_one(scope, authority, op).await?;
+        self.on_connection(async |client| {
+            self.submit_on(client, scope, authority, op, prepared.as_ref())
+                .await
+        })
+        .await
+    }
+    async fn submit_on(
+        &self,
+        client: &mut tokio_postgres::Client,
+        scope: &Scope,
+        authority: &dyn PlanAuthority,
+        op: &PlannedOperation,
+        prepared: Option<&Value>,
+    ) -> Result<Value> {
+        let context = self.transaction_context(scope, std::slice::from_ref(op), op.key.clone())?;
+        let mut tx = self.boundary.begin(client, context).await?;
         let identity = self
             .workplace_proof(tx.sql(), async {
                 authority.verify(tx.sql()).await.map_err(Error::from)
@@ -427,7 +536,9 @@ impl Plans {
         let Handler::SafeWrite(owner) = registered.definition.handler else {
             return Err(Error::WritesNotEnabled);
         };
-        let result = owner.commit(&mut tx, scope, &op.input).await?;
+        let result = owner
+            .commit_prepared(&mut tx, scope, &op.input, prepared)
+            .await?;
         let final_identity = self
             .workplace_proof(tx.sql(), async {
                 authority.verify(tx.sql()).await.map_err(Error::from)
@@ -438,6 +549,126 @@ impl Plans {
         }
         tx.commit().await?;
         Ok(result.envelope(&op.key))
+    }
+}
+impl Plans {
+    /// The owners of `operations` that stage work before the write
+    /// ([`WriteHandler::prepare`]), by step: one that prepares, for a step
+    /// whose input names no earlier step's new record.
+    fn stagers(&self, operations: &[PlannedOperation]) -> Vec<Option<&'static dyn WriteHandler>> {
+        (0..operations.len())
+            .map(|index| {
+                let registered = self
+                    .registry
+                    .operations
+                    .get(operations[index].key.as_str())?;
+                let Handler::SafeWrite(owner) = registered.definition.handler else {
+                    return None;
+                };
+                // A malformed reference stages nothing: the checks report it
+                // on its step.
+                let independent =
+                    crate::plan_references::collect(&self.registry, operations, index)
+                        .is_ok_and(|references| references.is_empty());
+                (owner.prepares() && independent).then_some(owner)
+            })
+            .collect()
+    }
+    /// What each step's owner staged for `commit`, by step. When an owner
+    /// prepares, commit's own checks run first (the authority, the plan's
+    /// shape, its workplace and every owner preview) in a transaction that is
+    /// rolled back, and its connection is released before any owner
+    /// prepares: a plan commit would refuse stages nothing, and no owner
+    /// waits on a second connection while this door holds one.
+    async fn prepared(
+        &self,
+        scope: &Scope,
+        authority: &dyn PlanAuthority,
+        operations: &[PlannedOperation],
+    ) -> Result<Vec<Option<Value>>> {
+        let stagers = self.stagers(operations);
+        let mut prepared = vec![None; operations.len()];
+        if stagers.iter().all(Option::is_none) {
+            return Ok(prepared);
+        }
+        let work_scope = {
+            let mut client = self.db.get().await.map_err(bilibi_database::Error::from)?;
+            let client: &mut tokio_postgres::Client = &mut client;
+            let tx = client
+                .transaction()
+                .await
+                .map_err(bilibi_database::Error::from)?;
+            self.verified(&tx, scope, authority).await?;
+            self.shape(&tx, operations).await?;
+            let work_scope = self
+                .workplace_proof(&tx, self.plan_scope(&tx, scope, operations))
+                .await?;
+            let (results, valid) = self.previews(&tx, &work_scope, operations).await?;
+            if !valid {
+                return Err(Error::PlanRejected(results));
+            }
+            tx.rollback().await.map_err(bilibi_database::Error::from)?;
+            work_scope
+        };
+        for ((slot, owner), op) in prepared.iter_mut().zip(stagers).zip(operations) {
+            if let Some(owner) = owner {
+                *slot = owner.prepare(&work_scope, &op.input).await?;
+            }
+        }
+        Ok(prepared)
+    }
+    /// `prepared` for `submit`'s one write: its checks (the authority, the
+    /// shape and the owner's preview, on the caller's scope), then the
+    /// owner's `prepare` with no connection held.
+    async fn prepared_one(
+        &self,
+        scope: &Scope,
+        authority: &dyn PlanAuthority,
+        op: &PlannedOperation,
+    ) -> Result<Option<Value>> {
+        let operations = std::slice::from_ref(op);
+        let Some(Some(owner)) = self.stagers(operations).pop() else {
+            return Ok(None);
+        };
+        {
+            let mut client = self.db.get().await.map_err(bilibi_database::Error::from)?;
+            let client: &mut tokio_postgres::Client = &mut client;
+            let tx = client
+                .transaction()
+                .await
+                .map_err(bilibi_database::Error::from)?;
+            self.verified(&tx, scope, authority).await?;
+            self.shape(&tx, operations).await?;
+            let reservations = crate::PreviewReservations::default();
+            self.preview_one(
+                &tx,
+                scope,
+                op,
+                &crate::PlanReferences::default(),
+                &reservations,
+            )
+            .await?;
+            tx.rollback().await.map_err(bilibi_database::Error::from)?;
+        }
+        owner.prepare(scope, &op.input).await
+    }
+    /// The authority proves the caller's own account, as commit checks it.
+    async fn verified(
+        &self,
+        tx: &Transaction<'_>,
+        scope: &Scope,
+        authority: &dyn PlanAuthority,
+    ) -> Result<()> {
+        let identity = self
+            .workplace_proof(tx, async {
+                authority.verify(tx).await.map_err(Error::from)
+            })
+            .await?;
+        if scope_binding(scope) != scope_binding(&identity.scope) {
+            return Err(bilibi_database::Error::Unauthorized.into());
+        }
+        binding(&identity)?;
+        Ok(())
     }
 }
 fn scope_binding(scope: &Scope) -> Value {

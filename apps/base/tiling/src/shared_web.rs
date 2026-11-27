@@ -7,9 +7,11 @@
 //! arrives in `?t=` from the workspace's "Share current tiles" link, so the
 //! form only renders when there is one; "Delete" opens the confirmation and
 //! writes nothing until it is confirmed.
-use crate::layouts::{self, Entry, LayoutError, Refusal, RoleOption};
+use crate::agent;
+use crate::layouts::{self, Entry, RoleOption};
 use crate::web::{audience, columns, Core, SharedActions, WORKSPACE};
 use askama::Template;
+use bilibi_agent_api::{page::Call, Error as ContractError};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
@@ -19,6 +21,7 @@ use bilibi_ui::{
     StatusKind, TableEmpty, NO_FLASH,
 };
 use serde::Deserialize;
+use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
 
 const COLUMNS: &[(&str, &str)] = &[("label", "Name"), ("audience", "Audience")];
@@ -57,7 +60,7 @@ pub(crate) struct SharedPage {
     entries: Vec<Entry>,
     role_options: Vec<RoleOption>,
     columns: ListColumns,
-    pending_delete: Option<String>,
+    pending_delete: Option<(i64, Entry)>,
     flash: Option<(StatusKind, String)>,
 }
 
@@ -69,8 +72,7 @@ impl SharedPage {
     ) -> Result<Self> {
         let tree = query
             .get("t")
-            .filter(|tree| layouts::clean_tree(tree).is_ok())
-            .cloned()
+            .and_then(|tree| layouts::clean_tree(tree))
             .unwrap_or_default();
         let client = core.db.get().await?;
         let entries = core.layouts.shared(&**client, scope).await?;
@@ -98,67 +100,100 @@ impl SharedPage {
         self.flash = Some((kind, message.into()));
     }
 
-    async fn event(&mut self, core: &Core, scope: &Scope, event: Event) -> Result<()> {
+    async fn event(
+        &mut self,
+        core: &Core,
+        scope: &Scope,
+        credential: &str,
+        event: Event,
+    ) -> Result<()> {
         match event {
             Event::PublishLayout { label, tree, roles } => {
                 let roles: Vec<String> = roles.into_iter().filter(|r| !r.is_empty()).collect();
                 self.label = label.clone();
                 self.roles = roles.clone();
-                let known = |code: &String| self.role_options.iter().any(|r| r.code == *code);
-                if !roles.iter().all(known) {
-                    self.flash(StatusKind::Error, "Choose role codes from this company.");
-                    return Ok(());
-                }
-                // The tree the form carries is the one the address handed over;
-                // a forged one is still only a layout the actor may publish.
-                let tree = if tree.is_empty() {
-                    self.tree.clone()
-                } else {
-                    tree
+                let tree = if tree.is_empty() { &self.tree } else { &tree };
+                let name = layouts::clean_label(&label);
+                let current = self
+                    .entries
+                    .iter()
+                    .find(|entry| Some(&entry.label) == name.as_ref());
+                let version = agent::version(current);
+                let slug = name
+                    .as_deref()
+                    .map(|name| layouts::publish_slug(name, current, &self.entries))
+                    .unwrap_or_default();
+                let company = scope.current_company().ok_or(Error::Forbidden)?;
+                let call = Call {
+                    scope,
+                    credential,
+                    service: "base/tiling.pages",
+                    event: "publish_layout",
+                    contract: agent::PUBLISH,
                 };
-                match core.layouts.publish(scope, &label, &tree, &roles).await {
+                match core.contracts.submit(&call, json!({"company_id":company.get(),"label":label,"slug":slug,"tree":tree,"roles":roles,"version":version})).await {
                     Ok(_) => {
                         self.reload(core, scope).await?;
                         self.flash(StatusKind::Success, "Shared the workspace.");
                         self.label.clear();
                         self.roles.clear();
                     }
-                    Err(LayoutError::Storage(Error::Unauthorized)) => {
-                        return Err(Error::Unauthorized)
-                    }
-                    Err(LayoutError::Refused(Refusal::Forbidden)) => {
+                    Err(ContractError::Backend(Error::Unauthorized)) => return Err(Error::Unauthorized),
+                    Err(ContractError::Forbidden | ContractError::Backend(Error::Forbidden)) => {
                         self.flash(StatusKind::Error, "You cannot share workspaces.");
                     }
-                    Err(LayoutError::Refused(Refusal::Label)) => {
-                        self.flash(StatusKind::Error, "A layout name is one to 60 characters.");
+                    Err(ContractError::InvalidInput(fields)) => {
+                        let message = fields.into_values().flatten().collect::<Vec<_>>().join(". ");
+                        self.flash(StatusKind::Error, message);
                     }
-                    Err(LayoutError::Refused(Refusal::Tree)) => {
-                        self.flash(
-                            StatusKind::Error,
-                            "Open at least one page before sharing a workspace.",
-                        );
+                    Err(ContractError::Backend(Error::Conflict)) => {
+                        self.reload(core, scope).await?;
+                        self.flash(StatusKind::Error, "The workspace changed. Review it and try again.");
                     }
                     Err(_) => self.flash(StatusKind::Error, "The workspace could not be shared."),
                 }
             }
             Event::DeleteLayout { slug } => {
-                if self.entries.iter().any(|entry| entry.slug == slug) {
-                    self.pending_delete = Some(slug);
+                if let Some(entry) = self.entries.iter().find(|entry| entry.slug == slug) {
+                    let company = scope.current_company().ok_or(Error::Forbidden)?;
+                    self.pending_delete = Some((company.get(), entry.clone()));
                 }
             }
             Event::CancelDeleteLayout => self.pending_delete = None,
             Event::ConfirmDeleteLayout => {
-                let Some(slug) = self.pending_delete.take() else {
+                let Some((company, entry)) = self.pending_delete.take() else {
                     self.flash(StatusKind::Error, "You cannot manage shared workspaces.");
                     return Ok(());
                 };
-                match core.layouts.unpublish(scope, &slug).await {
-                    Ok(()) => self.reload(core, scope).await?,
-                    Err(LayoutError::Storage(Error::Unauthorized)) => {
+                let version = agent::version(Some(&entry));
+                let call = Call {
+                    scope,
+                    credential,
+                    service: "base/tiling.pages",
+                    event: "confirm_delete_layout",
+                    contract: agent::WITHDRAW,
+                };
+                match core
+                    .contracts
+                    .submit(
+                        &call,
+                        json!({"company_id":company,"slug":entry.slug,"version":version}),
+                    )
+                    .await
+                {
+                    Ok(_) => self.reload(core, scope).await?,
+                    Err(ContractError::Backend(Error::Unauthorized)) => {
                         return Err(Error::Unauthorized)
                     }
-                    Err(LayoutError::Refused(Refusal::Forbidden)) => {
+                    Err(ContractError::Forbidden | ContractError::Backend(Error::Forbidden)) => {
                         self.flash(StatusKind::Error, "You cannot manage shared workspaces.");
+                    }
+                    Err(ContractError::Backend(Error::Conflict) | ContractError::NotFound) => {
+                        self.reload(core, scope).await?;
+                        self.flash(
+                            StatusKind::Error,
+                            "The workspace changed. Review it and try again.",
+                        );
                     }
                     Err(_) => {
                         self.flash(
@@ -241,10 +276,11 @@ impl SharedPage {
         table.add_query = &self.columns.add_query;
         table.caption = "Shared workspaces";
         table.actions = true;
+        table.framed = false;
         if self.entries.is_empty() {
             table.empty = Some(TableEmpty::State(EmptyState::missing(
                 "No shared workspaces",
-                "Publish a workspace to make it available to this company.",
+                "Arrange pages in a workspace, then share it here.",
             )));
         }
         SharedView {
@@ -300,7 +336,9 @@ impl LiveState<Scope, Error> for Mounted {
                 LiveInput::Event(value) => {
                     let event: Event =
                         serde_json::from_value(value.clone()).map_err(|_| Error::Invalid)?;
-                    self.page.event(&self.core, request.scope, event).await?;
+                    self.page
+                        .event(&self.core, request.scope, request.credential, event)
+                        .await?;
                 }
             }
             let notice = match &self.page.flash {

@@ -334,7 +334,7 @@ impl Engine {
         let (definition_key, kind) = (definition_key.to_owned(), kind.to_owned());
         tx.mutate(move |sql| Box::pin(async move {
             options.validate()?;
-            engine.writer(&context,&scope,id)?;
+            engine.writer_or_principal(&context,&scope,id)?;
             let scope=engine.live(sql,&scope).await?;
             let owner=engine.registry.owned_subject(&kind)?;
             let definition=engine.registry.process(&definition_key,options.version)?.clone();
@@ -917,18 +917,19 @@ impl Engine {
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         request: &crate::approval_store::ApprovalRequest,
-        outcome: crate::ApprovalOutcome,
+        outcome: &str,
     ) -> Result<()> {
         let engine = self.clone();
         let scope = scope.clone();
         let request = request.clone();
+        let outcome = outcome.to_owned();
         tx.mutate(move |sql|Box::pin(async move {
             let row=sql.query_one("SELECT state FROM base_workflow_approval_requests WHERE tenant_id=$1 AND id=$2 FOR UPDATE",&[&scope.tenant(),&request.id]).await?;
-            if row.get::<_,String>(0)!=outcome.as_str() {return Err(Error::Forbidden);}
+            if row.get::<_,String>(0)!=outcome {return Err(Error::Forbidden);}
             let (run,_,items,dependencies)=engine.locked_run(sql,&scope,request.run_id.ok_or(Error::Invalid)?,Operation::ReadRun).await?;
             if run.input["approval_request"]!=request.id || run.definition_key!=request.case || items.len()!=1 || items[0].fact.status!="available" {return Err(Error::Conflict);}
             let mut changes=Vec::new();
-            let finish=coordination::Finish::completed(&items[0],outcome.as_str(),&json!({"approval_request":request.id,"revision":request.revision}),Some(&format!("approval:{}",request.id)));
+            let finish=coordination::Finish::completed(&items[0],&outcome,&json!({"approval_request":request.id,"revision":request.revision}),Some(&format!("approval:{}",request.id)));
             coordination::finish_item(sql,&run,&items[0],finish,1,&dependencies,&mut changes).await?;
             Ok(((),changes))
         })).await

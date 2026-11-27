@@ -2,8 +2,10 @@
 //! the bearer `AgentAuth` boundary and the `/api/v1` operation and plan
 //! endpoints; `/mcp` (`mcp.rs`) shares this boundary and its recorder. Answers
 //! are JSON only, errors included. Every request here is one incoming
-//! Integration exchange, recorded after dispatch. Bodies, query strings,
-//! authorization headers and token values never reach the recorder.
+//! Integration exchange, recorded after dispatch, except a refusal that proved
+//! no credential: `api_gate.rs` budgets those per sender and counts them
+//! instead. Bodies, query strings, authorization headers and token values
+//! never reach the recorder.
 //!
 //! A bearer token is a claim, never a grant: each request reproves the grant,
 //! the account and its party facets (`AgentAccess::seal`), then seals a fresh
@@ -56,6 +58,7 @@ pub fn reserved(path: &str) -> bool {
         || path.starts_with("/scim/")
         || path == "/webhooks"
         || path.starts_with("/webhooks/")
+        || crate::visitor::reserved(path)
         || [
             "/oauth/device_authorization",
             "/oauth/token",
@@ -75,7 +78,14 @@ pub struct Edge {
     pub(crate) records: Arc<bilibi_base::records::Records>,
     integration: Arc<Integration>,
     pub(crate) settings: Arc<Settings>,
-    pub(crate) throttle: Throttle,
+    /// Per-sender minutes of the machine edges: OAuth, MCP, SCIM and the SSO
+    /// back-channel.
+    machines: Throttle,
+    /// Per-sender minutes of people signing in or recovering a password, kept
+    /// apart so a flood of machine requests never crowds out a sign-in key.
+    people: Throttle,
+    /// The per-sender budget and refusal counts of unauthenticated traffic.
+    pub(crate) gate: crate::api_gate::Gate,
 }
 impl Edge {
     pub fn new(services: &bilibi_module_registry::Services) -> bilibi_database::Result<Self> {
@@ -87,13 +97,43 @@ impl Edge {
             records: services.get(bilibi_base::records::SERVICE)?,
             integration: services.get(bilibi_base::integration::SERVICE)?,
             settings: services.get("base/settings.store")?,
-            throttle: Throttle::default(),
+            machines: Throttle::default(),
+            people: Throttle::default(),
+            gate: crate::api_gate::Gate::default(),
         })
+    }
+    /// Whether `address` may make another `kind` request this minute on a
+    /// machine edge, keyed by [`sender_key`].
+    pub(crate) fn admit_machine(
+        &self,
+        kind: &str,
+        address: Option<IpAddr>,
+        per_minute: u32,
+    ) -> bool {
+        let key = format!("{kind}:{}", sender_key(address));
+        self.machines.allow_among(&key, per_minute, SENDER_KEYS)
+    }
+    /// The same for a person signing in, recovering a password or starting
+    /// SSO, counted apart from the machine edges.
+    pub(crate) fn admit_person(
+        &self,
+        kind: &str,
+        address: Option<IpAddr>,
+        per_minute: u32,
+    ) -> bool {
+        let key = format!("{kind}:{}", sender_key(address));
+        self.people.allow_among(&key, per_minute, SENDER_KEYS)
     }
 }
 
+/// Senders each edge limiter counts in one minute, as the visitor edge and
+/// the gate do; a new sender beyond this is refused until the minute ends.
+/// With IPv6 keyed by /64, filling it takes 65,536 networks.
+const SENDER_KEYS: usize = 65_536;
+
 pub fn router(app: App) -> Router<App> {
     let api = Router::new()
+        .route("/api/v1/hello", get(hello))
         .route("/api/v1/search", get(search))
         .route("/api/v1/operations/{key}", get(describe))
         .route("/api/v1/guides/{key}", get(guide))
@@ -190,6 +230,22 @@ async fn record(State(app): State<App>, mut request: Request, next: Next) -> Res
     let run_id = label(request.headers(), RUN_ID_HEADER);
     let reported = Reported::from_headers(request.headers());
     let client_identity = client_identity(request.headers(), endpoint == "/mcp");
+    // Before anything else is read: a sender out of budget costs no lookup,
+    // no handler and no row.
+    let gate = &app.api.gate;
+    let bearer = bearer(request.headers()).is_some();
+    let sender = sender_key(peer_address(&request));
+    if let Err(error) = gate.open(&app).await {
+        return unavailable(&error).into_response();
+    }
+    if !gate.admit(&sender, bearer) {
+        gate.absorb(&endpoint, StatusCode::TOO_MANY_REQUESTS);
+        let mut response = error(StatusCode::TOO_MANY_REQUESTS, "rate_limited").into_response();
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+        return response;
+    }
     request.extensions_mut().insert(Trace {
         id: trace.clone(),
         reported: reported.clone(),
@@ -200,6 +256,14 @@ async fn record(State(app): State<App>, mut request: Request, next: Next) -> Res
         .extensions_mut()
         .remove::<Exchange>()
         .unwrap_or_default();
+    let status = response.status();
+    if exchange.scope.is_none() && crate::api_gate::absorbed(status) {
+        if bearer && status == StatusCode::UNAUTHORIZED {
+            gate.spend(&sender);
+        }
+        gate.absorb(&endpoint, status);
+        return response;
+    }
     let reported = exchange.reported.unwrap_or(reported);
     let incoming = Incoming {
         method: Some(method),
@@ -212,7 +276,7 @@ async fn record(State(app): State<App>, mut request: Request, next: Next) -> Res
                 .collect(),
         ),
         endpoint: Some(endpoint),
-        response_status: i16::try_from(response.status().as_u16()).ok(),
+        response_status: i16::try_from(status.as_u16()).ok(),
         duration_ms: Some(i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX)),
         connection_id: exchange
             .scope
@@ -418,12 +482,6 @@ async fn descriptor(State(app): State<App>) -> Response {
         Err(error) => return unavailable(&error).into_response(),
     };
     let base = origin(&app);
-    let host = base
-        .split_once("://")
-        .map_or(base, |(_, rest)| rest)
-        .split(['/', ':'])
-        .next()
-        .unwrap_or_default();
     reply(
         StatusCode::OK,
         json!({
@@ -431,7 +489,10 @@ async fn descriptor(State(app): State<App>) -> Response {
             "api_version": "1",
             "plan_endpoint": format!("{base}/api/v1/plans"),
             "commit_endpoint": format!("{base}/api/v1/plans/commit"),
-            "server_name": host,
+            "server_name": instance.server_name(),
+            "mcp_endpoint": mcp_resource(&app),
+            "device_authorization_endpoint": format!("{base}/oauth/device_authorization"),
+            "verification_uri": format!("{base}{}", bilibi_agent::DEVICE_PAGE),
             "instance": instance.agent_json(),
             "client_id": CLIENT_ID,
         }),
@@ -469,52 +530,67 @@ async fn params(request: Request) -> Option<HashMap<String, String>> {
     }
 }
 
-/// The direct peer, or the client a loopback reverse proxy reports: read
-/// `X-Forwarded-For` right to left, skipping loopback hops, and stop at the
-/// first other address. An unparseable hop leaves the peer address.
+/// The client's address as a string: [`client_address`], or `unknown` when
+/// the server was not given connection info.
 pub(crate) fn sender(request: &Request) -> String {
+    peer_address(request).map_or_else(|| "unknown".into(), |ip| ip.to_string())
+}
+
+/// [`client_address`] of a whole request.
+pub(crate) fn peer_address(request: &Request) -> Option<IpAddr> {
     let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(peer)| *peer);
-    client_address(peer, request.headers()).map_or_else(|| "unknown".into(), |ip| ip.to_string())
+    client_address(peer, request.headers())
 }
 
-/// The address behind [`sender`], for callers that hold the peer and the
-/// headers apart (a form handler that cannot take the whole request). `None`
-/// only when the server was not given connection info.
+/// The client's address, for callers that hold the peer and the headers
+/// apart (a form handler that cannot take the whole request). The peer is
+/// the client itself, the client a listed proxy on another machine named
+/// (`proxies::resolve` put it in the peer's place), or a proxy on this
+/// machine, whose `X-Forwarded-For` is then read as
+/// `TrustedProxies::client` describes. `None` only when the server was not
+/// given connection info.
 pub(crate) fn client_address(peer: Option<SocketAddr>, headers: &HeaderMap) -> Option<IpAddr> {
-    let peer = peer?.ip();
-    if !peer.is_loopback() {
-        return Some(peer);
-    }
-    let hops: Vec<&str> = headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .collect();
-    for hop in hops.into_iter().rev() {
-        match hop.trim().parse::<IpAddr>() {
-            Ok(address) if address.is_loopback() => continue,
-            Ok(address) => return Some(address),
-            Err(_) => break,
-        }
-    }
-    Some(peer)
+    Some(
+        bilibi_base::session::TrustedProxies::default()
+            .client(peer?.ip(), crate::proxies::hops(headers)),
+    )
 }
 
-pub(crate) async fn allowed(app: &App, kind: &str, sender: &str) -> Result<bool, Error> {
-    let client = app.db.get().await?;
-    let limit = app
+/// The key a public edge budgets a sender under: its IPv4 address, or the
+/// /64 network of its IPv6 address, since one subscriber is usually handed a
+/// whole /64 and could otherwise take a fresh key per request.
+pub(crate) fn sender_key(address: Option<IpAddr>) -> String {
+    match address.map(|ip| ip.to_canonical()) {
+        Some(IpAddr::V6(ip)) => {
+            let [a, b, c, d, ..] = ip.segments();
+            format!("{a:x}:{b:x}:{c:x}:{d:x}::/64")
+        }
+        Some(ip) => ip.to_string(),
+        None => "unknown".into(),
+    }
+}
+
+/// Whether `address` may make another `kind` request this minute on a
+/// machine edge, under `agent_access.oauth_requests_per_minute`.
+pub(crate) async fn allowed(app: &App, kind: &str, address: Option<IpAddr>) -> Result<bool, Error> {
+    Ok(app
         .api
+        .admit_machine(kind, address, oauth_limit(app).await?))
+}
+
+/// `agent_access.oauth_requests_per_minute`.
+pub(crate) async fn oauth_limit(app: &App) -> Result<u32, Error> {
+    let client = app.db.get().await?;
+    app.api
         .settings
         .get_global(&**client, OAUTH_REQUESTS_PER_MINUTE)
         .await?
         .as_u64()
         .and_then(|limit| u32::try_from(limit).ok())
-        .ok_or(Error::Invalid)?;
-    Ok(app.api.throttle.allow(&format!("{kind}:{sender}"), limit))
+        .ok_or(Error::Invalid)
 }
 
 /// Token-endpoint answers are never cached (RFC 6749 section 5.1).
@@ -530,13 +606,25 @@ fn oauth(result: Result<Value, OAuthError>) -> Response {
     response
 }
 
+/// A sender past its minute on an endpoint that starts something
+/// (registration, device authorization): `429` with `Retry-After`, as the
+/// gate answers. `slow_down` is RFC 8628's answer to a poll of the token
+/// endpoint, where it tells the client to keep polling at a longer interval;
+/// a client that has no device code yet has nothing to poll.
+fn rate_limited() -> Response {
+    let mut response = error(StatusCode::TOO_MANY_REQUESTS, "rate_limited").into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    response
+}
+
 /// RFC 7591 registration is intentionally unauthenticated. The same direct
 /// sender attribution and operator-set limiter as the token edge apply.
 async fn register(State(app): State<App>, request: Request) -> Response {
-    let sender = sender(&request);
-    match allowed(&app, "register", &sender).await {
+    match allowed(&app, "register", peer_address(&request)).await {
         Ok(true) => {}
-        Ok(false) => return oauth(Err(OAuthError::SlowDown)),
+        Ok(false) => return rate_limited(),
         Err(error) => return oauth(Err(error.into())),
     }
     let Ok(Json(value)) = Json::<Value>::from_request(request, &app).await else {
@@ -558,23 +646,34 @@ async fn register(State(app): State<App>, request: Request) -> Response {
 }
 
 async fn device(State(app): State<App>, request: Request) -> Response {
-    let sender = sender(&request);
-    match allowed(&app, "device", &sender).await {
+    match allowed(&app, "device", peer_address(&request)).await {
         Ok(true) => {}
-        Ok(false) => return oauth(Err(OAuthError::SlowDown)),
+        Ok(false) => return rate_limited(),
         Err(error) => return oauth(Err(error.into())),
     }
     let Some(fields) = params(request).await else {
         return oauth(Err(OAuthError::InvalidRequest));
     };
     let field = |key: &str| fields.get(key).map(String::as_str).unwrap_or_default();
+    // An empty field is an absent one, as `field` reads the others.
+    let stated = |key: &str| {
+        fields
+            .get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+    };
     let started = app
         .api
         .access
-        .start_device(field("client_id"), field("agent_id"))
+        .start_device_for(
+            field("client_id"),
+            stated("agent_id"),
+            stated("resource"),
+            &mcp_resource(&app),
+        )
         .await;
     oauth(started.map(|start| {
-        let uri = format!("{}/oauth/device", origin(&app));
+        let uri = format!("{}{}", origin(&app), bilibi_agent::DEVICE_PAGE);
         json!({
             "device_code": start.device_code,
             "user_code": start.user_code,
@@ -610,8 +709,7 @@ async fn token(State(app): State<App>, request: Request) -> Response {
         Err(error) => return unavailable(&error).into_response(),
     }
     let client_identity = client_identity(request.headers(), false);
-    let sender = sender(&request);
-    match allowed(&app, "token", &sender).await {
+    match allowed(&app, "token", peer_address(&request)).await {
         Ok(true) => {}
         Ok(false) => return oauth(Err(OAuthError::SlowDown)),
         Err(error) => return oauth(Err(error.into())),
@@ -875,6 +973,10 @@ fn api_error(error: bilibi_base::agent_api::Error) -> Refusal {
             json!({"error":"rejected","reason":"record_changed"}),
         ),
         E::Backend(Error::Invalid) => self::error(StatusCode::UNPROCESSABLE_ENTITY, "rejected"),
+        E::Backend(Error::UnrecoveredTransaction(message)) => refusal(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error":"transaction_unrecovered","message":message}),
+        ),
         E::Backend(other) => unavailable(&other),
     }
 }
@@ -895,6 +997,29 @@ async fn body(request: Request<Body>) -> Result<Map<String, Value>, Refusal> {
 }
 
 // --- /api/v1 -----------------------------------------------------------------
+
+/// The connection check (`bilibi_agent_api::hello`): the bearer edge proved
+/// the transport, the grant and the AI switch before this ran, and it reads
+/// nothing, so its answer never depends on a capability.
+async fn hello(State(app): State<App>, uri: Uri, request: Request) -> Response {
+    let trace = trace(&request);
+    let agent = match authenticate(&app, request.headers(), &trace, None).await {
+        Ok(agent) => agent,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let result = async {
+        let Query(query) =
+            Query::<HashMap<String, String>>::try_from_uri(&uri).map_err(|_| invalid_request())?;
+        if query.keys().any(|key| key != "message") {
+            return Err(invalid_request());
+        }
+        let instance = app.instance().await.map_err(|error| unavailable(&error))?;
+        bilibi_base::agent_api::hello(&instance, query.get("message").map(String::as_str))
+            .ok_or_else(invalid_request)
+    }
+    .await;
+    agent.answer(Some("agent_api.hello".into()), Vec::new(), result)
+}
 
 async fn search(State(app): State<App>, uri: Uri, request: Request) -> Response {
     let trace = trace(&request);
@@ -931,12 +1056,17 @@ async fn search(State(app): State<App>, uri: Uri, request: Request) -> Response 
             limit,
             include_unavailable,
         };
-        app.api
+        let found = app
+            .api
             .registry
             .search(&**client, &agent.scope, words, options)
             .await
-            .map(|found| json!({"result": found}))
-            .map_err(api_error)
+            .map_err(api_error)?;
+        drop(client);
+        let pages = crate::page_search::hits(&app, &agent.scope, words, limit)
+            .await
+            .map_err(|error| unavailable(&error))?;
+        Ok(json!({"result": found, "pages": pages}))
     }
     .await;
     agent.answer(None, Vec::new(), result)

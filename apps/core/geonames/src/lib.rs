@@ -13,7 +13,7 @@ mod reference_data;
 mod web;
 
 pub use contributions::{LIST, UPDATE, VIEW};
-pub use lookup::{country_known, normalize_iso, Geonames};
+pub use lookup::{country_known, country_summary, normalize_iso, Geonames};
 pub use model::*;
 pub use query::*;
 

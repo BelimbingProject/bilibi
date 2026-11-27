@@ -5,7 +5,7 @@
 //! passes it in.
 use super::{refusal, render, size, store_refusal, Pages, Refusal};
 use crate::{
-    Reference, Source, StoredFile, Upload, FILE_TYPES, LIST_CATEGORY, LIST_STATUS,
+    Reference, Revision, Source, StoredFile, Upload, FILE_TYPES, LIST_CATEGORY, LIST_STATUS,
     LIST_SUB_CATEGORY, LIST_TYPE, RECORD,
 };
 use askama::Template;
@@ -13,9 +13,12 @@ use bilibi_database::{Error, Result};
 use bilibi_records::{Hit, Resolved};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    choices, error_sentence, page::Uploads, params, upload::UploadSpec, Alert, Button,
-    ButtonVariant, Choice, ErrorSummary, Field, Form, Html, InputKind, Modal, ModalWidth,
-    RecordPicker, StatusKind,
+    choices, error_sentence,
+    page::Uploads,
+    params,
+    upload::{UploadSpec, UploadedFile},
+    ActionLink, Alert, Button, ButtonVariant, Choice, ErrorSummary, Field, Form, Html, InputKind,
+    Modal, ModalWidth, RecordPicker, StatusKind,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -25,6 +28,9 @@ pub const UPLOAD: &str = "file";
 const FORM: &str = "document";
 /// Long text fields post up to this many characters.
 const LIMIT: usize = 10_000;
+
+mod quick;
+pub(crate) use quick::QuickDocument;
 
 #[derive(Template)]
 #[template(path = "documents_form.html")]
@@ -36,15 +42,18 @@ struct FormView<'a> {
     body: Html,
 }
 
-/// The uploads a page that offers the dialogs declares at mount.
-pub fn uploads() -> Uploads {
-    Uploads::new([
-        UploadSpec::new(UPLOAD, bilibi_ui::upload::MAX_FILE_SIZE).accept(
-            FILE_TYPES
-                .iter()
-                .map(|(extension, _)| format!(".{extension}")),
-        ),
-    ])
+/// The uploads a page that offers the dialogs declares at mount, with the
+/// tenant's upload limit (`Documents::upload_limit`) so a larger file is
+/// refused before its bytes arrive. The file input is resumable: its chunks
+/// wait on Media's staging disk, so a dropped connection or a reload carries
+/// on from the bytes already there, up to Media's staging limit
+/// (`docs/live-pages.md`, Resumable uploads).
+pub fn uploads(limit: u64) -> Uploads {
+    Uploads::new([UploadSpec::resumable(UPLOAD, limit).accept(
+        FILE_TYPES
+            .iter()
+            .map(|(extension, _)| format!(".{extension}")),
+    )])
 }
 
 /// The posted field each contract input path refuses.
@@ -65,6 +74,11 @@ fn label_of(field: &str) -> &'static str {
         "sub_category" => "Sub-category",
         "document_type" => "Type",
         "status" => "Status",
+        "sync_id" => "Integration sync ID",
+        "related_document_id" => "Related document",
+        "relation" => "Relation",
+        "revision_label" | "label" => "Revision label",
+        "replaces_revision_id" => "Replaces revision",
         "related" => "Related to",
         "file" => "File",
         "revision" => "Revision",
@@ -78,6 +92,8 @@ fn label_of(field: &str) -> &'static str {
 struct State {
     values: BTreeMap<String, String>,
     stored: Option<StoredFile>,
+    /// Documents the reader may see that already hold the stored file.
+    duplicates: Vec<(i64, String)>,
     errors: BTreeMap<String, Vec<String>>,
     notice: String,
     submitted: bool,
@@ -107,6 +123,11 @@ impl State {
                 .insert("file".into(), vec!["needs a file chosen first".into()]);
             return Ok(());
         };
+        self.keep(pages, scope, file).await
+    }
+    /// Keeps one received file with `store_file` and names the document from
+    /// it when the name is still blank.
+    async fn keep(&mut self, pages: &Pages, scope: &Scope, file: UploadedFile) -> Result<()> {
         match pages
             .documents
             .store_file(
@@ -122,11 +143,30 @@ impl State {
                 if self.value("name").trim().is_empty() {
                     self.values.insert("name".into(), stored.file_name.clone());
                 }
-                self.stored = Some(stored);
+                self.duplicates = pages
+                    .documents
+                    .duplicates_of_file(scope, &stored.sha256)
+                    .await?
+                    .into_iter()
+                    .map(|d| (d.id, d.name))
+                    .collect();
+                // The file this one replaces is never attached now.
+                if let Some(replaced) = self.stored.replace(stored) {
+                    discard(pages, scope, replaced).await;
+                }
             }
-            Err(error) => self.notice = store_refusal(error)?,
+            Err(error) => {
+                self.duplicates.clear();
+                self.notice = store_refusal(error)?;
+            }
         }
         Ok(())
+    }
+    /// Discards the file the dialog holds, when it is closed without filing.
+    async fn discard(&mut self, pages: &Pages, scope: &Scope) {
+        if let Some(stored) = self.stored.take() {
+            discard(pages, scope, stored).await;
+        }
     }
     /// Keeps a refused contract call's reasons on their fields.
     fn refused(&mut self, error: bilibi_agent_api::Error, failed: &str) -> Result<()> {
@@ -148,27 +188,66 @@ impl State {
         }
         Ok(())
     }
-    fn sentences(&self, key: &str) -> Vec<String> {
+    fn sentences(&self, words: &bilibi_grid::RecordWords, key: &str) -> Vec<String> {
         self.errors
             .get(key)
             .map(|messages| {
                 messages
                     .iter()
-                    .map(|m| error_sentence(label_of(key), m))
+                    .map(|m| {
+                        error_sentence(
+                            words.field(
+                                if key == "revision_label" {
+                                    "label"
+                                } else {
+                                    key
+                                },
+                                label_of(key),
+                            ),
+                            m,
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
     }
-    fn field(&self, prefix: &str, key: &str, label: &str) -> Field {
+    fn field(
+        &self,
+        words: &bilibi_grid::RecordWords,
+        table: &str,
+        prefix: &str,
+        key: &str,
+        label: &str,
+    ) -> Field {
         Field::in_form(FORM, key)
             .id(format!("{prefix}-{}", key.replace('_', "-")))
-            .label(label)
+            .grid_field(format!(
+                "{table}.{}",
+                if key == "revision_label" {
+                    "label"
+                } else {
+                    key
+                }
+            ))
+            .label(words.field(
+                if key == "revision_label" {
+                    "label"
+                } else {
+                    key
+                },
+                label,
+            ))
             .value(self.value(key))
-            .errors(self.sentences(key))
+            .errors(self.sentences(words, key))
             .attr("data-debounce", "300")
     }
     /// The summary of every error and the notice, above the fields.
-    fn feedback(&self, prefix: &str) -> Result<Html> {
+    fn feedback(
+        &self,
+        words: &bilibi_grid::RecordWords,
+        revision_words: &bilibi_grid::RecordWords,
+        prefix: &str,
+    ) -> Result<Html> {
         let mut body = Html::EMPTY;
         if self.submitted && !self.errors.is_empty() {
             let mut summary = ErrorSummary::new(format!("{prefix}-errors"));
@@ -176,11 +255,39 @@ impl State {
                 for message in messages {
                     summary.push(
                         format!("{prefix}-{}", key.replace('_', "-")),
-                        error_sentence(label_of(key), message),
+                        error_sentence(
+                            if key == "revision_label" {
+                                revision_words.field("label", label_of(key))
+                            } else {
+                                words.field(key, label_of(key))
+                            },
+                            message,
+                        ),
                     );
                 }
             }
             body.push(&render(summary)?);
+        }
+        if !self.duplicates.is_empty() {
+            let mut warning = Html::text("A document with this file already exists: ");
+            for (index, (id, name)) in self.duplicates.iter().enumerate() {
+                if index > 0 {
+                    warning.push(&Html::text(", "));
+                }
+                warning.push(&render(ActionLink {
+                    id: &format!("{prefix}-duplicate-{id}"),
+                    href: &super::path(*id),
+                    body: Html::text(name),
+                    ..ActionLink::default()
+                })?);
+            }
+            warning.push(&Html::text(". Save only if you want another."));
+            body.push(&render(Alert {
+                kind: StatusKind::Warning,
+                id: &format!("{prefix}-duplicates"),
+                body: warning,
+                ..Alert::default()
+            })?);
         }
         if !self.notice.is_empty() {
             body.push(&render(Alert {
@@ -250,6 +357,25 @@ struct Options {
     statuses: Vec<Choice>,
 }
 
+/// Removes a stored file the dialog let go of (replaced by another upload,
+/// or the dialog closed) at once, rather than when its 24-hour discard job
+/// runs (#699). That job stays the way out when this fails or the tab closes,
+/// so a failure is only logged, by the file's token.
+async fn discard(pages: &Pages, scope: &Scope, stored: StoredFile) {
+    match pages
+        .documents
+        .discard_files(scope, std::slice::from_ref(&stored.artifact_id))
+        .await
+    {
+        Ok(failed) => {
+            for (token, error) in failed {
+                eprintln!("warning: document dialog could not discard file {token}: {error:?}");
+            }
+        }
+        Err(error) => eprintln!("warning: document dialog could not discard a file: {error:?}"),
+    }
+}
+
 /// A new document, written in the dialog.
 pub(crate) struct NewDocument {
     state: State,
@@ -261,6 +387,10 @@ pub(crate) struct NewDocument {
     options: Options,
 }
 impl NewDocument {
+    /// Closing without creating removes the file the dialog stored.
+    pub async fn discard(&mut self, pages: &Pages, scope: &Scope) {
+        self.state.discard(pages, scope).await;
+    }
     pub async fn new(pages: &Pages, scope: &Scope, fixed: Option<Resolved>) -> Result<Self> {
         let mut state = State::default();
         state.values.insert("source".into(), "internal".into());
@@ -339,6 +469,10 @@ impl NewDocument {
                 "sub_category",
                 "document_type",
                 "status",
+                "sync_id",
+                "related_document_id",
+                "relation",
+                "revision_label",
             ],
         )?;
         // A new category clears the sub-category and offers its own.
@@ -397,8 +531,21 @@ impl NewDocument {
             "sub_category",
             "document_type",
             "status",
+            "sync_id",
+            "revision_label",
         ] {
             put(key);
+        }
+        if !self.state.value("related_document_id").trim().is_empty() {
+            if let Ok(id) = self
+                .state
+                .value("related_document_id")
+                .trim()
+                .parse::<i64>()
+            {
+                input["related_document_id"] = json!(id);
+            }
+            input["relation"] = json!(self.state.value("relation"));
         }
         match self.source() {
             Source::Internal => {
@@ -432,6 +579,14 @@ impl NewDocument {
                 .insert("file".into(), vec!["needs to be uploaded first".into()]);
             return Ok(None);
         }
+        let related = self.state.value("related_document_id").trim();
+        if !related.is_empty() && related.parse::<i64>().ok().is_none_or(|id| id <= 0) {
+            self.state.errors.insert(
+                "related_document_id".into(),
+                vec!["needs a positive document ID".into()],
+            );
+            return Ok(None);
+        }
         let call = pages.call(scope, credential, "create", "core.document.create");
         match pages.contracts.submit(&call, self.input()).await {
             Ok(result) => Ok(result["result"]["id"].as_i64()),
@@ -447,21 +602,23 @@ impl NewDocument {
         &self,
         pages: &Pages,
         uploads: &Uploads,
+        words: (&bilibi_grid::RecordWords, &bilibi_grid::RecordWords),
         prefix: &str,
         cancel_event: &str,
         framed: bool,
     ) -> Result<Html> {
+        let (words, revision_words) = words;
         let state = &self.state;
-        let mut body = state.feedback(prefix)?;
+        let mut body = state.feedback(words, revision_words, prefix)?;
         let mut fields = vec![select(
-            state.field(prefix, "source", "Source"),
+            state.field(words, "documents", prefix, "source", "Source"),
             choices(&[("A file", "internal"), ("A link", "external")]),
             "",
         )];
         if self.source() == Source::External {
             fields.push(
                 state
-                    .field(prefix, "external_url", "Link")
+                    .field(words, "documents", prefix, "external_url", "Link")
                     .kind(InputKind::Url)
                     .required()
                     .attr("maxlength", "2000")
@@ -470,37 +627,69 @@ impl NewDocument {
         }
         fields.extend([
             state
-                .field(prefix, "name", "Name")
+                .field(words, "documents", prefix, "name", "Name")
                 .attr("maxlength", "255")
                 .hint("The file's name when left blank."),
             state
-                .field(prefix, "publish_date", "Publish date")
+                .field(words, "documents", prefix, "publish_date", "Publish date")
                 .kind(InputKind::Date)
                 .hint("Today when left blank."),
             select(
-                state.field(prefix, "category", "Category"),
+                state.field(words, "documents", prefix, "category", "Category"),
                 self.options.categories.clone(),
                 "None",
             ),
         ]);
         if !self.options.sub_categories.is_empty() {
             fields.push(select(
-                state.field(prefix, "sub_category", "Sub-category"),
+                state.field(words, "documents", prefix, "sub_category", "Sub-category"),
                 self.options.sub_categories.clone(),
                 "None",
             ));
         }
         fields.extend([
             select(
-                state.field(prefix, "document_type", "Type"),
+                state.field(words, "documents", prefix, "document_type", "Type"),
                 self.options.types.clone(),
                 "None",
             ),
             select(
-                state.field(prefix, "status", "Status"),
+                state.field(words, "documents", prefix, "status", "Status"),
                 self.options.statuses.clone(),
                 "",
             ),
+            state
+                .field(words, "documents", prefix, "sync_id", "Integration sync ID")
+                .attr("maxlength", "255")
+                .hint("Unique within this workspace when set."),
+            state
+                .field(
+                    words,
+                    "documents",
+                    prefix,
+                    "related_document_id",
+                    "Related document ID",
+                )
+                .kind(InputKind::Number)
+                .hint("Optional document you can view."),
+            select(
+                state.field(words, "documents", prefix, "relation", "Relation"),
+                choices(&[
+                    ("None", ""),
+                    ("Supersedes", "supersedes"),
+                    ("Replaces", "replaces"),
+                ]),
+                "",
+            ),
+            state
+                .field(
+                    revision_words,
+                    "document_revisions",
+                    prefix,
+                    "revision_label",
+                    "First revision label",
+                )
+                .attr("maxlength", "100"),
         ]);
         let mut details = Html::EMPTY;
         for field in fields {
@@ -531,7 +720,7 @@ impl NewDocument {
                         .as_ref()
                         .map(|(value, pill)| (value.as_str(), pill.clone())),
                     ("pick_related", "clear_related"),
-                    state.sentences("related"),
+                    state.sentences(words, "related"),
                 ))?);
             }
         }
@@ -593,9 +782,14 @@ pub(crate) struct NewRevision {
     state: State,
     source: Source,
     latest: i32,
+    prior: Vec<Choice>,
 }
 impl NewRevision {
-    pub fn new(source: Source, latest: i32) -> Self {
+    /// Closing without adding the revision removes the file it stored.
+    pub async fn discard(&mut self, pages: &Pages, scope: &Scope) {
+        self.state.discard(pages, scope).await;
+    }
+    pub fn new(source: Source, latest: i32, revisions: &[Revision]) -> Self {
         let mut state = State::default();
         state
             .values
@@ -604,6 +798,22 @@ impl NewRevision {
             state,
             source,
             latest,
+            prior: revisions
+                .iter()
+                .map(|r| {
+                    Choice::new(
+                        format!(
+                            "{}{}",
+                            r.revision,
+                            r.label
+                                .as_ref()
+                                .map(|label| format!(" - {label}"))
+                                .unwrap_or_default()
+                        ),
+                        r.id.to_string(),
+                    )
+                })
+                .collect(),
         }
     }
     /// The dialog's own events; `false` for an event it does not own.
@@ -616,9 +826,16 @@ impl NewRevision {
         uploads: &mut Uploads,
     ) -> Result<bool> {
         match name {
-            "document_change" => self
-                .state
-                .read(value, &["revision", "change_log", "external_url"])?,
+            "document_change" => self.state.read(
+                value,
+                &[
+                    "revision",
+                    "change_log",
+                    "external_url",
+                    "label",
+                    "replaces_revision_id",
+                ],
+            )?,
             "upload" => self.state.receive(pages, scope, uploads).await?,
             _ => return Ok(false),
         }
@@ -634,8 +851,16 @@ impl NewRevision {
         version: i64,
         value: &Value,
     ) -> Result<bool> {
-        self.state
-            .read(value, &["revision", "change_log", "external_url"])?;
+        self.state.read(
+            value,
+            &[
+                "revision",
+                "change_log",
+                "external_url",
+                "label",
+                "replaces_revision_id",
+            ],
+        )?;
         self.state.submitted = true;
         self.state.errors.clear();
         self.state.notice.clear();
@@ -648,6 +873,26 @@ impl NewRevision {
                     .errors
                     .insert("revision".into(), vec!["must be a whole number".into()]);
                 return Ok(false);
+            }
+        }
+        if !self.state.value("label").trim().is_empty() {
+            input["label"] = json!(self.state.value("label"));
+        }
+        if !self.state.value("replaces_revision_id").trim().is_empty() {
+            match self
+                .state
+                .value("replaces_revision_id")
+                .trim()
+                .parse::<i64>()
+            {
+                Ok(id) if id > 0 => input["replaces_revision_id"] = json!(id),
+                _ => {
+                    self.state.errors.insert(
+                        "replaces_revision_id".into(),
+                        vec!["needs an earlier revision".into()],
+                    );
+                    return Ok(false);
+                }
             }
         }
         match self.source {
@@ -677,9 +922,15 @@ impl NewRevision {
             }
         }
     }
-    pub fn render(&self, uploads: &Uploads, prefix: &str, cancel_event: &str) -> Result<Html> {
+    pub fn render(
+        &self,
+        uploads: &Uploads,
+        words: &bilibi_grid::RecordWords,
+        prefix: &str,
+        cancel_event: &str,
+    ) -> Result<Html> {
         let state = &self.state;
-        let mut body = state.feedback(prefix)?;
+        let mut body = state.feedback(words, words, prefix)?;
         if self.source == Source::Internal {
             body.push(&state.upload(prefix, uploads)?);
         }
@@ -687,7 +938,7 @@ impl NewRevision {
         if self.source == Source::External {
             details.push(&render(
                 state
-                    .field(prefix, "external_url", "Link")
+                    .field(words, "document_revisions", prefix, "external_url", "Link")
                     .kind(InputKind::Url)
                     .required()
                     .attr("maxlength", "2000")
@@ -696,7 +947,7 @@ impl NewRevision {
         }
         details.push(&render(
             state
-                .field(prefix, "revision", "Revision")
+                .field(words, "document_revisions", prefix, "revision", "Revision")
                 .kind(InputKind::Number)
                 .attr("min", &(self.latest.saturating_add(1)).to_string())
                 .hint(format!(
@@ -706,7 +957,37 @@ impl NewRevision {
         )?);
         details.push(&render(
             state
-                .field(prefix, "change_log", "Change log")
+                .field(
+                    words,
+                    "document_revisions",
+                    prefix,
+                    "label",
+                    "Revision label",
+                )
+                .attr("maxlength", "100"),
+        )?);
+        let mut prior = vec![Choice::new("None", "")];
+        prior.extend(self.prior.clone());
+        details.push(&render(select(
+            state.field(
+                words,
+                "document_revisions",
+                prefix,
+                "replaces_revision_id",
+                "Replaces revision",
+            ),
+            prior,
+            "",
+        ))?);
+        details.push(&render(
+            state
+                .field(
+                    words,
+                    "document_revisions",
+                    prefix,
+                    "change_log",
+                    "Change log",
+                )
                 .kind(InputKind::Textarea)
                 .required()
                 .attr("rows", "3")

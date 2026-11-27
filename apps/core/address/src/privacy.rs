@@ -33,11 +33,12 @@ static ADDRESSES: Addresses = Addresses;
 impl Handler for Addresses {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let count: i64 = client
                 .query_one(
                     "SELECT count(*) FROM address_person_subjects WHERE tenant_id=$1 AND person_id=$2",
@@ -126,7 +127,7 @@ impl Handler for Addresses {
             let mut erased = Erased::default();
             let mut count = 0;
             let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
-            let held = holds.records(grant, KIND, &ids).await?;
+            let held = holds.records(tx.sql(), grant, KIND, &ids).await?;
             for row in rows {
                 let id: i64 = row.get(0);
                 if let Some(hold) = held.get(&id) {

@@ -1,6 +1,7 @@
 //! Tenant-facing automation consent. Both browser controls call the same
 //! reviewed operation an agent calls; Authz owns the durable grant and audit.
 use crate::consent::{Kind, LIST, SET};
+mod principal;
 use askama::Template;
 use bilibi_agent_api::{
     page::{Call, PageContracts},
@@ -72,6 +73,8 @@ fn text(value: &Value) -> &str {
 #[derive(Clone)]
 pub struct Pages {
     pub contracts: Arc<PageContracts>,
+    pub db: bilibi_database::Db,
+    pub settings: Arc<bilibi_settings::Settings>,
 }
 
 impl Pages {
@@ -97,6 +100,7 @@ struct State {
     schedule_columns: ListColumns,
     event_columns: ListColumns,
     pending: Option<Pending>,
+    principals: principal::PrincipalState,
     flash: Option<(StatusKind, String)>,
 }
 
@@ -110,6 +114,7 @@ impl State {
             event_columns: ListColumns::mount("automation-events", event_columns())
                 .map_err(|_| Error::Internal)?,
             pending: None,
+            principals: principal::PrincipalState::new()?,
             flash: None,
         })
     }
@@ -120,6 +125,9 @@ impl State {
 
     async fn event(&mut self, request: &LiveRequest<'_, Scope>, value: &Value) -> Result<()> {
         let get = |key: &str| value.get(key).and_then(Value::as_str);
+        if self.principal_event(request, value).await? {
+            return Ok(());
+        }
         match get("type").ok_or(Error::Invalid)? {
             "filters" => self.list.apply_filters(
                 &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
@@ -370,7 +378,6 @@ impl State {
         body.push(&render(table)?);
         render(Card {
             id: "automation-events-card",
-            class: "mt-4",
             body,
             ..Card::default()
         })
@@ -392,11 +399,13 @@ impl State {
                 "search",
                 "Search automation",
                 &form["search"],
-                "Search schedules and subscriptions",
+                "Search schedules, subscriptions and system principals",
             )],
         ))?;
         let schedules = self.schedule_card(&facts["schedule"], &search)?;
         let events = self.events_card(&facts["events"], &search)?;
+        let principals = self.principal_card(scope, &search).await?;
+        let principal_dialog = self.principal_dialog().await?;
         let dialog = match self.pending {
             Some(Pending { kind:Kind::Schedule, granted:true }) => render(ConfirmDialog { id:"automation-consent-confirm", consequence:"Allow scheduled work for your organisation?", detail:"Every schedule listed here may run for your organisation. You can withdraw access later.", confirm:"Grant", working:"Granting…", confirm_event:"confirm-consent", cancel_event:"cancel-consent" })?,
             Some(Pending { kind:Kind::Schedule, granted:false }) => render(ConfirmDialog { id:"automation-consent-confirm", consequence:"Withdraw scheduled work access?", detail:"Waiting and future scheduled work will be refused at its next authorization check.", confirm:"Withdraw", working:"Withdrawing…", confirm_event:"confirm-consent", cancel_event:"cancel-consent" })?,
@@ -417,8 +426,8 @@ impl State {
             flash,
             header,
             toolbar,
-            schedules,
-            events,
+            cards: vec![schedules, events, principals],
+            principal_dialog,
             dialog,
         }
         .render()
@@ -432,8 +441,8 @@ struct AutomationView<'a> {
     flash: FlashMap<'a>,
     header: Html,
     toolbar: Html,
-    schedules: Html,
-    events: Html,
+    cards: Vec<Html>,
+    principal_dialog: Html,
     dialog: Html,
 }
 

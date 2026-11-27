@@ -1,5 +1,5 @@
-//! Opt-in manual service walkthrough. No test harness, assertions or unit tests.
-//! Uses a disposable migrated database and prints outcomes for inspection.
+//! Service walkthrough on a disposable migrated database.
+//! Prints outcomes and checks the slugs from concurrent creations.
 use bilibi_database::{pool, Error, Result};
 use bilibi_module_registry::Services;
 use bilibi_security::Scope;
@@ -53,7 +53,9 @@ async fn main() -> Result<()> {
     services.install(&modules)?;
     let queries = services.get::<QueryService>("core/user.database_queries")?;
     let users = services.get::<UserService>("core/user.accounts")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // Explicit disposable fixture setup, never a production operator shortcut.
     client.execute("INSERT INTO platform_operator(singleton,tenant_id) VALUES(true,1) ON CONFLICT(singleton) DO UPDATE SET tenant_id=1", &[]).await?;
     for (tenant, email) in [
@@ -64,6 +66,7 @@ async fn main() -> Result<()> {
         client.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) SELECT u.tenant_id,u.id,$3,true FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND i.email=$2 ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=true", &[&tenant,&email,&LIST]).await?;
     }
     let mut scopes = Vec::new();
+    let mut tokens = Vec::new();
     for email in [
         "admin@example.test",
         "manager@example.test",
@@ -74,8 +77,27 @@ async fn main() -> Result<()> {
             .await
             .map_err(|_| bilibi_database::Error::Unauthorized)?;
         scopes.push(users.sessions.check(&**client, &login.token).await?);
+        tokens.push(login.token);
     }
     let actor = &scopes[0];
+    // A session row keeps only its token's digest (#533): nothing is stored
+    // under the cookie value, and the stored id is no cookie.
+    let digest = bilibi_session::session_id(&tokens[0]);
+    for (label, id) in [("the token", &tokens[0]), ("its digest", &digest)] {
+        let rows: i64 = client
+            .query_one("SELECT count(*) FROM sessions WHERE id=$1", &[id])
+            .await?
+            .get(0);
+        println!("session rows stored under {label}: {rows}");
+    }
+    println!(
+        "stored id presented as a cookie: {:?}",
+        users
+            .sessions
+            .check(&**client, &digest)
+            .await
+            .map(|scope| scope.user())
+    );
     let input = QueryInput {
         name: "C9 owned report".into(),
         sql_query: "SELECT :minimum::int AS minimum, :minimum::int + 1 AS next".into(),
@@ -88,7 +110,29 @@ async fn main() -> Result<()> {
         Error::Internal
     })?;
     println!("created: {first:?}");
-    let (a, b) = tokio::join!(queries.create(actor, &input), queries.create(actor, &input));
+    let (a, b) = tokio::join!(
+        tokio::spawn({
+            let queries = queries.clone();
+            let input = input.clone();
+            let actor = (*actor).clone();
+            async move { queries.create(&actor, &input).await }
+        }),
+        tokio::spawn({
+            let queries = queries.clone();
+            let input = input.clone();
+            let actor = (*actor).clone();
+            async move { queries.create(&actor, &input).await }
+        })
+    );
+    let a = a
+        .map_err(|_| Error::Internal)?
+        .expect("first query was saved");
+    let b = b
+        .map_err(|_| Error::Internal)?
+        .expect("second query was saved");
+    assert_ne!(a.slug, b.slug);
+    assert_ne!(a.slug, first.slug);
+    assert_ne!(b.slug, first.slug);
     println!("concurrent same-name creations: {a:?} / {b:?}");
     println!(
         "list: {:?}",
@@ -234,6 +278,43 @@ async fn main() -> Result<()> {
         25,
     )
     .await?;
+    // The sessions table stays out of the console however it is named; a
+    // near name, or the word in a literal, is not refused.
+    for (label, sql) in [
+        (
+            "hidden table",
+            "SELECT id, csrf, tenant_id, user_id FROM sessions",
+        ),
+        ("hidden table quoted", "SELECT * FROM public.\"sessions\""),
+        (
+            "hidden table unicode name",
+            "SELECT * FROM U&\"\\0073essions\"",
+        ),
+        (
+            "hidden table through text",
+            "SELECT query_to_xml('SELECT * FROM sess' || 'ions', true, false, '')",
+        ),
+        (
+            "hidden table through a schema dump",
+            "SELECT schema_to_xml('public', true, false, '')",
+        ),
+        (
+            "near name allowed",
+            "SELECT count(*) AS sign_ins FROM session_sign_ins",
+        ),
+        ("word in a literal allowed", "SELECT 'sessions' AS word"),
+    ] {
+        run(
+            &queries,
+            actor,
+            label,
+            sql,
+            ConsoleOptions::default(),
+            1,
+            25,
+        )
+        .await?;
+    }
     run(
         &queries,
         actor,
@@ -297,6 +378,37 @@ async fn main() -> Result<()> {
             .await?
             .get::<_, i64>(0)
     );
+    // A session advisory lock outlives a rolled-back read-only transaction.
+    // The console closes its connection after each command (#575), so the
+    // lock every audited commit takes is free again once the command ends.
+    run(
+        &queries,
+        actor,
+        "session advisory lock",
+        "SELECT pg_advisory_lock(841332, base_audit_chain_key('actions', 1))",
+        ConsoleOptions::default(),
+        1,
+        25,
+    )
+    .await?;
+    let mut free = false;
+    for _ in 0..50 {
+        free = client
+            .query_one(
+                "SELECT pg_try_advisory_xact_lock(841332, base_audit_chain_key('actions', 1))",
+                &[],
+            )
+            .await?
+            .get(0);
+        if free {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    println!("audit chain lock free after the console command: {free}");
+    if !free {
+        return Err(Error::Internal);
+    }
     run(
         &queries,
         actor,

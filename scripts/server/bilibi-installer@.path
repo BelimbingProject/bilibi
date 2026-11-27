@@ -1,0 +1,13 @@
+# Starts one instance's installer only when the application has committed work
+# that is ready for it. The service is also enabled once at boot for recovery.
+[Unit]
+Description=Bilibi installer activation for instance %i
+Documentation=https://github.com/BelimbingProject/bilibi/blob/main/apps/installer/README.md
+ConditionFileIsExecutable=/opt/bilibi/%i/installer
+
+[Path]
+PathExistsGlob=/opt/bilibi/%i/incoming/installer-jobs/job-*.ready
+Unit=bilibi-installer@%i.service
+
+[Install]
+WantedBy=multi-user.target

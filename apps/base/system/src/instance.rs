@@ -6,11 +6,13 @@ use bilibi_settings::{
 };
 use bilibi_ui::{Html, InstanceBadge, InstanceBanner, InstanceStatus, StatusKind};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio_postgres::GenericClient;
 
 pub const INSTANCE_ROLE_KEY: &str = "instance.role";
 pub const INSTANCE_LABEL_KEY: &str = "instance.label";
 pub const INSTANCE_COLOUR_KEY: &str = "instance.colour";
+pub const INSTALLATION_MODE_KEY: &str = "installation.mode";
 /// Changing how the instance announces itself.
 pub const INSTANCE_MANAGE: &str = "admin.system.instance.manage";
 
@@ -20,6 +22,53 @@ pub enum Role {
     Dev,
     Staging,
     Production,
+}
+
+/// Whether this process serves unrelated customers or one isolated customer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstallationMode {
+    Shared,
+    Isolated,
+}
+impl InstallationMode {
+    pub const ALL: [Self; 2] = [Self::Shared, Self::Isolated];
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "shared" => Some(Self::Shared),
+            "isolated" => Some(Self::Isolated),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Isolated => "isolated",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "Shared service",
+            Self::Isolated => "Isolated installation",
+        }
+    }
+    pub async fn resolve(
+        settings: &Settings,
+        client: &(impl GenericClient + Sync),
+    ) -> bilibi_database::Result<Self> {
+        if !client
+            .query_one("SELECT to_regclass('base_settings') IS NOT NULL", &[])
+            .await?
+            .get::<_, bool>(0)
+        {
+            return Ok(Self::Shared);
+        }
+        settings
+            .get_global(client, INSTALLATION_MODE_KEY)
+            .await?
+            .as_str()
+            .and_then(Self::parse)
+            .ok_or(bilibi_database::Error::Invalid)
+    }
 }
 impl Role {
     /// The install seed's reading of `BILIBI_ENV`: `development`,
@@ -67,7 +116,7 @@ impl Role {
     pub fn effect(self) -> &'static str {
         match self {
             Self::Dev | Self::Staging => "Changes here do not affect production.",
-            Self::Production => "Changes here change real data.",
+            Self::Production => "",
         }
     }
     /// What a change here does, in one or two short sentences.
@@ -75,7 +124,7 @@ impl Role {
         match self {
             Self::Dev => "This is a development copy. Changes here do not affect production.",
             Self::Staging => "This is a test copy. Changes here do not affect production.",
-            Self::Production => "This is the live system. Changes here change real data.",
+            Self::Production => "",
         }
     }
     /// The default colour, one of `DESIGN.md`'s status roles.
@@ -148,6 +197,9 @@ pub fn valid_instance_name(name: &str) -> bool {
         && !name.starts_with('-')
 }
 
+/// The longest [`Instance::server_name`].
+const SERVER_NAME_LIMIT: usize = 32;
+
 /// This instance as it should be announced.
 #[derive(Clone, Debug)]
 pub struct Instance {
@@ -192,30 +244,69 @@ impl Instance {
             colour,
         })
     }
-    /// The label as an identifier: lower-case letters, digits and hyphens,
-    /// at most 24 characters (`Dev (laptop)` is `dev-laptop`), or the role
-    /// when the label has none. The MCP server name (`bilibi-<slug>`) and the
-    /// plugin package name are built from it, so a person who connects Dev,
-    /// Staging and Production to one harness can tell the three apart.
-    pub fn slug(&self) -> String {
-        const LIMIT: usize = 24;
-        let mut slug = String::new();
-        for c in self.label.chars() {
-            if c.is_ascii_alphanumeric() {
-                slug.push(c.to_ascii_lowercase());
-            } else if !slug.is_empty() && !slug.ends_with('-') {
-                slug.push('-');
-            }
-            if slug.len() >= LIMIT {
-                break;
+    /// The name an AI app saves this Bilibi under: the host of the canonical
+    /// address with dots as hyphens and existing hyphens doubled
+    /// (`try.bilibi.app` is `try-bilibi-app`, `bilibi-app.example.com` is
+    /// `bilibi--app-example-com`). The MCP server name, the connection prompt
+    /// and the plugin package all use it.
+    ///
+    /// The address is unique per deployment; a label is not (two Productions
+    /// would both be `production`, and one saved sign-in would then serve
+    /// both). It changes only when the address does, which ends a saved
+    /// sign-in anyway, so renaming the label never orphans one. Dots are not
+    /// safe in every app's server-name grammar; lower-case letters, digits
+    /// and hyphens are.
+    ///
+    /// Two different addresses do not share a name. An HTTPS host name of up
+    /// to 32 characters maps one to one: a label never starts or ends with a
+    /// hyphen, so a dot's single hyphen never meets a doubled one. Any other
+    /// address (a port, an IPv6 literal, plain HTTP, or a name past 32
+    /// characters, since apps name a tool `mcp__<server>__<tool>` within 64)
+    /// keeps the start of that name and ends in three hyphens and the first
+    /// 64 bits of the SHA-256 of the whole origin, scheme and port included.
+    /// Three hyphens in a row never come from a host name, so the two kinds
+    /// cannot meet either.
+    pub fn server_name(&self) -> String {
+        let (scheme, rest) = self
+            .origin
+            .split_once("://")
+            .unwrap_or(("", self.origin.as_str()));
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let authority = authority.rsplit('@').next().unwrap_or(authority);
+        let mut name = String::new();
+        for c in authority.chars() {
+            if c == '-' {
+                name.push_str("--");
+            } else if c.is_ascii_alphanumeric() {
+                name.push(c.to_ascii_lowercase());
+            } else if !name.is_empty() && !name.ends_with('-') {
+                name.push('-');
             }
         }
-        let slug = slug.trim_end_matches('-');
-        if slug.is_empty() {
-            self.role.env_value().to_owned()
-        } else {
-            slug.to_owned()
+        let name = name.trim_end_matches('-');
+        if name.is_empty() {
+            return "bilibi".to_owned();
         }
+        // A host name whose every label starts and ends with a letter or digit.
+        let host_name = authority.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        });
+        if host_name && scheme.eq_ignore_ascii_case("https") && name.len() <= SERVER_NAME_LIMIT {
+            return name.to_owned();
+        }
+        let origin = format!("{scheme}://{authority}").to_ascii_lowercase();
+        let digest = Sha256::digest(origin.as_bytes());
+        let tail: String = digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let kept = name[..name.len().min(SERVER_NAME_LIMIT - 19)].trim_end_matches('-');
+        format!("{kept}---{tail}")
     }
     /// Whether an AI app on the internet (a chat website, a bot) can reach
     /// this Bilibi at its configured address. Decided from what the server
@@ -288,6 +379,8 @@ impl Instance {
     /// test copy. Changes here do not affect production."
     pub fn notice(&self) -> String {
         format!("You are on {}. {}", self.label, self.role.consequence())
+            .trim_end()
+            .to_owned()
     }
     /// Agent connection identity includes the role even when the operator's
     /// label is ambiguous, and the canonical address rather than request data.
@@ -299,6 +392,8 @@ impl Instance {
             self.origin,
             self.role.consequence()
         )
+        .trim_end()
+        .to_owned()
     }
     /// What the Agent API and MCP send, so an agent can tell its person
     /// "this will create the order on Staging".
@@ -312,12 +407,9 @@ impl Instance {
             "notice": self.agent_notice(),
         })
     }
-    /// The shared badge for sign-in and the shell. Production needs no extra badge;
-    /// the workspace shell also suppresses Dev because its status bar names it.
+    /// The shared badge for sign-in and the shell. The workspace shell shows
+    /// only Staging because its status bar already names the other roles.
     pub fn badge(&self) -> askama::Result<Html> {
-        if self.role == Role::Production {
-            return Ok(Html::default());
-        }
         let title = self.notice();
         Html::render(&InstanceBadge {
             tone: self.colour.status(),
@@ -362,6 +454,13 @@ macro_rules! provenance {
     };
 }
 const GLOBAL: &[ScopeKind] = &[ScopeKind::Global];
+inventory::submit! { Contribution::new(DEFINITIONS, INSTALLATION_MODE_KEY, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::String, scopes: GLOBAL, default: || json!("shared"), nullable: false, encrypted: false,
+    minimum: None, maximum: None,
+    validator: Some(Validator { accepts: |value: &Value| value.as_str().is_some_and(|mode| InstallationMode::parse(mode).is_some()), message: "Choose Shared service or Isolated installation." }),
+    // The owner-only Instance settings operation owns this protected setting.
+    editor: None,
+})) }
 inventory::submit! { Contribution::new(DEFINITIONS, INSTANCE_LABEL_KEY, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::String, scopes: GLOBAL, default: || json!(null), nullable: true, encrypted: false,
     minimum: None, maximum: None,
@@ -374,8 +473,8 @@ inventory::submit! { Contribution::new(DEFINITIONS, INSTANCE_COLOUR_KEY, provena
     value_type: ValueType::String, scopes: GLOBAL, default: || json!(null), nullable: true, encrypted: false,
     minimum: None, maximum: None,
     validator: Some(Validator { accepts: |value: &Value| value.is_null() || value.as_str().is_some_and(|colour| Colour::parse(colour).is_some()), message: "The colour must be info (blue), success (green), warning (amber) or danger (red)." }),
-    editor: Some(Editor { group: "Instance", label: "Banner colour",
-        help: "info (blue), success (green), warning (amber) or danger (red). The default follows the role: Dev is info, Staging is warning, Production is danger (server owner only).",
+    editor: Some(Editor { group: "Instance", label: "Dev and Staging banner colour",
+        help: "info (blue), success (green), warning (amber) or danger (red). Shared Dev badges and banners default to blue and Staging defaults to amber. Shared Production badges are always neutral.",
         capability: Some(INSTANCE_MANAGE), reveal_duration_ms: 5_000 }),
 })) }
 // The dedicated Core Administrator page guards this setting; the generic editor cannot change it.

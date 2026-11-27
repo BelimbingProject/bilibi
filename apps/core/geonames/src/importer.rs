@@ -10,7 +10,9 @@
 //! The tables are reference data imported wholesale, so the import writes
 //! outside mutation capture, as these tables are excluded from audit.
 //! Country and Admin1 names are never overwritten by a re-import: an operator's
-//! local name survives every refresh. Postcodes have no upstream identity, so a
+//! local name survives every refresh. An Admin1 division that upstream moved to
+//! another code is added under the new code; the old code's row stays and
+//! gives up its GeoNames ID. Postcodes have no upstream identity, so a
 //! country's rows are replaced wholesale and the operator's corrections
 //! (`corrections`) are materialized again before the transaction commits.
 use crate::{corrections, normalize_iso};
@@ -394,6 +396,17 @@ impl Rows for Admin1 {
         let name: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         let alt_name: Vec<Option<&str>> = rows.iter().map(|r| r.alt_name.as_deref()).collect();
         let geoname_id: Vec<Option<i32>> = rows.iter().map(|r| r.geoname_id).collect();
+        // Upstream can move a division to another code. The row that still
+        // holds its GeoNames ID under the old code releases it first, or the
+        // unique ID would refuse every later refresh. That row stays, for the
+        // records that name the old code.
+        tx.execute(
+            "UPDATE geonames_admin1 a SET geoname_id=NULL, updated_at=now() \
+             FROM unnest($1::text[],$2::int4[]) AS u(code,geoname_id) \
+             WHERE a.geoname_id=u.geoname_id AND a.code<>u.code",
+            &[&code, &geoname_id],
+        )
+        .await?;
         // `name` is inserted but never replaced: a local edit stays.
         tx.execute(
             "INSERT INTO geonames_admin1 (code,name,alt_name,geoname_id) \

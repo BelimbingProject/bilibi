@@ -8,7 +8,7 @@
 //! audit evidence whose legal minimum has passed. Each run writes one summary
 //! per class.
 use crate::{runner, Privacy, RETENTION_VIEW};
-use bilibi_audit::Minimums;
+use bilibi_audit::Minimum;
 use bilibi_authz::{SystemAuthentication, SystemScope};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::{Catalog, Entry, Module, RegistryError, Result as RegistryResult};
@@ -91,7 +91,8 @@ pub struct Swept {
 pub struct Companies {
     company: OrganisationId,
     primary: bool,
-    listed: Vec<i64>,
+    /// Shared by every company's run of a sweep, never copied per company.
+    listed: Arc<[i64]>,
 }
 impl Companies {
     /// The company whose settings this run follows.
@@ -123,7 +124,6 @@ pub trait Sweeper: Send + Sync {
     /// acted on. Purge or anonymise those `holds` does not name, writing
     /// through `tx` and returning every change; never open a second
     /// transaction. Count the held ones as kept.
-    #[allow(clippy::too_many_arguments)]
     fn sweep<'a>(
         &'a self,
         tx: &'a mut MutationTransaction<'_>,
@@ -135,6 +135,15 @@ pub trait Sweeper: Send + Sync {
         after: i64,
         limit: i64,
     ) -> HandlerFuture<'a, Swept>;
+    /// After each batch commits, with the same grant (README, "Retention"). Default: nothing.
+    fn after_sweep<'a>(
+        &'a self,
+        _client: &'a mut Client,
+        _scope: &'a Scope,
+        _grant: &'a Erasure,
+    ) -> HandlerFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// The keys of a class's company settings.
@@ -249,16 +258,14 @@ pub(crate) struct Classes {
     by_key: BTreeMap<&'static str, (&'static str, &'static RecordClass)>,
 }
 impl Classes {
-    /// A contributor must depend on `base/privacy`, so the graph shows which
-    /// modules keep records on a clock.
+    /// A contributor must depend on `base/privacy` (or be it: the audit
+    /// actions class), so the graph shows which modules keep records on a clock.
     pub(crate) fn from_catalog(catalog: &Catalog, modules: &[&Module]) -> RegistryResult<Self> {
         let mut by_key = BTreeMap::new();
         for entry in catalog.entries::<RecordClass>(RECORD_CLASSES)? {
             let module = entry.provenance.module;
-            if !modules
-                .iter()
-                .any(|m| m.id == module && m.dependencies.contains(&"base/privacy"))
-            {
+            let depends = |m: &&Module| m.id == module && m.dependencies.contains(&"base/privacy");
+            if module != "base/privacy" && !modules.iter().any(depends) {
                 return Err(RegistryError::Service(format!(
                     "record class {} comes from {module}, which does not depend on base/privacy",
                     entry.id
@@ -494,7 +501,6 @@ impl Privacy {
 
     /// One class's run: batches in ID order until the class is done, each
     /// under the hold guard, with one summary for the whole run.
-    #[allow(clippy::too_many_arguments)]
     async fn sweep_class(
         &self,
         client: &mut Client,
@@ -503,7 +509,7 @@ impl Privacy {
         class: &'static RecordClass,
         companies: &Companies,
         period_days: i64,
-        minimums: &Minimums,
+        minimum: &Minimum,
     ) -> Result<()> {
         let (sweep, cutoff) = self
             .open_sweep(
@@ -518,26 +524,46 @@ impl Privacy {
         let grant = self
             .issuer
             .erasure(scope.tenant(), Cause::Sweep(sweep), None);
-        let (mut acted, mut kept, mut batches, mut after) = (0, 0, 0, 0);
+        let (mut acted, mut kept, mut batches, mut after, mut cleanup) = (0, 0, 0, 0, Ok(()));
+        // A failing batch stops the run, but its summary still closes with
+        // what the batches before it did; the run then retries.
+        let mut stopped = Ok(());
         loop {
-            let holds = Holds::acquire(scope, &grant).await?;
-            let mut tx = self
-                .boundary
-                .begin(client, scope.mutation_context("privacy.retention.sweep"))
-                .await?;
-            let swept = class
-                .sweeper
-                .sweep(
-                    &mut tx, scope, &grant, companies, &cutoff, &holds, after, BATCH,
-                )
-                .await?;
-            let mut step = bilibi_personal_data::Erased {
-                records: swept.records,
-                ..Default::default()
+            let batch = async {
+                let (holds, mut hold_guard) = Holds::acquire(client, scope, &grant).await?;
+                let client = hold_guard.client();
+                let result = async {
+                    let mut tx = self
+                        .boundary
+                        .begin(client, scope.mutation_context("privacy.retention.sweep"))
+                        .await?;
+                    let mut swept = class
+                        .sweeper
+                        .sweep(
+                            &mut tx, scope, &grant, companies, &cutoff, &holds, after, BATCH,
+                        )
+                        .await?;
+                    let mut step = bilibi_personal_data::Erased {
+                        records: std::mem::take(&mut swept.records),
+                        ..Default::default()
+                    };
+                    runner::clear_evidence(&tx, &grant, &mut step, minimum).await?;
+                    tx.commit().await?;
+                    Ok::<_, Error>(swept)
+                }
+                .await;
+                hold_guard.release().await?;
+                result
+            }
+            .await;
+            let swept = match batch {
+                Ok(swept) => swept,
+                Err(error) => {
+                    stopped = Err(error);
+                    break;
+                }
             };
-            runner::clear_evidence(&tx, &grant, &mut step, minimums).await?;
-            tx.commit().await?;
-            holds.release().await?;
+            cleanup = cleanup.and(class.sweeper.after_sweep(client, scope, &grant).await);
             acted += swept.acted;
             kept += swept.kept;
             batches += 1;
@@ -546,8 +572,8 @@ impl Privacy {
                 _ => break,
             }
         }
-        self.close_sweep(client, scope, sweep, (acted, kept, batches))
-            .await
+        let closed = self.close_sweep(client, scope, sweep, (acted, kept, batches));
+        closed.await.and(stopped).and(cleanup)
     }
 
     /// The deferred audit erasure: evidence kept for its legal minimum whose
@@ -557,7 +583,7 @@ impl Privacy {
         &self,
         client: &mut Client,
         scope: &Scope,
-        minimums: &Minimums,
+        minimum: &Minimum,
     ) -> Result<()> {
         if bilibi_audit::due_evidence(&*client, scope.tenant(), 0, 1)
             .await?
@@ -572,55 +598,83 @@ impl Privacy {
             .issuer
             .erasure(scope.tenant(), Cause::Sweep(sweep), None);
         let (mut acted, mut kept, mut batches, mut after) = (0, 0, 0, 0);
+        // As a class run: a failing batch still closes the summary with the
+        // counts so far.
+        let mut stopped = Ok(());
         loop {
-            let holds = Holds::acquire(scope, &grant).await?;
-            let due = bilibi_audit::due_evidence(&*client, scope.tenant(), after, BATCH).await?;
-            let Some(last) = due.last().map(|d| d.deferral) else {
-                holds.release().await?;
-                break;
-            };
-            let persons: Vec<i64> = due.iter().filter_map(|d| d.person).collect();
-            let held_persons = holds.persons(&grant, &persons).await?;
-            let mut by_kind: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
-            for d in &due {
-                by_kind.entry(d.kind.as_str()).or_default().push(d.id);
-            }
-            let mut held_records = std::collections::BTreeSet::new();
-            for (kind, ids) in &by_kind {
-                for id in holds.records(&grant, kind, ids).await?.into_keys() {
-                    held_records.insert((*kind, id));
+            let batch = async {
+                let (holds, mut hold_guard) = Holds::acquire(client, scope, &grant).await?;
+                let client = hold_guard.client();
+                let result = async {
+                    let due =
+                        bilibi_audit::due_evidence(&*client, scope.tenant(), after, BATCH).await?;
+                    let Some(last) = due.last().map(|d| d.deferral) else {
+                        return Ok::<_, Error>(None);
+                    };
+                    let persons: Vec<i64> = due.iter().filter_map(|d| d.person).collect();
+                    let held_persons = holds.persons(&*client, &grant, &persons).await?;
+                    let mut by_kind: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
+                    for d in &due {
+                        by_kind.entry(d.kind.as_str()).or_default().push(d.id);
+                    }
+                    let mut held_records = std::collections::BTreeSet::new();
+                    for (kind, ids) in &by_kind {
+                        for id in holds
+                            .records(&*client, &grant, kind, ids)
+                            .await?
+                            .into_keys()
+                        {
+                            held_records.insert((*kind, id));
+                        }
+                    }
+                    let free: Vec<i64> = due
+                        .iter()
+                        .filter(|d| {
+                            !d.person.is_some_and(|p| held_persons.contains_key(&p))
+                                && !held_records.contains(&(d.kind.as_str(), d.id))
+                        })
+                        .map(|d| d.deferral)
+                        .collect();
+                    let held = (due.len() - free.len()) as i64;
+                    let mut done = 0;
+                    if !free.is_empty() {
+                        let tx = self
+                            .boundary
+                            .begin(
+                                client,
+                                scope.mutation_context("privacy.retention.audit_evidence"),
+                            )
+                            .await?;
+                        done = bilibi_audit::erase_deferred(&tx, &grant, &free, minimum).await?;
+                        tx.commit().await?;
+                    }
+                    Ok(Some((held, i64::from(done), last, due.len() as i64)))
                 }
+                .await;
+                hold_guard.release().await?;
+                result
             }
-            let free: Vec<i64> = due
-                .iter()
-                .filter(|d| {
-                    !d.person.is_some_and(|p| held_persons.contains_key(&p))
-                        && !held_records.contains(&(d.kind.as_str(), d.id))
-                })
-                .map(|d| d.deferral)
-                .collect();
-            kept += (due.len() - free.len()) as i64;
-            if !free.is_empty() {
-                let tx = self
-                    .boundary
-                    .begin(
-                        client,
-                        scope.mutation_context("privacy.retention.audit_evidence"),
-                    )
-                    .await?;
-                let done = bilibi_audit::erase_deferred(&tx, &grant, &free, minimums).await?;
-                tx.commit().await?;
-                acted += i64::from(done);
-            }
-            holds.release().await?;
-            batches += 1;
-            after = last;
-            if (due.len() as i64) < BATCH {
-                break;
+            .await;
+            match batch {
+                Ok(Some((held, done, last, seen))) => {
+                    kept += held;
+                    acted += done;
+                    batches += 1;
+                    after = last;
+                    if seen < BATCH {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    stopped = Err(error);
+                    break;
+                }
             }
         }
         self.close_sweep(client, scope, sweep, (acted, kept, batches))
             .await
+            .and(stopped)
     }
 
     /// Sweeps one tenant as the scheduler: for each company, every class that
@@ -637,28 +691,63 @@ impl Privacy {
         let system =
             SystemScope::rehydrate(&*client, tenant, Some(bilibi_schedule::PRINCIPAL)).await?;
         let scope = authentication.for_system(&*client, &system).await?;
-        let minimums = self.evidence_minimums(client, &scope).await?;
+        let minimum = self.evidence_minimum(client, &scope).await?;
         let mut failed = false;
-        if let Some(primary) = self.parties.primary_organisation(&*client, &scope).await? {
-            let mut listed: Vec<i64> = self
-                .parties
-                .organisations_in_scope(&*client, &scope)
-                .await?
-                .iter()
-                .map(|company| company.id.get())
-                .collect();
+        // A failing read of the companies or of one class's settings skips
+        // only that part: owed cleanup and due evidence still run, and the
+        // run then fails and retries.
+        let primary = match self.parties.primary_organisation(&*client, &scope).await {
+            Ok(primary) => primary,
+            Err(_) => {
+                failed = true;
+                None
+            }
+        };
+        let mut listed = None;
+        if primary.is_some() {
+            match self.parties.organisations_in_scope(&*client, &scope).await {
+                Ok(companies) => listed = Some(companies),
+                Err(_) => failed = true,
+            }
+        }
+        if let (Some(primary), Some(companies)) = (primary, listed) {
+            let mut listed: Vec<i64> = companies.iter().map(|company| company.id.get()).collect();
             if !listed.contains(&primary.get()) {
                 listed.push(primary.get());
             }
-            for &id in &listed {
-                let company = OrganisationId::new(id).map_err(|_| Error::Internal)?;
-                let companies = Companies {
-                    company,
-                    primary: company == primary,
-                    listed: listed.clone(),
+            let live: std::collections::HashSet<i64> = listed.iter().copied().collect();
+            let listed: Arc<[i64]> = listed.into();
+            for (key, (_, class)) in &self.classes.by_key {
+                // The settings exist at company scope only and are off by default,
+                // so only a company that turned the class on itself can be due.
+                let on = match self
+                    .settings
+                    .company_values(&*client, &scope, &setting_keys(key)[0])
+                    .await
+                {
+                    Ok(on) => on,
+                    Err(_) => {
+                        failed = true;
+                        continue;
+                    }
                 };
-                for (key, (_, class)) in &self.classes.by_key {
-                    let policy = self.policy(client, &scope, company, key).await?;
+                for (id, _) in on
+                    .into_iter()
+                    .filter(|(id, value)| *value == Value::Bool(true) && live.contains(id))
+                {
+                    let company = OrganisationId::new(id).map_err(|_| Error::Internal)?;
+                    let companies = Companies {
+                        company,
+                        primary: company == primary,
+                        listed: Arc::clone(&listed),
+                    };
+                    let policy = match self.policy(client, &scope, company, key).await {
+                        Ok(policy) => policy,
+                        Err(_) => {
+                            failed = true;
+                            continue;
+                        }
+                    };
                     let Some(days) = policy.period_days.filter(|_| policy.enabled) else {
                         continue;
                     };
@@ -670,7 +759,7 @@ impl Privacy {
                         continue;
                     }
                     failed |= self
-                        .sweep_class(client, &scope, key, class, &companies, days, &minimums)
+                        .sweep_class(client, &scope, key, class, &companies, days, &minimum)
                         .await
                         .is_err();
                 }
@@ -678,13 +767,10 @@ impl Privacy {
         }
         // Each part runs although another failed; the run still fails, and retries.
         failed |= self
-            .resume_erasures(client, &scope, &minimums)
+            .resume_erasures(client, &scope, &minimum)
             .await
             .is_err();
-        failed |= self
-            .sweep_evidence(client, &scope, &minimums)
-            .await
-            .is_err();
+        failed |= self.sweep_evidence(client, &scope, &minimum).await.is_err();
         if failed {
             Err(Error::Internal)
         } else {

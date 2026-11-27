@@ -1,6 +1,9 @@
 //! What Reports declares to the platform: its capabilities and the bounds an
 //! operator sets for the installation, and overrides per company.
-use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
+use bilibi_authz::{
+    CapabilityDefinition, StandingGrant, SystemPrincipalDefinition, VocabularyContribution,
+    STANDING_GRANTS, VOCABULARY,
+};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
 use serde_json::json;
@@ -13,6 +16,9 @@ pub const AUTHOR: &str = "reports.author";
 pub const SHARE: &str = "reports.share";
 /// Download a report's result as a file.
 pub const EXPORT: &str = "reports.export";
+/// Move a queued export to `failed` once its job ended without finishing.
+/// Only the monitor principal holds it (a standing grant).
+pub const EXPORT_FAIL: &str = "reports.export.fail";
 /// Set the report bounds.
 pub const MANAGE: &str = "reports.manage";
 /// Have a report delivered on a schedule.
@@ -24,6 +30,7 @@ pub const EXPORT_ROWS_KEY: &str = "reports.export_rows";
 pub const QUEUED_ROWS_KEY: &str = "reports.queued_export_rows";
 pub const EXPORT_DAYS_KEY: &str = "reports.export_days";
 pub const MAX_SUBSCRIPTIONS_KEY: &str = "reports.max_subscriptions";
+pub const MAX_QUEUED_EXPORTS_KEY: &str = "reports.max_queued_exports";
 pub const STATEMENT_MS_KEY: &str = "reports.statement_ms";
 pub const MAX_COST_KEY: &str = "reports.max_cost";
 pub const QUEUED_STATEMENT_MS_KEY: &str = "reports.queued_statement_ms";
@@ -31,11 +38,15 @@ pub const QUEUED_MAX_COST_KEY: &str = "reports.queued_max_cost";
 
 inventory::submit! { Contribution::new(VOCABULARY, "base/reports", Provenance { module: "base/reports", source: file!(), line: line!() }, &VocabularyContribution {
     domains: &["reports"],
-    verbs: &["view", "author", "share", "export", "manage", "schedule"],
-    capabilities: &[CapabilityDefinition::tenant(VIEW), CapabilityDefinition::tenant(AUTHOR), CapabilityDefinition::tenant(SHARE), CapabilityDefinition::tenant(EXPORT), CapabilityDefinition::tenant(MANAGE), CapabilityDefinition::tenant(SCHEDULE)],
+    verbs: &["view", "author", "share", "export", "manage", "schedule", "fail"],
+    capabilities: &[CapabilityDefinition::tenant(VIEW), CapabilityDefinition::tenant(AUTHOR), CapabilityDefinition::tenant(SHARE), CapabilityDefinition::tenant(EXPORT), CapabilityDefinition::tenant(MANAGE), CapabilityDefinition::tenant(SCHEDULE), CapabilityDefinition::tenant(EXPORT_FAIL)],
     roles: &[],
-    system_principals: &[],
+    system_principals: &[SystemPrincipalDefinition { name: crate::exports::MONITOR, capabilities: &[EXPORT_FAIL] }],
 }) }
+// Recording that an export's job is gone is the way out of `queued`: no tenant
+// should have to switch it on. A tenant that denies it keeps such an export
+// `queued`, as before.
+inventory::submit! { Contribution::new(STANDING_GRANTS, crate::exports::MONITOR, Provenance { module: "base/reports", source: file!(), line: line!() }, &StandingGrant { principal: crate::exports::MONITOR, capabilities: &[EXPORT_FAIL] }) }
 
 macro_rules! bound {
     ($key:expr, $default:expr, $min:expr, $max:expr, $label:expr, $help:expr) => {
@@ -93,6 +104,16 @@ bound!(
     200,
     "Scheduled reports per person",
     "How many report schedules one person may hold."
+);
+// Every prepared export holds a slot of the installation's one Queue while
+// it runs, so one person's waiting exports are few.
+bound!(
+    MAX_QUEUED_EXPORTS_KEY,
+    3,
+    1,
+    20,
+    "Waiting exports per person",
+    "How many prepared exports one person may have waiting at once; the next is refused until one is ready."
 );
 // Read bounds. The interactive pair defaults to Grid's own bound, so a report
 // on a page is no heavier than a list; prepared exports and deliveries run in

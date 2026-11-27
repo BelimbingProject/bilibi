@@ -4,6 +4,7 @@
 use super::*;
 use crate::{contributions::CREATE, model, DuplicateQuery, Person, PersonInput, PersonKind};
 use bilibi_agent_api::Error as ContractError;
+use bilibi_custom_fields::Kind;
 use bilibi_ui::{
     error_sentence, Alert, Button, ButtonVariant, ErrorSummary, Field, InputKind, RestrictedField,
     StatusKind,
@@ -32,6 +33,18 @@ pub(super) fn open_query() -> &'static str {
 /// The dialog's draft. Field errors stay here until the dialog closes.
 pub(super) struct Draft {
     input: PersonInput,
+    /// Custom field values as typed, by control name (`cf_<key>`).
+    custom: std::collections::BTreeMap<String, String>,
+    /// Several-choices fields' ticked codes, by control name.
+    codes: std::collections::BTreeMap<String, Vec<String>>,
+    /// Record fields' pickers by control name: the text typed so far, its
+    /// hits, and the record chosen.
+    picking: std::collections::BTreeMap<String, Picking>,
+    /// The custom fields' labels by control name, for the error summary.
+    custom_labels: std::collections::BTreeMap<String, String>,
+    /// The custom fields the form last drew, by control name: how each
+    /// posted value is read.
+    custom_kinds: std::collections::BTreeMap<String, bilibi_custom_fields::Kind>,
     code: String,
     code_edited: bool,
     errors: Vec<(String, String)>,
@@ -41,6 +54,23 @@ pub(super) struct Draft {
 }
 
 impl Draft {
+    fn reconcile(&mut self, definitions: &[bilibi_custom_fields::Definition]) {
+        let active: std::collections::BTreeSet<String> = definitions
+            .iter()
+            .map(|d| crate::custom::name(&d.key))
+            .collect();
+        self.custom.retain(|name, _| active.contains(name));
+        self.codes.retain(|name, _| active.contains(name));
+        self.picking.retain(|name, _| active.contains(name));
+        self.custom_labels.retain(|name, _| active.contains(name));
+        self.custom_kinds = definitions
+            .iter()
+            .map(|d| (crate::custom::name(&d.key), d.kind))
+            .collect();
+        self.errors
+            .retain(|(name, _)| !name.starts_with("cf_") || active.contains(name));
+    }
+
     pub fn new() -> Self {
         Self {
             input: PersonInput {
@@ -49,6 +79,11 @@ impl Draft {
                 email: None,
                 phone: None,
             },
+            custom: std::collections::BTreeMap::new(),
+            codes: std::collections::BTreeMap::new(),
+            picking: std::collections::BTreeMap::new(),
+            custom_labels: std::collections::BTreeMap::new(),
+            custom_kinds: std::collections::BTreeMap::new(),
             code: String::new(),
             code_edited: false,
             errors: Vec::new(),
@@ -60,10 +95,66 @@ impl Draft {
 
     /// Reads the posted form. An unknown kind is a tampered event.
     pub fn read(&mut self, value: &Value) -> Result<()> {
-        let fields =
-            bilibi_ui::params::form_values_checked(value, "person", bilibi_ui::params::FIELD_LIMIT)
-                .map_err(bilibi_database::Error::refused)?;
+        let fields: std::collections::HashMap<String, String> =
+            ["code", "name", "kind", "email", "phone"]
+                .into_iter()
+                .map(|name| {
+                    Ok((
+                        name.to_owned(),
+                        posted(value, &format!("person[{name}]"))?.to_owned(),
+                    ))
+                })
+                .collect::<Result<_>>()?;
         self.code = fields.get("code").cloned().unwrap_or_default();
+        self.custom.clear();
+        for (name, kind) in &self.custom_kinds {
+            match kind {
+                Kind::Reference => {
+                    let key = format!("person_search[{name}]");
+                    if value.get(&key).is_some() {
+                        self.picking.entry(name.clone()).or_default().typed =
+                            posted(value, &key)?.chars().take(100).collect();
+                    }
+                }
+                Kind::Choices => {}
+                _ => {
+                    self.custom.insert(
+                        name.clone(),
+                        posted(value, &format!("person[{name}]"))?.to_owned(),
+                    );
+                }
+            }
+        }
+        self.codes = self
+            .custom_kinds
+            .iter()
+            .filter(|(_, kind)| **kind == Kind::Choices)
+            .map(|(name, _)| {
+                let ticked: Vec<String> = value
+                    .get(format!("person[{name}][]"))
+                    .and_then(Value::as_array)
+                    .map(|codes| {
+                        codes
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .filter(|code| !code.is_empty())
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let held = self.codes.get(name).map_or(&[][..], Vec::as_slice);
+                let ticked = if ticked.len() > bilibi_picklists::VALUES_MAX {
+                    ticked
+                } else {
+                    held.iter()
+                        .filter(|code| ticked.contains(code))
+                        .chain(ticked.iter().filter(|code| !held.contains(code)))
+                        .cloned()
+                        .collect()
+                };
+                (name.clone(), ticked)
+            })
+            .collect();
         self.input = PersonInput {
             name: fields.get("name").cloned().unwrap_or_default(),
             kind: match fields.get("kind").map(String::as_str) {
@@ -87,6 +178,17 @@ impl Draft {
             .into_iter()
             .map(|error| (error.field.to_owned(), error.message.to_owned()))
             .collect();
+        self.errors.extend(
+            self.codes
+                .iter()
+                .filter(|(_, codes)| codes.len() > bilibi_picklists::VALUES_MAX)
+                .map(|(name, _)| {
+                    (
+                        name.clone(),
+                        format!("must have at most {} choices", bilibi_picklists::VALUES_MAX),
+                    )
+                }),
+        );
         self.notice.clear();
         Ok(())
     }
@@ -105,6 +207,7 @@ impl Draft {
             .get("code_edited")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        self.reconcile(&super::custom::active(pages, scope).await?);
         self.read(value)?;
         if !create && self.input.name != previous_name && !self.code_edited {
             let client = pages.db.get().await?;
@@ -134,6 +237,30 @@ impl Draft {
                 input[key] = json!(contact);
             }
         }
+        // Filled custom fields only; the owner checks each against the
+        // tenant's definitions and refuses on `cf_<key>`.
+        let mut custom: Vec<Value> = self
+            .custom
+            .iter()
+            .filter(|(_, value)| !value.trim().is_empty())
+            .filter_map(|(name, value)| {
+                Some(json!({"key": name.strip_prefix("cf_")?, "value": value.trim()}))
+            })
+            .collect();
+        for (name, codes) in &self.codes {
+            let codes = bilibi_custom_fields::codes_value(codes.iter().map(String::as_str));
+            if let (Some(key), false) = (name.strip_prefix("cf_"), codes.is_null()) {
+                custom.push(json!({"key": key, "values": codes}));
+            }
+        }
+        for (name, picking) in &self.picking {
+            if let (Some(key), Some(chosen)) = (name.strip_prefix("cf_"), &picking.chosen) {
+                custom.push(json!({"key": key, "value": chosen.id}));
+            }
+        }
+        if !custom.is_empty() {
+            input["custom"] = json!(custom);
+        }
         match pages.contracts.submit(&call, input).await {
             Ok(result) => Ok(result["result"]["id"]
                 .as_i64()
@@ -162,11 +289,13 @@ impl Draft {
         for (path, messages) in fields {
             let key = ["name", "code", "kind", "email", "phone"]
                 .into_iter()
-                .find(|key| path == *key || path.ends_with(&format!(".{key}")));
+                .find(|key| path == *key || path.ends_with(&format!(".{key}")))
+                .map(str::to_owned)
+                .or_else(|| path.starts_with("cf_").then(|| path.clone()));
             match key {
                 Some(key) => {
                     for message in messages {
-                        self.errors.push((key.to_owned(), message));
+                        self.errors.push((key.clone(), message));
                     }
                     attached = true;
                 }
@@ -182,8 +311,74 @@ impl Draft {
         }
     }
 
+    async fn search(
+        &mut self,
+        definitions: &[bilibi_custom_fields::Definition],
+        scope: &Scope,
+    ) -> Result<()> {
+        let names: Vec<String> = self.picking.keys().cloned().collect();
+        for name in names {
+            let Some(definition) = definitions
+                .iter()
+                .find(|d| d.kind == Kind::Reference && crate::custom::name(&d.key) == name)
+            else {
+                self.picking.remove(&name);
+                continue;
+            };
+            let Some(picking) = self.picking.get_mut(&name) else {
+                continue;
+            };
+            picking.hits = super::custom::hits(scope, definition, &picking.typed).await?;
+        }
+        Ok(())
+    }
+
+    /// A record field's picker raised its pick (with `record=kind:id`) or its
+    /// clear, naming the field as `key`; `false` when the event is neither.
+    pub async fn pick(
+        &mut self,
+        pages: &Pages,
+        scope: &Scope,
+        event: &str,
+        value: &Value,
+    ) -> Result<bool> {
+        let picked = match event {
+            super::custom::PICK_EVENT => true,
+            super::custom::CLEAR_EVENT => false,
+            _ => return Ok(false),
+        };
+        let name = value["key"].as_str().ok_or(Error::Invalid)?;
+        if !name.starts_with("cf_") {
+            return Ok(false);
+        }
+        let definitions = super::custom::active(pages, scope).await?;
+        let definition = definitions
+            .iter()
+            .find(|d| d.kind == Kind::Reference && crate::custom::name(&d.key) == name)
+            .ok_or(Error::Invalid)?;
+        let chosen = if picked {
+            let raised = value["record"].as_str().ok_or(Error::Invalid)?;
+            Some(super::custom::chosen(scope, definition, raised).await?)
+        } else {
+            None
+        };
+        self.errors.retain(|(field, _)| field != name);
+        self.picking.insert(
+            name.to_owned(),
+            Picking {
+                chosen,
+                ..Picking::default()
+            },
+        );
+        Ok(true)
+    }
+
     pub async fn form(&mut self, pages: &Pages, scope: &Scope) -> Result<Html> {
+        let definitions = super::custom::active(pages, scope).await?;
+        self.reconcile(&definitions);
+        self.search(&definitions, scope).await?;
         let client = pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "persons").await?;
         let restricted = bilibi_authz::restrictions_for(&**client, scope, "persons").await?;
         drop(client);
         // A newly restricted field discards its server-side draft as well as
@@ -198,21 +393,14 @@ impl Draft {
         let mut fields = Vec::new();
         let mut masked = Vec::new();
         let input = &self.input;
-        for (key, label, value) in [
-            ("name", "Name", input.name.as_str()),
-            ("code", "Code", self.code.as_str()),
-            ("kind", "Kind", model::kind_key(input.kind)),
-            (
-                "email",
-                "Personal email",
-                input.email.as_deref().unwrap_or(""),
-            ),
-            (
-                "phone",
-                "Personal phone",
-                input.phone.as_deref().unwrap_or(""),
-            ),
+        for (key, value) in [
+            ("name", input.name.as_str()),
+            ("code", self.code.as_str()),
+            ("kind", model::kind_key(input.kind)),
+            ("email", input.email.as_deref().unwrap_or("")),
+            ("phone", input.phone.as_deref().unwrap_or("")),
         ] {
+            let label = words.get(&super::fields::get(key));
             if restricted.contains(key) {
                 masked.push(RestrictedField::new(format!("person-{key}"), label));
                 continue;
@@ -244,7 +432,7 @@ impl Draft {
                 }
                 "code" => {
                     field = field
-                        .hint("Clear the code to let Bilibi choose one.")
+                        .hint("Clear the code to generate one automatically.")
                         .attr("maxlength", "255")
                         .attr("data-edited-marker", "code_edited")
                 }
@@ -264,12 +452,46 @@ impl Draft {
             }
             fields.push(field);
         }
+        let mut fields = fields.into_iter().map(render).collect::<Result<Vec<_>>>()?;
+        // The tenant's own fields, posted as `cf_<key>`.
+        self.custom_labels.clear();
+        self.custom_kinds.clear();
+        for definition in definitions {
+            let name = crate::custom::name(&definition.key);
+            let label = definition.label.clone();
+            let errors = self
+                .errors
+                .iter()
+                .filter(|(field, _)| *field == name)
+                .map(|(_, message)| sentence(&label, message))
+                .collect();
+            let picking = self.picking.get(&name);
+            let entered = super::custom::Entered {
+                text: self.custom.get(&name).map_or("", String::as_str),
+                codes: self.codes.get(&name).map_or(&[], Vec::as_slice),
+                query: picking.map_or("", |p| p.typed.as_str()),
+                hits: picking.map_or(&[], |p| p.hits.as_slice()),
+                chosen: picking.and_then(|p| p.chosen.as_ref()),
+            };
+            fields.push(
+                super::custom::control(pages, scope, &definition, entered, errors, can_create)
+                    .await?,
+            );
+            self.custom_labels.insert(name.clone(), label);
+            self.custom_kinds.insert(name, definition.kind);
+        }
         let duplicates = self.duplicates(pages, scope).await?;
         let summary = if self.submitted && !self.errors.is_empty() {
             let mut summary = ErrorSummary::new("person-create-errors");
             for (field, message) in &self.errors {
-                let label = label_for(field);
-                summary.push(format!("person-{field}"), sentence(label, message));
+                let label = self
+                    .custom_labels
+                    .get(field)
+                    .map_or_else(|| label_for(field), String::as_str);
+                summary.push(
+                    format!("person-{}", field.replace('_', "-")),
+                    sentence(label, message),
+                );
             }
             render(summary)?
         } else {
@@ -328,6 +550,16 @@ impl Draft {
     }
 }
 
+fn posted<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
+    let text = value.get(key).and_then(Value::as_str).unwrap_or_default();
+    if text.chars().count() > bilibi_ui::params::FIELD_LIMIT {
+        return Err(Error::refused(format!(
+            "The “{key}” field is too long. Shorten the text and try again."
+        )));
+    }
+    Ok(text)
+}
+
 fn label_for(field: &str) -> &'static str {
     match field {
         "email" => "Personal email",
@@ -351,10 +583,19 @@ fn sentence(label: &str, message: &str) -> String {
     error_sentence(label, message)
 }
 
+/// One record field's picker in the dialog.
+#[derive(Default)]
+struct Picking {
+    typed: String,
+    hits: Vec<bilibi_ui::PickerHit>,
+    /// The record chosen, named with the reader's access.
+    chosen: Option<bilibi_records::Resolved>,
+}
+
 #[derive(Template)]
 #[template(path = "person_form.html")]
 struct Form {
-    fields: Vec<Field>,
+    fields: Vec<Html>,
     restricted: Vec<RestrictedField>,
     duplicates: Vec<Person>,
     summary: Html,

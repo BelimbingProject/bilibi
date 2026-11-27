@@ -23,11 +23,11 @@ that session is sent back through the page it holds and closed, and the page's
 guard forwards the browser to sign-in with the expired-session message
 (`apps/base/session/README.md`).
 
-The socket boundary is bounded per server by Base Session's operator settings, on `/live` and `/portal/live` alike (`live::Limits`). A session may keep `session.live.sockets_per_session` sockets open (default 16); a portal customer may keep `session.live.sockets_per_customer` across all their sign-ins (default 16). Staff and portal each have an independent `session.live.sockets_total` capacity (default 5,000 each), so portal traffic cannot take staff places. One more upgrade is refused with 429; closing a socket releases its session, account and side places. A session may send `session.live.messages_per_minute` text messages across its sockets (default 240); an excess one is answered with a non-clearing error before it is decoded, so it reaches no route admission, Authz decision, owner or session activity, and a socket that keeps sending past the budget is closed after 100 refusals in a row. Binary upload chunks have their own `session.live.chunks_per_minute` budget (default 6,000); exceeding it closes the sending socket before storage or owner work. Empty chunks and completed-entry replays do no work and never re-run owner refreshes; zero-byte files finish at registration.
+The socket boundary is bounded per server by Base Session's operator settings, on `/live` and `/portal/live` alike (`live::Limits`). A session may keep `session.live.sockets_per_session` sockets open (default 16); a portal customer may keep `session.live.sockets_per_customer` across all their sign-ins (default 16). Staff and portal each have an independent `session.live.sockets_total` capacity (default 5,000 each), so portal traffic cannot take staff places. One more upgrade is refused with 429; closing a socket releases its session, account and side places. A session may send `session.live.messages_per_minute` text messages across its sockets (default 240); an excess one is answered with a non-clearing error before it is decoded, so it reaches no route admission, Authz decision, owner or session activity, and a socket that keeps sending past the budget is closed after 100 refusals in a row. Binary upload chunks have their own `session.live.chunks_per_minute` budget (default 6,000); exceeding it closes the sending socket before storage or owner work. The upload bytes every page on a server holds in memory, staff and portal together, fit `session.live.upload_buffer_bytes` (default 1 GiB): a chunk that would pass it marks its entry `busy`. Empty chunks and completed-entry replays do no work and never re-run owner refreshes; zero-byte files finish at registration.
 
 ## Transport
 
-**Two sides, one transport** ([ADR 16](architecture/decisions/16-customer-accounts-and-portal.md)). Staff pages use `/live` with the staff session; a tenant's customer portal uses `/portal/live` with the `bilibi_portal` cookie, which the browser sends only under `/portal`. The page names its socket on its `[data-live]` element (`data-live-socket`, default `/live`; the portal layout sets `/portal/live`). The portal socket mounts only portal routes and `EmbedContext::Portal` panels, never the shell's panels, draws the portal layout and has no step-up prompt: a portal step-up still owed is refused. Everything below holds for both; `live::Side` in `apps/web/src/live.rs` is what differs.
+**Two sides, two sites** ([ADR 16](architecture/decisions/16-customer-accounts-and-portal.md), [ADR 34](architecture/decisions/34-two-sites-listener-boundary.md)). Staff pages use `/live` with `__Host-bilibi_session` on the staff listener; a tenant's customer portal uses `/portal/live` with `__Host-bilibi_customer` on the public listener. The page names its socket on its `[data-live]` element (`data-live-socket`, default `/live`; the portal layout sets `/portal/live`). The portal socket mounts only portal routes and `EmbedContext::Portal` panels, never the shell's panels, and draws the portal layout; a step-up a portal page owes floats the portal's own prompt (`/portal/account/two-factor/confirm`) over placeholders at the requested address, then mounts the page in place. Everything below holds for both; `live::Side` in `apps/web/src/live.rs` is what differs.
 
 `/live` validates cookie and Origin and proves the signed-in session. It does not
 require a Company capability. The page is selected by the discovered GET route,
@@ -61,7 +61,7 @@ under its element id (slot `shell.notifications` is `#app-notifications`, the
 bell; `shell.ai` is `#app-ai`, the status bar's AI tag) and drops it when its access is refused. Client payloads cannot
 choose an embed, operation, service, tenant, account or record binding.
 
-Responses are `page` (complete `#app`, canonical URL, notice and row count), `fragment` (one panel's complete root element with its existing ID), or `error` (message, target and clear flag). Accepted user events echo the request ID; background updates use null. A rejected intent with a valid request ID also acknowledges that ID. Canonical query values are encoded by Web, never supplied as a client URL. A mount or Back keeps the browser's address while the page's canonical query only adds values it left out, so a list opened at its bare path stays there; a page that drops or corrects a value the address carries replaces it with the canonical one. After that the URL is written only when the canonical address changes: user navigation/query changes push history, background refresh and history corrections replace it. A popstate that changes only the fragment leaves the page as mounted, since a remount would drop what was typed, so an ordinary `href="#id"` link keeps its native behaviour. A link marked `data-focus-link` (an error summary's link to its field) takes focus to its target instead, opening any closed `details` around it, with no history entry. Browser Back remounts the historical URL, except within a page that owns panel query namespaces (same pathname only) or marks an element `data-history="params"` (the tiled workspace): there a Back or Forward is a `params` update of the mounted state, so the DOM it keeps is reconciled rather than rebuilt. A page inside a workspace frame never adds a history entry: its address changes are replaced, a plain same-origin link click becomes `location.replace`, and `bilibi:location` is raised on its `window` after each address change so the workspace can record where the tile went.
+Responses are `page` (complete `#app`, canonical URL, notice and row count), `fragment` (one panel's complete root element with its existing ID), or `error` (message, target and clear flag). Accepted user events echo the request ID; background updates use null, and one that would repeat what the browser already holds is not sent. A rejected intent with a valid request ID also acknowledges that ID. Canonical query values are encoded by Web, never supplied as a client URL. A mount or Back keeps the browser's address while the page's canonical query only adds values it left out, so a list opened at its bare path stays there; a page that drops or corrects a value the address carries replaces it with the canonical one. After that the URL is written only when the canonical address changes: user navigation/query changes push history, background refresh and history corrections replace it. A popstate that changes only the fragment leaves the page as mounted, since a remount would drop what was typed, so an ordinary `href="#id"` link keeps its native behaviour. A link marked `data-focus-link` (an error summary's link to its field) takes focus to its target instead, opening any closed `details` around it, with no history entry. Browser Back remounts the historical URL, except within a page that owns panel query namespaces (same pathname only) or marks an element `data-history="params"` (the tiled workspace): there a Back or Forward is a `params` update of the mounted state, so the DOM it keeps is reconciled rather than rebuilt. A page inside a workspace frame never adds a history entry: its address changes are replaced, a plain same-origin link click becomes `location.replace`, and `bilibi:location` is raised on its `window` after each address change so the workspace can record where the tile went.
 `page` and `fragment` also carry the owner's `LiveBody.events`, which the
 browser dispatches after patching as `window` events `bilibi:<name>` with the
 pushed detail; the stored-secret reveal uses
@@ -122,10 +122,17 @@ Form authors follow [Shared UI's form-size rule](../apps/base/ui/README.md#form-
   document, including when keyed siblings before it leave (they are removed
   around it rather than it being moved, since a moved frame reloads). Focus and selection are restored by id when the focused element was
   replaced; scroll positions of `id`-bearing containers and the window are
-  restored except after a `navigate`/`mount`, which starts at the top. Hooks are
+  restored after ordinary patches. A new mount scrolls to the URL fragment
+  when it names an element on the page. Other navigations start at the top. Hooks are
   mounted and destroyed by the `ui.js` mutation observer; the patcher reports the
   hooks whose attributes it rewrote through `BilibiUI.patched`, so each receives
   one `updated` per patch.
+  A successful top-bar preference save protects its shell attribute
+  (`data-theme-choice` or `data-display-mode`) through live patches. In a
+  visible tab, the browser queues a visibility refresh after the save. The
+  first full `page` reply whose request ID matches an intent queued after
+  the save releases that attribute and reconciles the page even when its HTML
+  is identical to the previous reply.
 - **Busy state.** The control that raised an intent carries `aria-busy="true"`
   and `data-live-busy` until its acknowledgement, and is not patched meanwhile;
   a server-rendered `aria-busy` is never touched. `data-working` labels (see
@@ -193,7 +200,11 @@ the browser control does. The browser then sends binary frames of
 socket; each is answered by `{"type":"chunk","id":7,"received":65536,"size":…,"done":false}`
 (no `request_id`), which `live.js` relays as the window event
 `bilibi:upload`. A chunk that does not continue where the last ended, or
-overruns the announced size, marks the entry `interrupted`. A completed or
+overruns the announced size, marks the entry `interrupted`. A chunk the
+server has no memory budget for (`UploadBudget`,
+`session.live.upload_buffer_bytes`) marks it `busy` and gives back what the
+entry held; bytes are also given back when the owner consumes the file, the
+entry is removed or the page closes. A completed or
 refused entry re-renders its owner under the owner's guard; a removal is the
 `upload_cancel` intent (`{"type":"upload_cancel","target":"page","id":7}`).
 Ids are unique per socket, so a frame never reaches another state's entry,
@@ -208,7 +219,7 @@ A spec declared with `UploadSpec::resumable(name, max_file_size)` (issue 141) su
 - The input carries `data-resumable`. The hook hashes each chosen file (SHA-256, in 4 MiB slices), and the `upload` intent carries the hashes by entry ref: `"sha256":{"1":"<64 lowercase hex>"}`. Entries are announced as for any input.
 - The host registers the entries as usual, then places each accepted one (`Uploads::place`). While Media has a staging disk (`media.upload.staging_disk`, `apps/base/media/README.md`), an entry with a hash is staged in a private file bound to the tenant, the account (and impersonating operator), the page service, the input, the size and that hash. Every reply entry carries `received`, the offset to stream from: for a staged entry, the bytes a dropped connection already left there; otherwise 0.
 - The size limit is the spec's own, at most `MAX_RESUMABLE_FILE_SIZE` (512 MiB) and Media's `Staging::limit`: `media.max_bytes`, never below `MAX_FILE_SIZE` (64 MiB). `Uploads::place` refuses a larger file before any byte is sent, by the same figure the staging file checks. Without a staging disk the spec acts as `UploadSpec::new`: bytes in the state, at most 64 MiB.
-- When the last byte arrives the host checks the hash, then hands the bytes to the entry, which holds them in memory until the owner consumes them with `Uploads::consume`, like any other. A first mismatch empties the file and answers `received: 0`, so the browser sends it again; a second marks the entry `interrupted`.
+- When the last byte arrives the host checks the hash, then hands the bytes to the entry, which holds them in memory until the owner consumes them with `Uploads::consume`, like any other; they count against `session.live.upload_buffer_bytes` from then, and a file the budget has no room for is marked `interrupted`. A first mismatch empties the file and answers `received: 0`, so the browser sends it again; a second marks the entry `interrupted`.
 - A submit raised while files are being hashed, or while resumable files wait for the remount, is held like one raised mid-stream. A one-file input announces only its latest choice, and a file over the input's limit is not hashed.
 - After a drop, the hook keeps the files the server still listed. Once the page is remounted, `live.js` raises `bilibi:remounted` right behind the mount intent, and the hook announces them again, which picks up their staged bytes. Choosing the same file again later finds them too, until `media.upload.staging_hours` passes.
 - The staging file goes when its entry does (consumed, removed, replaced, or its state dropped on this socket) and stays when the socket closes. An account keeps at most 20, and its files nobody wrote to within `media.upload.staging_hours` are removed when it stages another and by the `base/media-staging-sweep` schedule.
@@ -247,6 +258,12 @@ embed's subject arguments on every update. Shell embeds use the same contract; W
 renders them into the shell with `Page::render` and mounts them with
 `Page::mount` (`apps/web/src/shell.rs`, `live.rs`).
 
+On record pages, render `bilibi_ui::LivePanelStack` with the rendered sections as `parts` and only the bottom-stack `PanelSpec::id` values as `panel_ids`, both in display order. Render each panel target once. Use `bilibi_ui::LivePanelAnchor` for header History and other standalone targets. Keep the page header and host dialogs outside the stack.
+
+Each bottom-stack provider renders its own card without an outer margin. The wide stack uses the [standard section spacing](../DESIGN.md#compact-scale) between rendered sections and mounted panels. Empty anchors, including refused mounts, take no space.
+
+Give each conditional host section a stable ID on its outer element so inserting or removing it keeps neighbouring panels in place during a parent refresh. The shared anchor puts `data-live-ignore` on the keyed `<id>-slot` wrapper and leaves the inner `<id>` target available for fragment patches.
+
 Each instance owns separate state, even for the same embed/service. An unchanged
 spec preserves that state across parent refresh; a changed or removed spec drops
 it. Parent-route access and panel access are rechecked before panel events and
@@ -258,17 +275,32 @@ An embedded list can override `LiveState::query_prefix` with its `ListSpec.param
 
 Return `Subscription`s from the mounted state's `subscriptions` method. Publish
 `Change` only after a business transaction commits, with its tenant and optional
-recipient account. Web forwards wakes through a bounded 64-entry channel,
-rechecks scope/access, discards other tenants/recipients and stale mount
-generations, then refreshes only the target. Broadcast lag causes a guarded
+recipient account. Web drops a `Change` for another tenant or another
+recipient where the socket hears it, before it costs anything: only a change
+for the socket's own tenant and account becomes a wake. Wakes travel through a
+bounded 64-entry channel; the wakes waiting there are merged into one per
+target, so a burst refreshes a panel once per round, not once per change. For
+each wake Web rechecks scope/access, discards stale mount generations, then
+refreshes only the target. Broadcast lag causes a guarded
 refresh rather than treating a lost message as current data. Dropping the mount
 aborts subscription tasks and releases receivers. Modules that own additional
 tasks/resources must release them when their state drops.
 
+Because the tenant and recipient decide who pays for a change, always name the
+recipient when a change is one person's; a tenant-wide `Change` (`user: None`)
+runs a session guard on every open socket of that tenant that subscribes.
+
 A notification is such a `Change` with its recipient: it wakes that account's
 bell panel and `/notifications` state only, never the page underneath. The
-15-second fallback revalidates the page and child panels (and re-renders the
-shell, so a notification another process wrote shows there). Neither notification, subscription nor
+15-second fallback revalidates the page, its child panels and each shell panel
+(so a notification another process wrote shows in the bell). It sends only what
+changed: a page body equal to the one the browser holds sends no `page` and does
+not render the shell, and an unchanged panel sends no `fragment`; a wake follows
+the same rule. The shell is drawn on a mount, a navigation and a person's own
+event. A tab out of view sends `{"type":"visibility","hidden":true}`
+(`live.js`, on `visibilitychange`); the server answers `ack` and stops that
+socket's timer until `hidden` is false, which it answers with a fresh `page`.
+Wakes still reach a hidden tab. Neither notification, subscription nor
 timer refresh records session activity. Only accepted user navigation/events do.
 
 ## Running reference specimen
@@ -296,6 +328,14 @@ text, caret and focus stay; scroll the box and the scroll position stays through
 the same patches; increment inside the island iframe (`/live-reference/island`,
 its own live page) and its count survives every parent patch because the frame
 is keyed by id and never replaced.
+
+`apps/web/examples/live-upload-walkthrough.rs` is the running proof of the upload memory budget (`BILIBI_DISPOSABLE_LIVE_UPLOAD_DEMO=yes`).
+
+`apps/web/examples/live-wake-walkthrough.rs` is the running proof of who a `Change` wakes. With a disposable, migrated `DATABASE_URL` and `BILIBI_DISPOSABLE_LIVE_WAKE_DEMO=yes`:
+
+    cargo run -p bilibi-web --example live-wake-walkthrough   # every case, exits non-zero on a FAIL
+
+It opens three sockets (two accounts of one tenant, one of another) on a fixture page that counts its refreshes, then announces one person's change, a tenant-wide one, another tenant's, 100 at once and 4,000 in a burst, and last a change for a person whose session has expired (the guard still runs and sends the page back through sign-in). It ends on a second fixture page whose body never changes: a wake and the 15-second timer render it and send nothing, a tab reported out of view is not refreshed on the timer, and coming back into view refreshes it at once.
 
 F5 runtime evidence lives outside the repository in the task evidence directory.
 Company list/filter/Back/save, targeted panel identity, subscription wakes,

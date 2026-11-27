@@ -7,12 +7,14 @@ use bilibi_tenancy::Scope;
 use std::collections::BTreeSet;
 use tokio_postgres::GenericClient;
 
+/// A signed-in self-service read must enforce visibility in its owner handler.
 pub fn read(capability: &str) -> bool {
-    bilibi_authz::vocabulary::valid_key(capability)
-        && matches!(
-            capability.rsplit('.').next(),
-            Some("view" | "list" | "search")
-        )
+    capability == crate::SIGNED_IN
+        || bilibi_authz::vocabulary::valid_key(capability)
+            && matches!(
+                capability.rsplit('.').next(),
+                Some("view" | "list" | "search")
+            )
 }
 /// An identity switch: never agent reach, even under grant-all.
 pub fn impersonation(capability: &str) -> bool {
@@ -27,4 +29,16 @@ pub async fn capabilities(client: &impl GenericClient, scope: &Scope) -> Result<
         .filter(|key| !impersonation(key))
         .map(str::to_owned)
         .collect())
+}
+
+pub fn signed_in(scope: &Scope) -> bool {
+    scope.user() > 0 && scope.principal().is_none()
+}
+
+pub fn allows(capability: &str, scope: &Scope, capabilities: &BTreeSet<String>) -> bool {
+    if capability == crate::SIGNED_IN {
+        signed_in(scope)
+    } else {
+        capabilities.contains(capability)
+    }
 }

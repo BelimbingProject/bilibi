@@ -40,10 +40,11 @@
 //! built-ins. A spec the fresh catalog refuses (a field an operator restricted
 //! since, a table the account lost) is pruned from what is shown and from the
 //! address, and leaves the account's memory on the next arrangement.
+mod views;
 use crate::page_views::PageViews;
 use crate::view::View;
 use crate::{lens, Catalog, Column, Lens, Lenses, Stats, MAX_COLUMNS};
-use bilibi_database::Result;
+use bilibi_database::{Error, Result};
 use bilibi_datetime::DisplayContext;
 use bilibi_tenancy::Scope;
 use bilibi_ui::flex_table::{step_zoom, Cost, FlexColumn, FlexRow, FlexTable, RowMode};
@@ -97,6 +98,17 @@ pub struct PageColumns {
     pub suggestions: Vec<FlexColumn>,
     pub add_query: String,
     scalar_sorts: BTreeMap<String, String>,
+    saved: views::Saved,
+    named_views: bool,
+    explicit: bool,
+}
+
+pub struct ViewCaller<'a> {
+    pub contracts: &'a bilibi_agent_api::page::PageContracts,
+    pub credential: &'a str,
+    pub service: &'static str,
+    pub event: &'a str,
+    pub query: HashMap<String, String>,
 }
 
 impl PageColumns {
@@ -144,6 +156,9 @@ impl PageColumns {
             suggestions: Vec::new(),
             add_query: String::new(),
             scalar_sorts: BTreeMap::new(),
+            saved: views::Saved::default(),
+            named_views: false,
+            explicit: false,
         })
     }
 
@@ -190,6 +205,7 @@ impl PageColumns {
             if let Some(builtin) = self.builtins.iter_mut().find(|b| b.id == column.id) {
                 builtin.label = column.label;
                 builtin.short_label = column.short_label;
+                builtin.field = column.field;
             } else {
                 self.builtins.push(column);
             }
@@ -198,14 +214,51 @@ impl PageColumns {
     }
 
     fn label_record_columns(&mut self) {
+        let builtin_words: BTreeMap<_, _> = self
+            .builtins
+            .iter()
+            .filter_map(|builtin| {
+                self.builtin_word(builtin)
+                    .map(|word| (builtin.id.clone(), word))
+            })
+            .collect();
+        let root = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.table(&self.table).map(|root| (catalog, root)));
         for column in self.columns.iter_mut().chain(&mut self.suggestions) {
-            if let Some(field) = self.record_fields.iter().find(|f| {
-                f.column == Some(column.spec.as_str()) || f.slot == Some(column.spec.as_str())
-            }) {
-                column.label = field.label.into();
-                column.short_label = field.label.into();
+            let word = builtin_words.get(&column.spec).cloned().or_else(|| {
+                self.record_fields
+                    .iter()
+                    .find(|field| {
+                        field.column == Some(column.spec.as_str())
+                            || field.slot == Some(column.spec.as_str())
+                    })
+                    .map(|field| {
+                        root.map_or_else(
+                            || field.label.to_owned(),
+                            |(catalog, root)| crate::record_word(catalog, root, field),
+                        )
+                    })
+            });
+            if let Some(word) = word {
+                column.label = word.clone();
+                column.short_label = word;
             }
         }
+    }
+
+    fn builtin_word(&self, builtin: &BuiltinColumn) -> Option<String> {
+        let (catalog, root) = self.root()?;
+        self.builtin_field(builtin)
+            .map(|field| crate::record_word(catalog, root, field))
+            .or_else(|| {
+                builtin
+                    .field
+                    .split_once('.')
+                    .and_then(|(table, field)| catalog.field_name(table, field))
+            })
+            .or_else(|| catalog.field_name(root.id(), &builtin.id))
     }
 
     pub fn view(&self) -> &View {
@@ -236,7 +289,9 @@ impl PageColumns {
         scope: &Scope,
         params: &HashMap<String, String>,
     ) -> Result<()> {
-        self.view = if View::carried(params) {
+        self.named_views = true;
+        self.explicit = View::carried(params);
+        self.view = if self.explicit {
             View::from_params(params, &self.table)
         } else {
             self.views
@@ -245,13 +300,23 @@ impl PageColumns {
                 .unwrap_or_else(|| View::new(&self.table))
         };
         self.clear_suggestions();
+        self.refresh_views(scope).await?;
         Ok(())
     }
 
-    /// The URL params a page merges into its own: only what differs from the
-    /// defaults.
+    pub fn event_values(payload: &Value) -> Result<HashMap<String, String>> {
+        bilibi_ui::params::string_values_checked(payload, crate::shared_views::MAX_QUERY)
+            .map_err(Error::refused)
+    }
+
+    /// The URL params a page merges into its own. Explicit arrangements keep
+    /// a row-height marker so the address still wins over personal memory.
     pub fn params(&self) -> HashMap<String, String> {
-        self.view.to_params()
+        let mut params = self.view.to_params();
+        if self.explicit {
+            params.insert("z".into(), self.view.zoom.to_string());
+        }
+        params
     }
 
     fn clear_suggestions(&mut self) {
@@ -270,20 +335,12 @@ impl PageColumns {
     ) -> Result<()> {
         let catalog = {
             let client = self.views.db().get().await?;
-            Catalog::for_scope(&**client, scope).await?
+            Catalog::for_scope(&**client, scope)
+                .await?
+                .without_custom_references()
         };
         if let Some(root) = catalog.table(&self.table) {
             self.record_fields = root.record_fields.clone();
-            for builtin in &mut self.builtins {
-                if let Some(field) = self
-                    .record_fields
-                    .iter()
-                    .find(|field| field.slot_id().as_deref() == Some(builtin.id.as_str()))
-                {
-                    builtin.label = field.label.into();
-                    builtin.short_label = field.label.into();
-                }
-            }
         }
         let kept = self.split(&catalog);
         let builtins = &self.builtins;
@@ -479,6 +536,48 @@ impl PageColumns {
         })
     }
 
+    /// Page-owned columns this reader may add, using the same pruning as the page.
+    pub fn available_builtins(&mut self, catalog: &Catalog) -> Vec<(String, String)> {
+        self.catalog = Some(catalog.clone());
+        if let Some(root) = catalog.table(&self.table) {
+            self.record_fields = root.record_fields.clone();
+        }
+        self.builtins
+            .iter()
+            .filter(|builtin| self.builtin_allowed(catalog, builtin))
+            .map(|builtin| {
+                (
+                    builtin.id.clone(),
+                    self.builtin_word(builtin)
+                        .unwrap_or_else(|| builtin.label.clone()),
+                )
+            })
+            .collect()
+    }
+
+    /// Resolve the same columns a page would show for this reader, without loading rows.
+    pub fn preview_columns(&mut self, catalog: &Catalog, view: View) -> Vec<(String, String)> {
+        self.view = view;
+        self.catalog = Some(catalog.clone());
+        if let Some(root) = catalog.table(&self.table) {
+            self.record_fields = root.record_fields.clone();
+        }
+        self.split(catalog)
+            .iter()
+            .map(|kept| match kept {
+                Kept::Builtin(index) => {
+                    let builtin = &self.builtins[*index];
+                    (
+                        builtin.id.clone(),
+                        self.builtin_word(builtin)
+                            .unwrap_or_else(|| builtin.label.clone()),
+                    )
+                }
+                Kept::Walked(column) => (column.spec.clone(), column.label.clone()),
+            })
+            .collect()
+    }
+
     /// The flexible table over the page's rows (this state's [`Self::rows`]
     /// with the page's slots filled in), wearing the arranged zoom, lenses,
     /// comparison date and the add box's state. The page still sets its
@@ -490,6 +589,9 @@ impl PageColumns {
         table.since = Some(&self.since);
         table.suggestions = self.suggestions.clone();
         table.add_query = &self.add_query;
+        if self.named_views {
+            table.views = Some(self.views_bar());
+        }
         table
     }
 
@@ -499,13 +601,16 @@ impl PageColumns {
         &mut self,
         scope: &Scope,
         params: &HashMap<String, String>,
+        caller: ViewCaller<'_>,
     ) -> Result<Outcome> {
         let get = |key: &str| params.get(key).map(String::as_str).unwrap_or("");
         let spec = get("spec");
         if get("op") == "sort" {
             let catalog = {
                 let client = self.views.db().get().await?;
-                Catalog::for_scope(&**client, scope).await?
+                Catalog::for_scope(&**client, scope)
+                    .await?
+                    .without_custom_references()
             };
             let requested = get("sort");
             let path = self
@@ -540,6 +645,9 @@ impl PageColumns {
                 })
                 .and_then(|b| b.sort.clone())
                 .map_or(Outcome::Noop, Outcome::Sort));
+        }
+        if let Some(outcome) = self.handle_views(scope, params, caller).await? {
+            return Ok(outcome);
         }
         // An empty column list means the page default; an op that changes
         // columns starts from that default spelled out, so a built-in is
@@ -727,7 +835,12 @@ impl PageColumns {
                         .catalog
                         .as_ref()
                         .is_none_or(|catalog| self.builtin_allowed(catalog, builtin))
-                    && (builtin.label.to_lowercase().contains(&wanted)
+                    && (self
+                        .builtin_word(builtin)
+                        .as_deref()
+                        .unwrap_or(&builtin.label)
+                        .to_lowercase()
+                        .contains(&wanted)
                         || builtin.id.contains(&wanted))
             })
             .collect()
@@ -741,11 +854,14 @@ impl PageColumns {
         }
         let wanted = text.to_lowercase();
         let shown = self.view.columns.clone();
-        if let Some(builtin) = self
-            .removed_builtins(&shown, text)
-            .into_iter()
-            .find(|b| b.label.to_lowercase() == wanted || b.id == wanted)
-        {
+        if let Some(builtin) = self.removed_builtins(&shown, text).into_iter().find(|b| {
+            self.builtin_word(b)
+                .as_deref()
+                .unwrap_or(&b.label)
+                .to_lowercase()
+                == wanted
+                || b.id == wanted
+        }) {
             return Some(builtin.id.clone());
         }
         if let Some(column) = self

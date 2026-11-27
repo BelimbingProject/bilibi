@@ -8,11 +8,12 @@
 <p class="text-ink-muted">Apps that ask for a connector or MCP address take this one:</p>
 <div class="flex flex-wrap items-center gap-1"><code id="app-ai-address" class="min-w-0 break-all rounded-sm bg-surface-muted px-1.5 py-0.5 text-ink">{{ address }}</code>{% call ui::copy_button(id="app-ai-copy-address", text=address, label="Copy address") %}{% endcall %}</div>
 </div>
+<p id="app-ai-device" class="text-ink-muted">A cloud app or bot shows you a code: <a href="{{ device_href }}" class="font-medium text-link hover:underline">enter it here</a>.</p>
 <p id="app-ai-manual" class="text-ink-muted">If the prompt does not work, <a href="{{ manage }}#ai-manual" class="font-medium text-link hover:underline">add the connection yourself</a>.</p>
 {% if plugin %}
 <div id="app-ai-plugin" class="space-y-1">
 {% call ui::button(id="app-ai-plugin-download", href=plugin_href) %}Download plugin{% endcall %}
-<p class="text-ink-muted">The ChatGPT plugin connects from OpenAI's cloud, so it needs a public address. A local or private Bilibi needs OpenAI's Secure MCP Tunnel.</p>
+<p class="text-ink-muted">The ChatGPT plugin connects from OpenAI's cloud, so it needs a public address. A local or private installation needs OpenAI's Secure MCP Tunnel.</p>
 </div>
 {% endif %}
 </div>

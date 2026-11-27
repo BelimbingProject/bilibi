@@ -8,10 +8,12 @@ mod contributions;
 mod definition;
 mod export;
 mod exports;
+mod listing;
 mod oversight;
 mod schedules;
 mod store;
 mod web;
+mod wording;
 
 #[doc(hidden)]
 pub use bilibi_module_registry::{Contribution, Provenance};
@@ -31,12 +33,10 @@ pub use store::Report;
 use bilibi_agent_api::schema::FieldErrors;
 use bilibi_database::{Change, Db, Error, MutationTransaction};
 use bilibi_datetime::DisplayPolicy;
-use bilibi_grid::{
-    Catalog, Column, FieldType, Filter, KeyPage, PageSpec, QueryError, SummarySpec, Test,
-};
+use bilibi_grid::{Catalog, Column, FieldType, Filter, PageSpec, QueryError, SummarySpec, Test};
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::Scope;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -44,9 +44,10 @@ pub const SERVICE: &str = "base/reports.reports";
 const DOWNLOAD: &str = "base/reports.export";
 const EXPORTED: &str = "base/reports.exported";
 const PREPARER: &str = "base/reports.preparer";
+const EXPORT_ENDED: &str = "base/reports.export_ended";
 const SWEEPER: &str = "base/reports.sweeper";
 const DELIVERER: &str = "base/reports.deliverer";
-const MIGRATIONS: [(&str, &str); 7] = [
+const MIGRATIONS: [(&str, &str); 9] = [
     (
         "base-reports-001-reports",
         include_str!("../migrations/001-reports.sql"),
@@ -75,12 +76,25 @@ const MIGRATIONS: [(&str, &str); 7] = [
         "base-reports-007-subscription-people",
         include_str!("../migrations/007-subscription-people.sql"),
     ),
+    (
+        "base-reports-008-reference-names",
+        include_str!("../migrations/008-reference-names.sql"),
+    ),
+    (
+        "base-reports-009-delivery-sweep",
+        include_str!("../migrations/009-delivery-sweep.sql"),
+    ),
 ];
 const KIND: &str = "base_report";
 /// Columns offered to a builder for one record type, at most.
 const MAX_OFFERED: usize = 300;
 /// Roles one report is shared with, at most.
 const MAX_SHARE_ROLES: usize = 50;
+/// Staff a schedule's form offers as extra recipients, at most; a page of
+/// holders read at once.
+const OFFERED_PEOPLE: usize = 500;
+/// Pages of `reports.view` holders read for that offer, at most.
+const PEOPLE_PAGES: usize = 4;
 
 /// Why a report request was refused; pages and agents show the message.
 #[derive(Debug, thiserror::Error)]
@@ -105,7 +119,9 @@ pub enum ReportError {
     Refused(String),
     /// Over the read's cost or time bound: a prepared export, which runs in
     /// the background under the larger bounds, may still produce it.
-    #[error("This report is too heavy to show here ({0}). Prepare it as an export instead; it runs in the background and the bell says when it is ready.")]
+    #[error(
+        "This report is too heavy to show here ({0}). Prepare it as an export instead; it runs in the background and the bell says when it is ready."
+    )]
     TooHeavy(&'static str),
     #[error(transparent)]
     Database(#[from] Error),
@@ -182,8 +198,17 @@ pub struct ColumnInfo {
     pub ty: &'static str,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub(crate) struct ReferenceName {
+    kind: String,
+    id: String,
+    label: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Run {
+    #[serde(skip)]
+    pub(crate) reference_names: Vec<ReferenceName>,
     pub report: Report,
     /// Live child outcomes, empty for an ordinary tenant report.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -234,7 +259,10 @@ pub struct Reports {
     authentication: Arc<bilibi_tenancy::Authentication>,
     mutations: Arc<bilibi_database::MutationBoundary>,
     mailer: Arc<bilibi_mail::Mailer>,
+    templates: Arc<bilibi_templates::Templates>,
+    locales: Arc<bilibi_locale::Locales>,
     directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
+    labels: Arc<bilibi_labels::Labels>,
     /// The public origin emailed links point at (`APP_ORIGIN`).
     origin: String,
     builtins: Vec<&'static Builtin>,
@@ -342,6 +370,11 @@ fn typed_filter(
 fn grid(error: QueryError) -> ReportError {
     match error {
         QueryError::ForbiddenRoot => ReportError::Unreadable,
+        QueryError::AuditCommitUnknown => ReportError::Refused(error.to_string()),
+        error @ QueryError::AuditSummaryFailed { .. } => match Error::from(error) {
+            Error::Refused(message) => ReportError::Refused(message),
+            error => ReportError::Database(error),
+        },
         QueryError::Database(error) => ReportError::Database(error),
         QueryError::Catalog(error) => ReportError::Database(error.into()),
         QueryError::TooHeavy(why) => ReportError::TooHeavy(why),
@@ -353,11 +386,13 @@ fn grid(error: QueryError) -> ReportError {
     }
 }
 
-fn access_key(catalog: &Catalog, report: &Report) -> String {
+fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Records) -> String {
     let Some(root) = catalog.table(&report.record_type) else {
         return format!("{}:unreadable", report.version);
     };
     let d = &report.definition;
+    let mut references = std::collections::BTreeSet::new();
+    let mut live_subjects = root.subject().is_some();
     let seen: String = d
         .columns
         .iter()
@@ -365,15 +400,43 @@ fn access_key(catalog: &Catalog, report: &Report) -> String {
         .chain(d.measures.iter().map(|m| &m.column))
         .chain(d.sort.iter().map(|s| &s.column))
         .chain(d.filters.iter().map(|f| &f.column))
-        .map(|spec| {
-            if catalog.resolve(root, spec).is_ok() {
-                '1'
-            } else {
-                '0'
+        // A masked column still resolves; its values are read partial, so
+        // masking it changes what the reader sees (ADR 05).
+        .map(|spec| match catalog.resolve(root, spec) {
+            Ok(column) => {
+                live_subjects |= column
+                    .hops
+                    .iter()
+                    .chain(&column.many)
+                    .chain(&column.tail)
+                    .any(|link| {
+                        catalog
+                            .table(link.to())
+                            .is_some_and(|table| table.subject().is_some())
+                    });
+                if let Some(kind) = column.reference {
+                    let readable = records
+                        .kind(kind)
+                        .is_some_and(|kind| catalog.table(kind.table).is_some());
+                    references.insert(format!("ref:{}:{kind}:{}", column.spec, u8::from(readable)));
+                    'r'
+                } else if catalog.mask(&column).is_some() {
+                    'm'
+                } else {
+                    '1'
+                }
             }
+            Err(_) => '0',
         })
         .collect();
-    format!("{}:{seen}", report.version)
+    if live_subjects {
+        return format!("{}:subject:live", report.version);
+    }
+    format!(
+        "{}:{seen}:{}",
+        report.version,
+        references.into_iter().collect::<Vec<_>>().join(":")
+    )
 }
 
 impl Reports {
@@ -398,6 +461,14 @@ impl Reports {
     /// background pair.
     async fn bounds(&self, scope: &Scope, background: bool) -> Result<bilibi_grid::Bounds, Error> {
         let client = self.db.get().await?;
+        self.bounds_on(&**client, scope, background).await
+    }
+    async fn bounds_on(
+        &self,
+        client: &dyn bilibi_tenancy::ReadClient,
+        scope: &Scope,
+        background: bool,
+    ) -> Result<bilibi_grid::Bounds, Error> {
         let (ms, cost) = if background {
             (
                 contributions::QUEUED_STATEMENT_MS_KEY,
@@ -407,9 +478,9 @@ impl Reports {
             (contributions::STATEMENT_MS_KEY, contributions::MAX_COST_KEY)
         };
         Ok(bilibi_grid::Bounds {
-            statement_ms: u32::try_from(self.setting(&**client, scope, ms).await?)
+            statement_ms: u32::try_from(self.setting(client, scope, ms).await?)
                 .map_err(|_| Error::Internal)?,
-            max_cost: self.setting(&**client, scope, cost).await? as f64,
+            max_cost: self.setting(client, scope, cost).await? as f64,
         })
     }
 
@@ -443,18 +514,70 @@ impl Reports {
     /// One report the reader may run, with its definition.
     pub async fn get(&self, scope: &Scope, id: i64) -> Outcome<Report> {
         let client = self.db.get().await.map_err(Error::from)?;
-        authorize(&**client, scope, VIEW).await?;
-        match store::read(&**client, scope.tenant(), scope.user(), id, false).await {
+        self.get_on(&**client, scope, id).await
+    }
+    async fn get_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        id: i64,
+    ) -> Outcome<Report> {
+        authorize(client, scope, VIEW).await?;
+        match store::read(client, scope.tenant(), scope.user(), id, false).await {
             Err(Error::NotFound) => Err(ReportError::NotFound),
             other => Ok(other?),
         }
     }
 
-    /// Checks a draft for its author: the shape, then every column against
-    /// the author's own catalog, then a bounded dry run that proves each
-    /// filter, grouping and measure suits its column. A dry run refused only
-    /// by size or cost still saves: the bound applies to each run.
+    /// Checks the draft's shape, catalog and query for its author.
+    /// A same-tenant probe may hit a size or cost bound without blocking
+    /// the save. Oversight checks follow Grid's audited probe rules.
     pub async fn check(&self, scope: &Scope, draft: &Draft) -> Outcome<()> {
+        Self::check_draft_shape(draft)?;
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        let transaction_timeout = std::time::Duration::from_secs(60);
+        let result = async {
+            let tx = tokio::time::timeout(transaction_timeout, client.transaction())
+                .await
+                .map_err(|_| Error::Internal)?
+                .map_err(Error::from)?;
+            self.check_draft_catalog(Some(&tx), scope, draft).await?;
+            tokio::time::timeout(transaction_timeout, tx.commit())
+                .await
+                .map_err(|_| Error::Internal)?
+                .map_err(Error::from)?;
+            Ok(())
+        }
+        .await;
+        if matches!(result, Err(ReportError::Database(_))) {
+            drop(bilibi_database::Connection::take(client));
+        }
+        result
+    }
+    async fn check_draft(
+        &self,
+        tx: Option<&tokio_postgres::Transaction<'_>>,
+        scope: &Scope,
+        draft: &Draft,
+    ) -> Outcome<()> {
+        Self::check_draft_shape(draft)?;
+        self.check_draft_catalog(tx, scope, draft).await
+    }
+
+    async fn check_mutation_draft(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        draft: &Draft,
+    ) -> Outcome<()> {
+        let result = self.check_draft(Some(tx.sql()), scope, draft).await;
+        if draft.definition.oversight && matches!(result, Err(ReportError::Database(_))) {
+            tx.poison();
+        }
+        result
+    }
+
+    fn check_draft_shape(draft: &Draft) -> Outcome<()> {
         let mut errors = FieldErrors::new();
         let name = draft.name.trim();
         if name.is_empty() || name.chars().count() > 120 {
@@ -472,15 +595,37 @@ impl Reports {
         if !errors.is_empty() {
             return Err(ReportError::Invalid(errors));
         }
-        let catalog = self
-            .catalog(scope, draft.definition.oversight, draft.kind == Kind::Rows)
-            .await?;
+        Ok(())
+    }
+
+    async fn check_draft_catalog(
+        &self,
+        tx: Option<&tokio_postgres::Transaction<'_>>,
+        scope: &Scope,
+        draft: &Draft,
+    ) -> Outcome<()> {
+        let catalog = if draft.definition.oversight {
+            self.oversight
+                .check_source(&draft.record_type)
+                .map_err(grid)?;
+            let tx = tx.ok_or(Error::Internal)?;
+            self.oversight
+                .builder_catalog_on(tx, scope, draft.kind == Kind::Rows)
+                .await
+                .map_err(grid)?
+        } else {
+            let tx = tx.ok_or(Error::Internal)?;
+            Catalog::for_report(tx, scope)
+                .await
+                .map_err(|e| ReportError::Database(e.into()))?
+        };
         let root = catalog.table(&draft.record_type).ok_or_else(|| {
             ReportError::Invalid(field_errors(
                 "record_type",
                 "is not a record type you can read",
             ))
         })?;
+        let mut errors = FieldErrors::new();
         for spec in draft.definition.specs() {
             if let Err(error) = catalog.resolve(root, spec) {
                 errors
@@ -508,11 +653,11 @@ impl Reports {
         if draft.definition.oversight {
             // Every spec has resolved against live consent; execution uses
             // the same bounded audited path as a reader, never a child Scope.
-            let proof = self.oversight.prove(scope).await.map_err(grid)?;
+            let tx = tx.ok_or(Error::Internal)?;
             let spec = if draft.kind == Kind::Rows {
                 bilibi_grid::OversightSpec::Rows {
                     page: PageSpec {
-                        bounds: self.bounds(scope, false).await?,
+                        bounds: self.bounds_on(tx, scope, false).await?,
                         filters,
                         sorts: draft.definition.sorts(),
                         timezone: "UTC".into(),
@@ -520,11 +665,11 @@ impl Reports {
                         limit: 1,
                     },
                     columns: draft.definition.columns.clone(),
-                    offsets: BTreeMap::new(),
+                    pages: BTreeMap::new(),
                 }
             } else {
                 bilibi_grid::OversightSpec::Summary(SummarySpec {
-                    bounds: self.bounds(scope, false).await?,
+                    bounds: self.bounds_on(tx, scope, false).await?,
                     filters,
                     groupings: draft.definition.groupings(),
                     measures: draft.definition.measures(),
@@ -534,10 +679,10 @@ impl Reports {
             };
             let probe = self
                 .oversight
-                .read(&proof, &draft.record_type, &spec)
+                .probe_on(tx, scope, &draft.record_type, &spec)
                 .await
                 .map_err(grid)?;
-            if !probe.children.is_empty() && probe.children.iter().all(|c| c.outcome == "refused") {
+            if !probe {
                 return Err(ReportError::Invalid(field_errors(
                     "definition",
                     "This question is not supported by any consenting child's catalog.",
@@ -545,8 +690,9 @@ impl Reports {
             }
             return Ok(());
         }
-        let bounds = self.bounds(scope, false).await?;
-        let probe = self.probe(scope, draft, filters, bounds).await;
+        let tx = tx.ok_or(Error::Internal)?;
+        let bounds = self.bounds_on(tx, scope, false).await?;
+        let probe = self.probe(tx, scope, draft, filters, bounds).await;
         match probe {
             Ok(()) => Ok(()),
             Err(QueryError::Column(spec, error)) => Err(ReportError::Invalid(field_errors(
@@ -569,6 +715,7 @@ impl Reports {
     /// One page or one summary under the author's scope, to prove the shape.
     async fn probe(
         &self,
+        tx: &tokio_postgres::Transaction<'_>,
         scope: &Scope,
         draft: &Draft,
         filters: Vec<Filter>,
@@ -576,17 +723,16 @@ impl Reports {
     ) -> Result<(), QueryError> {
         match draft.kind {
             Kind::Rows => {
-                bilibi_grid::project_within(
-                    &self.db,
+                bilibi_grid::validate_projection_on(
+                    tx,
                     scope,
                     &draft.record_type,
-                    &[],
                     &draft.definition.columns,
                     bounds,
                 )
                 .await?;
-                bilibi_grid::page_keys(
-                    &self.db,
+                bilibi_grid::validate_page_on(
+                    tx,
                     scope,
                     &draft.record_type,
                     &PageSpec {
@@ -598,11 +744,11 @@ impl Reports {
                         limit: 1,
                     },
                 )
-                .await?;
+                .await
             }
             Kind::Summary | Kind::Matrix => {
-                bilibi_grid::summarize(
-                    &self.db,
+                bilibi_grid::validate_summary_on(
+                    tx,
                     scope,
                     &draft.record_type,
                     &SummarySpec {
@@ -614,10 +760,9 @@ impl Reports {
                         max_groups: bilibi_grid::MAX_RESULT_GROUPS,
                     },
                 )
-                .await?;
+                .await
             }
         }
-        Ok(())
     }
 
     /// The record types the reader can report on, as `(id, label)`, by label.
@@ -629,11 +774,17 @@ impl Reports {
     ) -> Outcome<Vec<(String, String)>> {
         let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, VIEW).await?;
+        let words = self.labels.labels(&**client, scope).await?;
         drop(client);
         let catalog = self.catalog(scope, oversight, false).await?;
         let mut types: Vec<_> = catalog
             .tables()
-            .map(|table| (table.id().to_owned(), table.label().to_owned()))
+            .map(|table| {
+                (
+                    table.id().to_owned(),
+                    words.record(table.id(), table.label()),
+                )
+            })
             .collect();
         types.sort_by(|a, b| a.1.cmp(&b.1));
         Ok(types)
@@ -644,6 +795,7 @@ impl Reports {
     pub async fn record_sources(&self, scope: &Scope) -> Outcome<Vec<RecordSource>> {
         let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, VIEW).await?;
+        let words = self.labels.labels(&**client, scope).await?;
         drop(client);
         let catalog = self.catalog(scope, false, false).await?;
         let mut sources: Vec<_> = catalog
@@ -652,7 +804,7 @@ impl Reports {
                 let (area, area_label) = area_of(table.owner);
                 RecordSource {
                     id: table.id().to_owned(),
-                    label: table.label().to_owned(),
+                    label: words.record(table.id(), table.label()),
                     area,
                     area_label,
                 }
@@ -714,30 +866,32 @@ impl Reports {
     }
 
     /// The staff who can run reports, as `(id, name)`, for choosing whom a
-    /// schedule also goes to. Needs `reports.share`; at most 500 are offered.
+    /// schedule also goes to. Needs `reports.share`; at most
+    /// [`OFFERED_PEOPLE`] are offered. Each page of holders is proved staff in
+    /// one read, over at most [`PEOPLE_PAGES`] pages.
     pub async fn share_people(&self, scope: &Scope) -> Outcome<Vec<(i64, String)>> {
         let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, SHARE).await?;
         let mut accounts = Vec::new();
         let mut after = 0_i64;
-        while accounts.len() < 500 {
-            let page = bilibi_authz::holder_page(&**client, scope, after, VIEW, 100).await?;
-            for id in &page {
-                after = *id;
-                if self
-                    .authentication
-                    .account_identity(&**client, scope, *id)
-                    .await
-                    .is_ok_and(|identity| identity.kind == bilibi_tenancy::AccountKind::Staff)
-                {
-                    accounts.push(*id);
-                }
-            }
-            if page.len() < 100 {
+        for _ in 0..PEOPLE_PAGES {
+            let page =
+                bilibi_authz::holder_page(&**client, scope, after, VIEW, OFFERED_PEOPLE as i64)
+                    .await?;
+            let Some(last) = page.last() else {
+                break;
+            };
+            after = *last;
+            accounts.extend(
+                self.authentication
+                    .live_staff(&**client, scope, &page)
+                    .await?,
+            );
+            if accounts.len() >= OFFERED_PEOPLE || page.len() < OFFERED_PEOPLE {
                 break;
             }
         }
-        accounts.truncate(500);
+        accounts.truncate(OFFERED_PEOPLE);
         let principals = accounts
             .iter()
             .filter_map(|id| {
@@ -767,46 +921,50 @@ impl Reports {
     }
 
     /// What this reader may see of a report now, as a key that changes when
-    /// it does: its version and which of its columns their catalog resolves.
+    /// it does: its version and, per column, whether their catalog resolves
+    /// it, and whether they see it masked.
     /// A cached drawing is reused only while this key holds, so a field
     /// restriction or a lost share shows at the next refresh, not the next
     /// run. Cheaper than a run: no Grid read. Needs `reports.view`.
     pub async fn access(&self, scope: &Scope, id: i64) -> Outcome<String> {
+        self.access_report(scope, id)
+            .await
+            .map(|(_, access)| access)
+    }
+
+    async fn access_report(&self, scope: &Scope, id: i64) -> Outcome<(Report, String)> {
         let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, VIEW).await?;
         let report = match store::read(&**client, scope.tenant(), scope.user(), id, false).await {
             Err(Error::NotFound) => return Err(ReportError::NotFound),
             other => other?,
         };
-        if report.definition.oversight {
+        let access = if report.definition.oversight {
             drop(client);
             self.oversight.prove(scope).await.map_err(grid)?;
-            // Drawing caches cannot skip child audit or live consent checks.
-            return Ok(format!(
-                "{}:oversight:{}",
-                report.version,
-                jiff::Timestamp::now()
-            ));
-        }
-        let catalog = Catalog::for_scope(&**client, scope)
-            .await
-            .map_err(|e| ReportError::Database(e.into()))?;
-        Ok(access_key(&catalog, &report))
+            format!("{}:oversight:{}", report.version, jiff::Timestamp::now())
+        } else {
+            let catalog = Catalog::for_report(&**client, scope)
+                .await
+                .map_err(|e| ReportError::Database(e.into()))?;
+            access_key(&catalog, &report, &self.records)
+        };
+        Ok((report, access))
     }
 
     /// One dashboard update shares a fresh catalog across all placed reports.
     /// Unplaced offers are read only while Customize is open.
     pub(crate) async fn dashboard_entries(
         &self,
+        client: &tokio_postgres::Client,
         scope: &Scope,
         placed: &[String],
         offers: bool,
     ) -> Outcome<Vec<(Report, String)>> {
-        let client = self.db.get().await.map_err(Error::from)?;
-        authorize(&**client, scope, VIEW).await?;
+        authorize(client, scope, VIEW).await?;
         let reports =
-            store::dashboard(&**client, scope.tenant(), scope.user(), placed, offers).await?;
-        let catalog = Catalog::for_scope(&**client, scope)
+            store::dashboard(client, scope.tenant(), scope.user(), placed, offers).await?;
+        let catalog = Catalog::for_report(client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         Ok(reports
@@ -815,11 +973,89 @@ impl Reports {
                 let access = if report.definition.oversight {
                     format!("{}:oversight:{}", report.version, jiff::Timestamp::now())
                 } else {
-                    access_key(&catalog, &report)
+                    access_key(&catalog, &report, &self.records)
                 };
                 (report, access)
             })
             .collect())
+    }
+
+    async fn name_references<'a>(
+        &self,
+        scope: &Scope,
+        columns: &[Column],
+        rows: impl Iterator<Item = &'a mut Vec<Value>>,
+        group_keys: bool,
+    ) -> Outcome<Vec<ReferenceName>> {
+        let mut names = Vec::new();
+        let mut cells: std::collections::BTreeMap<&str, Vec<&mut Value>> = Default::default();
+        for row in rows {
+            for (column, value) in columns.iter().zip(row) {
+                if let Some(kind) = column.reference.filter(|_| !value.is_null()) {
+                    cells.entry(kind).or_default().push(value);
+                }
+            }
+        }
+        for (kind, values) in cells {
+            let ids: std::collections::BTreeSet<String> = values.iter().map(|v| cell(v)).collect();
+            let references: Vec<_> = ids
+                .into_iter()
+                .map(|id| bilibi_records::Reference::new(kind, id))
+                .collect();
+            let mut labels = std::collections::BTreeMap::new();
+            for chunk in references.chunks(100) {
+                for resolved in self.records.resolve(scope, chunk).await? {
+                    names.push(ReferenceName {
+                        kind: kind.to_owned(),
+                        id: resolved.reference.id.clone(),
+                        label: resolved.label.clone(),
+                    });
+                    labels.insert(
+                        resolved.reference.id,
+                        resolved.label.unwrap_or_else(|| "Restricted".into()),
+                    );
+                }
+            }
+            for value in values {
+                let id = cell(value);
+                let label = labels.get(&id).map(String::as_str).unwrap_or("Restricted");
+                *value = if group_keys {
+                    serde_json::json!({"stored_id": id, "label": label})
+                } else {
+                    Value::String(label.to_owned())
+                };
+            }
+        }
+        Ok(names)
+    }
+
+    async fn reference_names_current(
+        &self,
+        scope: &Scope,
+        names: &[ReferenceName],
+    ) -> Outcome<bool> {
+        let mut kinds: BTreeMap<&str, Vec<&ReferenceName>> = BTreeMap::new();
+        for name in names {
+            kinds.entry(&name.kind).or_default().push(name);
+        }
+        for (kind, names) in kinds {
+            for chunk in names.chunks(100) {
+                let references: Vec<_> = chunk
+                    .iter()
+                    .map(|name| bilibi_records::Reference::new(kind, &name.id))
+                    .collect();
+                let current = self.records.resolve(scope, &references).await?;
+                if current.len() != chunk.len()
+                    || current
+                        .iter()
+                        .zip(chunk)
+                        .any(|(now, before)| now.label != before.label)
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Each row's own page, through Base Records: a kind its owner registers
@@ -837,7 +1073,11 @@ impl Reports {
             .iter()
             .map(|(key, _)| bilibi_records::Reference::new(kind.key, cell(key)))
             .collect();
-        Ok(self.records.resolve(scope, &references).await?)
+        let mut pages = Vec::new();
+        for chunk in references.chunks(100) {
+            pages.extend(self.records.resolve(scope, chunk).await?);
+        }
+        Ok(pages)
     }
 
     /// Runs a report as the reader: their catalog, grants and time zone.
@@ -845,13 +1085,7 @@ impl Reports {
     /// out and listed; a filter on one refuses the run, so it cannot be used
     /// to infer a hidden value. Needs `reports.view`.
     pub async fn run(&self, scope: &Scope, id: i64, input: &RunInput) -> Outcome<Run> {
-        let client = self.db.get().await.map_err(Error::from)?;
-        authorize(&**client, scope, VIEW).await?;
-        let report = match store::read(&**client, scope.tenant(), scope.user(), id, false).await {
-            Err(Error::NotFound) => return Err(ReportError::NotFound),
-            other => other?,
-        };
-        drop(client);
+        let report = self.get(scope, id).await?;
         self.run_report(scope, report, input).await
     }
 
@@ -865,8 +1099,15 @@ impl Reports {
     /// their catalog includes. Needs `reports.view`.
     pub async fn builtins(&self, scope: &Scope) -> Outcome<Vec<Report>> {
         let client = self.db.get().await.map_err(Error::from)?;
-        authorize(&**client, scope, VIEW).await?;
-        let catalog = Catalog::for_scope(&**client, scope)
+        self.builtins_on(&**client, scope).await
+    }
+    async fn builtins_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+    ) -> Outcome<Vec<Report>> {
+        authorize(client, scope, VIEW).await?;
+        let catalog = Catalog::for_report(client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         Ok(self
@@ -879,13 +1120,22 @@ impl Reports {
 
     /// One built-in report the reader can run.
     pub async fn builtin(&self, scope: &Scope, key: &str) -> Outcome<Report> {
-        self.builtins(scope)
+        let client = self.db.get().await.map_err(Error::from)?;
+        self.builtin_on(&**client, scope, key).await
+    }
+
+    async fn builtin_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        key: &str,
+    ) -> Outcome<Report> {
+        self.builtins_on(client, scope)
             .await?
             .into_iter()
             .find(|r| r.builtin == Some(key))
             .ok_or(ReportError::NotFound)
     }
-
     /// Saves the reader's own copy of a built-in report. Needs `reports.author`.
     pub async fn copy_builtin(
         &self,
@@ -894,11 +1144,21 @@ impl Reports {
         key: &str,
         name: Option<&str>,
     ) -> Outcome<i64> {
-        let original = self.builtin(scope, key).await?;
+        let original = self.builtin_on(tx.sql(), scope, key).await?;
         self.create(tx, scope, &copy_of(&original, name)).await
     }
 
     async fn run_report(&self, scope: &Scope, report: Report, input: &RunInput) -> Outcome<Run> {
+        self.run_report_for(scope, report, input, None).await
+    }
+
+    async fn run_report_for(
+        &self,
+        scope: &Scope,
+        report: Report,
+        input: &RunInput,
+        file_cap: Option<usize>,
+    ) -> Outcome<Run> {
         if report.definition.oversight {
             return self.run_oversight(scope, report, input).await;
         }
@@ -909,7 +1169,7 @@ impl Reports {
             .display(&**client, scope, None, "en")
             .await?
             .timezone;
-        let catalog = Catalog::for_scope(&**client, scope)
+        let catalog = Catalog::for_report(&**client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         let root = catalog
@@ -941,6 +1201,7 @@ impl Reports {
             filters.extend(typed);
         }
         let as_rows = report.kind == Kind::Rows || input.as_rows;
+        let reference_names;
         let result = match report.kind {
             _ if as_rows => {
                 let specs: Vec<String> = if report.kind == Kind::Rows {
@@ -966,92 +1227,56 @@ impl Reports {
                 } else {
                     Vec::new()
                 };
-                let totals_of: Vec<Option<bilibi_grid::Measure>> = if report.kind == Kind::Rows
-                    && definition.totals
-                {
-                    columns
-                        .iter()
-                        .map(|c| {
-                            (c.ty.number() && c.spec != root.key()).then(|| bilibi_grid::Measure {
-                                column: c.spec.clone(),
-                                agg: bilibi_grid::Agg::Sum,
+                let totals_of: Vec<Option<bilibi_grid::Measure>> =
+                    if report.kind == Kind::Rows && definition.totals {
+                        columns
+                            .iter()
+                            .map(|c| {
+                                (c.reference.is_none() && c.ty.number() && c.spec != root.key())
+                                    .then(|| bilibi_grid::Measure {
+                                        column: c.spec.clone(),
+                                        agg: bilibi_grid::Agg::Sum,
+                                    })
                             })
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let totals_filters = filters.clone();
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                let measures: Vec<_> = totals_of.iter().flatten().cloned().collect();
                 // A value saved before the setting's bound was 100 still runs.
                 let page_size = self
                     .setting(&**client, scope, contributions::PAGE_SIZE_KEY)
                     .await?
                     .clamp(1, 100);
                 drop(client);
-                let page: KeyPage = bilibi_grid::page_keys(
-                    &self.db,
-                    scope,
-                    &report.record_type,
-                    &PageSpec {
-                        bounds,
-                        filters,
-                        sorts,
-                        timezone: timezone.clone(),
-                        offset: input.page.saturating_mul(page_size),
-                        limit: page_size,
-                    },
-                )
-                .await
-                .map_err(grid)?;
-                let specs: Vec<&str> = columns.iter().map(|c| c.spec.as_str()).collect();
-                // Filled under the same bounds the keys were read under.
-                let projection = bilibi_grid::project_within(
-                    &self.db,
-                    scope,
-                    &report.record_type,
-                    &page.keys,
-                    &specs,
+                let listing = listing::Listing {
+                    record_type: report.record_type.clone(),
+                    filters,
+                    sorts,
+                    specs: columns.iter().map(|c| c.spec.clone()).collect(),
                     bounds,
-                )
-                .await
-                .map_err(grid)?;
-                let rows: Vec<(Value, Vec<Value>)> = projection
-                    .rows
-                    .into_iter()
-                    .map(|row| {
-                        let cells = projection
-                            .columns
-                            .iter()
-                            .map(|c| row.cells.get(&c.id).cloned().unwrap_or(Value::Null))
-                            .collect();
-                        (row.key, cells)
-                    })
-                    .collect();
-                let pages = self.record_pages(scope, root, &rows).await?;
-                let totals = if totals_of.iter().any(Option::is_some) {
-                    // Grid totals up to 8 measures a read; a wider list
-                    // (up to 32 columns) takes one read per eight.
-                    let measures: Vec<_> = totals_of.iter().flatten().cloned().collect();
-                    let mut values = Vec::with_capacity(measures.len());
-                    for chunk in measures.chunks(bilibi_grid::MAX_MEASURES) {
-                        let summary = bilibi_grid::summarize(
-                            &self.db,
-                            scope,
-                            &report.record_type,
-                            &SummarySpec {
-                                bounds,
-                                filters: totals_filters.clone(),
-                                groupings: Vec::new(),
-                                measures: chunk.to_vec(),
-                                timezone: timezone.clone(),
-                                max_groups: 1,
-                            },
-                        )
-                        .await
-                        .map_err(grid)?;
-                        values.extend(summary.total.values);
-                    }
-                    let mut sums = values.into_iter();
+                    timezone: timezone.clone(),
+                };
+                let page = listing
+                    .page(
+                        self,
+                        scope,
+                        input.page.saturating_mul(page_size),
+                        page_size,
+                        &measures,
+                        file_cap,
+                    )
+                    .await?;
+                reference_names = page.reference_names;
+                let rows = page.rows;
+                // A file holds no links: the reader opens records from the page.
+                let pages = if file_cap.is_some() {
+                    Vec::new()
+                } else {
+                    self.record_pages(scope, root, &rows).await?
+                };
+                let totals = if !measures.is_empty() {
+                    let mut sums = page.totals.into_iter();
                     Some(
                         totals_of
                             .iter()
@@ -1068,7 +1293,7 @@ impl Reports {
                     None
                 };
                 RunResult::Rows {
-                    columns: projection.columns.iter().map(info).collect(),
+                    columns: page.columns.iter().map(info).collect(),
                     rows,
                     pages,
                     total: page.total,
@@ -1092,7 +1317,7 @@ impl Reports {
                     .setting(&**client, scope, contributions::MAX_GROUPS_KEY)
                     .await?;
                 drop(client);
-                let summary = bilibi_grid::summarize(
+                let mut summary = bilibi_grid::report_summary(
                     &self.db,
                     scope,
                     &report.record_type,
@@ -1107,6 +1332,16 @@ impl Reports {
                 )
                 .await
                 .map_err(grid)?;
+                let group_columns: Vec<_> =
+                    summary.groupings.iter().map(|(c, _)| c.clone()).collect();
+                reference_names = self
+                    .name_references(
+                        scope,
+                        &group_columns,
+                        summary.lines.iter_mut().map(|l| &mut l.keys),
+                        true,
+                    )
+                    .await?;
                 RunResult::Summary {
                     groupings: summary
                         .groupings
@@ -1128,13 +1363,15 @@ impl Reports {
                 }
             }
         };
-        Ok(Run {
+        let run = Run {
+            reference_names,
             report,
             oversight: Vec::new(),
             left_out,
             timezone,
             result,
-        })
+        };
+        Ok(run)
     }
 
     /// Saves a new report owned by the actor, inside the caller's audited
@@ -1148,7 +1385,7 @@ impl Reports {
         bilibi_authz::authorize_key(tx.sql(), scope, AUTHOR)
             .await
             .map_err(denied)?;
-        self.check(scope, draft).await?;
+        self.check_mutation_draft(tx, scope, draft).await?;
         let (tenant, owner) = (scope.tenant(), scope.user());
         let draft = draft.clone();
         Ok(tx
@@ -1194,7 +1431,7 @@ impl Reports {
         draft: &Draft,
     ) -> Outcome<()> {
         let before = self.owned(tx, scope, id, version, AUTHOR).await?;
-        self.check(scope, draft).await?;
+        self.check_mutation_draft(tx, scope, draft).await?;
         let (tenant, draft) = (scope.tenant(), draft.clone());
         let updated = tx
             .mutate(move |sql| {
@@ -1427,7 +1664,7 @@ fn line(out: &mut String, fields: impl IntoIterator<Item = String>) {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/reports", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/records", "base/principal_directory"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/templates", "base/records", "base/principal_directory", "base/labels"],
         migrations: &MIGRATIONS,
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let reports = Arc::new(Reports {
@@ -1442,7 +1679,10 @@ inventory::submit! {
                 authentication: services.get("base/tenancy.authentication")?,
                 mutations: services.get("base/database.mutations")?,
                 mailer: services.get("base/mail.mailer")?,
+                templates: services.get(bilibi_templates::SERVICE)?,
+                locales: services.get("base/locale.locales")?,
                 directory: services.get("base/principal_directory.directory")?,
+                labels: services.get(bilibi_labels::SERVICE)?,
                 origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
                 builtins: builtin::validate(bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?.entries::<Builtin>(BUILTINS)?)?,
             });
@@ -1458,6 +1698,8 @@ inventory::submit! {
             }))))
         }}, bilibi_module_registry::Service { id: PREPARER, factory: |services| {
             Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(exports::Preparer(services.get(SERVICE)?)))))
+        }}, bilibi_module_registry::Service { id: EXPORT_ENDED, factory: |services| {
+            Ok(Arc::new(bilibi_queue::EndingService(Arc::new(exports::ExportEnded(services.get(SERVICE)?)))))
         }}, bilibi_module_registry::Service { id: SWEEPER, factory: |services| {
             Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(schedules::Sweeper { reports: services.get(SERVICE)?, schedule: services.get("base/schedule.store")? }))))
         }}, bilibi_module_registry::Service { id: DELIVERER, factory: |services| {
@@ -1530,6 +1772,8 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
 // Scheduled deliveries: Schedule's recurrence sweeps due subscriptions as the
 // `scheduler` principal; each delivery then runs as its recipient. Like every
 // contributed recurrence it runs nothing until an operator enables it.
+// An export job that ends without finishing fails its export (queue README, "When a job ends without finishing").
+inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_queue::ENDINGS, exports::WORKER, bilibi_module_registry::Provenance { module: "base/reports", source: file!(), line: line!() }, &bilibi_queue::EndingBinding { service: EXPORT_ENDED, principal: exports::MONITOR, capability: contributions::EXPORT_FAIL }) }
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_queue::WORKERS, schedules::SWEEP, bilibi_module_registry::Provenance { module: "base/reports", source: file!(), line: line!() }, &bilibi_queue::Worker { max_attempts: 5, validate: schedules::validate_sweep }) }
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_queue::HANDLERS, schedules::SWEEP, bilibi_module_registry::Provenance { module: "base/reports", source: file!(), line: line!() }, &bilibi_queue::HandlerBinding { service: SWEEPER, capability: bilibi_schedule::EXECUTE }) }
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_schedule::DEFINITIONS, "base/reports.deliveries", bilibi_module_registry::Provenance { module: "base/reports", source: file!(), line: line!() }, &bilibi_schedule::Definition {

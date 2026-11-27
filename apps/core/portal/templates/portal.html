@@ -1,5 +1,5 @@
-{#- /customer-access (`src/web.rs`): the tenant's customer portal site, its
-    invitations, the requests for an account and its customer accounts. The site card reads first and opens its form in place; the
+{#- Staff portal page (`src/web.rs`): the tenant's customer portal on its
+    public site, its invitations, the requests for an account and its customer accounts. The site card reads first and opens its form in place; the
     invitations table, its cells and the pagination are rendered by
     src/web.rs through the shared models; this file lays the page out. The
     page renders its own flash outlet, and the open dialog owns the same
@@ -9,24 +9,16 @@
 {%- import "feedback.html" as feedback -%}
 {%- import "dialog.html" as dialog -%}
 {% call feedback::flash_group(messages=flash) %}{% endcall %}
-{% call ui::page(id="customer-access-page", variant=bilibi_ui::PageVariant::List) %}
+{% call ui::page(id="customer-portal-page", variant=bilibi_ui::PageVariant::List) %}
 {% call ui::header(subtitle="Where your customers sign in, and who has been invited.", actions=actions) %}Customer portal{% endcall %}
-{% call ui::card(id="customer-portal-site", title="Portal site", class="mb-4") %}
-{% if let Some(edit) = site_form %}
-<form id="customer-site-form" data-event="refresh_site" data-change data-submit-event="save_site" class="space-y-4">
+{% call ui::card(id="customer-portal-site", title="Portal", class="mb-4") %}
+{% if let Some(edit) = options_form %}
+<form id="customer-options-form" data-event="refresh_options" data-change data-submit-event="save_options" class="space-y-4">
 {% call feedback::error_summary(summary=edit.summary) %}{% endcall %}
-{% call form::input(field=edit.address) %}{% endcall %}
-{% call form::input(field=edit.title) %}{% endcall %}
-{% call form::input(field=edit.enabled) %}{% endcall %}
 {% call form::input(field=edit.registration) %}{% endcall %}
-{{ edit.logo }}
-{% for error in edit.logo_errors %}<p class="mt-1.5 text-sm text-danger-ink" id="customer-site-logo-error">{{ error }}</p>{% endfor %}
-{% if let Some(note) = edit.logo_note %}<p class="text-sm text-ink-muted" id="customer-site-logo-note">{{ note }}</p>{% endif %}
-{% call ui::button(button_type="button", event="store_logo", id="customer-site-logo-use", working="Storing…") %}Use this image{% endcall %}
-{% if let Some(remove) = edit.remove_logo %}{% call form::input(field=remove) %}{% endcall %}{% endif %}
 <div class="flex items-center gap-4">
-{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, button_type="submit", id="customer-site-save", working="Saving…") %}Save{% endcall %}
-{% if edit.cancel %}{% call ui::button(button_type="button", event="cancel_site", id="customer-site-cancel") %}Cancel{% endcall %}{% endif %}
+{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, button_type="submit", id="customer-options-save", working="Saving…") %}Save{% endcall %}
+{% call ui::button(button_type="button", event="cancel_options", id="customer-options-cancel") %}Cancel{% endcall %}
 </div>
 </form>
 {% else %}
@@ -61,3 +53,5 @@
 {% if revoke %}
 {% call dialog::confirm_dialog(id="customer-revoke-dialog", consequence="Revoke invitation?", detail="Its link stops working. You can invite the address again later.", confirm="Revoke", working="Revoking…", confirm_event="confirm_revoke", cancel_event="cancel_revoke") %}{% endcall %}
 {% endif %}
+
+{{ reset_dialog }}

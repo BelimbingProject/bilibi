@@ -98,12 +98,14 @@ struct NavBranch<'a> {
 }
 
 /// One company the top bar's switcher offers: an explicit live desk the host
-/// proved for the person. `current` marks the workplace of this request.
+/// proved for the person. `current` marks the workplace of this request;
+/// `archived` marks a desk whose company is read-only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompanyChoice {
     pub id: i64,
     pub name: String,
     pub current: bool,
+    pub archived: bool,
     pub image_url: Option<String>,
 }
 
@@ -151,10 +153,14 @@ const COMPANY_FILTER_FROM: usize = 8;
 /// The top bar's company switcher (`templates/company_bar.html`): the
 /// company the session works in (`current`, `None` for no desk) and the
 /// person's desks. With one desk, none, or a
-/// tenant-wide page (`tenant_wide`), it is a plain label. The host supplies
-/// `csrf` for the form and `path` as the address to return to after a switch.
+/// tenant-wide page (`tenant_wide`), it is a plain label. An archived company
+/// (`current_archived`, `CompanyChoice::archived`) carries an "Archived"
+/// badge: its records read, and nothing in it can be changed. The host
+/// supplies `csrf` for the form and `path` as the address to return to after
+/// a switch.
 pub fn company_bar(
     current: Option<&str>,
+    current_archived: bool,
     current_image_url: Option<&str>,
     companies: &[CompanyChoice],
     csrf: &str,
@@ -182,12 +188,14 @@ pub fn company_bar(
                 id: company.id,
                 name: &company.name,
                 current: company.current,
+                archived: company.archived,
                 image: Html::render(&crate::IdentityImage::company(company.image_url.as_deref()))?,
             })
         })
         .collect::<askama::Result<Vec<_>>>()?;
     Html::render(&CompanyBar {
         current,
+        current_archived,
         current_image,
         companies: &companies,
         csrf,
@@ -200,6 +208,7 @@ pub fn company_bar(
 #[template(path = "company_bar.html")]
 struct CompanyBar<'a> {
     current: Option<&'a str>,
+    current_archived: bool,
     current_image: Html,
     companies: &'a [RenderedCompanyChoice<'a>],
     csrf: &'a str,
@@ -211,12 +220,15 @@ struct RenderedCompanyChoice<'a> {
     id: i64,
     name: &'a str,
     current: bool,
+    archived: bool,
     image: Html,
 }
 
 /// Display-only scope. The host must obtain operator standing from an explicit
 /// proof; a tenant ID or administrator role never implies it.
 pub struct ShellContext<'a> {
+    /// Whose name the top bar carries: the installation's own, or Bilibi's.
+    pub brand: &'a crate::Brand,
     pub user: &'a str,
     pub email: &'a str,
     pub tenant: &'a str,
@@ -233,6 +245,9 @@ pub struct ShellContext<'a> {
     pub company_bar: Html,
     /// The signed-in account's uploaded picture or initials fallback.
     pub user_image: Html,
+    /// The previous sign-in summary and link to the account's active sessions.
+    /// Empty while an operator is viewing as another account.
+    pub session_security: Html,
     /// The installation-level tenant switcher, before the tenant's desk.
     pub tenant_bar: Html,
     pub platform_operator: bool,
@@ -270,9 +285,9 @@ pub struct ShellContext<'a> {
     /// The bind address of this server, shown after the role. The host supplies
     /// it only when the role is Dev.
     pub listen_address: Option<&'a str>,
-    /// The Platform version first, then each mounted Domain or Extension, from
-    /// `version_badges`.
-    pub versions: Vec<VersionBadge>,
+    /// The application or working-build identity supplied by the host.
+    pub version: Option<VersionBadge>,
+    pub can_view_software: bool,
     /// The open page's controls in the top bar, left of the bell
     /// (`topbar_actions` slot), from `Page::topbar_actions`.
     pub topbar_actions: Html,
@@ -291,77 +306,10 @@ impl ShellContext<'_> {
     }
 }
 
-/// One entry of the status bar's version list (`#app-version` for the
-/// Platform, `#app-version-<container>` for a mounted Domain or Extension).
-/// `text` is the short form shown; `title` says the commit and the modules.
+/// The status bar version. `text` is the short form; `title` describes the build.
 pub struct VersionBadge {
-    pub id: String,
     pub text: String,
     pub title: String,
-}
-
-/// The status bar's version badges for the program's composition (docs/versions.md):
-/// `v0.1.0` for the Platform, then `finance 0.1.0` for each mounted container,
-/// or its commit when it is at no release, and nothing when no fact is known (a build without a pin whose
-/// checkout is not Git).
-pub fn version_badges(made: &bilibi_module_registry::Composition) -> Vec<VersionBadge> {
-    use bilibi_module_registry::PinState;
-    let mut title = format!("Bilibi {}", made.version);
-    match (&made.pin, made.tag, made.short_commit()) {
-        (PinState::Stale(reason), _, _) => {
-            title.push_str(&format!(" · the pin is stale: {reason}"))
-        }
-        (PinState::Unpinned, _, commit) => {
-            if let Some(commit) = commit {
-                title.push_str(&format!(" · commit {commit}"));
-            }
-            title.push_str(" · development build");
-        }
-        (PinState::Pinned, Some(tag), commit) => {
-            title.push_str(&format!(" · release {tag}"));
-            if let Some(commit) = commit {
-                title.push_str(&format!(" · commit {commit}"));
-            }
-        }
-        (PinState::Pinned, None, commit) => {
-            title.push_str(" · unreleased");
-            if let Some(commit) = commit {
-                title.push_str(&format!(" · commit {commit}"));
-            }
-        }
-    }
-    let mut badges = vec![VersionBadge {
-        id: "app-version".into(),
-        text: format!("v{}", made.version),
-        title,
-    }];
-    for container in &made.containers {
-        let layer = match container.layer {
-            bilibi_module_registry::Layer::Extensions => "Extension",
-            _ => "Domain",
-        };
-        let (text, state) = match (container.version, container.short_commit()) {
-            (Some(version), Some(commit)) => (
-                format!("{} {version}", container.id),
-                format!("version {version} · commit {commit}"),
-            ),
-            (None, Some(commit)) => (
-                format!("{} {commit}", container.id),
-                format!("at no release · commit {commit}"),
-            ),
-            (_, None) => continue,
-        };
-        badges.push(VersionBadge {
-            id: format!("app-version-{}", container.id),
-            text,
-            title: format!(
-                "{layer} {} · {state} · modules: {}",
-                container.id,
-                container.modules.join(", ")
-            ),
-        });
-    }
-    badges
 }
 
 #[derive(Template)]
@@ -388,12 +336,13 @@ pub struct Framed<'a> {
 }
 
 /// A signed-in review without workspace navigation. It keeps the guarded live
-/// root and the account's display preferences, but draws only the Bilibi mark,
+/// root and the account's display preferences, but draws only the wordmark,
 /// the installation banner and the review card.
 #[derive(Template)]
 #[template(path = "standalone_review.html")]
 pub struct StandaloneReview<'a> {
     pub body: &'a str,
+    pub brand: &'a crate::Brand,
     pub instance: &'a Html,
     pub live: bool,
     pub tenant_id: i64,

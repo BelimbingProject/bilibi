@@ -1,5 +1,9 @@
 # Authorization owner contract
 
+**Use it for:** declaring capabilities, checking them, roles and grants (including roles a group you own, such as a team, gives its members), how far a grant reaches into its records (mine, my team's or all), and masking fields some readers must not see.
+
+**Not for:** role tables, permission flags in code or `is admin` checks of your own.
+
 The field restriction catalog combines owner contributions for the same table. Sources must agree on the table label and audit record types, and field IDs must be unique across the composition. This lets a record owner expose restrictions for an Extension-owned field without Authz depending on that Extension.
 
 Authz owns capability vocabulary, decisions, grants and field withholding.
@@ -31,15 +35,13 @@ Reconciliation serializes runs, adopts an existing same-named role in place, and
 synchronizes contributed system-role metadata/capabilities. It preserves role IDs,
 assignments, custom roles, direct grants/denies and field restrictions. It removes
 obsolete grants from contributed roles, and clears redundant grants on grant-all
-roles. Run it again after installing contributions or provisioning new tenants.
+roles. Run it again after installing contributions or provisioning tenants without their roles.
 `seed-production` also supplies the initial versioned reconciliation through the
-Database seed ledger. `Grants::grant_first_administrator_in` is the one
-bootstrap seam: on a system-attributed `MutationTransaction` of a tenant it
-reconciles that tenant's system roles and assigns the grant-all `core_admin`
-role as an audited change, for `bilibi-web create-owner` (Core User's
-`create_first_administrator`, which proves the tenant holds no account). It
-refuses a user- or agent-attributed transaction; every other assignment goes
-through `assign_role`, which proves the actor and asks for step-up. Neither path runs at app boot. The schema keeps one role
+Database seed ledger.
+
+For first-owner bootstrap, Authz reconciles system roles and audits the assignment on a system-attributed transaction for the target tenant. `Grants::grant_first_administrator_in` assigns the grant-all Core Administrator role for the platform operator. `Grants::grant_first_tenant_owner_in` assigns the contributed Tenant Owner role for a customer tenant. Ordinary assignments use `assign_role`, which checks the actor and requires step-up.
+
+The schema keeps one role
 instance per tenant; a custom role is owned by a company of that tenant
 (`roles.company_id`, migration `011-role-company`, K15). Base holds the bare
 column and Core Company contributes the scoped foreign key; `create_role`
@@ -60,11 +62,16 @@ Use `authorize_key` (or the compatibility `Capability` enum) for enforcement and
 `decide` for a reasoned decision. `authorize_any(client, scope, keys)` is the same
 enforcement for a combined page (`Access::AnyOf`): it opens for any one live key and
 writes no denial row for the others while one opens it. Unknown keys deny even grant-all holders.
-A contributed platform capability requires the persistent `platform_operator`
-identity **and** a grant; tenant 1 and grant-all have no implicit operator power.
+
+`CapabilityDefinition::platform` requires the persistent `platform_operator` identity and a grant. `CapabilityDefinition::owner` derives access exclusively from live [installation-owner proof](../tenancy/README.md). Grant administration rejects direct allows and role grants for owner-only keys. Named principals cannot hold those keys. A direct deny still takes precedence. `CapabilityDefinition::platform_or_owner` also accepts ordinary operator-tenant grants. Failure to prove standing for an owner-only key yields `denied_owner_standing` after the scope and audience checks. Calls through `authorize_operator` first reject requests outside the operator tenant with `denied_platform_scope`.
+
 **Audiences** ([ADR 16](../../../docs/architecture/decisions/16-customer-accounts-and-portal.md)). A customer account holds only portal capabilities and staff never hold one: `decide`, `decide_proof`, `holds_proof` and the effective sets deny a capability outside the actor's audience (`Actor::kind()`) with reason `denied_audience`, before any direct grant, role grant or grant-all. Grant-all never satisfies a portal capability: a customer needs a direct allow or a role that lists the key. `Grants` administer staff only: it refuses a customer account, a portal key as a direct allow or on a custom role, and assigning a role that lists a portal key. Boot refuses a contributed role that mixes portal and staff keys, a grant-all role with portal keys, and a system principal that declares a portal key. `holders` lists tenant capabilities only; its caller keeps only staff accounts. `effective_capabilities_of` reads another account as staff, since only staff administration screens read another account. A Domain's portal facade asks for its key with `authorize_portal(client, &PortalScope, key)`, which refuses a key that is not a portal capability before deciding it. A customer's portal role is assigned only by the portal's owner: `Grants::assign_portal_role_in` gives a contributed, all-portal, non-grant-all role inside Core Portal's transaction when an invitation is redeemed.
 Direct deny wins over direct allow, role grants and grant-all. Permission reads
-are fresh. Reauthenticate/revalidate a retained Scope at every request/event/job
+are fresh.
+
+An impersonated scope holds only the live intersection of permissions for the viewed account and operator in the same company. Logged decisions, proof-only checks and effective capability lists all apply this rule, so a permission granted to the viewed account or revoked from the operator cannot widen an open impersonated session; a direct deny on either account wins.
+
+**Taking access away is bounded too.** Only a full-access actor removes a role from, or directly denies a capability to, an account that holds full access (`Error::Forbidden` otherwise), so a narrower role administrator cannot lock out the tenant's administrators. Removing a tenant's last tenant-wide full-access assignment held by a live staff account (not deleted, suspended or still invited) is refused (`Error::Refused`); give another administrator full access first. Removals take the tenant's grant lock, so two at once cannot each leave the other as the one that remains. Proof: `apps/web/examples/role-assignment-bounds.rs`. Reauthenticate/revalidate a retained Scope at every request/event/job
 edge; the sealed scope is identity for one unit of work, not a permanent login.
 Decisions record reason and principal kind using the caller's connection; decisions
 inside an owner transaction follow that transaction's commit/rollback.
@@ -76,11 +83,15 @@ interactive role-grant writes; reconciliation is their explicit update path.
 Capture failure or cancellation prevents commit. No browser-provided actor ID is
 accepted as attribution. Callers cannot pass a SystemScope to grant administration.
 
-Administration → Authorization → **Automation access** (`/authz/automation`) is the tenant-facing page for the `scheduler` and `domain-events` grants. Its browser controls and agent key both call `base.authz_agent.automation_consent.set`, which reaches `Grants::set_system_in`; the existing grant bounds, 2FA policy and audit record remain the owner contract.
+Administration → Authorization → **Automation access** (`/authz/automation`) is the tenant-facing page for installed system-principal grants, including the `scheduler` and `domain-events` groups. The generic declared-principal door is `base.authz_agent.system_principal.list` / `.set` (input and concurrency contract in `base/authz_agent/README.md`). The schedule/event browser controls and agent key both call `base.authz_agent.automation_consent.set`, which reaches `Grants::set_system_in`; the existing grant bounds, 2FA policy and audit record remain the owner contract.
 
 Named system principals require an installed declaration and a durable grant in the execution tenant, or a standing grant (below). `SystemScope::rehydrate` is a trusted worker/maintenance edge, never a browser constructor. `SystemAuthentication::for_system(client, &SystemScope)` (SP1) seals a declared principal into a Tenancy `Scope` (`Authentication::for_principal`), so owner facades that take `&Scope` serve a worker: `decide`, `decide_proof`, `authorize_key`, `authorize_any`, `effective_capabilities` and `explicitly_granted` on that scope apply the named-principal rule (live tenant, declaration, platform gate, durable `authz_system_grants` row or standing grant, deny wins), log `system` with the principal, and never consult roles or grant-all. `effective_system` lists what a principal holds. `Grants` refuse a principal scope as the administrator. Tenancy's `Authorization::authorize_scope` is bound here (`authorize_proof`) for modules below Authz. Anonymous system identities always deny; declaration alone grants nothing. Removed declarations make old grants inert. Named identities hold no user roles, gain no grant-all bypass, and obey platform gates. Decisions stay tenant-scoped; company ownership of custom roles (K15) and the account binder (K9) use Tenancy owner proofs. An owner adapter that holds only Tenancy's sealed proof connection (`OrganisationDirectory`, Media `SubjectOwner`, Artifacts `Owner`) decides through `decide_proof` / `authorize_proof`: the same rules and decision log as `decide`, on that connection. `holds_proof` reads the same decision without logging it, for display and for reach checks that run on every page or authentication (the company switcher's listing and a chosen current company's reach); an operation still decides with `decide_proof`. Queue execution must rehydrate at execution, rather than retaining a Scope captured when enqueued.
 
 **Standing grants** (ADR 12) are for Platform work no tenant should have to switch on, such as Media's malware scans. The module that declares a principal may contribute `StandingGrant { principal, capabilities }` to `STANDING_GRANTS` under the principal's name; the principal then holds those tenant capabilities in every live tenant with no `authz_system_grants` row (decision reason `system_principal_standing`). A tenant's denying grant (`Grants::set_system(.., Some(false))`) still wins. Boot refuses a grant from another module, for a capability outside the declaration, for a platform capability, or a second grant for one principal. `effective_system` includes standing capabilities.
+
+**Optional capabilities** (#428) let a principal hold a key of a module its owner calls only while that module is mounted, such as a connector behind a port: the connector depends on the core module, so the core module's declaration cannot name the connector's key. The module that declares the principal contributes `OptionalCapabilities { principal, module, capabilities, standing }` to `OPTIONAL_CAPABILITIES` (one entry per principal and module). While `module` is installed, the keys join the principal's declared bounds, so Automation access, `Grants::set_system` and every decision treat them like declared keys; with `standing` they are also standing grants. While it is absent, the entry grants nothing and its keys are not checked. Boot refuses an entry from a module that does not declare the principal, a `module` that is the declaring module or one of its dependencies (declare those keys on the principal), and, with the module installed, a key that module does not contribute, a portal key, or a non-tenant key with `standing`. The keys never enter a role. Do not have the connector accept the core module's capability instead. Executable proof: `cargo run -p bilibi-web --example optional-capabilities -- --catalogs`.
+
+**Offered capabilities** (ADR 31) let the owner of a capability add it to another module's principal, so a Base principal can act on a Domain's records without Base naming the Domain: Base Watchers' `watchers` reads and routes a Domain's cases because that Domain offers it the keys. The owner contributes `OfferedCapabilities { principal, capabilities }` to `OFFERED_CAPABILITIES` (one entry per principal and module). The keys join the principal's bounds; they are never standing, so a tenant administrator still grants each one on Automation access, and they never enter a role. Boot refuses a key the contributor does not own, a platform or portal key, a principal its own module declares or one of a module it does not depend on, a key already in the bounds, and a second entry for one principal and module.
 
 `holders(client, tenant, key, limit)` lists the accounts of a tenant that hold a tenant capability (direct allow, grant-all or role grant, no direct deny), in id order, for an owner that must tell them about work only they may do (Media's quarantine notices). It logs nothing; prove each account live before writing to it.
 
@@ -98,8 +109,10 @@ listed by id, can be removed and cannot be re-restricted.
 
 **Mask mode (ADR 05).** A restricted field has one mode for all its roles (migration `base-authz-013-field-masks`): `withhold`, as above, or `mask`, offered on the screen only for fields the catalog marks personal (`CatalogField::personal`). A role that withholds wins over one that masks. `restrictions_for` and `fields::restricted` still return masked fields too, so a caller that only removes restricted fields never shows a masked value in full. A caller that shows partial values asks `fields::masks_for(table)` (or `fields::masked`, `fields::masked_by_record_type`) for each masked field's kind and uses `fields::partial(kind, value)` or `fields::apply_masks`. Writes and searches refuse a masked field like a withheld one. Revealing a full value is `base/privacy`'s (`apps/base/privacy/README.md`).
 
+`fields::restriction_modes(client, scope)` reads effective `mask` and `withhold` modes grouped by table and field on the supplied connection. Use it when a caller needs to detect a mode change across several tables.
+
 `restrictions_for` and `fields::restricted` read restrictions for any table ID;
-any held restricting role masks, even alongside an admin. `fields::mask` removes
+any held restricting role masks, even alongside an admin. For an impersonated scope the restrictions of the operator's roles apply as well as the viewed account's, so the session never reads or writes a field the operator could not. `fields::mask` removes
 restricted fields before JSON serialization, including arrays, audit old/new
 objects and headless projections. `fields::refuse_attempts` refuses any submitted
 restricted key regardless of its value. Owner-typed read models must also clear
@@ -108,6 +121,8 @@ principal holds no roles, so it fails closed: every restriction in its tenant
 applies to it, and it never sees or writes a role-restricted field. P8 owns the
 protected-field catalog contract and restriction administration; Grid supplies
 that catalog as data, with no Authz→Grid dependency.
+
+**Tenant fields.** A tenant's custom fields are data, so they cannot be in the deployment snapshot. `base/custom_fields` binds the one `field_catalog::TenantFields` hook, and `field_catalog::tenant_catalog(client, scope)` (what the Field Restrictions screen and `put_many` check against) adds the tenant's active `cf_<key>` fields to their tables. They are withheld only: none is personal, so mask mode is refused. An archived field's restriction stays listed and can be removed.
 
 A `CatalogField` may declare alternate restriction identities for the same
 record value. Each alias names its target table, field and that table's audit
@@ -140,6 +155,13 @@ BILIBI_ASSIGNMENT_PROOF=disposable cargo run -p bilibi-web --example role-assign
 ```
 
 It uses real grants, desks and Company authorization for two people with desks in two companies. It proves different company grants, exact-company revocation, future and expired dates, direct denies, incomplete engagement refusals, scoped grant-all and tenant-only-key refusals, another tenant, preserved unscoped behavior and audit capture. Finance supplies the source, report, retained-download and authenticated MCP proofs for its roles.
+
+## Administering another account
+
+`holds_everything_of(client, scope, target)` answers whether the actor holds everything `target` holds: tenant-wide, in the actor's current company and in each company where `target` has a company role. A target with a full-access role needs an actor with one; a named system principal compares its own grants and never covers a full-access account. It logs nothing.
+
+- It is the subset rule `Grants::validate_assignment` applies when giving a role.
+- Call it from any write that lets one account set another's password or sign-in address, delete it or act as it. Otherwise the account is the way around the role rule. Core User's account writes and impersonation use it (`apps/core/user/README.md`, "Who may change whose account").
 
 ## Step-up on grant changes
 
@@ -187,9 +209,53 @@ Keep provider-managed roles separate from administrator assignments.
 
 `Grants::configure_identity_roles_in` authorizes and audits a company-scoped source's complete role bound, using ordinary role-update capability and Step-up checks. `apply_identity_roles_in` can then apply only roles in that stored bound for an account proved to belong to the policy's company. Both use the caller's `MutationTransaction`; the identity owner supplies verified claims or provisioned memberships and calls the latter after proving the account live. Narrowing a bound removes obsolete grants immediately.
 
-Automatic memberships live in `authz_identity_roles`, while manual memberships remain in `principal_roles`. `effective_principal_roles` combines them for decisions, masking, role displays, agent reach and shared-layout eligibility. Use the Authz read APIs or that view for effective memberships. Never write the view or delete manual assignments to reflect a provider group change. Direct denies retain precedence over both kinds of role grant.
+Automatic memberships live in `authz_identity_roles`, while manual memberships remain in `principal_roles`; group memberships are under "Group roles". `effective_principal_roles` combines them for decisions, masking, role displays, agent reach and shared-layout eligibility. Use the Authz read APIs or that view for effective memberships. Never write the view or delete manual assignments to reflect a provider group change. Direct denies retain precedence over both kinds of role grant.
 
 `Grants::revoke_identity_source_roles_in` removes only one authenticated system identity source's automatic grants, even when the target account is frozen. Its caller proves the source credential; the system attribution must name that same source. It cannot add grants or touch manual roles.
+
+## Group roles
+
+A group another module owns (a Core team) can carry roles; its members hold them while they are members. Authz keeps the group's label, company, roles and members in `authz_groups`, `authz_group_roles` and `authz_group_members` (migration `base-authz-016-group-roles`). The owner writes them only through `Grants`, inside its own `MutationTransaction`, so Base never reads the owner's tables.
+
+| Method | What it does |
+| --- | --- |
+| `set_group_role_in`, `validate_group_role` | Give or take away one role of a group |
+| `set_group_members_in`, `validate_group_members` | Apply a membership change: additions and removals |
+| `sync_group_in`, `validate_group_move` | Record a new name or company |
+| `group_role_choices` | The roles this actor may give a group in a company now, for a picker |
+| `grants::group_roles`, `roles::group_assignments` | The roles a group carries; the roles an account holds through groups |
+
+- A `Group { source, id, label, company }` names the group: `source` is the owner's noun ("team"), `label` its name now.
+- **A grant check guards every widening.** Giving a role, adding a member to a group that carries roles, and moving such a group to another company each need `admin.authz.role.update`, every permission the roles give in the group's company (the subset rule of `validate_assignment`) and step-up `base.authz.principal_role.set`. Taking a role away needs role-update permission and step-up. Removing a member is never checked: it only narrows.
+- **Never grant-all, never engagement.** A group cannot carry a full-access role or an engagement role, and `effective_principal_roles` ignores one that became so later.
+- **Company scope (ADR 20).** A group with a company grants its roles there only (`company_id` on the effective row), so its roles may hold only keys that support company scope.
+- **Live.** Decisions read the rows; there is no cache, job or sign-in step.
+- **Explainable.** `effective_principal_roles` and `authz_roles_for` carry `via` ("team:12", the group's source and id, never its name; null for manual and provider memberships). A decision only a group's role allowed logs reason `group_role_capability` with `via`. The decision log resolves it when shown: the group's name when the reader works in its company, otherwise "a team in a company you do not work in".
+- Direct denies win over group roles, as over every other grant.
+
+## Record reach
+
+A role gives a capability with a reach: **mine** (`own`), **my team's** (`team`) or **all** (`all`, the default) ([ADR 30](../../../docs/architecture/decisions/30-record-reach-on-grants.md), #683). It is the `reach` of the role's grant (`role_capabilities`, migration `base-authz-017-grant-reach`), or of a direct allow (`principal_capabilities`).
+
+| Reach | Records it admits |
+| --- | --- |
+| Mine | Owned by the account |
+| My team's | Mine, owned by someone who shares a Core team with the account, or filed under one of its teams |
+| All | Every record the capability opens |
+
+- **Opt in.** Only a key declared `CapabilityDefinition::tenant(KEY).with_reach()` may carry less than all; `Grants` refuses the rest ("always reaches all records"). Opt in only after every read of the records applies the reach and every write rechecks it.
+- **Widest wins.** An account's reach is the widest grant that gives it the key, in the same company context as the decision. Grant-all reaches all; a team role carries its role's reach.
+- **A restriction on the user wins over the team.** A direct deny removes the key. A direct allow's reach is the account's reach for the key: it caps what roles and team roles give, and gives the key at that reach.
+- **Reach only narrows.** It applies on top of the owner's tenant and company filters ([ADR 19](../../../docs/architecture/decisions/19-company-work-access-and-page-scope.md)), never instead of them. Read live; nothing is cached.
+- **Apply it.** A Grid table names its owner field (`TableDecl::owner`, optional `team`) and Grid filters every read (`apps/base/grid/README.md`, "Record reach"). Your own SQL uses `Reach::predicate(owner, team)` with tenant `$1` and reader `$2`, after `reach_proof(client, scope, key)`; a write rechecks `reach_admits(client, scope, key, owner, team)` in its transaction. `effective_grants` returns the held keys and `Effective::reach_of` for a catalog.
+- **A grant gives no more reach than the actor holds.** `set_role_capability_in` (`grant: Option<Reach>`), `set_direct_in` (`Direct::Allow(reach)`), `validate_assignment`, group roles, new members of a group that carries roles, and provider role bounds need the actor to hold each key at least as far as it reaches (`Effective::reaches`). A system principal's grant needs all.
+- **Joining a team gives the member the team's reach.** Team management defines who shares "my team's" records; a membership change is not a grant and runs no reach check. A direct deny or a narrower direct allow on the user caps what the team gives.
+- **One rule for a user's direct rule.** An allow needs the actor to hold the key as far as it reaches. Clearing a direct rule on a key that supports reach (an allow, a deny or none) needs the actor to hold the key as far as the account reaches once it is gone, on their own account too, so neither a cap nor a deny-then-clear lifts it; a clear that leaves the key unheld needs nothing more (`Grants::validate_direct`, also run by the agent review). Setting a deny only narrows and checks no reach.
+- **Taking over an account needs all.** `holds_everything_of` treats a key the actor reaches only partly as covering nobody else's grant of it.
+- **Impersonating:** a key that supports reach is held only when the operator reaches all of it (`denied_impersonation_reach`), with the viewed account's reach.
+- **System principals** reach all of what they are granted; `reach_proof` holds nothing for them, as `holds_proof`.
+- **Where it shows.** The role page lists each grant's reach beside its key. `base.authz_agent.role_capability.set` and, for an allow, `base.authz_agent.principal_capability.set` take `reach` (`own`, `team`, `all`).
+- Proof: `BILIBI_RECORD_REACH=disposable cargo run -p bilibi-web --example record-reach` (`scripts/run-walkthroughs.sh record-reach`).
 
 ## Restrictions on a caller's read connection
 

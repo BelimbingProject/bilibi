@@ -1,5 +1,9 @@
 # Private artifacts (A1, A2)
 
+**Use it for:** private documents a record keeps: generated PDFs, sensitive uploaded evidence, their retention and encryption.
+
+**Not for:** ordinary record attachments and uploads (use `base/media`).
+
 Use `base/artifacts.store` and `Artifacts::for_owner(scope, company, &ConcreteOwner)`
 for sensitive uploaded/generated documents. Implement `Owner` in the business
 module and declare a dependency on `base/artifacts`. Select the concrete adapter
@@ -10,7 +14,7 @@ owner-reviewed data migration. There is no Base query of Company tables.
 Every callback must prove a live company in the tenant, current actor authority,
 and the live subject for that operation. `Purge` has no reference and requires
 company maintenance access. Base reauthenticates the sealed account on every
-operation and refuses changed identity or lost desk access to the bound company. The file company may differ from the selected desk when the person still has access there; the owner still authorizes every action. System-principal and approved privacy actions retain their existing authority.
+operation and refuses changed identity or lost desk access to the bound company. The file company may differ from the selected desk when the person still has access there; the owner still authorizes every action. An owner whose reads use explicit per-record grants may return `false` from `Owner::read_requires_desk`; only its staff reads then omit the desk check, while live identity, tenant/company binding, owner authorization and read audit still apply. The owner must prove the current record grant on every read; Core Document is the opt-in user (ADR 23). All other operations and owners retain their desk checks. System-principal and approved privacy actions retain their existing authority.
 The owner validates upload MIME/content
 and scanning policy; `content_type` is descriptive metadata only.
 
@@ -29,9 +33,9 @@ transaction. Reservations and tombstones must commit before filesystem work.
 No file path, filename or content enters audit payloads. Metadata returned to an
 owner contains no storage path. Reads hold a row lock, recheck permission and
 expiry, validate 0600 regular-file mode, byte count and SHA-256, and commit audit
-evidence before bytes escape. Owners' authenticated download routes must call
-`read` every time and return attachments with `Cache-Control: private, no-store`
-and `X-Content-Type-Options: nosniff`. A1 adds no public download route or screen.
+evidence before bytes escape. Owners' authenticated download routes must call `read` or `read_checked` every time and return attachments with `Cache-Control: private, no-store` and `X-Content-Type-Options: nosniff`. Use `read_checked` when file eligibility also depends on owner-specific checks. Its callback runs before loading bytes, in the same repeatable-read transaction as Artifacts' own authorization and row checks. A1 adds no public download route or screen.
+
+Keep the eligibility callback read-only. On a serialization failure, Artifacts can repeat the entire checked read, including the callback, in a fresh transaction up to twice.
 
 Operator Settings owns these installation values, gated by
 `admin.system.artifacts.manage` and explicit platform operator identity:
@@ -54,7 +58,7 @@ directory, rechecks authority, then publishes. If writing, permission, SQL or
 audit fails, the inaccessible reservation remains tracked. An ambiguous commit
 may have published: never blindly remove bytes after a database error.
 
-Deletion commits a tombstone first. Owners deleting one logical record with several artifacts use `delete_batch`, which checks every file's retention and legal hold before tombstoning any of them. Physical cleanup then holds the row lock, unlinks/syncs the directory and marks the tombstone purged in an audited commit. A failed unlink leaves a retryable tombstone. If the purge commit fails after unlink, retry accepts an absent file and commits the evidence. Purged metadata remains; database guards forbid hard deletion, authority substitution and lifecycle reversal.
+Deletion commits a tombstone first. Owners deleting one logical record with several artifacts use `delete_batch`, which checks every file's retention and legal hold before tombstoning any of them.  An owner about to move or rewrite protected documents (a merge) first calls `ensure_unprotected(client, ids, lock)` on its own connection: `Retained` or `LegalHold` refuses, and on its transaction `lock` holds the rows so a new hold waits for the owner's commit. Physical cleanup then holds the row lock, unlinks/syncs the directory and marks the tombstone purged in an audited commit. A failed unlink leaves a retryable tombstone. If the purge commit fails after unlink, retry accepts an absent file and commits the evidence. Purged metadata remains; database guards forbid hard deletion, authority substitution and lifecycle reversal.
 
 `recover` authorizes maintenance before selecting an ordered bounded batch for
 this tenant/company/concrete owner, then reauthorizes deletion per candidate.
@@ -141,6 +145,21 @@ documents.release_hold(&mut client, &id, None).await?;
 let events = documents.retention_history(&client, &id).await?; // oldest first
 ```
 
+An owner that attaches an ordinary Artifact to its own record inside a
+`MutationTransaction` may call `retain_in(tx, id, until, reason)` **after** the
+attachment row is written, so the owner record and Base retention commit or
+roll back together. It applies the same `Retain` authorization, future-time and
+extend-only guard, audit action and append-only retention event as `retain`;
+it does not open another transaction. `retention_statuses(client, ids)` returns
+at most 1000 owned, attached artifacts' retain-until, hold and due state without
+reading bytes or paths, after checking the owner's `Retain` grant on each. A
+missing or unauthorized artifact refuses the batch. Base checks the live account
+and desk once for the batch and asks `Owner::authorize_all` for the whole set;
+its default asks `authorize` for each, and an owner whose rule is a set query
+overrides it so a batch costs a few statements instead of a few per file.
+
+An owner whose record lists an ordinary Artifact as its file for as long as the record keeps it (Core Document's library revisions) calls `keep_in(tx, id)` in the same mutation, after the attachment row is written. It clears the expiry, so neither `artifacts.retention_days` nor `purge_expired` ever removes the document, and writes an `artifacts.kept` audit action. It needs the owner's `Retain` grant, because the installation setting no longer bounds the document's life, but it is not retention: nothing becomes irreversible, the document has no retain-until, and an explicit `Delete` removes it as before. A records-grade document is left as it is; an already expired one is `NotFound`.
+
 A records-grade document has `expires_at: None`; reads keep working before and
 after retain-until, and `purge_expired` never selects it. `delete` answers
 `Error::LegalHold` while a hold stands and `Error::Retained` before retain-until
@@ -159,7 +178,7 @@ publication transaction, so a failed upload stays an ordinary reservation that
 The database guards the same rules for any client (`base_artifacts_retention_guard`,
 `migrations/002-retention.sql`): retain-until cannot be cleared or moved earlier, a
 retained row cannot be tombstoned, purged or removed while on hold or before
-retain-until, exactly one of expiry and retain-until is set, and a hold needs
+retain-until, at most one of expiry and retain-until is set, and a hold needs
 retain-until. Each change writes one row to `base_artifact_retention_events`
 (`retained`, `retention_extended`, `hold_placed`, `hold_released`) with the
 retain-until and hold state after it, the reason, and the attributed actor (user,
@@ -188,7 +207,8 @@ alerting on `failed`; Base enumerates no companies.
 
 **`subject_documents(client, scope, owner, subject)` lists one subject's live documents of an owner** in every company of the tenant, keeping those the owner lets the scope `Read`, however many ([ADR 05](../../../docs/architecture/decisions/05-personal-data-registry.md)).
 
-- An approved request carries a sealed `base/personal_data` grant: `disclosed_documents` and `for_disclosure(.., &Disclosure, subject).read` read that subject's published documents; `erasable_documents` and `for_erasure(.., &Erasure, subject).delete` delete every unpurged document, including unpublished reservations that may already hold durable bytes. Subject and disclosure reads remain published-only. The owner is not asked for that subject's documents; the account must still be live, retention and legal holds still refuse, and every step is audited. An erasure's subject must be the grant's person ID under a declared person-keyed kind, or one the owner's `erasure_subject` confirms is that person's (default: none).
+- An approved request carries a sealed `base/personal_data` grant: `disclosed_documents` and `for_disclosure(.., &Disclosure, subject).read` read that subject's published documents; `erasable_documents` and `for_erasure(.., &Erasure, subject).delete` delete every unpurged document, including unpublished reservations that may already hold durable bytes. Subject and disclosure reads remain published-only. The owner is not asked for that subject's documents; the account must still be live, retention and legal holds still refuse, and every step is audited. An erasure's subject must be the grant's person ID under a declared person-keyed kind, or one the owner's `erasure_subject` confirms is that person's (default: none). A disclosure read's subject is likewise the grant's person ID under a person-keyed kind, or one the owner's `disclosure_subject` confirms (default: none); `disclosed_documents` takes only the first.
+- A portal customer reads through `for_portal(&PortalScope, company, &Owner).read` (ADR 16). The tenant files a document under its own company, never the customer's, so the check that keeps a business customer to its own company's files is not made there; only `read` is allowed, the owner's `authorize` still decides it with the customer's live scope, and the read is audited as the customer. Every other customer use of `for_owner` keeps that check.
 - `PdfOptions::retained(Retention)` publishes a rendered PDF records-grade, as `put_retained` does.
 
 ### Scheduled sweep across tenants
@@ -225,6 +245,10 @@ let metadata = documents.render_inline(&mut client, reference, &json!({})).await
 let metadata = documents.render_view(&mut client, reference, &json!({})).await?;
 ```
 
+For a business document from Base Templates, pass its compiled `InlineDocument` to `Owned::render_inline_document`. The owner authorizes the source snapshot before compilation. Artifacts checks `Create` before Chromium starts and rechecks authority at publication. The document carries a typed A4 or Letter choice into Chromium. The other rendering methods keep the installation's paper setting.
+
+The `business-print-walkthrough` stores and reads back English A4 and Bahasa Melayu Letter PDFs using 230 rows on a migrated disposable database. It uses the same environment as the HTML PDF walkthrough and needs no app listener.
+
 Both authorize `Create` before the template runs, print with an isolated Chromium
 and store through `store_pdf` (validate, reserve, publish, reauthorize, audit). A
 refused or failed render stores nothing. `render_inline` gives the browser the HTML
@@ -251,18 +275,17 @@ other request (subresources, frames, redirects, `file:`, other hosts) is refused
 by a DevTools Fetch policy, name resolution is disabled except for the origin and
 all other traffic is sent to a dead proxy, so not even a speculative connection
 leaves. A template that navigates its own page away (meta refresh, redirect) fails
-the render instead of printing a blank page. Profiles and requests live in random
-0700 directories; the browser's process group is killed and the directory removed
-on success, failure, timeout and cancellation. Tool output is discarded and callers
-see only fixed errors (`PdfEngineUnavailable`, `PdfFailed`, `PdfTimeout`,
-`RenderOrigin`, `RenderTokensFull`). Crashes can leave `bilibi-pdf-*` temporary
-directories: include them in the host's private temp cleanup.
+the render instead of printing a blank page.
+
+Each render creates a random `0700` directory under `/tmp` for Chromium's profile and sets the browser's `TMPDIR` to that directory to keep Unix socket paths short. Bilibi kills the browser's process group and removes the directory it created on success, failure, timeout and cancellation. Crashes can leave `bilibi-pdf-*` temporary directories under `/tmp`. Include them in the host's private temp cleanup.
+
+Tool output is discarded and callers see only fixed errors (`PdfEngineUnavailable`, `PdfFailed`, `PdfTimeout`, `RenderOrigin`, `RenderTokensFull`).
 
 Operator Settings (same capability as the artifact settings): `pdf.chromium.binary`
 (bare name searched on `PATH`, or absolute; default `chromium`), `pdf.render_origin`
 (http(s) origin the browser can reach, such as `http://127.0.0.1:3000`; empty
 disables signed-URL printing), `pdf.signed_url_ttl_seconds` (60),
-`pdf.render_timeout_seconds` (30), `pdf.max_render_tokens` (100),
+`pdf.launch_timeout_seconds` (60: how long the browser may take to start and answer its first command), `pdf.render_timeout_seconds` (30: the render itself, counted from that first answer, so a cold start after a restart or on a slow disk does not use it up, #707), `pdf.max_render_tokens` (100),
 `pdf.paper.format` (`A4`) and `pdf.paper.print_background` (true). Rendered size is
 bounded by `artifacts.max_bytes`. The walkthrough ran with Google Chrome 154 and the
 Snap Chromium. Password protection and queued rendering are the next sections.
@@ -346,8 +369,11 @@ refusal cancels the job; anything else retries up to 3 attempts and then discard
 Delivery is at least once, completion included: a failing callback retries the whole
 job and the retry stores another artifact (retention owns cleanup), so key the
 business effect on `request_id` and do callback writes inside `execution.begin(..)`,
-which fences them against an expired or cancelled lease. A render holds one pool
-connection for its duration; `View` needs the Web host's `/pdf/render` route and
+which fences them against an expired or cancelled lease. The worker releases
+its authorization connection before calling `pdf_request`. It checks out a
+connection for an `Inline` or `View` render, or after the owner's `Document`
+renderer returns bytes for persistence. The connection is released before
+`pdf_rendered`. `View` needs the Web host's `/pdf/render` route and
 `pdf.render_origin`, so a private host without HTTP renders `Inline` or `Document`.
 No Domain owner is wired yet: the production worker catalog stays empty.
 
@@ -368,7 +394,7 @@ No unit tests. `examples/artifacts-walkthrough.rs` (A1) and
 of real facade calls, raw-SQL guard attempts and injected DB/filesystem outages,
 with output for manual inspection. They run no assertions and use no test harness.
 
-Run the walkthrough after migrating an isolated database:
+Run the walkthrough after migrating an isolated database (`cargo run -p bilibi-web --locked -- migrate`: the walkthroughs install the fixture, which needs the tables):
 
 ```sh
 export DATABASE_URL=postgres://bilibi@127.0.0.1:55481/bilibi_a1
@@ -384,14 +410,14 @@ control document. The second starts a fresh process, reconciles the failures
 control. Repeat `recover` to see an empty successful batch. Fixture clock and
 failure triggers are confined to the explicitly opted-in disposable database.
 
-`examples/pdf-walkthrough.rs` does the same for PDFs. With only
+`examples/pdf-walkthrough.rs` does the same for PDFs, on a migrated database too. With only
 `BILIBI_PDF_DEMO_OUT=/absolute/dir` it writes the deterministic fixture PDFs and
 prints the renderer refusals (`-- fixtures`); with the disposable-DB variables
 above it also generates, stores and reads back an owner-selected PDF and shows
 unauthorized, cross-tenant, non-PDF and truncated-output refusals leaving no
 artifact behind.
 
-Run the retention walkthrough the same way. It publishes records-grade documents,
+Run the retention walkthrough the same way, on a migrated database. It publishes records-grade documents,
 exercises holds and refusals, tries raw SQL against the guards, then breaks and
 restores storage to show purge retries, an operator hold and recovery. It waits
 about 14 seconds for a short retain-until to pass. `report` prints the durable

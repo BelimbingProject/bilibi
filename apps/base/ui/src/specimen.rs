@@ -12,19 +12,37 @@ use crate::{
     PageVariant, RadioGroup, Restricted, RestrictedField, SecretInput, StatItem, UploadSpec,
     Uploads,
 };
+use crate::{FilePreview, MailFrame};
 use askama::Template;
+
+/// Mostly sanitiser output, plus what the frame must refuse by itself.
+const MAIL_SAMPLE: &str = r#"<p>Hello Support,</p>
+<p>The part arrived <b>cracked</b>. Photo below, invoice details in the table.</p>
+<p><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAGklEQVR4nGP4z8DAwMDAxMDAwMDAwMDAwAAAPgABEsn3QQAAAABJRU5ErkJggg==" width="48" height="48" alt="Photo of the part"></p>
+<table border="1"><tr><th>Item</th><th>Amount</th></tr><tr><td>Bracket</td><td>12.00</td></tr></table>
+<p><a href="https://example.test/cases/7" rel="noopener noreferrer">Open the case</a> or <a href="mailto:support@example.test">write back</a>.</p>
+<p style="color:#b91c1c">Inline style: not applied inside the frame.</p>
+<img src="https://tracker.example.test/open.gif" width="1" height="1" alt="">
+<script>document.body.append("script ran")</script>
+<p>Regards,<br>Customer</p>"#;
 
 /// The page is cut into sections, each its own template; see `section`.
 #[derive(Template)]
 #[template(path = "ui_components_specimen.html")]
 pub struct ComponentsSpecimen {
     header_actions: Html,
+    markdown: Html,
+    markdown_source: Field,
+    markdown_unsafe: Html,
+    markdown_plain: Html,
     header_title_actions: Html,
     section_title_actions: Html,
     section_actions: Html,
+    row_actions: Html,
     card_titled: Html,
     card_untitled: Html,
     card_flat: Html,
+    live_panels: Html,
     /// A record reference as a named pill and as unavailable, and the record
     /// picker with hits and with a choice (`record_reference.rs`).
     related: Html,
@@ -51,21 +69,36 @@ pub struct ComponentsSpecimen {
     /// The board: cards that can move, a column with more cards than it
     /// shows, a refused move, a viewer who may not move, and an empty board.
     boards: Vec<Html>,
+    /// Shared call states and unavailable controls.
+    softphones: Vec<Html>,
     /// The browser location action in both button variants and disabled.
     location_secondary: LocationAction,
     location_primary: LocationAction,
     location_disabled: LocationAction,
+    /// Received mail in its sandboxed frame. The sample keeps a script, a
+    /// remote image and an inline style that the sanitiser would remove, to
+    /// show that the frame refuses them on its own as well.
+    mail_frame: Html,
+    /// A file preview in its frame (the sample is a served stylesheet).
+    file_preview: Html,
+    /// The wordmark's brands: Bilibi's own, an installation's name, and an
+    /// installation's logo with its name.
+    brand: crate::Brand,
+    own_brand: crate::Brand,
+    own_logo_brand: crate::Brand,
 }
 
 sections! {
     ComponentsSpecimen {
         layout: "ui_components_specimen/layout.html",
         records: "ui_components_specimen/records.html",
+        markdown: "ui_components_specimen/markdown.html",
         buttons: "ui_components_specimen/buttons.html",
         links: "ui_components_specimen/links.html",
         day_tiles: "ui_components_specimen/day_tiles.html",
         calendars: "ui_components_specimen/calendars.html",
         boards: "ui_components_specimen/boards.html",
+        softphones: "ui_components_specimen/softphones.html",
         code_input: "ui_components_specimen/code_input.html",
         text_inputs: "ui_components_specimen/text_inputs.html",
         text_inputs_basic: "ui_components_specimen/text_inputs_basic.html",
@@ -86,6 +119,7 @@ sections! {
         inline_facts: "ui_components_specimen/inline_facts.html",
         flex_tables: "ui_components_specimen/flex_tables.html",
         charts: "ui_components_specimen/charts.html",
+        mail_frame: "ui_components_specimen/mail_frame.html",
     }
 }
 
@@ -106,10 +140,12 @@ pub struct FormControls {
     pub textarea: Field,
     pub select: Field,
     pub checkbox: Field,
+    pub switches: [Field; 5],
     pub radio: RadioGroup,
     pub required_roles: MultiSelect,
     pub chip_roles: MultiSelect,
     pub plain_roles: MultiSelect,
+    pub fact_roles: MultiSelect,
     pub locked_region: RadioGroup,
     pub date: Field,
     pub time: Field,
@@ -257,6 +293,25 @@ impl FormControls {
                 .kind(InputKind::Checkbox)
                 .label("Enable synchronization")
                 .checked(true),
+            switches: [
+                sample("switch_on", "true")
+                    .kind(InputKind::Switch)
+                    .label("Synchronization"),
+                sample("switch_off", "false")
+                    .kind(InputKind::Switch)
+                    .label("Notifications"),
+                sample("switch_unset", "")
+                    .kind(InputKind::Switch)
+                    .label("Reminders"),
+                sample("switch_disabled", "true")
+                    .kind(InputKind::Switch)
+                    .label("Managed setting")
+                    .disabled(),
+                sample("switch_error", "")
+                    .kind(InputKind::Switch)
+                    .label("Consent")
+                    .error("must be yes or no"),
+            ],
             radio: RadioGroup::in_form("sample", "radio_field", choices(&APPEARANCE))
                 .id("specimen-radio-group")
                 .label("Appearance")
@@ -285,6 +340,13 @@ impl FormControls {
                 .id("specimen-multi-select-plain")
                 .aria_label("Optional roles")
                 .options(choices(&ROLES))
+                .wrapper_class("mb-0"),
+            fact_roles: MultiSelect::in_form("sample", "fact_roles")
+                .id("specimen-multi-select-fact")
+                .label("Roles")
+                .in_fact()
+                .options(choices(&ROLES))
+                .values(strings(&["admin", "reviewer"]))
                 .wrapper_class("mb-0"),
             locked_region: RadioGroup::new(
                 "specimen-radio-locked",
@@ -425,11 +487,19 @@ impl FormControls {
 
 impl ComponentsSpecimen {
     pub fn new() -> askama::Result<Self> {
-        let header_actions = Html::render(&Button {
+        let mut header_actions = Html::render(&Button {
             variant: ButtonVariant::Primary,
             body: Html::text("Save changes"),
             ..Button::default()
         })?;
+        header_actions.push(&Html::render(&IconButton::new(
+            "archive",
+            "Archive company",
+        ))?);
+        header_actions.push(&Html::render(&IconButton {
+            disabled: true,
+            ..IconButton::new("delete", "Delete company")
+        })?);
         let header_title_actions = Html::render(&IconButton {
             context: IconContext::Inline,
             ..IconButton::new("edit", "Edit company")
@@ -446,6 +516,26 @@ impl ComponentsSpecimen {
             body: Html::text("Manage"),
             method: "",
         })?;
+        // A row's actions: its own (local) action as a plain icon, and the
+        // actions that take it to another module in the Non-local actions menu.
+        let mut row_actions = Html::render(&IconButton {
+            id: "specimen-row-actions-delete",
+            kind: IconKind::Danger,
+            title: "Delete rate",
+            event: "delete",
+            name: "id",
+            value: "example",
+            ..IconButton::new("delete", "Delete the example rate")
+        })?;
+        row_actions.push(&Html::render(&crate::AddToMenu::new(
+            "specimen-row-actions-menu",
+            "Example contact",
+            vec![crate::AddToItem {
+                label: "Invite as customer".into(),
+                href: "/customer-portal?drop=person:example".into(),
+                disabled: None,
+            }],
+        ))?);
         let card_titled = Html::render(&Card {
             title: "Company profile",
             inner_class: "p-3",
@@ -510,14 +600,22 @@ impl ComponentsSpecimen {
         )?;
         let hits = [
             crate::PickerHit {
+                instant: Some(crate::flex_table::Instant::new(
+                    "2026-11-06T01:13:00Z",
+                    "6 Nov 2026, 09:13 MYT",
+                    "6 Nov 2026, 09:13 MYT",
+                    "6 Nov 2026, 01:13 UTC",
+                    "company",
+                )),
                 value: "company:1".into(),
                 label: "Acme Holdings".into(),
-                kind_label: "Companies".into(),
+                kind_label: "Company".into(),
             },
             crate::PickerHit {
+                instant: None,
                 value: "person:7".into(),
                 label: "Ada Acme".into(),
-                kind_label: "Contacts".into(),
+                kind_label: "Contact".into(),
             },
         ];
         let named = |id: &str| {
@@ -560,15 +658,40 @@ impl ComponentsSpecimen {
             ("pick_record", "clear_record"),
             Vec::new(),
         ))?);
+        let markdown_source = "# Reading notes\n\nA **strong** point with *emphasis* and `literal <code>`.\n\n## Steps\n\n1. Open the record\n2. Read the [linked page](/assets/ui-components.html#specimen-markdown)\n\n- First item\n  - Nested item\n- Second item\n\n> Keep the original source.\n\n```text\n<script>alert(1)</script> & literal code\n```\n";
+        let live_panels = Html::render(&crate::LivePanelStack {
+            parts: &[
+                Html::render(&Card {
+                    body: Html::text("Company details"),
+                    ..Card::default()
+                })?,
+                Html::render(&Card {
+                    body: Html::text("Departments"),
+                    ..Card::default()
+                })?,
+            ],
+            panel_ids: &["specimen-empty-panel"],
+        })?;
         Ok(Self {
+            markdown: Html::render(&crate::Markdown::new(markdown_source))?,
+            markdown_source: Field::named("markdown_source")
+                .label("Markdown source")
+                .kind(InputKind::Textarea)
+                .value(markdown_source),
+            markdown_unsafe: Html::render(&crate::Markdown::new(
+                "<script>alert(1)</script>\n\n<img src=\"https://example.invalid/pixel\" onerror=\"alert(1)\">\n\n[Unsafe](javascript:alert(1)) [Entity](java&#x73;cript:alert(1)) [Data](data:text/html,unsafe) [File](file:///etc/passwd) [Protocol relative](//example.invalid)\n\n![Remote image](https://example.invalid/pixel)\n\n[HTTPS](https://example.test) [Mail](mailto:help@example.test) [Fragment](#specimen-markdown)\n\n~~unsupported~~ | plain table syntax |",
+            ))?,
+            markdown_plain: Html::render(&crate::Markdown::new("Plain text remains readable.\nA second line with <literal> text & punctuation."))?,
             header_actions,
             related,
             card_titled,
             card_untitled,
             card_flat,
+            live_panels,
             header_title_actions,
             section_title_actions,
             section_actions,
+            row_actions,
             stats_linked: vec![
                 StatItem::number("People", 24),
                 StatItem::number("Active", 18),
@@ -590,6 +713,16 @@ impl ComponentsSpecimen {
             day_month: specimen_day_month()?,
             calendars: specimen_calendars()?,
             boards: specimen_boards()?,
+            softphones: [crate::CallPhase::Ringing, crate::CallPhase::Held, crate::CallPhase::Ended].into_iter().map(|phase| {
+                Html::render(&crate::Softphone {
+                    id: format!("specimen-phone-{}", phase.label().replace(' ', "-")),
+                    phase, health: crate::PhoneHealth::Unavailable("Connection lost.".into()),
+                    caller: "Example caller".into(),
+                    actions: vec![crate::SoftphoneAction::disabled(crate::CallAction::Answer, "Reconnect first.")],
+                    event: "softphone_action".into(), version: "1".into(), notice: None,
+                    screen_pop: Html::text("Example customer"),
+                })
+            }).collect::<askama::Result<Vec<_>>>()?,
             uploads: specimen_uploads(),
             location_secondary: LocationAction::new(
                 "specimen-location",
@@ -607,6 +740,26 @@ impl ComponentsSpecimen {
             )
             .value("clock_type", "out")
             .disabled(),
+            mail_frame: Html::render(&MailFrame::new(
+                "specimen-mail-frame",
+                "Received mail: Broken part, photo attached",
+                MAIL_SAMPLE,
+            ))?,
+            file_preview: Html::render(&FilePreview {
+                id: "specimen-file-preview",
+                src: "/assets/mail-frame.css",
+                title: "Preview of mail-frame.css",
+            })?,
+            brand: crate::Brand::default(),
+            own_brand: crate::Brand {
+                name: "Acme Trading".into(),
+                ..crate::Brand::default()
+            },
+            own_logo_brand: crate::Brand {
+                name: "Acme Trading".into(),
+                logo: Some(crate::Assets::url("/favicon.svg").to_string()),
+                ..crate::Brand::default()
+            },
         })
     }
 
@@ -1041,8 +1194,10 @@ fn specimen_uploads() -> Uploads {
         &mut ids,
     );
     // The first file is complete, the second a little over a third in.
-    let _ = uploads.append(1, 0, &[0; 3_200]);
-    let _ = uploads.append(2, 0, &[0; 700]);
+    // A specimen's bytes are a few kilobytes and counted nowhere else.
+    let budget = crate::UploadBudget::default();
+    let _ = uploads.append(1, 0, &[0; 3_200], &budget, u64::MAX);
+    let _ = uploads.append(2, 0, &[0; 700], &budget, u64::MAX);
     uploads.register(
         "scan",
         vec![
@@ -1157,6 +1312,7 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
             .movable("2"),
         CalendarItem::timed("m3", "Design review", at(25, 11, 0), at(25, 12, 30))
             .kind("Meeting", 1)
+            .urgency(Some(crate::calendar::Urgency::Overdue))
             .href("#review")
             .lane("amira"),
         CalendarItem::all_day("a1", "Stocktake", date(2026, 3, 26), date(2026, 3, 27))
@@ -1175,6 +1331,7 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
         .resizable(),
         CalendarItem::timed("d2", "Weekly planning", at(29, 14, 0), at(29, 15, 0))
             .kind("Meeting", 1)
+            .urgency(Some(crate::calendar::Urgency::Imminent))
             .lane("chen")
             .movable("1")
             .resizable(),
@@ -1202,6 +1359,7 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
         calendar.lanes = lanes.clone();
         calendar.items = items.clone();
         calendar.day_marks = marks.clone();
+        calendar.creatable = true;
         calendar
     };
     let mut refused = make(
@@ -1247,6 +1405,16 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
         make(
             "specimen-calendar-month",
             CalendarView::Month,
+            date(2026, 3, 25),
+        ),
+        make(
+            "specimen-calendar-agenda",
+            CalendarView::Agenda,
+            date(2026, 3, 25),
+        ),
+        make(
+            "specimen-calendar-year",
+            CalendarView::Year,
             date(2026, 3, 25),
         ),
         make(

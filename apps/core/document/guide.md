@@ -4,20 +4,32 @@ Use Documents to keep one business document with every revision and link it to t
 
 ## Find a document
 
-Use `core.document.list` to search by name or filter by category, type, status or related record. The results include only documents explicitly shared with you. A record link never gives you document access.
+Use `core.document.list` to search by name or exact integration sync ID or filter by category, type, status or related record. The results include only documents explicitly shared with you. A record link never gives you document access.
 
-Use `core.document.get` for one document, its revisions and its related records. Use the revision's `download_path` only when you have download permission.
+Use `core.document.get` for one document, its revisions and its related records. Use the revision's `download_path` only when you have download permission. A held internal revision has `scan_status` pending, quarantined, failed or unscanned and no download path; its file cannot be previewed or downloaded. The uploader and current managers receive notices when a scan holds or settles a file.
 
 ## Create and revise
 
 Use `core.document.create` for an internal file already stored through the Documents page, or for an external HTTPS link. Add later versions with `core.document.add_revision` and explain the change in `change_log`.
 
-Use `core.document.update` for the document's name, publication date, category, subcategory, type or status. Link and unlink work records with `core.document.link` and `core.document.unlink`.
+Use `core.document.update` for the document's name, publication date, category, subcategory, type, status, integration sync ID or document relation. The sync ID is unique within the tenant. A relation needs a document ID you can view and a kind (supersedes or replaces); clear both fields together. `core.document.add_revision` accepts an optional label and an earlier revision ID from the same document in replaces_revision_id. The revision IDs are returned by `core.document.get`. Link and unlink work records with `core.document.link` and `core.document.unlink`.
+
+## Favourites, duplicates, copy and merge
+
+Use `core.document.mark` to favourite or follow a document: marks are yours alone, `core.document.list` takes `mark` (`favourites` or `following`), and followers are notified of new revisions. Use `core.document.duplicates` to find documents you may see with the same file, link or name. Use `core.document.copy` for a new document with only the latest revision: a link copies directly; a file needs a clean latest revision and the Documents page's Copy action to store the file first. Use `core.document.merge` to fold duplicates into a survivor with each document's stored `version`: it needs merge, manage and share permission on every document, moves each duplicate's revisions after the survivor's latest, combines links, marks and access, and removes the duplicates. Wait for pending file scans on the survivor and every duplicate to settle before previewing or committing a merge.
 
 ## Share safely
 
-Use `core.document.access` to read the current explicit grants. Use `core.document.share` to give an active account view access, with optional download, manage or share permission. Use `core.document.unshare` with the grant ID to remove access; you cannot remove your own grant.
+Use `core.document.access` to read the current explicit grants. Use `core.document.share` to give an active account view access, with optional download, manage or share permission, `until` (the last day it works, UTC) and `email` (queue an email with a link that opens the document only for their account; it is audited and limited, and the result says `rate_limited` when a limit stopped it). Use `core.document.unshare` with the grant ID to remove access; you cannot remove your own grant.
+
+## Share with a portal customer
+
+Use `core.document.customer_share` to let a customer see a document that keeps a file on the portal and download its latest file once it is scanned clean. The `recipient` is a `person` record (one customer) or a `company` record (every business customer who signs in for that company), found with `base.records.search`; `until` is the last day (UTC) it works. Sharing again with the same customer replaces the end. It needs the same share permission as `core.document.share`. Use `core.document.customer_shares` to read who sees it, and `core.document.customer_unshare` with the share ID to stop: the document leaves the customer's portal at once. Customers never see links, grants, revisions or the filing company.
+
+## Expiry and custom fields
+
+Set `expires_on` in `core.document.create` or `core.document.update` (an empty string clears it): you get a reminder task through Core Activity, due the tenant's lead time before, and the list filters `expiry` (`expired` or `soon`). Tenant-defined custom fields travel as `custom` pairs on create and in `patch`: `{key, value}` with text (null clears), or `{key, values}` with the codes of a several-choices field (an empty list clears). A record field's value is the record's ID, found with `base.records.search`. `core.document.get` returns them with labels, types and, for a record field, its `target` kind; it never names the record, so use `base.records.resolve`.
 
 ## Delete
 
-Use `core.document.delete` with the document's current version. Documents checks every revision together. Retention or legal hold refuses the deletion and keeps the document with its complete revision history.
+Use `core.document.delete` with the document's current version. Documents checks every revision together. Retention or legal hold refuses the deletion, in the preview too, and keeps the document readable with its complete revision history; the refusal says which. To delete several, call it once per document and report which were removed and which were refused.

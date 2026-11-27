@@ -10,7 +10,7 @@
 {% if !success.is_empty() %}<div id="{{ id }}-success">{% call feedback::alert(kind=bilibi_ui::StatusKind::Success) %}{{ success }}{% endcall %}</div>{% endif %}
 {% if !error.is_empty() %}<div id="{{ id }}-error">{% call feedback::alert(kind=bilibi_ui::StatusKind::Error) %}{{ error }}{% endcall %}</div>{% endif %}
 {% if !fields.is_empty() %}
-<form id="{{ id }}-form" method="post" class="flex flex-col gap-4">
+<form id="{{ id }}-form" action="{{ action }}" method="post" class="flex flex-col gap-4">
 {% for field in fields %}{{ field }}{% endfor %}
 {% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="{}-submit"|format(id), class="w-full", button_type="submit", working=working) %}{{ submit }}{% endcall %}
 </form>

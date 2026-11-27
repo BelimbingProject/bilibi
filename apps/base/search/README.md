@@ -1,5 +1,9 @@
 # Search
 
+**Use it for:** making your records findable from the top-bar search, `/search` and agents.
+
+**Not for:** a search box or search index of your own.
+
 One search over the records of every mounted module, trimmed to what the person may open. The search box in the top bar, the `/search` page and agents all search through the operation `base.search.records` (ADR 01), so they find the same records. The decision is [ADR 06](../../../docs/architecture/decisions/06-query-time-record-search.md).
 
 ## Make a table searchable
@@ -21,22 +25,34 @@ One contribution and one migration in the module that owns the Grid table. The h
    ```rust
    static SEARCH: bilibi_search::Searchable =
        bilibi_search::Searchable::new("companies", "name", "search_vector", "/companies/{id}")
+           .title_trigrams()
            .subtitle(&["code", "legal_name"])
            .state("status", &["archived"])
            .updated("updated_at");
    bilibi_search::contribute!("core/company", "company.search", &SEARCH);
    ```
 
+To add title matches for typos and parts of words, use `.title_trigrams()` and index the protected title in the module's migration. Reuse the index if the list already has one on the same expression. When the Grid source always excludes soft-deleted rows, you can use the same predicate on the index.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX companies_name_trgm
+    ON companies USING gin (lower(name) gin_trgm_ops)
+    WHERE deleted_at IS NULL;
+```
+
 | Part | Rule |
 | --- | --- |
 | `table` | A Grid table the contributing module owns; its id is the kind's id, its label the kind's name |
 | `title` | Shown and protected (the label field usually) |
+| `.title_trigrams()` | Matches the protected text title by substring and close spelling. Requires a GIN index using `lower(title)` and `gin_trgm_ops` |
 | `subtitle` | Up to two fields; one the reader's role restricts is left out, one it masks shows only its partial value |
 | `vector` | The hidden Grid field holding the `tsvector` |
 | `prefix` | Up to four text fields that also match when they start with the query (a personal email or phone). A restrictable one takes part only for a reader no held role restricts or masks, as the Contacts search does |
 | `link` | A GET page route of the record, with `{id}` for the key. A hit is offered only to a reader that route admits |
-| `state` | A protected field and the values that mean "no longer current". Such records stay findable, ranked after current ones and marked |
+| `state` | A protected field and the values that mean "no longer current". Such records stay findable and marked, and rank after current records in the same match tier |
 | `updated` | A date or time the results page shows |
+| `.custom(field)` | The hidden Grid field holding a stored generated `tsvector` of the row's tenant custom values (`jsonb_to_tsvector('simple', custom_fields, '["string"]')`, GIN-indexed). The full query matches the built-in vector combined with the tenant's active text fields (text, long text, link, phone, email; [Custom Fields](../custom_fields/README.md#reports-lists-and-search)): both GIN indexes select candidates by any positive normalized term or any lexeme of the accepted plain-text alternative, and the combined vector applies every required word, phrase and exclusion, so an archived field, a code or a yes/no never matches. Its words rank lowest (weight D) |
 | `.off()` | Not searched until an operator turns the kind on |
 
 Discovery refuses a malformed declaration and a second one for the same table. Boot refuses an unknown table, a table of another module, a field the table does not declare or of the wrong kind, and a link that is no page route or is public.
@@ -45,9 +61,10 @@ Discovery refuses a malformed declaration and a second one for the same table. B
 
 - **Who may search.** Capability `base.search.records.list`, which Authz's built-in roles hold (Core Administrator holds everything). A tenant grants it to its own roles. The search box shows records only to a person holding it; it searches pages for everyone.
 - **What is searched.** A fresh Grid catalog for the scope keeps the tables the reader may read; a kind also needs its record page to admit the reader, the operator's settings to have it on and the person not to have hidden it. A direct deny or a revoked role takes a kind away on the next keystroke. There is no cache of grants.
-- **One statement.** Each kind matches and ranks inside its owner's Grid source with the scope's tenant and user bound, so tenant, soft delete and company filters apply with the match. The branches merge by rank, then group by kind (see Ranking). The read is read-only and repeatable-read, with Grid's statement and lock timeouts and an estimated-cost check before it runs.
-- **Matching.** The first 200 characters and 8 words count. Words are runs of letters and digits, lower-cased and bound; what a person typed never becomes `tsquery` syntax. Each word matches the start of a word (`acm` finds Acme) and every word must match; `"a phrase"` matches in order and `-word` leaves records with it out. `%`, quotes and `&|!:*` are literal and never error.
-- **Ranking.** `ts_rank_cd` (the title weighs most, as the owner's `setweight` says) times the kind's boost, then newer first by the table's time field; records that are no longer current come after current ones. The search box and results pages keep each kind's hits together, the kinds in the order of their best hit; on a results page a kind's group continues on the next page.
+- **One statement.** Each kind matches and ranks inside its owner's Grid source with the scope's tenant, user and selected company bound, so tenant, soft delete and company filters apply with the match. The branches merge by rank, then group by kind (see Ranking). The read is read-only and repeatable-read, with Grid's statement and lock timeouts and an estimated-cost check before it runs.
+- **Matching.** The first 200 characters and 8 words count. Words are runs of letters and digits, lower-cased and bound; what a person typed never becomes `tsquery` syntax. Each word matches the start of a word (`acm` finds Acme) and every word must match; `"a phrase"` matches in order and `-word` leaves records with it out. `%`, quotes and `&|!:*` are literal and never error. A plain lookup (no phrase, no `-word`) also matches the whole text as PostgreSQL's parser reads it (`plainto_tsquery`), the same way the stored vector was built, so a name or code kept as one token with its punctuation is found when typed in full: `Amazon.com`, `abc-123`, `PO-2024-001`, `acme/west`. Owners with their own word search reuse `bilibi_search::terms` (`Terms::query` and `Terms::plain`).
+- **Title matches.** For a kind with `.title_trigrams()`, a plain lookup with at least three letters or digits can match a literal part of the title or a close spelling. Every query word must match for a close spelling. For example, `custmer` finds Customer Services and `stom` finds Customer Services. Quoted phrases and exclusions use the full-text rules.
+- **Ranking.** An exact title comes first, followed by full-text and field-prefix matches, then title substrings and close spellings. Within each tier, current records come first. Full-text matches use `ts_rank_cd` and the owner's field weights, and close spellings use trigram similarity. The kind's boost multiplies the score, then newer records break ties. Results keep each kind's hits together and order the kinds by their best hit. On a results page a kind's group can continue on the next page.
 - **Fresh.** The vector is a generated column of the owner's row, so a record is findable as soon as its write commits. There is no index to keep in step.
 - **Bounded.** A query that matches too many records to rank within the bounds returns no hits and asks for another word. Results pages count up to 500 matches per kind ("500+").
 - **Private.** Query text is not stored or logged, and audit records no search event. Each search logs two capability decisions: the contract's, then the owner's own.
@@ -75,7 +92,7 @@ The operator edits the first four on System Settings, for every tenant (Global),
 
 ## Not in this phase
 
-Typo tolerance and matching inside a word (`pg_trgm`), scripts written without spaces, stemming per language, synonyms, highlighted snippets, facets beyond kind, saved searches and alerts, usage reports, semantic search and any external engine. Advanced list filters belong to `ListState`.
+Typo tolerance and matching inside a word for kinds that do not opt in with `.title_trigrams()`, and for text other than the title; scripts written without spaces, stemming per language, synonyms, highlighted snippets, facets beyond kind, saved searches and alerts, usage reports, semantic search and any external engine. Advanced list filters belong to `ListState`.
 
 ## Runtime checks
 

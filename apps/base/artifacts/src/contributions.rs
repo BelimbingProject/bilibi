@@ -21,6 +21,7 @@ inventory::submit! { Contribution::new(VOCABULARY,"base/artifacts",provenance!()
     capabilities:&[CapabilityDefinition::platform(MANAGE),CapabilityDefinition::tenant(PURGE)], domains:&["artifacts"],verbs:&["purge"],roles:&[],
     system_principals:&[SystemPrincipalDefinition { name: SWEEPER, capabilities: &[PURGE] }],
 }) }
+inventory::submit! { Contribution::new(bilibi_module_registry::contributions::CREDENTIAL_PATHS, "base/artifacts.pdf-render", provenance!(), &bilibi_module_registry::contributions::CredentialPath { path: crate::RENDER_ROUTE }) }
 // Purging expired documents is Platform housekeeping no tenant should have to
 // switch on (`Artifacts::sweep_expired`); a tenant may still deny it, and its
 // expired bytes then wait for the next purge a person in it triggers.
@@ -150,7 +151,17 @@ setting!(
     Some(1.0),
     Some(600.0),
     "PDF render timeout (seconds)",
-    "Maximum runtime of one Chromium render."
+    "Maximum runtime of one Chromium render, counted from when the browser has started."
+);
+setting!(
+    "pdf.launch_timeout_seconds",
+    Integer,
+    json!(60),
+    false,
+    Some(1.0),
+    Some(600.0),
+    "PDF browser start timeout (seconds)",
+    "Maximum time Chromium may take to start and answer before a render begins; a first start after a restart or on a slow disk can take tens of seconds."
 );
 setting!("pdf.render_origin",String,json!(""),false,None,None,Some(Validator { accepts: |value| value.as_str().is_some_and(valid_origin), message: "must be empty or an http(s) origin with a host name or IPv4 address, no path" }),"PDF render origin","Application origin reachable from Chromium; signed render requests must reach the issuing node.");
 setting!(

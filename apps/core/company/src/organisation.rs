@@ -10,8 +10,8 @@ use bilibi_authz::{authorize_key, authorize_proof, decide_proof, holds_proof, re
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_party_ids::OrganisationId;
 use bilibi_tenancy::{
-    NamedOrganisation, OrganisationDirectory, OrganisationProvider, ProofClient, ProofFuture,
-    ReadClient, Scope,
+    NamedOrganisation, OrganisationDirectory, OrganisationProvider, OrganisationSearch,
+    ProofClient, ProofFuture, ReadClient, Scope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -104,7 +104,7 @@ pub async fn require_live(client: &impl GenericClient, scope: &Scope, id: i64) -
 /// compatible with Queue's `FOR KEY SHARE` workplace proof while still
 /// excluding company updates, archival and deletion.
 pub async fn require_writable(
-    client: &impl GenericClient,
+    client: &dyn ProofClient,
     scope: &Scope,
     id: i64,
     lock: bool,
@@ -113,7 +113,7 @@ pub async fn require_writable(
 }
 /// [`require_writable`] for a system principal with no account scope.
 pub async fn require_writable_in(
-    client: &impl GenericClient,
+    client: &dyn ProofClient,
     tenant: i64,
     id: i64,
     lock: bool,
@@ -128,7 +128,7 @@ pub async fn require_writable_in(
     let row = client
         .query_opt(&sql, &[&tenant, &id])
         .await
-        .map_err(Error::from)?
+        .map_err(WriteError::Access)?
         .ok_or(WriteError::NotFound)?;
     if row.get::<_, String>(0) == ARCHIVED {
         return Err(WriteError::Archived);
@@ -207,17 +207,49 @@ fn named(row: &tokio_postgres::Row) -> Result<NamedOrganisation> {
         archived,
     })
 }
+/// The live companies of the tenant, or only those among `ids`, without the
+/// archived ones when `unarchived`; the filter runs in SQL.
 async fn named_in_scope(
     client: &dyn ProofClient,
     scope: &Scope,
     ids: Option<Vec<i64>>,
+    unarchived: bool,
 ) -> Result<Vec<NamedOrganisation>> {
+    named_matching(client, scope, ids, unarchived, None).await
+}
+/// `named_in_scope` narrowed by a picker's search: the text and the limit
+/// apply in SQL, so the answer never holds more than `limit` companies.
+async fn named_matching(
+    client: &dyn ProofClient,
+    scope: &Scope,
+    ids: Option<Vec<i64>>,
+    unarchived: bool,
+    search: Option<OrganisationSearch<'_>>,
+) -> Result<Vec<NamedOrganisation>> {
+    let ids = match search.and_then(|search| search.among) {
+        Some(among) => {
+            let among: Vec<i64> = among.iter().map(|id| id.get()).collect();
+            Some(match ids {
+                Some(ids) => among.into_iter().filter(|id| ids.contains(id)).collect(),
+                None => among,
+            })
+        }
+        None => ids,
+    };
+    let pattern = search
+        .map(|search| search.text.trim())
+        .filter(|text| !text.is_empty())
+        .map(|text| format!("%{}%", escape_like(text)));
+    let limit = search.map(|search| i64::try_from(search.limit).unwrap_or(i64::MAX));
     // The proof connection answers one row; a tenant's companies arrive as
     // one JSON array of tenant-scoped rows, never as client input.
     let rows: serde_json::Value = client
         .query_opt(
-            "SELECT COALESCE(json_agg(json_build_object('id',id,'name',name,'legal_name',legal_name,'status',status) ORDER BY id),'[]'::json) FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND ($2::bigint[] IS NULL OR id=ANY($2))",
-            &[&scope.tenant(), &ids],
+            "SELECT COALESCE(json_agg(json_build_object('id',id,'name',name,'legal_name',legal_name,'status',status) ORDER BY id),'[]'::json) FROM (\
+             SELECT id,name,legal_name,status FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND ($2::bigint[] IS NULL OR id=ANY($2)) AND NOT ($3 AND status=$4) \
+             AND ($5::text IS NULL OR name ILIKE $5 OR legal_name ILIKE $5 OR code ILIKE $5) \
+             ORDER BY lower(CASE WHEN btrim(coalesce(legal_name,''))<>'' THEN legal_name ELSE name END),id LIMIT $6) c",
+            &[&scope.tenant(), &ids, &unarchived, &ARCHIVED, &pattern, &limit],
         )
         .await?
         .map(|row| row.get(0))
@@ -247,26 +279,34 @@ async fn named_in_scope(
     companies.sort_by_cached_key(|company| (company.name.to_lowercase(), company.id.get()));
     Ok(companies)
 }
-/// Whether `scope` may work in company `id` right now: a live, unarchived
-/// company of its own tenant with an explicit desk. This is the fact
-/// Tenancy asks for a session's chosen company (`Scope::current_company`) and the
-/// test the switch applies before storing a choice. It grants nothing: an
-/// operational owner still uses `authorize_work_target` with its own
-/// capability, while company-record administration uses `authorize_target`.
-/// A missing, cross-tenant or archived company is `false`,
-/// never an error, so a stale choice selects another valid desk.
+/// Whether `scope` may work in company `id` right now: a live company of its
+/// own tenant with an explicit desk. An archived company stays reachable for
+/// the people whose desks it kept, so its records stay readable for audit and
+/// retention; every write into it is refused by [`require_writable`]. This is
+/// the fact Tenancy asks for a session's chosen company
+/// (`Scope::current_company`) and the test the switch applies before storing
+/// a choice. It grants nothing: an operational owner still uses
+/// `authorize_work_target` with its own capability, while company-record
+/// administration uses `authorize_target`. A missing or cross-tenant company
+/// is `false`, never an error, so a stale choice selects another valid desk.
 pub async fn reachable(
     client: &dyn ProofClient,
     scope: &Scope,
     id: OrganisationId,
 ) -> Result<bool> {
-    let live = client
-        .query_opt(
-            "SELECT status FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR KEY SHARE",
-            &[&scope.tenant(), &id.get()],
-        )
+    let mode = client
+        .query_opt("SHOW transaction_read_only", &[])
         .await?
-        .is_some_and(|row| row.get::<_, String>(0) != ARCHIVED);
+        .ok_or(Error::Internal)?;
+    let sql = if mode.get::<_, &str>(0) == "on" {
+        "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL"
+    } else {
+        "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR KEY SHARE"
+    };
+    let live = client
+        .query_opt(sql, &[&scope.tenant(), &id.get()])
+        .await?
+        .is_some();
     if !live {
         return Ok(false);
     }
@@ -300,13 +340,28 @@ impl OrganisationDirectory for Directory {
         client: &'a dyn ProofClient,
         scope: &'a Scope,
     ) -> ProofFuture<'a, Vec<NamedOrganisation>> {
-        Box::pin(named_in_scope(client, scope, None))
+        Box::pin(named_in_scope(client, scope, None, false))
+    }
+    fn named<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        ids: &'a [OrganisationId],
+    ) -> ProofFuture<'a, Vec<NamedOrganisation>> {
+        Box::pin(async move {
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let ids = ids.iter().map(|id| id.get()).collect();
+            named_in_scope(client, scope, Some(ids), false).await
+        })
     }
     fn selectable<'a>(
         &'a self,
         client: &'a dyn ProofClient,
         scope: &'a Scope,
         capability: &'a str,
+        search: OrganisationSearch<'a>,
     ) -> ProofFuture<'a, Vec<NamedOrganisation>> {
         Box::pin(async move {
             if !decide_proof(client, scope, capability).await?.allowed {
@@ -314,15 +369,26 @@ impl OrganisationDirectory for Directory {
             }
             let tenant_wide = scope.principal().is_some()
                 || decide_proof(client, scope, TENANT_WIDE).await?.allowed;
-            Ok(named_in_scope(client, scope, None)
-                .await?
-                .into_iter()
-                .filter(|company| {
-                    !company.archived
-                        && (tenant_wide || reaches_without_tenant_wide(scope, company.id.get()))
-                })
-                .collect())
+            // Without the tenant-wide reach only the current company is
+            // selectable, so only it is read.
+            let ids = if tenant_wide {
+                None
+            } else {
+                match scope.current_company() {
+                    Some(company) => Some(vec![company.get()]),
+                    None => return Ok(Vec::new()),
+                }
+            };
+            named_matching(client, scope, ids, true, Some(search)).await
         })
+    }
+    fn find<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        search: OrganisationSearch<'a>,
+    ) -> ProofFuture<'a, Vec<NamedOrganisation>> {
+        Box::pin(named_matching(client, scope, None, true, Some(search)))
     }
     fn target<'a>(
         &'a self,
@@ -391,11 +457,8 @@ impl OrganisationDirectory for Directory {
                 .into_iter()
                 .map(OrganisationId::get)
                 .collect();
-            Ok(named_in_scope(client, scope, Some(ids))
-                .await?
-                .into_iter()
-                .filter(|company| !company.archived)
-                .collect())
+            // Archived desks stay listed, flagged, so their records can be read.
+            named_in_scope(client, scope, Some(ids), false).await
         })
     }
 }
@@ -908,9 +971,11 @@ pub async fn preview_create_with_fields(
     Ok(Ok(CreatePreview { company, matches }))
 }
 
-/// One bounded page of the administration index: search over name, code, legal name, email
-/// and jurisdiction, skipping a restricted column, with each row's parent
-/// name and whether it is the tenant's primary company.
+/// One page of companies: search words over name, code and legal name
+/// through the indexed `search_vector`, with each row's parent name and
+/// whether it is the tenant's primary company. The caller sets the
+/// statement bounds of its connection (`core.company.list` reads under
+/// Grid's `BOUNDS`).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SearchQuery {
@@ -953,20 +1018,30 @@ pub async fn search(
     }
     authorize_key(client, scope, crate::contributions::LIST).await?;
     let masked = restrictions(client, scope).await?;
-    let columns = ["name", "code", "legal_name", "email", "jurisdiction"]
-        .into_iter()
-        .filter(|column| !masked.contains(*column))
-        .map(|column| format!("c.{column} ILIKE $3"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    let pattern = format!("%{}%", escape_like(query.search.trim()));
+    // Words match through the indexed `search_vector` (name, code, legal
+    // name; none of them restrictable) as Base Search reads them: each word
+    // as a word prefix, all required, and a plain lookup also as PostgreSQL
+    // parses the whole text, so `amazon.com` or `po-2024-001` is found.
+    let terms = bilibi_search::terms(&query.search);
+    let (words, plain) = (terms.query, terms.plain);
+    if words.is_none() && !query.search.trim().is_empty() {
+        return Ok(SearchPage {
+            entries: Vec::new(),
+            total: 0,
+        });
+    }
     let filter = format!(
-        "c.tenant_id=$1 AND c.deleted_at IS NULL AND ($2='' OR c.status=$2) AND ($3='%%' OR {columns})"
+        "c.tenant_id=$1 AND c.deleted_at IS NULL AND ($2='' OR c.status=$2) AND {}",
+        match (&words, &plain) {
+            (Some(_), Some(_)) => "c.search_vector @@ (to_tsquery('simple', $3::text) || plainto_tsquery('simple', $4::text))",
+            (Some(_), None) => "c.search_vector @@ to_tsquery('simple', $3::text) AND $4::text IS NULL",
+            (None, _) => "$3::text IS NULL AND $4::text IS NULL",
+        }
     );
     let total: i64 = client
         .query_one(
             &format!("SELECT count(*) FROM companies c WHERE {filter}"),
-            &[&scope.tenant(), &query.status, &pattern],
+            &[&scope.tenant(), &query.status, &words, &plain],
         )
         .await?
         .get(0);
@@ -977,14 +1052,23 @@ pub async fn search(
         .map(|column| format!("c.{column}"))
         .collect::<Vec<_>>()
         .join(",");
-    let sql = format!("SELECT {columns},p.name AS parent_name,(t.company_id IS NOT NULL) AS is_primary FROM companies c LEFT JOIN companies p ON p.tenant_id=c.tenant_id AND p.id=c.parent_id AND p.deleted_at IS NULL LEFT JOIN tenant_primary_companies t ON t.tenant_id=c.tenant_id AND t.company_id=c.id WHERE {filter} ORDER BY c.name, c.id LIMIT $4 OFFSET $5");
+    // With words, page from the indexed matches: ordered by name with a
+    // limit, PostgreSQL would otherwise walk the tenant's name index and test
+    // every company against the words until the page fills.
+    let page = if words.is_some() {
+        format!("WITH matched AS MATERIALIZED (SELECT c.id, c.name FROM companies c WHERE {filter}), page AS (SELECT id FROM matched ORDER BY name, id LIMIT $5 OFFSET $6) SELECT {columns} FROM page JOIN companies c ON c.tenant_id=$1 AND c.id=page.id")
+    } else {
+        format!("SELECT {columns} FROM companies c WHERE {filter} ORDER BY c.name, c.id LIMIT $5 OFFSET $6")
+    };
+    let sql = format!("SELECT {columns},p.name AS parent_name,(t.company_id IS NOT NULL) AS is_primary FROM ({page}) c LEFT JOIN companies p ON p.tenant_id=c.tenant_id AND p.id=c.parent_id AND p.deleted_at IS NULL LEFT JOIN tenant_primary_companies t ON t.tenant_id=c.tenant_id AND t.company_id=c.id ORDER BY c.name, c.id");
     let entries = client
         .query(
             &sql,
             &[
                 &scope.tenant(),
                 &query.status,
-                &pattern,
+                &words,
+                &plain,
                 &query.page_size,
                 &((query.page - 1) * query.page_size),
             ],

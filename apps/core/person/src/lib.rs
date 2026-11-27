@@ -1,11 +1,14 @@
 //! Core identities and personal contacts. No HR or implicit account creation.
 mod agent_operations;
+mod contact_lookup;
 mod contributions;
+mod custom;
 mod directory;
 mod files;
 mod identity;
 mod identity_directory;
 mod model;
+mod portal;
 mod privacy;
 mod records;
 mod step_up;
@@ -13,19 +16,26 @@ mod web;
 
 use bilibi_database::{Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_tenancy::{Authentication, Scope};
+pub use contact_lookup::{ContactAddress, ContactMatches};
 pub use contributions::{CAPS, CREATE, LIST, RETIRE, SYSTEM_MANAGE, UPDATE, VIEW};
 pub use files::{PersonFiles, ARTIFACT_OWNER, ATTACHMENT_SUBJECT, FILES};
-// Other owners' transactions: a person read, searched, previewed or created
-// on the caller's connection, and the account binder's locks and standing.
+// Other owners' transactions: a person read, searched, previewed, created or
+// updated on the caller's connection, and the account binder's locks and standing.
 pub use identity::{
     account_standing, create as create_person, create_with_code as create_person_with_code,
-    lock_for_account_binding, preview as preview_person,
+    hold_account_person, hold_account_standing, lock_for_account_binding,
+    preview as preview_person, preview_update as preview_update_person,
     preview_with_code as preview_person_with_code, read as read_person, search as search_persons,
-    BindingIdentity,
+    update as update_person, BindingIdentity,
 };
 pub use model::{
-    validate as validate_person, CreatePreview, DuplicateQuery, FieldError, Page, Person, PersonId,
-    PersonInput, PersonKind, Search, Update,
+    validate as validate_person, CreatePreview, Custom, CustomFieldError, CustomFilter,
+    DuplicateQuery, FieldError, Page, Person, PersonId, PersonInput, PersonKind, Search, Update,
+    CUSTOM_FILTERS_MAX,
+};
+pub use portal::{
+    PortalChoice, PortalField, PortalPerson, PortalUpdate, PORTAL, PORTAL_EDITABLE_KEY,
+    PORTAL_VISIBLE_KEY,
 };
 use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;
@@ -37,6 +47,9 @@ pub enum WriteError {
     Backend(#[from] Error),
     #[error("Invalid contact fields")]
     Validation(Vec<FieldError>),
+    /// Custom field values the tenant's definitions refuse, on `cf_<key>`.
+    #[error("Invalid custom field values")]
+    CustomFields(Vec<CustomFieldError>),
     #[error("This identity is retired")]
     Retired,
     #[error("The platform system identity is protected")]
@@ -60,6 +73,9 @@ pub struct PersonService {
     db: Db,
     mutations: Arc<MutationBoundary>,
     authentication: Arc<Authentication>,
+    settings: Arc<bilibi_settings::Settings>,
+    picklists: Arc<bilibi_picklists::PickLists>,
+    bulk: Arc<bilibi_bulk_data::BulkData>,
 }
 impl PersonService {
     pub fn subscribe(&self) -> broadcast::Receiver<PersonChanged> {
@@ -72,7 +88,7 @@ impl PersonService {
     /// HTTP adapters still validate their durable session on every request.
     async fn fresh(
         &self,
-        client: &(impl tokio_postgres::GenericClient + Sync),
+        client: &dyn bilibi_tenancy::ProofClient,
         scope: &Scope,
     ) -> Result<Scope> {
         // Keeps the impersonator and agent facet the edge sealed.
@@ -90,8 +106,19 @@ impl PersonService {
     }
     pub async fn duplicates(&self, scope: &Scope, query: &DuplicateQuery) -> Result<Vec<Person>> {
         let client = self.db.get().await?;
-        let scope = self.fresh(&**client, scope).await?;
-        identity::duplicates(&**client, &scope, query).await
+        self.duplicates_on(&**client, scope, query).await
+    }
+    /// Find duplicate candidates on the caller's connection or transaction.
+    /// Re-proves the sealed scope on that client and retains the owner policy.
+    /// Sees earlier uncommitted writes; reserves nothing and commits nothing.
+    pub async fn duplicates_on(
+        &self,
+        client: &dyn bilibi_tenancy::ReadClient,
+        scope: &Scope,
+        query: &DuplicateQuery,
+    ) -> Result<Vec<Person>> {
+        let scope = self.fresh(client, scope).await?;
+        identity::duplicates(client, &scope, query).await
     }
     pub async fn create(
         &self,
@@ -188,12 +215,17 @@ impl PersonService {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "core/person", layer: bilibi_module_registry::Layer::Core,
-        dependencies: &["base/audit", "base/database", "base/tenancy", "base/authz", "base/grid", "base/search", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale", "base/media", "base/artifacts", "base/step_up", "base/records", "base/bulk_data", "base/personal_data", "base/privacy", "base/settings", "base/system", "core/party"],
+        dependencies: &["base/audit", "base/database", "base/tenancy", "base/authz", "base/grid", "base/search", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale", "base/media", "base/artifacts", "base/step_up", "base/records", "base/bulk_data", "base/personal_data", "base/privacy", "base/settings", "base/system", "base/custom_fields", "base/picklists", "core/party"],
         migrations: &[
             ("001-core-person", include_str!("../migrations/001-person.sql")),
             ("core-person-002-search", include_str!("../migrations/002-search.sql")),
             ("core-person-003-code", include_str!("../migrations/003-code.sql")),
             ("core-person-004-erasure", include_str!("../migrations/004-erasure.sql")),
+            ("core-person-005-contact-lookup", include_str!("../migrations/005-contact-lookup.sql")),
+            ("core-person-006-custom-fields", include_str!("../migrations/006-custom-fields.sql")),
+            ("core-person-007-code-suffix", include_str!("../migrations/007-code-suffix.sql")),
+            ("core-person-008-search-trigram", include_str!("../migrations/008-search-trigram.sql")),
+            ("core-person-009-custom-search", include_str!("../migrations/009-custom-search.sql")),
         ],
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let parties = services.get::<bilibi_tenancy::PartyProofs>("base/tenancy.parties")?;
@@ -206,9 +238,11 @@ inventory::submit! {
             directory.bind("core/person", Arc::new(directory::Provider(bilibi_principal_directory::PrincipalKind::Agent)))?;
             CHANGES.set(broadcast::channel(128).0).map_err(|_| bilibi_module_registry::RegistryError::Service("duplicate person change sender".into()))?;
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
-            agent_operations::bind(db.clone())?;
+            custom::bind(services.get(bilibi_custom_fields::SERVICE)?)?;
             step_up::bind(services.get(bilibi_step_up::SERVICE)?)?;
-            Ok(Arc::new(PersonService { db, mutations: services.get("base/database.mutations")?, authentication: services.get("base/tenancy.authentication")? }))
+            let persons = Arc::new(PersonService { db, mutations: services.get("base/database.mutations")?, authentication: services.get("base/tenancy.authentication")?, settings: services.get("base/settings.store")?, picklists: services.get(bilibi_picklists::SERVICE)?, bulk: services.get(bilibi_bulk_data::SERVICE)? });
+            agent_operations::bind(persons.clone())?;
+            Ok(persons)
         }}, bilibi_module_registry::Service { id: web::SERVICE, factory: |services| {
             Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages {
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(),

@@ -60,6 +60,15 @@ codes! {
     }
 }
 codes! {
+    /// A guest's answer to an invitation.
+    Response {
+        NoResponse => "none", "No answer",
+        Accepted => "accepted", "Accepted",
+        Declined => "declined", "Declined",
+        Tentative => "tentative", "Tentative",
+    }
+}
+codes! {
     /// Which way a call went.
     Direction {
         Inbound => "inbound", "Inbound",
@@ -104,7 +113,9 @@ impl Kind {
             Self::Note => None,
         }
     }
-    fn timed(self) -> bool {
+    /// Calls and meetings: they have a start and an end, guests may be
+    /// invited to them and they can overlap.
+    pub fn timed(self) -> bool {
         matches!(self, Self::Call | Self::Meeting)
     }
 }
@@ -118,14 +129,19 @@ impl Status {
     }
 }
 
-/// Someone invited who has no account: a Core person, or an email address
-/// (a lead with no Core person yet). `related` marks the address of the
-/// record the activity is about, which lead conversion replaces with the new
-/// person.
+/// Someone invited: a colleague's account, a Core person, or an email
+/// address (a lead with no Core person yet). `related` marks the address of
+/// the record the activity is about, which lead conversion replaces with the
+/// new person.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Guest {
+    /// An active account of the tenant: told and reminded in the bell.
+    User(i64),
     Person(PersonId),
-    Address { email: String, related: bool },
+    Address {
+        email: String,
+        related: bool,
+    },
 }
 
 /// How a logged call ended: held, or planned for later.
@@ -148,6 +164,15 @@ pub struct Common {
     pub guests: Vec<Guest>,
     pub description: Option<String>,
     pub internal_notes: Option<String>,
+    /// Minutes before it starts or is due to remind at (up to five); `None`
+    /// follows the creator's default, then the tenant's, an empty list asks
+    /// for no reminder.
+    pub reminder_minutes: Option<Vec<i32>>,
+    /// Whether each reminder is also emailed; `None` follows the creator's
+    /// default, then the tenant's.
+    pub reminder_email: Option<bool>,
+    /// The tag codes it carries (`core.activity.tags`).
+    pub tags: Vec<String>,
 }
 
 /// `create_task`.
@@ -171,6 +196,21 @@ pub struct CallInput {
     pub direction: Direction,
 }
 
+/// `create_meeting`. A held meeting has ended: `ends_at` is not in the
+/// future.
+#[derive(Clone, Debug)]
+pub struct MeetingInput {
+    pub common: Common,
+    pub starts_at: Timestamp,
+    pub ends_at: Timestamp,
+    /// Where it takes place, up to 255 characters.
+    pub location: Option<String>,
+    /// An `https://` or `http://` link to join it, up to 2,000 characters.
+    pub join_url: Option<String>,
+    /// Plain text up to 100 characters (a pick-list later).
+    pub meeting_type: Option<String>,
+}
+
 /// A note: a title and its text, about a record.
 #[derive(Clone, Debug, Default)]
 pub struct NoteInput {
@@ -190,11 +230,19 @@ pub struct Patch {
     pub due_at: Option<Option<Timestamp>>,
     pub start_at: Option<Option<Timestamp>>,
     pub outcome: Option<Option<String>>,
+    pub location: Option<Option<String>>,
+    pub join_url: Option<Option<String>>,
+    pub meeting_type: Option<Option<String>>,
     pub description: Option<Option<String>>,
     pub internal_notes: Option<Option<String>>,
     pub related: Option<Option<Reference>>,
     pub shared: Option<bool>,
     pub assignee: Option<i64>,
+    /// `Some(None)` goes back to the default.
+    pub reminder_minutes: Option<Option<Vec<i32>>>,
+    pub reminder_email: Option<Option<bool>>,
+    /// The whole tag set when given: an empty list clears every tag.
+    pub tags: Option<Vec<String>>,
 }
 impl Patch {
     pub fn is_empty(&self) -> bool {
@@ -207,11 +255,17 @@ impl Patch {
             && self.due_at.is_none()
             && self.start_at.is_none()
             && self.outcome.is_none()
+            && self.location.is_none()
+            && self.join_url.is_none()
+            && self.meeting_type.is_none()
             && self.description.is_none()
             && self.internal_notes.is_none()
             && self.related.is_none()
             && self.shared.is_none()
             && self.assignee.is_none()
+            && self.reminder_minutes.is_none()
+            && self.reminder_email.is_none()
+            && self.tags.is_none()
     }
 }
 
@@ -232,6 +286,19 @@ impl FieldError {
 
 /// At most this many guests per activity.
 pub const MAX_GUESTS: usize = 50;
+/// At most this many tags per activity.
+pub const MAX_TAGS: usize = 20;
+/// At most this many reminders per activity, and how far ahead the earliest
+/// may be (one week).
+pub const MAX_REMINDERS: usize = 5;
+pub const MAX_REMINDER_MINUTES: i32 = 10_080;
+
+/// Reminder offsets as they are kept: the furthest ahead first, each once.
+pub(crate) fn offsets(mut minutes: Vec<i32>) -> Vec<i32> {
+    minutes.sort_unstable_by(|a, b| b.cmp(a));
+    minutes.dedup();
+    minutes
+}
 
 /// An activity's values before it is saved: a reviewed create, the unsaved
 /// copy Close and create new returns, or an activity's values before and
@@ -248,6 +315,9 @@ pub struct Draft {
     pub due_at: Option<Timestamp>,
     pub start_at: Option<Timestamp>,
     pub outcome: Option<String>,
+    pub location: Option<String>,
+    pub join_url: Option<String>,
+    pub meeting_type: Option<String>,
     pub description: Option<String>,
     pub internal_notes: Option<String>,
     pub related: Option<Reference>,
@@ -255,6 +325,11 @@ pub struct Draft {
     /// The creator when `None`.
     pub assignee: Option<i64>,
     pub guests: Vec<Guest>,
+    /// See [`Common::reminder_minutes`].
+    pub reminder_minutes: Option<Vec<i32>>,
+    pub reminder_email: Option<bool>,
+    /// The tag codes it carries (`core.activity.tags`).
+    pub tags: Vec<String>,
 }
 impl Draft {
     /// An empty draft of `kind` in its opening status (medium priority for
@@ -271,23 +346,32 @@ impl Draft {
             due_at: None,
             start_at: None,
             outcome: None,
+            location: None,
+            join_url: None,
+            meeting_type: None,
             description: None,
             internal_notes: None,
             related: None,
             shared: false,
             assignee: None,
             guests: Vec::new(),
+            reminder_minutes: None,
+            reminder_email: None,
+            tags: Vec::new(),
         }
     }
     fn common(kind: Kind, common: &Common) -> Self {
         Self {
             title: common.title.trim().to_owned(),
-            description: clean(common.description.as_deref()),
-            internal_notes: clean(common.internal_notes.as_deref()),
+            description: bilibi_ui::params::blank_to_none(common.description.as_deref()),
+            internal_notes: bilibi_ui::params::blank_to_none(common.internal_notes.as_deref()),
             related: common.related.clone(),
             shared: common.shared,
             assignee: common.assignee,
             guests: common.guests.clone(),
+            reminder_minutes: common.reminder_minutes.clone().map(offsets),
+            reminder_email: common.reminder_email,
+            tags: common.tags.clone(),
             ..Self::new(kind)
         }
     }
@@ -307,22 +391,24 @@ impl Draft {
                 CallStatus::Held => Status::Held,
                 CallStatus::Planned => Status::Scheduled,
             }),
-            outcome: clean(input.outcome.as_deref()),
+            outcome: bilibi_ui::params::blank_to_none(input.outcome.as_deref()),
             direction: Some(input.direction),
             ..Self::common(Kind::Call, &input.common)
+        }
+    }
+    pub fn meeting(input: &MeetingInput) -> Self {
+        Self {
+            starts_at: Some(input.starts_at),
+            ends_at: Some(input.ends_at),
+            location: bilibi_ui::params::blank_to_none(input.location.as_deref()),
+            join_url: bilibi_ui::params::blank_to_none(input.join_url.as_deref()),
+            meeting_type: bilibi_ui::params::blank_to_none(input.meeting_type.as_deref()),
+            ..Self::common(Kind::Meeting, &input.common)
         }
     }
     pub fn note(input: &NoteInput) -> Self {
         Self::common(Kind::Note, &input.common)
     }
-}
-
-/// Trimmed text, or `None` when blank.
-pub(crate) fn clean(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_owned)
 }
 
 fn text(errors: &mut Vec<FieldError>, field: &'static str, value: &Option<String>, max: usize) {
@@ -410,11 +496,32 @@ pub(crate) fn check(values: &Draft) -> Vec<FieldError> {
             }
         }
     }
-    errors.extend(held_call_ended(kind, values.status, values.ends_at));
+    errors.extend(held_ended(kind, values.status, values.ends_at));
     if kind != Kind::Call && values.outcome.is_some() {
         errors.push(FieldError::new("outcome", "is only for calls"));
     }
     text(&mut errors, "outcome", &values.outcome, 100);
+    for (field, value, max) in [
+        ("location", &values.location, 255),
+        ("join_url", &values.join_url, 2000),
+        ("meeting_type", &values.meeting_type, 100),
+    ] {
+        if kind != Kind::Meeting && value.is_some() {
+            errors.push(FieldError::new(field, "is only for meetings"));
+        }
+        text(&mut errors, field, value, max);
+    }
+    if let Some(url) = &values.join_url {
+        let scheme = url.get(..8).map(str::to_ascii_lowercase);
+        let link = scheme.as_deref() == Some("https://")
+            || url.get(..7).map(str::to_ascii_lowercase).as_deref() == Some("http://");
+        if !link || url.chars().any(char::is_whitespace) {
+            errors.push(FieldError::new(
+                "join_url",
+                "must be a link that starts with https:// or http://",
+            ));
+        }
+    }
     text(&mut errors, "description", &values.description, 10_000);
     text(
         &mut errors,
@@ -431,6 +538,39 @@ pub(crate) fn check(values: &Draft) -> Vec<FieldError> {
     if values.assignee.is_none_or(|id| id <= 0) {
         errors.push(FieldError::new("assignee", "can't be blank"));
     }
+    if let Some(minutes) = &values.reminder_minutes {
+        if kind == Kind::Note {
+            errors.push(FieldError::new(
+                "reminder_minutes",
+                "is not for notes, which nobody is reminded of",
+            ));
+        } else if minutes.len() > MAX_REMINDERS {
+            errors.push(FieldError::new(
+                "reminder_minutes",
+                format!("must name at most {MAX_REMINDERS} reminders"),
+            ));
+        } else if minutes
+            .iter()
+            .any(|m| !(0..=MAX_REMINDER_MINUTES).contains(m))
+        {
+            errors.push(FieldError::new(
+                "reminder_minutes",
+                format!("must be between 0 and {MAX_REMINDER_MINUTES} minutes (one week) before"),
+            ));
+        }
+    }
+    if values.reminder_email.is_some() && kind == Kind::Note {
+        errors.push(FieldError::new(
+            "reminder_email",
+            "is not for notes, which nobody is reminded of",
+        ));
+    }
+    if values.tags.len() > MAX_TAGS {
+        errors.push(FieldError::new(
+            "tags",
+            format!("must name at most {MAX_TAGS} tags"),
+        ));
+    }
     if values.guests.len() > MAX_GUESTS {
         errors.push(FieldError::new(
             "guests",
@@ -438,6 +578,11 @@ pub(crate) fn check(values: &Draft) -> Vec<FieldError> {
         ));
     }
     for guest in &values.guests {
+        if let Guest::User(user) = guest {
+            if *user <= 0 {
+                errors.push(FieldError::new("guests", "must name an account by its id"));
+            }
+        }
         if let Guest::Address { email, .. } = guest {
             if !email_shape(email) {
                 errors.push(FieldError::new(
@@ -450,19 +595,28 @@ pub(crate) fn check(values: &Draft) -> Vec<FieldError> {
     errors
 }
 
-/// A held call has ended: every write that leaves a call held (a create, an
-/// update, Close) refuses an end in the future. Five minutes' grace covers a
-/// call logged as it ends and a clock that runs ahead.
-pub(crate) fn held_call_ended(
+/// A held call or meeting has ended: every write that leaves one held (a
+/// create, an update, Close) refuses an end in the future, so its timeline
+/// line is never written before it happened. Five minutes' grace covers one
+/// logged as it ends and a clock that runs ahead.
+pub(crate) fn held_ended(
     kind: Kind,
     status: Option<Status>,
     ends_at: Option<Timestamp>,
 ) -> Option<FieldError> {
     let grace = jiff::SignedDuration::from_mins(5);
-    (kind == Kind::Call
+    (kind.timed()
         && status == Some(Status::Held)
         && ends_at.is_some_and(|ends| ends > Timestamp::now() + grace))
-    .then(|| FieldError::new("ends_at", "must not be in the future for a held call"))
+    .then(|| {
+        FieldError::new(
+            "ends_at",
+            format!(
+                "must not be in the future for a held {}",
+                kind.label().to_lowercase()
+            ),
+        )
+    })
 }
 
 /// The shape of an email address a guest may be invited by.
@@ -509,13 +663,22 @@ pub(crate) fn patched(before: &Draft, patch: &Patch) -> Draft {
         after.start_at = start;
     }
     if let Some(outcome) = &patch.outcome {
-        after.outcome = clean(outcome.as_deref());
+        after.outcome = bilibi_ui::params::blank_to_none(outcome.as_deref());
+    }
+    if let Some(location) = &patch.location {
+        after.location = bilibi_ui::params::blank_to_none(location.as_deref());
+    }
+    if let Some(url) = &patch.join_url {
+        after.join_url = bilibi_ui::params::blank_to_none(url.as_deref());
+    }
+    if let Some(meeting_type) = &patch.meeting_type {
+        after.meeting_type = bilibi_ui::params::blank_to_none(meeting_type.as_deref());
     }
     if let Some(description) = &patch.description {
-        after.description = clean(description.as_deref());
+        after.description = bilibi_ui::params::blank_to_none(description.as_deref());
     }
     if let Some(notes) = &patch.internal_notes {
-        after.internal_notes = clean(notes.as_deref());
+        after.internal_notes = bilibi_ui::params::blank_to_none(notes.as_deref());
     }
     if let Some(related) = &patch.related {
         after.related = related.clone();
@@ -529,6 +692,15 @@ pub(crate) fn patched(before: &Draft, patch: &Patch) -> Draft {
     }
     if let Some(assignee) = patch.assignee {
         after.assignee = Some(assignee);
+    }
+    if let Some(minutes) = &patch.reminder_minutes {
+        after.reminder_minutes = minutes.clone().map(offsets);
+    }
+    if let Some(email) = patch.reminder_email {
+        after.reminder_email = email;
+    }
+    if let Some(tags) = &patch.tags {
+        after.tags = tags.clone();
     }
     after
 }

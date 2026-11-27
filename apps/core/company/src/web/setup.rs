@@ -150,13 +150,14 @@ impl Setup {
         for (name, label, kind, maxlength) in FIELDS {
             let id = format!("platform-operator-{}", name.replace('_', "-"));
             if masked.contains(name) {
-                fields.push(render(&RestrictedField::new(
-                    format!("{id}-restricted"),
-                    label,
-                ))?);
+                fields.push(render(
+                    &RestrictedField::new(format!("{id}-restricted"), label)
+                        .grid_field(format!("companies.{name}")),
+                )?);
                 continue;
             }
             let mut field = Field::named(name)
+                .grid_field(format!("companies.{name}"))
                 .id(id)
                 .kind(kind)
                 .label(label)

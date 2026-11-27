@@ -68,6 +68,21 @@ pub(super) struct Index {
     /// The field a bulk update sets while its dialog is open, and why the
     /// last try was refused.
     bulk: Option<(bilibi_bulk_data::Field, Option<String>)>,
+    /// The tenant's custom fields the list offers as columns, sorts and
+    /// filters, as last read.
+    definitions: Vec<bilibi_custom_fields::Definition>,
+}
+/// The tenant's custom fields the list offers (the first of them).
+async fn offered(pages: &Pages, scope: &Scope) -> Result<Vec<bilibi_custom_fields::Definition>> {
+    let mut definitions = super::custom::active(pages, scope).await?;
+    definitions.truncate(super::custom::LIST_MAX);
+    Ok(definitions)
+}
+/// The list's spec with these custom fields' sorts and filters.
+fn spec(definitions: &[bilibi_custom_fields::Definition]) -> Result<Arc<ListSpec>> {
+    super::custom::spec(&SPEC, definitions)
+        .shared()
+        .map_err(|_| Error::Internal)
 }
 /// The contact fields withheld from this reader: restricted and not masked. A
 /// masked contact keeps its column and shows its partial value.
@@ -84,9 +99,15 @@ async fn withheld(
 }
 // Contact columns with discovered work details. Identity
 // filters and URL sorts remain the approved Person model's additional controls.
-fn columns(pages: &Pages, masked: &std::collections::HashSet<String>) -> Result<PageColumns> {
+// The tenant's custom fields are columns a person adds from the picker
+// (`cf_<key>`), each sortable; none is shown by default.
+fn columns(
+    views: Arc<bilibi_grid::PageViews>,
+    masked: &std::collections::HashSet<String>,
+    definitions: &[bilibi_custom_fields::Definition],
+) -> Result<PageColumns> {
     PageColumns::mount(
-        pages.views.clone(),
+        views,
         "persons",
         [
             BuiltinColumn::new("name", "Name").sortable("name"),
@@ -96,6 +117,15 @@ fn columns(pages: &Pages, masked: &std::collections::HashSet<String>) -> Result<
         ]
         .into_iter()
         .filter(|column| !masked.contains(&column.id))
+        .chain(definitions.iter().map(|definition| {
+            let name = crate::custom::name(&definition.key);
+            let column = BuiltinColumn::new(&name, &definition.label);
+            if crate::custom::sortable(definition.kind) {
+                column.sortable(&name)
+            } else {
+                column
+            }
+        }))
         .collect(),
     )
     .map(|columns| {
@@ -120,13 +150,15 @@ impl Index {
     ) -> Result<Self> {
         let client = pages.db.get().await?;
         let masked = withheld(&client, scope).await?;
-        let mut columns = columns(&pages, &masked)?;
+        drop(client);
+        let definitions = offered(&pages, scope).await?;
+        let mut columns = columns(pages.views.clone(), &masked, &definitions)?;
         columns.from_params(scope, query).await?;
         let open = query.get("new").map(String::as_str) == Some("1")
             && pages.allowed(scope, CREATE).await?;
         Ok(Self {
             pages,
-            list: ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?,
+            list: ListState::parse(query, spec(&definitions)?).map_err(|_| Error::Internal)?,
             columns,
             masked,
             framed,
@@ -139,14 +171,30 @@ impl Index {
             },
             page_keys: Vec::new(),
             bulk: None,
+            definitions,
         })
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
-        let client = self.pages.db.get().await?;
-        let masked = withheld(&client, scope).await?;
-        if masked != self.masked {
+        self.columns.refresh_views(scope).await?;
+        // Each read below takes its own pooled connection; none is held
+        // across another, so many open lists cannot exhaust the pool.
+        let masked = {
+            let client = self.pages.db.get().await?;
+            withheld(&client, scope).await?
+        };
+        // A field added, archived or renamed while the page is open: its
+        // column, sort and filters follow, and a sort or filter on a field
+        // the list no longer offers is dropped.
+        let definitions = offered(&self.pages, scope).await?;
+        let fields_changed = definitions != self.definitions;
+        if fields_changed {
+            self.list = ListState::parse(&self.list.to_params(), spec(&definitions)?)
+                .map_err(|_| Error::Internal)?;
+            self.definitions = definitions;
+        }
+        if masked != self.masked || fields_changed {
             let query = self.columns.params();
-            self.columns = columns(&self.pages, &masked)?;
+            self.columns = columns(self.pages.views.clone(), &masked, &self.definitions)?;
             self.columns.from_params(scope, &query).await?;
             self.masked = masked;
         }
@@ -174,11 +222,13 @@ impl Index {
         let mut actions = Html::EMPTY;
         // What the person may do in bulk, from one look at their grants and
         // the restrictions this page already read.
-        let offers = self
-            .pages
-            .bulk
-            .offers(&**client, scope, EXPORT_TYPE, &self.masked)
-            .await?;
+        let offers = {
+            let client = self.pages.db.get().await?;
+            self.pages
+                .bulk
+                .offers(&**client, scope, EXPORT_TYPE, &self.masked)
+                .await?
+        };
         let (may_export, bulk_fields) = (offers.export, offers.fields);
         if may_export {
             actions.push(&render(Button {
@@ -213,9 +263,13 @@ impl Index {
             })?);
         }
         let form = self.list.filters_form();
+        let (_, custom_errors) = super::custom::conditions(&self.list.filters, &self.definitions);
+        let custom_controls =
+            super::custom::controls(&self.pages, scope, &self.definitions, &form, &custom_errors)
+                .await?;
         body.push(&render(FilterToolbar::new(
             "persons-filters",
-            vec![
+            [
                 ToolbarControl::search(
                     "persons-search",
                     "search",
@@ -233,7 +287,8 @@ impl Index {
                         ("Human only", "human"),
                         ("Agent only", "agent"),
                     ]),
-                ),
+                )
+                .grid_field("persons.kind"),
                 ToolbarControl::select(
                     "persons-retired",
                     "retired",
@@ -241,11 +296,39 @@ impl Index {
                     &form["retired"],
                     choices(&[("Current identities", "active"), ("Include retired", "all")]),
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(custom_controls)
+            .collect(),
         ))?);
         // Where a contact may go from here (issue 265): rows become draggable
-        // and offer "Add to…" only when a page the person may use accepts one.
+        // and offer "Non-local actions" only when a page the person may use accepts one.
         let add_to = self.pages.records.add_to(scope, PERSON_KIND).await?;
+        // Only the custom fields whose column is on screen are read and
+        // drawn, with the display settings this render already resolved.
+        let on_screen: Vec<_> = self
+            .definitions
+            .iter()
+            .filter(|definition| {
+                let name = crate::custom::name(&definition.key);
+                self.columns.columns.iter().any(|column| column.id == name)
+            })
+            .collect();
+        // Every record the on-screen record columns hold is named in one call.
+        let names = super::custom::Names::read(
+            scope,
+            &on_screen,
+            page.entries.iter().map(|person| &person.custom),
+        )
+        .await?;
+        let shown = super::custom::Shown {
+            pages: &self.pages,
+            scope,
+            display: &display,
+            names: &names,
+            framed: self.framed,
+        };
+        let cells = super::custom::cells(&shown, &on_screen, &page.entries).await?;
         let mut rows = self.columns.rows.clone();
         for row in &mut rows {
             let Some(person) = page
@@ -260,7 +343,7 @@ impl Index {
                 row.record = Some((PERSON_KIND.into(), row.key.clone()));
                 row.actions = render(bilibi_ui::AddToMenu::new(
                     format!("person-{}-add-to", person.id.get()),
-                    format!("Add {} to…", person.name),
+                    person.name.clone(),
                     add_to
                         .iter()
                         .map(|target| bilibi_ui::AddToItem {
@@ -291,6 +374,14 @@ impl Index {
                         .insert(key.into(), Html::text(value.as_deref().unwrap_or("—")));
                 }
             }
+            for definition in &on_screen {
+                let name = crate::custom::name(&definition.key);
+                let cell = cells
+                    .get(&(person.id.get(), name.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| Html::text("—"));
+                row.slots.insert(name, cell);
+            }
         }
         self.page_keys = rows.iter().map(|row| row.key.clone()).collect();
         let mut table = self
@@ -314,7 +405,7 @@ impl Index {
                     .collect();
                 bar.push(&render(bilibi_ui::AddToMenu::new(
                     "persons-add-to-selected",
-                    "Add the selected contacts to…",
+                    "the selected contacts",
                     add_to
                         .iter()
                         .map(|target| {
@@ -465,8 +556,14 @@ impl Index {
             include_retired: list.filters["retired"] == "all",
             page: list.page as i64,
             page_size: list.page_size as i64,
-            sort: list.sort_by.clone().unwrap_or_else(|| "name".into()),
+            // A custom sort the list no longer offers falls back to the name.
+            sort: list
+                .sort_by
+                .clone()
+                .filter(|sort| list.spec().sortable.contains_key(sort))
+                .unwrap_or_else(|| "name".into()),
             descending: list.sort_dir == Some(SortDir::Desc),
+            custom: super::custom::conditions(&list.filters, &self.definitions).0,
         }
     }
 
@@ -490,17 +587,25 @@ impl Index {
     }
 
     /// Starts a CSV export of the list as filtered (or of the ticked
-    /// contacts), with the columns shown, through
+    /// contacts), with the shown non-custom columns, through
     /// `base.bulk_data.export.start`, and opens it.
     async fn export(&mut self, scope: &Scope, credential: &str, event: &str) -> Result<LiveBody> {
+        let custom_shown = self
+            .columns
+            .columns
+            .iter()
+            .any(|column| column.spec.starts_with("cf_"));
         let mut input = json!({
             "record_type": EXPORT_TYPE,
             // The columns on screen: the person's arrangement or the defaults.
+            // This page omits custom columns from list exports; custom filters
+            // still choose the contacts. Reports offer the custom columns.
             "columns": self
                 .columns
                 .columns
                 .iter()
                 .map(|column| column.spec.clone())
+                .filter(|spec| !spec.starts_with("cf_"))
                 .collect::<Vec<_>>(),
         });
         if event == "export_selected" {
@@ -521,7 +626,12 @@ impl Index {
                         redirect: Some(format!("/exports/{id}")),
                         flash: Some((
                             bilibi_ui::StatusKind::Success,
-                            "Export started. You get a notice when the file is ready.".into(),
+                            if custom_shown {
+                                "Export started without the custom field columns, which a file cannot hold yet. You get a notice when the file is ready."
+                            } else {
+                                "Export started. You get a notice when the file is ready."
+                            }
+                            .into(),
                         )),
                         ..LiveBody::default()
                     });
@@ -584,7 +694,7 @@ impl Index {
             bilibi_bulk_data::Kind::Integer | bilibi_bulk_data::Kind::Number => {
                 control.kind(InputKind::Number)
             }
-            bilibi_bulk_data::Kind::Text => control,
+            bilibi_bulk_data::Kind::Text | bilibi_bulk_data::Kind::Custom(_) => control,
         };
         let which = if self.selection.all_matching && !self.selection.excluded.is_empty() {
             format!("{count} of the {matching} contacts the filters match")
@@ -644,10 +754,12 @@ impl Index {
         let Some((field, _)) = &self.bulk else {
             return self.view(scope).await;
         };
-        let text = bilibi_ui::params::form_values(value, "bulk")
-            .get("value")
-            .cloned()
-            .unwrap_or_default();
+        let text =
+            bilibi_ui::params::form_values_checked(value, "bulk", bilibi_ui::params::FIELD_LIMIT)
+                .map_err(Error::refused)?
+                .get("value")
+                .cloned()
+                .unwrap_or_default();
         let mut input = json!({"record_type": EXPORT_TYPE, "field": field.name, "value": text});
         if !self.chosen(&mut input) {
             self.bulk = None;
@@ -711,8 +823,8 @@ impl LiveState<Scope, Error> for Index {
             match request.input {
                 LiveInput::Refresh => {}
                 LiveInput::Params(query) => {
-                    self.list =
-                        ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?;
+                    self.list = ListState::parse(query, spec(&self.definitions)?)
+                        .map_err(|_| Error::Internal)?;
                     self.columns.from_params(request.scope, query).await?;
                     if query.get("new").map(String::as_str) == Some("1")
                         && self.draft.is_none()
@@ -739,8 +851,21 @@ impl LiveState<Scope, Error> for Index {
                         self.list.next_sort(value["sort"].as_str().unwrap_or(""));
                     }
                     "grid" => {
-                        if let Outcome::Sort(key) =
-                            self.columns.handle(request.scope, &values(value)).await?
+                        let query = self.list.to_params();
+                        if let Outcome::Sort(key) = self
+                            .columns
+                            .handle(
+                                request.scope,
+                                &PageColumns::event_values(value)?,
+                                bilibi_grid::ViewCaller {
+                                    contracts: &self.pages.contracts,
+                                    credential: request.credential,
+                                    service: super::SERVICE,
+                                    event: "grid",
+                                    query,
+                                },
+                            )
+                            .await?
                         {
                             self.list.next_sort(&key);
                         }
@@ -778,7 +903,7 @@ impl LiveState<Scope, Error> for Index {
                     "bulk_update" => {
                         return self
                             .bulk_update(request.scope, request.credential, value)
-                            .await
+                            .await;
                     }
                     "close_modal" => self.draft = None,
                     "validate" | "create" => {
@@ -808,6 +933,13 @@ impl LiveState<Scope, Error> for Index {
                         }
                     }
                     "clear-flash" => {}
+                    // A record field's picker in the new-contact dialog.
+                    other @ (super::custom::PICK_EVENT | super::custom::CLEAR_EVENT) => {
+                        let pages = self.pages.clone();
+                        if let Some(draft) = &mut self.draft {
+                            draft.pick(&pages, request.scope, other, value).await?;
+                        }
+                    }
                     _ => return Err(Error::Invalid),
                 },
             }
@@ -818,3 +950,47 @@ impl LiveState<Scope, Error> for Index {
         })
     }
 }
+
+fn agent_filter_details<'a>(
+    client: &'a tokio_postgres::Client,
+    scope: &'a Scope,
+) -> bilibi_grid::PageDetailsFuture<'a> {
+    Box::pin(async move {
+        let definitions = crate::custom::fields()?
+            .active(client, scope, crate::custom::RECORD_TYPE)
+            .await?;
+        Ok(definitions.iter().take(super::custom::LIST_MAX).flat_map(|field| {
+            super::custom::filter_keys(field).into_iter().map(move |(key, operator)| json!({"key":key,"type":"string","label":field.label,"operator":operator}))
+        }).collect())
+    })
+}
+
+fn agent_columns<'a>(
+    client: &'a tokio_postgres::Client,
+    scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(async move {
+        let masked = withheld(client, scope).await?;
+        let definitions = crate::custom::fields()?
+            .active(client, scope, crate::custom::RECORD_TYPE)
+            .await?;
+        columns(
+            views,
+            &masked,
+            &definitions[..definitions.len().min(super::custom::LIST_MAX)],
+        )
+    })
+}
+
+bilibi_grid::contribute_page_metadata!(
+    "core/person",
+    "core/person.grid-page",
+    "persons",
+    None,
+    crate::contributions::LIST,
+    Some(|| SPEC.clone()),
+    &[],
+    Some(agent_filter_details),
+    agent_columns
+);

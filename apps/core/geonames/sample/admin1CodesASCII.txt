@@ -1,6 +1,6 @@
 FR.11	Île-de-France	Ile-de-France	3012874
 ID.04	Jakarta	Jakarta	1642907
-JP.27	Ōsaka	Osaka	1853904
+JP.32	Ōsaka	Osaka	1853904
 JP.40	Tōkyō	Tokyo	1850144
 MY.01	Johor	Johor	1733049
 MY.09	Penang	Penang	1733047

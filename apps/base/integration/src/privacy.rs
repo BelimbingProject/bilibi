@@ -32,11 +32,12 @@ static PREVIEWS: Previews = Previews;
 impl Handler for Previews {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let (emails, phones) = subject.patterns();
             if emails.is_empty() && phones.is_empty() {
                 return Ok(Located::default());
@@ -146,7 +147,7 @@ impl Handler for Previews {
                 .iter()
                 .map(|row| row.get(0))
                 .collect();
-            let held = holds.records(grant, KIND, &rows).await?;
+            let held = holds.records(tx.sql(), grant, KIND, &rows).await?;
             let mut erase = Vec::new();
             for id in rows {
                 match held.get(&id) {

@@ -1,7 +1,4 @@
-//! The one bounded read: tenant staff accounts with their live desks and
-//! visible roles, filtered, counted, ordered and paged in one PostgreSQL
-//! statement. Every physical
-//! source is named here and nowhere else in this crate; nothing is written.
+//! Bounded, filtered and paged tenant staff accounts.
 use super::{Entry, Membership, Options, Page, Role, Sort};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
@@ -35,18 +32,23 @@ fn escape_like(text: &str) -> String {
 
 const STATEMENT: &str = "WITH filtered_users AS (
   SELECT u.id,u.name,COALESCE(i.email,v.email) AS email,u.created_at,
-    CASE WHEN u.status='invited' THEN 'invited' WHEN i.home_tenant_id=u.tenant_id THEN 'home' ELSE 'outside' END AS membership,
+    u.status AS membership,
     v.id AS invitation_id,
-    (SELECT string_agg(c.name,', ' ORDER BY c.name) FROM user_desks d JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id WHERE d.tenant_id=u.tenant_id AND d.person_id=u.person_id AND c.deleted_at IS NULL AND c.status <> 'archived') AS desks
+    CASE WHEN eligibility.can_reset THEN (SELECT max(r.requested_at) FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id AND r.closed_at IS NULL) END AS reset_requested_at,
+    EXISTS(SELECT 1 FROM user_two_factor f WHERE f.identity_id=u.identity_id AND f.confirmed_at IS NOT NULL) AS two_factor_enabled,
+    eligibility.can_reset,
+    (SELECT string_agg(c.name || CASE WHEN c.status='archived' THEN ' (archived)' ELSE '' END,', ' ORDER BY c.name) FROM user_desks d JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id WHERE d.tenant_id=u.tenant_id AND d.person_id=u.person_id AND c.deleted_at IS NULL) AS desks
   FROM users u
   LEFT JOIN user_identities i ON i.id = u.identity_id AND i.status = 'active' AND i.deleted_at IS NULL
   LEFT JOIN user_invitations v ON v.tenant_id=u.tenant_id AND v.user_id=u.id AND v.accepted_at IS NULL AND v.revoked_at IS NULL
+  CROSS JOIN LATERAL (SELECT ($9::bool AND u.id<>$10 AND u.identity_id IS NOT NULL AND ($11::bool OR (NOT {owner_only} AND NOT u.id=ANY($12::bigint[])))) AS can_reset) eligibility
   WHERE u.tenant_id = $1 AND u.kind = 'staff' AND u.deleted_at IS NULL
     AND ((u.status IN ('active','disabled') AND i.id IS NOT NULL) OR (u.status='invited' AND u.identity_id IS NULL AND v.id IS NOT NULL))
     AND ($2::text IS NULL OR u.name ILIKE $2 OR COALESCE(i.email,v.email) ILIKE $2)
     AND (cardinality($3::bigint[]) = 0 OR EXISTS (
       SELECT 1 FROM effective_principal_roles pr WHERE pr.tenant_id = u.tenant_id AND pr.user_id = u.id AND pr.role_id = ANY($3)))
-    AND ($7::text IS NULL OR CASE WHEN u.status='invited' THEN 'invited' WHEN i.home_tenant_id=u.tenant_id THEN 'home' ELSE 'outside' END=$7)
+    AND ($7::text IS NULL OR u.status=$7)
+    AND (NOT $8::bool OR (eligibility.can_reset AND EXISTS(SELECT 1 FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id AND r.closed_at IS NULL)))
 ), user_total AS (
   SELECT count(*) AS total FROM filtered_users
 ), page_users AS (
@@ -64,7 +66,7 @@ const STATEMENT: &str = "WITH filtered_users AS (
   GROUP BY pr.user_id
 )
 SELECT t.total, p.id, p.name, p.email, p.created_at, p.desks,
-       p.membership,p.invitation_id,
+       p.membership,p.invitation_id,p.reset_requested_at,p.two_factor_enabled,p.can_reset,
        g.role_ids, g.role_names, g.role_codes, g.role_system
 FROM user_total t
 LEFT JOIN page_users p ON true
@@ -77,7 +79,7 @@ ORDER BY {final_order}";
 /// rule `bilibi_authz::roles::list` applies). An out-of-range page keeps the
 /// real total.
 pub async fn list(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     companies: &[i64],
     options: &Options,
@@ -91,7 +93,16 @@ pub async fn list(
     let offset = i64::try_from((options.page - 1).saturating_mul(options.page_size))
         .map_err(|_| Error::Invalid)?;
     let membership = options.membership.map(Membership::database_value);
-    let params: [&(dyn ToSql + Sync); 7] = [
+    let recovery = crate::two_factor::recovery::CAPABILITY;
+    let can_reset = scope.impersonator().is_none()
+        && bilibi_authz::decide(client, scope, recovery).await?.allowed;
+    let owner = can_reset && crate::two_factor::recovery::installation_owner(client, scope).await?;
+    let administrators = if can_reset && !owner {
+        crate::two_factor::recovery::administrators(client, tenant).await?
+    } else {
+        Vec::new()
+    };
+    let params: [&(dyn ToSql + Sync); 12] = [
         &tenant,
         &pattern,
         &options.role_ids,
@@ -99,8 +110,14 @@ pub async fn list(
         &offset,
         &companies,
         &membership,
+        &(options.reset_requested && can_reset),
+        &can_reset,
+        &scope.user(),
+        &owner,
+        &administrators,
     ];
     let statement = STATEMENT
+        .replace("{owner_only}", crate::two_factor::recovery::OWNER_ONLY)
         .replacen("{order}", &order(options.sort, options.descending, ""), 1)
         .replacen(
             "{final_order}",
@@ -117,12 +134,12 @@ pub async fn list(
         let Some(id) = row.get::<_, Option<i64>>(1) else {
             continue;
         };
-        let roles = match row.get::<_, Option<Vec<i64>>>(8) {
+        let roles = match row.get::<_, Option<Vec<i64>>>(11) {
             None => Vec::new(),
             Some(ids) => {
-                let names: Vec<String> = row.get(9);
-                let codes: Vec<Option<String>> = row.get(10);
-                let system: Vec<bool> = row.get(11);
+                let names: Vec<String> = row.get(12);
+                let codes: Vec<Option<String>> = row.get(13);
+                let system: Vec<bool> = row.get(14);
                 ids.into_iter()
                     .zip(names)
                     .zip(codes)
@@ -143,17 +160,53 @@ pub async fn list(
             created_at: row.get(4),
             desks: row.get(5),
             roles,
-            membership: match row.get::<_, &str>(6) {
-                "home" => Membership::Home,
-                "outside" => Membership::Outside,
-                "invited" => Membership::Invited,
-                _ => return Err(Error::Internal),
-            },
+            membership: Membership::parse(row.get(6)).ok_or(Error::Internal)?,
             invitation: row.get(7),
+            reset_requested_at: row.get(8),
+            two_factor_enabled: row.get(9),
+            can_reset: row.get(10),
         });
     }
     Ok(Page {
         entries,
         total_entries: u64::try_from(total).unwrap_or_default(),
     })
+}
+
+pub(super) async fn recovery_entry(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    tenant: i64,
+    user: i64,
+) -> Result<Option<Entry>> {
+    bilibi_tenancy::prove_owner(client, scope).await?;
+    let actor_identity = crate::sign_in_identity::id(client, scope.tenant(), scope.user()).await?;
+    client
+        .query_opt(
+            "SELECT u.id,u.name,i.email,u.created_at,u.status,\
+             (SELECT company_name FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id AND r.closed_at IS NULL ORDER BY r.requested_at DESC LIMIT 1),\
+             (SELECT max(requested_at) FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id AND r.closed_at IS NULL),\
+             EXISTS(SELECT 1 FROM user_two_factor f WHERE f.identity_id=u.identity_id AND f.confirmed_at IS NOT NULL)\
+             FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL\
+             WHERE u.tenant_id=$1 AND u.id=$2 AND u.kind='staff' AND u.deleted_at IS NULL AND u.identity_id<>$3\
+               AND EXISTS(SELECT 1 FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id AND r.closed_at IS NULL)",
+            &[&tenant, &user, &actor_identity],
+        )
+        .await?
+        .map(|row| {
+            Ok(Entry {
+                id: row.get(0),
+                name: row.get(1),
+                email: row.get(2),
+                created_at: row.get(3),
+                membership: Membership::parse(row.get(4)).ok_or(Error::Internal)?,
+                desks: row.get(5),
+                roles: Vec::new(),
+                invitation: None,
+                reset_requested_at: row.get(6),
+                two_factor_enabled: row.get(7),
+                can_reset: true,
+            })
+        })
+        .transpose()
 }

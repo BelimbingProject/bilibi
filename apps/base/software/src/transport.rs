@@ -20,6 +20,9 @@ pub const RELEASE_FILES: [&str; 6] = [
     "release.json",
     "bundle.json",
 ];
+/// The local record of the proof that admitted an archive. It is written
+/// after verification, never trusted from the archive itself.
+pub const ADMISSION_FILE: &str = "admission.json";
 /// Add-ons that travel with the release live here, inside the folder.
 pub const PLUGINS_DIR: &str = "plugins";
 /// The add-ons the release switches on, a list of `{id, name, publisher,
@@ -31,6 +34,9 @@ pub const MAX_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
 /// Prefixes of the folders under `incoming/`.
 pub const JOB_PREFIX: &str = "job-";
 pub const UPLOAD_PREFIX: &str = "upload-";
+/// Job-specific markers watched by `bilibi-installer@.path`. The application
+/// writes one only after the database job is ready for the privileged worker.
+const INSTALLER_JOBS_DIR: &str = "installer-jobs";
 
 /// The instance folder this program serves (`BILIBI_INSTANCE_DIR`, from the
 /// instance's `env` file): where its releases are kept, and where a release
@@ -77,6 +83,48 @@ impl Paths {
     }
     pub fn incoming_folder(&self, name: &str) -> PathBuf {
         self.incoming().join(name)
+    }
+    /// The directory prepared by `install-server.sh` for systemd path
+    /// activation. It is deliberately below `incoming/`, the one filesystem
+    /// boundary shared by the application and its installer.
+    pub fn installer_jobs(&self) -> PathBuf {
+        self.incoming().join(INSTALLER_JOBS_DIR)
+    }
+    /// Refuse a queue write when server setup has not prepared the activation
+    /// directory. Creating it here would give it the application's private
+    /// ownership instead of the shared instance group.
+    pub fn require_installer_activation(&self) -> Result<(), String> {
+        let dir = self.installer_jobs();
+        if dir.is_dir() {
+            return Ok(());
+        }
+        Err(format!(
+            "This server has no installer activation folder ({}). Run `sudo scripts/install-server.sh installer {} <bilibi-installer> --tag <setup-tag>` with the verified installer asset, then ask again.",
+            dir.display(),
+            self.name
+        ))
+    }
+    /// Notify systemd that database job `job` is ready. A distinct marker per
+    /// job makes a queue/idle race harmless: the installer removes only the
+    /// markers it observed before its final idle scan.
+    pub fn wake_installer(&self, job: i64) -> Result<(), String> {
+        if job <= 0 {
+            return Err("The installer job number is invalid.".into());
+        }
+        self.require_installer_activation()?;
+        let marker = self.installer_jobs().join(format!("job-{job}.ready"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(format!(
+                "The installer could not be activated ({}: {error}).",
+                marker.display()
+            )),
+        }
     }
     /// The release in service: `current` resolves to `releases/<n>`.
     pub fn current(&self) -> Option<u64> {
@@ -153,6 +201,7 @@ pub fn folder_facts(dir: &Path) -> Value {
     };
     let recipe = read_json("release.json");
     let bundle = read_json("bundle.json");
+    let admission = read_json(ADMISSION_FILE);
     let bytes = fs::metadata(dir.join("bilibi-web"))
         .map(|meta| meta.len())
         .unwrap_or(0);
@@ -171,6 +220,7 @@ pub fn folder_facts(dir: &Path) -> Value {
         "from": bundle["from"].clone(),
         "program": recipe["status"].as_str().and_then(|s| s.lines().next()).map(|s| s.chars().take(200).collect::<String>()),
         "plugins": plugins,
+        "proof": admission,
     })
 }
 
@@ -235,7 +285,7 @@ fn unpack_into(reader: impl Read, into: &Path) -> Result<Unpacked, String> {
             _ => {
                 return Err(format!(
                     "The release file holds {name} as something other than a plain file. Download it again from the source."
-                ))
+                ));
             }
         }
         total += entry.size();
@@ -357,68 +407,44 @@ pub fn sha256_of(path: &Path) -> io::Result<String> {
 }
 
 /// Verify GitHub's signed build provenance before an archive is unpacked or
-/// handed to the installer. The accepted repository ID closes the offline-name
-/// reuse gap; the signer and source ref bind the artifact to release.yml and
-/// the reviewed setup tag.
+/// handed to the installer. The pinned repository ID closes the offline-name
+/// reuse gap; the pinned signer and source ref bind the artifact to its
+/// trusted workflow and reviewed setup tag.
 pub fn verify_attestation(
+    helper: &Path,
     artifact: &Path,
-    repository: &str,
-    repository_id: i64,
+    policy: &crate::release_proof::Policy,
     tag: &str,
     token: Option<&str>,
 ) -> Result<(), String> {
-    let workflow = format!("{repository}/.github/workflows/release.yml");
-    let source_ref = format!("refs/tags/{tag}");
-    let mut command = Command::new("gh");
-    command.args([
-        "attestation",
-        "verify",
-        artifact
-            .to_str()
-            .ok_or("The release file path cannot be verified.")?,
-        "--repo",
-        repository,
-        "--signer-workflow",
-        &workflow,
-        "--source-ref",
-        &source_ref,
-        "--format",
-        "json",
-        "--jq",
-        ".[].verificationResult.signature.certificate.sourceRepositoryIdentifier",
-    ]);
-    command.env("GH_PROMPT_DISABLED", "1").env("NO_COLOR", "1");
-    match token {
-        Some(token) => {
-            command.env("GH_TOKEN", token);
-        }
-        None => {
-            command.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
-        }
+    let mut command = Command::new("python3");
+    command
+        .arg(helper)
+        .args(["verify-github", "--artifact"])
+        .arg(artifact)
+        .args([
+            "--repository",
+            &policy.repository,
+            "--repository-id",
+            &policy.repository_id.to_string(),
+            "--workflow",
+            &policy.workflow,
+            "--tag",
+            tag,
+        ])
+        .env_remove("GH_TOKEN");
+    if let Some(token) = token {
+        command.arg("--app").env("GH_TOKEN", token);
     }
-    let output = command.output().map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            "GitHub CLI is not installed, so the release provenance cannot be checked. Run scripts/install-server.sh create again, then retry.".to_owned()
-        } else {
-            format!("The release provenance check could not start: {error}.")
-        }
-    })?;
+    let output = command
+        .output()
+        .map_err(|error| format!("The release provenance check could not start: {error}."))?;
     if !output.status.success() {
         return Err(format!(
-            "GitHub build provenance did not verify for {repository} tag {tag}. Nothing was unpacked; download the asset from the official Release setup workflow and retry."
+            "GitHub artifact attestation did not verify for {} tag {tag}. Nothing was unpacked. {}",
+            policy.repository,
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
-    }
-    let ids = String::from_utf8_lossy(&output.stdout);
-    let expected_id = repository_id.to_string();
-    let mut found = false;
-    for id in ids.lines().map(str::trim).filter(|id| !id.is_empty()) {
-        found = true;
-        if id != expected_id {
-            return Err("The release provenance belongs to a different GitHub repository number. Nothing was unpacked; accept the repository again and retry.".into());
-        }
-    }
-    if !found {
-        return Err("GitHub returned no verified build provenance for this release. Nothing was unpacked; inspect the Release setup workflow and retry.".into());
     }
     Ok(())
 }

@@ -1,9 +1,14 @@
 # Base Records
 
+**Use it for:** pointing at a record another module owns, even in another Domain, and showing it as a pill or picker.
+
+**Not for:** a foreign key across modules or a copy of another record's name.
+
 One way for any module to point at a record that another module owns, including a record in another Domain, without depending on that module.
 - **A holder stores `(record_kind, record_id)`, both text.** No foreign key crosses a module boundary, and the owner never learns who points at its records.
 - **An owner registers each kind of record once:** its key, Grid table, page path and an access check.
 - **Names follow the reader's own permissions.** A record the reader cannot see stays unnamed; the pill, the picker and linking all follow the owner's own access check.
+- **Portal step-up follows the record owner.** A kind whose portal page conditionally asks for Base Step-up contributes one batched `PortalStepUp`; holders can then hide references to protected records until that portal session holds the same operation.
 - **Every page shows a reference the same way,** with the `RelatedRecord` pill and `RecordPicker` from `base/ui`. Why a Base module, and why one key per kind: [ADR 11](../../../docs/architecture/decisions/11-record-references.md).
 
 ## Register a kind (owner)
@@ -51,14 +56,64 @@ An owner may override `RecordOwner::select` to refuse a new choice while keeping
 | --- | --- |
 | Accept a new reference | `check(client, scope, kind, id)` on the connection you already hold: your write's `tx.sql()` in a commit, and in a preview the `OperationClient` the plan hands you. Store the `Reference` it returns. |
 | Show references | `resolve(scope, &references)` → `Resolved { label, path, … }`, in the order given; `resolved.pill(id, framed)` gives the `RelatedRecord`. |
-| Pick a record | `search(scope, &kinds, text)` → hits; `records.picker_hits(&hits)` feeds `RecordPicker`. |
+| Pick a record | `search(scope, &kinds, text)` → hits; `records.picker_hits(&hits)` feeds `RecordPicker`, with a singular kind label only when the hits span several kinds. |
+| Filter your own counts and pages by an existing reference | `matching(tx, scope, kind, id)` → an owner-built `ReferenceMatch` subquery, or `None` for an unavailable source; see below. |
 | Who points here | `referrers(scope, kind, id)` → a count per holder table the reader may read, through Grid's bounded `summarize`, for the record `id` names now (a merged id counts its survivor's referrers); a malformed id of a mounted kind is refused. |
-| Merge two records (owner) | `redirect(tx, scope, kind, from, to)` in the owner's merge transaction. |
+| Merge two records (owner) | `redirect(tx, scope, kind, from, to)` in the owner's merge transaction, at `READ COMMITTED`. |
 
 - A refusal from `check` (`UnknownKind`, `MalformedId`, `NotFound`, `Forbidden`) is your field error: `refusal.message()`.
 - Your holder row is your own write through `MutationBoundary`, with a `Change` on your own kind. The owner is not written to.
 
+## Filter by a surviving record
+
+Use `matching` when your own indexed count or list must include references stored before a merge. Canonicalizing the requested source with `check` and comparing its survivor with stored `record_id` by equality loses those earlier references.
+
+```rust
+let tx = client.build_transaction()
+    .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+    .start().await?;
+tx.batch_execute(bilibi_grid::BOUNDS).await?;
+let Some(matched) = records.matching(&tx, scope, kind, id).await? else {
+    // Your ordinary unavailable-source response, identical for every denial.
+    return Err(bilibi_database::Error::NotFound);
+};
+let (tenant, kind, survivor) = matched.parameters();
+let predicate = format!(
+    "(tenant_id, record_kind, record_id) IN ({})",
+    matched.sql(),
+);
+// Your authorized holder read uses this same predicate in both statements:
+let count = format!("SELECT count(*), count(*) FILTER (WHERE owner_id IS NOT NULL) FROM notes WHERE {predicate}");
+let page = format!("SELECT id FROM notes WHERE {predicate} ORDER BY id LIMIT $4 OFFSET $5");
+// Admit each complete statement with EXPLAIN against Grid's
+// MAX_ESTIMATED_COST, then bind tenant/kind/survivor to $1/$2/$3.
+// Bind the page's limit/offset to $4/$5; propagate a query failure.
+```
+
+- **Owner boundary:** `ReferenceMatch::sql()` is a complete owner-built membership subquery with the three columns `(tenant_id, record_kind, record_id)`. Compare all three holder columns with it as one row; an ID-only or otherwise partial membership test is invalid. Embed it whole; do not inspect its implementation or query Records storage yourself. `reference()` identifies the readable survivor. All values are parameters; holder table/column names come from your code, never request input.
+- **Exact membership:** the survivor and every predecessor from transitive merges participate in one SQL membership test. There is no alias cap, client-side enumeration, chunk arithmetic or holder-row multiplication. Keep the holder index on `(tenant_id, record_kind, record_id)` and apply membership before pagination and aggregation, including your own conditional counts.
+- **Uniform source denial:** unknown/unmounted kinds, malformed ids, missing/removed/other-tenant sources and unreadable survivors all return `None`. The survivor passes the owner's read check (`authorize`, as in `resolve`), so a retired record may still filter its existing references. This grants no holder access or write authority; the holder authorizes its own read, and new selections still use `check`.
+- **Connection and snapshot:** pass your existing PostgreSQL transaction. `matching` takes no pooled connection and starts, commits or rolls back nothing. It refuses `READ COMMITTED`/`READ UNCOMMITTED` with `Error::Invalid`; use `REPEATABLE READ` or `SERIALIZABLE`, then execute the subquery immediately on that same transaction and scope. Source access, redirects, count and pages see that transaction's snapshot, including its own holder writes. Merges never run in such a transaction (`redirect` requires `READ COMMITTED`); concurrent merges become visible in a fresh transaction. Do not cache a match or reuse it after the transaction. The transaction must allow owner authorization decision-log writes; use `READ WRITE` even for these business reads.
+- **Cost:** the reverse redirect index serves the predecessor relation; no holder or tenant scan is required to discover aliases. The holder owns admission for its complete SQL: use Grid's `BOUNDS` (statement/lock timeouts), `MAX_ESTIMATED_COST`, `MAX_ROWS` and `MAX_OFFSET`, as in [`text_search_sql`](../grid/README.md). A timeout, cost refusal or database error must fail the read, never produce a partial count/page. `matching` does not change transaction settings or admit arbitrary holder SQL for you.
+
+## Report on a subject
+
+When each row of your table is about one record (a case about a customer) and people will count rows per record, declare that field as the table's subject instead of reading redirects yourself: [Grid: Record subjects](../grid/README.md#record-subjects). Reports canonicalize subject IDs by the target kind’s key type and group merged records under their survivor and use the owner’s `authorize` decision on the report transaction to determine which rows each reader may see.
+
 ## Behaviour
+
+### Portal step-up
+
+A record owner whose portal page conditionally requires a second factor declares the same rule for holders:
+
+```rust
+bilibi_records::portal_step_up!(
+    "domain/module",
+    PortalStepUp::new(RECORD, PORTAL_READ, &PORTAL_PROTECTION)
+);
+```
+
+`PortalProtection::protected(client, portal, ids)` returns only the requested ids that currently require `PORTAL_READ`, in one owner query on the supplied client, preserving the holder's database snapshot. A holder asks `Records::unverified_portal_rules` before taking its connection; Base checks which declared Step-up operations the portal session lacks, then the holder calls those owners. Core Document's list and download behaviour is defined in [Shared with portal customers](../../core/document/README.md#shared-with-portal-customers). The contributor must own the registered record kind, and the operation must be declared; boot refuses otherwise. A record whose portal read never asks Step-up declares nothing.
 
 - **Ids are text,** at most 64 bytes in one path segment (`workspace::record_id`). A kind whose Grid key is a number only accepts numeric ids, so a forged id never reaches the owner's source as an error.
 - **One spelling per id:** a number key is read as plain decimal everywhere. `check` returns `01` as `1` for the holder to store, and `resolve`, `redirect` and `referrers` read `01` as `1` too.
@@ -67,7 +122,7 @@ An owner may override `RecordOwner::select` to refuse a new choice while keeping
 - **Previews take no connection:** a plan holds one pooled transaction while the owner previews, so a holder's preview checks on the client the plan hands it and calls nothing that takes another connection, `resolve` and `search` included. Show the checked reference and its page (`kind.path_of`); agents name it with `base.records.resolve`.
 - **Connections:** no facade method holds a pooled connection while Grid takes one, and the agent dispatcher holds none while a read runs (`apps/base/agent_api/README.md`), so concurrent resolves and searches, direct or through `/api/v1` and `/mcp`, cannot fill the pool and wait on each other.
 - **Removed records** are never cascaded and holders' rows are never deleted.
-- **Merges:** a redirect `(tenant, kind, from) → to` is followed by `check`, `resolve` and the pill, so every holder repoints on read. Chains collapse on write, and each redirect row is an audited `Change` on `record_redirect`. `redirect` takes a transaction lock per tenant and kind, so overlapping merges run one after the other and never commit a chain (`a → b` beside `b → c`).
+- **Merges:** a redirect `(tenant, kind, from) → to` is followed by `check`, `resolve` and the pill, so every holder repoints on read. Chains collapse on write, and each redirect row is an audited `Change` on `record_redirect`. `redirect` takes a transaction lock per tenant and kind, so overlapping merges run one after the other and never commit a chain (`a → b` beside `b → c`). This needs the merge transaction at `READ COMMITTED`, the `MutationBoundary` default: an older snapshot would miss the merge it waited for. `redirect` refuses any other isolation with `Error::Invalid` before it locks or writes. Chains already committed are not repaired.
 - **Picker:** `search` matches each allowed kind's `label_field` inside the owner's own source (`text_search_sql`), so tenant, soft delete and permissions apply. Matches are read in key order, 50 at a time, and named as `resolve` names them: records merged into one survivor are one hit and records the owner refuses are skipped. Each kind gathers up to the tenant setting `records.picker_hits` distinct records (default 8, Settings › Records), reading at most 500 matches. Each kind is searched once, however often it is named, and an unmounted kind not at all. A choice is still `check`ed on save; a forged id is refused.
 - **Long names:** the pill stays on one line, at most 16rem (60% of a phone's width), and a picker hit within its row; a longer name ends in "…" with the whole name as the title, so a table cell never grows to fit it.
 - **Workspace:** the pill renders through `RecordLink` with the registering module as its workspace kind, so on a framed page it selects the record in a following tile.
@@ -75,7 +130,7 @@ An owner may override `RecordOwner::select` to refuse a new choice while keeping
 
 ## Drop targets
 
-A page can take records dropped from another tile as a shortcut for an action it already has (issue 265): contacts onto Customer portal opens the invitation review on that contact. A drop grants nothing: it opens the target's own review, and the operation that review commits decides again. The same shortcut is always an "Add to…" menu item (a link), so phones, the keyboard, screen readers and agents need no drag.
+A page can take records dropped from another tile as a shortcut for an action it already has (issue 265): contacts onto Customer portal opens the invitation review on that contact. A drop grants nothing: it opens the target's own review, and the operation that review commits decides again. The same shortcut is always a "Non-local actions" menu item (a link), so phones, the keyboard, screen readers and agents need no drag.
 
 **Declare a target (the page's owner),** beside the page's `PageWrites`:
 
@@ -91,7 +146,7 @@ A page can take records dropped from another tile as a shortcut for an action it
 - Boot refuses a target that accepts a kind no mounted module declares, whose `path` is no contributed GET page route of its `service`, or whose contract the service does not declare.
 - **The page** wraps itself with `target.zone().wrap(id, html)` only while its own button shows, and handles two inputs the same way: the live event `drop_records` (`records` = `kind:id,kind:id`) and the address parameter `?drop=` (`DROP_EVENT`, `DROP_PARAM`). Both call `Records::receive(scope, target_id, text)`, which checks the count, the kinds and every record (read as `resolve` reads them, so a hidden, removed or forged record is refused), then the page opens its review with the record chosen, as its button and picker would. Show a refusal with `DropRefusal::message`.
 
-**Offer a source (a list's owner):** `Records::add_to(scope, kind)` lists the targets that accept the kind and that the person holds the capability for. When it is not empty, set `FlexRow::record(kind, id)` on each row and `AddTo::href(&records)` in a `bilibi_ui::AddToMenu` on the row and on the selection bar (a target that takes fewer records than are ticked stays in the menu, disabled with the reason). Dragging a ticked row takes every ticked row of its table that is on screen. Contacts (`person`, with a selection bar) and Companies (`company`, one row at a time) are the Platform's sources; Finance's Customers (`receivables.customer`) and Vendors (`payables.vendor`) accept both, up to 20 at a time, and Customer portal (`portal.invite`) takes one contact.
+**Offer a source (a list's owner):** `Records::add_to(scope, kind)` lists the targets that accept the kind and that the person holds the capability for. When it is not empty, set `FlexRow::record(kind, id)` on each row and `AddTo::href(&records)` in a `bilibi_ui::AddToMenu` on the row and on the selection bar (a target that takes fewer records than are ticked stays in the menu, disabled with the reason). Dragging a ticked row takes every ticked row of its table that is on screen. Contacts (`person`, with a selection bar), Companies (`company`, one row at a time) and Users (`user`, one row at a time) are the Platform's sources; Finance's Customers (`receivables.customer`) and Vendors (`payables.vendor`) accept both of the first two, up to 20 at a time, Customer portal (`portal.invite`) takes one contact, and Teams (`team.add_members`, "Add to team") takes up to 100 staff accounts.
 
 The browser half is `apps/base/ui/assets/drops.js`: the source frame tells the workspace what it carries (`assets/tiling.js` relays it) so every accepting tile lights up, the drop raises `drop_records` on the page, and a drag from another site carries none of the types it reads and is ignored.
 
@@ -146,3 +201,15 @@ Add `APP_ORIGIN` and `BIND_ADDR` to serve the app afterwards, with the notes pag
 | Long names | A 160-character company name: the pill, the picker hit and the chosen pill stay within a 390 px page, ending in "…" with the whole name as their title. |
 | Synchronized plans | 16 plans of the notes write at once through `/api/v1/plans` and through MCP's `plan` answer within 8 s on the pool of 16, three rounds, and 16 commits of previewed plans at once all finish. |
 | List but not view | For the manager allowed `admin.company.list` and denied `admin.company.view`, `check` refuses company 1, `resolve` shows it unavailable and `search` offers no company, directly and through `/api/v1` and MCP; in the browser their company pills are Restricted and the picker offers no company. |
+
+### Native equivalence proof
+
+`apps/web/examples/records-equivalence/` runs the complete Platform app with a disposable audited holder and the walkthrough fixture, without serving or changing UI. On a clean committed checkout, use the supported real-Git composition recipe and a fresh disposable database:
+
+```sh
+python3 scripts/discover-modules.py --check
+python3 scripts/discover-modules.py --pin
+DATABASE_URL=… cargo run --locked -p bilibi-web --example records-equivalence
+```
+
+The executable requires a current compiled-in pin and asserts unmerged and chained merges, canonical source spelling, the equality defect, total/taken/owned counts, every ordered page, more than 100 predecessors, agreement with `referrers`, uniform tenant/source denial, unchanged complete holder rows and mutation history, concurrent merge snapshots, refusal of redirects at `REPEATABLE READ` and `SERIALIZABLE` before any write, a caller-owned uncommitted `READ COMMITTED` redirect and its rollback, refusal of `matching` at `READ COMMITTED`, and successful reads with every pool connection already held. Complete consumer statements use Grid's cost admission and timeout bounds. Fixture-only source setup is explicit SQL; holder writes and redirects use `MutationBoundary`. Any failed assertion exits unsuccessfully.

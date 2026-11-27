@@ -87,6 +87,8 @@ impl Entry {
 pub struct Catalog {
     entries: BTreeMap<&'static str, Vec<Entry>>,
     types: BTreeMap<&'static str, TypeId>,
+    /// Each installed module's declared dependencies.
+    modules: BTreeMap<&'static str, &'static [&'static str]>,
 }
 impl Catalog {
     pub fn discover(modules: &[&Module]) -> Result<Self> {
@@ -166,7 +168,12 @@ impl Catalog {
             items.sort_by_key(|entry| (entry.provenance.module, entry.id));
             validators[consumer](items)?;
         }
-        let catalog = Self { entries, types };
+        let catalog = Self {
+            entries,
+            types,
+            modules: modules.iter().map(|m| (m.id, m.dependencies)).collect(),
+        };
+        catalog.validate_credential_routes()?;
         catalog.validate_references(modules)?;
         Ok(catalog)
     }
@@ -177,6 +184,15 @@ impl Catalog {
             )));
         }
         Ok(&self.entries[consumer])
+    }
+    /// Whether `module` is part of this composition, for a contribution that
+    /// applies only while another module is mounted.
+    pub fn installed(&self, module: &str) -> bool {
+        self.modules.contains_key(module)
+    }
+    /// An installed module's declared dependencies.
+    pub fn dependencies(&self, module: &str) -> Option<&'static [&'static str]> {
+        self.modules.get(module).copied()
     }
     fn validate_references(&self, modules: &[&Module]) -> Result<()> {
         let services: BTreeMap<_, _> = modules
@@ -232,6 +248,49 @@ impl Catalog {
         }
         Ok(())
     }
+    /// A bearer path belongs to the module that registers it. Keeping this
+    /// cross-catalog check here makes a new route fail boot before Web can log
+    /// or expose its `{token}` segment without the matching privacy policy.
+    fn validate_credential_routes(&self) -> Result<()> {
+        // An explicit catalog may leave out any of these points (`build`), so
+        // an absent one reads as empty instead of indexing into a panic.
+        let of = |consumer: &str| self.entries.get(consumer).into_iter().flatten();
+        let credentials: BTreeMap<_, _> = of(CREDENTIAL_PATHS)
+            .map(|entry| Ok((entry.get::<CredentialPath>()?.path, entry)))
+            .collect::<Result<_>>()?;
+        let check = |entry: &Entry, path: &str| -> Result<()> {
+            if !parameters(path).any(|name| name == "token") {
+                return Ok(());
+            }
+            let Some(credential) = credentials.get(path) else {
+                return Err(invalid(format!(
+                    "{} at {}:{} registers credential route {path} without a {CREDENTIAL_PATHS} contribution",
+                    entry.id, entry.provenance.source, entry.provenance.line
+                )));
+            };
+            if credential.provenance.module != entry.provenance.module {
+                return Err(invalid(format!(
+                    "{} at {}:{} registers credential route {path}, but {} declared it for {}",
+                    entry.id,
+                    entry.provenance.source,
+                    entry.provenance.line,
+                    credential.id,
+                    credential.provenance.module
+                )));
+            }
+            Ok(())
+        };
+        for entry in of(ROUTES) {
+            check(entry, entry.get::<Route>()?.path)?;
+        }
+        for entry in of(DOWNLOADS) {
+            check(entry, entry.get::<Download>()?.path)?;
+        }
+        for entry in of(MOVED) {
+            check(entry, entry.get::<Moved>()?.from)?;
+        }
+        Ok(())
+    }
 }
 fn invalid(message: String) -> RegistryError {
     RegistryError::Contribution(message)
@@ -243,6 +302,42 @@ pub const DOWNLOADS: &str = "base/module_registry.downloads";
 pub const SEEDS: &str = "base/module_registry.seeds";
 pub const MOVED: &str = "base/module_registry.moved";
 pub const PAGE_WRITES: &str = "base/module_registry.page_writes";
+pub const PAGE_SECTIONS: &str = "base/module_registry.page_sections";
+
+/// A part of a named staff page that the top-bar search can open directly.
+/// The declaring module owns the GET route and shows this section to every
+/// reader who may open it.
+pub struct PageSection {
+    pub route: &'static str,
+    pub title: &'static str,
+    pub anchor: &'static str,
+    pub keywords: &'static [&'static str],
+    /// A URL query without the leading `?`, when needed to open a tab.
+    pub query: Option<&'static str>,
+}
+
+fn validate_page_sections(entries: &[Entry]) -> Result<()> {
+    let mut destinations = BTreeSet::new();
+    for entry in entries {
+        let section = entry.get::<PageSection>()?;
+        if section.title.trim().is_empty()
+            || section.anchor.is_empty()
+            || !section
+                .anchor
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            || !destinations.insert((section.route, section.query, section.anchor))
+        {
+            return Err(invalid(format!(
+                "page section {} at {}:{} needs a title and a unique anchor for its destination",
+                entry.id, entry.provenance.source, entry.provenance.line
+            )));
+        }
+    }
+    Ok(())
+}
+inventory::submit! { Consumer::new::<PageSection>(PAGE_SECTIONS, "base/module_registry", validate_page_sections) }
+pub const CREDENTIAL_PATHS: &str = "base/module_registry.credential_paths";
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Method {
     Get,
@@ -253,7 +348,8 @@ pub enum Method {
 }
 #[derive(Clone, Copy, Debug)]
 pub enum Access {
-    Public,
+    /// Any signed-in staff session. Nothing on the staff site is anonymous:
+    /// an anonymous page is a `base/public` page on the public site.
     SignedIn,
     Capability(&'static str),
     Operator,
@@ -272,8 +368,8 @@ pub enum Access {
     /// The inner access, then Base Step-up's check of `operation` (a key
     /// the route's owner declared with `bilibi_step_up::declare!`): when the
     /// tenant's policy requires it, a GET without a holding check is sent to
-    /// confirm first. Wrap a signed-in access, never `Public` or another
-    /// `StepUp`; Web refuses either, and an undeclared operation, at boot.
+    /// confirm first. Wrap a signed-in access, never another `StepUp`; Web
+    /// refuses that, and an undeclared operation, at boot.
     StepUp {
         operation: &'static str,
         inner: &'static Access,
@@ -331,7 +427,7 @@ impl Access {
     pub fn admits(self, viewer: &Viewer<'_>) -> bool {
         let held = |key: &str| viewer.capabilities.contains(key);
         match self.base() {
-            Access::Public | Access::SignedIn => true,
+            Access::SignedIn => true,
             Access::Capability(key) => held(key),
             Access::AnyOf(keys) => keys.iter().any(|key| held(key)),
             Access::Operator => viewer.operator,
@@ -372,6 +468,14 @@ pub struct Route {
     pub operation: &'static str,
     pub access: Access,
     pub framed: bool,
+}
+/// A route pattern whose `{token}` segment is a bearer secret. Web redacts the
+/// token from logs and debug reports and sends a referrer policy that never
+/// forwards the full path. The module that registers a token route declares
+/// the same pattern under [`CREDENTIAL_PATHS`]; boot refuses an omission.
+#[derive(Clone, Copy, Debug)]
+pub struct CredentialPath {
+    pub path: &'static str,
 }
 /// A GET that answers with a file instead of a page: a download or
 /// export (`/finance/attachments/{id}/download`, a return's CSV).
@@ -523,9 +627,7 @@ fn validate_downloads(entries: &[Entry]) -> Result<()> {
     let mut paths = BTreeSet::new();
     for entry in entries {
         let download = entry.get::<Download>()?;
-        if !path_valid(download.path, download.operation, download.access)
-            || matches!(download.access, Access::Public)
-        {
+        if !path_valid(download.path, download.operation, download.access) {
             return Err(invalid(format!("invalid download {}", entry.id)));
         }
         validate_portal(entry, download.path, download.access, false)?;
@@ -557,6 +659,24 @@ fn validate_embeds(entries: &[Entry]) -> Result<()> {
 inventory::submit! { Consumer::new::<Route>(ROUTES, "base/module_registry", validate_routes) }
 inventory::submit! { Consumer::new::<Embed>(EMBEDS, "base/module_registry", validate_embeds) }
 inventory::submit! { Consumer::new::<Download>(DOWNLOADS, "base/module_registry", validate_downloads) }
+fn validate_credential_paths(entries: &[Entry]) -> Result<()> {
+    let mut paths = BTreeSet::new();
+    for entry in entries {
+        let path = entry.get::<CredentialPath>()?.path;
+        if !path.starts_with('/')
+            || path.contains(['?', '#'])
+            || !parameters(path).any(|name| name == "token")
+            || !paths.insert(path)
+        {
+            return Err(invalid(format!(
+                "invalid credential path {} at {}:{}",
+                entry.id, entry.provenance.source, entry.provenance.line
+            )));
+        }
+    }
+    Ok(())
+}
+inventory::submit! { Consumer::new::<CredentialPath>(CREDENTIAL_PATHS, "base/module_registry", validate_credential_paths) }
 fn validate_moved(entries: &[Entry]) -> Result<()> {
     let mut paths = BTreeSet::new();
     for entry in entries {
@@ -641,7 +761,7 @@ fn validate_page_writes(entries: &[Entry]) -> Result<()> {
                 return Err(invalid(format!("{at} names an event's contract twice")));
             }
         }
-        let mut events: BTreeSet<&str> = pairs.iter().map(|(event, _)| *event).collect();
+        let mut events = BTreeSet::new();
         match writes.pending {
             Pending::None => {}
             Pending::Every { reason } if reason_text(reason) => {}

@@ -1,0 +1,18 @@
+{#- The person's Calendar feed tab of My Settings (src/web/feed.rs,
+    `/settings/calendar-feed`): the link status, make, replace and revoke, the
+    link shown once, and for an administrator every person's link with
+    Revoke. -#}
+{% import "settings.html" as settings %}
+{% import "components.html" as ui %}
+{{ flash }}
+{% call ui::page(variant=bilibi_ui::PageVariant::List) %}
+{% call settings::layout(header=header, current=bilibi_ui::SettingsTab::CalendarFeed, heading="Calendar") %}
+<div class="space-y-3">
+{{ reminders }}
+{{ own }}
+{{ link }}
+{{ everyone }}
+</div>
+{{ dialog }}
+{% endcall %}
+{% endcall %}

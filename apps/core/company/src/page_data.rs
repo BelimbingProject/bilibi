@@ -25,12 +25,9 @@ impl CompanyService {
             .mutations
             .begin(&mut client, scope.mutation_context("company.create"))
             .await?;
-        if let Some(parent) = new.parent_id {
-            organisation::authorize_target(tx.sql(), scope, parent, crate::CREATE).await?;
-            organisation::require_writable(tx.sql(), scope, parent, true)
-                .await
-                .map_err(write_error)?;
-        }
+        // `create_with_fields` checks the parent after the tenant lock, the
+        // order every company writer takes; checking it here first would lock
+        // the parent before the tenant.
         let result = organisation::create_with_fields(&mut tx, scope, new, fields).await?;
         if let CreateOutcome::Created(company) = &result {
             let id = company.id;

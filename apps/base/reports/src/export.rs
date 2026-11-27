@@ -4,7 +4,8 @@
 //! (`bilibi_artifacts::pdf`). Each export is audited with the report, the
 //! reader, the format and the row count, never the data.
 use crate::{
-    cell, contributions, line, web::result, Kind, ReportError, Reports, RunInput, RunResult, EXPORT,
+    cell, contributions, line, web::result, Kind, Report, ReportError, Reports, RunInput,
+    RunResult, EXPORT,
 };
 use bilibi_audit::{record_action, Attribution};
 use bilibi_database::Error;
@@ -46,6 +47,7 @@ impl Format {
 /// A finished export.
 #[derive(Debug)]
 pub struct File {
+    pub(crate) reference_names: Vec<crate::ReferenceName>,
     pub filename: String,
     pub content_type: &'static str,
     pub bytes: Vec<u8>,
@@ -58,6 +60,7 @@ pub struct File {
 
 /// The result laid out as one table, whatever the format.
 pub(crate) struct Tabled {
+    reference_names: Vec<crate::ReferenceName>,
     pub name: String,
     pub description: String,
     pub headers: Vec<String>,
@@ -80,7 +83,7 @@ impl Reports {
         format: Format,
     ) -> Outcome<File> {
         let cap = self.export_rows(scope).await?;
-        self.export_within(scope, id, input, format, cap, false)
+        self.export_within(scope, self.get(scope, id).await?, input, format, cap, false)
             .await
     }
 
@@ -100,7 +103,9 @@ impl Reports {
             crate::authorize(&**client, scope, EXPORT).await?;
         }
         let cap = self.export_rows(scope).await?;
-        let table = self.tabulate(scope, id, input, cap, false).await?;
+        let table = self
+            .tabulate(scope, self.get(scope, id).await?, input, cap, false)
+            .await?;
         render(&table, format).map(|_| ())
     }
 
@@ -110,7 +115,7 @@ impl Reports {
     pub(crate) async fn export_within(
         &self,
         scope: &Scope,
-        id: i64,
+        report: Report,
         input: &RunInput,
         format: Format,
         cap: usize,
@@ -120,7 +125,8 @@ impl Reports {
             let client = self.db.get().await.map_err(Error::from)?;
             crate::authorize(&**client, scope, EXPORT).await?;
         }
-        let table = self.tabulate(scope, id, input, cap, background).await?;
+        let id = report.id;
+        let table = self.tabulate(scope, report, input, cap, background).await?;
         let bytes = render(&table, format)?;
         let client = self.db.get().await.map_err(Error::from)?;
         record_action(
@@ -132,7 +138,11 @@ impl Reports {
             true,
         )
         .await?;
+        let mut reference_names = table.reference_names;
+        reference_names.sort();
+        reference_names.dedup();
         Ok(File {
+            reference_names,
             filename: format!("{}.{}", slug(&table.name), format.key()),
             content_type: format.content_type(),
             bytes,
@@ -145,7 +155,7 @@ impl Reports {
     pub(crate) async fn tabulate(
         &self,
         scope: &Scope,
-        id: i64,
+        report: Report,
         input: &RunInput,
         cap: usize,
         background: bool,
@@ -156,7 +166,9 @@ impl Reports {
             background,
             ..input.clone()
         };
-        let first = self.run(scope, id, &input).await?;
+        let first = self
+            .run_report_for(scope, report.clone(), &input, Some(cap))
+            .await?;
         let oversight = first.report.definition.oversight;
         let status = first.oversight_status();
         let cohort = first.oversight.clone();
@@ -166,6 +178,7 @@ impl Reports {
             first.report.kind,
         );
         let mut table = Tabled {
+            reference_names: first.reference_names.clone(),
             name,
             description,
             headers: Vec::new(),
@@ -187,27 +200,32 @@ impl Reports {
                 table.empty = *total == 0;
                 table.headers = columns.iter().map(|c| c.label.clone()).collect();
                 let totals = totals.clone();
-                let pages = (*total as usize).div_ceil((*page_size).max(1));
                 let expected_total = *total;
+                let first_page = (*page_size).max(1);
                 let mut current = Some(first);
-                for page in 0..pages {
-                    let run = match current.take() {
-                        Some(run) => run,
-                        None => {
-                            input.page = page;
-                            self.run(scope, id, &input).await?
-                        }
-                    };
-                    if oversight
-                        && (run.oversight != cohort
-                            || !matches!(&run.result,RunResult::Rows{ total:now,.. } if *now==expected_total))
-                    {
-                        return Err(ReportError::Refused("Oversight access or record counts changed during download. Refresh and download again.".into()));
+                if !oversight {
+                    if let Some(RunResult::Rows { rows, .. }) = current.take().map(|r| r.result) {
+                        push_rows(&mut table, rows);
                     }
-                    if let RunResult::Rows { rows, .. } = run.result {
-                        for (_, cells) in rows {
-                            table.rows.push(cells.iter().map(cell).collect());
-                            table.records += 1;
+                } else {
+                    let pages = (expected_total as usize).div_ceil(first_page);
+                    for page in 0..pages {
+                        let run = match current.take() {
+                            Some(run) => run,
+                            None => {
+                                input.page = page;
+                                self.run_report(scope, report.clone(), &input).await?
+                            }
+                        };
+                        if oversight
+                            && (run.oversight != cohort
+                                || !matches!(&run.result,RunResult::Rows{ total:now,.. } if *now==expected_total))
+                        {
+                            return Err(ReportError::Refused("Oversight access or record counts changed during download. Refresh and download again.".into()));
+                        }
+                        table.reference_names.extend(run.reference_names);
+                        if let RunResult::Rows { rows, .. } = run.result {
+                            push_rows(&mut table, rows);
                         }
                     }
                 }
@@ -342,13 +360,22 @@ impl Reports {
     }
 }
 
+fn push_rows(table: &mut Tabled, rows: Vec<(Value, Vec<Value>)>) {
+    for (_, cells) in rows {
+        table.rows.push(cells.iter().map(cell).collect());
+        table.records += 1;
+    }
+}
+
 fn too_many(total: i64, cap: usize, background: bool) -> ReportError {
     ReportError::Refused(if background {
         format!(
             "This report has {total} rows; a prepared export holds at most {cap}. Add a filter."
         )
     } else {
-        format!("This report has {total} rows; a download holds at most {cap}. Prepare it as an export instead, or add a filter.")
+        format!(
+            "This report has {total} rows; a download holds at most {cap}. Prepare it as an export instead, or add a filter."
+        )
     })
 }
 

@@ -31,7 +31,7 @@ Only these business facts belong in Core. “Every seller needs it” is the adm
 | Active or retired | Stop new selection without losing references from earlier work. |
 | Dated selling price: amount per base unit, currency, selling company and effective date | State how much that seller charges, in which money and when, without replacing earlier prices. |
 
-Products are shared within the tenant; a price explicitly names the selling company. Use [Core Currency](../../../apps/core/currency/README.md) for enabled currencies and precision. Select the latest price effective on the requested date for that product, company and currency; refuse duplicate effective dates. A missing price is reported as missing, never zero or another company's price. Authorize the chosen selling company; a desk selection alone is not permission.
+Products are shared within the tenant; a price explicitly names the selling company. Use [Core Currency](../../../apps/core/currency/README.md) for currencies and precision. Select the latest price effective on the requested date for that product, company and currency; refuse duplicate effective dates. A missing price is reported as missing, never zero or another company's price. Authorize the chosen selling company; a desk selection alone is not permission.
 
 Stored prices are optional for negotiated work. Core stores amounts, not formulas, costs, tax rates, price books or customer discounts. A Domain may calculate a price and save it through the same Core operation as a person. Core never invokes that calculation. Once a transaction uses a product, the transaction owner freezes the description, unit and agreed money facts; later product changes do not rewrite them.
 

@@ -35,7 +35,7 @@ use crate::layouts::{Entry, Layouts, PUBLISH};
 use askama::Template;
 use bilibi_database::{Db, Error, Result};
 use bilibi_menu::Menu;
-use bilibi_module_registry::contributions::{Method, Route, Viewer};
+use bilibi_module_registry::contributions::{Method, Viewer};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
     lists::EmptyState,
@@ -58,23 +58,22 @@ pub(crate) const SHARED_LAYOUTS: &str = "/workspace/shared-layouts";
 pub(crate) struct Core {
     pub(crate) db: Db,
     menu: Arc<Menu>,
-    /// Every discovered route with the module that contributes it.
-    routes: Vec<(&'static str, &'static Route)>,
     pub(crate) layouts: Arc<Layouts>,
+    pub(crate) contracts: Arc<bilibi_agent_api::page::PageContracts>,
 }
 pub struct Pages(Arc<Core>);
 impl Pages {
     pub fn new(
         db: Db,
         menu: Arc<Menu>,
-        routes: Vec<(&'static str, &'static Route)>,
         layouts: Arc<Layouts>,
+        contracts: Arc<bilibi_agent_api::page::PageContracts>,
     ) -> Self {
         Self(Arc::new(Core {
             db,
             menu,
-            routes,
             layouts,
+            contracts,
         }))
     }
 }
@@ -129,42 +128,10 @@ impl Core {
         })
     }
 
-    /// The discovered GET page serving `path`, literal segments before
-    /// parameters, as Web resolves it.
-    fn route(&self, path: &str) -> Option<&'static Route> {
-        let path = path.split(['?', '#']).next().unwrap_or_default();
-        let segments: Vec<_> = path.split('/').collect();
-        self.routes
-            .iter()
-            .map(|(_, route)| *route)
-            .filter(|route| route.method == Method::Get)
-            .filter_map(|route| {
-                let pattern: Vec<_> = route.path.split('/').collect();
-                if pattern.len() != segments.len() {
-                    return None;
-                }
-                let mut literal = 0;
-                for (pattern, value) in pattern.iter().zip(&segments) {
-                    if pattern.starts_with('{') {
-                        if value.is_empty() || [".", ".."].contains(value) {
-                            return None;
-                        }
-                    } else if pattern == value {
-                        literal += 1;
-                    } else {
-                        return None;
-                    }
-                }
-                Some((literal, route))
-            })
-            .max_by_key(|(literal, _)| *literal)
-            .map(|(_, route)| route)
-    }
-
     /// The route pattern a tile at `path` may follow: its page's own pattern
     /// when that names one record, such as `/companies/:id`.
     fn follow_pattern(&self, path: &str) -> Option<String> {
-        let route = self.route(path).filter(|route| route.framed)?;
+        let route = self.layouts.route(path).filter(|route| route.framed)?;
         let pattern = pattern(route.path);
         crate::layout::follow_pattern(&pattern).then_some(pattern)
     }
@@ -172,10 +139,14 @@ impl Core {
     /// The module that owns the page `pattern` names: the kind of record a
     /// tile following it goes to.
     fn pattern_kind(&self, pattern: &str) -> Option<&'static str> {
-        self.routes
+        self.layouts
+            .routes
             .iter()
             .find(|(_, route)| {
-                route.method == Method::Get && route.framed && self::pattern(route.path) == pattern
+                route.method == Method::Get
+                    && !route.access.portal()
+                    && route.framed
+                    && self::pattern(route.path) == pattern
             })
             .map(|(module, _)| *module)
     }
@@ -196,7 +167,7 @@ impl Core {
     }
 
     fn reach(&self, standing: &Standing, path: &str) -> Reach {
-        let Some(route) = self.route(path).filter(|route| route.framed) else {
+        let Some(route) = self.layouts.route(path).filter(|route| route.framed) else {
             return Reach::Unserved;
         };
         // A step-up page still opens in a tile; the frame shows its prompt.
@@ -230,13 +201,9 @@ impl Core {
                 walk(&node.children, &deeper, out);
             }
         }
-        let tree = self.menu.visible_tree(&|key| {
-            if key == bilibi_menu::OWNER_STANDING {
-                standing.owner
-            } else {
-                standing.capabilities.contains(key)
-            }
-        });
+        let tree = self
+            .menu
+            .visible_staff_tree(&standing.capabilities, standing.owner);
         let mut out = Vec::new();
         walk(&tree, &[], &mut out);
         out
@@ -550,7 +517,7 @@ impl Workspace {
                 if self.known(&id).is_some()
                     && path.len() <= 2048
                     && crate::layout::page_path(&path)
-                    && core.route(&path).is_some()
+                    && core.layouts.route(&path).is_some_and(|route| route.framed)
                 {
                     self.layout.update_path(&id, &path);
                     match title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
@@ -649,8 +616,9 @@ impl Workspace {
                         }
                         let path = fill_pattern(pattern, &id);
                         let current = leaf.path.split(['?', '#']).next().unwrap_or_default();
-                        (current != path && core.route(&path).is_some())
-                            .then(|| (leaf.id.clone(), path))
+                        (current != path
+                            && core.layouts.route(&path).is_some_and(|route| route.framed))
+                        .then(|| (leaf.id.clone(), path))
                     })
                     .collect();
                 for (tile, path) in moves {
@@ -711,11 +679,7 @@ impl Workspace {
                         .map(|leaf| {
                             self.titles
                                 .get(&leaf.id)
-                                .map(|title| {
-                                    title
-                                        .trim_end_matches(" · Business application platform")
-                                        .to_owned()
-                                })
+                                .cloned()
                                 .unwrap_or_else(|| leaf.path.clone())
                         })
                         .collect::<Vec<_>>()

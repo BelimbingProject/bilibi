@@ -70,8 +70,9 @@ async fn main() -> Result<(), Failure> {
         .services
         .get::<MutationBoundary>("base/database.mutations")?;
     let proofs = app.services.get::<PartyProofs>("base/tenancy.parties")?;
-    let mut client = db.get().await?;
-    bilibi_company::ensure_default_relationship_roles(&**client, manager.tenant()).await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let role = relationship_role_by_code(&**client, &manager, "customer")
         .await?
         .ok_or("customer role missing")?;
@@ -512,7 +513,9 @@ async fn main() -> Result<(), Failure> {
         code: Some(format!("match-{stamp}")),
         ..new.clone()
     };
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let preview = preview_create(&**client, &manager, &matching)
         .await?
         .map_err(|errors| format!("persistent preview: {errors:?}"))?;
@@ -527,7 +530,12 @@ async fn main() -> Result<(), Failure> {
     )?;
     drop(client);
     grants
-        .set_direct(&admin, manager.user(), bilibi_company::LIST, Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            bilibi_company::LIST,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     let client = db.get().await?;
     let hidden = preview_create(&**client, &manager, &matching)
@@ -549,7 +557,12 @@ async fn main() -> Result<(), Failure> {
         .set_direct(&admin, manager.user(), bilibi_company::LIST, None)
         .await?;
     grants
-        .set_direct(&admin, manager.user(), bilibi_company::CREATE, Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            bilibi_company::CREATE,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     let client = db.get().await?;
     prove(
@@ -669,10 +682,20 @@ async fn main() -> Result<(), Failure> {
     )?;
     drop(client);
     grants
-        .set_direct(&admin, manager.user(), bilibi_company::VIEW, Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            bilibi_company::VIEW,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     grants
-        .set_direct(&admin, manager.user(), "admin.address.view", Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            "admin.address.view",
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     let client = db.get().await?;
     prove(

@@ -1,19 +1,18 @@
 //! Legal holds on a person or one record (ADR 05). Erasure and retention sweeps
 //! see them through `bilibi_personal_data::Holds`, which this module serves: a
-//! session on its own connection holds the tenant's hold guard (a shared
-//! transaction-level advisory lock) until the work it guards has committed,
+//! session on the working connection holds the tenant's shared advisory lock until the work it guards has committed,
 //! and placing a hold takes the same guard exclusively. A hold placed while an
 //! erasure runs waits for it; an erasure that starts after a hold committed
 //! sees it. Reads ask only about the records in hand.
 use crate::{HOLD_MANAGE, HOLD_VIEW};
-use bilibi_database::{Change, Db, Error, MutationTransaction, Result};
+use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_party_ids::PersonId;
 use bilibi_personal_data::{HandlerFuture, HoldSession, HoldSource};
-use bilibi_tenancy::Scope;
+use bilibi_tenancy::{ReadClient, Scope};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use tokio_postgres::{error::SqlState, GenericClient, Row};
+use tokio_postgres::{error::SqlState, Client, GenericClient, Row};
 
 const MAX_REASON: usize = 255;
 const RECORD_KIND: &str = "base/privacy.hold";
@@ -65,45 +64,55 @@ fn tenant_key(tenant: i64) -> Result<i32> {
 }
 
 /// The hold source `base/personal_data` hands out sessions from.
-pub(crate) struct Source {
-    pub(crate) db: Db,
-}
+pub(crate) struct Source;
 impl HoldSource for Source {
-    fn open<'a>(&'a self, tenant: i64) -> HandlerFuture<'a, Box<dyn HoldSession>> {
-        Box::pin(async move {
-            let key = tenant_key(tenant)?;
-            let client = self.db.get().await?;
-            client.batch_execute("BEGIN").await?;
-            let session = Session {
-                client: Some(client),
-                tenant,
-            };
-            session
-                .client()?
-                .execute(
-                    "SELECT pg_advisory_xact_lock_shared($1,$2)",
-                    &[&GUARD, &key],
-                )
-                .await?;
-            Ok(Box::new(session) as Box<dyn HoldSession>)
-        })
+    fn session(&self, tenant: i64) -> Result<Box<dyn HoldSession>> {
+        Ok(Box::new(Session {
+            tenant,
+            key: tenant_key(tenant)?,
+        }))
     }
 }
-/// A read-only transaction holding the shared guard.
+
 struct Session {
-    client: Option<deadpool_postgres::Object>,
     tenant: i64,
-}
-impl Session {
-    fn client(&self) -> Result<&deadpool_postgres::Object> {
-        self.client.as_ref().ok_or(Error::Internal)
-    }
+    key: i32,
 }
 impl HoldSession for Session {
-    fn persons<'a>(&'a self, persons: &'a [i64]) -> HandlerFuture<'a, BTreeMap<i64, i64>> {
+    fn lock<'a>(&'a self, client: &'a Client) -> HandlerFuture<'a, ()> {
         Box::pin(async move {
-            Ok(self
-                .client()?
+            client
+                .execute(
+                    "SELECT pg_advisory_lock_shared($1,$2)",
+                    &[&GUARD, &self.key],
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn unlock<'a>(&'a self, client: &'a Client) -> HandlerFuture<'a, ()> {
+        Box::pin(async move {
+            let unlocked: bool = client
+                .query_one(
+                    "SELECT pg_advisory_unlock_shared($1,$2)",
+                    &[&GUARD, &self.key],
+                )
+                .await?
+                .get(0);
+            if !unlocked {
+                return Err(Error::Internal);
+            }
+            Ok(())
+        })
+    }
+    fn persons<'a>(
+        &'a self,
+        client: &'a dyn ReadClient,
+        persons: &'a [i64],
+    ) -> HandlerFuture<'a, BTreeMap<i64, i64>> {
+        Box::pin(async move {
+            Ok(client
                 .query(
                     "SELECT person_id,id FROM base_privacy_holds WHERE tenant_id=$1 AND released_at IS NULL AND person_id=ANY($2)",
                     &[&self.tenant, &persons],
@@ -116,12 +125,12 @@ impl HoldSession for Session {
     }
     fn records<'a>(
         &'a self,
+        client: &'a dyn ReadClient,
         kind: &'a str,
         ids: &'a [i64],
     ) -> HandlerFuture<'a, BTreeMap<i64, i64>> {
         Box::pin(async move {
-            Ok(self
-                .client()?
+            Ok(client
                 .query(
                     "SELECT record_id,id FROM base_privacy_holds WHERE tenant_id=$1 AND released_at IS NULL AND record_kind=$2 AND record_id=ANY($3)",
                     &[&self.tenant, &kind, &ids],
@@ -131,24 +140,6 @@ impl HoldSession for Session {
                 .map(|row| (row.get(0), row.get(1)))
                 .collect())
         })
-    }
-    fn release(mut self: Box<Self>) -> HandlerFuture<'static, ()> {
-        let client = self.client.take();
-        Box::pin(async move {
-            if let Some(client) = client {
-                client.batch_execute("COMMIT").await?;
-            }
-            Ok(())
-        })
-    }
-}
-impl Drop for Session {
-    /// A session dropped without `release` (a failed erasure) must not go
-    /// back to the pool mid-transaction: closing it ends the guard.
-    fn drop(&mut self) {
-        if let Some(client) = self.client.take() {
-            drop(deadpool_postgres::Object::take(client));
-        }
     }
 }
 
@@ -190,9 +181,17 @@ fn snapshot(hold: &Hold) -> Value {
     serde_json::to_value(hold).unwrap_or(Value::Null)
 }
 
+/// How long placing a hold waits for running erasures and sweeps: one may
+/// hold the guard while it removes many files.
+const PLACE_WAIT: &str = "SET LOCAL lock_timeout = '5s'";
+/// Shown when that wait runs out.
+const PLACE_BUSY: &str =
+    "An erasure or retention sweep is running in this tenant. Try again in a minute.";
+
 /// Places a hold in the caller's transaction. A second active hold on the
 /// same target is `Conflict`, however close together the two arrive. The
-/// exclusive guard waits for running erasures and sweeps to commit.
+/// exclusive guard waits for running erasures and sweeps to commit, up to
+/// five seconds, then refuses with [`PLACE_BUSY`].
 pub(crate) async fn place_in(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
@@ -210,11 +209,23 @@ pub(crate) async fn place_in(
         }
     };
     bilibi_authz::authorize_key(tx.sql(), scope, HOLD_MANAGE).await?;
-    tx.sql()
+    tx.sql().batch_execute(PLACE_WAIT).await?;
+    match tx
+        .sql()
         .execute(
             "SELECT pg_advisory_xact_lock($1,$2)",
             &[&GUARD, &tenant_key(scope.tenant())?],
         )
+        .await
+    {
+        Ok(_) => {}
+        Err(error) if error.code() == Some(&SqlState::LOCK_NOT_AVAILABLE) => {
+            return Err(Error::Refused(PLACE_BUSY.into()));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    tx.sql()
+        .batch_execute("SET LOCAL lock_timeout = DEFAULT")
         .await?;
     let taken = tx
         .sql()

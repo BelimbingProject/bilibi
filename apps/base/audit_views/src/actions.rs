@@ -3,20 +3,21 @@
 //!
 //! The route guard checks `admin.audit.log.list` on every request and live
 //! event. `admin.audit.log.manage` only decides whether the retain control is
-//! drawn; the write asks again, inside the same live event, and a refusal
+//! drawn; the write asks again, inside its own transaction, and a refusal
 //! flashes instead of clearing the page. Retaining flips a bookmark beside the
 //! immutable record (`bilibi_audit::toggle_retained`) and is itself audited.
 //!
-//! Dates are shown through the request's `DisplayContext`; the screen has no
-//! period filter.
+//! Dates are shown through the request's `DisplayContext`. The list reads one
+//! period at a time (`period::ListPeriod`, the last 30 days by default), counts
+//! its matches only up to `bilibi_audit::MAX_COUNT` and orders by time alone,
+//! because the ledger can be large.
 use crate::{
+    period::{Changed, ListPeriod},
     present::{self, Presentation},
     MANAGE,
 };
 use askama::Template;
-use bilibi_audit::{
-    ActionEntry, ActionPage, ActionQuery, ActionSort, EVENT_FAMILIES, MAX_PAGE_SIZE,
-};
+use bilibi_audit::{ActionEntry, ActionPage, ActionQuery, EVENT_FAMILIES, MAX_PAGE_SIZE};
 use bilibi_authz::{authorize_key, effective_capabilities};
 use bilibi_database::{Change, Db, Error, MutationBoundary, Result};
 use bilibi_datetime::{DisplayContext, DisplayPolicy};
@@ -37,6 +38,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, LazyLock},
+    time::SystemTime,
 };
 
 const PAGE_SIZES: [u64; 4] = [25, 50, 100, 300];
@@ -53,8 +55,8 @@ const ACTOR_TYPES: [&str; 8] = [
 const FORBIDDEN: &str = "You do not have permission to manage audit logs.";
 const NOT_UPDATED: &str = "Could not update retention status.";
 
-/// `occurred_at` opens descending, every other column
-/// ascending; the page-size key is `page_size`; diagnostics default to hidden.
+/// `occurred_at` is the only order (newest first, or oldest first); the
+/// page-size key is `page_size`; diagnostics default to hidden.
 static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
     let with_any = |values: &[&'static str]| -> Vec<&'static str> {
         let mut all = vec![""];
@@ -62,13 +64,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
         all
     };
     ListSpec {
-        sortable: BTreeMap::from([
-            ("occurred_at".into(), SortDir::Desc),
-            ("actor_type".into(), SortDir::Asc),
-            ("event".into(), SortDir::Asc),
-            ("url".into(), SortDir::Asc),
-            ("trace_id".into(), SortDir::Asc),
-        ]),
+        sortable: BTreeMap::from([("occurred_at".into(), SortDir::Desc)]),
         default_sort: Some("occurred_at".into()),
         page_sizes: PAGE_SIZES.to_vec(),
         page_size_param: "page_size".into(),
@@ -106,11 +102,11 @@ fn builtins() -> Vec<BuiltinColumn> {
     occurred.kind = ColumnType::Datetime;
     vec![
         occurred,
-        sortable(BuiltinColumn::new("actor_type", "Actor"), "actor_type"),
-        sortable(BuiltinColumn::new("event", "Action"), "event"),
+        BuiltinColumn::new("actor_type", "Actor"),
+        BuiltinColumn::new("event", "Action"),
         BuiltinColumn::new("context", "Context"),
         BuiltinColumn::new("result", "Result"),
-        sortable(BuiltinColumn::new("trace_id", "Trace"), "trace_id"),
+        BuiltinColumn::new("trace_id", "Trace"),
         BuiltinColumn::new("agent_self_report", SelfReport::LABEL),
         BuiltinColumn::new("client_identity", ClientIdentity::LABEL),
         BuiltinColumn::new("retain", "Retain").right(),
@@ -124,6 +120,17 @@ pub(crate) struct Pages {
     pub display: Arc<DisplayPolicy>,
     pub locales: Arc<Locales>,
 }
+impl Pages {
+    /// The reader's clock and date format.
+    async fn display(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<DisplayContext> {
+        let locale = self.locales.resolve(client, scope, None).await?.locale;
+        self.display.display(client, scope, None, locale).await
+    }
+}
 
 /// What the last read returned, kept so a column-arrangement press redraws
 /// without another query.
@@ -131,11 +138,14 @@ struct Shown {
     page: ActionPage,
     display: DisplayContext,
     can_manage: bool,
+    /// Why the chosen range lists nothing, when it cannot be resolved.
+    range_error: Option<&'static str>,
 }
 
 struct Actions {
     pages: Pages,
     list: ListState,
+    period: ListPeriod,
     columns: ListColumns,
     flash: Option<String>,
     shown: Option<Shown>,
@@ -153,6 +163,7 @@ impl Actions {
         Ok(Self {
             pages,
             list: parse(query)?,
+            period: ListPeriod::new("actions-period", query),
             columns: ListColumns::mount("actions-table", builtins())
                 .map_err(|_| Error::Internal)?,
             flash: None,
@@ -160,7 +171,7 @@ impl Actions {
         })
     }
 
-    fn query(&self) -> ActionQuery {
+    fn query(&self, since: SystemTime, until: SystemTime) -> ActionQuery {
         let filter = |key: &str| self.list.filters[key].clone();
         ActionQuery {
             search: self.list.search.clone(),
@@ -168,13 +179,9 @@ impl Actions {
             event_family: filter("event_family"),
             result: filter("result"),
             diagnostics: self.list.filters["diagnostics"] == "show",
-            sort: self
-                .list
-                .sort_by
-                .as_deref()
-                .and_then(ActionSort::parse)
-                .unwrap_or(ActionSort::OccurredAt),
-            descending: self.list.sort_dir == Some(SortDir::Desc),
+            since,
+            until,
+            descending: self.list.sort_dir != Some(SortDir::Asc),
             page: self.list.page,
             page_size: self.list.page_size.min(MAX_PAGE_SIZE),
         }
@@ -184,27 +191,22 @@ impl Actions {
     /// out-of-range page (a stale link, a shrunk filter) lands on the last real
     /// page instead of an empty one with no pager.
     async fn load(&mut self, scope: &Scope) -> Result<()> {
-        let client = self.pages.db.get().await?;
-        let locale = self
-            .pages
-            .locales
-            .resolve(&**client, scope, None)
-            .await?
-            .locale;
-        let display = self
-            .pages
-            .display
-            .display(&**client, scope, None, locale)
-            .await?;
+        let mut client = self.pages.db.get().await?;
+        let display = self.pages.display(&**client, scope).await?;
         let can_manage = effective_capabilities(&**client, scope)
             .await?
             .contains(MANAGE);
-        let mut page = bilibi_audit::list_actions(&**client, scope, &self.query()).await?;
-        if self
-            .list
-            .clamp_to_last_page(page.total_entries.div_ceil(self.list.page_size), true)
+        let (since, until, range_error) = self.period.resolve(&display);
+        let mut page =
+            bilibi_audit::list_actions(&mut client, scope, &self.query(since, until)).await?;
+        // A read that timed out has no total to clamp against.
+        if !page.timed_out
+            && self
+                .list
+                .clamp_to_last_page(page.total_entries.div_ceil(self.list.page_size), true)
         {
-            page = bilibi_audit::list_actions(&**client, scope, &self.query()).await?;
+            page =
+                bilibi_audit::list_actions(&mut client, scope, &self.query(since, until)).await?;
         }
         // The rows changed: ListColumns forgets an unfinished add box.
         self.columns
@@ -213,6 +215,7 @@ impl Actions {
             page,
             display,
             can_manage,
+            range_error,
         });
         Ok(())
     }
@@ -229,14 +232,6 @@ impl Actions {
             return Ok(());
         };
         let mut client = self.pages.db.get().await?;
-        match authorize_key(&**client, scope, MANAGE).await {
-            Ok(()) => {}
-            Err(Error::Forbidden) => {
-                self.flash = Some(FORBIDDEN.into());
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        }
         let outcome: Result<bool> = async {
             let mut tx = self
                 .pages
@@ -246,6 +241,9 @@ impl Actions {
                     scope.mutation_context("audit.action.retention"),
                 )
                 .await?;
+            // Decided inside the write's own transaction, so a grant removed
+            // a moment ago cannot slip between the check and the write.
+            authorize_key(tx.sql(), scope, MANAGE).await?;
             match bilibi_audit::toggle_retained(tx.sql(), scope, id).await? {
                 Some((before, after)) => {
                     tx.record(Change {
@@ -267,6 +265,7 @@ impl Actions {
         .await;
         match outcome {
             Ok(true) => {}
+            Err(Error::Forbidden) => self.flash = Some(FORBIDDEN.into()),
             Ok(false) | Err(Error::Invalid | Error::NotFound | Error::Database(_)) => {
                 self.flash = Some(NOT_UPDATED.into());
             }
@@ -285,7 +284,7 @@ impl Actions {
             flash.error = message;
         }
         let form = self.list.filters_form();
-        let toolbar = render(FilterToolbar::new(
+        let mut toolbar = FilterToolbar::new(
             "actions-filters",
             vec![
                 ToolbarControl::search(
@@ -346,7 +345,9 @@ impl Actions {
                     ]),
                 ),
             ],
-        ))?;
+        );
+        toolbar.class = "mb-0 min-w-0 flex-1";
+        let toolbar = render(toolbar)?;
         let mut rows = Vec::new();
         for action in &shown.page.entries {
             rows.push(row(&shown.display, shown.can_manage, action)?);
@@ -363,10 +364,12 @@ impl Actions {
                 && self.list.filters["actor_type"].is_empty()
                 && self.list.filters["event_family"].is_empty()
                 && self.list.filters["result"].is_empty());
-            table.empty = Some(TableEmpty::Content(Html::text(if narrowed {
-                "No action logs match the current filters."
+            table.empty = Some(TableEmpty::Content(Html::text(if shown.page.timed_out {
+                "Nothing to show: the search was stopped before it finished."
+            } else if narrowed {
+                "No actions in this period match the filters."
             } else {
-                "No action logs match the current filters. Choose Show Diagnostics to include background traffic."
+                "No actions in this period. Choose a longer period, or Show Diagnostics to include background traffic."
             })));
         }
         let pagination = render(Pagination::new(
@@ -381,6 +384,10 @@ impl Actions {
         ActionsView {
             flash,
             toolbar,
+            period: render(self.period.filter.clone())?,
+            range_error: shown.range_error,
+            timed_out: shown.page.timed_out,
+            more: shown.page.more,
             hide_diagnostics: self.list.filters["diagnostics"] == "hide",
             table: render(table)?,
             pagination,
@@ -395,6 +402,10 @@ impl Actions {
 struct ActionsView<'a> {
     flash: FlashMap<'a>,
     toolbar: Html,
+    period: Html,
+    range_error: Option<&'static str>,
+    timed_out: bool,
+    more: bool,
     hide_diagnostics: bool,
     table: Html,
     pagination: Html,
@@ -549,7 +560,10 @@ impl LiveState<Scope, Error> for Actions {
             let mut requery = true;
             match request.input {
                 LiveInput::Refresh => {}
-                LiveInput::Params(values) => self.list = parse(values)?,
+                LiveInput::Params(values) => {
+                    self.list = parse(values)?;
+                    self.period.read(values);
+                }
                 LiveInput::Event(event) => {
                     let get = |key: &str| event.get(key).and_then(Value::as_str);
                     match get("type") {
@@ -586,14 +600,28 @@ impl LiveState<Scope, Error> for Actions {
                             }
                             requery = false;
                         }
-                        _ => return Err(Error::Invalid),
+                        Some("browser_timezone") => self.period.browser_timezone(get("timezone")),
+                        Some(kind) => {
+                            let display = {
+                                let client = self.pages.db.get().await?;
+                                self.pages.display(&**client, request.scope).await?
+                            };
+                            match self.period.event(kind, event, &display)? {
+                                Some(Changed::Applied) => self.list.put_page(Some("1")),
+                                Some(Changed::Control) => requery = false,
+                                None => return Err(Error::Invalid),
+                            }
+                        }
+                        None => return Err(Error::Invalid),
                     }
                 }
             }
             let html = self.view(request.scope, requery).await?;
+            let mut query = self.list.to_params();
+            query.extend(self.period.url());
             Ok(LiveBody {
                 html,
-                query: self.list.to_params(),
+                query,
                 ..LiveBody::default()
             })
         })

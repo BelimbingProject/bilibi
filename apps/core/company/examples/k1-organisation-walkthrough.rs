@@ -33,13 +33,7 @@ struct Browser<'a> {
 impl PlanAuthority for Browser<'_> {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(bilibi_database::Error::Unauthorized)?;
-            let scope = self.app.security.sessions.check(tx, self.token).await?;
+            let scope = self.app.security.sessions.hold(tx, self.token).await?;
             Ok(PlanIdentity {
                 scope,
                 credential_binding: format!("browser:{}", self.token),
@@ -74,8 +68,10 @@ async fn main() -> Result<(), Error> {
     let manager = app.security.guard(&manager_login.token).await?;
     let viewer = app.security.guard(&viewer_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
-    let client = db.get().await?;
-    let client: &tokio_postgres::Client = &client;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
+    let client: &mut tokio_postgres::Client = &mut client;
     let sdn_bhd_id: i64 = client
         .query_one(
             "SELECT id FROM company_legal_entity_types WHERE code='sdn_bhd'",
@@ -234,12 +230,16 @@ async fn main() -> Result<(), Error> {
     let page = bilibi_company::search(client, &viewer, &query).await?;
     for entry in &page.entries {
         println!(
-            "  viewer sees {} email={} (restricted column skipped in search)",
+            "  viewer sees {} email={} (restricted columns are not searched)",
             entry.company.name, entry.company.email
         );
     }
 
     println!("== legal entity types");
+    // The catalogs are global: only the platform operator's tenant writes them.
+    client
+        .batch_execute("INSERT INTO platform_operator(tenant_id) VALUES(1) ON CONFLICT DO NOTHING")
+        .await?;
     let llp = companies
         .create_legal_entity_type(
             &manager,

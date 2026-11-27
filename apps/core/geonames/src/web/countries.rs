@@ -33,12 +33,15 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
 });
 fn builtins() -> Vec<BuiltinColumn> {
     vec![
-        sortable("iso", "ISO", "countries-sort-iso"),
-        sortable("country", "Country", "countries-sort-country"),
-        sortable("capital", "Capital", "countries-sort-capital"),
-        sortable("phone", "Phone", "countries-sort-phone"),
-        sortable("currency_code", "Currency", "countries-sort-currency"),
-        sortable("population", "Population", "countries-sort-population").right(),
+        sortable("iso", "ISO", "countries-sort-iso").grid_field("countries.iso"),
+        sortable("country", "Country", "countries-sort-country").grid_field("countries.country"),
+        sortable("capital", "Capital", "countries-sort-capital").grid_field("countries.capital"),
+        sortable("phone", "Phone", "countries-sort-phone").grid_field("countries.phone"),
+        sortable("currency_code", "Currency", "countries-sort-currency")
+            .grid_field("countries.currency_code"),
+        sortable("population", "Population", "countries-sort-population")
+            .grid_field("countries.population")
+            .right(),
         sortable("updated_at", "Updated", "countries-sort-updated"),
     ]
 }
@@ -158,6 +161,9 @@ impl Countries {
     }
 
     pub async fn view(&mut self, scope: &Scope, requery: bool) -> Result<String> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "countries").await?;
+        drop(client);
         if requery || self.shown.is_none() {
             self.load(scope).await?;
         }
@@ -193,9 +199,13 @@ impl Countries {
             row.dom_id = Some(format!("country-{id}"));
             let name = if can_update {
                 let field_id = format!("country-{id}-name");
-                let mut field =
-                    InlineField::new(&field_id, "country", "Country name", &country.country)
-                        .status(self.statuses.get(&field_id));
+                let mut field = InlineField::new(
+                    &field_id,
+                    "country",
+                    words.field("country", "Country name"),
+                    &country.country,
+                )
+                .status(self.statuses.get(&field_id));
                 field.id_value = id.to_string();
                 field.save_event = "save-country-name".into();
                 render(InlineEdit { field })?

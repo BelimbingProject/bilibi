@@ -1,6 +1,6 @@
 # Versions, releases and the catalogue
 
-Every release of Bilibi and of each Domain is a Git tag `vX.Y.Z`. `catalogue.json` lists those releases and the pairs CI proved build and run together. The running program knows exactly which commits it was built from and shows them in `bilibi-web status` and in the status bar.
+Every release of Bilibi and of each Domain is a Git tag `vX.Y.Z`. `catalogue.json` lists those releases and the pairs CI proved build and run together. The running program knows exactly which commits it was built from and reports them in `bilibi-web status`. The status bar identifies the assembled application.
 
 ## One example
 
@@ -14,7 +14,7 @@ Domains:
 Extensions: none mounted
 ```
 
-Notice what you learn without opening a file: the Platform is release 0.1.0 (not some commit after it), Finance is release 0.1.0, and the exact commits both came from. The status bar at the bottom of every page shows the same in short form: `v0.1.0` and `finance 0.1.0`, with the commits in the tooltip.
+The Platform and Finance are both at release 0.1.0. The command gives the exact commit for each. For viewers with Software access, the status bar version links to Software, which shows the installed Finance version.
 
 You may already have questions: where does a version number come from, how do you make a release, what counts as "tested together", and what happens on a developer's machine without a pin? We cover each below.
 
@@ -60,7 +60,7 @@ Only a repository owner acting as the release maintainer creates the tag. Contri
 
 After the tag exists, open a pull request that bumps `Cargo.toml` to the next number, so `main` never claims a number that was released.
 
-**A Domain or Extension.** Copy [`docs/domain-ci/ci.yml`](domain-ci/ci.yml) to `.github/workflows/ci.yml`. No secret is needed. An owner creates the protected `vX.Y.Z` tag only on a reviewed default-branch commit whose CI is green:
+**A Domain or Extension.** Copy [`docs/domain-ci/ci.yml`](domain-ci/ci.yml) to `.github/workflows/ci.yml` and [`docs/domain-ci/platform-reuse.yml`](domain-ci/platform-reuse.yml) to `.github/workflows/platform-reuse.yml`. No secret is needed. An owner creates the protected `vX.Y.Z` tag only on a reviewed default-branch commit whose CI is green:
 
 ```sh
 git tag v0.1.1 <commit>
@@ -81,9 +81,9 @@ To record the pair as tested before the next Platform release, run `Domains on t
 
 In the application root, commit and push component changes in their owning repositories, then run `./bilibi check` and `./bilibi build`. Each asks whether to use new commits since the saved record: yes uses them and saves the record; no uses the saved versions. Uncommitted source changes stop the command. Scripts can use `--yes` to accept new commits; without it, a command with no keyboard stops rather than guessing. Checks and builds use independently fetchable commits and the saved dependency lock. Checks need their own empty disposable database.
 
-Commit `setup.toml`, `composition/manifest.txt` and `composition/Cargo.lock`, review them, and merge them into the application's default branch. Then run `./bilibi release` to create the protected `setup-vX.Y.Z` tag. The command and workflow both refuse a commit outside the remote default branch. GitHub builds with the saved lock, publishes SHA-256 checksums and creates signed build provenance for every release asset.
+Commit `setup.toml`, `composition/manifest.txt` and `composition/Cargo.lock`, review them, and merge them into the application's default branch. Then create the protected `setup-vX.Y.Z` tag through the application's release command or equivalent protected process. The build refuses a commit outside the remote default branch, uses the saved lock and publishes SHA-256 checksums. A public GitHub workflow may publish GitHub artifact attestations. A private or non-GitHub workflow may publish the operator-key proof described in [Application releases](server-install.md#application-releases).
 
-Follow the generated application's README and release workflow to publish its verified archive through the `release` environment. The server checks the archive's SHA-256 and GitHub provenance against the application repository, its exact release workflow and setup tag before unpacking it. A failed check leaves the running release untouched. Validate the verified archive on Staging and promote that same archive to Production under ADR 02. This does not replace the Platform release workflow above or the server installer's backup and rollback rules.
+Follow the generated application's README and trusted workflow to publish its archive through the protected release environment. Each instance applies its [pinned release-proof policy](architecture/decisions/35-server-release-proof-follows-installation-trust.md). Validate the verified archive on Staging and promote that same archive to Production under ADR 02. This does not replace the Platform release workflow above or the server installer's backup and rollback rules.
 
 ## Upgrade notes for agents
 
@@ -112,6 +112,8 @@ The file has five required parts and an optional extension list:
 | `plugins` | per plug-in ID: name, publisher, repository, the Domain it belongs to (`null` for a Platform plug-in) and its versions, in the same shape | a person; empty until the plug-in runtime ships |
 | `tested` | one entry per Platform commit and Domain commit that passed the gates together, with both versions, the time and the CI run | CI, through the `catalogue` branch; a person may also record a set by hand on `main` with the run that proved it, and CI merges those with its own |
 
+Newly published Domain and Extension version records include `committed_at`, the tagged commit’s committer timestamp from GitHub. Older records may omit it.
+
 A `platform` requirement is comparators joined by commas: `>=0.1.0, <0.2.0`. The operators are `>=`, `<=`, `>`, `<` and `=`. `python3 scripts/catalogue.py --check` refuses a catalogue that is not well formed, and CI runs it on every change, so a typo never reaches the published copy.
 
 ## How releases reach the catalogue
@@ -122,13 +124,13 @@ A `platform` requirement is comparators joined by commas: `>=0.1.0, <0.2.0`. The
 2. It reads the `vX.Y.Z` tags of Bilibi itself first and lists each Platform tag that has a GitHub release, which only the Release workflow makes. A tag with no release is reported as waiting and is not listed. Then, for each listed repository, it reads the `vX.Y.Z` tags (these repositories are public, so no token is needed to read them). A tag that is not listed yet becomes a version when its tagged commit has a passed `Mounted in Bilibi` check, its Platform requirement is valid (`.github/bilibi-platform` at the tag, else the previous version's), and the Platform commit in `.github/bilibi-revision` satisfies that requirement. The release date is the date the tag was made.
 3. It writes the result to the `catalogue` branch. Because the workflow pushes that branch itself and `main` is never written, `main` keeps its pull request rule and the required `Official compatibility` and `check` checks.
 
-A release whose check has not finished is retried at the next run. One that cannot be listed (a failed check, a requirement no listed Platform satisfies, a tag moved after it was listed) is reported as an error on the run and does not stop the other releases. The Release workflow calls the same workflow for the Platform version it just tagged, so a Platform release is listed at once. If that call fails, the next daily run lists the Platform release itself.
+A release whose check has not finished is retried at the next run. One that cannot be listed (a failed check, a requirement no listed Platform satisfies, a tag moved after it was listed) is reported as an error on the run and does not stop the other releases. The Release workflow refreshes the catalogue when it [publishes tested sets](#tested-sets). If that refresh fails, the next daily run lists the published Platform release.
 
 To list a release sooner than the next daily run, run **Catalogue** from the Actions tab. Tick `dry_run` to see the change in the run summary without writing it. GitHub stops scheduled workflows after 60 days without repository activity; running **Catalogue** by hand starts them again.
 
 ## Tested sets
 
-**A tested set is one Domain, mounted alone on one Platform commit, that passed the release gates in `scripts/domain-ci.sh`:** discovery, CSS compilation and coverage, a pinned `Cargo.lock`, format and lint, a locked release build, a fresh migration, the production seeds and a `GET /`. It is recorded as the two commits, each with the release tag it sits on (or `null` for a commit between releases), the time, and the CI run to read.
+**A tested set is one Domain, mounted alone on one Platform commit, that passed the [mounted release gates](domain-ci/README.md).** It is recorded as the two commits, each with the release tag it sits on (or `null` for a commit between releases), the time, and the CI run to read.
 
 ```json
 {
@@ -144,11 +146,11 @@ To list a release sooner than the next daily run, run **Catalogue** from the Act
 
 How CI records a set (`.github/workflows/domains.yml`):
 
-1. On a push to `main`, and on a pull request that can affect a mounted Domain or Extension, every official entry in `catalogue.json` is mounted separately at its `main` HEAD and the gates run. A pull request can select companion branches as described below. Nothing is recorded: these runs protect `main`, they are not releases. A pull request lints and boots a debug build. A push to `main` does the locked release build, and also the debug build so that pull requests start from a warm cache. A pull request is mounted as the change on top of the live tip of its base branch, not on GitHub's merge ref, which is frozen when the pull request is pushed and can be older than the Domains it meets. `scripts/merge-live-base.sh` fetches the base and merges it before the build. A merge conflict fails the job and tells the author to update the branch. Pushes, tags and manual runs are unchanged.
+1. On a push to `main` or a pull request that can affect a mounted Domain or Extension, every official entry in `catalogue.json` defaults to its `main` branch. A pull request can select companion branches as described below. These runs check [mounted compatibility](domain-ci/README.md) without publishing tested sets.
 2. A pull request passes **Official compatibility** without mounting when every changed file cannot affect a Domain or Extension. The unmounted `Rust` workflow still compiles CSS twice on those pull requests to verify reproducibility. That is `docs/`, Markdown that no Rust source compiles in with `include_str!` or `include_bytes!`, `LICENSE`, `.gitignore`, `.editorconfig`, `.gitattributes`, `compose.yml`, `.agents/`, `.amp/`, `.claude/`, and `.github/` except `.github/workflows/domains.yml`. Anything else mounts. A `Bilibi-Companion:` line mounts even when the files would not. `scripts/compatibility.py` is the list.
-3. On a release tag `v*`, each Domain and Extension is mounted at its latest release tag instead, and the locked release build runs. On a hand-started run, `domains_at` chooses between the two. The Release workflow calls the same workflow with `domains_at` set to `latest-release` before the tag exists. Companion branches never apply to tags, manual runs, pushes to `main` or that call. The unmounted Rust workflow skips the same kind of docs-only pull request, except for the CSS check, and it skips `.github/` except `.github/workflows/ci.yml`. The unmounted Rust workflow runs the locked release build (`cargo build --workspace --release --locked`) only on `main` and on tags; a pull request relies on clippy compiling every target, so its required `check` job passes without the release build. The Release workflow does not depend on that run: its call of `Domains on this change` does the locked release build of the exact commit, with every official Domain and Extension mounted, before the tag exists.
-4. After the gates pass, `python3 scripts/catalogue.py tested` reads the pin the gates made (`.local/composition/manifest.txt`) and writes the set. The Release workflow passes `--platform-version` from `Cargo.toml`, because the tag is created after this run.
-5. The `Record the tested sets` job then runs `python3 scripts/catalogue.py publish`, which merges `catalogue.json` from the run's checkout, the sets already on the `catalogue` branch and the new ones, and pushes the result to that branch. The same pair recorded twice keeps the newer run. A tag pushed by hand still records this way. The Release workflow's own call records when Official compatibility passed, which is the run that publishes a release, because the tag it pushes does not start a second workflow.
+3. On a manual compatibility run, `domains_at` selects each entry's latest release tag by default or its `main` branch. The Release workflow calls compatibility with `domains_at` set to `latest-release` to verify the tagged Platform commit before publishing. Companion branches apply only to pull requests. The unmounted Rust workflow skips the same kind of docs-only pull request, except for the CSS check, and it skips `.github/` except `.github/workflows/ci.yml` and `.github/workflows/walkthroughs.yml`. The Walkthroughs workflow decides the same way. The unmounted Rust workflow runs the locked release build (`cargo build --workspace --release --locked`) only on `main` and on tags. A pull request relies on Clippy compiling every target, so its required `check` job passes without the release build.
+4. The release build job runs `python3 scripts/catalogue.py tested` after boot to describe the set from its pin (`.local/composition/manifest.txt`). The workflow collects the Finance set when the lint and release phases report matching [composition inputs](domain-ci/README.md#finance-compatibility) and the set's two commits match those inputs. The Release workflow supplies the version verified by its tag check as `--platform-version`.
+5. A manual compatibility run publishes the tested sets it collects even if an unrelated Domain or Extension fails. The `Record the tested sets` job runs `python3 scripts/catalogue.py publish`, which merges `catalogue.json` from the run's checkout, the sets already on the `catalogue` branch and the new ones, then pushes the result to that branch. The same pair recorded twice keeps the newer run. The Release workflow publishes its sets as part of the release after Official compatibility passes.
 
 Extension checks use the same gates. The existing tested-set format records Domain pairs only; Extension checks do not add records or change catalogue publishing.
 
@@ -159,7 +161,7 @@ Extension checks use the same gates. The existing tested-set format records Doma
 - Open a companion PR in each affected repository and link it from the Platform PR. Link back to the Platform PR from each companion.
 - Keep the Platform and companion checks green, and merge the changes together. For a repository owned by someone else, open the companion PR and notify its owner.
 - Do not change Domains and Extensions outside the catalogue, including private repositories, from a Platform task.
-- Require the stable `Official compatibility` check from `Domains on this change` in branch protection. It fails if catalogue selection or any mounted job fails or is cancelled; no official entry is allowed to fail. A pull request that cannot affect a mount passes this check with the mount skipped.
+- Require the stable `Official compatibility` check from `Domains on this change` in branch protection. See the [Domain CI gates](domain-ci/README.md) and [Finance composition requirements](domain-ci/README.md#finance-compatibility).
 
 To check a companion branch with a Platform PR, add one standalone line to the Platform PR body for each affected entry:
 
@@ -169,13 +171,11 @@ Bilibi-Companion: domains/finance=fix/platform-change
 
 Use `extensions/<catalogue-id>=<branch>` for an Extension. The branch must exist in that entry's catalogue repository. Fork repository overrides, duplicate entries, unknown entries and malformed directives are refused. Entries without a directive still use `main`. Link the companion PR alongside the directive; the directive selects a branch, it does not replace that link.
 
-Opening or editing the Platform PR body starts a new run, as does pushing a Platform commit. After pushing a new companion commit, rerun the workflow or edit the Platform PR body to start a fresh run. A companion push alone does not trigger Platform CI. Check the mounted job summary for the exact repository, ref and commit used. For the companion's own CI to check the new Platform API, update its `.github/bilibi-revision` to the Platform commit under review.
-
-The matrix comes from `scripts/compatibility.py`, reading `domains` and optional `extensions` from the checkout's `catalogue.json`. Each job runs the shared `scripts/domain-ci.sh` gates. A pull request formats, lints, builds a debug `bilibi-web`, migrates, seeds and loads `/`. A push to `main`, a tag and a hand-started run also do the locked release build and boot that binary. A failing job names the Domain or Extension and points back to this companion-PR rule.
+Opening or editing the Platform PR body starts a new run, as does pushing a Platform commit. After pushing a new companion commit, rerun the workflow or edit the Platform PR body to start a fresh run. Follow the [Finance retry instructions](domain-ci/README.md#finance-compatibility) for a Finance companion. A companion push alone does not trigger Platform CI. Check the mounted job summary for the repository and exact commit used. For the companion's own CI to check the new Platform API, update its `.github/bilibi-revision` to the Platform commit under review.
 
 ## Versions inside the program
 
-**The program is the truth about what it contains.** `scripts/discover-modules.py --pin` records the Platform commit, its version and release tag, and each mounted Domain's commit and release in `.local/composition/manifest.txt`. The executable host's build script (`apps/web/build.rs`) compiles that manifest into the program, and `bilibi_web::composition` hands it to `bilibi-web status`, the status bar and anything else that asks. Nothing is read from a file or the database at run time, so the shown versions cannot drift from the running code.
+**The program is the truth about what it contains.** `scripts/discover-modules.py --pin` records the Platform commit, its version and release tag, each mounted Domain or Extension's commit, date, branch, package version and release when known, and each Extension's reviewed/customer code declaration in `.local/composition/manifest.txt`. The executable host's build script (`apps/web/build.rs`) compiles that manifest into the program, and `bilibi_web::composition` hands it to `bilibi-web status` and anything else that asks. Those composition facts are compiled in, so they cannot drift from the running code. The application release identity is separate: the status bar reads the `release.json` packaged beside the executable.
 
 Pin, then build:
 
@@ -187,18 +187,13 @@ cargo build --release --locked -p bilibi-web
 
 The pin is read at build time, so **pin before you build**. The build also checks the pin against the checkouts it compiles: when Git is available and the Platform or a Domain is at another commit than the pin recorded, the pin is reported stale instead of shown.
 
+Customer-code Extensions require a saved isolated installation at discovery, pinning and restoration: supply `DATABASE_URL` for `psql` to read `installation.mode`. No saved isolated policy means refusal; prepare a code-free release instead. Runtime composition verification reads the setting again, independently of build-time admission.
+
 **Platform-only setups can be pinned too.** With no Domains or Extensions mounted, `--pin` records the Platform revision, version and resolved `Cargo.lock`, with an empty `[containers]` table. On a checkout at that Platform revision, copy `.local/composition/` into place and run `python3 scripts/discover-modules.py --restore` to restore the lockfile. The same checks apply: a changed Platform revision, an altered pinned lockfile or a mounted container absent from the pin is refused.
 
-What you see in each state:
+`bilibi-web status` reports each pinned Platform and component version and commit, marks untagged components, and explains an unpinned or stale composition. The Software page also shows component versions.
 
-| State | `status` says | Status bar |
-| --- | --- | --- |
-| Pinned at a release | `Bilibi 0.1.0, release v0.1.0, commit …` and `finance 0.1.0, commit …` | `v0.1.0` `finance 0.1.0` |
-| Pinned between releases | `unreleased, commit …`; a Domain at no tag reads `untagged, commit …` | `v0.1.1` `finance 24938fb69a4d` |
-| No pin (a developer build) | `built from commit …` and `Pin: none`; a Domain checkout read from its own Git shows its commit (or release), any other reads `unpinned` | `v0.1.1` `finance 24938fb69a4d` (a Domain with no known commit has no badge) |
-| Stale pin (mounted set, `Cargo.toml` or a checkout's commit changed after the pin) | `Pin: stale, …` with what differs; no commits are shown, because they would be wrong | No Domain badge; the reason is in the Platform badge's tooltip |
-
-Hover a badge in the status bar for the commit and the module list.
+Staging and Production show the application tag without `setup-` when the package provides the tag and release date. Hover or focus the version to see its release date. Dev shows the Platform working version and `*` when a source checkout has uncommitted changes. Open Components to see the installed Domain and Extension versions.
 
 ## Where to go next
 

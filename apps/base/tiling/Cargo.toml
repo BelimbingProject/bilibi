@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 askama.workspace = true
+bilibi-agent-api.workspace = true
+bilibi-labels.workspace = true
 bilibi-authz = { path = "../authz" }
 bilibi-database.workspace = true
 bilibi-menu.workspace = true
@@ -17,4 +19,8 @@ bilibi-ui.workspace = true
 inventory.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio-postgres.workspace = true
+
+[lints]
+workspace = true

@@ -101,6 +101,23 @@ impl CompanyService {
         for change in bilibi_picklists::provision(tx.sql(), tenant).await? {
             tx.record(change).await?;
         }
+        // The default relationship roles, audited like the pick-lists.
+        tx.mutate(move |sql| {
+            Box::pin(async move {
+                let changes = crate::relationship_roles::ensure_defaults(sql, tenant)
+                    .await?
+                    .iter()
+                    .map(|role| Change {
+                        kind: "company.relationship_role".into(),
+                        id: role.id.get(),
+                        old: Value::Null,
+                        new: role.to_json(),
+                    })
+                    .collect();
+                Ok(((), changes))
+            })
+        })
+        .await?;
         let created = tx
             .mutate(move |sql| {
                 Box::pin(async move {

@@ -30,13 +30,12 @@ pub(crate) fn bind(calendars: Arc<WorkCalendars>) -> bilibi_module_registry::Res
 fn calendars() -> bilibi_agent_api::Result<&'static Arc<WorkCalendars>> {
     CALENDARS.get().ok_or(Error::Internal.into())
 }
-fn field(name: &str, message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([(name.into(), vec![message.into()])]))
-}
 fn refusal(error: WriteError) -> AgentError {
     match error {
         WriteError::Access(error) => error.into(),
-        WriteError::NotFound => field("code", "is not a calendar or holiday set of this tenant"),
+        WriteError::NotFound => {
+            bilibi_agent_api::invalid("code", "is not a calendar or holiday set of this tenant")
+        }
         WriteError::Stale => Error::Conflict.into(),
         WriteError::Invalid(errors) => {
             let mut fields: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -49,8 +48,10 @@ fn refusal(error: WriteError) -> AgentError {
 }
 fn read_refusal(error: Error, name: &str) -> AgentError {
     match error {
-        Error::NotFound => field(name, "is not a calendar or holiday set of this tenant"),
-        Error::Invalid => field(
+        Error::NotFound => {
+            bilibi_agent_api::invalid(name, "is not a calendar or holiday set of this tenant")
+        }
+        Error::Invalid => bilibi_agent_api::invalid(
             name,
             "is not a valid window: from on or before to, at most 731 days",
         ),
@@ -61,14 +62,14 @@ fn date(input: &Value, name: &str) -> bilibi_agent_api::Result<Date> {
     input[name]
         .as_str()
         .and_then(|text| text.parse().ok())
-        .ok_or_else(|| field(name, "must be a date (YYYY-MM-DD)"))
+        .ok_or_else(|| bilibi_agent_api::invalid(name, "must be a date (YYYY-MM-DD)"))
 }
 fn instant(input: &Value, name: &str) -> bilibi_agent_api::Result<Timestamp> {
     input[name]
         .as_str()
         .and_then(|text| text.parse().ok())
         .ok_or_else(|| {
-            field(
+            bilibi_agent_api::invalid(
                 name,
                 "must be an instant with an offset, such as 2026-11-02T09:00:00+08:00",
             )
@@ -76,7 +77,7 @@ fn instant(input: &Value, name: &str) -> bilibi_agent_api::Result<Timestamp> {
 }
 fn shift(date: Date, days: i64) -> bilibi_agent_api::Result<Date> {
     date.checked_add(days.days())
-        .map_err(|_| field("date", "is out of range"))
+        .map_err(|_| bilibi_agent_api::invalid("date", "is out of range"))
 }
 /// An optional whole number from `min` to `max`, `default` when omitted.
 fn number(
@@ -91,7 +92,12 @@ fn number(
         Some(value) => value
             .as_i64()
             .filter(|n| (min..=max).contains(n))
-            .ok_or_else(|| field(name, &format!("must be a whole number from {min} to {max}"))),
+            .ok_or_else(|| {
+                bilibi_agent_api::invalid(
+                    name,
+                    format!("must be a whole number from {min} to {max}"),
+                )
+            }),
     }
 }
 fn page(input: &Value) -> bilibi_agent_api::Result<i64> {
@@ -103,7 +109,9 @@ fn listing(input: &Value) -> bilibi_agent_api::Result<Listing> {
         Some(value) => value
             .as_str()
             .filter(|text| text.chars().count() <= 200)
-            .ok_or_else(|| field("search", "must be text of at most 200 characters"))?
+            .ok_or_else(|| {
+                bilibi_agent_api::invalid("search", "must be text of at most 200 characters")
+            })?
             .to_owned(),
     };
     Ok(Listing {
@@ -206,9 +214,21 @@ async fn business_time(
 ) -> bilibi_agent_api::Result<Value> {
     let operation = input["operation"].as_str().unwrap_or_default();
     let (from, to) = match operation {
-        "is_open" | "next_open" | "add" => {
+        "is_open" | "next_open" | "add" | "add_working_days_at" => {
             let at = utc_date(instant(input, "at")?);
             (shift(at, -1)?, shift(at, SEARCH_DAYS + 1)?)
+        }
+        "shift" => {
+            let at = utc_date(instant(input, "at")?);
+            let backwards = input["duration"]
+                .as_str()
+                .and_then(|text| text.parse::<SignedDuration>().ok())
+                .is_some_and(|duration| duration.is_negative());
+            if backwards {
+                (shift(at, -(SEARCH_DAYS + 1))?, shift(at, 1)?)
+            } else {
+                (shift(at, -1)?, shift(at, SEARCH_DAYS + 1)?)
+            }
         }
         "elapsed" => (
             shift(utc_date(instant(input, "at")?), -1)?,
@@ -219,9 +239,9 @@ async fn business_time(
             (day, shift(day, SEARCH_DAYS)?)
         }
         _ => {
-            return Err(field(
+            return Err(bilibi_agent_api::invalid(
                 "operation",
-                "must be is_open, next_open, add, elapsed or add_working_days",
+                "must be is_open, next_open, add, shift, elapsed, add_working_days or add_working_days_at",
             ))
         }
     };
@@ -229,7 +249,10 @@ async fn business_time(
         .until(to)
         .map_or(true, |span| i64::from(span.get_days()) >= MAX_WINDOW_DAYS)
     {
-        return Err(field("until", "must be within 729 days of at"));
+        return Err(bilibi_agent_api::invalid(
+            "until",
+            "must be within 729 days of at",
+        ));
     }
     let timetable: Timetable = calendars
         .timetable(scope, code, from, to)
@@ -242,16 +265,23 @@ async fn business_time(
         "next_open" => timetable
             .next_open(instant(input, "at")?)
             .map(|at| json!(at.to_string())),
-        "add" => {
+        "add" | "shift" => {
             let duration: SignedDuration = input["duration"]
                 .as_str()
                 .and_then(|text| text.parse().ok())
                 .ok_or_else(|| {
-                    field("duration", "must be an ISO 8601 duration, such as PT8H30M")
+                    bilibi_agent_api::invalid(
+                        "duration",
+                        "must be an ISO 8601 duration, such as PT8H30M",
+                    )
                 })?;
-            timetable
-                .add(instant(input, "at")?, duration)
-                .map(|at| json!(at.to_string()))
+            let at = instant(input, "at")?;
+            let answer = if operation == "shift" {
+                timetable.shift(at, duration)
+            } else {
+                timetable.add(at, duration)
+            };
+            answer.map(|at| json!(at.to_string()))
         }
         "elapsed" => timetable
             .elapsed(instant(input, "at")?, instant(input, "until")?)
@@ -260,10 +290,18 @@ async fn business_time(
             let days = input["days"]
                 .as_u64()
                 .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| field("days", "must be a whole number from 0"))?;
-            timetable
-                .add_working_days(date(input, "date")?, days)
-                .map(|day| json!(day.to_string()))
+                .ok_or_else(|| {
+                    bilibi_agent_api::invalid("days", "must be a whole number from 0")
+                })?;
+            if operation == "add_working_days_at" {
+                timetable
+                    .add_working_days_at(instant(input, "at")?, days)
+                    .map(|at| json!(at.to_string()))
+            } else {
+                timetable
+                    .add_working_days(date(input, "date")?, days)
+                    .map(|day| json!(day.to_string()))
+            }
         }
     };
     match answer {
@@ -273,35 +311,57 @@ async fn business_time(
         Err(TimeError::Beyond) => {
             Ok(json!({"code": code, "operation": operation, "result": null, "beyond": true}))
         }
-        Err(TimeError::Backwards) => Err(field("until", "must not be before at")),
-        Err(TimeError::Negative) => Err(field("duration", "must not be negative")),
+        Err(TimeError::Backwards) => {
+            Err(bilibi_agent_api::invalid("until", "must not be before at"))
+        }
+        Err(TimeError::Negative) => Err(bilibi_agent_api::invalid(
+            "duration",
+            "must not be negative",
+        )),
     }
 }
 
 struct Write(Action);
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let calendars = calendars()?;
+        let scope = calendars.authentication.reprove(client, scope).await?;
+        let prepared = calendars
+            .prepare(client, &scope, self.0, input)
+            .await
+            .map_err(refusal)?;
+        Ok(calendars
+            .review(client, &scope, &prepared, None)
+            .await
+            .map_err(refusal)?
+            .into())
+    }
+}
 impl WriteHandler for Write {
     fn owner(&self) -> &'static str {
         "core/work_calendar"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let calendars = calendars()?;
-            let client = calendars.db.get().await.map_err(Error::from)?;
-            let scope = calendars.authentication.reprove(&**client, scope).await?;
-            let prepared = calendars
-                .prepare(&**client, &scope, self.0, input)
-                .await
-                .map_err(refusal)?;
-            Ok(calendars
-                .review(&**client, &scope, &prepared, None)
-                .await
-                .map_err(refusal)?
-                .into())
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = calendars()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
+                }
+            }
         })
     }
     fn commit<'a>(
@@ -363,12 +423,12 @@ fn read_schema(operation: Read) -> Value {
         }}),
         Read::BusinessTime => json!({"type":"object","required":["code","operation"],"properties":{
             "code":code_schema("A calendar code"),
-            "operation":{"type":"string","enum":["is_open","next_open","add","elapsed","add_working_days"]},
-            "at":{"type":"string","format":"date-time","description":"is_open, next_open, add, elapsed: the instant, with an offset"},
+            "operation":{"type":"string","enum":["is_open","next_open","add","shift","elapsed","add_working_days","add_working_days_at"]},
+            "at":{"type":"string","format":"date-time","description":"is_open, next_open, add, shift, elapsed, add_working_days_at: the instant, with an offset"},
             "until":{"type":"string","format":"date-time","description":"elapsed: the end, not before at"},
-            "duration":{"type":"string","maxLength":40,"description":"add: business time to add, ISO 8601 (PT8H30M)"},
+            "duration":{"type":"string","maxLength":40,"description":"add: non-negative business time; shift: signed business time, ISO 8601 (PT8H30M or -PT2H)"},
             "date":{"type":"string","format":"date","description":"add_working_days: the start date"},
-            "days":{"type":"integer","minimum":0,"maximum":366,"description":"add_working_days: 0 is the date itself or the next working day"}
+            "days":{"type":"integer","minimum":0,"maximum":366,"description":"add_working_days, add_working_days_at: 0 is the date itself or the next working day; the instant operation preserves local time capped at final close"}
         }}),
     }
 }
@@ -556,7 +616,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/work_calendar", crate:
         read!("core.work_calendar.holiday_set.list", "List holiday sets", "This tenant's holiday sets and the installation-wide ones (code, name, country, division, installation), a page at a time, with the total.", LIST, SETS_OP, sets_schema),
         read!("core.work_calendar.get", "Get a work calendar", "One calendar: its weekly rule versions, included holiday sets and dated exceptions, with the version to write against.", VIEW, GET_OP, get_schema),
         read!("core.work_calendar.days", "Resolve calendar days", "Each date in a range (at most 731 days) as working, rest, off or holiday, with its opening periods and why.", VIEW, DAYS_OP, days_schema),
-        read!("core.work_calendar.business_time", "Business-time arithmetic", "Ask a calendar: is it open at an instant, when does it next open, what instant is a duration of business time later, how much business time lies between two instants, which is the nth working day after a date.", VIEW, BUSINESS_OP, business_schema),
+        read!("core.work_calendar.business_time", "Business-time arithmetic", "Ask a calendar: is it open at an instant, when does it next open, what instant is a duration of business time later, shift by signed business time, how much business time lies between two instants, which is the nth working day after a date or instant (preserving local time capped at final close).", VIEW, BUSINESS_OP, business_schema),
         read!("core.work_calendar.holiday_set.get", "Get a holiday set", "One holiday set with its holidays (optionally from and to a date) and the calendars that include it.", VIEW, SET_OP, set_schema),
         write!("core.work_calendar.create", "Create a work calendar", "A new calendar with its zone, its first weekly rule and its holiday substitution rule.", CREATE, create_schema),
         write!("core.work_calendar.update", "Update a work calendar", "Rename a calendar, change where holidays on rest days move, or retire or reactivate it.", UPDATE, update_schema),
@@ -570,5 +630,5 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/work_calendar", crate:
         write!("core.work_calendar.include", "Include a holiday set in a calendar", "Include a holiday set in a calendar, or leave it out.", INCLUDE, include_schema),
     ],
     guides: &[Guide { key: "core.work_calendar", title: "Work calendars", summary: "Build a calendar, enter holidays and ask business-time questions.", keywords: &["calendar", "working hours", "holiday", "business time", "sla"], capability: VIEW,
-        body: "A work calendar says when a tenant does business. Every date resolves to working (with opening periods), rest (the weekly rest day), off (another non-working day) or holiday: a dated exception wins, then a holiday (or a substitute for one) from an included holiday set, then the weekly rule in force. Build one with core.work_calendar.create (code, name, week; the zone defaults to the tenant's). Change the week from a date with core.work_calendar.rule.set; earlier dates keep their rules. Create a holiday set per country or state with core.work_calendar.holiday_set.create, enter a year of holidays in one core.work_calendar.holiday_set.holidays call, and include it with core.work_calendar.include. Installation-wide sets (installation true in core.work_calendar.holiday_set.list) are kept by the platform operator for every tenant: include one like your own; it is read-only, so to change it copy it with core.work_calendar.holiday_set.copy and include the copy instead. A shutdown, a special working day or a half day is core.work_calendar.exception.add. Writes need the version from core.work_calendar.get or .holiday_set.get; plan, show the review, then commit. One plan may write a calendar or set several times: each of those writes names the version you read. Check the result with core.work_calendar.days, and answer due times with core.work_calendar.business_time: add PT8H from an instant gives the due time (a result at a closing time stays there), elapsed measures business time between two instants, add_working_days counts working days. beyond true means the answer lies more than 366 days ahead or the calendar has no working time." }],
+        body: "A work calendar says when a tenant does business. Every date resolves to working (with opening periods), rest (the weekly rest day), off (another non-working day) or holiday: a dated exception wins, then a holiday (or a substitute for one) from an included holiday set, then the weekly rule in force. Build one with core.work_calendar.create (code, name, week; the zone defaults to the tenant's). Change the week from a date with core.work_calendar.rule.set; earlier dates keep their rules. Create a holiday set per country or state with core.work_calendar.holiday_set.create, enter a year of holidays in one core.work_calendar.holiday_set.holidays call, and include it with core.work_calendar.include. Installation-wide sets (installation true in core.work_calendar.holiday_set.list) are kept by the platform operator for every tenant: include one like your own; it is read-only, so to change it copy it with core.work_calendar.holiday_set.copy and include the copy instead. A shutdown, a special working day or a half day is core.work_calendar.exception.add. Writes need the version from core.work_calendar.get or .holiday_set.get; plan, show the review, then commit. One plan may write a calendar or set several times: each of those writes names the version you read. Check the result with core.work_calendar.days, and answer due times with core.work_calendar.business_time: add PT8H from an instant gives the due time (a result at a closing time stays there), elapsed measures business time between two instants, shift accepts signed durations (negative counts backwards from the previous close when closed), add_working_days counts working dates, and add_working_days_at preserves local time capped at the destination final close (gaps use the first valid instant, folds the earlier one; zero rolls a non-working date forward). beyond true means the answer lies past the loaded window or 366-day search limit or the calendar has no working time." }],
 }) }

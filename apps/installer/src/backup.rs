@@ -3,15 +3,15 @@
 //! for a release that fails its check after the database changed shape.
 //! The connection details go to the tools through the `PG*` environment,
 //! never as an argument another user could read in the process list.
-use crate::jobs;
+use crate::{composition, jobs};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
-use tokio_postgres::GenericClient;
+use tokio_postgres::Client;
 
 /// The instance's database connection as libpq environment variables.
 pub struct PgEnv(Vec<(&'static str, String)>);
@@ -83,8 +83,9 @@ pub struct Restored {
 /// Replaces the database's contents with a dump: the software history, and
 /// the audit rows of the software changes made after `since` (the instant
 /// the dump was taken), are saved to `history_file` first, the `public` schema is dropped and made
-/// again, the dump is restored into it, and the history is put back so the
-/// job doing this does not erase itself or the record of who confirmed it. The service must be stopped first.
+/// again in bounded transactions, the dump is restored into it, and the
+/// history is put back so the job doing this does not erase itself or the
+/// record of who confirmed it. The service must be stopped first.
 ///
 /// The file is what makes this safe to run again after a restart: when it
 /// exists it is read instead of the database, which a cut-off restore left
@@ -94,13 +95,14 @@ pub struct Restored {
 /// the restore fails and the job tables are gone, they are made again from
 /// the file, so the failure can still be recorded.
 pub async fn restore(
-    client: &impl GenericClient,
+    client: &Client,
     pg: &PgEnv,
     dump: &Path,
     since: &str,
     history_file: &Path,
+    target: Option<&Path>,
 ) -> Result<Restored, String> {
-    let outcome = replace(client, pg, dump, since, history_file).await;
+    let outcome = replace(client, pg, dump, since, history_file, target).await;
     let Err(why) = &outcome else {
         return outcome;
     };
@@ -116,11 +118,12 @@ pub async fn restore(
     }
 }
 async fn replace(
-    client: &impl GenericClient,
+    client: &Client,
     pg: &PgEnv,
     dump: &Path,
     since: &str,
     history_file: &Path,
+    target: Option<&Path>,
 ) -> Result<Restored, String> {
     if restored(history_file) {
         return Ok(Restored {
@@ -134,35 +137,36 @@ async fn replace(
     let saved = match read_saved(history_file) {
         Some((_, saved)) => saved,
         None => {
-            let saved = jobs::history(client, since).await.map_err(|error| {
+            let mut saved = jobs::history(client, since).await.map_err(|error| {
                 format!(
                     "could not read the software history: {}",
                     jobs::short(&error)
                 )
             })?;
+            let target = target.ok_or("The restore has no target release composition.")?;
+            saved["target_composition"] = json!(composition::status(target)?);
+            validate_restore(&saved)?;
             write_saved(history_file, dump, &saved)?;
             saved
         }
     };
-    clear(client).await?;
-    let out = pg
-        .command("pg_restore")
-        .args([
-            "--no-owner",
-            "--no-privileges",
-            "--exit-on-error",
-            "--dbname",
-            pg.dbname(),
-        ])
-        .arg(dump)
-        .output()
-        .map_err(|error| format!("could not run pg_restore: {error}"));
-    let failed = match out {
-        Ok(out) if out.status.success() => None,
-        Ok(out) => Some(format!("pg_restore failed: {}", tail(&out.stderr))),
-        Err(why) => Some(why),
+    validate_restore(&saved)?;
+    let kept = match keep_owner(client).await {
+        Ok(kept) => kept,
+        Err(why) => {
+            return Err(match rebuild(client, &saved, false).await {
+                Ok(()) => why,
+                Err(more) => format!("{why} {more}"),
+            });
+        }
     };
-    if let Some(why) = failed {
+    if let Err(why) = clear(client).await {
+        return Err(match rebuild(client, &saved, true).await {
+            Ok(()) => why,
+            Err(more) => format!("{why} {more}"),
+        });
+    }
+    if let Err(why) = restore_with_owner(pg, dump, &kept) {
         return Err(match rebuild(client, &saved, true).await {
             Ok(()) => why,
             Err(more) => format!("{why} {more}"),
@@ -180,16 +184,103 @@ async fn replace(
     let _ = fs::rename(history_file, restored_name(history_file));
     Ok(Restored { carried, problems })
 }
-async fn clear(client: &impl GenericClient) -> Result<(), String> {
+fn validate_restore(saved: &Value) -> Result<(), String> {
+    let rows = saved["base_settings"]["rows"]
+        .as_array()
+        .ok_or("The restore record has no saved installation policy; restore refused.")?;
+    let mode = match rows.as_slice() {
+        [] => "shared",
+        [row] => row["value"]
+            .as_str()
+            .ok_or("The saved installation policy is invalid.")?,
+        _ => return Err("The saved installation policy is ambiguous.".into()),
+    };
+    let status = saved["target_composition"]
+        .as_str()
+        .ok_or("The restore record has no target composition; restore refused.")?;
+    composition::admit(status, mode)
+        .map(|_| ())
+        .map_err(|why| format!("Restore refused: {why}"))
+}
+/// Clears `public` without asking PostgreSQL to lock every relation in one
+/// transaction. Each generated statement runs in its own implicit
+/// transaction on a plain [`Client`], so a large installation cannot exhaust
+/// the shared lock table while it is being replaced. The durable history file
+/// and dump already exist before this starts, so an interruption can safely
+/// repeat the bounded clear and restore.
+pub(crate) async fn clear(client: &Client) -> Result<(), String> {
+    drop_each(
+        client,
+        "foreign keys",
+        "SELECT format(
+             'ALTER TABLE IF EXISTS %I.%I DROP CONSTRAINT IF EXISTS %I CASCADE',
+             nsp.nspname, rel.relname, cst.conname
+         )
+         FROM pg_constraint AS cst
+         JOIN pg_class AS rel ON rel.oid = cst.conrelid
+         JOIN pg_namespace AS nsp ON nsp.oid = rel.relnamespace
+         WHERE nsp.nspname = 'public' AND cst.conislocal AND cst.contype = 'f'
+         ORDER BY cst.oid",
+    )
+    .await?;
+    drop_each(
+        client,
+        "relations",
+        "SELECT format(
+             'DROP %s IF EXISTS %I.%I CASCADE',
+             CASE rel.relkind
+                 WHEN 'v' THEN 'VIEW'
+                 WHEN 'm' THEN 'MATERIALIZED VIEW'
+                 WHEN 'S' THEN 'SEQUENCE'
+                 WHEN 'f' THEN 'FOREIGN TABLE'
+                 ELSE 'TABLE'
+             END,
+             nsp.nspname,
+             rel.relname
+         )
+         FROM pg_class AS rel
+         JOIN pg_namespace AS nsp ON nsp.oid = rel.relnamespace
+         WHERE nsp.nspname = 'public'
+           AND rel.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+         ORDER BY
+             rel.relispartition DESC,
+             CASE rel.relkind WHEN 'v' THEN 0 WHEN 'm' THEN 1 WHEN 'S' THEN 3 ELSE 2 END,
+             rel.oid",
+    )
+    .await?;
     client
-        .batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+        .batch_execute("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
         .await
-        .map_err(|error| format!("could not clear the database: {}", jobs::short(&error)))
+        .map_err(|error| {
+            format!(
+                "could not replace the cleared schema: {}",
+                jobs::short(&error)
+            )
+        })
+}
+
+async fn drop_each(client: &Client, kind: &str, query: &str) -> Result<(), String> {
+    let statements = client.query(query, &[]).await.map_err(|error| {
+        format!(
+            "could not list {kind} while clearing the database: {}",
+            jobs::short(&error)
+        )
+    })?;
+    for row in statements {
+        let statement: String = row.get(0);
+        client.execute(&statement, &[]).await.map_err(|error| {
+            format!(
+                "could not drop a {kind} object while clearing the database: {}",
+                jobs::short(&error)
+            )
+        })?;
+    }
+    Ok(())
 }
 /// After a restore that failed, gives the database back its job tables and
 /// the history, so the job can record that it failed. `wipe` first clears
 /// what the cut-off restore left behind.
-async fn rebuild(client: &impl GenericClient, saved: &Value, wipe: bool) -> Result<(), String> {
+async fn rebuild(client: &Client, saved: &Value, wipe: bool) -> Result<(), String> {
     let again = |error: tokio_postgres::Error| {
         format!(
             "The job record could not be made again: {}",
@@ -202,6 +293,195 @@ async fn rebuild(client: &impl GenericClient, saved: &Value, wipe: bool) -> Resu
     jobs::recreate_tables(client, saved).await.map_err(again)?;
     jobs::restore_history(client, saved).await.map_err(again)?;
     Ok(())
+}
+
+/// Reads the live owner's standing aside for the restore that replaces the
+/// database: the receipt, the account's creation time, its sign-in row, its
+/// authenticator and its sessions, as one JSON object (SQL `null` when there
+/// is no owner yet). Call it before the database is cleared, and give the
+/// result to [`restore_with_owner`].
+pub(crate) async fn keep_owner(client: &Client) -> Result<Value, String> {
+    // A restore can resume with the schema already cleared, and then there is
+    // no live owner to keep.
+    let present = client
+        .query_one(
+            "SELECT to_regclass('public.user_bootstrap') IS NOT NULL
+                AND to_regclass('public.users') IS NOT NULL",
+            &[],
+        )
+        .await
+        .map_err(|error| format!("could not read the current owner: {}", jobs::short(&error)))?;
+    if !present.get::<_, bool>(0) {
+        return Ok(Value::Null);
+    }
+    client
+        .query_one(
+            "SELECT to_jsonb(o) FROM (
+                 SELECT to_jsonb(b) AS receipt, u.created_at,
+                     to_jsonb(i) AS identity,
+                     (SELECT coalesce(jsonb_agg(to_jsonb(f)), '[]'::jsonb)
+                        FROM public.user_two_factor f
+                       WHERE to_regclass('public.user_two_factor') IS NOT NULL
+                         AND (f.tenant_id, f.user_id) = (b.tenant_id, b.user_id)) AS two_factor,
+                     (SELECT coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb)
+                        FROM public.sessions s
+                       WHERE (s.tenant_id, s.user_id) = (b.tenant_id, b.user_id)) AS sessions
+                 FROM (VALUES (1)) AS singleton(id)
+                 LEFT JOIN public.user_bootstrap b ON b.id=singleton.id
+                 LEFT JOIN public.users u ON u.tenant_id=b.tenant_id AND u.id=b.user_id
+                 LEFT JOIN public.user_identities i ON i.id=u.identity_id
+             ) o",
+            &[],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|error| format!("could not read the current owner: {}", jobs::short(&error)))
+}
+
+/// The owner standing the restore keeps: the live owner keeps being able to
+/// sign in after the database is replaced. The receipt row itself is carried
+/// forward, and so are the parts of that account the restored dump may have
+/// rolled back: an inactive or deleted account is made active again, and a
+/// lost password or authenticator stays as it is now, never as the dump had
+/// it. Every pending ownership offer is cancelled, because a restored one
+/// could be accepted on an old deadline. A restore that cannot keep the owner
+/// usable is refused, with the terminal recovery named.
+///
+/// `owner` is what [`keep_owner`] read before the database was cleared: the
+/// restore brings back the dump, but the owner kept here is who signs in after.
+fn restore_with_owner(pg: &PgEnv, dump: &Path, owner: &Value) -> Result<(), String> {
+    let mut restore = pg
+        .command("pg_restore")
+        .args(["--no-owner", "--no-privileges", "--file=-"])
+        .arg(dump)
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run pg_restore: {error}"))?;
+    let mut sql = restore.stdout.take().expect("piped pg_restore output");
+    let destination = pg
+        .command("psql")
+        .args([
+            "--no-psqlrc",
+            "--quiet",
+            "--set=ON_ERROR_STOP=1",
+            "--file=-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut destination = match destination {
+        Ok(process) => process,
+        Err(error) => {
+            drop(sql);
+            let _ = restore.wait();
+            return Err(format!("could not run psql: {error}"));
+        }
+    };
+    let mut input = destination.stdin.take().expect("piped psql input");
+    let copied = input
+        .write_all(
+            format!(
+                "\
+        BEGIN;
+        CREATE TEMP TABLE current_owner (receipt jsonb, created_at timestamptz,
+            identity jsonb, two_factor jsonb, sessions jsonb) ON COMMIT DROP;
+        INSERT INTO pg_temp.current_owner
+            SELECT * FROM jsonb_to_record({}) AS x(
+                receipt jsonb, created_at timestamptz, identity jsonb,
+                two_factor jsonb, sessions jsonb);
+    ",
+                literal(owner)
+            )
+            .as_bytes(),
+        )
+        .and_then(|()| io::copy(&mut sql, &mut input).map(|_| ()));
+    drop(sql);
+    let archive = restore.wait();
+    let applied = match (copied, archive) {
+        (Ok(()), Ok(status)) if status.success() => input.write_all(
+            b"
+            DO $owner$
+            DECLARE
+                o jsonb;
+                tenant bigint;
+                owner bigint;
+                recovery constant text := 'The backup does not contain the current owner account. Restore it by hand, or recover ownership from the server terminal with install-server.sh create-owner --recover.';
+            BEGIN
+                SELECT to_jsonb(k) INTO o FROM pg_temp.current_owner k;
+                IF o->'receipt' IS NOT NULL AND o->'receipt' <> 'null'::jsonb THEN
+                    tenant := (o->'receipt'->>'tenant_id')::bigint;
+                    owner := (o->'receipt'->>'user_id')::bigint;
+                    IF to_regclass('public.user_bootstrap') IS NULL
+                        OR to_regclass('public.users') IS NULL THEN
+                        RAISE EXCEPTION '%', RECOVERY;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM public.users u
+                        WHERE u.tenant_id=tenant AND u.id=owner AND u.created_at=(o->>'created_at')::timestamptz
+                    ) THEN
+                        RAISE EXCEPTION '%', RECOVERY;
+                    END IF;
+                    -- The receipt names a person who can still sign in: the
+                    -- account and its sign-in are restored to active, and the
+                    -- credentials they use now are kept over the dump's.
+                    UPDATE public.users SET status='active', deleted_at=NULL
+                     WHERE tenant_id=tenant AND id=owner;
+                    IF to_regclass('public.user_identities') IS NOT NULL THEN
+                        UPDATE public.user_identities SET status='active', deleted_at=NULL
+                         WHERE id=(SELECT identity_id FROM public.users WHERE tenant_id=tenant AND id=owner)
+                           AND (status<>'active' OR deleted_at IS NOT NULL);
+                        IF o->'identity' IS NOT NULL AND o->'identity' <> 'null'::jsonb THEN
+                            UPDATE public.user_identities i
+                               SET password_hash=(o->'identity'->>'password_hash'),
+                                   password_version=(o->'identity'->>'password_version')::bigint,
+                                   email_verified_at=(o->'identity'->>'email_verified_at')::timestamptz
+                             WHERE i.id=(o->'identity'->>'id')::bigint
+                               AND EXISTS (SELECT 1 FROM public.users u WHERE u.identity_id=i.id
+                                            AND u.tenant_id=tenant AND u.id=owner);
+                        END IF;
+                    END IF;
+                    IF to_regclass('public.user_two_factor') IS NOT NULL THEN
+                        DELETE FROM public.user_two_factor WHERE tenant_id=tenant AND user_id=owner;
+                        INSERT INTO public.user_two_factor
+                            SELECT * FROM jsonb_populate_recordset(NULL::public.user_two_factor, o->'two_factor');
+                    END IF;
+                    DELETE FROM public.sessions WHERE tenant_id=tenant AND user_id=owner;
+                    INSERT INTO public.sessions
+                        SELECT * FROM jsonb_populate_recordset(NULL::public.sessions, o->'sessions');
+                    -- A restored pending offer could be accepted on an old
+                    -- deadline, so every one is cancelled: a handover is
+                    -- simply offered again when it is still wanted.
+                    IF to_regclass('public.user_ownership_transfers') IS NOT NULL THEN
+                        UPDATE public.user_ownership_transfers
+                           SET status='expired', resolved_at=clock_timestamp()
+                         WHERE status='pending';
+                    END IF;
+                END IF;
+                IF o->'receipt' IS NOT NULL AND o->'receipt' <> 'null'::jsonb
+                    AND to_regclass('public.user_bootstrap') IS NOT NULL THEN
+                    DELETE FROM public.user_bootstrap;
+                    INSERT INTO public.user_bootstrap
+                        SELECT (jsonb_populate_record(NULL::public.user_bootstrap, o->'receipt')).*;
+                END IF;
+            END $owner$;
+            COMMIT;
+        ",
+        ),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(()), Ok(status)) => Err(io::Error::other(format!("pg_restore exited with {status}"))),
+    };
+    drop(input);
+    let output = destination
+        .wait_with_output()
+        .map_err(|error| format!("could not wait for psql: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "database restore could not preserve the current owner: {}",
+            tail(&output.stderr)
+        ));
+    }
+    applied.map_err(|error| format!("database restore could not finish: {error}"))
 }
 
 /// The restores a restart cut off, found by their saved history: the job,
@@ -231,6 +511,17 @@ pub fn unfinished_restores(backups: &Path) -> Vec<(i64, PathBuf, PathBuf)> {
     }
     found.sort_by_key(|(id, _, _)| std::cmp::Reverse(*id));
     found
+}
+/// A JSON value as one SQL literal (a quoted string: PostgreSQL reads it as
+/// JSON wherever a json or jsonb column is expected). A JSON null becomes an
+/// empty object.
+fn literal(value: &Value) -> String {
+    let json = match value {
+        // `jsonb_to_record` takes a JSON object, never the scalar null.
+        Value::Null => "{}".to_owned(),
+        other => other.to_string(),
+    };
+    format!("'{}'", json.replace('\'', "''"))
 }
 fn restored_name(history_file: &Path) -> PathBuf {
     history_file.with_extension("restored")

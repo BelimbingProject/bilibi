@@ -216,6 +216,7 @@ impl Index {
         let query = QuarantineQuery {
             states,
             search,
+            before: None,
             offset: i64::try_from(self.state.offset()).map_err(|_| Error::Invalid)?,
             limit: i64::try_from(self.state.page_size).map_err(|_| Error::Invalid)?,
         };
@@ -230,7 +231,7 @@ impl Index {
     }
     fn counts(&self, found: &QuarantinePage) -> PageCounts {
         let total = u64::try_from(found.total).unwrap_or(0);
-        PageCounts::new(self.state.page, self.state.page_size, total)
+        PageCounts::new(self.state.page, self.state.page_size, total).or_more(found.more)
     }
 
     /// Run one quarantine contract as the page's person and say how it went.
@@ -287,11 +288,15 @@ impl Index {
     async fn event(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         let get = |key: &str| value.get(key).and_then(Value::as_str);
         match get("type").ok_or(Error::Invalid)? {
-            "filters" => self
-                .state
-                .apply_filters(&params::form_values(value, FILTERS_FORM)),
+            "filters" => self.state.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
             "page" => self.state.put_page(get("page")),
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },

@@ -45,6 +45,13 @@ async fn main() -> Result<(), Error> {
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
     let app = bilibi_web::App::new(db.clone(), "http://localhost:35572")?;
+    // The fixture's SQL grants only the company capabilities; the desk part
+    // below also creates a Person and links an account, which the fixture
+    // roles hold once the contributed role sets are reconciled.
+    app.services
+        .get::<bilibi_authz::grants::Grants>("base/authz.grants")?
+        .reconcile()
+        .await?;
     let companies = app.services.get::<CompanyService>(SERVICE)?;
     let persons = app.services.get::<PersonService>(bilibi_person::SERVICE)?;
     let mutations = app
@@ -60,8 +67,44 @@ async fn main() -> Result<(), Error> {
     let manager = app.security.guard(&manager_login.token).await?;
     let unassigned_staff = app.security.guard(&unassigned_staff_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
+    let before: i64 = client
+        .query_one(
+            "SELECT count(*) FROM notifications WHERE tenant_id=1 AND user_id=$1",
+            &[&manager.user()],
+        )
+        .await?
+        .get(0);
+    let version: i64 = client
+        .query_one(
+            "SELECT version FROM companies WHERE tenant_id=1 AND id=1",
+            &[],
+        )
+        .await?
+        .get(0);
+    companies
+        .save(
+            &manager_login.token,
+            &Edit {
+                id: 1,
+                field: "website".into(),
+                value: "https://example.test".into(),
+                version,
+            },
+        )
+        .await?;
+    let after: i64 = client
+        .query_one(
+            "SELECT count(*) FROM notifications WHERE tenant_id=1 AND user_id=$1",
+            &[&manager.user()],
+        )
+        .await?
+        .get(0);
+    assert_eq!(before, after, "a company edit must not notify its editor");
+    println!("company edit does not notify its editor");
     let id = create(&companies, &manager, "K2 lifecycle specimen", "pending").await?;
     let org = OrganisationId::new(id)?;
     for status in ["pending", "active", "suspended", "archived"] {
@@ -228,7 +271,9 @@ async fn main() -> Result<(), Error> {
         )
         .await?;
 
-    let mut first = db.get().await?;
+    let mut first = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = mutations
         .begin(
             &mut first,

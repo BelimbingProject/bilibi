@@ -10,7 +10,7 @@
     reconnecting arrow; connection ("client" | "server") binds it to the drop. -#}
 {% macro flash(kind, id="", title="", message="", spinner=false, hidden=false, auto_dismiss=false, connection="", local=false) %}
 {%- if !message.is_empty() -%}
-<div id="{% if id.is_empty() %}flash-{{ kind.name() }}{% else %}{{ id }}{% endif %}" data-flash{% if local %} data-local-flash{% endif %} {% if !local %}data-event="clear-flash" data-value-key="{{ kind.name() }}"{% endif %} role="{{ kind.role() }}" aria-live="{{ kind.live() }}" class="w-full"{% if hidden %} hidden{% endif %}{% if !connection.is_empty() %} data-connection="{{ connection }}"{% endif %}{% if auto_dismiss %} data-hook="FlashAutoDismiss" data-auto-dismiss-ms="{{ bilibi_ui::AUTO_DISMISS_MS }}"{% endif %}><div class="flex items-start gap-2 rounded-xl border px-panel py-feedback text-sm shadow-xl shadow-ink/[0.08] backdrop-blur {{ kind.flash_class() }}">{% call c::icon(name=kind.icon(), class="size-4 shrink-0") %}{% endcall %}<div class="min-w-0 flex-1">{% if !title.is_empty() %}<p class="font-semibold">{{ title }}</p>{% endif %}<p data-flash-message>{{ message }}{% if spinner %} {% call c::icon(name="arrow-path", class="ml-1 size-3 animate-spin") %}{% endcall %}{% endif %}</p></div><button type="button" class="ui-icon-button group grid size-6 shrink-0 -my-1 place-items-center self-start rounded-sm cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong/40" aria-label="close">{% call c::icon(name="close", class="size-4 opacity-40 group-hover:opacity-70") %}{% endcall %}</button></div></div>
+<div id="{% if id.is_empty() %}flash-{{ kind.name() }}{% else %}{{ id }}{% endif %}" data-flash{% if local %} data-local-flash{% endif %} {% if !local %}data-event="clear-flash" data-value-key="{{ kind.name() }}"{% endif %} role="{{ kind.role() }}" aria-live="{{ kind.live() }}" class="w-full"{% if hidden %} hidden{% endif %}{% if !connection.is_empty() %} data-connection="{{ connection }}"{% endif %}{% if auto_dismiss %} data-hook="FlashAutoDismiss" data-auto-dismiss-ms="{{ bilibi_ui::AUTO_DISMISS_MS }}"{% endif %}><div class="flex items-start gap-2 rounded-xl border px-panel py-feedback text-sm shadow-xl shadow-ink/[0.08] backdrop-blur {{ kind.flash_class() }}">{% call c::icon(name=kind.icon(), class="size-4 shrink-0") %}{% endcall %}<div class="min-w-0 flex-1">{% if !title.is_empty() %}<p class="font-semibold">{{ title }}</p>{% endif %}<p data-flash-message>{{ message }}{% if spinner %} {% call c::icon(name="arrow-path", class="ml-1 size-3 animate-spin") %}{% endcall %}{% endif %}</p></div><button type="button" class="ui-icon-button group grid size-6 shrink-0 -my-1 pointer-coarse:-my-2 pointer-coarse:-mr-2.5 place-items-center self-start rounded-sm cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong/40" aria-label="close">{% call c::icon(name="close", class="size-4 opacity-40 group-hover:opacity-70") %}{% endcall %}</button></div></div>
 {%- endif -%}
 {% endmacro %}
 
@@ -43,16 +43,30 @@
 </div>
 {% endmacro %}
 
+{% macro production_badge(identity, id="", title="", editable=false) %}
+{% if editable %}<a{% else %}<span{% endif %}{% if !id.is_empty() %} id="{{ id }}"{% endif %}{% if editable %} href="/system/instance"{% endif %}{% if !title.is_empty() %} title="{% if editable %}Server Instance · {% endif %}{{ title }}"{% endif %} data-instance="production" class="inline-flex min-h-5 items-center rounded-sm border border-line px-1.5 break-words text-xs font-semibold text-ink">Production{% if identity.label != "Production" %} · {{ identity.label }}{% endif %}{% if editable %}</a>{% else %}</span>{% endif %}
+{% endmacro %}
+
 {#- Which installation this is (src/instance.rs): a small badge for the top
     bar. The label is always in words; the colour only repeats it. -#}
 {% macro instance_badge(badge) %}
+{% if badge.role == "production" %}
+<div class="flex flex-wrap items-center justify-center gap-2 text-center text-sm">
+{% call production_badge(identity=badge) %}{% endcall %}
+</div>
+{% else %}
 <span data-instance="{{ badge.role }}" title="{{ badge.title }}" class="inline-flex h-5 min-w-0 shrink items-center gap-1 rounded-sm border px-1.5 text-xs font-semibold {{ badge.tone.surface_class() }}">{% call c::icon(name=badge.tone.icon(), class="size-3.5 shrink-0") %}{% endcall %}<span class="min-w-0 truncate uppercase tracking-wide">{{ badge.label }}</span></span>
+{% endif %}
 {% endmacro %}
 
 {#- Which installation a review or confirmation acts on, at its top
     (src/instance.rs). A note, not an alert: it is read in place, every time. -#}
 {% macro instance_banner(banner) %}
+{% if banner.role == "production" %}
+<div{% if !banner.id.is_empty() %} id="{{ banner.id }}"{% endif %} role="note" aria-label="Server identity" class="flex flex-wrap items-center gap-2 text-sm{% if !banner.class.is_empty() %} {{ banner.class }}{% endif %}">{% call production_badge(identity=banner) %}{% endcall %}</div>
+{% else %}
 <div{% if !banner.id.is_empty() %} id="{{ banner.id }}"{% endif %} role="note" aria-label="Server identity" data-instance="{{ banner.role }}" class="flex items-start gap-3 rounded-lg border-2 px-3 py-2.5 text-sm {{ banner.tone.surface_class() }}{% if !banner.class.is_empty() %} {{ banner.class }}{% endif %}">{% call c::icon(name=banner.tone.icon(), class="mt-0.5 size-5 shrink-0") %}{% endcall %}<div class="min-w-0"><p class="break-words text-base font-semibold uppercase tracking-wide">{{ banner.label }}</p><p>{{ banner.message }}</p></div></div>
+{% endif %}
 {% endmacro %}
 
 {#- An inline status alert. -#}
@@ -68,7 +82,7 @@
 {% macro panel_notice(id, kind=bilibi_ui::NoticeKind::Info, dismiss_event="", class="") %}
 {%- let status = kind.status() -%}
 {%- let notice = id -%}
-<div id="{{ id }}" role="{{ status.role() }}" aria-live="{{ status.live() }}" data-kind="{{ status.name() }}" class="flex items-start gap-2 rounded-lg border px-panel py-1.5 text-sm {{ status.surface_class() }}{% if !class.is_empty() %} {{ class }}{% endif %}">{% call c::icon(name=status.icon(), class="mt-0.5 size-4 shrink-0") %}{% endcall %}<span class="min-w-0 flex-1">{{ caller() }}</span>{% call c::icon_button(id="{}-dismiss"|format(id), icon="close", label="Dismiss notice", context=bilibi_ui::IconContext::Inline, class="-my-0.5", event=dismiss_event, name="id", value=notice) %}{% endcall %}</div>
+<div id="{{ id }}" role="{{ status.role() }}" aria-live="{{ status.live() }}" data-kind="{{ status.name() }}" class="flex items-start gap-2 rounded-lg border px-panel py-1.5 text-sm {{ status.surface_class() }}{% if !class.is_empty() %} {{ class }}{% endif %}">{% call c::icon(name=status.icon(), class="mt-0.5 size-4 shrink-0") %}{% endcall %}<span class="min-w-0 flex-1">{{ caller() }}</span>{% call c::icon_button(id="{}-dismiss"|format(id), icon="close", label="Dismiss notice", context=bilibi_ui::IconContext::Inline, class="-my-0.5 pointer-coarse:-my-1.5 pointer-coarse:-mr-2.5", event=dismiss_event, name="id", value=notice) %}{% endcall %}</div>
 {% endmacro %}
 
 {#- The problems that stopped a save, above the form (summary is a
@@ -83,7 +97,11 @@
 
 {# The stored server role, never the compiler's build mode. #}
 {% macro instance_status(status) %}
-{% if status.editable %}<a{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} href="/system/instance" title="Instance settings · {{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {{ status.tone.surface_class() }}">{% else %}<span{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} title="{{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {{ status.tone.surface_class() }}">{% endif %}{{ status.role_label }}{% if status.label != status.role_label %} · {{ status.label }}{% endif %}{% if status.editable %}</a>{% else %}</span>{% endif %}
+{% if status.role == "production" %}
+{% call production_badge(identity=status, id=status.id, title=status.title, editable=status.editable) %}{% endcall %}
+{% else %}
+{% if status.editable %}<a{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} href="/system/instance" title="Server Instance · {{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {{ status.tone.surface_class() }}">{% else %}<span{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} title="{{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {{ status.tone.surface_class() }}">{% endif %}{{ status.role_label }}{% if status.label != status.role_label %} · {{ status.label }}{% endif %}{% if status.editable %}</a>{% else %}</span>{% endif %}
+{% endif %}
 {% endmacro %}
 
 {#- A tag in the status bar's centre that opens a panel (src/statusbar.rs):

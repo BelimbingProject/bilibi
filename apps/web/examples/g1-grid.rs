@@ -142,7 +142,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .get::<Authentication>("base/tenancy.authentication")?;
     let grants = app.services.get::<Grants>("base/authz.grants")?;
     grants.reconcile().await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &Client = &client;
     seed(client).await?;
     let manager = auth.authenticate(client, 1, 1, String::new()).await?;
@@ -159,7 +161,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         &for_viewer,
     );
     grants
-        .set_direct(&admin, viewer.user(), "grid.reference.view", Some(false))
+        .set_direct(
+            &admin,
+            viewer.user(),
+            "grid.reference.view",
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     show(
         "viewer after a direct deny",
@@ -196,7 +203,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // A platform capability needs the operator identity as well as a grant, so
     // grant-all administrators never see this table in the other steps.
     grants
-        .set_direct(&admin, staff.user(), "reference.broken.view", Some(true))
+        .set_direct(
+            &admin,
+            staff.user(),
+            "reference.broken.view",
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
+        )
         .await?;
     println!(
         "granted but not operator: sees it = {:?}",
@@ -611,6 +625,23 @@ fn defects() -> Result<(), Box<dyn std::error::Error>> {
         GridContribution {
             record_fields: &[],
             tables: &TYPES,
+            links: &[]
+        }
+    );
+    static SUBJECT: TableDecl = TableDecl::new(
+        "t_subject",
+        "Subject",
+        "grid.reference.view",
+        Source::tenant("SELECT id FROM base_grid_ref_groups WHERE tenant_id = $1"),
+        "id",
+        &[Field::new("id", "ID", T::Integer)],
+    )
+    .subject("id", "reference_item");
+    defect!(
+        "subject that names the key",
+        GridContribution {
+            record_fields: &[],
+            tables: std::slice::from_ref(&SUBJECT),
             links: &[]
         }
     );

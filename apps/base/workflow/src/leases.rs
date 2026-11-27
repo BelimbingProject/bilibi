@@ -5,9 +5,7 @@
 use super::*;
 use coordination::{finish_item, reason_text, Finish};
 
-/// Candidates refused under their lock are skipped; the claim gives up after
-/// this many, so retained unsupported runs never starve supported work.
-const CLAIM_ATTEMPTS: usize = 8;
+const CLAIM_CANDIDATES: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -199,9 +197,9 @@ impl Engine {
         }
         let (mut skipped_items, mut skipped_runs): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
         let mut client = self.db.get().await?;
-        for _ in 0..CLAIM_ATTEMPTS {
+        for _ in 0..CLAIM_CANDIDATES {
             // Unlocked selection: the database never chooses a lock order.
-            let candidate = client.query_opt("SELECT w.id,r.id FROM base_workflow_process_work_items w JOIN base_workflow_process_runs r ON r.id=w.run_id WHERE r.tenant_id=$1 AND w.tenant_id=$1 AND r.status='running' AND r.last_error IS NULL AND r.available_at<=now() AND NOT w.id=ANY($2) AND NOT r.id=ANY($3) AND ((w.status IN ('available','pending') AND w.available_at<=now()) OR (w.status='leased' AND w.lease_expires_at<=now())) AND (r.definition_key,r.definition_version,r.definition_fingerprint) IN (SELECT * FROM unnest($4::text[],$5::integer[],$6::text[])) AND ($7::text IS NULL OR r.definition_key=$7) AND ($8::text[] IS NULL OR w.executor_key=ANY($8)) AND ($9::bigint[] IS NULL OR r.id=ANY($9)) ORDER BY r.priority DESC,w.priority DESC,w.available_at,w.id LIMIT 1", &[&scope.tenant(),&skipped_items,&skipped_runs,&keys,&versions,&fingerprints,&options.definition_key,&options.executor_keys,&options.run_ids]).await?;
+            let candidate = client.query_opt("SELECT w.id,r.id FROM base_workflow_process_work_items w JOIN base_workflow_process_runs r ON r.id=w.run_id WHERE r.tenant_id=$1 AND w.tenant_id=$1 AND w.executor_key<>'approval.wait' AND r.status='running' AND r.last_error IS NULL AND r.available_at<=now() AND NOT w.id=ANY($2) AND NOT r.id=ANY($3) AND ((w.status IN ('available','pending') AND w.available_at<=now()) OR (w.status='leased' AND w.lease_expires_at<=now())) AND (r.definition_key,r.definition_version,r.definition_fingerprint) IN (SELECT * FROM unnest($4::text[],$5::integer[],$6::text[])) AND ($7::text IS NULL OR r.definition_key=$7) AND ($8::text[] IS NULL OR w.executor_key=ANY($8)) AND ($9::bigint[] IS NULL OR r.id=ANY($9)) ORDER BY r.priority DESC,w.priority DESC,w.available_at,w.id LIMIT 1", &[&scope.tenant(),&skipped_items,&skipped_runs,&keys,&versions,&fingerprints,&options.definition_key,&options.executor_keys,&options.run_ids]).await?;
             let Some(candidate) = candidate else {
                 return Ok(None);
             };
@@ -216,7 +214,7 @@ impl Engine {
             let result = tx
                 .mutate(move |sql| {
                     Box::pin(async move {
-                        engine.writer(&context, &scope, run_id)?;
+                        engine.writer_or_principal(&context, &scope, run_id)?;
                         let scope = engine.live(sql, &scope).await?;
                         let (run, _, items, dependencies) = engine
                             .locked_run(sql, &scope, run_id, Operation::ClaimWork)
@@ -319,7 +317,7 @@ impl Engine {
                 if !claim.valid() {
                     return Err(Error::Invalid);
                 }
-                engine.writer(&context, &scope, claim.run_id)?;
+                engine.writer_or_principal(&context, &scope, claim.run_id)?;
                 let scope = engine.live(sql, &scope).await?;
                 let (run, _, items, dependencies) = engine
                     .locked_run(sql, &scope, claim.run_id, command.operation())
@@ -378,15 +376,6 @@ async fn work(
                 old: json!({"lease_expires_at":fact.lease_expires_at}),
                 new: json!({"lease_expires_at":expires}),
             });
-            append_event(
-                sql,
-                run,
-                Some(fact.id),
-                "work.heartbeat",
-                json!({"lease_expires_at":expires}),
-                changes,
-            )
-            .await?;
             Ok(())
         }
         WorkCommand::Complete {

@@ -14,7 +14,8 @@ use tokio::{
 };
 
 pub const EXTERNAL: &str = "external";
-/// Streams are buffered, so adopted files above this refuse rather than exhaust memory.
+/// The largest file read back; a larger adopted file refuses. Whole-file
+/// reads are bounded by `Media::load`'s permits, streams are not buffered.
 pub const MAX_READ: u64 = 536_870_912;
 const RESERVED_ROOT_PARTS: [&str; 3] = ["static", "public", "assets"];
 
@@ -190,18 +191,60 @@ pub async fn write(roots: &Value, disk: &str, key: &str, bytes: &[u8]) -> Result
     Ok(())
 }
 
-pub async fn read(roots: &Value, disk: &str, key: &str) -> Result<Vec<u8>> {
+/// A stored file opened for reading, not yet read: its length is the size it
+/// had when it was opened.
+pub struct Opened {
+    file: fs::File,
+    len: u64,
+}
+impl Opened {
+    pub fn size(&self) -> u64 {
+        self.len
+    }
+    /// Exactly the bytes it had when opened: a file that grew is cut there,
+    /// one that shrank refuses.
+    pub fn into_reader(self) -> tokio::io::Take<fs::File> {
+        self.file.take(self.len)
+    }
+    /// The whole file in memory. Callers hold a load permit (`Media::load`).
+    pub async fn read_all(self) -> Result<Vec<u8>> {
+        let len = self.len;
+        let mut bytes = Vec::with_capacity(len as usize);
+        self.into_reader()
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| Error::StorageUnavailable)?;
+        if bytes.len() as u64 != len {
+            return Err(Error::StorageUnavailable);
+        }
+        Ok(bytes)
+    }
+}
+
+/// Opens `disk`/`key` without reading it. `Ok(None)`: the disk and its
+/// folders are there but no file is at `key` (its bytes were removed). Any
+/// other failure, such as an unmounted disk, is `StorageUnavailable`.
+pub async fn open(roots: &Value, disk: &str, key: &str) -> Result<Option<Opened>> {
     let unavailable = |_| Error::StorageUnavailable;
     let path = location(roots, disk, key).await.map_err(unavailable)?;
-    directory_chain(path.parent().ok_or(Error::StorageUnavailable)?)
-        .await
-        .map_err(unavailable)?;
-    let file = OpenOptions::new()
+    let parent = path.parent().ok_or(Error::StorageUnavailable)?;
+    match directory_chain(parent).await {
+        Ok(()) => {}
+        // The root is safe (`location`), so a missing folder below it is a
+        // missing file, not a missing disk.
+        Err(_) if !fs::try_exists(parent).await.unwrap_or(true) => return Ok(None),
+        Err(_) => return Err(Error::StorageUnavailable),
+    }
+    let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
         .await
-        .map_err(|_| Error::StorageUnavailable)?;
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(Error::StorageUnavailable),
+    };
     let stat = file
         .metadata()
         .await
@@ -209,15 +252,10 @@ pub async fn read(roots: &Value, disk: &str, key: &str) -> Result<Vec<u8>> {
     if !stat.is_file() || stat.len() > MAX_READ {
         return Err(Error::StorageUnavailable);
     }
-    let mut bytes = Vec::with_capacity(stat.len() as usize);
-    file.take(MAX_READ + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| Error::StorageUnavailable)?;
-    if bytes.len() as u64 != stat.len() {
-        return Err(Error::StorageUnavailable);
-    }
-    Ok(bytes)
+    Ok(Some(Opened {
+        file,
+        len: stat.len(),
+    }))
 }
 
 /// Idempotent: a missing file or directory is already deleted. A symlink or

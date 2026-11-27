@@ -95,7 +95,9 @@ impl SubjectOwner for PersonFiles {
         Box::pin(async move {
             let id = person_id(subject_id)?;
             match action {
-                SubjectAction::Download => authorize(client, scope, id, VIEW, false).await,
+                SubjectAction::Download | SubjectAction::Inspect => {
+                    authorize(client, scope, id, VIEW, false).await
+                }
                 SubjectAction::Upload
                 | SubjectAction::Submit
                 | SubjectAction::Retain

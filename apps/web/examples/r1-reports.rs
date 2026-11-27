@@ -5,7 +5,7 @@
 //! plain SQL over the same rows, or proves a refusal; it prints PASS/FAIL and
 //! exits non-zero on any failure. No test runner or mocks.
 use bilibi_base::{
-    agent_api::Registry,
+    agent_api::{job::JobContracts, Registry},
     authz::grants::Grants,
     grid,
     reports::{
@@ -14,9 +14,25 @@ use bilibi_base::{
     },
     tenancy::{Authentication, Scope},
 };
-use bilibi_database::{pool, MutationBoundary};
+use bilibi_database::{pool, Db, MutationBoundary};
+use bilibi_module_registry::{Contribution, Layer, Module, Provenance, Service};
+use bilibi_queue::{
+    Execution, Handler, HandlerBinding, HandlerFuture, HandlerService, Outcome, Queue, Worker,
+};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    io,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
@@ -26,10 +42,144 @@ bilibi_walkthrough_fixture::inventory::submit! { bilibi_walkthrough_fixture::reg
     verbs: &[],
     capabilities: &[],
     roles: &[
-        bilibi_walkthrough_fixture::authz::RoleDefinition { code: "manager", name: "manager", description: "Walkthrough fixture role", grant_all: false, capabilities: &["reports.view", "reports.author", "reports.share", "reports.export", "reports.schedule"] },
+        bilibi_walkthrough_fixture::authz::RoleDefinition { code: "manager", name: "manager", description: "Walkthrough fixture role", grant_all: false, capabilities: &["reports.view", "reports.author", "reports.share", "reports.export", "reports.schedule", "tenancy.oversight.view"] },
         bilibi_walkthrough_fixture::authz::RoleDefinition { code: "viewer", name: "viewer", description: "Walkthrough fixture role", grant_all: false, capabilities: &["reports.view"] },
     ],
     system_principals: &[],
+}) }
+
+const PREVIEW_MODULE: &str = "extensions/report_preview_walkthrough";
+const PREVIEW_WORKER: &str = "report-preview-walkthrough/check";
+const PREVIEW_SERVICE: &str = "extensions/report_preview_walkthrough.worker";
+const PREVIEW_SOURCE: Provenance = Provenance {
+    module: PREVIEW_MODULE,
+    source: file!(),
+    line: line!(),
+};
+const PREVIEW_NAME: &str = "Job preview without saving";
+
+struct PreviewWorker {
+    db: Arc<Db>,
+    contracts: Arc<JobContracts>,
+}
+impl Handler for PreviewWorker {
+    fn perform<'a>(&'a self, execution: &'a Execution, args: Value) -> HandlerFuture<'a> {
+        Box::pin(async move {
+            let Ok(mut connection) = self.db.get().await else {
+                return Outcome::Cancel("no_connection");
+            };
+            let client: &mut tokio_postgres::Client = &mut connection;
+            if args["refusal"] == true {
+                let Some(scope) = execution.scope() else {
+                    return Outcome::Cancel("missing_scope");
+                };
+                let count =
+                    async |client: &tokio_postgres::Client| -> bilibi_database::Result<i64> {
+                        Ok(client.query_one("SELECT count(*) FROM authz_decision_log WHERE tenant_id=$1 AND user_id=$2 AND capability='reports.view' AND NOT allowed", &[&scope.tenant(), &scope.user()]).await?.get(0))
+                    };
+                let Ok(before) = count(client).await else {
+                    return Outcome::Cancel("no_before_count");
+                };
+                let refusal = self
+                    .contracts
+                    .preview(
+                        client,
+                        execution,
+                        "base.reports.delete",
+                        &json!({"id": 1, "version": 1}),
+                    )
+                    .await;
+                if matches!(
+                    refusal,
+                    Err(bilibi_agent_api::Error::Backend(
+                        bilibi_database::Error::UnrecoveredTransaction(_)
+                    ))
+                ) {
+                    drop(bilibi_database::Connection::take(connection));
+                    return Outcome::Cancel("unrecovered_transaction");
+                }
+                let after = count(client).await;
+                return if matches!(refusal, Err(bilibi_agent_api::Error::Forbidden))
+                    && matches!(after, Ok(after) if after == before + 1)
+                {
+                    println!("PASS job owner refusal retains its reports.view denial log");
+                    Outcome::Completed
+                } else {
+                    eprintln!(
+                        "FAIL job refusal log: {refusal:?}, before={before}, after={after:?}"
+                    );
+                    Outcome::Cancel("missing_owner_refusal_log")
+                };
+            }
+            let pause = self
+                .contracts
+                .preview(
+                    client,
+                    execution,
+                    "base.reports.pause_subscription",
+                    &json!({"subscription": args["subscription"], "version": 1, "paused": true}),
+                )
+                .await;
+            if matches!(
+                pause,
+                Err(bilibi_agent_api::Error::Backend(
+                    bilibi_database::Error::UnrecoveredTransaction(_)
+                ))
+            ) {
+                drop(bilibi_database::Connection::take(connection));
+                return Outcome::Cancel("unrecovered_transaction");
+            }
+            let create = self.contracts.preview(client, execution, "base.reports.create",
+                &json!({"name": PREVIEW_NAME, "record_type": "reference_items", "kind": "rows", "definition": {"columns": ["name"]}})).await;
+            if matches!(
+                create,
+                Err(bilibi_agent_api::Error::Backend(
+                    bilibi_database::Error::UnrecoveredTransaction(_)
+                ))
+            ) {
+                drop(bilibi_database::Connection::take(connection));
+                return Outcome::Cancel("unrecovered_transaction");
+            }
+            match (&pause, &create) {
+                (Ok(pause), Ok(create))
+                    if pause["result"]["summary"]
+                        == "Pause this scheduled report; deliveries not started are cancelled"
+                        && create["result"]["report"]["name"] == PREVIEW_NAME =>
+                {
+                    Outcome::Completed
+                }
+                _ => {
+                    eprintln!("Report job previews: {pause:?}, {create:?}");
+                    Outcome::Cancel("incorrect_preview")
+                }
+            }
+        })
+    }
+}
+inventory::submit! { Module {
+    id: PREVIEW_MODULE, layer: Layer::Extensions,
+    dependencies: &["base/agent_api", "base/database", "base/queue", "base/reports"],
+    migrations: &[], services: &[Service { id: PREVIEW_SERVICE, factory: |services| {
+        Ok(Arc::new(HandlerService(Arc::new(PreviewWorker {
+            db: services.get("base/database.pool")?,
+            contracts: services.get(bilibi_base::agent_api::job::SERVICE)?,
+        }))))
+    }}],
+} }
+inventory::submit! { Contribution::new(bilibi_queue::WORKERS, PREVIEW_WORKER, PREVIEW_SOURCE, &Worker {
+    max_attempts: 1,
+    validate: |args| {
+        if args == json!({"refusal": true})
+            || args["subscription"].as_i64().is_some_and(|id| id > 0 && args == json!({"subscription": id}))
+        {
+            Ok(args)
+        } else {
+            Err(bilibi_database::Error::Invalid)
+        }
+    },
+}) }
+inventory::submit! { Contribution::new(bilibi_queue::HANDLERS, PREVIEW_WORKER, PREVIEW_SOURCE, &HandlerBinding {
+    service: PREVIEW_SERVICE, capability: "reports.author",
 }) }
 
 // A source the planner thinks is heavy (20 million rows) that returns one
@@ -146,7 +296,10 @@ async fn write<T>(
         &mut bilibi_database::MutationTransaction<'t>,
     ) -> Result<T, ReportError>,
 ) -> Result<T, ReportError> {
-    let mut client = db.get().await.map_err(bilibi_database::Error::from)?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await
+        .map_err(bilibi_database::Error::from)?;
     let mut tx = boundary
         .begin(&mut client, scope.mutation_context(action))
         .await?;
@@ -155,16 +308,109 @@ async fn write<T>(
     Ok(value)
 }
 
+async fn delay_commit_reply(
+    mut client: TcpStream,
+    mut server: TcpStream,
+    commits_until_delay: &AtomicUsize,
+    seals_until_disconnect: &AtomicUsize,
+) -> io::Result<()> {
+    client.set_nodelay(true)?;
+    server.set_nodelay(true)?;
+    let (mut requests, mut replies) = client.split();
+    let (mut database_replies, mut database_requests) = server.split();
+    let forward_replies = async {
+        let mut payload = Vec::new();
+        loop {
+            let tag = database_replies.read_u8().await?;
+            let len = database_replies.read_u32().await?;
+            let size = len.checked_sub(4).ok_or(io::ErrorKind::InvalidData)?;
+            payload.resize(size as usize, 0);
+            database_replies.read_exact(&mut payload).await?;
+            if tag == b'C'
+                && payload == b"SET CONSTRAINTS\0"
+                && seals_until_disconnect.try_update(
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                    |count| count.checked_sub(1),
+                ) == Ok(1)
+            {
+                return Ok(());
+            }
+            if tag == b'C'
+                && payload == b"COMMIT\0"
+                && commits_until_delay.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    count.checked_sub(1)
+                }) == Ok(1)
+            {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            replies.write_u8(tag).await?;
+            replies.write_u32(len).await?;
+            replies.write_all(&payload).await?;
+        }
+    };
+    tokio::select! {
+        result = tokio::io::copy(&mut requests, &mut database_requests) => result.map(|_| ()),
+        result = forward_replies => result,
+    }
+}
+
+async fn delayed_commit_url(
+    database_url: &str,
+    commits_until_delay: Arc<AtomicUsize>,
+    seals_until_disconnect: Arc<AtomicUsize>,
+) -> io::Result<url::Url> {
+    let mut url = url::Url::parse(database_url).map_err(io::Error::other)?;
+    let host = url
+        .host_str()
+        .ok_or(io::ErrorKind::InvalidInput)?
+        .to_owned();
+    let port = url.port().unwrap_or(5432);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    url.set_host(Some("127.0.0.1")).map_err(io::Error::other)?;
+    url.set_port(Some(listener.local_addr()?.port()))
+        .map_err(|()| io::ErrorKind::InvalidInput)?;
+    url.query_pairs_mut().append_pair("sslmode", "disable");
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let host = host.clone();
+            let commits_until_delay = commits_until_delay.clone();
+            let seals_until_disconnect = seals_until_disconnect.clone();
+            tokio::spawn(async move {
+                if let Ok(server) = TcpStream::connect((host.as_str(), port)).await {
+                    let _ = delay_commit_reply(
+                        client,
+                        server,
+                        &commits_until_delay,
+                        &seals_until_disconnect,
+                    )
+                    .await;
+                }
+            });
+        }
+    });
+    Ok(url)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("BILIBI_GRID_DEMO").as_deref() != Ok("disposable") {
         return Err("set BILIBI_GRID_DEMO=disposable on a disposable migrated database".into());
     }
-    let db = pool(&std::env::var("DATABASE_URL")?)?;
+    let database_url = std::env::var("DATABASE_URL")?;
+    let db = pool(&database_url)?;
     bilibi_walkthrough_fixture::install(&db).await?;
     // Before the first catalog read, which describes each source once.
     db.get().await?.batch_execute("CREATE OR REPLACE FUNCTION r1_heavy() RETURNS SETOF int LANGUAGE plpgsql STABLE ROWS 20000000 AS 'BEGIN RETURN NEXT 1; END'; CREATE OR REPLACE FUNCTION r1_slow() RETURNS int LANGUAGE plpgsql STABLE AS 'BEGIN PERFORM pg_sleep(2.5); RETURN 1; END'").await?;
-    let app = bilibi_web::App::new(db.clone(), "http://localhost:35567")?;
+    let commits_until_delay = Arc::new(AtomicUsize::new(0));
+    let seals_until_disconnect = Arc::new(AtomicUsize::new(0));
+    let reports_url = delayed_commit_url(
+        &database_url,
+        commits_until_delay.clone(),
+        seals_until_disconnect.clone(),
+    )
+    .await?;
+    let app = bilibi_web::App::new(pool(reports_url.as_str())?, "http://localhost:35567")?;
     let auth = app
         .services
         .get::<Authentication>("base/tenancy.authentication")?;
@@ -177,8 +423,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let boundary = app
         .services
         .get::<MutationBoundary>("base/database.mutations")?;
-    let client = db.get().await?;
-    let client: &tokio_postgres::Client = &client;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
+    let client: &mut tokio_postgres::Client = &mut client;
     let manager = auth.authenticate(client, 1, 1, String::new()).await?;
     let viewer = auth.authenticate(client, 1, 2, String::new()).await?;
     let other = auth.authenticate(client, 2, 5, String::new()).await?;
@@ -245,8 +493,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("== Running as the author");
+    let sql = &*client;
     let expected = |active: bool| async move {
-        let rows = client.query("SELECT category, count(*)::float8, sum(quantity)::float8, max(unit_cost)::float8 FROM base_grid_ref_items WHERE tenant_id=1 AND active=$1 GROUP BY category", &[&active]).await?;
+        let rows = sql.query("SELECT category, count(*)::float8, sum(quantity)::float8, max(unit_cost)::float8 FROM base_grid_ref_items WHERE tenant_id=1 AND active=$1 GROUP BY category", &[&active]).await?;
         Ok::<_, tokio_postgres::Error>(
             rows.iter()
                 .map(|r| {
@@ -495,6 +744,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "the file name is safe",
         csv.filename == "items-by-cost.csv",
         csv.filename.clone(),
+    );
+    // At 10 rows a page the first run reads 10 rows and the file reads the
+    // other 2 as keys and cells only (#555): the same file as one page.
+    client.execute("INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES('reports.page_size',0,'global',0,'10',false) ON CONFLICT (key,tenant_id,scope_type,scope_id) DO UPDATE SET value='10'", &[]).await?;
+    let paged = reports
+        .export(&manager, rows_id, &RunInput::default(), Format::Csv)
+        .await;
+    client
+        .execute(
+            "DELETE FROM base_settings WHERE key='reports.page_size' AND tenant_id=0",
+            &[],
+        )
+        .await?;
+    checks.check(
+        "a file read past its first page holds every row once, in the page's order",
+        matches!(&paged, Ok(file) if file.bytes == csv.bytes && file.rows == 12),
+        format!(
+            "{:?}",
+            paged.as_ref().map(|f| f.rows).map_err(|e| e.to_string())
+        ),
     );
     let exported: Value = client.query_one("SELECT payload FROM base_audit_actions WHERE event='base.reports.exported' ORDER BY id DESC LIMIT 1", &[]).await?.get(0);
     checks.check(
@@ -781,6 +1050,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("== Phase 2: prepared exports and schedules");
+    let plan = Plan {
+        frequency: Frequency::Weekly,
+        at_minute: 8 * 60,
+        weekday: Some(1),
+        monthday: None,
+        format: Format::Csv,
+        include_owner: true,
+        skip_empty: true,
+        roles: Vec::new(),
+        people: Vec::new(),
+    };
+    let subscription = write(&boundary, &db, &manager, "reports.subscribe", async |tx| {
+        reports.subscribe(tx, &manager, rows_id, &plan).await
+    })
+    .await?;
     let prepared = write(
         &boundary,
         &db,
@@ -802,14 +1086,123 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!("export {export}, {jobs} job(s)"),
             );
             // Queue ends the job before it runs (as when it refuses the
-            // requester): the request shows as failed, not preparing.
+            // requester). A running executor then tells Reports through the
+            // `base/queue.endings` hook, which fails the request: it shows
+            // as failed, not preparing. Nothing derives that from the job
+            // row, so the walkthrough runs an executor until it is told.
             client.execute("UPDATE base_queue_jobs SET state='cancelled', cancelled_at=now(), failure_code='actor_refused' WHERE id=(SELECT job_id FROM base_report_exports WHERE id=$1)", &[export]).await?;
-            let listed = reports.exports(&manager, Some(rows_id)).await?;
-            let shown = listed.iter().find(|e| e.id == *export);
+            let queue = app.services.get::<Queue>(bilibi_queue::SERVICE)?;
+            let preview_job = write(
+                &boundary,
+                &db,
+                &manager,
+                "reports.walkthrough.preview",
+                async |tx| {
+                    Ok(queue
+                        .enqueue_for(
+                            tx,
+                            &manager,
+                            PREVIEW_WORKER,
+                            json!({"subscription": subscription}),
+                        )
+                        .await?
+                        .id())
+                },
+            )
+            .await?;
+            client.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES($1,$2,'reports.author',true,'all'),($1,$2,'reports.view',false,'all') ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=EXCLUDED.is_allowed", &[&viewer.tenant(), &viewer.user()]).await?;
+            let refusal_job = write(
+                &boundary,
+                &db,
+                &viewer,
+                "reports.walkthrough.refusal_preview",
+                async |tx| {
+                    Ok(queue
+                        .enqueue_for(tx, &viewer, PREVIEW_WORKER, json!({"refusal": true}))
+                        .await?
+                        .id())
+                },
+            )
+            .await?;
+            let executor = bilibi_queue::Executor::from_services(
+                &app.services,
+                bilibi_queue::Config::default(),
+            )?;
+            let (stop, stopped) = tokio::sync::watch::channel(false);
+            let workers = tokio::spawn(executor.run(stopped));
+            let mut shown = None;
+            let mut preview_state = String::new();
+            let mut refusal_state = String::new();
+            for _ in 0..60 {
+                preview_state = client
+                    .query_one(
+                        "SELECT state FROM base_queue_jobs WHERE tenant_id=$1 AND id=$2",
+                        &[&manager.tenant(), &preview_job],
+                    )
+                    .await?
+                    .get(0);
+                refusal_state = client
+                    .query_one(
+                        "SELECT state FROM base_queue_jobs WHERE tenant_id=$1 AND id=$2",
+                        &[&viewer.tenant(), &refusal_job],
+                    )
+                    .await?
+                    .get(0);
+                let listed = reports.exports(&manager, Some(rows_id)).await?;
+                shown = listed.into_iter().find(|e| e.id == *export);
+                if shown.as_ref().is_some_and(|e| e.state != "queued")
+                    && matches!(
+                        refusal_state.as_str(),
+                        "completed" | "cancelled" | "discarded"
+                    )
+                    && matches!(
+                        preview_state.as_str(),
+                        "completed" | "cancelled" | "discarded"
+                    )
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            stop.send(true)?;
+            workers.await??;
+            client.execute("DELETE FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability IN ('reports.author','reports.view')", &[&viewer.tenant(), &viewer.user()]).await?;
+            checks.check(
+                "job refusal preserves the owner's authorization decision",
+                refusal_state == "completed",
+                refusal_state,
+            );
+            let saved: bool = client
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM base_reports WHERE tenant_id=$1 AND name=$2)",
+                    &[&manager.tenant(), &PREVIEW_NAME],
+                )
+                .await?
+                .get(0);
+            let pause_state: Option<(bool, i64)> = client
+                .query_opt(
+                    "SELECT paused,version FROM base_report_subscriptions WHERE tenant_id=$1 AND id=$2",
+                    &[&manager.tenant(), &subscription],
+                )
+                .await?
+                .map(|row| (row.get(0), row.get(1)));
+            checks.check(
+                "job previews a pause and a row draft on a plain client without saving",
+                preview_state == "completed" && pause_state == Some((false, 1)) && !saved,
+                format!("job {preview_state}, subscription {pause_state:?}, report saved {saved}"),
+            );
+            let told: Option<String> = client.query_one("SELECT ending FROM base_queue_jobs WHERE id=(SELECT job_id FROM base_report_exports WHERE id=$1)", &[export]).await?.get(0);
+            checks.check(
+                "Queue tells Reports once that the job ended",
+                told.as_deref() == Some("told"),
+                format!("ending {told:?}"),
+            );
             checks.check(
                 "a request whose job ended unrun shows as failed with why",
-                shown.is_some_and(|e| e.state == "failed" && e.message.is_some()),
-                format!("{:?}", shown.map(|e| (e.state, e.message.clone()))),
+                shown
+                    .as_ref()
+                    .is_some_and(|e| e.state == "failed" && e.message.is_some()),
+                format!("{:?}", shown.map(|e| (e.state, e.message))),
             );
             // A file made under other access than the requester has now
             // is refused before any byte is read.
@@ -820,6 +1213,92 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 matches!(&stale, Err(ReportError::Refused(m)) if m.contains("changed")),
                 format!("{:?}", stale.map(|f| f.rows)),
             );
+            // Masking a field the file holds retires it too (#554): the key
+            // records a masked column apart from a full one.
+            let contacts = Draft {
+                name: "Contacts with email".into(),
+                description: String::new(),
+                record_type: "persons".into(),
+                kind: Kind::Rows,
+                definition: Definition {
+                    columns: vec!["name".into(), "email".into()],
+                    ..Definition::default()
+                },
+            };
+            let contacts_id = write(&boundary, &db, &manager, "reports.create", async |tx| {
+                reports.create(tx, &manager, &contacts).await
+            })
+            .await?;
+            let made = reports.access(&manager, contacts_id).await?;
+            client
+                .execute(
+                    "UPDATE base_report_exports SET report_id=$2, access=$3 WHERE id=$1",
+                    &[export, &contacts_id, &made],
+                )
+                .await?;
+            let unmasked = reports.exported(&manager, *export).await;
+            client.execute("INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES(1,1,'persons','email','mask') ON CONFLICT DO NOTHING", &[]).await?;
+            let now = reports.access(&manager, contacts_id).await?;
+            let masked = reports.exported(&manager, *export).await;
+            client
+                .execute(
+                    "DELETE FROM field_restrictions WHERE tenant_id=1 AND role_id=1 AND table_id='persons'",
+                    &[],
+                )
+                .await?;
+            checks.check(
+                "masking a field the file holds changes what its requester may see",
+                made != now,
+                format!("{made} -> {now}"),
+            );
+            checks.check(
+                "a file made before the mask is refused after it",
+                !matches!(&unmasked, Err(ReportError::Refused(_)))
+                    && matches!(&masked, Err(ReportError::Refused(m)) if m.contains("changed")),
+                format!(
+                    "before {:?}, after {:?}",
+                    unmasked.map(|f| f.rows).map_err(|e| e.to_string()),
+                    masked.map(|f| f.rows).map_err(|e| e.to_string())
+                ),
+            );
+            // One person's waiting exports are few (#551): the default is
+            // three, and the next is refused with a sentence to wait.
+            let already: i64 = client.query_one("SELECT count(*) FROM base_report_exports WHERE tenant_id=1 AND requester_id=1 AND state='queued'", &[]).await?.get(0);
+            let mut waiting: Vec<i64> = Vec::new();
+            let mut refused = None;
+            for _ in 0..10 {
+                let asked = write(
+                    &boundary,
+                    &db,
+                    &manager,
+                    "reports.prepare_export",
+                    async |tx| {
+                        reports
+                            .prepare_export(tx, &manager, rows_id, &BTreeMap::new(), Format::Csv)
+                            .await
+                    },
+                )
+                .await;
+                match asked {
+                    Ok(id) => waiting.push(id),
+                    Err(error) => {
+                        refused = Some(error);
+                        break;
+                    }
+                }
+            }
+            checks.check(
+                "a person's exports past the waiting limit are refused with a sentence to wait",
+                waiting.len() as i64 == (3 - already).max(0)
+                    && matches!(&refused, Some(ReportError::Refused(m)) if m.contains("Wait for one")),
+                format!(
+                    "{already} waiting before, {} accepted, then {:?}",
+                    waiting.len(),
+                    refused.map(|e| e.to_string())
+                ),
+            );
+            client.execute("UPDATE base_queue_jobs SET state='cancelled', cancelled_at=now(), failure_code='walkthrough' WHERE id IN (SELECT job_id FROM base_report_exports WHERE id=ANY($1))", &[&waiting]).await?;
+            client.execute("UPDATE base_report_exports SET state='failed', message='walkthrough', finished_at=now() WHERE id=ANY($1)", &[&waiting]).await?;
         }
         Err(ReportError::Refused(message)) => checks.check(
             "an account with no current workplace is told how to prepare an export",
@@ -828,17 +1307,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         Err(error) => checks.check("a prepared export is accepted", false, error.to_string()),
     }
-    let plan = Plan {
-        frequency: Frequency::Weekly,
-        at_minute: 8 * 60,
-        weekday: Some(1),
-        monthday: None,
-        format: Format::Csv,
-        include_owner: true,
-        skip_empty: true,
-        roles: Vec::new(),
-        people: Vec::new(),
-    };
     let refused = write(&boundary, &db, &viewer, "reports.subscribe", async |tx| {
         reports.subscribe(tx, &viewer, rows_id, &plan).await
     })
@@ -848,10 +1316,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         matches!(refused, Err(ReportError::Forbidden)),
         format!("{refused:?}").chars().take(60).collect::<String>(),
     );
-    let subscription = write(&boundary, &db, &manager, "reports.subscribe", async |tx| {
-        reports.subscribe(tx, &manager, rows_id, &plan).await
-    })
-    .await?;
     let held = reports.subscriptions(&manager, rows_id).await?;
     let next = held
         .first()
@@ -903,6 +1367,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reports.subscriptions(&manager, rows_id).await?.is_empty(),
         "",
     );
+    // CC people (#556): the offer is each page of holders proved staff in
+    // one read, and a subscription proves only the people it names.
+    let offered = reports.share_people(&manager).await?;
+    checks.check(
+        "the people offered are staff of the tenant who can run reports",
+        offered.iter().any(|(id, _)| *id == 2) && offered.iter().all(|(id, _)| *id != 5),
+        format!(
+            "{:?}",
+            offered.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+        ),
+    );
+    let mut cc = plan.clone();
+    cc.people = vec![2];
+    let named = write(&boundary, &db, &manager, "reports.subscribe", async |tx| {
+        reports.subscribe(tx, &manager, rows_id, &cc).await
+    })
+    .await;
+    let mut stranger = plan.clone();
+    stranger.people = vec![2, 999_999];
+    let unknown = write(&boundary, &db, &manager, "reports.subscribe", async |tx| {
+        reports.subscribe(tx, &manager, rows_id, &stranger).await
+    })
+    .await;
+    checks.check(
+        "a named person who can run reports is accepted, one who cannot refuses the schedule",
+        named.is_ok()
+            && matches!(&unknown, Err(ReportError::Invalid(fields)) if fields.contains_key("people")),
+        format!(
+            "{:?}, {:?}",
+            named.as_ref().map_err(ToString::to_string),
+            unknown.as_ref().map_err(ToString::to_string)
+        ),
+    );
+    if let Ok(subscription) = named {
+        write(
+            &boundary,
+            &db,
+            &manager,
+            "reports.unsubscribe",
+            async |tx| reports.unsubscribe(tx, &manager, subscription, 1).await,
+        )
+        .await?;
+    }
 
     println!("== Totals over every column once, wider than one Grid read, and agent date drills (review of #172)");
     let mut doubled = totals.clone();
@@ -1351,6 +1858,442 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "deleted, its shares go with it",
         shares == 0 && matches!(gone, Err(ReportError::NotFound)),
         format!("{shares} share(s)"),
+    );
+
+    println!("== Oversight probe audit");
+    client
+        .execute(
+            "UPDATE tenants SET parent_id=$1 WHERE id=$2",
+            &[&1_i64, &2_i64],
+        )
+        .await?;
+    let consent = json!({"reference_items":{"level":"rows","withheld":[],"personal":[]}});
+    client
+        .execute(
+            "INSERT INTO base_tenancy_oversight(tenant_id,parent_id,active,tables) VALUES($1,$2,true,$3)
+             ON CONFLICT(tenant_id) DO UPDATE SET parent_id=EXCLUDED.parent_id,active=true,tables=EXCLUDED.tables",
+            &[&2_i64, &1_i64, &consent],
+        )
+        .await?;
+    let mut oversight_summary = summary_draft("Oversight check", vec![]);
+    oversight_summary.definition.oversight = true;
+    let oversight_rows = Draft {
+        name: "Rolled-back oversight report".into(),
+        kind: Kind::Rows,
+        definition: Definition {
+            oversight: true,
+            columns: vec!["name".into()],
+            ..Definition::default()
+        },
+        ..oversight_summary.clone()
+    };
+    let audit_counts = async || -> Result<(i64, i64), tokio_postgres::Error> {
+        let counts = client
+            .query_one(
+                "SELECT count(*) FILTER (WHERE tenant_id=$1 AND event='tenancy.oversight.query'),
+                        count(*) FILTER (WHERE tenant_id=$2 AND event='tenancy.oversight.read')
+                 FROM base_audit_actions WHERE tenant_id IN ($1,$2) AND
+                 payload->>'table'='reference_items' AND payload->>'row_count'='1'",
+                &[&1_i64, &2_i64],
+            )
+            .await?;
+        Ok((counts.get(0), counts.get(1)))
+    };
+    let before = audit_counts().await?;
+    reports.check(&manager, &oversight_summary).await?;
+    let checked = audit_counts().await?;
+    checks.check(
+        "a standalone oversight check records both audits",
+        checked == (before.0 + 1, before.1 + 1),
+        format!("parent and child audit counts: {before:?} to {checked:?}"),
+    );
+
+    let refused = write(&boundary, &db, &manager, "reports.create", async |tx| {
+        reports.create(tx, &manager, &oversight_rows).await?;
+        let invalid = Draft {
+            name: String::new(),
+            ..oversight_rows.clone()
+        };
+        reports.create(tx, &manager, &invalid).await
+    })
+    .await;
+    let saved: bool = client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM base_reports WHERE tenant_id=$1 AND name=$2)",
+            &[&1_i64, &oversight_rows.name],
+        )
+        .await?
+        .get(0);
+    let audited = audit_counts().await?;
+    checks.check(
+        "both oversight audits survive a later step rolling back the report",
+        matches!(refused, Err(ReportError::Invalid(ref errors)) if errors.contains_key("name"))
+            && !saved
+            && audited == (checked.0 + 1, checked.1 + 1),
+        format!("{refused:?}, report saved: {saved}, audit counts: {checked:?} to {audited:?}"),
+    );
+
+    let audit_watermark = async || -> Result<i64, tokio_postgres::Error> {
+        Ok(client
+            .query_one("SELECT coalesce(max(id),0) FROM base_audit_actions", &[])
+            .await?
+            .get(0))
+    };
+    let oversight_events =
+        async |after: i64| -> Result<Vec<(i64, String, Value)>, tokio_postgres::Error> {
+            Ok(client
+            .query(
+                "SELECT tenant_id,event,payload FROM base_audit_actions WHERE id>$1
+                 AND tenant_id IN (1,2,3) AND event IN ('tenancy.oversight.query','tenancy.oversight.read')
+                 AND payload->>'table'='reference_items' ORDER BY id",
+                &[&after],
+            )
+            .await?
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2)))
+            .collect())
+        };
+    let after = audit_watermark().await?;
+    let mut blocker = db.get_detached("the walkthrough's source lock").await?;
+    let lock = blocker.transaction().await?;
+    lock.batch_execute("LOCK TABLE base_grid_ref_items IN ACCESS EXCLUSIVE MODE")
+        .await?;
+    let refused = write(&boundary, &db, &manager, "reports.create", async |tx| {
+        reports.create(tx, &manager, &oversight_rows).await
+    })
+    .await;
+    lock.rollback().await?;
+    drop(blocker);
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a source lock timeout refuses the child and the parent evidence survives rollback",
+        matches!(refused, Err(ReportError::Invalid(ref errors)) if errors.contains_key("definition"))
+            && matches!(&events[..], [(1, event, parent)]
+                if event == "tenancy.oversight.query"
+                && parent["row_count"] == 0
+                && parent["children"] == json!([{"tenant_id": 2, "outcome": "refused"}])),
+        format!("{refused:?}, oversight evidence: {events:?}"),
+    );
+
+    let after = audit_watermark().await?;
+    client
+        .batch_execute(
+            "ALTER TABLE base_grid_ref_items RENAME TO r1_probe_items;
+             CREATE VIEW base_grid_ref_items AS SELECT * FROM r1_probe_items
+                 WHERE set_config('r1.probe_read', 'done', true) = 'done';
+             CREATE FUNCTION r1_delay_probe_recheck() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF current_setting('r1.probe_read', true) = 'done' THEN
+                     PERFORM pg_sleep(3);
+                 END IF;
+                 RETURN NEW;
+             END;
+             $$;
+             CREATE TRIGGER r1_delay_probe_recheck BEFORE INSERT ON authz_decision_log
+                 FOR EACH ROW WHEN (NEW.capability = 'tenancy.oversight.view')
+                 EXECUTE FUNCTION r1_delay_probe_recheck()",
+        )
+        .await?;
+    let refused = reports.check(&manager, &oversight_summary).await;
+    client
+        .batch_execute(
+            "DROP TRIGGER r1_delay_probe_recheck ON authz_decision_log;
+             DROP FUNCTION r1_delay_probe_recheck();
+             DROP VIEW base_grid_ref_items;
+             ALTER TABLE r1_probe_items RENAME TO base_grid_ref_items",
+        )
+        .await?;
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a policy recheck timeout after a child read cannot validate an oversight draft",
+        matches!(refused, Err(ReportError::Invalid(ref errors)) if errors.contains_key("definition"))
+            && matches!(&events[..], [(1, event, parent)]
+                if event == "tenancy.oversight.query"
+                && parent["row_count"] == 0
+                && parent["children"] == json!([{"tenant_id": 2, "outcome": "timed_out"}])),
+        format!("{refused:?}, oversight evidence: {events:?}"),
+    );
+
+    let after = audit_watermark().await?;
+    let mut blocker = db.get_detached("the walkthrough's audit lock").await?;
+    let lock = blocker.transaction().await?;
+    lock.query_one(
+        "SELECT 1 FROM base_audit_chain_heads WHERE chain='actions' AND tenant_id=$1 FOR UPDATE",
+        &[&2_i64],
+    )
+    .await?;
+    let refused = reports.check(&manager, &oversight_rows).await;
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a child audit timeout alone cannot validate an oversight draft",
+        matches!(refused, Err(ReportError::Invalid(ref errors)) if errors.contains_key("definition"))
+            && matches!(&events[..], [(1, event, parent)]
+                if event == "tenancy.oversight.query"
+                && parent["row_count"] == 0
+                && parent["children"] == json!([{"tenant_id": 2, "outcome": "timed_out"}])),
+        format!("{refused:?}, oversight evidence: {events:?}"),
+    );
+
+    let budget_key = "tenancy.oversight.total_timeout_ms";
+    client
+        .execute(
+            "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted)
+             VALUES($1,0,'global',0,'1000',false)
+             ON CONFLICT(key,tenant_id,scope_type,scope_id) DO UPDATE SET value=EXCLUDED.value",
+            &[&budget_key],
+        )
+        .await?;
+    let timed = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        reports.check(&manager, &oversight_rows),
+    )
+    .await;
+    lock.rollback().await?;
+    drop(blocker);
+    reports.check(&manager, &oversight_rows).await?;
+    let after_retry = audit_counts().await?;
+    checks.check(
+        "a blocked audit times out without writing late and the next check can audit",
+        matches!(timed, Ok(Err(ReportError::TooHeavy(_))))
+            && after_retry == (audited.0 + 1, audited.1 + 1),
+        format!("{timed:?}, parent and child audit counts: {audited:?} to {after_retry:?}"),
+    );
+
+    client
+        .execute(
+            "INSERT INTO tenants(id,name,parent_id) VALUES($1,'Deadline child',$2)",
+            &[&3_i64, &1_i64],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO base_tenancy_oversight(tenant_id,parent_id,active,tables) VALUES($1,$2,true,$3)",
+            &[&3_i64, &1_i64, &consent],
+        )
+        .await?;
+    client
+        .batch_execute(
+            "INSERT INTO base_grid_ref_groups(id,tenant_id,name,region) VALUES (9305,3,'Deadline group','west');
+             INSERT INTO base_grid_ref_items(id,tenant_id,group_id,name,category,quantity,unit_cost)
+             VALUES (9324,3,9305,'Deadline item','parts',1,1)",
+        )
+        .await?;
+    reports.check(&manager, &oversight_rows).await?;
+    let after = audit_watermark().await?;
+    let mut blocker = db
+        .get_detached("the walkthrough's second child audit lock")
+        .await?;
+    let lock = blocker.transaction().await?;
+    lock.query_one(
+        "SELECT 1 FROM base_audit_chain_heads WHERE chain='actions' AND tenant_id=$1 FOR UPDATE",
+        &[&3_i64],
+    )
+    .await?;
+    let timed = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        write(&boundary, &db, &manager, "reports.create", async |tx| {
+            reports.create(tx, &manager, &oversight_rows).await
+        }),
+    )
+    .await;
+    lock.rollback().await?;
+    drop(blocker);
+    let events = oversight_events(after).await?;
+    checks.check(
+        "the total deadline preserves the first child audit and the partial parent summary on rollback",
+        matches!(timed, Ok(Err(ReportError::TooHeavy("oversight total time bound exceeded"))))
+            && matches!(&events[..], [(2, child_event, child), (1, parent_event, parent)]
+                if child_event == "tenancy.oversight.read" && child["row_count"] == 1
+                && parent_event == "tenancy.oversight.query" && parent["row_count"] == 1
+                && parent["children"] == json!([
+                    {"tenant_id": 2, "outcome": "ok"},
+                    {"tenant_id": 3, "outcome": "timed_out"}
+                ])),
+        format!("{timed:?}, oversight evidence: {events:?}"),
+    );
+
+    let after = audit_watermark().await?;
+    commits_until_delay.store(2, Ordering::Relaxed);
+    let pool_size = app.db.status().max_size;
+    app.db.resize(1);
+    let (uncertain, contender) = tokio::time::timeout(Duration::from_secs(4), async {
+        tokio::join!(
+            write(&boundary, &db, &manager, "reports.create", async |tx| {
+                reports.create(tx, &manager, &oversight_rows).await
+            }),
+            async {
+                while commits_until_delay.load(Ordering::Relaxed) != 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                let connection = app.db.get().await?;
+                let summary_pending = oversight_events(after).await?.len() == 2;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                drop(connection);
+                Ok::<_, bilibi_database::Error>(summary_pending)
+            },
+        )
+    })
+    .await?;
+    app.db.resize(pool_size);
+    let summary_pending = contender?;
+    let events = oversight_events(after).await?;
+    let unknown_message =
+        "The oversight audit commit could not be confirmed. Check the audit trail before retrying.";
+    checks.check(
+        "a child COMMIT with a withheld reply is summarized after a waiting checkout gets the slot",
+        summary_pending
+            && matches!(uncertain, Err(ReportError::Refused(ref why)) if why == unknown_message)
+            && matches!(&events[..], [(2, first_event, first), (3, second_event, second), (1, parent_event, parent)]
+                if first_event == "tenancy.oversight.read" && first["row_count"] == 1
+                && second_event == "tenancy.oversight.read" && second["row_count"] == 1
+                && parent_event == "tenancy.oversight.query" && parent["row_count"] == 1
+                && parent["children"] == json!([
+                    {"tenant_id": 2, "outcome": "ok"},
+                    {"tenant_id": 3, "outcome": "outcome unknown"}
+                ])),
+        format!("{uncertain:?}, oversight evidence: {events:?}"),
+    );
+
+    let after = audit_watermark().await?;
+    commits_until_delay.store(3, Ordering::Relaxed);
+    let uncertain = tokio::time::timeout(
+        Duration::from_secs(4),
+        reports.check(&manager, &oversight_rows),
+    )
+    .await?
+    .map_err(bilibi_agent_api::Error::from);
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a parent COMMIT with a withheld reply gives agent callers the uncertainty message",
+        matches!(uncertain, Err(bilibi_agent_api::Error::InvalidInput(ref fields))
+            if fields.get("report").is_some_and(|messages| messages.as_slice() == [unknown_message]))
+            && matches!(&events[..], [(2, first_event, _), (3, second_event, _), (1, parent_event, parent)]
+                if first_event == "tenancy.oversight.read" && second_event == "tenancy.oversight.read"
+                && parent_event == "tenancy.oversight.query" && parent["row_count"] == 2
+                && parent["children"] == json!([
+                    {"tenant_id": 2, "outcome": "ok"},
+                    {"tenant_id": 3, "outcome": "ok"}
+                ])),
+        format!("{uncertain:?}, oversight evidence: {events:?}"),
+    );
+    let after = audit_watermark().await?;
+    let mut blocker = db
+        .get_detached("the walkthrough's blocked parent audit")
+        .await?;
+    let lock = blocker.transaction().await?;
+    lock.query_one(
+        "SELECT 1 FROM base_audit_chain_heads WHERE chain='actions' AND tenant_id=$1 FOR UPDATE",
+        &[&1_i64],
+    )
+    .await?;
+    commits_until_delay.store(2, Ordering::Relaxed);
+    let failed = tokio::time::timeout(
+        Duration::from_secs(5),
+        write(&boundary, &db, &manager, "reports.create", async |tx| {
+            reports.create(tx, &manager, &oversight_rows).await
+        }),
+    )
+    .await?;
+    lock.rollback().await?;
+    drop(blocker);
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a blocked parent summary reports its failure alongside the uncertain child commit",
+        matches!(failed, Err(ReportError::Refused(ref message))
+            if message.contains(unknown_message) && message.contains("oversight summary audit timed out"))
+            && matches!(&events[..], [(2, first, _), (3, second, _)]
+                if first == "tenancy.oversight.read" && second == "tenancy.oversight.read"),
+        format!("{failed:?}, oversight evidence: {events:?}"),
+    );
+
+    let after = audit_watermark().await?;
+    let mut blocker = db
+        .get_detached("the walkthrough's refused first audit")
+        .await?;
+    let lock = blocker.transaction().await?;
+    lock.query_one(
+        "SELECT 1 FROM base_audit_chain_heads WHERE chain='actions' AND tenant_id=$1 FOR UPDATE",
+        &[&2_i64],
+    )
+    .await?;
+    app.db.resize(1);
+    app.db
+        .get()
+        .await?
+        .batch_execute("SET lock_timeout = '100ms'")
+        .await?;
+    let recovered = write(&boundary, &db, &manager, "reports.create", async |tx| {
+        reports.create(tx, &manager, &oversight_rows).await?;
+        Err::<(), _>(ReportError::NotFound)
+    })
+    .await;
+    app.db
+        .get()
+        .await?
+        .batch_execute("RESET lock_timeout")
+        .await?;
+    app.db.resize(pool_size);
+    lock.rollback().await?;
+    drop(blocker);
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a recovered audit lock refusal leaves later children eligible",
+        matches!(recovered, Err(ReportError::NotFound))
+            && matches!(&events[..], [(3, child, _), (1, event, parent)]
+            if child == "tenancy.oversight.read" && event == "tenancy.oversight.query"
+            && parent["row_count"] == 1 && parent["children"] == json!([
+                {"tenant_id": 2, "outcome": "refused"},
+                {"tenant_id": 3, "outcome": "ok"}
+            ])),
+        format!("{recovered:?}, oversight evidence: {events:?}"),
+    );
+    let after = audit_watermark().await?;
+    seals_until_disconnect.store(3, Ordering::Relaxed);
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(4),
+        reports.check(&manager, &oversight_rows),
+    )
+    .await?;
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a disconnect while sealing the parent summary before COMMIT permits one replacement write",
+        seals_until_disconnect.load(Ordering::Relaxed) == 0
+            && recovered.is_ok()
+            && matches!(&events[..], [(2, first, _), (3, second, _), (1, event, parent)]
+            if first == "tenancy.oversight.read" && second == "tenancy.oversight.read"
+            && event == "tenancy.oversight.query" && parent["row_count"] == 2
+            && parent["children"] == json!([
+                {"tenant_id": 2, "outcome": "ok"},
+                {"tenant_id": 3, "outcome": "ok"}
+            ])),
+        format!("{recovered:?}, oversight evidence: {events:?}"),
+    );
+    client
+        .execute(
+            "DELETE FROM base_tenancy_oversight WHERE tenant_id=$1",
+            &[&3_i64],
+        )
+        .await?;
+    client
+        .execute(
+            "DELETE FROM base_settings WHERE key=$1 AND tenant_id=0 AND scope_type='global' AND scope_id=0",
+            &[&budget_key],
+        )
+        .await?;
+
+    client
+        .batch_execute(
+            "INSERT INTO base_grid_ref_items(id,tenant_id,group_id,name,category,quantity,unit_cost)
+             SELECT 10000+n,2,9304,'Distinct item ' || n,'parts',1,1
+             FROM generate_series(1,1000) n",
+        )
+        .await?;
+    oversight_summary.definition.groupings[0].column = "name".into();
+    let refused = reports.check(&manager, &oversight_summary).await;
+    checks.check(
+        "an oversight summary over the group limit cannot be saved",
+        matches!(refused, Err(ReportError::Invalid(ref errors)) if errors.contains_key("definition")),
+        format!("{refused:?}"),
     );
 
     client

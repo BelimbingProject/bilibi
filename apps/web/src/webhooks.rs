@@ -137,6 +137,11 @@ impl Boundary {
             settings: services.get("base/settings.store")?,
         })
     }
+    /// Whether `path` is a registered webhook's delivery address.
+    pub(crate) fn serves(&self, path: &str) -> bool {
+        path.strip_prefix("/webhooks/")
+            .is_some_and(|identifier| self.handlers.contains_key(identifier))
+    }
     fn state(&self) -> std::sync::MutexGuard<'_, Option<Window>> {
         self.window
             .lock()
@@ -290,8 +295,9 @@ fn absorb(window: &mut Window, handler: &str, outcome: Outcome) {
         .entry((handler.to_owned(), outcome.reason()))
         .or_insert(0) += 1;
 }
-/// Deliveries are unauthenticated at the host: a guest, no tenant.
-fn guest() -> Attribution {
+/// Deliveries are unauthenticated at the host: a guest, no tenant. The agent
+/// edge's aggregated refusals (`api_gate.rs`) are recorded as the same guest.
+pub(crate) fn guest() -> Attribution {
     Attribution {
         tenant: None,
         actor_type: "guest",

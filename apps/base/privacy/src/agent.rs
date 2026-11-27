@@ -21,10 +21,7 @@ use bilibi_party_ids::{OrganisationId, PersonId};
 use bilibi_personal_data::Identifier;
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 static PRIVACY: OnceLock<Arc<Privacy>> = OnceLock::new();
 /// Bound once at boot by the `base/privacy.agent` service.
@@ -34,20 +31,17 @@ pub(crate) fn bind(privacy: Arc<Privacy>) -> bool {
 fn privacy() -> bilibi_agent_api::Result<&'static Arc<Privacy>> {
     PRIVACY.get().ok_or(Error::Internal.into())
 }
-fn field_error(field: &str, message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([(field.into(), vec![message.into()])]))
-}
 fn id(input: &Value, field: &str) -> bilibi_agent_api::Result<i64> {
     input[field]
         .as_i64()
         .filter(|id| *id > 0)
-        .ok_or_else(|| field_error(field, "must be a positive integer"))
+        .ok_or_else(|| bilibi_agent_api::invalid(field, "must be a positive integer"))
 }
 fn text<'a>(input: &'a Value, field: &str) -> bilibi_agent_api::Result<&'a str> {
     input[field]
         .as_str()
         .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| field_error(field, "is required"))
+        .ok_or_else(|| bilibi_agent_api::invalid(field, "is required"))
 }
 
 /// A request as agents and pages read it: never the identifier values.
@@ -59,7 +53,8 @@ pub(crate) fn request_json(request: &RequestView) -> Value {
         "received_by": request.received_by, "received_at": request.received_at, "due_at": request.due_at,
         "verified_by": request.verified_by, "approved_by": request.approved_by, "approved_at": request.approved_at,
         "approval_request": request.approval_request, "approval_awaiting": request.approval_awaiting,
-        "refused_reason": request.refused_reason, "completed_at": request.completed_at, "late": request.late,
+        "refused_reason": request.refused_reason, "failed_at": request.failed_at, "failure": request.failure,
+        "completed_at": request.completed_at, "late": request.late,
         "finish_attempts": request.finish_attempts, "finish_error": request.finish_error, "erased": request.erased,
         "confirmed": request.confirmed,
         "has_export": request.export_artifact.is_some(), "has_certificate": request.certificate_artifact.is_some(),
@@ -81,40 +76,48 @@ impl ReadHandler for Read {
     fn owner(&self) -> &'static str {
         "base/privacy"
     }
+    fn requires_transaction(&self) -> bool {
+        matches!(self, Self::Locate)
+    }
     fn call<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let privacy = privacy()?;
-            let client = privacy.db.get().await.map_err(Error::from)?;
             let data = match self {
                 Self::Requests => {
+                    let client = client.sql_client().await?;
                     let open = input["open"].as_bool().unwrap_or(false);
                     let search = input["search"].as_str().unwrap_or("");
                     let offset = input["offset"].as_i64().unwrap_or(0);
                     let limit = input["limit"].as_i64().unwrap_or(100);
                     let (rows, total) = privacy
-                        .requests(&**client, scope, search, open, offset, limit)
+                        .requests(client, scope, search, open, offset, limit)
                         .await?;
                     json!({"requests": rows.iter().map(request_json).collect::<Vec<_>>(), "total": total})
                 }
                 Self::Request => {
-                    json!({"request": request_json(&privacy.request(&**client, scope, id(input, "id")?).await?)})
+                    let client = client.sql_client().await?;
+                    json!({"request": request_json(&privacy.request(client, scope, id(input, "id")?).await?)})
                 }
                 Self::Locate => {
-                    let found = privacy.locate(&client, scope, id(input, "id")?).await?;
+                    let tx = client.transaction().ok_or(Error::Internal)?;
+                    let found = privacy
+                        .locate_request_on(tx, scope, id(input, "id")?)
+                        .await?;
                     json!({"stores": found.iter().map(|(store, label, located)| json!({
                         "store": store, "label": label, "kinds": located.kinds,
                         "candidates": located.candidates, "truncated": located.truncated,
                     })).collect::<Vec<_>>()})
                 }
                 Self::Holds => {
+                    let client = client.sql_client().await?;
                     let page = privacy
                         .holds(
-                            &**client,
+                            client,
                             scope,
                             input["search"].as_str().unwrap_or(""),
                             input["offset"].as_i64().unwrap_or(0),
@@ -125,14 +128,16 @@ impl ReadHandler for Read {
                 }
                 Self::Retention => {
                     let company = match input.get("company_id") {
-                        Some(_) => Some(
-                            OrganisationId::new(id(input, "company_id")?)
-                                .map_err(|_| field_error("company_id", "is invalid"))?,
-                        ),
+                        Some(_) => {
+                            Some(OrganisationId::new(id(input, "company_id")?).map_err(|_| {
+                                bilibi_agent_api::invalid("company_id", "is invalid")
+                            })?)
+                        }
                         None => None,
                     };
+                    let client = client.sql_client().await?;
                     let (company, classes) =
-                        privacy.retention_classes(&client, scope, company).await?;
+                        privacy.retention_classes(client, scope, company).await?;
                     json!({"company_id": company.map(OrganisationId::get), "classes": classes})
                 }
             };
@@ -146,7 +151,7 @@ fn kind(input: &Value) -> bilibi_agent_api::Result<RequestKind> {
         Some("access") => Ok(RequestKind::Access),
         Some("portability") => Ok(RequestKind::Portability),
         Some("erasure") => Ok(RequestKind::Erasure),
-        _ => Err(field_error(
+        _ => Err(bilibi_agent_api::invalid(
             "kind",
             "must be access, portability or erasure",
         )),
@@ -154,9 +159,9 @@ fn kind(input: &Value) -> bilibi_agent_api::Result<RequestKind> {
 }
 fn new_request(input: &Value) -> bilibi_agent_api::Result<NewRequest> {
     let person = PersonId::new(id(input, "person_id")?)
-        .map_err(|_| field_error("person_id", "is invalid"))?;
+        .map_err(|_| bilibi_agent_api::invalid("person_id", "is invalid"))?;
     let company = OrganisationId::new(id(input, "company_id")?)
-        .map_err(|_| field_error("company_id", "is invalid"))?;
+        .map_err(|_| bilibi_agent_api::invalid("company_id", "is invalid"))?;
     let mut identifiers = Vec::new();
     for (field, make) in [
         ("emails", Identifier::Email as fn(String) -> Identifier),
@@ -165,12 +170,12 @@ fn new_request(input: &Value) -> bilibi_agent_api::Result<NewRequest> {
         if let Some(values) = input.get(field) {
             let values = values
                 .as_array()
-                .ok_or_else(|| field_error(field, "must be a list"))?;
+                .ok_or_else(|| bilibi_agent_api::invalid(field, "must be a list"))?;
             for value in values {
                 identifiers.push(make(
                     value
                         .as_str()
-                        .ok_or_else(|| field_error(field, "must be text"))?
+                        .ok_or_else(|| bilibi_agent_api::invalid(field, "must be text"))?
                         .to_owned(),
                 ));
             }
@@ -187,13 +192,13 @@ fn hold_target(input: &Value) -> bilibi_agent_api::Result<HoldTarget> {
     match (input.get("person_id"), input.get("record_kind")) {
         (Some(_), None) => Ok(HoldTarget::Person {
             person: PersonId::new(id(input, "person_id")?)
-                .map_err(|_| field_error("person_id", "is invalid"))?,
+                .map_err(|_| bilibi_agent_api::invalid("person_id", "is invalid"))?,
         }),
         (None, Some(_)) => Ok(HoldTarget::Record {
             kind: text(input, "record_kind")?.to_owned(),
             id: id(input, "record_id")?,
         }),
-        _ => Err(field_error(
+        _ => Err(bilibi_agent_api::invalid(
             "person_id",
             "give exactly one of person_id or record_kind with record_id",
         )),
@@ -201,7 +206,9 @@ fn hold_target(input: &Value) -> bilibi_agent_api::Result<HoldTarget> {
 }
 fn refusal(error: Error) -> AgentError {
     match error {
-        Error::Conflict => field_error("version", "the request or hold changed; read it again"),
+        Error::Conflict => {
+            bilibi_agent_api::invalid("version", "the request or hold changed; read it again")
+        }
         error => error.into(),
     }
 }
@@ -212,6 +219,7 @@ enum Write {
     Approve,
     Submit,
     Refuse,
+    RunAgain,
     PlaceHold,
     ReleaseHold,
     Reveal,
@@ -219,15 +227,57 @@ enum Write {
 fn reveal_record(input: &Value) -> bilibi_agent_api::Result<Value> {
     match &input["record"] {
         record @ (Value::Number(_) | Value::String(_)) => Ok(record.clone()),
-        _ => Err(field_error("record", "must be the record's key")),
+        _ => Err(bilibi_agent_api::invalid(
+            "record",
+            "must be the record's key",
+        )),
     }
 }
 /// The records the operator confirms, as `base.privacy.request.locate` listed them.
 fn confirm(input: &Value) -> bilibi_agent_api::Result<Vec<ConfirmedRecord>> {
     match input.get("confirm") {
         None | Some(Value::Null) => Ok(Vec::new()),
-        Some(list) => serde_json::from_value(list.clone())
-            .map_err(|_| field_error("confirm", "must be a list of {store, kind, id}")),
+        Some(list) => serde_json::from_value(list.clone()).map_err(|_| {
+            bilibi_agent_api::invalid("confirm", "must be a list of {store, kind, id}")
+        }),
+    }
+}
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let privacy = privacy()?;
+        let facts = match self {
+            Self::Receive => {
+                let new = new_request(input)?;
+                json!({"summary": format!("Record a {} request for person {}, filed under company {}", new.kind.as_str(), new.person.get(), new.company.get())})
+            }
+            Self::Verify | Self::Approve | Self::Submit | Self::Refuse | Self::RunAgain => {
+                let request = privacy.request(client, scope, id(input, "id")?).await?;
+                let verb = match self {
+                    Self::Verify => "Verify",
+                    Self::Approve => "Approve and run",
+                    Self::Submit => "Send for approval",
+                    Self::RunAgain => "Run again",
+                    _ => "Refuse",
+                };
+                json!({"summary": format!("{verb} {} request {} for person {} (now {})", request.kind.as_str(), request.id, request.person.get(), request.status), "request": request_json(&request)})
+            }
+            Self::PlaceHold => {
+                let target = hold_target(input)?;
+                json!({"summary": format!("Place a legal hold on {}", match &target { HoldTarget::Person { person } => format!("person {person}"), HoldTarget::Record { kind, id } => format!("{kind} {id}") })})
+            }
+            Self::ReleaseHold => {
+                json!({"summary": format!("Release legal hold {}", id(input, "id")?)})
+            }
+            Self::Reveal => {
+                json!({"summary": format!("Reveal {}.{} of record {} (recorded with the reason)", text(input, "table")?, text(input, "field")?, reveal_record(input)?), "step_up": [STEP_UP_REVEAL]})
+            }
+        };
+        Ok(facts.into())
     }
 }
 impl WriteHandler for Write {
@@ -236,40 +286,20 @@ impl WriteHandler for Write {
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let privacy = privacy()?;
-            let client = privacy.db.get().await.map_err(Error::from)?;
-            let facts = match self {
-                Self::Receive => {
-                    let new = new_request(input)?;
-                    json!({"summary": format!("Record a {} request for person {}, filed under company {}", new.kind.as_str(), new.person.get(), new.company.get())})
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    self.preview_on(client.sql_client().await?, scope, input)
+                        .await
                 }
-                Self::Verify | Self::Approve | Self::Submit | Self::Refuse => {
-                    let request = privacy.request(&**client, scope, id(input, "id")?).await?;
-                    let verb = match self {
-                        Self::Verify => "Verify",
-                        Self::Approve => "Approve and run",
-                        Self::Submit => "Send for approval",
-                        _ => "Refuse",
-                    };
-                    json!({"summary": format!("{verb} {} request {} for person {} (now {})", request.kind.as_str(), request.id, request.person.get(), request.status), "request": request_json(&request)})
-                }
-                Self::PlaceHold => {
-                    let target = hold_target(input)?;
-                    json!({"summary": format!("Place a legal hold on {}", match &target { HoldTarget::Person { person } => format!("person {person}"), HoldTarget::Record { kind, id } => format!("{kind} {id}") })})
-                }
-                Self::ReleaseHold => {
-                    json!({"summary": format!("Release legal hold {}", id(input, "id")?)})
-                }
-                Self::Reveal => {
-                    json!({"summary": format!("Reveal {}.{} of record {} (recorded with the reason)", text(input, "table")?, text(input, "field")?, reveal_record(input)?), "step_up": [STEP_UP_REVEAL]})
-                }
-            };
-            Ok(facts.into())
+            }
         })
     }
     fn commit<'a>(
@@ -283,7 +313,7 @@ impl WriteHandler for Write {
             let version = || {
                 input["version"]
                     .as_i64()
-                    .ok_or_else(|| field_error("version", "is required"))
+                    .ok_or_else(|| bilibi_agent_api::invalid("version", "is required"))
             };
             let result = match self {
                 Self::Receive => request_json(
@@ -304,7 +334,7 @@ impl WriteHandler for Write {
                         )
                         .await
                         .map_err(|error| match error {
-                            Error::Invalid => field_error(
+                            Error::Invalid => bilibi_agent_api::invalid(
                                 "confirm",
                                 "names a record that is not a current candidate, or the note is invalid",
                             ),
@@ -335,6 +365,12 @@ impl WriteHandler for Write {
                         .await
                         .map_err(refusal)?,
                 ),
+                Self::RunAgain => request_json(
+                    &privacy
+                        .run_again_in(tx, scope, id(input, "id")?, version()?)
+                        .await
+                        .map_err(refusal)?,
+                ),
                 Self::PlaceHold => json!(privacy
                     .place_hold_in(tx, scope, hold_target(input)?, text(input, "reason")?)
                     .await
@@ -344,7 +380,7 @@ impl WriteHandler for Write {
                     .await
                     .map_err(refusal)?),
                 Self::Reveal => json!({"value": privacy
-                    .reveal_field(scope, text(input, "table")?, text(input, "field")?, &reveal_record(input)?, text(input, "reason")?)
+                    .reveal_field_in(tx.sql(), scope, text(input, "table")?, text(input, "field")?, &reveal_record(input)?, text(input, "reason")?)
                     .await?}),
             };
             Ok(result.into())
@@ -493,9 +529,10 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/privacy", Provenance {
         write!("base.privacy.request.approve", "Approve a data-subject request", "Approve and run a verified access or portability request in every store, for a person who can file under its company. An erasure is sent with base.privacy.erasure.submit instead.", REQUEST_APPROVE, approve_schema, &Write::Approve, &[]),
         write!("base.privacy.erasure.submit", "Send an erasure for approval", "Send a verified erasure request to Workflow's approval case privacy.erasure; someone independent of it decides with base.privacy.erasure.decide, and the erasure runs when it is approved.", REQUEST_RECEIVE, approve_schema, &Write::Submit, &[]),
         write!("base.privacy.request.refuse", "Refuse a data-subject request", "Refuse a request that is not yet approved, with the reason.", REQUEST_RECEIVE, refuse_schema, &Write::Refuse, &[]),
+        write!("base.privacy.request.run_again", "Run a failed data-subject request again", "Ask again every store that has not answered a failed request (its approver lost the right to run it, or a store or the finish step ran out of attempts), for a person who may approve and can file under its company; the stores run as them.", REQUEST_APPROVE, approve_schema, &Write::RunAgain, &[]),
         write!("base.privacy.hold.place", "Place a legal hold", "Stop erasure and retention sweeps for a person or one record.", HOLD_MANAGE, place_schema, &Write::PlaceHold, &[]),
         write!("base.privacy.hold.release", "Release a legal hold", "Release an active legal hold; the next erasure or sweep acts on what it kept.", HOLD_MANAGE, release_schema, &Write::ReleaseHold, &[]),
     ],
     guides: &[Guide { key: "base.privacy", title: "Data-subject requests", summary: "Answer a person's access or erasure request in every store.", keywords: &["privacy", "pdpa", "gdpr", "erasure", "access request", "legal hold"], capability: REQUEST_VIEW,
-        body: "Record the request with base.privacy.request.receive (kind, person_id, company_id, and the emails or phones the person gave). Read base.privacy.request.locate to see what every store holds; records found only by email or phone are listed as candidates. Record how the person's identity was checked with base.privacy.request.verify, passing in confirm only the candidates that are this person's; nothing else found only by an identifier is touched. A person with privacy.request.approve, or you as their agent, then approves an access or portability request with base.privacy.request.approve. An erasure is sent for approval with base.privacy.erasure.submit and decided on Waiting for my approval or with base.privacy.erasure.decide, by someone independent of it: not the data subject or any account linked to them, not whoever received or verified it, and never while impersonating. Each decision asks for that person's Step-up code: when a commit answers step_up_required, ask them for their current authenticator code. A rejected or recalled erasure returns to whoever received it, to send again or refuse. Running answers each store in the background; read base.privacy.request.get until status is completed. A store that fails stays pending and the request shows late. Legal holds (base.privacy.hold.place) keep what they name through erasure; the certificate lists every store, what was kept and why." }],
+        body: "Record the request with base.privacy.request.receive (kind, person_id, company_id, and the emails or phones the person gave). Read base.privacy.request.locate to see what every store holds; records found only by email or phone are listed as candidates. Record how the person's identity was checked with base.privacy.request.verify, passing in confirm only the candidates that are this person's; nothing else found only by an identifier is touched. A person with privacy.request.approve, or you as their agent, then approves an access or portability request with base.privacy.request.approve. An erasure is sent for approval with base.privacy.erasure.submit and decided on Waiting for my approval or with base.privacy.erasure.decide, by someone independent of it: not the data subject or any account linked to them, not whoever received or verified it, and never while impersonating. Each decision asks for that person's Step-up code: when a commit answers step_up_required, ask them for their current authenticator code. A rejected or recalled erasure returns to whoever received it, to send again or refuse. Running answers each store in the background; read base.privacy.request.get until status is completed. A store that fails is retried and the request shows late; once its retries run out, or its approver can no longer run it, the request becomes failed with a failure code, and a person who may approve runs it again with base.privacy.request.run_again. Legal holds (base.privacy.hold.place) keep what they name through erasure; the certificate lists every store, what was kept and why." }],
 }) }

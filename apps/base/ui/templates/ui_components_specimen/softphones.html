@@ -1,0 +1,5 @@
+{% import "components.html" as ui %}
+{% call ui::card(id="specimen-softphones", title="Softphone") %}
+<p class="text-sm text-ink-muted">Call phase remains visible when the phone is unavailable.</p>
+{% for phone in softphones %}{{ phone|safe }}{% endfor %}
+{% endcall %}

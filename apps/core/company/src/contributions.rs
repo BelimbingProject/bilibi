@@ -2,7 +2,9 @@
 //! roles that carry it, the Company pages' routes and the Companies menu
 //! entry. Web owns dispatch and scope guards; a route here bypasses nothing.
 use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribution, VOCABULARY};
-use bilibi_grid::{Field, FieldType::*, GridContribution, LinkDecl, LinkKind, Source, TableDecl};
+use bilibi_grid::{
+    Field, FieldType::*, GridContribution, LinkDecl, LinkKind, PersonalKind, Source, TableDecl,
+};
 use bilibi_menu::{MenuItem, Requirement};
 use bilibi_module_registry::{
     contributions::{Access, Method, Route, ROUTES},
@@ -120,32 +122,35 @@ static GRID: GridContribution = GridContribution {
         "Companies",
         LIST,
         Source::tenant(
-            "SELECT id, parent_id, code, name, legal_name, registration_number, legal_entity_type_id, jurisdiction, website, status, email, phone, tax_id, revenue, created_at, updated_at, search_vector FROM companies WHERE tenant_id = $1 AND deleted_at IS NULL",
+            "SELECT id, parent_id, code, name, legal_name, registration_number, legal_entity_type_id, jurisdiction, website, status, email, phone, tax_id, revenue, created_at, updated_at, search_vector, custom_fields, custom_search_vector FROM companies WHERE tenant_id = $1 AND deleted_at IS NULL",
         ),
         "id",
         &[
             Field::new("id", "ID", Integer),
-            Field::new("code", "Code", String).protected(),
-            Field::new("legal_name", "Legal Name", String).protected(),
-            Field::new("registration_number", "Registration Number", String),
-            Field::new("jurisdiction", "Jurisdiction", String),
-            Field::new("website", "Website", String),
-            Field::new("parent_id", "Parent", Integer).hidden(),
-            Field::new("legal_entity_type_id", "Legal entity type", Integer).hidden(),
-            Field::new("name", "Name", String),
-            Field::choice("status", "Status", &["active", "suspended", "pending", "archived"]).protected(),
-            Field::new("email", "Email", String),
-            Field::new("phone", "Phone", String),
-            Field::new("tax_id", "Tax ID", String),
+            Field::record(crate::web::fields::CODE).protected(),
+            Field::record(crate::web::fields::LEGAL_NAME).protected(),
+            Field::record(crate::web::fields::REGISTRATION_NUMBER),
+            Field::record(crate::web::fields::JURISDICTION),
+            Field::record(crate::web::fields::WEBSITE),
+            Field::record(crate::web::fields::PARENT_ID).hidden(),
+            Field::record(crate::web::fields::LEGAL_ENTITY_TYPE_ID).hidden(),
+            Field::record(crate::web::fields::NAME),
+            Field::record(crate::web::fields::STATUS).protected(),
+            Field::record(crate::web::fields::EMAIL),
+            Field::new("phone", "Phone", String).personal(PersonalKind::Phone),
+            Field::record(crate::web::fields::TAX_ID),
             Field::new("revenue", "Revenue", Integer),
             Field::new("created_at", "Created", DateTime),
             Field::new("updated_at", "Updated", DateTime),
             Field::new("search_vector", "Search terms", String).hidden(),
+            // The tenant's custom values; Grid adds each active field as `cf_<key>`.
+            Field::new("custom_fields", "Custom fields", String).hidden(),
+            Field::new("custom_search_vector", "Custom search terms", String).hidden(),
         ],
     )
     .label_field("name")
     .time_field("created_at")
-    .record_types(&["company"]),
+    .record_types(&["company"]).list_address("/companies"),
     // A department is in the tenant through its company, so the source joins
     // the tenant's live companies; the
     // head is the affiliation id, which the affiliation owner links.
@@ -183,7 +188,7 @@ static GRID: GridContribution = GridContribution {
             Field::new("is_active", "Active", Boolean),
         ],
     )
-    .label_field("name")],
+    .label_field("name").list_address("/companies/legal-entity-types")],
     links: &[
         LinkDecl::on("parent", "Parent company", LinkKind::One, "companies", "parent_id", "companies", "id"),
         LinkDecl::on("children", "Subsidiaries", LinkKind::Many, "companies", "id", "companies", "parent_id"),
@@ -193,14 +198,24 @@ static GRID: GridContribution = GridContribution {
     ],
 };
 bilibi_grid::contribute!("core/company", "company.grid", &GRID);
+// A watcher on a record that links to its company (an order, a case) may read
+// the company's fields as conditions, such as `company.cf_segment`. Bounds
+// only: each tenant grants the watchers principal this key on Automation access.
+inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "watchers:core/company", provenance!(), &bilibi_authz::OfferedCapabilities {
+    principal: bilibi_watchers::PRINCIPAL, capabilities: &[LIST],
+}) }
+inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_custom_fields::GRID_SOURCES, "company", bilibi_module_registry::Provenance { module: "core/company", source: file!(), line: line!() },
+&bilibi_custom_fields::GridSource { record_type: "company", table: "companies", column: "custom_fields" }) }
 
 // Global search finds live companies by name, code and legal name; an archived
 // one stays findable, ranked after current ones and marked.
 static SEARCH: bilibi_search::Searchable =
     bilibi_search::Searchable::new("companies", "name", "search_vector", "/companies/{id}")
+        .title_trigrams()
         .subtitle(&["code", "legal_name"])
         .state("status", &["archived"])
-        .updated("updated_at");
+        .updated("updated_at")
+        .custom("custom_search_vector");
 bilibi_search::contribute!("core/company", "company.search", &SEARCH);
 
 inventory::submit! {

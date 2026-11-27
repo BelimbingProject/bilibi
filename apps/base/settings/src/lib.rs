@@ -6,8 +6,8 @@
 mod definition;
 mod encryption;
 pub use definition::{
-    Constraint, Definition, Definitions, Editor, OwnedSetting, ScopeKind, Setting, Validator,
-    ValueType, CONSTRAINTS, DEFINITIONS,
+    Constraint, Definition, Definitions, Editor, OwnedSetting, ScopeKind, Setting, TenantAdmin,
+    Validator, ValueType, CONSTRAINTS, DEFINITIONS, NEVER_REVEALED, TENANT_ADMIN,
 };
 pub use encryption::Encryption;
 
@@ -104,11 +104,16 @@ impl Settings {
         self.changes.subscribe()
     }
 
+    /// The inheritance chain for `target`. A company in it must be a live
+    /// company of the actor's tenant; a `write` also needs it unarchived (the
+    /// organisation proof), while a read resolves an archived company's
+    /// values, because its records and reports stay readable.
     async fn chain(
         &self,
         client: &dyn ReadClient,
         actor: &Scope,
         target: Target,
+        write: bool,
     ) -> Result<Vec<StorageScope>> {
         let global = StorageScope {
             kind: ScopeKind::Global,
@@ -124,7 +129,7 @@ impl Settings {
             Target::Global => Ok(vec![global]),
             Target::Tenant => Ok(vec![tenant, global]),
             Target::Company(id) => {
-                self.parties.organisation(client, actor, id).await?;
+                self.company(client, actor, id, write).await?;
                 Ok(vec![
                     StorageScope {
                         kind: ScopeKind::Company,
@@ -146,7 +151,7 @@ impl Settings {
                     id: actor.user(),
                 }];
                 if let Some(id) = company {
-                    self.parties.organisation(client, actor, id).await?;
+                    self.company(client, actor, id, write).await?;
                     chain.push(StorageScope {
                         kind: ScopeKind::Company,
                         tenant: actor.tenant(),
@@ -157,6 +162,23 @@ impl Settings {
                 Ok(chain)
             }
         }
+    }
+    async fn company(
+        &self,
+        client: &dyn ReadClient,
+        actor: &Scope,
+        id: OrganisationId,
+        write: bool,
+    ) -> Result<()> {
+        if write {
+            self.parties.organisation(client, actor, id).await?;
+        } else {
+            self.parties
+                .organisation_name(client, actor, id)
+                .await?
+                .ok_or(Error::NotFound)?;
+        }
+        Ok(())
     }
     fn plan(&self, key: &str) -> Result<(Option<&Definition>, bool)> {
         match self.definitions.lookup(key)?.setting {
@@ -250,7 +272,7 @@ impl Settings {
         for key in keys {
             self.plan(key)?;
         }
-        let chain = self.chain(client, actor, target).await?;
+        let chain = self.chain(client, actor, target, false).await?;
         let identities = Value::Array(chain.iter().map(|scope| json!({"tenant_id":scope.tenant,"scope_type":scope.kind.as_str(),"scope_id":scope.id})).collect());
         let rows = client.query("SELECT s.key,s.tenant_id,s.scope_type,s.scope_id,s.value,s.is_encrypted FROM base_settings s JOIN jsonb_to_recordset($2::jsonb) AS requested(tenant_id bigint,scope_type text,scope_id bigint) USING(tenant_id,scope_type,scope_id) WHERE s.key=ANY($1)", &[&keys,&identities]).await?;
         let mut result = std::collections::BTreeMap::new();
@@ -346,6 +368,33 @@ impl Settings {
         }
         Ok(value)
     }
+    /// Ambient read of one non-secret, tenant-scope value for unattended work
+    /// on a tenant the caller proved from its own record (a reset token, an
+    /// invitation, a queued job), where no session gives a `Scope`: the
+    /// tenant's own value, else the global one when the definition has that
+    /// scope, else the default. Encrypted definitions and runtime claims
+    /// refuse, as for [`Settings::get_global`].
+    pub async fn get_tenant(
+        &self,
+        client: &dyn ReadClient,
+        tenant: i64,
+        key: &str,
+    ) -> Result<Value> {
+        let definition = match self.definitions.lookup(key)?.setting {
+            Setting::Definition(d) if !d.encrypted && d.scopes.contains(&ScopeKind::Tenant) => d,
+            _ => return Err(Error::Invalid),
+        };
+        let global = definition.scopes.contains(&ScopeKind::Global);
+        let row = client.query_opt("SELECT value,is_encrypted FROM base_settings WHERE key=$1 AND ((tenant_id=$2 AND scope_type='tenant' AND scope_id=$2) OR ($3 AND tenant_id=0 AND scope_type='global' AND scope_id=0)) ORDER BY tenant_id DESC LIMIT 1", &[&key, &tenant, &global]).await?;
+        let Some(row) = row else {
+            return Ok((definition.default)());
+        };
+        let value: Value = row.get("value");
+        if row.get::<_, bool>("is_encrypted") || definition.validate(&value).is_err() {
+            return Err(Error::Invalid);
+        }
+        Ok(value)
+    }
     /// Every company's own stored value of one non-secret, company-scope key
     /// in the actor's tenant, by company ID: for rules that must honour each
     /// company's value at once, such as a legal minimum. A company with no
@@ -413,6 +462,41 @@ impl Settings {
         let (_, encrypted) = self.plan(key)?;
         self.write(tx, actor, target, key, None, encrypted).await
     }
+    pub async fn lock_tenant_override(
+        &self,
+        tx: &MutationTransaction<'_>,
+        actor: &Scope,
+        key: &str,
+    ) -> Result<()> {
+        let scope = self.chain(tx.sql(), actor, Target::Tenant, true).await?[0];
+        let constraints: Vec<_> = self.definitions.constraints_for(key).collect();
+        Self::lock_keys(tx.sql(), scope, key, &constraints).await
+    }
+
+    async fn lock_keys(
+        sql: &tokio_postgres::Transaction<'_>,
+        scope: StorageScope,
+        key: &str,
+        constraints: &[&'static Constraint],
+    ) -> Result<()> {
+        let mut locked: Vec<&str> = constraints
+            .iter()
+            .flat_map(|constraint| constraint.keys.iter().copied())
+            .collect();
+        locked.push(key);
+        locked.sort_unstable();
+        locked.dedup();
+        for name in locked {
+            let lock = String::from_utf8(scope.identity(name)).map_err(|_| Error::Internal)?;
+            sql.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                &[&lock],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn write(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -431,7 +515,7 @@ impl Settings {
         if matches!(target, Target::Global) {
             bilibi_tenancy::prove_operator(tx.sql(), actor).await?;
         }
-        let scope = self.chain(tx.sql(), actor, target).await?[0];
+        let scope = self.chain(tx.sql(), actor, target, true).await?[0];
         let (definition, _) = self.plan(key)?;
         if definition.is_some_and(|d| !d.scopes.contains(&scope.kind)) {
             return Err(Error::Invalid);
@@ -457,22 +541,7 @@ impl Settings {
         // old value.
         let constraints: Vec<&'static Constraint> =
             self.definitions.constraints_for(&key).collect();
-        let mut locked: Vec<&str> = constraints
-            .iter()
-            .flat_map(|constraint| constraint.keys.iter().copied())
-            .collect();
-        locked.push(&key);
-        locked.sort_unstable();
-        locked.dedup();
-        for name in locked {
-            let lock = String::from_utf8(scope.identity(name)).map_err(|_| Error::Internal)?;
-            tx.sql()
-                .execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
-                    &[&lock],
-                )
-                .await?;
-        }
+        Self::lock_keys(tx.sql(), scope, &key, &constraints).await?;
         let payload =
             json!({"key":key,"tenant":scope.tenant,"scope":scope.kind.as_str(),"id":scope.id})
                 .to_string();

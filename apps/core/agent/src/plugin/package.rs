@@ -4,10 +4,9 @@
 //! MCP tools, the apps and the guide index), never hand-written per harness.
 //! A harness adapter only lays the package out in its own format.
 //!
-//! The package is named after the instance (`bilibi-staging`, "Bilibi
-//! Staging"), so a person who connects Dev, Staging and Production to one
-//! harness gets three plugins that do not collide, each naming the server it
-//! reaches.
+//! The package is named after the instance's address (`try-bilibi-app`,
+//! "Bilibi Staging"), so a person who connects several Bilibis to one harness
+//! gets plugins that do not collide, each naming the server it reaches.
 use super::PluginError;
 use crate::{https_origin, OAUTH_SCOPE};
 use bilibi_agent_api::{
@@ -18,8 +17,6 @@ use bilibi_tenancy::SelfReport;
 use serde_json::Value;
 use std::fmt::Write;
 
-/// The common prefix of every package, MCP server and skill name.
-pub const NAME: &str = "bilibi";
 pub const DISPLAY_NAME: &str = "Bilibi";
 const DESCRIPTION: &str = "Connect to Bilibi through MCP, discover and read records, review supported writes, and show verified results.";
 const SHORT_DESCRIPTION: &str = "Read and update Bilibi with reviewed changes";
@@ -29,10 +26,10 @@ const DEFAULT_PROMPT: &str =
 /// Agent Skills names: lowercase letters, digits and hyphens, at most 64.
 const SKILL_NAME_LIMIT: usize = 64;
 
-/// `bilibi-<instance>` (`bilibi-staging`, `bilibi-dev-laptop`): the same
-/// name the MCP server gives itself in `initialize`, from `Instance::slug`.
+/// The name the MCP server gives itself in `initialize` and the connection
+/// prompt states (`try-bilibi-app`), from `Instance::server_name`.
 pub fn package_name(instance: &Instance) -> String {
-    format!("{NAME}-{}", instance.slug())
+    instance.server_name()
 }
 
 /// Where and how an agent connects: the canonical origin and automatic
@@ -97,7 +94,7 @@ impl Skill {
 /// registry, so a newly mounted module's guides appear without a code change.
 pub struct Package {
     pub connection: Connection,
-    /// `bilibi-<instance>`: the plugin, the MCP server and the workflow skill.
+    /// `Instance::server_name`: the plugin, the MCP server and the workflow skill.
     pub name: String,
     /// "Bilibi <instance label>".
     pub display_name: String,
@@ -125,10 +122,12 @@ impl Package {
             display_name: format!("{DISPLAY_NAME} {}", instance.label),
             version: env!("CARGO_PKG_VERSION"),
             description: format!(
-                "{DESCRIPTION} This plugin reaches {}: {}",
+                "{DESCRIPTION} This plugin reaches {}. {}",
                 instance.label,
                 instance.role.consequence()
-            ),
+            )
+            .trim_end()
+            .to_owned(),
             short_description: format!("{SHORT_DESCRIPTION} on {}", instance.label),
             default_prompt: DEFAULT_PROMPT.replace("{}", &instance.label),
             skills,
@@ -145,7 +144,7 @@ fn setup_skill_name(package: &str) -> String {
 }
 
 /// `core.company.relationship` becomes
-/// `bilibi-<instance>-core-company-relationship`.
+/// `<package>-core-company-relationship`.
 fn skill_name(package: &str, key: &str) -> String {
     let mut name = format!("{package}-{}", key.replace(['.', '_'], "-"));
     name.truncate(SKILL_NAME_LIMIT);
@@ -192,9 +191,18 @@ fn guide_skills(package: &str, registry: &Registry) -> Vec<(&'static str, Skill)
         .collect()
 }
 
-/// One skill per MCP App (`bilibi-<instance>-software` for the Software
+/// One skill per MCP App (`<package>-software` for the Software
 /// card): the app's own instructions under a heading that names the
 /// instance, since a card changes the server it is opened on.
+fn consequence_suffix(instance: &Instance) -> String {
+    let consequence = instance.role.consequence();
+    if consequence.is_empty() {
+        String::new()
+    } else {
+        format!(" {consequence}")
+    }
+}
+
 fn app_skills(package: &str, registry: &Registry, instance: &Instance) -> Vec<Skill> {
     registry
         .apps
@@ -203,10 +211,10 @@ fn app_skills(package: &str, registry: &Registry, instance: &Instance) -> Vec<Sk
         .map(|app| {
             let name = skill_name(package, &app.tool.replace("open_", ""));
             let body = format!(
-                "{skill}\n## This connection\n\nThis `{package}` connection reaches **{label}**. {consequence} The card says the same at the top of every screen; if the person meant another instance, use that instance's own connection.\n\nOpen the card with the `{tool}` tool of this connection. Read the `{package}` skill for the tools, the self-report and the review rules.\n",
+                "{skill}\n## This connection\n\nThis `{package}` connection reaches **{label}**.{consequence} The card says the same at the top of every screen; if the person meant another instance, use that instance's own connection.\n\nOpen the card with the `{tool}` tool of this connection. Read the `{package}` skill for the tools, the self-report and the review rules.\n",
                 skill = app.skill,
                 label = instance.label,
-                consequence = instance.role.consequence(),
+                consequence = consequence_suffix(instance),
                 tool = app.tool,
             );
             Skill {
@@ -232,10 +240,10 @@ fn workflow(
     guides: &[(&'static str, Skill)],
 ) -> Skill {
     let mut body = format!(
-        "{BUSINESS_CONTEXT}\n\n{identity} {INSTANCE_INSTRUCTIONS}\n\n{REVIEW_INSTRUCTIONS}\n\n## Connection\n\nUse the connected Bilibi MCP server of this plugin. It reaches **{label}**: {consequence} Say \"{label}\" whenever you tell the person where a change lands; a person may hold a Dev, a Staging and a Production connection, and only the plugin's name and this skill tell them apart. It needs no shell, local executable or tokens in chat. Use the host's OAuth connection UI when linking is required; never ask for a token or password. Each connection selects the person, company and tenant during consent. Do not switch accounts or transports to bypass a refusal.\n\n## Tools\n\n",
+        "{BUSINESS_CONTEXT}\n\n{identity} {INSTANCE_INSTRUCTIONS}\n\n{REVIEW_INSTRUCTIONS}\n\n## Connection\n\nUse the connected Bilibi MCP server of this plugin. It reaches **{label}**.{consequence} Say \"{label}\" whenever you tell the person where a change lands; a person may hold a Dev, a Staging and a Production connection, and only the plugin's name and this skill tell them apart. It needs no shell, local executable or tokens in chat. Use the host's OAuth connection UI when linking is required; never ask for a token or password. Each connection selects the person, company and tenant during consent. Do not switch accounts or transports to bypass a refusal.\n\n## Tools\n\n",
         identity = instance.agent_notice(),
         label = instance.label,
-        consequence = instance.role.consequence(),
+        consequence = consequence_suffix(instance),
     );
     for tool in mcp::tools().into_iter().chain(mcp::app_tools(registry)) {
         let name = tool.get("name").and_then(Value::as_str).unwrap_or_default();
@@ -304,16 +312,14 @@ fn setup(package: &str, connection: &Connection, instance: &Instance) -> Skill {
         description: format!("Set up or diagnose the Bilibi {} connection: check the MCP tools, complete OAuth linking through the host, and report what is available.", instance.label),
         body: format!(
             "Read the `{package}` skill's workflow first, including how to report yourself.\n\n\
-This plugin connects to **{label}** ({consequence}). Its MCP server is `{server}`. It uses OAuth with PKCE (S256) and automatic client registration, with no client secret and the scope `{scope}`.\n\n\
-Follow these steps in order:\n\n\
-1. Check whether `{package}` is already in the host's MCP settings.\n\
-2. If it is absent, add it with `{server}`.\n\
-3. If sign-in is required, or the saved sign-in is missing or invalid, check the host's MCP management commands and settings, then start MCP sign-in for `{package}`. Give the person the authorization link to open. Never ask for a Bilibi password or token. Do not say that sign-in cannot be started until both have been checked.\n\
-4. After the person approves sign-in, call `search` for `company`. If Bilibi returns `ai_switched_off`, tell the person to open {settings} and switch on this connection. OAuth approval and the AI switch are separate choices. Wait for confirmation, then call `search` for `company` again.\n\
-5. Report the operations actually returned. Authentication refusals, permission refusals and empty results are distinct outcomes; report which one happened.\n\n\
-If the Bilibi tools still do not appear, report the exact error. Say whether a new chat or a host reload is needed, then verify again. Do not assume that missing tools mean the server is absent.\n",
+This plugin connects to **{label}**.{consequence}\n\n\
+- MCP server: `{server}`, saved as `{package}`.\n\
+- Sign-in: OAuth with PKCE (S256) and automatic client registration, with no client secret and the scope `{scope}`. The person approves it in their browser through the host's connection UI; no Bilibi password or token goes through chat.\n\
+- AI switch: each connection is switched on or off at {settings}. The error `ai_switched_off` means it is off; OAuth approval and the switch are separate choices.\n\
+- Check: call `hello`. A working call proves the connection and the sign-in, so a later refusal of an operation is a permission answer and an empty result is an empty result.\n\n\
+Report what `hello` returned, or the exact error and whether the host needs a new chat or a reload to list the tools.\n",
             label = instance.label,
-            consequence = instance.role.consequence(),
+            consequence = consequence_suffix(instance),
             scope = connection.scope(),
         ),
     }

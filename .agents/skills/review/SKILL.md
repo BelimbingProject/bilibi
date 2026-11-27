@@ -14,6 +14,7 @@ Before reviewing, read `AGENTS.md`, the touched area's `AGENTS.md` files, and `D
 - **Entropy:** Flag needless machinery, duplication of existing Platform pieces, speculative code, and settings nobody asked for.
 - **Non-compliance:** Flag breaches of the repository's rules. Cite the relevant rule or authoritative contract.
 - **Non-functionalities:** Check whether the change's claims hold up in the running app; source inspection alone is not proof.
+- **Doors:** The API, MCP, pages, jobs and the command line (`apps/cli`) are doors to one operation contract and hold no decision of their own. Flag a door that validates business input, decides a permission, computes a preview, defaults a business value or reshapes an answer's meaning; the rule belongs in the contract's owner, where every door gets it. A change to `apps/cli` may call only the versioned API and print what it answered; `apps/cli/README.md` ("Only a door") is the contract, and its two-doors walkthrough must still pass and cover any new command.
 
 ## Prove it in the running app
 

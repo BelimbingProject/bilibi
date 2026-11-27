@@ -1,0 +1,696 @@
+//! One consent and opt-out state that every sender checks (`core/consent`).
+//! See `README.md`. This Core module has no Bilimbi counterpart; the person panel
+//! follows the Platform's record-panel pattern (Core Address) and the
+//! suppressions page its list pattern (Core Person).
+mod agent_operations;
+mod contributions;
+mod model;
+mod privacy;
+mod retention;
+mod store;
+mod web;
+
+use bilibi_database::{Db, Error, MutationTransaction, Result};
+use bilibi_module_registry::{Layer, Module, Service};
+use bilibi_party_ids::{OrganisationId, PersonId};
+use bilibi_picklists::PickLists;
+use bilibi_settings::{Settings, Target};
+use bilibi_tenancy::{Authentication, OrganisationDirectory, ReadClient, Scope};
+use std::sync::Arc;
+
+pub use contributions::{CHECK, DEFAULT_NEW_ADDRESS, MANAGE, PURPOSES, RECORD, VIEW};
+pub use model::{
+    normalise, Answer, Batch, Capture, Channel, Contact, DecisionInput, FieldError, NewAddress,
+    Question, Reason, Recipient, Refusal, Source, SuppressionInput, ADDRESS_MAX, BATCH_MAX,
+    EVIDENCE_MAX, KEY_MAX, LIFT_REASON_MAX,
+};
+
+pub const MODULE: &str = "core/consent";
+pub const SERVICE: &str = "core/consent.consent";
+/// The audit kinds of a decision, a current-state row, a suppression and a
+/// logged check.
+pub const DECISION_RECORD: &str = "core.consent.decision";
+pub const CURRENT_RECORD: &str = "core.consent.current";
+pub const SUPPRESSION_RECORD: &str = "core.consent.suppression";
+pub const LOG_RECORD: &str = "core.consent.log";
+
+/// One version of a consent decision.
+#[derive(Clone, Debug)]
+pub struct Decision {
+    pub id: i64,
+    pub company_id: i64,
+    pub contact: Contact,
+    pub purpose: String,
+    pub channel: Channel,
+    pub granted: bool,
+    pub source: Source,
+    pub captured_on: Capture,
+    pub evidence: Option<String>,
+    pub version: i32,
+    pub recorded_at: jiff::Timestamp,
+    /// The account that recorded it, or `None` for a system principal.
+    pub recorded_by: Option<i64>,
+    pub recorded_principal: Option<String>,
+}
+
+/// The latest decision for one person or address, purpose and channel.
+#[derive(Clone, Debug)]
+pub struct Current {
+    pub id: i64,
+    pub company_id: i64,
+    pub contact: Contact,
+    pub purpose: String,
+    pub channel: Channel,
+    pub granted: bool,
+    pub source: Source,
+    pub captured_on: Capture,
+    pub version: i32,
+    pub recorded_at: jiff::Timestamp,
+}
+
+/// An address or a person not contacted on a channel.
+#[derive(Clone, Debug)]
+pub struct Suppression {
+    pub id: i64,
+    pub company_id: i64,
+    pub contact: Contact,
+    pub channel: Channel,
+    pub reason: Reason,
+    pub evidence: Option<String>,
+    pub suppressed_at: jiff::Timestamp,
+    pub lifted_at: Option<jiff::Timestamp>,
+    pub lifted_by: Option<i64>,
+    pub lifted_principal: Option<String>,
+    pub lift_reason: Option<String>,
+}
+
+/// A person's consent: the latest decision per purpose and channel, their
+/// active person-level suppressions, and what applies with no decision.
+#[derive(Clone, Debug)]
+pub struct Standing {
+    pub current: Vec<Current>,
+    pub suppressions: Vec<Suppression>,
+    pub default: NewAddress,
+}
+
+/// Active, lifted, or both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum State {
+    #[default]
+    Active,
+    Lifted,
+    All,
+}
+
+/// A page of suppressions. `search` matches the address or the person's id;
+/// `page` counts from 1.
+#[derive(Clone, Debug)]
+pub struct SuppressionFilter {
+    pub search: String,
+    pub channel: Option<Channel>,
+    pub reason: Option<Reason>,
+    pub state: State,
+    pub page: i64,
+    pub page_size: i64,
+}
+impl Default for SuppressionFilter {
+    fn default() -> Self {
+        Self {
+            search: String::new(),
+            channel: None,
+            reason: None,
+            state: State::Active,
+            page: 1,
+            page_size: 25,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SuppressionPage {
+    pub entries: Vec<Suppression>,
+    pub total: i64,
+}
+
+pub type WriteResult<T> = std::result::Result<T, WriteError>;
+#[derive(Debug, thiserror::Error)]
+pub enum WriteError {
+    #[error("The person or suppression could not be found.")]
+    NotFound,
+    #[error("This suppression was already lifted.")]
+    Lifted,
+    /// The company is archived: its consent history reads, and nothing is
+    /// recorded, suppressed, lifted or logged in it.
+    #[error("This company is archived, so nothing in it can change.")]
+    CompanyArchived,
+    #[error("Invalid input")]
+    Invalid(Vec<FieldError>),
+    #[error(transparent)]
+    Access(#[from] Error),
+}
+/// The archived check a preview makes (`bilibi_company::require_writable`'s
+/// rule, without a lock).
+async fn writable(client: &dyn ReadClient, scope: &Scope, company: i64) -> WriteResult<()> {
+    let id = OrganisationId::new(company).map_err(|_| WriteError::NotFound)?;
+    match bilibi_company::Directory.lookup(client, scope, id).await? {
+        Some(company) if company.archived => Err(WriteError::CompanyArchived),
+        Some(_) => Ok(()),
+        None => Err(Error::NotFound.into()),
+    }
+}
+/// The same check on a write's transaction. With `lock`, the company is held
+/// `FOR NO KEY UPDATE` against a concurrent archive until the write commits.
+/// A dispatch check passes `false`: `authorize_work_target` already holds the
+/// company `FOR KEY SHARE` on the same transaction, which archiving's
+/// `FOR UPDATE` waits for, and a shared hold lets concurrent checks and other
+/// writes into the company go on (#587).
+async fn lock_writable(
+    tx: &MutationTransaction<'_>,
+    scope: &Scope,
+    company: i64,
+    lock: bool,
+) -> WriteResult<()> {
+    match bilibi_company::require_writable(tx.sql(), scope, company, lock).await {
+        Ok(_) => Ok(()),
+        Err(bilibi_company::WriteError::Archived) => Err(WriteError::CompanyArchived),
+        Err(bilibi_company::WriteError::Access(error)) => Err(error.into()),
+        Err(_) => Err(Error::NotFound.into()),
+    }
+}
+fn invalid(errors: Vec<FieldError>) -> WriteResult<()> {
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(WriteError::Invalid(errors))
+    }
+}
+
+/// The `core/consent` facade. Every call refreshes the scope and checks its
+/// capability; no call takes a tenant from input.
+pub struct Consent {
+    db: Db,
+    authentication: Arc<Authentication>,
+    picklists: Arc<PickLists>,
+    settings: Arc<Settings>,
+}
+impl Consent {
+    async fn fresh(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<Scope> {
+        self.authentication.reprove(client, scope).await
+    }
+    /// What applies to a contact with no decision for a purpose.
+    async fn default(&self, client: &dyn ReadClient, scope: &Scope) -> Result<NewAddress> {
+        let value = self
+            .settings
+            .get(client, scope, Target::Tenant, DEFAULT_NEW_ADDRESS)
+            .await?
+            .value;
+        Ok(value
+            .as_str()
+            .and_then(NewAddress::parse)
+            .unwrap_or(NewAddress::OptedOut))
+    }
+    /// The keyed hash an erased suppression of each contact's address keeps,
+    /// in order; the tenant's key is read once.
+    async fn address_hashes(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        contacts: &[&Contact],
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let addresses: Vec<Option<&str>> = contacts.iter().map(|c| c.address.as_deref()).collect();
+        privacy::address_hashes(client, &self.settings, scope.tenant(), &addresses).await
+    }
+    /// The question with its address normalised.
+    fn question(question: &Question, errors: &mut Vec<FieldError>) -> Question {
+        if question.channel == Channel::Any {
+            errors.push(model::field(
+                "channel",
+                "must be the channel the message is sent on",
+            ));
+        }
+        Question {
+            company_id: question.company_id,
+            contact: model::contact(&question.contact, question.channel, true, errors),
+            channel: question.channel,
+            purpose: question.purpose.clone(),
+        }
+    }
+    async fn purpose(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        purpose: &str,
+        errors: &mut Vec<FieldError>,
+    ) -> Result<()> {
+        if !self
+            .picklists
+            .contains_choice(client, scope, PURPOSES, purpose, None)
+            .await?
+        {
+            errors.push(model::field("purpose", "is not one of the purposes"));
+        }
+        Ok(())
+    }
+
+    /// May we contact this person or address, on this channel, for this
+    /// purpose, now? Logs a fresh answer in the caller's transaction under
+    /// correlation `key`. Senders call this immediately before every
+    /// elective dispatch; delivery idempotency stays with the sender. A
+    /// required business message does not call Consent. Needs
+    /// `core.consent.check`. A sender with many recipients calls
+    /// [`Consent::check_many`] instead.
+    pub async fn check(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        question: &Question,
+        key: &str,
+        caller: &'static str,
+    ) -> WriteResult<Answer> {
+        let batch = Batch {
+            company_id: question.company_id,
+            channel: question.channel,
+            purpose: question.purpose.clone(),
+            recipients: vec![Recipient {
+                contact: question.contact.clone(),
+                key: key.to_owned(),
+            }],
+        };
+        let answers = self.check_many(tx, scope, &batch, caller).await?;
+        answers
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Internal.into())
+    }
+    /// [`Consent::check`] for up to [`BATCH_MAX`] recipients of one message:
+    /// one answer per recipient, in order, each logged under its own key.
+    /// Access, the company, the purpose, the default and the tenant's key are
+    /// checked once; decisions and suppressions are read for every recipient
+    /// at once and the log is one insert. A recipient's invalid key or
+    /// address refuses the whole batch, naming the recipient by position.
+    pub async fn check_many(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        batch: &Batch,
+        caller: &'static str,
+    ) -> WriteResult<Vec<Answer>> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        bilibi_authz::authorize_proof(tx.sql(), &scope, CHECK).await?;
+        let mut errors = Vec::new();
+        if caller.is_empty() || caller.len() > 100 {
+            errors.push(model::field("caller", "must be the caller's module id"));
+        }
+        if batch.channel == Channel::Any {
+            errors.push(model::field(
+                "channel",
+                "must be the channel the message is sent on",
+            ));
+        }
+        if batch.recipients.is_empty() || batch.recipients.len() > BATCH_MAX {
+            errors.push(model::field(
+                "recipients",
+                format!("must be 1 to {BATCH_MAX} recipients"),
+            ));
+        }
+        let many = batch.recipients.len() > 1;
+        let mut recipients = Vec::with_capacity(batch.recipients.len());
+        for (n, recipient) in batch.recipients.iter().enumerate() {
+            let mut own = Vec::new();
+            let key = recipient.key.trim();
+            if key.is_empty() || key.len() > KEY_MAX {
+                own.push(model::field("key", "must be 1 to 200 bytes"));
+            }
+            let contact = model::contact(&recipient.contact, batch.channel, true, &mut own);
+            errors.extend(own.into_iter().map(|e| match many {
+                true => FieldError {
+                    message: format!("recipient {}: {}", n + 1, e.message),
+                    ..e
+                },
+                false => e,
+            }));
+            recipients.push(Recipient {
+                contact,
+                key: key.to_owned(),
+            });
+        }
+        invalid(errors)?;
+        let batch = Batch {
+            company_id: batch.company_id,
+            channel: batch.channel,
+            purpose: batch.purpose.clone(),
+            recipients,
+        };
+        bilibi_company::authorize_work_target(tx.sql(), &scope, batch.company_id, CHECK).await?;
+        lock_writable(tx, &scope, batch.company_id, false).await?;
+        self.lock_purpose(tx, &scope, &batch.purpose).await?;
+        let default = self.default(tx.sql(), &scope).await?;
+        let contacts: Vec<&Contact> = batch.recipients.iter().map(|r| &r.contact).collect();
+        let hashes = self.address_hashes(tx.sql(), &scope, &contacts).await?;
+        Ok(store::log(tx, &scope, &batch, caller, default, &hashes).await?)
+    }
+    /// Locks the purpose `FOR SHARE` on the write's transaction, so a
+    /// concurrent retirement waits for this write.
+    async fn lock_purpose(
+        &self,
+        tx: &MutationTransaction<'_>,
+        scope: &Scope,
+        purpose: &str,
+    ) -> WriteResult<()> {
+        match self
+            .picklists
+            .check(tx, scope, PURPOSES, purpose, None)
+            .await?
+        {
+            Ok(()) => Ok(()),
+            Err(refusal) => Err(WriteError::Invalid(vec![model::field(
+                "purpose",
+                refusal.message(),
+            )])),
+        }
+    }
+    /// The answer `check` would give now, logging nothing. Needs
+    /// `core.consent.view`.
+    pub async fn preview(&self, scope: &Scope, question: &Question) -> WriteResult<Answer> {
+        let client = self.db.get().await.map_err(Error::from)?;
+        self.preview_on(&**client, scope, question).await
+    }
+    /// [`Consent::preview`] on the caller's connection or transaction, for a
+    /// caller that already holds one (a queue job deciding whether to send):
+    /// the same access rule and answer, logging nothing.
+    pub async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        question: &Question,
+    ) -> WriteResult<Answer> {
+        let scope = self.fresh(client, scope).await?;
+        bilibi_authz::authorize_proof(client, &scope, VIEW).await?;
+        let mut errors = Vec::new();
+        let question = Self::question(question, &mut errors);
+        self.purpose(client, &scope, &question.purpose, &mut errors)
+            .await?;
+        invalid(errors)?;
+        bilibi_company::authorize_work_target(client, &scope, question.company_id, VIEW).await?;
+        let default = self.default(client, &scope).await?;
+        let hashes = self
+            .address_hashes(client, &scope, &[&question.contact])
+            .await?;
+        // The answer reads no key.
+        let batch = Batch {
+            company_id: question.company_id,
+            channel: question.channel,
+            purpose: question.purpose,
+            recipients: vec![Recipient {
+                contact: question.contact,
+                key: String::new(),
+            }],
+        };
+        let answers = store::answers(client, &scope, &batch, default, &hashes).await?;
+        Ok(answers.into_iter().next().ok_or(Error::Internal)?)
+    }
+
+    /// A person's consent matrix and active suppressions. Needs
+    /// `core.consent.view` and the person (`NotFound` when the reader cannot
+    /// see them).
+    pub async fn for_person(
+        &self,
+        scope: &Scope,
+        company_id: i64,
+        person: PersonId,
+    ) -> Result<Standing> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        bilibi_authz::authorize_proof(&**client, &scope, VIEW).await?;
+        bilibi_company::authorize_work_target(&**client, &scope, company_id, VIEW).await?;
+        bilibi_person::read_person(&**client, &scope, person).await?;
+        Ok(Standing {
+            current: store::current_for_person(&**client, &scope, company_id, person).await?,
+            suppressions: store::active_for_person(&**client, &scope, company_id, person).await?,
+            default: self.default(&**client, &scope).await?,
+        })
+    }
+    /// Every version of a person's decisions, oldest first, optionally for
+    /// one purpose or channel. Needs `core.consent.view`.
+    pub async fn history(
+        &self,
+        scope: &Scope,
+        company_id: i64,
+        person: PersonId,
+        purpose: Option<&str>,
+        channel: Option<Channel>,
+    ) -> Result<Vec<Decision>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        bilibi_authz::authorize_proof(&**client, &scope, VIEW).await?;
+        bilibi_company::authorize_work_target(&**client, &scope, company_id, VIEW).await?;
+        bilibi_person::read_person(&**client, &scope, person).await?;
+        store::history(&**client, &scope, company_id, person, purpose, channel).await
+    }
+    /// The purposes a decision may be recorded for, in the reader's
+    /// language: every active `core.consent.purposes` value.
+    /// Needs `core.consent.view`.
+    pub async fn purposes(&self, scope: &Scope) -> Result<Vec<bilibi_ui::Choice>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        bilibi_authz::authorize_proof(&**client, &scope, VIEW).await?;
+        self.picklists
+            .choices(&**client, &scope, PURPOSES, None)
+            .await
+    }
+    /// Whether the reader holds `capability` now.
+    pub async fn may(&self, scope: &Scope, capability: &'static str) -> Result<bool> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        bilibi_authz::holds_proof(&**client, &scope, capability).await
+    }
+
+    /// The checks `record` makes, with no write, on the client a plan hands
+    /// its preview: the input with its address normalised and evidence
+    /// trimmed.
+    pub async fn preview_record(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        input: &DecisionInput,
+    ) -> WriteResult<DecisionInput> {
+        bilibi_authz::authorize_proof(client, scope, RECORD).await?;
+        let mut errors = Vec::new();
+        let contact = model::contact(&input.contact, input.channel, false, &mut errors);
+        self.purpose(client, scope, &input.purpose, &mut errors)
+            .await?;
+        bilibi_company::authorize_work_target(client, scope, input.company_id, RECORD).await?;
+        writable(client, scope, input.company_id).await?;
+        let evidence = model::evidence(input.evidence.as_deref()).unwrap_or_else(|e| {
+            errors.push(e);
+            None
+        });
+        invalid(errors)?;
+        if let Some(person) = contact.person {
+            match bilibi_person::read_person(client, scope, person).await {
+                Ok(_) => {}
+                Err(Error::NotFound) => return Err(WriteError::NotFound),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(DecisionInput {
+            company_id: input.company_id,
+            contact,
+            evidence,
+            ..input.clone()
+        })
+    }
+    /// Records a decision as the next version for its person or address,
+    /// purpose and channel, in the caller's transaction. Needs
+    /// `core.consent.record`.
+    pub async fn record(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        input: &DecisionInput,
+    ) -> WriteResult<Decision> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        lock_writable(tx, &scope, input.company_id, true).await?;
+        let input = self.preview_record(tx.sql(), &scope, input).await?;
+        self.lock_purpose(tx, &scope, &input.purpose).await?;
+        Ok(store::record(tx, &scope, &input).await?)
+    }
+
+    /// The checks `suppress` makes, with no write.
+    pub async fn preview_suppress(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        input: &SuppressionInput,
+    ) -> WriteResult<SuppressionInput> {
+        bilibi_authz::authorize_proof(client, scope, CHECK).await?;
+        let mut errors = Vec::new();
+        if input.channel == Channel::Any {
+            errors.push(model::field("channel", "must be one channel"));
+        }
+        let contact = model::contact(&input.contact, input.channel, false, &mut errors);
+        bilibi_company::authorize_work_target(client, scope, input.company_id, CHECK).await?;
+        writable(client, scope, input.company_id).await?;
+        let evidence = model::evidence(input.evidence.as_deref()).unwrap_or_else(|e| {
+            errors.push(e);
+            None
+        });
+        invalid(errors)?;
+        Ok(SuppressionInput {
+            company_id: input.company_id,
+            contact,
+            evidence,
+            ..input.clone()
+        })
+    }
+    /// Stops contact with an address or a person on a channel, in the
+    /// caller's transaction. Idempotent: an active suppression with the same
+    /// channel, contact and reason is returned unchanged. Needs
+    /// `core.consent.check`.
+    pub async fn suppress(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        input: &SuppressionInput,
+    ) -> WriteResult<Suppression> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        lock_writable(tx, &scope, input.company_id, true).await?;
+        let input = self.preview_suppress(tx.sql(), &scope, input).await?;
+        Ok(store::suppress(tx, &scope, &input).await?.0)
+    }
+
+    /// The active suppression `lift` would lift, with no write.
+    pub async fn preview_lift(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        reason: &str,
+    ) -> WriteResult<Suppression> {
+        self.liftable(client, scope, id, reason, false).await
+    }
+    async fn liftable(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        reason: &str,
+        lock: bool,
+    ) -> WriteResult<Suppression> {
+        bilibi_authz::authorize_proof(client, scope, MANAGE).await?;
+        let reason = reason.trim();
+        if reason.is_empty() || reason.chars().count() > LIFT_REASON_MAX {
+            return Err(WriteError::Invalid(vec![model::field(
+                "reason",
+                "must be 1 to 500 characters",
+            )]));
+        }
+        let suppression = match store::suppression_by_id(client, scope, id, lock).await {
+            Ok(suppression) => suppression,
+            Err(Error::NotFound) => return Err(WriteError::NotFound),
+            Err(error) => return Err(error.into()),
+        };
+        bilibi_company::authorize_work_target(client, scope, suppression.company_id, MANAGE)
+            .await?;
+        writable(client, scope, suppression.company_id).await?;
+        if suppression.lifted_at.is_some() {
+            return Err(WriteError::Lifted);
+        }
+        Ok(suppression)
+    }
+    /// Lifts an active suppression with a reason, in the caller's
+    /// transaction. Needs `core.consent.manage`.
+    pub async fn lift(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        reason: &str,
+    ) -> WriteResult<Suppression> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        let before = self.liftable(tx.sql(), &scope, id, reason, true).await?;
+        lock_writable(tx, &scope, before.company_id, true).await?;
+        Ok(store::lift(tx, &scope, before, reason.trim()).await?)
+    }
+    /// One suppression. Needs `core.consent.view`.
+    pub async fn suppression(
+        &self,
+        scope: &Scope,
+        company_id: i64,
+        id: i64,
+    ) -> Result<Suppression> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        bilibi_authz::authorize_proof(&**client, &scope, VIEW).await?;
+        bilibi_company::authorize_work_target(&**client, &scope, company_id, VIEW).await?;
+        let suppression = store::suppression_by_id(&**client, &scope, id, false).await?;
+        if suppression.company_id != company_id {
+            return Err(Error::NotFound);
+        }
+        Ok(suppression)
+    }
+    /// A page of suppressions, newest first. Needs `core.consent.view`.
+    pub async fn suppressions(
+        &self,
+        scope: &Scope,
+        company_id: i64,
+        filter: &SuppressionFilter,
+    ) -> Result<SuppressionPage> {
+        let client = self.db.get().await?;
+        self.suppressions_on(&**client, scope, company_id, filter)
+            .await
+    }
+    /// [`Consent::suppressions`] on the caller's connection or transaction,
+    /// for a sender that checks them inside its dispatch transaction: the
+    /// same access rule (`core.consent.view`) and answer.
+    pub async fn suppressions_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        company_id: i64,
+        filter: &SuppressionFilter,
+    ) -> Result<SuppressionPage> {
+        let scope = self.fresh(client, scope).await?;
+        bilibi_authz::authorize_proof(client, &scope, VIEW).await?;
+        bilibi_company::authorize_work_target(client, &scope, company_id, VIEW).await?;
+        store::suppressions(client, &scope, company_id, filter).await
+    }
+}
+
+inventory::submit! { Module {
+    id: MODULE, layer: Layer::Core,
+    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/locale", "base/menu", "base/party_ids", "base/personal_data", "base/picklists", "base/privacy", "base/principal_directory", "base/records", "base/settings", "base/tenancy", "base/ui", "core/company", "core/person", "core/user"],
+    migrations: &[
+        ("core-consent-001-decisions", include_str!("../migrations/001-decisions.sql")),
+        ("core-consent-002-suppressions", include_str!("../migrations/002-suppressions.sql")),
+        ("core-consent-003-log", include_str!("../migrations/003-log.sql")),
+        ("core-consent-004-personal-data", include_str!("../migrations/004-personal-data.sql")),
+        ("core-consent-005-search-and-retention", include_str!("../migrations/005-search-and-retention.sql")),
+        ("core-consent-006-manual-channels", include_str!("../migrations/006-manual-channels.sql")),
+    ],
+    services: &[Service { id: SERVICE, factory: |s| {
+        let consent = Arc::new(Consent {
+            db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
+            authentication: s.get("base/tenancy.authentication")?,
+            picklists: s.get(bilibi_picklists::SERVICE)?,
+            settings: s.get("base/settings.store")?,
+        });
+        privacy::bind(consent.settings.clone())?;
+        agent_operations::bind(consent.clone())?;
+        Ok(consent)
+    }}, Service { id: web::SERVICE, factory: |s| {
+        Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages {
+            consent: s.get(SERVICE)?,
+            records: s.get(bilibi_records::SERVICE)?,
+            contracts: s.get(bilibi_agent_api::page::SERVICE)?,
+            directory: s.get("base/principal_directory.directory")?,
+            display: s.get("base/datetime.display")?,
+            locales: s.get("base/locale.locales")?,
+            db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
+        }))))
+    }}],
+} }

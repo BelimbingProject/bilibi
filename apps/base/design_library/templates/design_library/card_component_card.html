@@ -6,9 +6,9 @@
                 <p class="text-xs text-ink-muted">A card has no loading or empty state of its own; its content supplies it.</p>
                 <div id="design-library-card-titled">
                   <p class="mb-1 text-xs text-ink-muted">With a title</p>
-                  {% call ui::card(title="Company profile", inner_class="p-3") %}{{ self.card_company_profile()? }}{% endcall %}
+                  {% call ui::card(id=crate::sections::COMPONENT_COMPANY_PROFILE.anchor, title=crate::sections::COMPONENT_COMPANY_PROFILE.title, inner_class="p-3") %}{{ self.card_company_profile()? }}{% endcall %}
                 </div>
                 <div id="design-library-card-untitled">
                   <p class="mb-1 text-xs text-ink-muted">Without a title</p>
-                  {% call ui::card(inner_class="p-3") %}{{ self.card_surface_51()? }}{% endcall %}
+                  {% call ui::card(id=crate::sections::EXAMPLE_COMPANY_PROFILE.anchor, inner_class="p-3") %}{{ self.card_surface_51()? }}{% endcall %}
                 </div>

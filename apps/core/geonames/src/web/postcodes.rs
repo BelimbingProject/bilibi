@@ -81,14 +81,14 @@ static SUMMARY: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
     .shared()
     .expect("geonames summary spec")
 });
-bilibi_ui::record_fields! { mod fields {
-    COUNTRY: bilibi_ui::RecordField::new("country_iso", "Country").slot("country_name"),
-    POSTCODE: bilibi_ui::RecordField::new("postcode", "Postcode"),
-    PLACE_NAME: bilibi_ui::RecordField::new("place_name", "Place Name"),
-    ADMIN1: bilibi_ui::RecordField::new("admin1_division", "First-level division"),
-    LATITUDE: bilibi_ui::RecordField::new("latitude", "Latitude"),
-    LONGITUDE: bilibi_ui::RecordField::new("longitude", "Longitude"),
-    ACCURACY: bilibi_ui::RecordField::new("accuracy", "Accuracy"),
+bilibi_ui::record_fields! { "core/geonames", mod fields {
+    COUNTRY: bilibi_ui::RecordField::new("country_iso", "Country", bilibi_ui::RecordFieldType::String).slot("country_name"),
+    POSTCODE: bilibi_ui::RecordField::new("postcode", "Postcode", bilibi_ui::RecordFieldType::String),
+    PLACE_NAME: bilibi_ui::RecordField::new("place_name", "Place Name", bilibi_ui::RecordFieldType::String),
+    ADMIN1: bilibi_ui::RecordField::new("admin1_division", "First-level division", bilibi_ui::RecordFieldType::String),
+    LATITUDE: bilibi_ui::RecordField::new("latitude", "Latitude", bilibi_ui::RecordFieldType::Float),
+    LONGITUDE: bilibi_ui::RecordField::new("longitude", "Longitude", bilibi_ui::RecordFieldType::Float),
+    ACCURACY: bilibi_ui::RecordField::new("accuracy", "Accuracy", bilibi_ui::RecordFieldType::Integer),
 } }
 
 fn builtins() -> Vec<BuiltinColumn> {
@@ -588,7 +588,7 @@ impl Postcodes {
         if let Some(search) = event.get(PICKER_SEARCH).and_then(Value::as_str) {
             picker.search = search.chars().take(100).collect();
         }
-        // Read every `country[XX]` key here: `params::form_values` keeps
+        // Read every `country[XX]` key here: `params::form_values_checked` keeps
         // 64 fields, and an unfiltered grid posts one per country.
         let keys = event.as_object().into_iter().flatten();
         for (key, value) in keys {
@@ -1158,6 +1158,7 @@ impl Postcodes {
                 width: ModalWidth::Wide,
                 description: "Your changes are kept when postcodes are next updated from GeoNames.",
                 role: "",
+                close_icon: false,
                 flash: Some(self.flash.map()),
                 body: self.form(draft, &shown.countries)?,
             })?,

@@ -448,13 +448,24 @@ impl Instant {
     }
 }
 
+/// One timestamp through the same markup a flexible-table datetime cell uses.
+#[derive(Template, Debug)]
+#[template(
+    source = r#"{% import "flex_table.html" as flex %}{% call flex::instant(id=id, i=instant) %}{% endcall %}"#,
+    ext = "html"
+)]
+pub struct InstantView<'a> {
+    pub id: &'a str,
+    pub instant: &'a Instant,
+}
+
 /// What a cell's value is, beyond its text. A calendar date is zone-free.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Typed {
     #[default]
     Text,
     Instant(Instant),
-    /// `iso` is `YYYY-MM-DD`; `text` its `dd/mm/yyyy` reading.
+    /// `iso` is `YYYY-MM-DD`; `text` its `6 Nov 2026` reading.
     Date {
         iso: String,
         text: String,
@@ -753,6 +764,8 @@ pub struct Cost {
 pub struct FlexTable<'a> {
     pub id: &'a str,
     pub columns: Vec<FlexColumn>,
+    /// Column specs to place first below 640 px; other columns keep their order.
+    pub phone_columns: Vec<&'a str>,
     pub rows: Vec<FlexRow>,
     /// The height of a row, one of [`ZOOM_STEPS`]; it decides the mode.
     pub zoom: u16,
@@ -785,6 +798,44 @@ pub struct FlexTable<'a> {
     pub empty: Option<TableEmpty>,
     /// Row ticks and the selection bar; `None` draws neither.
     pub selection: Option<Selection>,
+    /// The saved views strip and the save form; `None` draws neither.
+    pub views: Option<ViewsBar>,
+}
+
+/// One saved list view on the views strip: a link to the page's own address
+/// with the view's query, so the page applies the reader's own access.
+#[derive(Clone, Debug)]
+pub struct ViewLink {
+    pub id: i64,
+    pub name: String,
+    /// The view's query string, without the leading `?`.
+    pub query: String,
+    /// Whom it is shared with, in words, for its tooltip.
+    pub audience: String,
+    /// The reader saved it, so may delete it.
+    pub deletable: bool,
+}
+
+/// The saved views of a list: the strip of views to open, the save form in
+/// the notch, and the state of a delete awaiting its confirmation.
+#[derive(Clone, Debug, Default)]
+pub struct ViewsBar {
+    pub links: Vec<ViewLink>,
+    /// Whether the reader may share a view; the form then asks with whom.
+    pub can_share: bool,
+    /// The roles a view may be shared with, by name.
+    pub roles: Vec<(i64, String)>,
+    /// The view whose delete awaits the reader's confirmation.
+    pub confirming: Option<i64>,
+    /// What the last save or delete said, when it was refused.
+    pub notice: Option<String>,
+}
+
+impl ViewsBar {
+    /// Whether this view's delete awaits the reader's confirmation.
+    pub fn confirming_link(&self, link: &ViewLink) -> bool {
+        self.confirming == Some(link.id)
+    }
 }
 
 impl<'a> FlexTable<'a> {
@@ -792,6 +843,7 @@ impl<'a> FlexTable<'a> {
         Self {
             id,
             columns,
+            phone_columns: Vec::new(),
             rows,
             zoom: DEFAULT_ZOOM,
             event: "grid",
@@ -810,7 +862,22 @@ impl<'a> FlexTable<'a> {
             actions: false,
             empty: None,
             selection: None,
+            views: None,
         }
+    }
+
+    /// Put these visible column specs first on a phone. Missing specs are ignored;
+    /// unlisted columns follow in their current order. Desktop and saved views stay intact.
+    pub fn phone_columns(mut self, specs: &[&'a str]) -> Self {
+        self.phone_columns = specs.to_vec();
+        self
+    }
+
+    pub fn phone_rank(&self, column: &FlexColumn) -> usize {
+        self.phone_columns
+            .iter()
+            .position(|spec| *spec == column.spec)
+            .unwrap_or(self.phone_columns.len())
     }
 
     pub fn sorted(mut self, sort_by: Option<&'a str>, sort_dir: Option<SortDir>) -> Self {
@@ -850,6 +917,11 @@ impl<'a> FlexTable<'a> {
     /// Whether a change-since lens is worn, which shows its date control.
     pub fn delta(&self) -> bool {
         self.columns.iter().any(|column| column.lens == Lens::Delta)
+    }
+
+    /// The change-since date as its date box shows it ("6 Nov 2026").
+    pub fn since_text(&self) -> String {
+        crate::forms::date_text("date", self.since.unwrap_or_default())
     }
 
     pub fn cost_text(&self, cost: &Cost) -> String {

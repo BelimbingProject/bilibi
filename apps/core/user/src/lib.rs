@@ -6,6 +6,7 @@ mod appearance;
 mod bootstrap;
 mod company_accounts;
 mod company_context;
+mod session_notice;
 pub use company_context::{ChoiceRefusal, Switched};
 mod contributions;
 mod credential_attempts;
@@ -20,12 +21,15 @@ mod desks_agent;
 mod directory;
 mod factor_choice;
 mod identity;
+mod identity_lifecycle;
 pub mod impersonation;
 mod inbox;
 mod memberships;
 pub mod notifications;
+mod ownership;
 mod panels;
 pub mod password;
+mod preference_operations;
 mod preferences;
 mod privacy;
 mod query_ui;
@@ -34,9 +38,12 @@ mod reset;
 mod retention;
 mod scim;
 mod sign_in;
+mod sign_in_alert;
 mod sign_in_identity;
 mod sso;
+mod staff_choices;
 mod tenant_context;
+mod tenant_owner;
 pub use scim::{ScimError, ScimRequest, ScimResponse, ScimResult};
 pub use sso::{
     ConfigurationError, ExternalIdentity, ExternalLogout, IdentityConfiguration, IdentityFuture,
@@ -46,13 +53,12 @@ pub use sso::{
 mod two_factor;
 mod two_factor_ui;
 pub use tenant_context::{TenantChoice, TenantChoiceRefusal, TenantEntry};
-pub use two_factor_ui::PortalTwoFactor;
+pub use two_factor_ui::{PortalConfirm, PortalTwoFactor};
 mod verification;
 mod web;
+mod wording;
 
-pub use accounts::{
-    AccountError, AccountField, AccountInput, FieldError, LandingPage, ProfileOutcome,
-};
+pub use accounts::{AccountError, AccountField, FieldError, LandingPage, ProfileOutcome};
 pub use administration::{
     list_users, Entry, Membership, Options, Page, Role, Sort, MAX_PAGE, MAX_ROLE_IDS,
     MAX_SEARCH_BYTES, PAGE_SIZES, PATH,
@@ -61,21 +67,30 @@ use bilibi_database::{Db, Error, MutationBoundary, Result};
 use bilibi_security::{guard, Sessions};
 pub use bootstrap::{
     validate_first_administrator, BootstrapAffiliation, FirstAdministrator,
-    FirstAdministratorCreated, FirstAdministratorError, OperatorAccounts, OperatorCompany,
+    FirstAdministratorCreated, FirstAdministratorError, InstallationOwner, OperatorAccounts,
+    OperatorCompany, OwnerClaim, OwnerClaimError,
 };
 pub use identity::{standing, Account, AccountLinks, AccountVerifier, Freeze, LinkError, Standing};
+pub use identity_lifecycle::{
+    IdentityLifecycleError, IdentityRecovery, RETENTION_DAYS_KEY as IDENTITY_RETENTION_DAYS_KEY,
+};
 pub use memberships::{
     Invitation, InvitationAcceptance, InvitationError, InvitationInput, INVITATION_DAYS_KEY,
 };
 pub use notifications::{unread, Notifications};
+pub use ownership::{OwnershipError, OwnershipOffer, OwnershipState, OFFER_MINUTES};
 pub use password::PolicyViolation;
 pub use preferences::{
-    list_pins, normalize_label, normalize_url, presentation, Pin, PreferenceError, Presentation,
-    MAX_PINS, THEMES, THEME_KEY,
+    list_pins, normalize_label, normalize_url, pin_route_is_served, presentation, Pin,
+    PreferenceError, Presentation, MAX_PINS, THEMES, THEME_KEY,
 };
+pub use tenant_owner::{FirstTenantOwnerError, TenantOwnerTarget};
 pub use two_factor::{
-    safe_return, Enrollment, TwoFactorEmailError, TwoFactorEmailReset, TwoFactorError,
-    TwoFactorStatus, CONFIRM_PATH, SETTINGS_PATH as TWO_FACTOR_PATH,
+    customer_reset_requests, recovery_customer_account, safe_return, Enrollment,
+    RequestOutcome as TwoFactorResetRequest, TwoFactorEmailError, TwoFactorEmailReset,
+    TwoFactorError, TwoFactorStatus, CONFIRM_PATH, PORTAL_CONFIRM_PATH,
+    PORTAL_SETTINGS_PATH as PORTAL_TWO_FACTOR_PATH, RESET_OPERATION as RESET_TWO_FACTOR_OPERATION,
+    SETTINGS_PATH as TWO_FACTOR_PATH,
 };
 pub use verification::{Signer, Verification};
 
@@ -95,6 +110,10 @@ pub const NOTIFICATIONS_MIGRATION: (&str, &str) = (
 pub const BOOTSTRAP_MIGRATION: (&str, &str) = (
     "core-user-006-bootstrap",
     include_str!("../migrations/006-bootstrap.sql"),
+);
+pub const OWNERSHIP_TRANSFER_MIGRATION: (&str, &str) = (
+    "core-user-036-ownership-transfer",
+    include_str!("../migrations/036-ownership-transfer.sql"),
 );
 pub const IDENTITY_MIGRATION: (&str, &str) = (
     "core-user-007-identity",
@@ -151,6 +170,14 @@ pub const SIGN_IN_IDENTITIES_MIGRATION: (&str, &str) = (
 pub const MEMBERSHIP_INVITATIONS_MIGRATION: (&str, &str) = (
     "core-user-030-membership-invitations",
     include_str!("../migrations/030-membership-invitations.sql"),
+);
+const TWO_FACTOR_IDENTITY_SEAL_MIGRATION: (&str, &str) = (
+    "core-user-031-two-factor-identity-seal",
+    include_str!("../migrations/031-two-factor-identity-seal.sql"),
+);
+const TENANT_OWNER_BOOTSTRAP_MIGRATION: (&str, &str) = (
+    "core-user-032-tenant-owner-bootstrap",
+    include_str!("../migrations/032-tenant-owner-bootstrap.sql"),
 );
 pub const PROFILE_IMAGE_KEY: &str = "ui.profile_image_asset_id";
 pub const PROFILE_IMAGE_MAX_BYTES: u64 = 1024 * 1024;
@@ -222,18 +249,30 @@ pub async fn login(
     password: &str,
 ) -> std::result::Result<Login, CredentialError> {
     users
-        .begin_sign_in(identity::Audience::Staff, email, password)
+        .begin_sign_in(identity::Audience::Staff, None, email, password)
         .await
 }
 
-pub async fn logout(db: &Db, token: &str, csrf: &str, sessions: &Sessions) -> Result<()> {
-    let client = db.get().await?;
+async fn logout(
+    db: &Db,
+    mutations: &bilibi_database::MutationBoundary,
+    token: &str,
+    csrf: &str,
+    sessions: &Sessions,
+) -> Result<()> {
+    let mut client = db.get().await?;
     let scope = guard(&**client, token, sessions).await?;
     if scope.csrf != csrf {
         return Err(Error::Forbidden);
     }
-    // Any signed-in session may end itself. Through Session, so every other live page of this session is signed out.
-    sessions.delete(&**client, &scope, token).await
+    // Any signed-in session may end itself. Through Session, so every other
+    // live page of this session is signed out and the account's
+    // session-ended notice is recorded with the sign-out.
+    let mut tx = mutations
+        .begin(&mut client, scope.mutation_context("session.sign_out"))
+        .await?;
+    sessions.delete(&mut tx, &scope, token).await?;
+    tx.commit().await
 }
 
 pub struct UserService {
@@ -246,6 +285,7 @@ pub struct UserService {
     pub(crate) persons: std::sync::Arc<bilibi_person::PersonService>,
     pub(crate) affiliations: std::sync::Arc<bilibi_affiliation::AffiliationService>,
     mailer: std::sync::Arc<bilibi_mail::Mailer>,
+    templates: std::sync::Arc<bilibi_templates::Templates>,
     settings: std::sync::Arc<bilibi_settings::Settings>,
     media: std::sync::Arc<bilibi_media::Media>,
     display: std::sync::Arc<bilibi_datetime::DisplayPolicy>,
@@ -257,11 +297,13 @@ pub struct UserService {
     sso_grants: std::sync::Arc<bilibi_authz::grants::Grants>,
     sso_parties: std::sync::Arc<bilibi_tenancy::PartyProofs>,
     pub(crate) step_up: std::sync::Arc<bilibi_step_up::StepUp>,
+    staff_assignments: staff_choices::Assignments,
+    pin_routes: Vec<&'static str>,
 }
 inventory::submit! {
     bilibi_module_registry::Module {
         id:"core/user",layer:bilibi_module_registry::Layer::Core,
-        dependencies:&["base/authz_agent","base/integration","base/agent_api","base/database","base/security","base/step_up","base/system","base/notifications","base/tenancy","base/session","base/principal_directory","base/mail","base/media","base/settings","base/datetime","base/locale","base/ui","base/audit","base/authz","base/menu","base/grid","base/dashboard","base/party_ids","base/records","base/personal_data","base/privacy","core/company","core/person","core/affiliation"],migrations:&[MIGRATION,CREDENTIALS_MIGRATION,PINS_MIGRATION,NOTIFICATIONS_MIGRATION,database_queries::MIGRATION,database_queries::DROP_PROMPT,BOOTSTRAP_MIGRATION,IDENTITY_MIGRATION,ACCOUNTS_MIGRATION,IMPERSONATION_MIGRATION,BOOTSTRAP_AFFILIATION_MIGRATION,MOVED_PINS_MIGRATION,TWO_FACTOR_MIGRATION,TWO_FACTOR_RECOVERY_DROP,sign_in::MIGRATION,sso::MIGRATION,sso::RUNTIME_MIGRATION,CREDENTIAL_ATTEMPTS_MIGRATION,BARE_ICON_NAMES_MIGRATION,scim::MIGRATION,DATABASE_TABLE_PIN_ICONS_MIGRATION,ACCOUNT_KIND_MIGRATION,PIN_WORKSPACE_ADDRESSES,("core-user-024-desks",include_str!("../migrations/024-desks.sql")),("core-user-025-tenant-accounts",include_str!("../migrations/025-tenant-accounts.sql")),("core-user-026-provider-step-up-proof",include_str!("../migrations/026-provider-step-up-proof.sql")),ANONYMISED_MIGRATION,SIGN_IN_IDENTITIES_MIGRATION,ICON_RENAMES_MIGRATION,MEMBERSHIP_INVITATIONS_MIGRATION],
+        dependencies:&["base/authz_agent","base/integration","base/agent_api","base/labels","base/database","base/security","base/step_up","base/system","base/notifications","base/tenancy","base/session","base/events","base/principal_directory","base/mail","base/templates","base/media","base/settings","base/datetime","base/locale","base/ui","base/audit","base/authz","base/menu","base/grid","base/dashboard","base/party_ids","base/records","base/personal_data","base/privacy","core/company","core/person","core/affiliation"],migrations:&[MIGRATION,CREDENTIALS_MIGRATION,PINS_MIGRATION,NOTIFICATIONS_MIGRATION,database_queries::MIGRATION,database_queries::DROP_PROMPT,BOOTSTRAP_MIGRATION,IDENTITY_MIGRATION,ACCOUNTS_MIGRATION,IMPERSONATION_MIGRATION,BOOTSTRAP_AFFILIATION_MIGRATION,MOVED_PINS_MIGRATION,TWO_FACTOR_MIGRATION,TWO_FACTOR_RECOVERY_DROP,sign_in::MIGRATION,sso::MIGRATION,sso::RUNTIME_MIGRATION,CREDENTIAL_ATTEMPTS_MIGRATION,BARE_ICON_NAMES_MIGRATION,scim::MIGRATION,DATABASE_TABLE_PIN_ICONS_MIGRATION,ACCOUNT_KIND_MIGRATION,PIN_WORKSPACE_ADDRESSES,("core-user-024-desks",include_str!("../migrations/024-desks.sql")),("core-user-025-tenant-accounts",include_str!("../migrations/025-tenant-accounts.sql")),("core-user-026-provider-step-up-proof",include_str!("../migrations/026-provider-step-up-proof.sql")),ANONYMISED_MIGRATION,SIGN_IN_IDENTITIES_MIGRATION,ICON_RENAMES_MIGRATION,MEMBERSHIP_INVITATIONS_MIGRATION,TWO_FACTOR_IDENTITY_SEAL_MIGRATION,TENANT_OWNER_BOOTSTRAP_MIGRATION,("core-user-033-portable-identity-authority",include_str!("../migrations/033-portable-identity-authority.sql")),("core-user-034-identity-lifecycle",include_str!("../migrations/034-identity-lifecycle.sql")),("core-user-035-two-factor-reset-requests",include_str!("../migrations/035-two-factor-reset-requests.sql")),OWNERSHIP_TRANSFER_MIGRATION],
         services:&[bilibi_module_registry::Service {id:"core/user.database_queries",factory:|services| {
             Ok(std::sync::Arc::new(database_queries::QueryService::new(services.get::<Db>("base/database.pool")?.as_ref().clone(), services.get("base/database.mutations")?, services.get("base/tenancy.authentication")?)))
         }},bilibi_module_registry::Service {id:"core/user.query-pages",factory:|services| {
@@ -274,8 +316,21 @@ inventory::submit! {
             services.get::<bilibi_security::Authentication>("base/tenancy.authentication")?.bind(std::sync::Arc::new(AccountVerifier))?;
             services.get::<bilibi_notifications::NotificationBoundary>("base/notifications.sink")?.bind(std::sync::Arc::new(notifications.clone()))?;
             services.get::<bilibi_principal_directory::PrincipalDirectory>("base/principal_directory.directory")?.bind("core/user", std::sync::Arc::new(directory::UserDirectory))?;
-            privacy::bind(services.get("base/session.sessions")?, services.get(bilibi_step_up::SERVICE)?)?;
-            let users = std::sync::Arc::new(UserService {identities:sso::Registry::default(),sso_grants:services.get("base/authz.grants")?,sso_parties:services.get("base/tenancy.parties")?,sessions:services.get("base/session.sessions")?,mutations:services.get("base/database.mutations")?,authentication:services.get("base/tenancy.authentication")?,persons:services.get(bilibi_person::SERVICE)?,affiliations:services.get(bilibi_affiliation::SERVICE)?,db:services.get::<Db>("base/database.pool")?.as_ref().clone(),notification_boundary:services.get("base/notifications.sink")?,notifications,mailer:services.get("base/mail.mailer")?,media:services.get(bilibi_media::SERVICE)?,settings:services.get("base/settings.store")?,display:services.get("base/datetime.display")?,locales:services.get("base/locale.locales")?,signer:Signer::from_hex(std::env::var("BILIBI_USER_SIGNING_KEY").ok().as_deref()),origin:std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),step_up:services.get(bilibi_step_up::SERVICE)?});
+            privacy::bind(services.get("base/session.sessions")?)?;
+            services.get::<Sessions>("base/session.sessions")?.bind_end_notice(std::sync::Arc::new(session_notice::SessionNotice(services.get(bilibi_events::SERVICE)?)))?;
+            let modules = bilibi_module_registry::discover()?;
+            let catalog = bilibi_module_registry::Catalog::discover(&modules)?;
+            let staff_assignments = staff_choices::Assignments::from_catalog(&catalog, &modules)?;
+            use bilibi_module_registry::contributions::{Method, Route, ROUTES};
+            let pin_routes = catalog.entries::<Route>(ROUTES)?.iter()
+                .map(|entry| entry.get::<Route>())
+                .filter_map(|route| match route {
+                    Ok(route) if route.method == Method::Get && !route.access.portal() => Some(Ok(route.path)),
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<bilibi_module_registry::Result<Vec<_>>>()?;
+            let users = std::sync::Arc::new(UserService {staff_assignments,pin_routes,identities:sso::Registry::default(),sso_grants:services.get("base/authz.grants")?,sso_parties:services.get("base/tenancy.parties")?,sessions:services.get("base/session.sessions")?,mutations:services.get("base/database.mutations")?,authentication:services.get("base/tenancy.authentication")?,persons:services.get(bilibi_person::SERVICE)?,affiliations:services.get(bilibi_affiliation::SERVICE)?,db:services.get::<Db>("base/database.pool")?.as_ref().clone(),notification_boundary:services.get("base/notifications.sink")?,notifications,mailer:services.get("base/mail.mailer")?,templates:services.get(bilibi_templates::SERVICE)?,media:services.get(bilibi_media::SERVICE)?,settings:services.get("base/settings.store")?,display:services.get("base/datetime.display")?,locales:services.get("base/locale.locales")?,signer:Signer::from_hex(std::env::var("BILIBI_USER_SIGNING_KEY").ok().as_deref()),origin:std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),step_up:services.get(bilibi_step_up::SERVICE)?});
             users.register_identity_provider("oidc", std::sync::Arc::new(sso::oidc::Oidc(services.get("base/integration.exchanges")?)))?;
             users.step_up.register(sso::factor::METHOD, std::sync::Arc::new(sso::factor::Factor(users.clone())))?;
             let authenticator = std::sync::Arc::new(two_factor::Authenticator(users.clone()));
@@ -283,6 +338,8 @@ inventory::submit! {
             users.step_up.bind_session(authenticator)?;
             bilibi_company::bind_work_access(users.clone())?;
             desks_agent::bind(users.clone())?;
+            preference_operations::bind(users.clone())?;
+            reset::bind(users.settings.clone())?;
             two_factor::bind(users.clone())?;
             sso::agent::bind(users.clone())?;
             Ok(users)
@@ -290,6 +347,8 @@ inventory::submit! {
         bilibi_module_registry::Service{id:"core/user.sso-pages",factory:|services|Ok(std::sync::Arc::new(bilibi_ui::page::PageService(std::sync::Arc::new(sso::web::Pages{users:services.get("core/user.accounts")?,contracts:services.get(bilibi_agent_api::page::SERVICE)?}))))},
         bilibi_module_registry::Service {id:"core/user.pages",factory:|services| {
             Ok(std::sync::Arc::new(bilibi_ui::page::PageService(std::sync::Arc::new(web::Pages {users:services.get("core/user.accounts")?,display:services.get("base/datetime.display")?,locales:services.get("base/locale.locales")?,db:services.get::<Db>("base/database.pool")?.as_ref().clone(),grants:services.get("base/authz.grants")?,contracts:services.get(bilibi_agent_api::page::SERVICE)?}))))
+        }}, bilibi_module_registry::Service {id:account_ui::PROFILE_SERVICE,factory:|services| {
+            Ok(services.get::<bilibi_ui::page::PageService<bilibi_security::Scope, Error>>("core/user.pages")?)
         }}, bilibi_module_registry::Service {id:administration::SERVICE,factory:administration::service}],
     }
 }
@@ -300,7 +359,22 @@ impl UserService {
         email: &str,
         password: &str,
     ) -> std::result::Result<Login, CredentialError> {
-        self.begin_sign_in(identity::Audience::Staff, email, password)
+        self.begin_sign_in(identity::Audience::Staff, None, email, password)
+            .await
+    }
+    /// Portable sign-in bound to a selected tenant membership. The target is
+    /// only a selector after the shared password is proved; it grants no
+    /// membership and unknown targets are indistinguishable from bad credentials.
+    pub async fn login_to_tenant(
+        &self,
+        tenant: i64,
+        email: &str,
+        password: &str,
+    ) -> std::result::Result<Login, CredentialError> {
+        if tenant <= 0 {
+            return Err(CredentialError::Rejected);
+        }
+        self.begin_sign_in(identity::Audience::Staff, Some(tenant), email, password)
             .await
     }
     /// A customer's sign-in at the portal of `tenant`, which the caller
@@ -318,19 +392,29 @@ impl UserService {
         if tenant <= 0 {
             return Err(CredentialError::Rejected);
         }
-        self.begin_sign_in(identity::Audience::Customer { tenant }, email, password)
-            .await
+        self.begin_sign_in(
+            identity::Audience::Customer { tenant },
+            None,
+            email,
+            password,
+        )
+        .await
     }
     /// A customer ends its own portal session (ADR 16): the portal's
     /// sign-out, through Session, so every other live page of the session is
     /// signed out too.
     pub async fn portal_logout(&self, token: &str, csrf: &str) -> Result<()> {
-        let client = self.db.get().await?;
+        let mut client = self.db.get().await?;
         let scope = self.sessions.check_portal(&**client, token).await?;
         if scope.csrf != csrf {
             return Err(Error::Forbidden);
         }
-        self.sessions.delete(&**client, &scope, token).await
+        let mut tx = self
+            .mutations
+            .begin(&mut client, scope.mutation_context("session.sign_out"))
+            .await?;
+        self.sessions.delete(&mut tx, &scope, token).await?;
+        tx.commit().await
     }
     pub async fn logout(&self, token: &str, csrf: &str) -> Result<()> {
         let scope = {
@@ -341,7 +425,7 @@ impl UserService {
             return Err(Error::Forbidden);
         }
         self.forget_external_session(&scope, token).await?;
-        logout(&self.db, token, csrf, &self.sessions).await
+        logout(&self.db, &self.mutations, token, csrf, &self.sessions).await
     }
     pub async fn mark_read(&self, token: &str, id: i64) -> Result<notifications::Item> {
         notifications::mark_read(
@@ -366,13 +450,13 @@ impl UserService {
     }
 }
 
-// Role assignments and resetting another person's 2FA use contracts. Other
+// Role assignments use contracts. Other
 // account, password, two-factor setup and notification events still write
 // through the facade (`base/agent_api` page).
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "core/user.pages", bilibi_module_registry::Provenance { module: "core/user", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
     service: "core/user.pages",
-    contracts: &[(two_factor::RESET_EVENT, two_factor::RESET_KEY), ("assign_selected_roles", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("confirm_role_assignments", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("request_remove_role", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("remove_role", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("desk_assign", "core.user.desk.set"), ("desk_confirm_remove", "core.user.desk.set")],
-    pending: bilibi_module_registry::contributions::Pending::Every { reason: "Accounts, passwords, two-factor setup and notifications write through the User facade. Role assignments, desk changes and resetting another person's 2FA use operation contracts." },
+    contracts: &[("assign_selected_roles", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("confirm_role_assignments", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("request_remove_role", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("remove_role", bilibi_authz_agent::PRINCIPAL_ROLE_SET), ("desk_assign", "core.user.desk.set"), ("desk_confirm_remove", "core.user.desk.set")],
+    pending: bilibi_module_registry::contributions::Pending::Every { reason: "Accounts, two-factor setup and notifications write through the User facade. Role assignments and desk changes use operation contracts." },
 }) }
 
 // ADR 01 gap, listed so it stays visible: these pages still write through
@@ -384,16 +468,24 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
 }) }
 
 // Columns extend the list vocabulary.
-bilibi_ui::record_fields! { pub(crate) mod record_fields {
-    NAME: bilibi_ui::RecordField::new("name", "Name"),
-    EMAIL: bilibi_ui::RecordField::new("email", "Email"),
-    PERSON_ID: bilibi_ui::RecordField::new("person_id", "Person").path("person.name"),
-    EMAIL_VERIFIED_AT: bilibi_ui::RecordField::new("email_verified_at", "Email Verified"),
-    CREATED_AT: bilibi_ui::RecordField::new("created_at", "Created"),
-    UPDATED_AT: bilibi_ui::RecordField::new("updated_at", "Updated"),
+bilibi_ui::record_fields! { "core/user", pub(crate) mod record_fields {
+    NAME: bilibi_ui::RecordField::new("name", "Name", bilibi_ui::RecordFieldType::String),
+    EMAIL: bilibi_ui::RecordField::new("email", "Email", bilibi_ui::RecordFieldType::String),
+    PERSON_ID: bilibi_ui::RecordField::new("person_id", "Person", bilibi_ui::RecordFieldType::Integer).path("person.name"),
+    EMAIL_VERIFIED_AT: bilibi_ui::RecordField::new("email_verified_at", "Email Verified", bilibi_ui::RecordFieldType::DateTime),
+    CREATED_AT: bilibi_ui::RecordField::new("created_at", "Created", bilibi_ui::RecordFieldType::DateTime),
+    UPDATED_AT: bilibi_ui::RecordField::new("updated_at", "Updated", bilibi_ui::RecordFieldType::DateTime),
 } }
 
-pub use accounts::{validate_input, LANDING_KEY, NAME_MAX};
+pub use accounts::{LANDING_KEY, NAME_MAX};
 pub use bootstrap::{BOOTSTRAP_ACTION, BOOTSTRAP_COMPLETED, CREATE_OWNER_PRINCIPAL};
 pub use company_accounts::CompanyAccount;
-pub use contributions::{CREATE, DELETE, INVITE, LIST, UPDATE, VIEW};
+pub use contributions::{CREATE, DELETE, INVITE, LIST, RESET_TWO_FACTOR, UPDATE, VIEW};
+pub use staff_choices::{
+    StaffAssignment, StaffChoice, ASSIGNMENTS, STAFF_CHOICE_MAX, STAFF_SEARCH_MAX,
+};
+#[doc(hidden)]
+pub use {
+    bilibi_module_registry::{Contribution, Provenance},
+    inventory,
+};

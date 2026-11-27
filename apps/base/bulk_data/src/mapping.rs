@@ -179,14 +179,36 @@ impl Mapping {
     }
 }
 
-/// A cell's text as a field's value: `None` when blank. Choices match
-/// without regard to case; whole numbers, numbers and yes/no are parsed.
+/// A cell's text as a field's value: `None` when blank.
+/// Built-in choices match without regard to case; numbers and yes/no are parsed.
+/// Custom values stay strings for owner validation, with exact decimal checks
+/// and yes/no normalization here.
 pub fn convert(field: &Field, text: &str) -> Result<Option<Value>, String> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(None);
     }
     let value = match field.kind {
+        Kind::Custom(bilibi_custom_fields::Kind::Boolean) => Value::String(
+            match text.to_ascii_lowercase().as_str() {
+                "true" | "yes" | "y" | "1" => "true",
+                "false" | "no" | "n" | "0" => "false",
+                _ => return Err("must be yes or no".into()),
+            }
+            .into(),
+        ),
+        Kind::Custom(bilibi_custom_fields::Kind::Number) => {
+            if !bilibi_custom_fields::valid_number(text) {
+                return Err("must be an exact decimal (up to 18 digits, 6 decimals)".into());
+            }
+            Value::String(text.to_owned())
+        }
+        // Several codes in one cell, separated by `;` (a pick-list code never
+        // holds one): the owner checks each against the list.
+        Kind::Custom(bilibi_custom_fields::Kind::Choices) => {
+            bilibi_custom_fields::codes_value(text.split(';'))
+        }
+        Kind::Custom(_) => Value::String(text.to_owned()),
         Kind::Text | Kind::Date if !field.choices.is_empty() => field
             .choices
             .iter()

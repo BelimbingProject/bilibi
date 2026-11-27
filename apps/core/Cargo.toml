@@ -12,6 +12,7 @@ bilibi-address = { path = "address" }
 bilibi-affiliation = { path = "affiliation" }
 bilibi-agent = { path = "agent" }
 bilibi-company = { path = "company" }
+bilibi-consent = { path = "consent" }
 bilibi-currency = { path = "currency" }
 bilibi-document = { path = "document" }
 bilibi-geonames = { path = "geonames" }
@@ -19,6 +20,10 @@ bilibi-party = { path = "party" }
 bilibi-person = { path = "person" }
 bilibi-portal = { path = "portal" }
 bilibi-product = { path = "product" }
+bilibi-team = { path = "team" }
 bilibi-tenant = { path = "tenant" }
 bilibi-user = { path = "user" }
 bilibi-work-calendar = { path = "work_calendar" }
+
+[lints]
+workspace = true

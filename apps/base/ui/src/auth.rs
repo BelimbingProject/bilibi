@@ -1,10 +1,11 @@
 //! The credential pages: the centered layout and the
-//! sign-in, forgotten-password and reset cards as typed templates. The host
+//! sign-in, forgotten-password and reset cards as typed templates, all built
+//! from the shared parts in `templates/credential.html`. The host
 //! owns the routes, the validation and the credential services; these models
 //! own the DOM, the ids and the copy, so a field error lands on the right element.
 //! Field values are the submitted text kept for another
 //! attempt; a password is never echoed back.
-use crate::{Attrs, Field, FlashMap, Html, InputKind, SecretInput};
+use crate::{Attrs, Field, FlashMap, Html, InputKind, Reveal, SecretInput};
 use askama::Template;
 
 /// The centered credential layout around one card body, with the page-level
@@ -13,9 +14,14 @@ use askama::Template;
 #[template(path = "auth.html")]
 pub struct AuthLayout<'a> {
     pub body: Html,
-    /// Which installation this is (`bilibi_system::Instance` badge), under the brand
-    /// so nobody signs in to a test copy thinking it is live; empty for
-    /// production and for error pages.
+    /// Whose name the page carries: the installation's own, or Bilibi's.
+    pub brand: &'a crate::Brand,
+    /// Whose installation this is, right after the brand: the platform
+    /// operator's company, or that none is provisioned yet. `None` leaves the
+    /// line out for cards other than sign-in.
+    pub workspace: Option<LoginWorkspace>,
+    /// Which installation this is (`bilibi_system::Instance` badge), below
+    /// the wordmark and any company line.
     pub instance: Html,
     pub flash: FlashMap<'a>,
 }
@@ -45,19 +51,18 @@ pub const WORKSPACE_UNAVAILABLE: &str = "This account is not attached to an acti
 #[derive(Clone, Debug, Default)]
 pub struct LoginForm {
     pub email: String,
-    /// Kept (masked) across a failed attempt.
-    pub password: String,
     pub email_errors: Vec<String>,
     pub password_errors: Vec<String>,
     /// The announced failure above the form; the email field repeats it.
     pub form_error: String,
     pub session_expired: bool,
-    pub workspace: LoginWorkspace,
+    /// A signed-in person is proving access to a selected workspace.
+    pub reauthenticating: bool,
     pub sso_public: String,
     pub sso_label: String,
 }
 
-/// The workspace strip under the sign-in card:
+/// The line after the brand on the sign-in page:
 /// the platform operator's company once provisioned, else why not. Every
 /// state but `Ready` reads "Platform workspace not provisioned"; `data-state`
 /// keeps the distinction.
@@ -86,8 +91,8 @@ impl LoginWorkspace {
 #[template(path = "login.html")]
 pub struct LoginPage {
     pub session_expired: bool,
+    pub reauthenticating: bool,
     pub form_error: String,
-    pub workspace: LoginWorkspace,
     pub sso_public: String,
     pub sso_label: String,
     pub email: Html,
@@ -98,8 +103,8 @@ impl LoginPage {
     pub fn new(form: &LoginForm) -> askama::Result<Self> {
         Ok(Self {
             session_expired: form.session_expired,
+            reauthenticating: form.reauthenticating,
             form_error: form.form_error.clone(),
-            workspace: form.workspace.clone(),
             sso_public: form.sso_public.clone(),
             sso_label: form.sso_label.clone(),
             email: Html::render(
@@ -120,12 +125,10 @@ impl LoginPage {
             password: Html::render(
                 &Field::in_form("login", "password")
                     .id("login-password")
-                    .wrapper_class("mb-0")
                     .kind(InputKind::Password)
+                    .reveal(Reveal::Subject("password".into()))
                     .label("Password")
-                    .value(&form.password)
                     .errors(form.password_errors.clone())
-                    .placeholder("Password")
                     .autocomplete("current-password")
                     .required(),
             )?,
@@ -140,11 +143,13 @@ pub struct ForgotForm {
     pub email_errors: Vec<String>,
     /// Set once a well-formed request was accepted.
     pub confirmation: String,
+    pub resend: bool,
 }
 
 #[derive(Template)]
 #[template(path = "forgot_password.html")]
 pub struct ForgotPasswordPage {
+    pub resend: bool,
     pub confirmation: String,
     pub email: Html,
 }
@@ -152,6 +157,7 @@ pub struct ForgotPasswordPage {
 impl ForgotPasswordPage {
     pub fn new(form: &ForgotForm) -> askama::Result<Self> {
         Ok(Self {
+            resend: form.resend,
             confirmation: form.confirmation.clone(),
             email: Html::render(
                 &Field::in_form("forgot", "email")
@@ -218,6 +224,7 @@ pub struct InvitationResultPage<'a> {
     pub message: &'a str,
     pub href: &'a str,
     pub action: &'a str,
+    pub resend: bool,
 }
 
 impl InvitationPage {
@@ -230,6 +237,7 @@ impl InvitationPage {
                     .id("invitation-password")
                     .label("Password")
                     .errors(form.password_errors.clone())
+                    .wrapper_class("mb-3")
                     .attrs(new_password()),
             )?,
             password_confirmation: Html::render(
@@ -237,6 +245,7 @@ impl InvitationPage {
                     .id("invitation-password-confirmation")
                     .label("Confirm password")
                     .errors(form.confirmation_errors.clone())
+                    .wrapper_class("mb-3")
                     .attrs(new_password()),
             )?,
         })
@@ -265,6 +274,7 @@ impl ResetPasswordPage {
                     .id("reset-password")
                     .label("New password")
                     .errors(form.password_errors.clone())
+                    .wrapper_class("mb-3")
                     .attrs(new_password()),
             )?,
             password_confirmation: Html::render(
@@ -272,6 +282,7 @@ impl ResetPasswordPage {
                     .id("reset-password-confirmation")
                     .label("Confirm new password")
                     .errors(form.confirmation_errors.clone())
+                    .wrapper_class("mb-3")
                     .attrs(new_password()),
             )?,
         })
@@ -297,6 +308,8 @@ pub struct SignInChallengePage {
     pub start_fields: Html,
     pub verify_fields: Html,
     pub cancel_fields: Html,
+    pub request_reset_fields: Html,
+    pub password_origin: bool,
     pub has_methods: bool,
     pub multiple: bool,
     pub message: String,
@@ -318,6 +331,7 @@ impl SignInChallengePage {
         selected: &str,
         message: &str,
         error: &str,
+        password_origin: bool,
     ) -> askama::Result<Self> {
         let method = methods
             .iter()
@@ -372,6 +386,8 @@ impl SignInChallengePage {
             start_fields: hidden("sign-in-start")?,
             verify_fields: hidden("sign-in-verify")?,
             cancel_fields: hidden("sign-in-cancel")?,
+            request_reset_fields: hidden("sign-in-request-reset")?,
+            password_origin,
             has_methods: !methods.is_empty(),
             multiple: methods.len() > 1,
             message: message.to_owned(),

@@ -1,11 +1,10 @@
 # Integration exchange log and outgoing transport
 
-`base/integration` records incoming and outgoing HTTP exchanges in one log,
-`base_integration_exchanges`, and is the only outgoing HTTP client. Domain
-modules own request meaning, response parsing, retries and user-facing
-outcomes. API adapters own authentication and call the incoming recorder after
-dispatch. Business writes keep using the ordinary mutation audit; exchange
-logging is separate.
+**Use it for:** every outgoing HTTP call, the log of incoming and outgoing exchanges, and checking where a connector's own socket (a mail server, a phone system) may connect.
+
+**Not for:** an HTTP client crate (`reqwest`, `hyper`, `ureq`) of your own, or a connector socket opened to a configured host without `ConnectorPolicy`.
+
+`base/integration` records incoming and outgoing HTTP exchanges in one log, `base_integration_exchanges`, and is the only outgoing HTTP client. Domain modules own request meaning, response parsing, retries and user-facing outcomes. API adapters own authentication and call the incoming recorder after dispatch. Business writes keep using the ordinary mutation audit. Exchange logging uses an independent connection so an HTTP exchange remains recorded if the caller’s transaction rolls back.
 
 The service is `base/integration.exchanges` (`Integration`).
 
@@ -56,6 +55,46 @@ The `Location` target, including a signed download query, is not stored.
 
 For URLs supplied by an untrusted caller, use `Outgoing::public_https()`. It accepts HTTPS only, resolves the host once, refuses non-public addresses, pins the accepted addresses for the TLS connection and disables proxies and redirects. Public certificate roots still verify the original host. Set a short timeout and body limit for metadata documents; never fetch an untrusted URL with the ordinary redirecting client.
 
+## Connector sockets: `ConnectorPolicy`
+
+A connector that speaks its own protocol to a server a tenant configures (IMAP, SMTP, a phone system's manager interface) opens a TCP socket, not an HTTP call, so `public_https` cannot guard it. Without a check, a tenant administrator could point it at the loopback, the installation's private network or a cloud metadata address, and read from its health codes which internal addresses answer. `ConnectorPolicy` is the installation's check, applied when connecting, not only when saving, so a name cannot be re-pointed after it was accepted.
+
+```rust
+// On the connection you already hold (no second pooled connection).
+let policy = ConnectorPolicy::load(&settings, client).await?;
+// On the blocking thread that connects, right before connecting.
+let destination = policy
+    .resolve(&host, port)
+    .map_err(|Unusable| Failure::DestinationRefused)?; // report DESTINATION_REFUSED
+let tcp = destination.connect(timeout)?; // only the checked addresses, one time limit in total
+```
+
+- `resolve` asks the system resolver once and checks **every** address the name gives, up to the first 16 distinct ones (the only ones a connection may use); one refused address refuses the destination. `Destination` holds only checked addresses and has no name: `connect` tries them in order within one `timeout` in total, however many there are, and a library that dials by itself (an SMTP client) is given a checked address from `addresses()` as its server while TLS still verifies the configured name.
+- An address is admitted when it is public (the conservative global-unicast test `public_https` uses), when it is private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`) and the operator turned on `integration.connector_private_networks`, or when an entry of `integration.connector_allowed_destinations` covers it.
+- Never admitted, whatever the operator lists: unspecified (`0.0.0.0/8`, `::`), multicast, broadcast, link-local (`169.254.0.0/16`, `fe80::/10`) and the cloud metadata addresses outside them (`fd00:ec2::254`, `100.100.100.200`, `192.0.0.192`). Loopback, shared (`100.64.0.0/10`), documentation, benchmarking and reserved ranges are refused unless an entry names them. An IPv4-mapped IPv6 address is judged as its IPv4 form; NAT64 and 6to4 forms are not public.
+- A connection kept open between uses (a phone system's event stream) asks `policy.admits(host, peer)` with a freshly loaded policy before each use, so a policy the operator tightened ends it.
+- Every failure before connecting is the one `Unusable`, which carries no reason: a name that gives no address, an address outside the policy, an empty host and port 0. A connector reports it as the one code `DESTINATION_REFUSED` (`destination_refused`), decided before anything is sent. It must not map any of these to a code of its own, such as `unreachable`: a tenant who could tell "no such name" from "a name that resolves to a forbidden address" could enumerate the installation's internal DNS names without making a connection. `unreachable` is only for a checked destination that did not accept in time.
+
+| Global operator setting (System Settings, group Connectors) | Default | Meaning |
+| --- | --- | --- |
+| `integration.connector_private_networks` | `false` | `true` admits the private ranges above. |
+| `integration.connector_allowed_destinations` | `[]` | At most 200 entries: `host` or `host:port` (a name: every address it resolves to is admitted), `a.b.c.d[/len][:port]` or `[v6[/len]][:port]` (an address or block). No port means any port. Anything else is refused when saved. |
+
+Proof: `examples/connector-destinations-walkthrough.rs` (in `scripts/run-walkthroughs.sh`) sets both settings as the operator on a disposable database and checks each class above, IPv4-mapped forms, names that resolve to local addresses, a name that gives no address getting exactly the refusal a forbidden name gets (with private networks closed and open), a public address admitted, an allowed name, address and block connecting to a local server on the checked address only, an allowed address that does not answer giving up within its one time limit, ports, a kept connection re-checked with `admits`, and the refused setting values.
+## Customer-hosted scorers
+
+A reviewed Platform module or reviewed Extension contributes one `Scorer` under `SCORERS`. Customer-code Extensions are refused at boot. The contract fixes one event name, the exact field keys that leave, tenant consent/destination/signing-secret setting keys, a timeout and expiry, one action key, and each typed result's fixed JSON input. The three settings must be editable tenant definitions: boolean consent, a plain string destination and an encrypted string secret. This is the reviewed connector boundary; a reply supplies no action name or input.
+
+The installation owner admits exact destinations through the global `integration.connector_destinations` JSON array in System Settings. Each entry must be distinct public HTTPS with no credentials or fragment. `Integration::score` rechecks that policy, the stored tenant consent override, destination and secret before sending and again before releasing a decision. It always uses `Outgoing::public_https`, disables redirects and proxies, pins public DNS answers, applies the contributed whole-call timeout and limits a reply to 16 KiB. Removing the destination, clearing consent, or clearing/rotating the secret revokes later and in-flight decisions.
+
+The JSON request is `{delivery_id, expires_at, event, fields}`. `event` is the contributed event name; internal event keys and record subjects never leave. `fields` contains every contributed key exactly once and no other key. The opaque delivery id is a truncated HMAC of the tenant, scorer and internal deduplication key. Headers are `Bilibi-Delivery`, Unix-seconds `Bilibi-Expires`, and `Bilibi-Signature: v1=<lowercase hex HMAC-SHA256>` over `expires_at + "." + exact_body_bytes`. The customer service rejects an expired request and deduplicates on `delivery_id`.
+
+The typed reply is a JSON object containing exactly two string fields, `delivery_id` and `result`. The delivery id must match and the result must be one of the contributed values before `score` returns its fixed `ScoreDecision { action, input }`. The connector invokes that action through its ordinary owner contract and uses the decision's delivery id to correlate the action. The delivery receipt prevents a duplicate event from invoking it again. A repeated event never sends or releases the choice again.
+
+`base_integration_scorer_deliveries` is the durable delivery receipt: tenant, scorer, a one-way event-key digest, opaque delivery id, exchange id, state, HTTP status, typed result or bounded refusal code. It stores neither the internal event key, event fields nor the secret. Inserting `sending` before the call gives at-most-once delivery; an interrupted or repeated delivery is uncertain and withheld rather than resent. The ordinary Integration exchange row remains the one HTTP measurement and retains no scorer payload.
+
+The Platform supplies this reusable boundary and an executable walkthrough. The first real customer scorer will supply the production event and action binding.
+
 ## Incoming calls
 
 ```rust
@@ -69,7 +108,7 @@ integration.record_incoming_system(&Incoming { method: Some("POST".into()),
     endpoint: Some("/api/v1/operations".into()), response_status: Some(401), ..Incoming::default() }).await?;
 ```
 
-Call once after dispatch, including refused and failed requests. The tenant and
+Call once after dispatch, including refused and failed requests. An edge open to callers with no credential must not write a row for each refusal that proved nothing: a row stays until retention deletes it (180 days by default), so count those instead, as the agent edge does (`apps/web/README.md`). The tenant and
 user come only from the sealed scope; a system row asserts neither, and only the
 platform operator can see it. Connection, agent and run ids are observations,
 never authority. `agent_self_report` is the agent's shape-checked
@@ -107,15 +146,19 @@ status, user and agent ids, exact status, actor, UTC `since` and exclusive
 `until`) and page sizes 25/50/100/300. Deletion is an audited mutation
 (`base/integration.exchange`) carrying metadata only.
 
-Recording is a machine measurement on its own pooled connection, outside the caller's transaction and outside mutation capture; pruning runs on the scheduler job's connection and is captured, as below. The global operator setting `integration.payload_retention_days` (default 30) drives the contributed daily schedule `base/integration-payload-retention` (03:17 UTC, forbid overlap), which clears previews and keeps metadata, per tenant in batches: a preview a legal hold names stays (checked under the hold guard), and each cleared preview is an audited change by the scheduler. Like every contributed recurrence it runs nothing until an operator enables it on `/system/schedule`.
+`list` never counts or skips the whole log. It counts a filter's rows up to `LIST_CAP` (10,000); past that `Page::more` is set and the pager reads "of 10000+ results" (`PageCounts::or_more`). Pages stop at the cap, so the skip is bounded too: older rows are reached by narrowing the period or the search. A tenant's read is an equality on `tenant_id`, which the timeline index serves; only the operator's every-tenant read names no tenant.
+
+Recording is a machine measurement on its own pooled connection, outside the caller's transaction and outside mutation capture; pruning runs on the scheduler job's connection and is captured, as below. The global operator setting `integration.payload_retention_days` (default 30) drives the contributed daily schedule `base/integration-payload-retention` (03:17 UTC, forbid overlap), which clears previews and keeps metadata, per tenant in batches: a preview a legal hold names stays (checked under the hold guard), and each cleared preview is an audited change by the scheduler. The same job then deletes whole exchanges older than `integration.exchange_retention_days` (default 180, 1 to 3650), oldest first in batches per tenant (`prune_rows`). A row a legal hold names stays. Like recording, this expiry writes no audit row; a person's `delete` is the audited one. The job finds rows that still hold a preview through the partial index `base_integration_exchanges_payload_idx` (migration 007) instead of walking the log. Like every contributed recurrence it runs nothing until an operator enables it on `/system/schedule`.
 
 ## Runtime evidence
 
 `examples/integration-walkthrough.rs` runs against a disposable database
-(`BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes`, `DATABASE_URL`) with a local fixture
+(`BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes`, `DATABASE_URL`, after `bilibi-web migrate`: it installs the fixture, which needs the tables) with a local fixture
 server: retained/redacted preview, HTTP error, body limit, streamed download,
 connect failure, timeout, tenant and system incoming rows, every visibility and
 capability gate, audited deletion and payload pruning.
+
+`examples/scorer-walkthrough.rs` uses a fresh disposable database and a fixture receiver on `127.0.0.1:18464`. Set `BILIBI_SCORER_FIXTURE_URL` to a public HTTPS URL that forwards the request to `/score` on that listener with its headers and body intact. The example also needs `BILIBI_SETTINGS_KEY`, `BILIBI_DISPOSABLE_SCORER_DEMO=yes` and `DATABASE_URL`. It checks the signed envelope at the receiver, invokes the Pick Lists owner's create operation as a granted automation principal, and reads the new value back. It also checks duplicate suppression, extra-field refusal, consent revocation while the receiver holds a valid reply, and payload-free receipts.
 
 ## Inbound webhooks
 

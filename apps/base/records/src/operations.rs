@@ -14,10 +14,7 @@ use bilibi_database::Error;
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 static BOUND: OnceLock<Arc<Records>> = OnceLock::new();
 pub(crate) fn bind(records: Arc<Records>) -> bilibi_module_registry::Result<()> {
@@ -27,12 +24,6 @@ pub(crate) fn bind(records: Arc<Records>) -> bilibi_module_registry::Result<()> 
 }
 fn bound() -> bilibi_agent_api::Result<&'static Arc<Records>> {
     BOUND.get().ok_or(Error::Internal.into())
-}
-fn invalid(field: &str, message: &str) -> bilibi_agent_api::Error {
-    bilibi_agent_api::Error::InvalidInput(BTreeMap::from([(
-        field.to_owned(),
-        vec![message.to_owned()],
-    )]))
 }
 
 enum Read {
@@ -65,7 +56,10 @@ impl ReadHandler for Read {
                         })
                         .collect();
                     if references.len() > MAX_PER_KIND {
-                        return Err(invalid("references", "must name at most 100 references"));
+                        return Err(bilibi_agent_api::invalid(
+                            "references",
+                            "must name at most 100 references",
+                        ));
                     }
                     let resolved = records.resolve(scope, &references).await?;
                     json!({"references": resolved.iter().map(|r| json!({
@@ -81,7 +75,10 @@ impl ReadHandler for Read {
                         .filter_map(Value::as_str)
                         .collect();
                     if kinds.len() > MAX_SEARCH_KINDS {
-                        return Err(invalid("kinds", "must name at most 20 kinds"));
+                        return Err(bilibi_agent_api::invalid(
+                            "kinds",
+                            "must name at most 20 kinds",
+                        ));
                     }
                     let hits = records
                         .search(scope, &kinds, input["text"].as_str().unwrap_or_default())

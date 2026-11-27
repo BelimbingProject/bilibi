@@ -1,27 +1,29 @@
 //! The instance's systemd service and its health: stop and start through the
-//! sudo rule `scripts/install-server.sh` gives `bilibi-build`, and the check
+//! sudo rule `scripts/install-server.sh` gives the instance installer, and the check
 //! that the program answers on its own port.
 use crate::layout::Layout;
 use std::{process::Command, time::Duration};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     time::{sleep, timeout, Instant},
 };
 
 pub struct Service {
     unit: String,
-    port: u16,
+    layout: Layout,
 }
 impl Service {
     pub fn of(layout: &Layout) -> Result<Self, String> {
+        if Listener::configured(layout, "BIND_ADDR", "APP_ORIGIN")?.is_none() {
+            return Err(format!(
+                "{} has no staff listener in its env file",
+                layout.dir.display()
+            ));
+        }
+        Listener::configured(layout, "PUBLIC_BIND_ADDR", "PUBLIC_ORIGIN")?;
         Ok(Self {
             unit: layout.unit(),
-            port: layout.port().ok_or_else(|| {
-                format!(
-                    "{} has no BIND_ADDR with a port in its env file",
-                    layout.dir.display()
-                )
-            })?,
+            layout: layout.clone(),
         })
     }
     /// Stops the program. From here the proxy shows the waiting page.
@@ -55,10 +57,19 @@ impl Service {
             .filter(|state| !state.is_empty())
             .unwrap_or_else(|| "unknown".into())
     }
-    /// One HTTP request to the program's own port: any answer counts, a
-    /// refused connection or a timeout does not.
+    /// Checks readiness on every configured listener.
     pub async fn answers(&self) -> bool {
-        answers_on(self.port).await
+        let Ok(Some(staff)) = Listener::configured(&self.layout, "BIND_ADDR", "APP_ORIGIN") else {
+            return false;
+        };
+        if !staff.answers("/login").await {
+            return false;
+        }
+        match Listener::configured(&self.layout, "PUBLIC_BIND_ADDR", "PUBLIC_ORIGIN") {
+            Ok(Some(public)) => public.answers("/portal/sign-in").await,
+            Ok(None) => true,
+            Err(_) => false,
+        }
     }
     /// How many times systemd has restarted the service since it was last
     /// started by hand: a program that exits right after starting shows here
@@ -96,33 +107,66 @@ impl Service {
             sleep(Duration::from_secs(1)).await;
         }
         Err(format!(
-            "no answer on port {} within {} seconds (service {})",
-            self.port,
+            "not all listeners became ready within {} seconds (service {})",
             limit.as_secs(),
             self.state()
         ))
     }
 }
 
-/// Whether a Bilibi program answers HTTP on `127.0.0.1:<port>`.
-pub async fn answers_on(port: u16) -> bool {
-    let request = async {
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+struct Listener {
+    bind: String,
+    authority: String,
+}
+impl Listener {
+    fn configured(
+        layout: &Layout,
+        bind_key: &str,
+        origin_key: &str,
+    ) -> Result<Option<Self>, String> {
+        match (layout.env_value(bind_key), layout.env_value(origin_key)) {
+            (Some(bind), Some(origin)) => {
+                let authority = origin
+                    .split_once("://")
+                    .map(|(_, rest)| rest.split('/').next().unwrap_or_default())
+                    .filter(|host| {
+                        !host.is_empty() && !host.bytes().any(|byte| byte.is_ascii_whitespace())
+                    })
+                    .ok_or_else(|| format!("Invalid {origin_key} in {}", layout.dir.display()))?;
+                Ok(Some(Self {
+                    bind,
+                    authority: authority.to_owned(),
+                }))
+            }
+            (None, None) => Ok(None),
+            _ => Err(format!(
+                "Configure {bind_key} and {origin_key} together in {}",
+                layout.dir.display()
+            )),
+        }
+    }
+
+    async fn answers(&self, path: &str) -> bool {
+        let request = async {
+            let mut stream = tokio::net::TcpStream::connect(&self.bind).await.ok()?;
+            let request = format!(
+                "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                self.authority
+            );
+            stream.write_all(request.as_bytes()).await.ok()?;
+            let mut line = String::new();
+            tokio::io::AsyncBufReadExt::read_line(
+                &mut tokio::io::BufReader::new(stream),
+                &mut line,
+            )
             .await
             .ok()?;
-        stream
-            .write_all(b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            (line.split_whitespace().nth(1)? == "200").then_some(())
+        };
+        timeout(Duration::from_secs(2), request)
             .await
-            .ok()?;
-        let mut head = [0u8; 64];
-        let read = stream.read(&mut head).await.ok()?;
-        let line = String::from_utf8_lossy(&head[..read]);
-        let status: u16 = line.split_whitespace().nth(1)?.parse().ok()?;
-        (100..500).contains(&status).then_some(())
-    };
-    timeout(Duration::from_secs(2), request)
-        .await
-        .ok()
-        .flatten()
-        .is_some()
+            .ok()
+            .flatten()
+            .is_some()
+    }
 }

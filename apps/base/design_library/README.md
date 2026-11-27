@@ -1,5 +1,9 @@
 # Design Library
 
+**Use it for:** seeing the shared UI components rendered (Administration › System › Design Library).
+
+**Not for:** building pages (use `base/ui`).
+
 The five source routes are discovered from this module. Access requires
 `admin.system.design-library.view`; the contributed System Viewer role receives
 that capability. The menu lives under Administration → System → Design Library.
@@ -14,7 +18,7 @@ the route capability, Origin and CSRF checks, including when framed.
 
 The templates keep every family anchor and specimen ID, using the shared compact UI scale; `sample.json` and `controls.json` hold the sample form values and control declarations.
 The Components page lists one line per family (`A. Foundations`, `B. Page structure`, …). A card is a title, one short plain sentence, then the sample; gaps in a family go in one `Not shown yet:` line in its intro, and a sample or explanation that repeats is shown once.
-The page is split at family/card boundaries because Askama inlines macros;
+Each Components card uses the title and anchor declared in `src/sections.rs` so the top-bar search opens that card. The page is split at family/card boundaries because Askama inlines macros;
 large input templates otherwise exceed the compiler's memory limit. Every
 control declaration renders through its shared typed model in `controls.rs`.
 
@@ -34,3 +38,5 @@ search/paging, FlexTable notch and Graphic's icon filter/copy tiles.
 Graphic lists every embedded SVG variant and semantic action from `bilibi_ui::Icons`; copied names use the same bare format as menus and components.
 Theme and Design Spec preserve the source's foundations and accepted decisions.
 No unit tests or test-only infrastructure belong to this module.
+
+The period-filter specimen enables financial-year presets with a 1 April year start and no preceding year, using the same caller-owned calendar API as reports.

@@ -1,0 +1,34 @@
+From: Feedback Loop <fbl@isp.example.test>
+To: abuse@example.test
+Subject: Complaint about message from support@example.test
+Date: Thu, 05 Nov 2026 11:00:00 +0000
+Message-ID: <arf-1@isp.example.test>
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=feedback-report; boundary="arf-1"
+
+--arf-1
+Content-Type: text/plain; charset=utf-8
+
+This is an email abuse report.
+
+--arf-1
+Content-Type: message/feedback-report
+
+Feedback-Type: abuse
+User-Agent: ExampleFBL/1.0
+Version: 1
+Original-Mail-From: <support@example.test>
+Original-Rcpt-To: <reader@example.test>
+
+--arf-1
+Content-Type: message/rfc822
+
+From: Support <support@example.test>
+To: reader@example.test
+Subject: Our newsletter
+Message-ID: <newsletter-11@example.test>
+Content-Type: text/plain
+
+News.
+
+--arf-1--

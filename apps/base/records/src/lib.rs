@@ -6,11 +6,16 @@
 //! [`Records`]. Contract: `README.md`.
 mod declaration;
 mod drops;
+mod matching;
 mod operations;
 mod records;
 
-pub use declaration::{Access, Holder, RecordKind, RecordOwner, HOLDERS, KINDS};
+pub use declaration::{
+    Access, Holder, PortalProtection, PortalStepUp, RecordKind, RecordOwner, HOLDERS, KINDS,
+    PORTAL_STEP_UP,
+};
 pub use drops::{AddTo, DropRefusal, DropTarget, DROP_EVENT, DROP_PARAM, DROP_TARGETS, MAX_DROP};
+pub use matching::ReferenceMatch;
 pub use records::{
     Hit, Records, Reference, Referrers, Refusal, Resolved, MAX_PER_KIND, MAX_SEARCH_KINDS,
     PICKER_HITS,
@@ -83,6 +88,17 @@ inventory::submit! { Contribution::new(DEFINITIONS, PICKER_HITS, provenance!(), 
 /// - a holder's Grid table exists with both of its fields.
 pub fn validate_installed(catalog: &Catalog) -> bilibi_module_registry::Result<()> {
     let installed = bilibi_grid::installed()?;
+    for table in installed.tables() {
+        if let Some(subject) = table.subject() {
+            if !declaration::key_shaped(subject.kind) {
+                return Err(RegistryError::Contribution(format!(
+                    "Grid table {} names an invalid subject kind: {}",
+                    table.id(),
+                    subject.kind
+                )));
+            }
+        }
+    }
     let routes: Vec<&Route> = catalog
         .entries::<Route>(ROUTES)?
         .iter()
@@ -141,6 +157,35 @@ pub fn validate_installed(catalog: &Catalog) -> bilibi_module_registry::Result<(
             )));
         }
     }
+    let operations = catalog.entries::<bilibi_step_up::Operation>(bilibi_step_up::OPERATIONS)?;
+    for entry in catalog.entries::<PortalStepUp>(PORTAL_STEP_UP)? {
+        let rule = entry.get::<PortalStepUp>()?;
+        let kind = catalog
+            .entries::<RecordKind>(KINDS)?
+            .iter()
+            .find(|candidate| candidate.id == rule.kind)
+            .ok_or_else(|| {
+                RegistryError::Contribution(format!(
+                    "portal step-up rule {} at {}:{} names an unregistered record kind",
+                    entry.id, entry.provenance.source, entry.provenance.line
+                ))
+            })?;
+        if kind.provenance.module != entry.provenance.module {
+            return Err(RegistryError::Contribution(format!(
+                "portal step-up rule {} at {}:{} is not contributed by record owner {}",
+                entry.id, entry.provenance.source, entry.provenance.line, kind.provenance.module
+            )));
+        }
+        if !operations
+            .iter()
+            .any(|operation| operation.id == rule.operation)
+        {
+            return Err(RegistryError::Contribution(format!(
+                "portal step-up rule {} at {}:{} names undeclared operation {}",
+                entry.id, entry.provenance.source, entry.provenance.line, rule.operation
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -164,6 +209,11 @@ fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry:
         .iter()
         .map(|entry| entry.get::<DropTarget>())
         .collect::<bilibi_module_registry::Result<_>>()?;
+    let portal_step_up = catalog
+        .entries::<PortalStepUp>(PORTAL_STEP_UP)?
+        .iter()
+        .map(|entry| entry.get::<PortalStepUp>().map(|rule| (rule.kind, rule)))
+        .collect::<bilibi_module_registry::Result<_>>()?;
     Ok(Records {
         db: services
             .get::<bilibi_database::Db>("base/database.pool")?
@@ -173,16 +223,20 @@ fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry:
         kinds,
         holders,
         drop_targets,
+        portal_step_up,
+        step_up: services.get(bilibi_step_up::SERVICE)?,
     })
 }
 
 inventory::submit! {
     Module {
         id: "base/records", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/grid", "base/ui", "base/settings", "base/agent_api"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/grid", "base/ui", "base/settings", "base/agent_api", "base/step_up"],
         migrations: &[("base-records-001-redirects", include_str!("../migrations/001-redirects.sql"))],
         services: &[Service { id: SERVICE, factory: |services| {
             let records = Arc::new(build(services)?);
+            // Grid reads a table's subject as its survivor (#877).
+            bilibi_grid::bind_survivors(bilibi_grid::Survivors { relation: matching::SURVIVORS_SQL, access: records.clone() })?;
             operations::bind(records.clone())?;
             Ok(records)
         } }],

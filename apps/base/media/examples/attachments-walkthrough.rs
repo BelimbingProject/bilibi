@@ -124,7 +124,9 @@ async fn main() -> DbResult<()> {
         std::env::var("BILIBI_MEDIA_DEMO_ROOT").map_err(|_| bilibi_database::Error::Invalid)?;
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| bilibi_database::Error::Invalid)?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client.batch_execute("CREATE TABLE IF NOT EXISTS walkthrough_tickets(id text NOT NULL, tenant_id bigint NOT NULL, open boolean NOT NULL, denied text[] NOT NULL DEFAULT '{}', PRIMARY KEY(id, tenant_id))").await?;
     client.batch_execute("INSERT INTO walkthrough_tickets(id,tenant_id,open) VALUES('1',1,true),('2',1,false),('3',1,true),('9',2,true) ON CONFLICT (id,tenant_id) DO UPDATE SET open=excluded.open, denied='{}'").await?;
     if std::env::args().nth(1).as_deref() == Some("serve") {
@@ -135,7 +137,7 @@ async fn main() -> DbResult<()> {
             .map_err(internal)?;
         println!("Bilibi (with the fixture ticket owner) at {origin}");
         let app = bilibi_web::App::new(db.clone(), &origin)?;
-        return axum::serve(listener, bilibi_web::router(app))
+        return axum::serve(listener, bilibi_web::staff_router(app))
             .await
             .map_err(internal);
     }
@@ -412,6 +414,69 @@ async fn main() -> DbResult<()> {
         "ticket 1 reopened",
         fetch(&media, &client, &actor, &receipt.public_id).await,
     );
+
+    println!("== every delivery and every owner refusal is an audit action (#568)");
+    // Alex Admin (4) viewing as Ada Manager (1), as an impersonated session does.
+    let impersonated_reader = authentication
+        .authenticate_session(&**client, 1, 1, Some(4), None, String::new())
+        .await?;
+    let mark = count(
+        &client,
+        "SELECT coalesce(max(id),0) FROM base_audit_actions",
+    )
+    .await?;
+    show(
+        "the operator, viewing as the uploader, downloads the png",
+        fetch(&media, &client, &impersonated_reader, &receipt.public_id).await,
+    );
+    client
+        .batch_execute(
+            "UPDATE walkthrough_tickets SET denied='{download}' WHERE id='1' AND tenant_id=1",
+        )
+        .await?;
+    show(
+        "owner denies download again",
+        fetch(&media, &client, &actor, &receipt.public_id).await,
+    );
+    client
+        .batch_execute("UPDATE walkthrough_tickets SET denied='{}' WHERE id='1' AND tenant_id=1")
+        .await?;
+    let trail = client
+        .query(
+            "SELECT event, actor_id, impersonator_id, coalesce(payload->>'reason',''), payload->>'attachment', payload->>'subject_type', payload->>'subject_id', payload::text \
+             FROM base_audit_actions WHERE tenant_id=1 AND id > $1 AND event LIKE 'media.attachment.download%' ORDER BY id",
+            &[&mark],
+        )
+        .await?;
+    for row in &trail {
+        println!(
+            "audit {} actor={} impersonator={:?} reason={:?}",
+            row.get::<_, String>(0),
+            row.get::<_, i64>(1),
+            row.get::<_, Option<i64>>(2),
+            row.get::<_, String>(3)
+        );
+    }
+    let named = |row: &tokio_postgres::Row| {
+        row.get::<_, Option<String>>(4).as_deref() == Some(receipt.public_id.as_str())
+            && row.get::<_, Option<String>>(5).as_deref() == Some(TICKET)
+            && row.get::<_, Option<String>>(6).as_deref() == Some("1")
+            && !row.get::<_, String>(7).contains("receipt.png")
+    };
+    let recorded = trail.len() == 2
+        && trail[0].get::<_, String>(0) == "media.attachment.downloaded"
+        && trail[0].get::<_, i64>(1) == 1
+        && trail[0].get::<_, Option<i64>>(2) == Some(4)
+        && trail[1].get::<_, String>(0) == "media.attachment.download_refused"
+        && trail[1].get::<_, i64>(1) == 1
+        && trail[1].get::<_, Option<i64>>(2).is_none()
+        && trail[1].get::<_, String>(3) == "forbidden"
+        && trail.iter().all(named);
+    if !recorded {
+        println!("download audit trail is wrong");
+        return Err(bilibi_database::Error::Internal);
+    }
+    println!("download audit: the delivery names the operator behind the session, the refusal its reason; neither names the file");
 
     println!("== submit and retain join the owner's transaction");
     let ids = [receipt.public_id.as_str()];
@@ -736,6 +801,76 @@ async fn main() -> DbResult<()> {
     client
         .batch_execute("SET session_replication_role = DEFAULT")
         .await?;
+
+    println!("== an uploader keeps at most 200 unsubmitted drafts (#570)");
+    let unretained = "SELECT count(*) FROM base_media_attachments WHERE tenant_id=1 AND uploaded_by_id=2 AND state='draft' AND retained_at IS NULL";
+    let mut first_capped = None;
+    while count(&client, unretained).await? < 200 {
+        let draft = media
+            .upload_attachment(
+                &mut client,
+                &peer,
+                ticket("3"),
+                upload("bulk.txt", b"One of many drafts.\n"),
+                Rules::default(),
+            )
+            .await
+            .map_err(internal)?;
+        first_capped.get_or_insert(draft.public_id);
+    }
+    let over = media
+        .upload_attachment(
+            &mut client,
+            &peer,
+            ticket("3"),
+            upload("one-too-many.txt", b"Over the cap.\n"),
+            Rules::default(),
+        )
+        .await;
+    println!(
+        "draft 201 of one uploader: {}",
+        over.as_ref()
+            .map_or_else(|e| e.to_string(), |_| "stored".into())
+    );
+    if !matches!(over, Err(bilibi_media::Error::TooManyDrafts)) {
+        return Err(bilibi_database::Error::Invalid);
+    }
+    let first = first_capped.ok_or(bilibi_database::Error::Internal)?;
+    // Demonstration only, as below: one of them is a day and a half old.
+    client
+        .batch_execute("SET session_replication_role = replica")
+        .await?;
+    client.execute("UPDATE base_media_attachments SET created_at=now()-interval '36 hours' WHERE public_id=$1", &[&first]).await?;
+    client
+        .batch_execute("SET session_replication_role = DEFAULT")
+        .await?;
+    let room = media
+        .upload_attachment(
+            &mut client,
+            &peer,
+            ticket("3"),
+            upload(
+                "room-made.txt",
+                b"Room made by removing an abandoned draft.\n",
+            ),
+            Rules::default(),
+        )
+        .await;
+    let gone = count(
+        &client,
+        &format!("SELECT count(*) FROM base_media_attachments WHERE public_id='{first}'"),
+    )
+    .await?
+        == 0;
+    println!(
+        "with one draft older than 24 hours, the next upload {} and the abandoned draft is removed: {gone}",
+        if room.is_ok() { "is stored" } else { "is refused" }
+    );
+    if room.is_err() || !gone || count(&client, unretained).await? != 200 {
+        return Err(bilibi_database::Error::Invalid);
+    }
+    let others = count(&client, "SELECT count(*) FROM base_media_attachments WHERE tenant_id=1 AND uploaded_by_id=1 AND state='draft'").await?;
+    println!("Ada's own drafts are not counted or removed: {others} remain");
 
     println!("== audit evidence");
     for row in client.query("SELECT event,auditable_type,actor_type,count(*) FROM base_audit_mutations WHERE auditable_type='base/media/attachment' GROUP BY 1,2,3 ORDER BY 1", &[]).await? {

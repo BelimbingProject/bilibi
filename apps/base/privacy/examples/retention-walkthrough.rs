@@ -118,6 +118,19 @@ async fn put(
         .await?;
     tx.commit().await
 }
+/// A statement the database must refuse.
+async fn sql_refused(client: &Client, label: &str, sql: &str) -> Result<()> {
+    match client.batch_execute(sql).await {
+        Ok(()) => Err(format!("{label}: was not refused").into()),
+        Err(error) => {
+            println!(
+                "{label}: refused — {}",
+                error.as_db_error().map_or("error", |e| e.message())
+            );
+            Ok(())
+        }
+    }
+}
 /// Queues a run now and waits for the queue to finish it.
 async fn sweep(
     app: &bilibi_web::App,
@@ -177,7 +190,9 @@ async fn main() -> Result<()> {
     }
     let grants = app.services.get::<Grants>("base/authz.grants")?;
     grants.reconcile().await?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client
         .batch_execute(
             "INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(2,5,'privacy.retention.view') ON CONFLICT DO NOTHING",
@@ -195,6 +210,49 @@ async fn main() -> Result<()> {
     let [accounts_on, accounts_days, accounts_minimum] = setting_keys("core/user.closed_accounts");
     let [notices_on, notices_days, _] = setting_keys("core/user.notifications");
     let [invitations_on, invitations_days, _] = setting_keys("core/user.lapsed_invitations");
+    let [portal_on, portal_days, _] = setting_keys("core/portal.invitations");
+    let [actions_on, actions_days, _] = setting_keys("base/privacy.audit_actions");
+
+    // Synthetic portal lifecycle rows: expiration alone, early revocation,
+    // acceptance, a still-live link, a recent acceptance of an old invitation,
+    // two holds, another tenant, and another company's unchanged policy.
+    client.batch_execute("INSERT INTO persons(id,tenant_id,code,name,kind) VALUES(45105,1,'held_invitee','Held Invitee','human'); \
+        INSERT INTO customer_invitations(id,tenant_id,person_id,name,email,token_hash,invited_by,expires_at,accepted_at,user_id,revoked_at,affiliation_id,organisation_id,created_at) OVERRIDING SYSTEM VALUE \
+        SELECT 45200+n,tenant,person,'Retention Invitee','retention-'||n||'@example.test',decode(lpad(to_hex(45200+n),8,'0'),'hex'),4,expiry,accepted,CASE WHEN accepted IS NOT NULL THEN 2 END,revoked,affiliation,company,now()-interval '70 days' \
+        FROM (VALUES \
+          (1,1,1,now()-interval '40 days',NULL::timestamptz,now()-interval '2 days',NULL::bigint,NULL::bigint), \
+          (2,1,1,now()+interval '5 days',NULL,now()-interval '40 days',NULL,NULL), \
+          (3,1,1,now()+interval '5 days',now()-interval '40 days',NULL,NULL,NULL), \
+          (4,1,1,now()+interval '5 days',NULL,NULL,NULL,NULL), \
+          (5,1,1,now()+interval '5 days',now()-interval '2 days',NULL,NULL,NULL), \
+          (6,1,1,now()-interval '40 days',NULL,NULL,NULL,NULL), \
+          (7,1,45105,now()-interval '40 days',NULL,NULL,NULL,NULL), \
+          (8,2,1,now()-interval '40 days',NULL,NULL,NULL,NULL), \
+          (9,1,2,now()-interval '40 days',NULL,NULL,2,2)) \
+          AS fixture(n,tenant,person,expiry,accepted,revoked,affiliation,company); \
+        INSERT INTO customer_invitations(tenant_id,person_id,name,email,token_hash,invited_by,expires_at) \
+        SELECT 1,1,'Batched Invitee','batch-'||n||'@example.test',decode(lpad(to_hex(45300+n),8,'0'),'hex'),4,now()-interval '40 days' FROM generate_series(1,205) n;").await?;
+    let portal_record_hold = privacy
+        .place_hold(
+            &mut client,
+            &admin,
+            HoldTarget::Record {
+                kind: "portal.invitation".into(),
+                id: 45206,
+            },
+            "Invitation record hold",
+        )
+        .await?;
+    let portal_person_hold = privacy
+        .place_hold(
+            &mut client,
+            &admin,
+            HoldTarget::Person {
+                person: bilibi_party_ids::PersonId::new(45105)?,
+            },
+            "Invitee hold",
+        )
+        .await?;
 
     println!("== record classes: nothing is swept until a company chooses");
     classes(&privacy, &client, &admin, "tenant 1").await?;
@@ -262,7 +320,11 @@ async fn main() -> Result<()> {
     );
     println!("-- the period and the minimum saved at the same moment");
     let (a, b) = {
-        let (mut first, mut second) = (db.get().await?, db.get().await?);
+        let (mut first, mut second) = (
+            db.get_detached("the walkthrough's own checking connection")
+                .await?,
+            db.get().await?,
+        );
         tokio::join!(
             put(
                 &boundary,
@@ -358,6 +420,58 @@ async fn main() -> Result<()> {
              VALUES (1,2,'viewer-invited@example.test','\\x03'::bytea,1,now()-interval '60 days',now()-interval '59 days');",
         )
         .await?;
+    // #566: a closed account whose accepted invitation is held, and a lapsed
+    // invitation whose prepared account is held. Each hold keeps the pair.
+    let held_pair = client
+        .query_one(
+            "WITH n AS (SELECT nextval(pg_get_serial_sequence('users','id'))::bigint AS user_id), \
+             i AS (INSERT INTO user_identities(kind,email,password_hash,last_tenant_id) SELECT 'staff','held-closed@example.test','walkthrough',1 FROM n RETURNING id), \
+             closed AS (INSERT INTO users(id,tenant_id,identity_id,name,status,deleted_at) SELECT n.user_id,1,i.id,'Held Closed','deleted',now()-interval '40 days' FROM i CROSS JOIN n RETURNING id), \
+             accepted AS (INSERT INTO user_invitations(tenant_id,user_id,email,token_hash,invited_by,expires_at,accepted_at) SELECT 1,id,'held-accepted@example.test','\\x04'::bytea,1,now()-interval '60 days',now()-interval '59 days' FROM closed RETURNING id), \
+             prepared AS (INSERT INTO users(tenant_id,name,status) VALUES (1,'Held Invitee','invited') RETURNING id), \
+             lapsed AS (INSERT INTO user_invitations(tenant_id,user_id,email,token_hash,invited_by,expires_at) SELECT 1,id,'held-lapsed@example.test','\\x05'::bytea,1,now()-interval '40 days' FROM prepared RETURNING id) \
+             SELECT (SELECT id FROM closed),(SELECT id FROM accepted),(SELECT id FROM prepared),(SELECT id FROM lapsed)",
+            &[],
+        )
+        .await?;
+    let (held_closed, held_accepted, held_prepared, held_lapsed): (i64, i64, i64, i64) = (
+        held_pair.get(0),
+        held_pair.get(1),
+        held_pair.get(2),
+        held_pair.get(3),
+    );
+    let accepted_hold = privacy
+        .place_hold(
+            &mut client,
+            &admin,
+            HoldTarget::Record {
+                kind: "user.invitation".into(),
+                id: held_accepted,
+            },
+            "Accepted invitation evidence",
+        )
+        .await?;
+    let prepared_hold = privacy
+        .place_hold(
+            &mut client,
+            &admin,
+            HoldTarget::Record {
+                kind: "user".into(),
+                id: held_prepared,
+            },
+            "Prepared account evidence",
+        )
+        .await?;
+    // A held pair, as one query: `held` is whether both are untouched.
+    const PAIRS: &str = "SELECT \
+        (SELECT name='Held Closed' AND anonymised_at IS NULL FROM users WHERE tenant_id=1 AND id=$1) \
+        AND (SELECT email='held-accepted@example.test' FROM user_invitations WHERE tenant_id=1 AND id=$2) \
+        AND (SELECT name='Held Invitee' AND status='invited' FROM users WHERE tenant_id=1 AND id=$3) \
+        AND (SELECT email='held-lapsed@example.test' AND revoked_at IS NULL FROM user_invitations WHERE tenant_id=1 AND id=$4), \
+        (SELECT name<>'Held Closed' AND anonymised_at IS NOT NULL FROM users WHERE tenant_id=1 AND id=$1) \
+        AND (SELECT email LIKE 'erased-inv-%' FROM user_invitations WHERE tenant_id=1 AND id=$2) \
+        AND (SELECT name<>'Held Invitee' AND status='deleted' FROM users WHERE tenant_id=1 AND id=$3) \
+        AND (SELECT email LIKE 'erased-inv-%' AND revoked_at IS NOT NULL FROM user_invitations WHERE tenant_id=1 AND id=$4)";
     // Audit evidence of user 2: one row inside a 30-day legal minimum, one older.
     client
         .batch_execute(
@@ -455,6 +569,34 @@ async fn main() -> Result<()> {
     .await?;
 
     println!("== company 1 turns both classes on");
+    let untouched: i64 = client
+        .query_one(
+            "SELECT count(*) FROM customer_invitations WHERE tenant_id=1 AND name='[erased]'",
+            &[],
+        )
+        .await?
+        .get(0);
+    if untouched != 0 {
+        return Err("portal invitations swept before class opt-in".into());
+    }
+    put(
+        &boundary,
+        &settings,
+        &mut client,
+        &admin,
+        &portal_days,
+        json!(30),
+    )
+    .await?;
+    put(
+        &boundary,
+        &settings,
+        &mut client,
+        &admin,
+        &portal_on,
+        json!(true),
+    )
+    .await?;
     show(
         "closed accounts on",
         put(
@@ -503,7 +645,94 @@ async fn main() -> Result<()> {
         }
         .await,
     );
+    // The action ledger (class `base/privacy.audit_actions`): 230 actions of
+    // tenant 1 past the period (one recorded as retained, one bookmarked), a
+    // recent one, and one of tenant 2, which did not turn the class on.
+    client.batch_execute("INSERT INTO base_audit_actions(tenant_id,actor_type,actor_id,ip_address,url,user_agent,event,payload,is_retained,occurred_at) \
+        SELECT 1,'user',4,'203.0.113.9','https://bilibi.test/people?email=old@example.test','Firefox','walkthrough.retention',jsonb_build_object('status',200,'email','old@example.test'),n=1,now()-interval '90 days' FROM generate_series(1,230) n; \
+        INSERT INTO base_audit_action_metadata(action_id,is_retained,partition_month) SELECT id,true,partition_month FROM base_audit_actions WHERE event='walkthrough.retention' ORDER BY id DESC LIMIT 1; \
+        INSERT INTO base_audit_actions(tenant_id,actor_type,actor_id,ip_address,url,user_agent,event,payload,occurred_at) VALUES \
+          (1,'user',4,'203.0.113.9','https://bilibi.test/recent','Firefox','walkthrough.retention.recent','{\"status\":200}',now()-interval '2 days'), \
+          (2,'user',5,'203.0.113.9','https://bilibi.test/other','Firefox','walkthrough.retention','{\"status\":200}',now()-interval '90 days');").await?;
+    show(
+        "audit actions on, 30 days",
+        async {
+            put(
+                &boundary,
+                &settings,
+                &mut client,
+                &admin,
+                &actions_days,
+                json!(30),
+            )
+            .await?;
+            put(
+                &boundary,
+                &settings,
+                &mut client,
+                &admin,
+                &actions_on,
+                json!(true),
+            )
+            .await
+        }
+        .await,
+    );
     sweep(&app, &mut client, &admin, "run 2").await?;
+    let actions_result: bool = client.query_one("SELECT \
+        (SELECT count(*)=228 FROM base_audit_actions WHERE tenant_id=1 AND event='walkthrough.retention' AND erased_at IS NOT NULL AND ip_address IS NULL AND url IS NULL AND user_agent IS NULL \
+           AND payload=jsonb_build_object('email','[erased]','status','[erased]') AND actor_id=4 AND chain_seq IS NOT NULL) \
+        AND (SELECT count(*)=2 FROM base_audit_actions WHERE tenant_id=1 AND event='walkthrough.retention' AND erased_at IS NULL AND url IS NOT NULL AND payload->>'email'='old@example.test') \
+        AND EXISTS(SELECT 1 FROM base_audit_actions WHERE event='walkthrough.retention.recent' AND erased_at IS NULL AND url IS NOT NULL) \
+        AND EXISTS(SELECT 1 FROM base_audit_actions WHERE tenant_id=2 AND event='walkthrough.retention' AND erased_at IS NULL AND url IS NOT NULL) \
+        AND EXISTS(SELECT 1 FROM base_privacy_sweeps WHERE tenant_id=1 AND class='base/privacy.audit_actions' AND acted=228 AND kept=2 AND batches>1 AND finished_at IS NOT NULL) \
+        AND (SELECT coalesce(sum(action_rows),0)=228 FROM base_audit_action_erasures WHERE tenant_id=1) \
+        AND (SELECT finished AND reason IS NULL FROM base_audit_verify_range('actions',1,0,''::bytea,100000))", &[]).await?.get(0);
+    if !actions_result {
+        return Err(
+            "action ledger retention: erased rows, retained exemption, tenant isolation, ledger or chain failed".into(),
+        );
+    }
+    println!("audit actions retention: 228 actions lost their address, URL, browser and payload values across batches; the 2 retained, the recent one and the other tenant's kept theirs; the chain holds");
+    rows(&client, "action erasure ledger", "SELECT 'sweep '||sweep_id||' actions '||first_id||'-'||last_id||' erased='||action_rows||' kept='||kept_rows FROM base_audit_action_erasures ORDER BY id").await?;
+    sql_refused(
+        &client,
+        "erase an action row directly",
+        "UPDATE base_audit_actions SET erased_at=now() WHERE event='walkthrough.retention.recent'",
+    )
+    .await?;
+    sql_refused(&client, "erase actions without an open sweep", "SELECT base_audit_erase_actions(1,999999,now()-interval '30 days',0,10,'user',4,'walkthrough')").await?;
+    let portal_result: bool = client.query_one("SELECT \
+        (SELECT count(*)=208 FROM customer_invitations WHERE tenant_id=1 AND name='[erased]' AND email='[erased]' AND (accepted_at IS NOT NULL OR revoked_at IS NOT NULL)) \
+        AND NOT EXISTS(SELECT 1 FROM customer_invitations WHERE id BETWEEN 45204 AND 45209 AND name='[erased]') \
+        AND EXISTS(SELECT 1 FROM base_privacy_sweeps WHERE tenant_id=1 AND class='core/portal.invitations' AND acted=208 AND kept=2 AND batches>1 AND finished_at IS NOT NULL)", &[]).await?.get(0);
+    if !portal_result {
+        return Err(
+            "portal retention lifecycle, company/tenant isolation, hold or batching failed".into(),
+        );
+    }
+    println!("portal retention: 208 anonymised across batches; live/recent/held/other-company/other-tenant preserved");
+    let pairs = client
+        .query_one(
+            PAIRS,
+            &[&held_closed, &held_accepted, &held_prepared, &held_lapsed],
+        )
+        .await?;
+    let lapsed_kept: bool = client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM base_privacy_sweeps WHERE tenant_id=1 AND class='core/user.lapsed_invitations' AND kept=1) \
+             AND EXISTS(SELECT 1 FROM user_invitations WHERE tenant_id=1 AND email LIKE 'erased-inv-%' AND accepted_at IS NULL)",
+            &[],
+        )
+        .await?
+        .get(0);
+    if !pairs.get::<_, bool>(0) || !lapsed_kept {
+        return Err(
+            "a held invitation or prepared account was anonymised, or the hold was not counted"
+                .into(),
+        );
+    }
+    println!("invitation holds: the held accepted invitation kept its closed account, the held prepared account kept its lapsed invitation; the unheld ones were swept");
     rows(&client, "invitation", "SELECT v.email||' '||u.name||' '||u.status||' accepted='||(v.accepted_at IS NOT NULL)||' closed='||(v.revoked_at IS NOT NULL) FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id WHERE v.tenant_id=1 AND (v.email LIKE '%invitee%' OR v.email LIKE '%invited%' OR v.email LIKE 'erased-inv-%') ORDER BY v.id").await?;
     rows(&client, "user", "SELECT u.id||' '||u.name||' '||i.email||' '||u.status||' anonymised='||(u.anonymised_at IS NOT NULL) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=1 AND u.id IN (2,3,7) ORDER BY u.id").await?;
     rows(
@@ -521,8 +750,32 @@ async fn main() -> Result<()> {
 
     println!("== the hold is released; the next run acts on user 3");
     privacy
+        .release_hold(
+            &mut client,
+            &admin,
+            portal_record_hold.id,
+            "Invitation evidence released",
+        )
+        .await?;
+    privacy
+        .release_hold(
+            &mut client,
+            &admin,
+            portal_person_hold.id,
+            "Invitee evidence released",
+        )
+        .await?;
+    privacy
         .release_hold(&mut client, &admin, hold.id, "Tribunal closed")
         .await?;
+    for (id, reason) in [
+        (accepted_hold.id, "Accepted invitation evidence released"),
+        (prepared_hold.id, "Prepared account evidence released"),
+    ] {
+        privacy
+            .release_hold(&mut client, &admin, id, reason)
+            .await?;
+    }
     privacy
         .release_hold(
             &mut client,
@@ -532,6 +785,22 @@ async fn main() -> Result<()> {
         )
         .await?;
     sweep(&app, &mut client, &admin, "run 3").await?;
+    let released: i64 = client.query_one("SELECT count(*) FROM customer_invitations WHERE tenant_id=1 AND id IN (45206,45207) AND name='[erased]' AND email='[erased]'", &[]).await?.get(0);
+    if released != 2 {
+        return Err("released invitation holds did not resume retention".into());
+    }
+    let pairs = client
+        .query_one(
+            PAIRS,
+            &[&held_closed, &held_accepted, &held_prepared, &held_lapsed],
+        )
+        .await?;
+    if !pairs.get::<_, bool>(1) {
+        return Err(
+            "released invitation and account holds did not let the sweep finish both".into(),
+        );
+    }
+    println!("invitation holds released: the closed account, its invitation, the lapsed invitation and its prepared account are anonymised");
     rows(&client, "user", "SELECT u.id||' '||u.name||' '||i.email||' anonymised='||(u.anonymised_at IS NOT NULL) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=1 AND u.id IN (2,3,7) ORDER BY u.id").await?;
     rows(&client, "sweep", "SELECT id||' '||class||' acted='||acted||' kept='||kept FROM base_privacy_sweeps ORDER BY id DESC LIMIT 2").await?;
 

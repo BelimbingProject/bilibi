@@ -438,14 +438,8 @@ struct Browser<'a> {
 impl PlanAuthority for Browser<'_> {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(Error::Unauthorized)?;
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.check(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })
@@ -705,7 +699,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             .await?;
         let listener = tokio::net::TcpListener::bind(bind).await?;
         println!("Pick-lists reference listening at {origin}/admin/picklists and {origin}/reference/cases");
-        axum::serve(listener, bilibi_web::router(app))
+        axum::serve(listener, bilibi_web::staff_router(app))
             .with_graceful_shutdown(async {
                 let _ = tokio::signal::ctrl_c().await;
             })
@@ -743,9 +737,11 @@ async fn agent(
         Ok::<_, Error>(count)
     };
     println!("-- reviewed writes (agent operations)");
-    let client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let lists = registry
-        .call(&**client, &admin, "base.picklists.lists", &json!({}))
+        .call(&mut **client, &admin, "base.picklists.lists", &json!({}))
         .await?;
     println!(
         "base.picklists.lists: {:?}",
@@ -758,7 +754,7 @@ async fn agent(
     );
     let values = registry
         .call(
-            &**client,
+            &mut **client,
             &admin,
             "base.picklists.values",
             &json!({"list": CATEGORY}),

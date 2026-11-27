@@ -7,8 +7,6 @@ Read this file and `DESIGN.md` (UI design) before changing code, templates, migr
 
 The GitHub organization is **BelimbingProject**, renamed from **BelimbingApp** in November 2026. The old organization name is not ours, so never trust it. Official repositories: [`bilibi`](https://github.com/BelimbingProject/bilibi), [`bilibi-app-maker`](https://github.com/BelimbingProject/bilibi-app-maker), [`bilibi-dom-finance`](https://github.com/BelimbingProject/bilibi-dom-finance), [`bilibi-dom-commerce`](https://github.com/BelimbingProject/bilibi-dom-commerce), [`bilibi-dom-people`](https://github.com/BelimbingProject/bilibi-dom-people), [`bilibi-dom-people-connector`](https://github.com/BelimbingProject/bilibi-dom-people-connector), [`bilibi-dom-factory`](https://github.com/BelimbingProject/bilibi-dom-factory), and [`bilibi-dom-supply-chain`](https://github.com/BelimbingProject/bilibi-dom-supply-chain).
 
-**Temporary, remove after 2026-11-08:** The GitHub organization was renamed from `BelimbingApp` to `BelimbingProject`; the old name is not ours, so never trust or fetch it. Run `./bilibi update` to repoint old remotes, or run `git remote set-url origin https://github.com/BelimbingProject/<repo>` by hand in the Platform clone and in each mounted `apps/domains/<id>` and `apps/extensions/<id>` checkout.
-
 Folder guides hold the mistakes that recur in that folder. Open the one you are about to work in:
 
 - `apps/AGENTS.md`: authorization, actor, clocks and routes in any module
@@ -16,6 +14,8 @@ Folder guides hold the mistakes that recur in that folder. Open the one you are 
 - `apps/base/media/AGENTS.md`: uploads, private files, attachments
 - `apps/base/dashboard/AGENTS.md`: dashboard panels
 - `apps/domains/AGENTS.md`, `apps/extensions/AGENTS.md`: mounting Domains and Extensions
+
+Before writing a small helper, read `apps/base/HELPERS.md`.
 
 Authoritative contracts (point to them, do not copy them): `apps/base/module_registry/README.md` (descriptors, contributions, boot validation), `apps/web/README.md` (routes, downloads, access, agent edge), `apps/base/database/README.md` and `apps/base/audit/README.md` (writes and audit), `docs/live-pages.md` and `docs/inline-editing.md`, and the README of the module you edit.
 
@@ -26,7 +26,7 @@ Authoritative contracts (point to them, do not copy them): `apps/base/module_reg
 - **Deep modules.** One small facade per module; the crate root exports the facade, its service ID and its public types, everything else is private (`mod`, not `pub mod`). Do not widen a surface to reach a helper. Narrow existing extra `pub mod`s when you touch them.
 - **Clean breaks, no shims.** When you rename, move or narrow something, move every caller in the same change (with companion PRs) instead of leaving aliases, re-exports, wrappers or deprecated copies of the old form. Record the old -> new mapping in the PR's upgrade notes for code outside the catalogue. This holds while breaking changes are cheap (Bilibi pre-1.0, few consumers); revisit when they become too costly.
 - **No production users yet (until 2027-01-01).** Never build data imports, backfills, conversion of existing rows, or compatibility tables, columns or code paths; replace or drop them in a new migration. Development and walkthrough databases are disposable. After 2027-01-01 this rule no longer applies: ask the owner whether to extend it before relying on it.
-- **Configurable.** A value an operator could reasonably set is a setting with an operator UI (`base/settings`, `base/settings_editor`), not a constant or an environment-only value. Secrets are encrypted, never shown back, never logged.
+- **Configurable.** A value an operator could reasonably set is a setting, not a constant or an environment-only value; its human interface follows [ADR 33](docs/architecture/decisions/33-pages-for-business-actions-and-customisations.md). Secrets are encrypted, never shown back, never logged.
 
 ## Modules and dependencies
 
@@ -45,14 +45,14 @@ Authoritative contracts (point to them, do not copy them): `apps/base/module_reg
 - **Writes go through `MutationBoundary`**, returning every affected record as a `Change`. Never insert audit rows, open an inner transaction or publish notifications by hand.
 - **Authorization.** Capabilities are declared in the module's vocabulary contribution; an unknown key fails closed; direct denies win. The owner rechecks inside its mutation transaction.
 - **Migrations** are embedded in the owning module, ID `<layer>-<module>-NNN-<slug>` (mounted: `<name>-<module>-NNN-<slug>`, where `<name>` is the Domain or Extension). Never edit an applied migration. Nothing migrates or seeds on boot.
-- **Use the platform, do not hand-roll:** files `base/media`, documents `base/artifacts`, jobs `base/queue`, mail `base/mail`, outbound HTTP `base/integration`, time `bilibi_datetime` (store UTC).
+- **Use the platform, do not hand-roll:** before designing any feature, read `apps/base/CAPABILITIES.md` (approvals, history, notifications, files, jobs, schedules, settings, time and the rest of Base) and build on the module it names; store time in UTC.
 - **Agents.** Expose an operation with an `agent_api` contribution that calls your facade with the scope it receives. No endpoint per module.
 - Askama escapes by default: keep `|safe` inside the shared macros, never `Html::raw` on request data. Never build identifiers or SQL fragments from request input.
 - Never commit or log secrets, session IDs or tokens, including in fixtures and evidence.
 
 ## UI
 
-`DESIGN.md` is the design source; `apps/base/ui/AGENTS.md` holds the recurring mistakes.
+`DESIGN.md` is the design source; run its Page review checklist on every page you change. `apps/base/ui/AGENTS.md` holds the recurring mistakes.
 
 - Use the shared Askama macros and typed models of `base/ui` for every page element. No hand-written markup or copied classes.
 - Every list uses `FlexTable` on `ListState`, never the plain `Table`.

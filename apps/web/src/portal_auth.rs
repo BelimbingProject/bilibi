@@ -1,23 +1,22 @@
 //! The portal's credential pages (ADR 16): sign-in, forgotten password, reset
-//! and invitation, each under the address of its tenant's portal site
-//! (`/portal/sign-in/{site}`), which names the tenant and brands the card.
-//! Core Portal answers which site an address names and redeems
-//! invitations; Core User proves credentials. Like the staff pages in
+//! and invitation, on the public site whose hostname names the tenant and
+//! brands the card (`base/public` resolved it at the door). Core Portal
+//! answers whether that site's portal is on and redeems invitations; Core User proves credentials. Like the staff pages in
 //! `auth.rs`, these are plain forms: a POST re-renders the card with its
 //! errors and a completed step redirects, here with a fixed `done` key in the
 //! query, never free text.
 //!
 //! The portal cookie (`portal::COOKIE`) is set here and nowhere else:
-//! `HttpOnly`, `SameSite=Lax`, `Path=/portal` and `Secure` on an `https`
-//! origin, holding the fresh token each sign-in issues (the sign-in form, or
+//! `HttpOnly`, `SameSite=Lax`, `Path=/` and `Secure`, holding the fresh token
+//! each sign-in issues (the sign-in form, or
 //! accepting an invitation, which signs the customer in). One browser holds one
-//! portal session: signing in to another tenant's portal ends the session the
-//! cookie held before.
+//! portal session on a public hostname: signing in to another tenant's portal
+//! ends the session the cookie held before.
 use crate::{
     api,
     auth::{
-        bounded, recovery_allowed, secure, validate_confirmation, validate_email,
-        validate_new_password, validate_required, RECOVERY_THROTTLED,
+        bounded, recovery_allowed, validate_confirmation, validate_email, validate_new_password,
+        validate_required, RECOVERY_THROTTLED,
     },
     origin, portal, App, HttpError,
 };
@@ -37,15 +36,12 @@ use bilibi_user::CredentialError;
 use serde::Deserialize;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-/// Remembers the portal a browser last signed in to, so `/portal/sign-in`
-/// (where a signed-out portal page sends the customer) can return there.
-const SITE_COOKIE: &str = "bilibi_portal_site";
 /// The brand of a card whose site is unknown: no tenant is named.
 const UNNAMED: &str = "Customer portal";
 /// Holds a customer's pending portal sign-in between its password and its
-/// second step. `HttpOnly`, `Path=/portal/sign-in`, so no other portal page
-/// receives it; completing it still needs the pending credential's own CSRF.
-const PENDING_COOKIE: &str = "bilibi_portal_sign_in";
+/// second step. Like every `__Host-` cookie, it has `Path=/`; completing it
+/// still needs the pending credential's own CSRF.
+const PENDING_COOKIE: &str = "__Host-bilibi_portal_sign_in";
 const INVITATION_INVALID: &str =
     "This invitation link is invalid, already used or expired. Ask the company that invited you for a new one.";
 const ACCOUNT_EXISTS: &str =
@@ -63,9 +59,17 @@ fn access(app: &App) -> Result<Arc<PortalService>, HttpError> {
         .get(bilibi_portal::SERVICE)
         .map_err(Error::from)?)
 }
-async fn site(app: &App, address: &str) -> Result<Option<Site>, HttpError> {
-    Ok(access(app)?.portal_site(address).await?)
+/// The portal of the public site the request reached (its hostname names
+/// it), while the site is on.
+async fn site(app: &App) -> Result<Option<Site>, HttpError> {
+    Ok(access(app)?.portal_site(&app.public_scope()?).await?)
 }
+/// The portal's paths. The hostname names the site, so no path carries its
+/// address.
+const SIGN_IN: &str = "/portal/sign-in";
+const CHALLENGE: &str = "/portal/sign-in/challenge";
+const FORGOT: &str = "/portal/forgot";
+const REGISTER: &str = "/portal/register";
 
 /// A credential card in the portal's document, branded with `brand`.
 fn card(
@@ -98,15 +102,17 @@ fn card(
     // its token, is set for every credential link in `response_headers`.
     Ok(response)
 }
-/// The card for an address no active portal uses.
+/// The card for a site with no portal on (the door already refused an
+/// unknown hostname).
 fn unknown_site() -> Result<Response, HttpError> {
     card(
         None,
         "Portal not found",
         &PortalForm {
+            action: "",
             id: "portal-unknown",
             heading: "Portal not found",
-            intro: "This portal address is not in use. Check the link from the company that invited you.",
+            intro: "This portal is not open. Check the link from the company that invited you.",
             success: "",
             error: "",
             fields: Vec::new(),
@@ -118,27 +124,16 @@ fn unknown_site() -> Result<Response, HttpError> {
     )
 }
 
-fn cookie(app: &App, name: &str, value: &str, max_age: u64) -> Result<HeaderValue, HttpError> {
+fn cookie(name: &str, value: &str, max_age: u64) -> Result<HeaderValue, HttpError> {
     HeaderValue::from_str(&format!(
-        "{name}={value}; HttpOnly; SameSite=Lax; Path=/portal; Max-Age={max_age}{}",
-        secure(app)
+        "{name}={value}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age={max_age}"
     ))
     .map_err(|_| Error::Internal.into())
-}
-fn remembered(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(header::COOKIE)?
-        .to_str()
-        .ok()?
-        .split(';')
-        .find_map(|part| part.trim().strip_prefix(SITE_COOKIE)?.strip_prefix('='))
-        .filter(|address| bilibi_portal::address_shaped(address))
-        .map(str::to_owned)
 }
 /// The tenant of the portal session this browser holds, if one is live.
 async fn signed_in_tenant(app: &App, headers: &HeaderMap) -> Option<i64> {
     let token = portal::token(headers).ok()?;
-    let portal = app.security.guard_portal(&token).await.ok()?;
+    let portal = portal::session(app, &token).await.ok()?;
     Some(portal.scope().tenant())
 }
 fn email_field(form: &str, value: &str, errors: Vec<String>, autofocus: bool) -> Field {
@@ -173,38 +168,6 @@ fn rendered(template: &impl askama::Template) -> Result<Html, HttpError> {
 
 // ---- sign-in -----------------------------------------------------------------
 
-/// `GET /portal/sign-in`, where a signed-out portal page sends the visitor:
-/// the portal it last signed in to, else a notice to open its link.
-pub async fn sign_in_root(
-    State(app): State<App>,
-    headers: HeaderMap,
-) -> Result<Response, HttpError> {
-    if signed_in_tenant(&app, &headers).await.is_some() {
-        return Ok(Redirect::to(portal::HOME).into_response());
-    }
-    if let Some(address) = remembered(&headers) {
-        if site(&app, &address).await?.is_some() {
-            return Ok(Redirect::to(&format!("/portal/sign-in/{address}")).into_response());
-        }
-    }
-    card(
-        None,
-        "Sign in",
-        &PortalForm {
-            id: "portal-sign-in-unknown",
-            heading: "Sign in to your customer portal",
-            intro: "Open the sign-in link from the company that invited you. Each company's portal has its own address.",
-            success: "",
-            error: "",
-            fields: Vec::new(),
-            submit: "",
-            working: "",
-            links: &[],
-        },
-        StatusCode::OK,
-    )
-}
-
 struct SignInCard<'a> {
     email: &'a str,
     email_errors: Vec<String>,
@@ -217,17 +180,15 @@ fn sign_in_card(
     form: SignInCard<'_>,
     status: StatusCode,
 ) -> Result<Response, HttpError> {
-    let forgot = format!("/portal/forgot/{}", site.address);
-    let register = format!("/portal/register/{}", site.address);
     let mut links = vec![PortalCardLink {
         id: "portal-sign-in-forgot",
-        href: &forgot,
+        href: FORGOT,
         label: "Forgot your password?",
     }];
     if site.registration {
         links.push(PortalCardLink {
             id: "portal-sign-in-register",
-            href: &register,
+            href: REGISTER,
             label: "No account yet? Request one",
         });
     }
@@ -235,6 +196,7 @@ fn sign_in_card(
         Some(site),
         "Sign in",
         &PortalForm {
+            action: "",
             id: "portal-sign-in",
             heading: "Sign in",
             intro: "",
@@ -260,15 +222,14 @@ fn sign_in_card(
     )
 }
 
-/// `GET /portal/sign-in/{site}`: the portal's sign-in card, or the portal
-/// itself for a customer already signed in to this one.
+/// `GET /portal/sign-in`: the portal's sign-in card, or the portal itself
+/// for a customer already signed in to this one.
 pub async fn sign_in_page(
     State(app): State<App>,
     headers: HeaderMap,
-    Path(address): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, HttpError> {
-    let Some(site) = site(&app, &address).await? else {
+    let Some(site) = site(&app).await? else {
         return unknown_site();
     };
     if signed_in_tenant(&app, &headers).await == Some(site.tenant) {
@@ -299,18 +260,17 @@ pub struct SignInSubmission {
     #[serde(rename = "portal[password]", default)]
     password: String,
 }
-/// `POST /portal/sign-in/{site}`: the customer's credentials, checked among
+/// `POST /portal/sign-in`: the customer's credentials, checked among
 /// this tenant's customers only. A staff member's credentials here are
 /// refused as a wrong password is.
 pub async fn sign_in(
     State(app): State<App>,
     headers: HeaderMap,
-    Path(address): Path<String>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Form(submission): Form<SignInSubmission>,
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
-    let Some(site) = site(&app, &address).await? else {
+    let Some(site) = site(&app).await? else {
         return unknown_site();
     };
     let email = bounded(&submission.email);
@@ -340,17 +300,12 @@ pub async fn sign_in(
         );
     }
     // Per sender, before any account is looked at, as the staff form does.
-    let sender = api::client_address(
+    let address = api::client_address(
         peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
         &headers,
-    )
-    .map_or_else(|| "unknown".into(), |ip| ip.to_string());
+    );
     let per_minute = app.user.sign_in_per_sender().await?;
-    if !app
-        .api
-        .throttle
-        .allow(&format!("portal-sign-in:{sender}"), per_minute)
-    {
+    if !app.api.admit_person("portal-sign-in", address, per_minute) {
         return refuse(
             SIGN_IN_THROTTLED,
             Vec::new(),
@@ -394,25 +349,20 @@ pub async fn sign_in(
     if session.pending {
         // The tenant asks for a second step: the password was accepted, the
         // customer confirms it on the challenge page.
-        let mut response = Redirect::to(&challenge_path(&site.address)).into_response();
-        response.headers_mut().append(
-            header::SET_COOKIE,
-            pending_cookie(&app, &session.token, true)?,
-        );
+        let mut response = Redirect::to(CHALLENGE).into_response();
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, pending_cookie(&session.token, true)?);
         return Ok(response);
     }
-    admitted(&app, &headers, peer, &site, &session).await
+    admitted(&app, &headers, peer, &session).await
 }
 
-fn challenge_path(address: &str) -> String {
-    format!("/portal/sign-in/{address}/challenge")
-}
-fn pending_cookie(app: &App, token: &str, set: bool) -> Result<HeaderValue, HttpError> {
+fn pending_cookie(token: &str, set: bool) -> Result<HeaderValue, HttpError> {
     HeaderValue::from_str(&format!(
-        "{PENDING_COOKIE}={}; HttpOnly; SameSite=Lax; Path=/portal/sign-in{}{}",
+        "{PENDING_COOKIE}={}; HttpOnly; SameSite=Lax; Secure; Path=/{}",
         if set { token } else { "" },
-        if set { "" } else { "; Max-Age=0" },
-        secure(app)
+        if set { "" } else { "; Max-Age=0" }
     ))
     .map_err(|_| Error::Internal.into())
 }
@@ -428,11 +378,11 @@ fn pending_token(headers: &HeaderMap) -> Option<String> {
 }
 /// The pending sign-in ended (expired, cancelled or never there): back to the
 /// sign-in card, with the pending cookie cleared.
-fn pending_ended(app: &App, address: &str) -> Result<Response, HttpError> {
-    let mut response = Redirect::to(&format!("/portal/sign-in/{address}")).into_response();
+fn pending_ended() -> Result<Response, HttpError> {
+    let mut response = Redirect::to(SIGN_IN).into_response();
     response
         .headers_mut()
-        .append(header::SET_COOKIE, pending_cookie(app, "", false)?);
+        .append(header::SET_COOKIE, pending_cookie("", false)?);
     Ok(response)
 }
 /// The second-step card in the portal's document, branded with the site's
@@ -473,7 +423,7 @@ async fn challenge_card(
 ) -> Result<Response, HttpError> {
     let pending = match app.user.portal_pending_sign_in(token).await {
         Ok(pending) => pending,
-        Err(Error::Unauthorized) => return pending_ended(app, &site.address),
+        Err(Error::Unauthorized) => return pending_ended(),
         Err(error) => return Err(error.into()),
     };
     let methods = pending
@@ -483,25 +433,31 @@ async fn challenge_card(
         .collect::<Vec<_>>();
     challenge_card_response(
         site,
-        bilibi_ui::SignInChallengePage::new(&pending.csrf, &methods, method, message, error)
-            .map_err(|_| Error::Internal)?
-            .at(challenge_path(&site.address)),
+        bilibi_ui::SignInChallengePage::new(
+            &pending.csrf,
+            &methods,
+            method,
+            message,
+            error,
+            pending.password_origin,
+        )
+        .map_err(|_| Error::Internal)?
+        .at(CHALLENGE.to_owned()),
         StatusCode::OK,
     )
 }
-/// `GET /portal/sign-in/{site}/challenge`: the second step of a customer's
+/// `GET /portal/sign-in/challenge`: the second step of a customer's
 /// sign-in. Nothing is sent until the customer asks for it.
 pub async fn challenge_page(
     State(app): State<App>,
     headers: HeaderMap,
-    Path(address): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, HttpError> {
-    let Some(site) = site(&app, &address).await? else {
+    let Some(site) = site(&app).await? else {
         return unknown_site();
     };
     let Some(token) = pending_token(&headers) else {
-        return pending_ended(&app, &site.address);
+        return pending_ended();
     };
     challenge_card(
         &app,
@@ -523,22 +479,21 @@ pub struct ChallengeSubmission {
     code: String,
     action: String,
 }
-/// `POST /portal/sign-in/{site}/challenge`: start or resend the challenge,
+/// `POST /portal/sign-in/challenge`: start or resend the challenge,
 /// verify the code, or cancel. A proof admits the customer exactly as the
 /// password alone does when the tenant asks for no second step.
 pub async fn challenge(
     State(app): State<App>,
     headers: HeaderMap,
-    Path(address): Path<String>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Form(submission): Form<ChallengeSubmission>,
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
-    let Some(site) = site(&app, &address).await? else {
+    let Some(site) = site(&app).await? else {
         return unknown_site();
     };
     let Some(token) = pending_token(&headers) else {
-        return pending_ended(&app, &site.address);
+        return pending_ended();
     };
     let result: Result<Response, HttpError> = async {
         match submission.action.as_str() {
@@ -546,7 +501,7 @@ pub async fn challenge(
                 app.user
                     .portal_cancel_sign_in(&token, &submission.csrf)
                     .await?;
-                pending_ended(&app, &site.address)
+                pending_ended()
             }
             "start" => {
                 let challenge = app
@@ -570,16 +525,26 @@ pub async fn challenge(
                 }
                 challenge_card(&app, &site, &token, &submission.method, &message, "").await
             }
+            "request_reset" => {
+                let outcome=app.user.portal_request_sign_in_two_factor_reset(&token,&submission.csrf).await?;
+                let message=if outcome.created {
+                    format!("Request sent to {}. You'll get an email when 2FA is reset.",outcome.recipient)
+                } else {
+                    let at=jiff::Timestamp::try_from(outcome.requested_at).map_err(|_|Error::Internal)?;
+                    format!("A request was already sent at {}. You'll get an email when 2FA is reset.",at.strftime("%Y-%m-%d %H:%M UTC"))
+                };
+                challenge_card(&app,&site,&token,&submission.method,&message,"").await
+            }
             "verify" => match app
                 .user
                 .portal_complete_sign_in(&token, &submission.csrf, &submission.method, &submission.code)
                 .await?
             {
                 Some(session) => {
-                    let mut response = admitted(&app, &headers, peer, &site, &session).await?;
+                    let mut response = admitted(&app, &headers, peer, &session).await?;
                     response
                         .headers_mut()
-                        .append(header::SET_COOKIE, pending_cookie(&app, "", false)?);
+                        .append(header::SET_COOKIE, pending_cookie("", false)?);
                     Ok(response)
                 }
                 None => {
@@ -601,9 +566,7 @@ pub async fn challenge(
     match result {
         // A forged CSRF value or an ended pending sign-in is not the
         // customer's mistake to read about: the sign-in card starts over.
-        Err(error) if matches!(error.0, Error::Forbidden | Error::Unauthorized) => {
-            pending_ended(&app, &site.address)
-        }
+        Err(error) if matches!(error.0, Error::Forbidden | Error::Unauthorized) => pending_ended(),
         other => other,
     }
 }
@@ -615,26 +578,32 @@ async fn admitted(
     app: &App,
     headers: &HeaderMap,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
-    site: &Site,
     session: &bilibi_user::Login,
 ) -> Result<Response, HttpError> {
-    let client = app.db.get().await.map_err(Error::from)?;
-    // One browser holds one portal session: the one the cookie held before,
-    // this tenant's or another's, ends now.
-    if let Ok(previous) = portal::token(headers) {
-        if let Ok(scope) = app
-            .security
-            .sessions
-            .check_portal(&**client, &previous)
+    let previous = match portal::token(headers) {
+        Ok(token) => portal::session(app, &token)
             .await
-        {
-            app.security
-                .sessions
-                .delete(&**client, &scope, &previous)
-                .await?;
-        }
+            .ok()
+            .map(|portal| (token, portal)),
+        Err(_) => None,
+    };
+    let mut client = app.db.get().await.map_err(Error::from)?;
+    if let Some((previous, portal)) = previous {
+        let scope = portal.scope();
+        let mut tx = app
+            .mutations
+            .begin(&mut client, scope.mutation_context("session.sign_out"))
+            .await?;
+        app.security
+            .sessions
+            .delete(&mut tx, scope, &previous)
+            .await?;
+        tx.commit().await?;
     }
-    app.security
+    // The portal has no Your sessions page, so a customer gets no
+    // new-device email; the sign-in is still recorded.
+    let _new_device = app
+        .security
         .sessions
         .describe(
             &**client,
@@ -652,11 +621,7 @@ async fn admitted(
     let cookies = response.headers_mut();
     cookies.append(
         header::SET_COOKIE,
-        cookie(app, portal::COOKIE, &session.token, 86_400)?,
-    );
-    cookies.append(
-        header::SET_COOKIE,
-        cookie(app, SITE_COOKIE, &site.address, 31_536_000)?,
+        cookie(portal::COOKIE, &session.token, 86_400)?,
     );
     Ok(response)
 }
@@ -670,7 +635,9 @@ fn forgot_card(
     success: &str,
     status: StatusCode,
 ) -> Result<Response, HttpError> {
-    let back = format!("/portal/sign-in/{}", site.address);
+    let back = SIGN_IN.to_owned();
+    let action = FORGOT.to_owned();
+    let resend = errors.iter().any(|error| error == RESET_LINK_INVALID);
     let links = [PortalCardLink {
         id: "portal-forgot-back",
         href: &back,
@@ -680,25 +647,27 @@ fn forgot_card(
         Some(site),
         "Forgot password",
         &PortalForm {
+            action: &action,
             id: "portal-forgot",
             heading: "Forgot your password?",
             intro: "Enter your email address to request a reset link.",
             success,
             error: "",
             fields: vec![rendered(&email_field("forgot", email, errors, true))?],
-            submit: "Send reset link",
+            submit: if resend {
+                "Send me a new link"
+            } else {
+                "Send reset link"
+            },
             working: "Sending…",
             links: &links,
         },
         status,
     )
 }
-/// `GET /portal/forgot/{site}`.
-pub async fn forgot_page(
-    State(app): State<App>,
-    Path(address): Path<String>,
-) -> Result<Response, HttpError> {
-    let Some(site) = site(&app, &address).await? else {
+/// `GET /portal/forgot`.
+pub async fn forgot_page(State(app): State<App>) -> Result<Response, HttpError> {
+    let Some(site) = site(&app).await? else {
         return unknown_site();
     };
     forgot_card(&site, "", Vec::new(), "", StatusCode::OK)
@@ -708,17 +677,16 @@ pub struct ForgotSubmission {
     #[serde(rename = "forgot[email]", default)]
     email: String,
 }
-/// `POST /portal/forgot/{site}`: the same answer whether or not the address
+/// `POST /portal/forgot`: the same answer whether or not the address
 /// is one of this tenant's customers.
 pub async fn forgot(
     State(app): State<App>,
     headers: HeaderMap,
-    Path(address): Path<String>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Form(submission): Form<ForgotSubmission>,
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
-    let Some(site) = site(&app, &address).await? else {
+    let Some(site) = site(&app).await? else {
         return unknown_site();
     };
     let email = bounded(&submission.email);
@@ -737,7 +705,11 @@ pub async fn forgot(
     }
     match app
         .user
-        .request_portal_password_reset(site.tenant, &site.address, &email)
+        .request_portal_password_reset(
+            site.tenant,
+            &app.public_origin(&headers).ok_or(Error::NotFound)?,
+            &email,
+        )
         .await
     {
         Ok(()) | Err(CredentialError::Other(Error::Invalid)) => {
@@ -757,7 +729,7 @@ struct ResetCard<'a> {
     confirmation_errors: Vec<String>,
 }
 fn reset_card(site: &Site, form: ResetCard<'_>, status: StatusCode) -> Result<Response, HttpError> {
-    let back = format!("/portal/sign-in/{}", site.address);
+    let back = SIGN_IN.to_owned();
     let links = [PortalCardLink {
         id: "portal-reset-back",
         href: &back,
@@ -767,6 +739,7 @@ fn reset_card(site: &Site, form: ResetCard<'_>, status: StatusCode) -> Result<Re
         Some(site),
         "Reset password",
         &PortalForm {
+            action: "",
             id: "portal-reset",
             heading: "Reset your password",
             intro: "Choose a new password for your account.",
@@ -794,16 +767,27 @@ fn reset_card(site: &Site, form: ResetCard<'_>, status: StatusCode) -> Result<Re
         status,
     )
 }
-/// `GET /portal/reset/{site}/{token}`: the address comes from the emailed link.
+fn reset_unavailable(site: &Site, email: &str, status: StatusCode) -> Result<Response, HttpError> {
+    forgot_card(site, email, vec![RESET_LINK_INVALID.into()], "", status)
+}
+
+/// `GET /portal/reset/{token}`: from the emailed link.
 pub async fn reset_page(
     State(app): State<App>,
-    Path((address, _token)): Path<(String, String)>,
+    Path(token): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, HttpError> {
-    let Some(site) = site(&app, &address).await? else {
+    let Some(site) = site(&app).await? else {
         return unknown_site();
     };
     let email = bounded(query.get("email").map(String::as_str).unwrap_or(""));
+    if !app
+        .user
+        .portal_reset_link_valid(site.tenant, &email, &token)
+        .await?
+    {
+        return reset_unavailable(&site, &email, StatusCode::OK);
+    }
     reset_card(
         &site,
         ResetCard {
@@ -824,17 +808,17 @@ pub struct ResetSubmission {
     #[serde(rename = "reset[password_confirmation]", default)]
     password_confirmation: String,
 }
-/// `POST /portal/reset/{site}/{token}`: redeems the link among this tenant's
+/// `POST /portal/reset/{token}`: redeems the link among this tenant's
 /// customers only, then sends the customer to sign in.
 pub async fn reset(
     State(app): State<App>,
     headers: HeaderMap,
-    Path((address, token)): Path<(String, String)>,
+    Path(token): Path<String>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Form(submission): Form<ResetSubmission>,
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
-    let Some(site) = site(&app, &address).await? else {
+    let Some(site) = site(&app).await? else {
         return unknown_site();
     };
     let email = bounded(&submission.email);
@@ -847,27 +831,35 @@ pub async fn reset(
             &submission.password,
         ),
     };
-    if !(form.email_errors.is_empty()
+    let redisplay = if !(form.email_errors.is_empty()
         && form.password_errors.is_empty()
         && form.confirmation_errors.is_empty())
     {
-        return reset_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    if !recovery_allowed(&app, &headers, peer.as_ref()).await? {
+        Some(StatusCode::UNPROCESSABLE_ENTITY)
+    } else if !recovery_allowed(&app, &headers, peer.as_ref()).await? {
         form.email_errors = vec![RECOVERY_THROTTLED.into()];
-        return reset_card(&site, form, StatusCode::TOO_MANY_REQUESTS);
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    } else {
+        None
+    };
+    if let Some(status) = redisplay {
+        if !app
+            .user
+            .portal_reset_link_valid(site.tenant, &email, &token)
+            .await?
+        {
+            return reset_unavailable(&site, &email, status);
+        }
+        return reset_card(&site, form, status);
     }
     match app
         .user
         .portal_reset_password(site.tenant, &email, &token, &submission.password)
         .await
     {
-        Ok(()) => Ok(
-            Redirect::to(&format!("/portal/sign-in/{}?done=reset", site.address)).into_response(),
-        ),
+        Ok(()) => Ok(Redirect::to(&format!("{SIGN_IN}?done=reset")).into_response()),
         Err(CredentialError::InvalidOrExpiredToken) => {
-            form.email_errors = vec![RESET_LINK_INVALID.into()];
-            reset_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY)
+            reset_unavailable(&site, &email, StatusCode::UNPROCESSABLE_ENTITY)
         }
         Err(CredentialError::Policy(violation)) => {
             form.password_errors = vec![violation.to_string()];
@@ -901,6 +893,7 @@ fn accept_card(
         Some(site),
         "Accept invitation",
         &PortalForm {
+            action: "",
             id: "portal-accept",
             heading: "Set up your account",
             intro: &intro,
@@ -937,7 +930,7 @@ fn accept_card(
     )
 }
 fn invitation_invalid(site: &Site, address_taken: bool) -> Result<Response, HttpError> {
-    let sign_in = format!("/portal/sign-in/{}", site.address);
+    let sign_in = SIGN_IN.to_owned();
     let links = [PortalCardLink {
         id: "portal-accept-sign-in",
         href: &sign_in,
@@ -947,6 +940,7 @@ fn invitation_invalid(site: &Site, address_taken: bool) -> Result<Response, Http
         Some(site),
         "Accept invitation",
         &PortalForm {
+            action: "",
             id: "portal-accept-invalid",
             heading: "Set up your account",
             intro: "",
@@ -968,16 +962,19 @@ fn invitation_invalid(site: &Site, address_taken: bool) -> Result<Response, Http
         },
     )
 }
-/// `GET /portal/accept/{site}/{token}`: the invitation's card, while its link
+/// `GET /portal/accept/{token}`: the invitation's card, while its link
 /// is open.
 pub async fn accept_page(
     State(app): State<App>,
-    Path((address, token)): Path<(String, String)>,
+    Path(token): Path<String>,
 ) -> Result<Response, HttpError> {
-    let Some(site) = site(&app, &address).await? else {
+    let Some(site) = site(&app).await? else {
         return unknown_site();
     };
-    let Some(invitation) = access(&app)?.open_invitation(&address, &token).await? else {
+    let Some(invitation) = access(&app)?
+        .open_invitation(&app.public_scope()?, &token)
+        .await?
+    else {
         return invitation_invalid(&site, false);
     };
     accept_card(
@@ -1002,21 +999,21 @@ pub struct AcceptSubmission {
     #[serde(rename = "accept[password_confirmation]", default)]
     password_confirmation: String,
 }
-/// `POST /portal/accept/{site}/{token}`: Core Portal redeems the
+/// `POST /portal/accept/{token}`: Core Portal redeems the
 /// invitation; the customer then signs in.
 pub async fn accept(
     State(app): State<App>,
     headers: HeaderMap,
-    Path((address, token)): Path<(String, String)>,
+    Path(token): Path<String>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Form(submission): Form<AcceptSubmission>,
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
-    let Some(site) = site(&app, &address).await? else {
+    let Some(site) = site(&app).await? else {
         return unknown_site();
     };
     let access = access(&app)?;
-    let Some(invitation) = access.open_invitation(&address, &token).await? else {
+    let Some(invitation) = access.open_invitation(&app.public_scope()?, &token).await? else {
         return invitation_invalid(&site, false);
     };
     let name = submission.name.trim().chars().take(255).collect::<String>();
@@ -1038,7 +1035,7 @@ pub async fn accept(
         return accept_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY);
     }
     match access
-        .accept(&address, &token, &name, &submission.password)
+        .accept(&app.public_scope()?, &token, &name, &submission.password)
         .await
     {
         Ok(()) => {
@@ -1052,7 +1049,7 @@ pub async fn accept(
                 .await
             {
                 Ok(session) if !session.pending => {
-                    return admitted(&app, &headers, peer, &site, &session).await;
+                    return admitted(&app, &headers, peer, &session).await;
                 }
                 Ok(session) => {
                     app.user
@@ -1062,13 +1059,7 @@ pub async fn accept(
                 Err(CredentialError::Other(error)) => return Err(error.into()),
                 Err(_) => {}
             }
-            let mut response =
-                Redirect::to(&format!("/portal/sign-in/{}?done=accepted", site.address))
-                    .into_response();
-            response.headers_mut().append(
-                header::SET_COOKIE,
-                cookie(&app, SITE_COOKIE, &site.address, 31_536_000)?,
-            );
+            let response = Redirect::to(&format!("{SIGN_IN}?done=accepted")).into_response();
             Ok(response)
         }
         Err(AcceptError::Link) => invitation_invalid(&site, false),
@@ -1106,7 +1097,7 @@ fn register_card(
     form: RegisterCard<'_>,
     status: StatusCode,
 ) -> Result<Response, HttpError> {
-    let back = format!("/portal/sign-in/{}", site.address);
+    let back = SIGN_IN.to_owned();
     let links = [PortalCardLink {
         id: "portal-register-back",
         href: &back,
@@ -1146,6 +1137,7 @@ fn register_card(
         Some(site),
         "Request an account",
         &PortalForm {
+            action: "",
             id: "portal-register",
             heading: "Request an account",
             intro: if form.success.is_empty() {
@@ -1163,13 +1155,13 @@ fn register_card(
         status,
     )
 }
-/// `GET /portal/register/{site}`: 404 unless the portal is on and takes
+/// `GET /portal/register`: 404 unless the portal is on and takes
 /// requests.
-pub async fn register_page(
-    State(app): State<App>,
-    Path(address): Path<String>,
-) -> Result<Response, HttpError> {
-    let Some(site) = access(&app)?.registration_site(&address).await? else {
+pub async fn register_page(State(app): State<App>) -> Result<Response, HttpError> {
+    let Some(site) = access(&app)?
+        .registration_site(&app.public_scope()?)
+        .await?
+    else {
         return unknown_site();
     };
     register_card(
@@ -1195,19 +1187,19 @@ pub struct RegisterSubmission {
     #[serde(rename = "register[company_name]", default)]
     company_name: String,
 }
-/// `POST /portal/register/{site}`: takes the request and emails its
+/// `POST /portal/register`: takes the request and emails its
 /// confirmation link; the answer is the same for known and unknown
-/// addresses. Bounded per sender with password recovery, since it sends mail.
+/// addresses. Core Portal applies its own shared registration limits before
+/// it writes a request or sends mail.
 pub async fn register(
     State(app): State<App>,
     headers: HeaderMap,
-    Path(address): Path<String>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Form(submission): Form<RegisterSubmission>,
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
     let access = access(&app)?;
-    let Some(site) = access.registration_site(&address).await? else {
+    let Some(site) = access.registration_site(&app.public_scope()?).await? else {
         return unknown_site();
     };
     let (name, email, company) = (
@@ -1227,11 +1219,15 @@ pub async fn register(
     if !(form.name_errors.is_empty() && form.email_errors.is_empty()) {
         return register_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY);
     }
-    if !recovery_allowed(&app, &headers, peer.as_ref()).await? {
-        form.email_errors = vec![RECOVERY_THROTTLED.into()];
-        return register_card(&site, form, StatusCode::TOO_MANY_REQUESTS);
-    }
-    match access.register(&address, &name, &email, &company).await {
+    // Counted per network, as the edge limiters key a sender.
+    let sender = api::sender_key(api::client_address(
+        peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
+        &headers,
+    ));
+    match access
+        .register(&app.public_scope()?, &name, &email, &company, &sender)
+        .await
+    {
         Ok(()) => {
             form.success = REQUESTED;
             register_card(&site, form, StatusCode::OK)
@@ -1252,7 +1248,7 @@ pub async fn register(
 }
 
 fn verify_card(site: &Site, open: bool, done: bool) -> Result<Response, HttpError> {
-    let back = format!("/portal/sign-in/{}", site.address);
+    let back = SIGN_IN.to_owned();
     let links = [PortalCardLink {
         id: "portal-verify-back",
         href: &back,
@@ -1275,6 +1271,7 @@ fn verify_card(site: &Site, open: bool, done: bool) -> Result<Response, HttpErro
         Some(site),
         "Confirm your request",
         &PortalForm {
+            action: "",
             id: "portal-verify",
             heading: "Confirm your request",
             intro: if open && !done {
@@ -1298,31 +1295,33 @@ fn verify_card(site: &Site, open: bool, done: bool) -> Result<Response, HttpErro
         status,
     )
 }
-/// `GET /portal/verify/{site}/{token}`: the confirmation button, while the
+/// `GET /portal/verify/{token}`: the confirmation button, while the
 /// link is open.
 pub async fn verify_page(
     State(app): State<App>,
-    Path((address, token)): Path<(String, String)>,
+    Path(token): Path<String>,
 ) -> Result<Response, HttpError> {
     let access = access(&app)?;
-    let Some(site) = access.registration_site(&address).await? else {
+    let Some(site) = access.registration_site(&app.public_scope()?).await? else {
         return unknown_site();
     };
-    let open = access.verification_open(&address, &token).await?;
+    let open = access
+        .verification_open(&app.public_scope()?, &token)
+        .await?;
     verify_card(&site, open, false)
 }
-/// `POST /portal/verify/{site}/{token}`: confirms the request's address; it
+/// `POST /portal/verify/{token}`: confirms the request's address; it
 /// then waits for staff.
 pub async fn verify(
     State(app): State<App>,
     headers: HeaderMap,
-    Path((address, token)): Path<(String, String)>,
+    Path(token): Path<String>,
 ) -> Result<Response, HttpError> {
     origin(&app, &headers)?;
     let access = access(&app)?;
-    let Some(site) = access.registration_site(&address).await? else {
+    let Some(site) = access.registration_site(&app.public_scope()?).await? else {
         return unknown_site();
     };
-    let verified = access.verify(&address, &token).await?;
+    let verified = access.verify(&app.public_scope()?, &token).await?;
     verify_card(&site, verified, verified)
 }

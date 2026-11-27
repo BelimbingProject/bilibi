@@ -1,6 +1,6 @@
 //! The executable owns the changing Git/pin facts; registry types stay stable.
 //! Bilibi-specific version contract (docs/versions.md).
-use bilibi_module_registry::{Composition, Container, Layer, PinState};
+use bilibi_module_registry::{Composition, Container, ExtensionCode, Layer, PinState};
 
 /// One mounted Domain or Extension as the pin recorded it.
 #[derive(Clone, Copy, Debug)]
@@ -10,6 +10,8 @@ struct PinnedContainer {
     commit: &'static str,
     /// The `vX.Y.Z` tag at that commit, without the `v`; `None` when untagged.
     version: Option<&'static str>,
+    branch: Option<&'static str>,
+    committed_at: Option<&'static str>,
 }
 /// The pin as `build.rs` read it.
 #[derive(Clone, Copy, Debug)]
@@ -24,7 +26,13 @@ struct Pin {
 /// since it was made) and `BUILT_FROM` (the commit Git reported at build time,
 /// set only for an unpinned build) and `BUILT_CONTAINERS` (the mounted checkouts' own commits and tags Git reported then), as `build.rs` generated them.
 mod generated {
-    #![allow(dead_code, unused_imports)]
+    // `expect` would fail in a composition that uses all of it, and the
+    // generated contents change with the mounted containers.
+    #![allow(
+        dead_code,
+        unused_imports,
+        reason = "the generated file holds every pinned container, and an unpinned build uses fewer of them"
+    )]
     use super::{Pin, PinnedContainer};
     include!(concat!(env!("OUT_DIR"), "/composition.rs"));
 }
@@ -52,6 +60,15 @@ pub(super) fn composition() -> Composition {
                         modules: Vec::new(),
                         commit: None,
                         version: None,
+                        branch: None,
+                        committed_at: None,
+                        extension_code: (layer == Layer::Extensions).then(|| {
+                            bilibi_extensions::CODE
+                                .iter()
+                                .find(|(declared, _)| *declared == id)
+                                .and_then(|(_, code)| ExtensionCode::parse(code))
+                                .expect("verified Extension code declaration")
+                        }),
                     });
                     containers.len() - 1
                 });
@@ -75,6 +92,8 @@ pub(super) fn composition() -> Composition {
             if let Some(built) = generated::BUILT_CONTAINERS.iter().find(|c| c.name == name) {
                 container.commit = Some(built.commit);
                 container.version = built.version;
+                container.branch = built.branch;
+                container.committed_at = built.committed_at;
             }
         }
         return Composition {
@@ -123,6 +142,8 @@ pub(super) fn composition() -> Composition {
         if let Some(pinned) = pin.containers.iter().find(|c| c.name == name) {
             container.commit = Some(pinned.commit);
             container.version = pinned.version;
+            container.branch = pinned.branch;
+            container.committed_at = pinned.committed_at;
         }
     }
     Composition {

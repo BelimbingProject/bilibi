@@ -8,24 +8,30 @@ license.workspace = true
 
 [dependencies]
 bilibi-agent-api = { path = "agent_api" }
+bilibi-ai = { path = "ai" }
 bilibi-artifacts = { path = "artifacts" }
 bilibi-audit = { path = "audit" }
 bilibi-audit-views = { path = "audit_views" }
 bilibi-authz = { path = "authz" }
 bilibi-authz-agent = { path = "authz_agent" }
+bilibi-branding = { path = "branding" }
 bilibi-bulk-data = { path = "bulk_data" }
 bilibi-custom-fields = { path = "custom_fields" }
 bilibi-dashboard = { path = "dashboard" }
+bilibi-dashboard-agent = { path = "dashboard_agent" }
 bilibi-database = { path = "database" }
 bilibi-datetime = { path = "datetime" }
 bilibi-design-library = { path = "design_library" }
 bilibi-events = { path = "events" }
 bilibi-grid = { path = "grid" }
 bilibi-integration = { path = "integration" }
+bilibi-labels = { path = "labels" }
+bilibi-language-detection = { path = "language_detection" }
 bilibi-locale = { path = "locale" }
 bilibi-mail = { path = "mail" }
 bilibi-media = { path = "media" }
 bilibi-menu = { path = "menu" }
+bilibi-menu-order = { path = "menu_order" }
 bilibi-module-registry = { path = "module_registry" }
 bilibi-notifications = { path = "notifications" }
 bilibi-party-ids = { path = "party_ids" }
@@ -35,19 +41,28 @@ bilibi-picklists = { path = "picklists" }
 bilibi-ports = { path = "ports" }
 bilibi-principal-directory = { path = "principal_directory" }
 bilibi-privacy = { path = "privacy" }
+bilibi-public = { path = "public" }
 bilibi-queue = { path = "queue" }
 bilibi-records = { path = "records" }
 bilibi-reports = { path = "reports" }
+bilibi-residents = { path = "residents" }
 bilibi-schedule = { path = "schedule" }
 bilibi-search = { path = "search" }
 bilibi-security = { path = "security" }
 bilibi-session = { path = "session" }
 bilibi-settings = { path = "settings" }
 bilibi-settings-editor = { path = "settings_editor" }
+bilibi-setup-packs = { path = "setup_packs" }
 bilibi-software = { path = "software" }
 bilibi-step-up = { path = "step_up" }
 bilibi-system = { path = "system" }
+bilibi-templates = { path = "templates" }
 bilibi-tenancy = { path = "tenancy" }
 bilibi-tiling = { path = "tiling" }
 bilibi-ui = { path = "ui" }
+bilibi-visitor = { path = "visitor" }
+bilibi-watchers = { path = "watchers" }
 bilibi-workflow = { path = "workflow" }
+
+[lints]
+workspace = true

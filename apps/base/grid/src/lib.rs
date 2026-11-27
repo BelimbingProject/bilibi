@@ -5,31 +5,44 @@
 //! through `PageColumns`; see `README.md`.
 pub mod catalog;
 pub mod column;
+mod custom;
+mod field;
 pub mod lens;
-pub mod model;
+mod model;
+pub use field::{Field, FieldType, PersonalKind};
 mod oversight;
 pub mod page_columns;
+mod page_metadata;
 pub mod page_views;
 pub mod query;
 pub mod reference;
+mod shared_views;
+mod subject;
 mod summary;
+mod transfer;
 pub mod view;
+mod view_operations;
 pub use lens::{Lens, Range};
 pub use oversight::{
     ChildResult, OversightData, OversightQueries, OversightResult, OversightSpec, OVERSIGHT_QUERIES,
 };
-pub use page_columns::{Outcome, PageColumns};
+pub use page_columns::{Outcome, PageColumns, ViewCaller};
+pub use page_metadata::{PageColumnsFuture, PageDetailsFuture, PageMetadata, PAGE_METADATA};
 pub use page_views::{PageViews, PAGE_VIEWS};
 pub use query::{
-    project, project_lenses, project_within, scalar_expression, scalar_join, stats, Lenses,
-    Projection, QueryError, Row, ScalarJoin, Stats, BOUNDS, MAX_ESTIMATED_COST,
+    project, project_lenses, project_on, scalar_access, scalar_expression, scalar_join, stats,
+    validate_projection_on, Lenses, Projection, QueryError, Row, ScalarJoin, Stats, BOUNDS,
+    MAX_ESTIMATED_COST,
 };
+pub use shared_views::{Audience, SharedView, SHARE as SHARE_VIEWS};
+pub use subject::{bind_survivors, SubjectAccess, Survivors};
 pub use summary::{
-    page_keys, summarize, Bounds, Bucket, Filter, Grouping, KeyPage, Line, Measure, PageSpec,
-    Period, Sort, Summary, SummarySpec, Test, MAX_CHOICES, MAX_COST_BOUND, MAX_FILTERS,
-    MAX_GROUPINGS, MAX_MEASURES, MAX_OFFSET, MAX_RESULT_GROUPS, MAX_SORTS, MAX_STATEMENT_MS,
-    MAX_TEXT,
+    page_keys, report_page, report_summary, summarize, validate_page_on, validate_summary_on,
+    Bounds, Bucket, Filter, Grouping, KeyPage, Line, Measure, PageSpec, Period, Sort, Summary,
+    SummarySpec, Test, MAX_CHOICES, MAX_COST_BOUND, MAX_FILTERS, MAX_GROUPINGS, MAX_MEASURES,
+    MAX_OFFSET, MAX_RESULT_GROUPS, MAX_SORTS, MAX_STATEMENT_MS, MAX_TEXT,
 };
+pub use transfer::{ViewPreview, ViewSetup, ViewTransfer};
 pub use view::View;
 
 use bilibi_module_registry::{Consumer, Layer, Module, RegistryError, Result, Service};
@@ -39,9 +52,13 @@ pub use catalog::{
     restrictable, restriction_catalog, Catalog, CatalogError, Restrictable, MAX_COLUMNS,
 };
 pub use column::{Agg, Column, ColumnError, ColumnKind};
+pub use custom::{
+    bind_custom_columns, custom_field_id, custom_key, custom_tables, key_shaped, CustomColumn,
+    CustomColumns, CustomFuture, CustomTable,
+};
 pub use model::{
-    Field, FieldType, GridContribution, Installed, Join, Link, LinkDecl, LinkKind, PersonalKind,
-    RecordFields, Source, Table, TableDecl,
+    id_valid, DerivedColumn, GridContribution, Installed, Join, Link, LinkDecl, LinkKind,
+    RecordFields, Source, Subject, Table, TableDecl, MAX_FIELDS, MAX_LINKS_PER_TABLE, MAX_TABLES,
 };
 
 #[doc(hidden)]
@@ -94,7 +111,7 @@ pub fn validate_capabilities(
     vocabulary: &bilibi_authz::Vocabulary,
 ) -> Result<()> {
     for table in installed.tables() {
-        if !vocabulary.capabilities.contains_key(table.capability()) {
+        let Some(capability) = vocabulary.capabilities.get(table.capability()) else {
             return Err(RegistryError::Contribution(format!(
                 "grid table {} from {} ({}:{}) names undeclared capability {}",
                 table.id(),
@@ -102,6 +119,48 @@ pub fn validate_capabilities(
                 table.provenance.source,
                 table.provenance.line,
                 table.capability()
+            )));
+        };
+        if capability.definition.company_scoped != table.source().company_scoped {
+            return Err(RegistryError::Contribution(format!(
+                "grid table {} from {} ({}:{}): {} is {} but its source is {}",
+                table.id(),
+                table.owner,
+                table.provenance.source,
+                table.provenance.line,
+                table.capability(),
+                if capability.definition.company_scoped {
+                    "company-scoped"
+                } else {
+                    "tenant-wide"
+                },
+                if table.source().company_scoped {
+                    "company-scoped"
+                } else {
+                    "not company-scoped"
+                },
+            )));
+        }
+        // Reach is applied through the owner field: a table read under a key
+        // that supports reach without one would show every row (#683).
+        if capability.definition.reach != table.decl.owner.is_some() {
+            return Err(RegistryError::Contribution(format!(
+                "grid table {} from {} ({}:{}): {} {}, so the table {} an owner field",
+                table.id(),
+                table.owner,
+                table.provenance.source,
+                table.provenance.line,
+                table.capability(),
+                if capability.definition.reach {
+                    "supports record reach"
+                } else {
+                    "does not support record reach"
+                },
+                if capability.definition.reach {
+                    "must declare"
+                } else {
+                    "cannot declare"
+                },
             )));
         }
     }
@@ -124,8 +183,8 @@ fn restriction_snapshot(
                     .fields
                     .into_iter()
                     .map(|(id, label, personal)| CatalogField {
-                        id,
-                        label,
+                        id: id.into(),
+                        label: label.into(),
                         personal,
                         restriction_aliases: Vec::new(),
                     })
@@ -140,18 +199,161 @@ inventory::submit! {
         &bilibi_authz::field_catalog::CatalogSource { snapshot: restriction_snapshot })
 }
 
+impl Table {
+    pub fn record_kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
+        std::iter::once(self.id()).chain(self.decl.record_types.iter().copied())
+    }
+}
+
+/// Grid supplies Labels' renamable record types and fields as data: every
+/// installed table, and each table's non-hidden fields by `table.field`.
+fn label_subjects() -> std::result::Result<Vec<bilibi_labels::Subject>, String> {
+    use bilibi_labels::{subject_id, Kind, Subject};
+    let installed = installed().map_err(|error| error.to_string())?;
+    let mut subjects = Vec::new();
+    for table in installed.tables() {
+        let record_kinds: Vec<String> = table.record_kinds().map(str::to_owned).collect();
+        let page = table.list_address();
+        subjects.push(Subject {
+            kind: Kind::Record,
+            id: table.id().to_owned(),
+            default: table.label().to_owned(),
+            trail: String::new(),
+            page: page.map(str::to_owned),
+            record_kinds: record_kinds.clone(),
+        });
+        subjects.extend(table.visible_fields().map(|field| Subject {
+            kind: Kind::Field,
+            id: subject_id(table.id(), field.id),
+            default: field.label.to_owned(),
+            trail: table.label().to_owned(),
+            page: page.map(str::to_owned),
+            record_kinds: record_kinds.clone(),
+        }));
+    }
+    Ok(subjects)
+}
+inventory::submit! {
+    Contribution::new(bilibi_labels::SUBJECTS, "base/grid.label_subjects",
+        Provenance { module: "base/grid", source: file!(), line: line!() },
+        &bilibi_labels::SubjectSource { snapshot: label_subjects })
+}
+
 inventory::submit! { Consumer::new::<GridContribution>(TABLES, "base/grid", |entries| Installed::from_entries(entries).map(|_| ())) }
 inventory::submit! {
     Module {
         id: "base/grid", layer: Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/ui", "base/datetime", "base/settings", "base/personal_data"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/ui", "base/datetime", "base/settings", "base/personal_data", "base/agent_api", "base/labels"],
         migrations: &[
             ("base-grid-001", include_str!("../migrations/001-reference.sql")),
             ("base-grid-002", include_str!("../migrations/002-reference-recorded-at.sql")),
+            ("base-grid-003-reference-tasks", include_str!("../migrations/003-reference-tasks.sql")),
+            ("base-grid-004-shared-views", include_str!("../migrations/004-shared-views.sql")),
         ],
         services: &[Service { id: PAGE_VIEWS, factory: page_views::service }, Service { id: OVERSIGHT_QUERIES, factory: oversight::service }],
     }
 }
 inventory::submit! {
     bilibi_module_registry::Ready { module: "base/grid", check: |_| installed().map(|_| ()) }
+}
+
+/// A record field's word: the tenant's label for the Grid field it reads, or
+/// the owner's own.
+pub(crate) fn record_word(
+    catalog: &Catalog,
+    root: &Table,
+    field: &bilibi_ui::RecordField,
+) -> String {
+    field
+        .column
+        .and_then(|path| catalog.resolve(root, path).ok())
+        .and_then(|column| {
+            let id = column.field.as_ref()?.id;
+            catalog.field_name(column.table, id)
+        })
+        .unwrap_or_else(|| field.label.to_owned())
+}
+
+/// The words a record page shows for its table's Grid and record fields under one
+/// tenant's field labels (`base/labels`). A detail page, form or inline
+/// editor draws its labels with [`RecordWords::get`] instead of
+/// `field.label`, so a rename shows there as it does in lists and exports.
+/// Load it once per render; never keep it across requests or tenants.
+#[derive(Clone, Debug, Default)]
+pub struct RecordWords(std::collections::BTreeMap<&'static str, String>);
+impl RecordWords {
+    /// One read of the tenant's field labels, applied to visible Grid fields
+    /// and registered record-field paths of `table`. An uninstalled table has no words.
+    pub async fn load(
+        client: &impl tokio_postgres::GenericClient,
+        scope: &bilibi_tenancy::Scope,
+        table: &str,
+    ) -> std::result::Result<Self, bilibi_database::Error> {
+        let names = bilibi_labels::field_labels(client, scope).await?;
+        let installed = installed().map_err(|_| bilibi_database::Error::Internal)?;
+        let Some(root) = installed.table(table) else {
+            return Ok(Self::default());
+        };
+        let mut words: std::collections::BTreeMap<_, _> = root
+            .visible_fields()
+            .filter_map(|field| {
+                names
+                    .get(root.id(), field.id)
+                    .map(|word| (field.id, word.to_owned()))
+            })
+            .collect();
+        for field in &root.record_fields {
+            let Some(column) = field
+                .column
+                .and_then(|path| column::resolve(path, root, &|id| installed.table(id)).ok())
+            else {
+                continue;
+            };
+            let Some(word) = column
+                .field
+                .as_ref()
+                .and_then(|field| names.get(column.table, field.id))
+            else {
+                continue;
+            };
+            words.insert(field.vocabulary, word.to_owned());
+            words.insert(field.id, word.to_owned());
+        }
+        Ok(Self(words))
+    }
+    /// The tenant's word for a Grid field without record vocabulary.
+    pub fn field<'a>(&'a self, id: &str, default: &'a str) -> &'a str {
+        self.0.get(id).map_or(default, String::as_str)
+    }
+    /// The tenant's word for `field`, or the owner's own.
+    pub fn get<'a>(&'a self, field: &bilibi_ui::RecordField) -> &'a str {
+        self.0
+            .get(field.vocabulary)
+            .map_or_else(|| self.field(field.id, field.label), String::as_str)
+    }
+}
+
+pub async fn render_labels(
+    client: &impl tokio_postgres::GenericClient,
+    scope: &bilibi_tenancy::Scope,
+) -> std::result::Result<bilibi_ui::FieldLabels, bilibi_database::Error> {
+    let names = bilibi_labels::field_labels(client, scope).await?;
+    let installed = installed().map_err(|_| bilibi_database::Error::Internal)?;
+    let mut words = std::collections::BTreeMap::new();
+    for root in installed.tables() {
+        for field in root.visible_fields() {
+            if let Some(word) = names.get(root.id(), field.id) {
+                words.insert(format!("{}.{}", root.id(), field.id), word.to_owned());
+            }
+        }
+        for field in &root.record_fields {
+            if let Some(word) = field.column.and_then(|path| {
+                let column = column::resolve(path, root, &|id| installed.table(id)).ok()?;
+                names.get(column.table, column.field.as_ref()?.id)
+            }) {
+                words.insert(field.vocabulary.to_owned(), word.to_owned());
+            }
+        }
+    }
+    Ok(bilibi_ui::FieldLabels(words))
 }

@@ -16,6 +16,8 @@
 <div class="space-y-3" data-hook="ClipboardCopy">
 <p class="text-ink-muted">Give this prompt to your AI app, then approve the connection in your browser.</p>
 {% call ui::copy_box(id="ai-prompt", label="Prompt for your AI app", text=prompt_text, copy_label="Copy prompt") %}{% endcall %}
+<p class="text-ink-muted">A cloud app or bot shows you a code instead of opening your browser.</p>
+{% call ui::button(id="ai-device", href=device_href) %}Enter a code{% endcall %}
 </div>
 {% endcall %}
 {% call ui::fold(id="ai-trouble", title="Trouble connecting?") %}
@@ -26,11 +28,11 @@
 <li>Codex: <code id="ai-manual-codex" class="break-all">codex mcp add {{ server_name }} --url {{ address }}</code>. Run <code>codex mcp login {{ server_name }}</code> to sign in.</li>
 </ul>
 {% if local_help %}
-<p>AI apps in the cloud cannot reach this private Bilibi. Use an AI app on this computer or a public tunnel.</p>
+<p>AI apps in the cloud cannot reach this private installation. Use an AI app on this computer or a public tunnel.</p>
 <p>If Claude Code in WSL does not trust the certificate, run <code id="ai-local-help-command" class="break-all">export NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"</code> and add it to your shell startup file.</p>
 {% endif %}
 {% if plugin %}
-<p>ChatGPT connects from OpenAI's cloud. To connect to a local or private Bilibi, set up OpenAI's Secure MCP Tunnel.</p>
+<p>ChatGPT connects from OpenAI's cloud. To connect to a local or private installation, set up OpenAI's Secure MCP Tunnel.</p>
 {% call ui::button(id="ai-plugin-download", href=plugin_href) %}Download ChatGPT plugin{% endcall %}
 {% endif %}
 </div>

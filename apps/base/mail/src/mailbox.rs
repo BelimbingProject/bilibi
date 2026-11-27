@@ -113,7 +113,7 @@ impl Transport for Mailbox {
     }
     fn describe(&self) -> String {
         format!(
-            "dev mailbox {} (newest {} messages; set MAIL_HOST for SMTP)",
+            "dev mailbox {} (newest {} messages, development only; set MAIL_HOST for SMTP)",
             self.dir.display(),
             self.capacity
         )

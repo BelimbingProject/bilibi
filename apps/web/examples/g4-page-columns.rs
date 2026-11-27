@@ -15,10 +15,13 @@
 //! back without an address and the page opens as it was left; paste an address
 //! into another account's browser and it shows the sender's view without
 //! changing that account's memory. Reset returns the page's own columns and
-//! forgets what was kept. The restriction control restricts `unit_cost` for the roles
-//! the signed-in account holds, which prunes that column from the table, the
-//! address and the suggestions until the restriction is lifted. Sign in as the
-//! fixture manager (grid.reference.view) after the example reconciles roles.
+//! forgets what was kept. A calculation table projects Factor cost from
+//! `reference_items.unit_cost` through `Source::derives`. The restriction
+//! control restricts that source field for the roles the signed-in account
+//! holds, which prunes both Unit cost and Calculation › Factor cost from the
+//! table, the address and the suggestions until the restriction is lifted.
+//! Sign in as the fixture manager (grid.reference.view) after the example
+//! reconciles roles.
 use bilibi_base::{
     authz::grants::Grants,
     datetime::{DisplayContext, Mode},
@@ -50,6 +53,43 @@ bilibi_walkthrough_fixture::walkthrough_module_roles!();
 const ROOT: &str = "reference_items";
 const TABLE_ID: &str = "g4-items";
 const PAGE_SIZES: [u64; 2] = [10, 25];
+
+static DERIVED_GRID: grid::GridContribution = grid::GridContribution {
+    record_fields: &[],
+    tables: &[grid::TableDecl::new(
+        "g4_calculations",
+        "Calculations",
+        "grid.reference.view",
+        grid::Source::tenant(
+            "SELECT id,unit_cost AS factor_cost FROM base_grid_ref_items WHERE tenant_id=$1",
+        )
+        .reads(&["reference_items"])
+        .derives(&[grid::DerivedColumn::new(
+            "factor_cost",
+            "reference_items",
+            "unit_cost",
+        )]),
+        "id",
+        &[
+            grid::Field::new("id", "ID", grid::FieldType::Integer).protected(),
+            grid::Field::new("factor_cost", "Factor cost", grid::FieldType::Decimal),
+        ],
+    )],
+    links: &[grid::LinkDecl::on(
+        "calculation",
+        "Calculation",
+        grid::LinkKind::One,
+        ROOT,
+        "id",
+        "g4_calculations",
+        "id",
+    )],
+};
+bilibi_grid::contribute!(
+    "extensions/g4_page_columns",
+    "g4_page_columns.derived_grid",
+    &DERIVED_GRID
+);
 
 static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
     ListSpec {
@@ -98,10 +138,12 @@ struct Item {
 struct Pages {
     db: Db,
     views: Arc<PageViews>,
+    contracts: Arc<bilibi_base::agent_api::page::PageContracts>,
 }
 
 struct State {
     db: Db,
+    contracts: Arc<bilibi_base::agent_api::page::PageContracts>,
     list: ListState,
     columns: PageColumns,
     mode: Mode,
@@ -131,6 +173,7 @@ impl State {
     async fn new(pages: &Pages, query: &HashMap<String, String>) -> Result<Self> {
         Ok(Self {
             db: pages.db.clone(),
+            contracts: pages.contracts.clone(),
             list: parse(query)?,
             columns: PageColumns::mount(pages.views.clone(), ROOT, builtins())
                 .map_err(|_| Error::Internal)?,
@@ -369,24 +412,6 @@ impl State {
     }
 }
 
-/// The event payload's values as strings, the shape every flex op is read in.
-fn values(event: &Value) -> HashMap<String, String> {
-    event
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(key, value)| {
-            let text = match value {
-                Value::String(text) => text.clone(),
-                Value::Number(number) => number.to_string(),
-                Value::Bool(flag) => flag.to_string(),
-                _ => return None,
-            };
-            Some((key.clone(), text))
-        })
-        .collect()
-}
-
 impl Page<Scope, Error> for Pages {
     fn render<'a>(&'a self, request: PageRequest<'a, Scope>) -> PageFuture<'a, Error> {
         Box::pin(async move {
@@ -425,9 +450,24 @@ impl LiveState<Scope, Error> for State {
                     self.columns.from_params(scope, values).await?;
                 }
                 LiveInput::Event(event) => {
+                    let query = self.query();
                     let get = |key: &str| event.get(key).and_then(Value::as_str);
                     match get("type") {
-                        Some("grid") => match self.columns.handle(scope, &values(event)).await? {
+                        Some("grid") => match self
+                            .columns
+                            .handle(
+                                scope,
+                                &PageColumns::event_values(event)?,
+                                grid::ViewCaller {
+                                    contracts: &self.contracts,
+                                    credential: request.credential,
+                                    service: "extensions/g4_page_columns.pages",
+                                    event: "grid",
+                                    query,
+                                },
+                            )
+                            .await?
+                        {
                             Outcome::Sort(key) => {
                                 if !self.list.next_sort(&key) {
                                     return Err(Error::Invalid);
@@ -456,6 +496,7 @@ impl LiveState<Scope, Error> for State {
                     }
                 }
             }
+            self.columns.refresh_views(scope).await?;
             if reload {
                 self.load(scope).await?;
             }
@@ -471,11 +512,12 @@ impl LiveState<Scope, Error> for State {
 
 inventory::submit! {
     Module {id: "extensions/g4_page_columns", layer: Layer::Extensions,
-        dependencies: &["base/ui", "base/grid", "base/database"], migrations: &[], services: &[Service {
+        dependencies: &["base/ui", "base/grid", "base/database", "base/agent_api"], migrations: &[], services: &[Service {
             id: "extensions/g4_page_columns.pages",
             factory: |services| Ok(Arc::new(PageService::<Scope, Error>(Arc::new(Pages {
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
                 views: services.get::<PageViews>(PAGE_VIEWS)?,
+                contracts: services.get(bilibi_base::agent_api::page::SERVICE)?,
             })))),
         }],
     }
@@ -506,10 +548,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .await?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     println!("Page columns at {origin}/g4-page-columns");
-    axum::serve(listener, bilibi_web::router(app))
+    axum::serve(listener, bilibi_web::staff_router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
     Ok(())
+}
+
+inventory::submit! {
+    Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "extensions/g4_page_columns.pages", Provenance {module:"extensions/g4_page_columns", source:file!(), line:line!()}, &bilibi_module_registry::contributions::PageWrites {
+        service: "extensions/g4_page_columns.pages",
+        contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete")],
+        pending: bilibi_module_registry::contributions::Pending::Events { events: &["restrict"], reason: "Walkthrough field restrictions use the Authz facade." },
+    })
 }

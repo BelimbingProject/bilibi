@@ -2,13 +2,18 @@
 //! a revision's file and the CSV
 //! export. Reads use the `Documents` facade; every write calls an operation
 //! contract through `PageContracts` (declared in `PageWrites`), except
-//! receiving a file, which stores it with `store_file` (a listed page-write
-//! gap, as Bulk data's receive). No Bilimbi counterpart; the shapes follow
+//! receiving a file, which stores it with `store_file`, and closing a dialog,
+//! which discards the file it stored with `discard_files` (listed page-write
+//! gaps, as Bulk data's receive). No Bilimbi counterpart; the shapes follow
 //! `cx/activities` and Core Person's list and record pages.
+mod customers;
 mod dialog;
 mod list;
 mod panel;
+mod portal;
 mod record;
+
+pub use portal::{PortalFiles, PortalPages, PORTAL, PORTAL_FILES};
 
 use crate::{Document, Documents, Filter, Sort};
 use askama::Template;
@@ -33,8 +38,12 @@ pub const SERVICE: &str = "core/document.pages";
 pub const FILES: &str = "core/document.files";
 /// The list's path.
 pub const INDEX: &str = "/documents";
-/// The most rows one CSV export writes.
-const EXPORT_ROWS: i64 = 5_000;
+/// The most rows one CSV export writes. A longer list ends with a line that
+/// says so and is saved under a name that says so.
+const EXPORT_ROWS: usize = 5_000;
+/// The rows the export asks `Documents::list` for at a time: the largest
+/// page it returns.
+const EXPORT_PAGE: i64 = 300;
 
 /// A document's record page.
 pub fn path(id: i64) -> String {
@@ -44,7 +53,10 @@ pub fn path(id: i64) -> String {
 pub fn file_path(id: i64, revision: i32) -> String {
     format!("{INDEX}/{id}/revisions/{revision}/file")
 }
-
+/// Where a revision's file shows in place, behind the download's authority.
+pub fn preview_path(id: i64, revision: i32) -> String {
+    format!("{INDEX}/{id}/revisions/{revision}/preview")
+}
 pub struct Pages {
     pub documents: Arc<Documents>,
     pub records: Arc<Records>,
@@ -168,6 +180,13 @@ impl Pages {
 /// How the reader sees dates and instants.
 pub(crate) struct Clock(DisplayContext);
 impl Clock {
+    /// Today in the reader's company zone.
+    pub fn today(&self) -> Date {
+        Timestamp::now().in_tz(&self.0.timezone).map_or_else(
+            |_| Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date(),
+            |z| z.date(),
+        )
+    }
     pub fn date(&self, date: Date) -> String {
         self.0.render_date(date)
     }
@@ -232,7 +251,7 @@ pub(crate) fn refusal(error: bilibi_agent_api::Error, failed: &str) -> Result<Re
     use bilibi_agent_api::Error as E;
     Ok(match error {
         E::Backend(error @ (Error::Unauthorized | Error::StepUpRequired { .. })) => {
-            return Err(error)
+            return Err(error);
         }
         E::Forbidden | E::Backend(Error::Forbidden) => {
             Refusal::Message("You do not have permission to change this document.".into())
@@ -259,7 +278,7 @@ pub(crate) fn store_refusal(error: crate::WriteError) -> Result<String> {
             "You do not have permission to upload documents.".into()
         }
         W::Access(error @ (Error::Unauthorized | Error::StepUpRequired { .. })) => {
-            return Err(error)
+            return Err(error);
         }
         W::Access(Error::Refused(message)) => message,
         W::Access(error) => return Err(error),
@@ -323,7 +342,7 @@ impl Pages {
                     .await?,
             ),
             "company_panel" | "person_panel" | "record_panel" => {
-                Box::new(panel::Panel::new(self.shared(), request)?)
+                Box::new(panel::Panel::new(self.shared(), scope, request).await?)
             }
             _ => return Err(Error::NotFound),
         })
@@ -331,7 +350,8 @@ impl Pages {
 }
 
 /// The list's filters as the address carries them, for the list and its
-/// export: `search`, `category`, `type`, `status` and `related=<kind>:<id>`.
+/// export: `search`, `category`, `type`, `status`, `show` (`favourites` or
+/// `following`) and `related=<kind>:<id>`.
 pub(crate) fn filter_of(query: &HashMap<String, String>) -> Filter {
     let code = |key: &str| {
         query
@@ -348,7 +368,14 @@ pub(crate) fn filter_of(query: &HashMap<String, String>) -> Filter {
         category: code("category"),
         document_type: code("type"),
         status: code("status"),
+        expiry: query
+            .get("expiry")
+            .and_then(|v| crate::ExpiryFilter::parse(v.trim())),
         related: related_of(query),
+        marked: query
+            .get("show")
+            .and_then(|v| crate::MarkFilter::parse(v.trim())),
+        retention_due: query.get("show").is_some_and(|v| v == "retention_due"),
         ..Filter::default()
     }
 }
@@ -384,19 +411,45 @@ fn csv_row(cells: &[String]) -> String {
 }
 
 /// The downloads: a revision's file (`/documents/{id}/revisions/{revision}/file`)
-/// read through `base/artifacts` every time, and the list's metadata as CSV
-/// (`/documents/export.csv`), never a file's content.
+/// read through `base/artifacts` every time, the same file shown in place when
+/// its type is one a browser shows safely (`.../preview`, the same read and
+/// the same authority, not a second path to the bytes), and the list's
+/// metadata as CSV (`/documents/export.csv`), never a file's content.
 pub struct Files(pub Arc<Documents>);
 impl Files {
     async fn export(&self, scope: &Scope, query: &HashMap<String, String>) -> Result<FileBody> {
-        let filter = Filter {
-            sort: Sort::Name,
-            descending: false,
-            page: 1,
-            page_size: EXPORT_ROWS,
-            ..filter_of(query)
-        };
-        let page = self.0.list(scope, &filter).await?;
+        // `list` returns one bounded page, so the export reads page after
+        // page until it holds every match or `EXPORT_ROWS` of them.
+        let mut entries: Vec<Document> = Vec::new();
+        let mut latest: HashMap<i64, crate::Revision> = HashMap::new();
+        let mut due: HashMap<i64, std::time::SystemTime> = HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut total = 0;
+        for number in 1.. {
+            let filter = Filter {
+                sort: Sort::Name,
+                descending: false,
+                page: number,
+                page_size: EXPORT_PAGE,
+                ..filter_of(query)
+            };
+            let mut page = self.0.list(scope, &filter).await?;
+            total = usize::try_from(page.total).unwrap_or(0);
+            if page.entries.is_empty() {
+                break;
+            }
+            // A document filed between two reads can shift a row onto the
+            // next page: keep its first appearance only.
+            page.entries.retain(|d| seen.insert(d.id));
+            page.entries
+                .truncate(EXPORT_ROWS.saturating_sub(entries.len()));
+            latest.extend(self.0.latest_revisions(scope, &page.entries).await?);
+            due.extend(page.retention_due_at);
+            entries.extend(page.entries);
+            if entries.len() >= EXPORT_ROWS.min(total) {
+                break;
+            }
+        }
         let mut csv = csv_row(
             &[
                 "id",
@@ -408,25 +461,49 @@ impl Files {
                 "sub_category",
                 "type",
                 "status",
+                "sync_id",
+                "related_document_id",
+                "relation",
                 "revision",
+                "latest_scan_status",
                 "last_revision_at",
+                "retention_due_at",
                 "filing_company_id",
                 "created_at",
             ]
             .map(String::from),
         );
         let text = |v: &Option<String>| v.clone().unwrap_or_default();
-        for d in &page.entries {
-            csv.push_str(&csv_row(&row(d, text)));
+        for d in &entries {
+            csv.push_str(&csv_row(&row(d, text, latest.get(&d.id), due.get(&d.id))));
+        }
+        let partial = total > entries.len();
+        self.0
+            .exported(scope, &filter_of(query), entries.len(), total)
+            .await?;
+        if partial {
+            csv.push_str(&csv_row(&[format!(
+                "Not complete: the first {} of {total} documents. Narrow the filters and export again for the rest.",
+                entries.len()
+            )]));
         }
         Ok(FileBody::attachment(
             csv.into_bytes(),
             "text/csv",
-            "documents.csv",
+            if partial {
+                "documents-not-complete.csv"
+            } else {
+                "documents.csv"
+            },
         ))
     }
 }
-fn row(d: &Document, text: impl Fn(&Option<String>) -> String) -> Vec<String> {
+fn row(
+    d: &Document,
+    text: impl Fn(&Option<String>) -> String,
+    latest: Option<&crate::Revision>,
+    due: Option<&std::time::SystemTime>,
+) -> Vec<String> {
     vec![
         d.id.to_string(),
         d.name.clone(),
@@ -437,8 +514,19 @@ fn row(d: &Document, text: impl Fn(&Option<String>) -> String) -> Vec<String> {
         text(&d.sub_category),
         text(&d.document_type),
         d.status.clone(),
+        text(&d.sync_id),
+        d.related_document_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        text(&d.relation),
         d.revision.to_string(),
+        latest
+            .map(|r| r.scan_status.code().to_owned())
+            .unwrap_or_default(),
         d.last_revision_at.to_string(),
+        due.and_then(|at| jiff::Timestamp::try_from(*at).ok())
+            .map(|at| at.to_string())
+            .unwrap_or_default(),
         d.company_id.to_string(),
         d.created_at.to_string(),
     ]
@@ -460,6 +548,10 @@ impl Download<Scope, Error> for Files {
             let id = number("id")?;
             let revision = i32::try_from(number("revision")?).map_err(|_| Error::NotFound)?;
             match self.0.read_file(request.scope, id, revision).await {
+                Ok(file) if request.operation == "preview" => {
+                    FileBody::preview(file.bytes, &file.content_type, &file.file_name)
+                        .ok_or(Error::NotFound)
+                }
                 Ok(file) => Ok(FileBody::attachment(
                     file.bytes,
                     &file.content_type,

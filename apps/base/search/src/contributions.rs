@@ -5,8 +5,8 @@
 use crate::{model, Found, BOOST, HIDDEN, KINDS, MIN_CHARS, SEARCH, SUGGESTIONS};
 use bilibi_agent_api::{
     json::{Data, Output},
-    Channels, Definitions, Error as AgentError, Guide, Handler, Operation, OperationClient,
-    OperationFuture, ReadHandler,
+    Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
+    ReadHandler,
 };
 use bilibi_authz::{CapabilityDefinition, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::{
@@ -16,7 +16,7 @@ use bilibi_module_registry::{
 use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Validator, ValueType, DEFINITIONS};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 macro_rules! provenance {
     () => {
@@ -148,10 +148,6 @@ inventory::submit! { Contribution::new(ROUTES, "base/search.preferences", proven
 
 // ---- Agent operation -----------------------------------------------------
 
-fn field_error(field: &str, message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([(field.into(), vec![message.into()])]))
-}
-
 /// The answer as the pages show it: the hits grouped by kind and, for a
 /// results page (`kind`, `page`, `page_size`), which page it is and how many
 /// records each kind matched.
@@ -199,7 +195,10 @@ impl ReadHandler for Records {
             }
             let kind = input["kind"].as_str().filter(|kind| !kind.is_empty());
             if kind.is_some_and(|kind| search.kind(kind).is_none()) {
-                return Err(field_error("kind", "is not a kind of record search knows"));
+                return Err(bilibi_agent_api::invalid(
+                    "kind",
+                    "is not a kind of record search knows",
+                ));
             }
             let page = input["page"].as_u64().unwrap_or(1).max(1);
             let page_size = input["page_size"].as_u64().unwrap_or(25).clamp(1, 100);

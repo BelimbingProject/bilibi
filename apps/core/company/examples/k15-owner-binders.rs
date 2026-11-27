@@ -27,6 +27,11 @@ use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{PartyProofs, Scope};
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
+
+/// Every company the call may offer: these checks count them all.
+fn every() -> bilibi_tenancy::OrganisationSearch<'static> {
+    bilibi_tenancy::OrganisationSearch::text("").limit(usize::MAX)
+}
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
@@ -83,7 +88,9 @@ async fn main() -> Result<(), Error> {
     let other = login(&app, "manager@other.example.test").await?;
     // Reconciliation gives the fixture roles their declared module grants.
     grants.reconcile().await?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // Re-runs start from the seeded state.
     client.batch_execute("UPDATE companies SET status='active' WHERE tenant_id=1 AND id=4; DELETE FROM roles WHERE code LIKE 'k15_%'; DELETE FROM address_attachments WHERE tenant_id=1 AND address_id IN (SELECT id FROM addresses WHERE label='K15 walkthrough'); DELETE FROM addresses WHERE label='K15 walkthrough'; DELETE FROM base_settings WHERE key LIKE 'ui.locale%' AND scope_type='global'; DELETE FROM base_settings WHERE key='localization.timezone' AND scope_type='company'").await?;
     let four = OrganisationId::new(4)?;
@@ -114,7 +121,7 @@ async fn main() -> Result<(), Error> {
     );
     const SETTINGS_MANAGE: &str = "base.settings.company.manage";
     let selectable = parties
-        .selectable_organisations(sql, &admin, SETTINGS_MANAGE)
+        .selectable_organisations(sql, &admin, SETTINGS_MANAGE, every())
         .await?;
     show(
         "selectable(admin, settings.company.manage): count, archived offered",
@@ -123,14 +130,14 @@ async fn main() -> Result<(), Error> {
     show(
         "selectable(manager, settings.company.manage)",
         parties
-            .selectable_organisations(sql, &manager, SETTINGS_MANAGE)
+            .selectable_organisations(sql, &manager, SETTINGS_MANAGE, every())
             .await
             .map(|c| c.len()),
     );
     show(
         "selectable(viewer, settings.company.manage)",
         parties
-            .selectable_organisations(sql, &viewer, SETTINGS_MANAGE)
+            .selectable_organisations(sql, &viewer, SETTINGS_MANAGE, every())
             .await
             .map(|c| c.len()),
     );

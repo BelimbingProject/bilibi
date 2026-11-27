@@ -141,7 +141,18 @@ impl Engine {
         tx.mutate(move |sql| {
             Box::pin(async move {
                 command.validate()?;
-                engine.writer(&context, &scope, run_id)?;
+                match &command {
+                    RunCommand::Reconcile => engine.writer(&context, &scope, run_id)?,
+                    RunCommand::Complete { .. }
+                    | RunCommand::Signal { .. }
+                    | RunCommand::Pause { .. }
+                    | RunCommand::Resume
+                    | RunCommand::Supersede { .. }
+                    | RunCommand::Waive { .. }
+                    | RunCommand::Block { .. } => {
+                        engine.writer_or_principal(&context, &scope, run_id)?;
+                    }
+                }
                 let scope = engine.live(sql, &scope).await?;
                 let (run, definition, items, dependencies) = engine
                     .locked_run(sql, &scope, run_id, command.operation())
@@ -428,7 +439,6 @@ pub(super) async fn completable(
     }
     Ok(())
 }
-#[allow(clippy::too_many_arguments)]
 async fn administer(
     sql: &Transaction<'_>,
     run: &Run,

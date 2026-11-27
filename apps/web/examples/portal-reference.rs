@@ -12,7 +12,7 @@
 //!
 //! Without arguments it serves the app, as the other reference fixtures do,
 //! with an isolated, migrated DATABASE_URL, APP_ORIGIN and BIND_ADDR. A portal
-//! page needs a customer session in the `bilibi_portal` cookie; a staff session
+//! page needs a customer session in the `__Host-bilibi_customer` cookie; a staff session
 //! or none is sent to the portal sign-in.
 use bilibi_authz::{
     authorize_portal, CapabilityDefinition, RoleDefinition, Vocabulary, VocabularyContribution,
@@ -414,7 +414,22 @@ async fn main() -> std::result::Result<std::process::ExitCode, Error> {
     bilibi_walkthrough_fixture::install(&db).await?;
     let origin = std::env::var("APP_ORIGIN").map_err(|_| Error::Invalid)?;
     let bind = std::env::var("BIND_ADDR").map_err(|_| Error::Invalid)?;
+    // Tenant 1's public site answers at the origin's hostname.
     let app = bilibi_web::App::new(db, &origin)?;
+    if let Some(name) = url::Url::parse(&origin)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+    {
+        if let Ok(Err(_)) | Err(_) = app
+            .services
+            .get::<bilibi_base::public::Public>(bilibi_base::public::SERVICE)?
+            .bind_hostname(&app.mutations, 1, &name, true)
+            .await
+        {
+            eprintln!("{name} cannot name a public site; use an APP_ORIGIN with a hostname such as reference.localhost");
+        }
+    }
+    let app = app.at_public_site(&origin);
     app.services
         .get::<bilibi_authz::grants::Grants>("base/authz.grants")?
         .reconcile()
@@ -423,7 +438,7 @@ async fn main() -> std::result::Result<std::process::ExitCode, Error> {
         .await
         .map_err(|_| Error::Internal)?;
     println!("Portal reference listening at {origin}");
-    axum::serve(listener, bilibi_web::router(app))
+    axum::serve(listener, bilibi_web::public_router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

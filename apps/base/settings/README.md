@@ -1,5 +1,9 @@
 # Settings storage contract (P2)
 
+**Use it for:** any value an operator could reasonably set, per installation, tenant or company, with secrets encrypted.
+
+**Not for:** constants, environment-only values or a settings table of your own.
+
 Contribute `Setting` payloads to `base/settings.definitions` using the registry's
 `Contribution` and the declaring module's provenance. The contribution ID is the
 setting key or wildcard pattern. Exact keys win, then the longest matching
@@ -14,7 +18,12 @@ a secret: use an encrypted definition for secrets. Undeclared keys, wildcard
 requests, overlong keys, wrong types and forbidden scopes refuse before writing.
 Writes are bounded to 1 MiB of JSON.
 
+An owning module explicitly delegates one exact, tenant-scoped editable definition to tenant administrators by contributing `TenantAdmin` under `base/settings.tenant-admin` with the setting key as the contribution ID. The owner must be the setting's owner; wildcard, runtime, non-tenant and non-editable settings refuse at boot. Delegation makes the setting reachable through Settings Editor's tenant agent operations; merely allowing `ScopeKind::Tenant` or adding editor metadata does not. The definition remains the one source of its label, validation, field capability and encryption policy.
+
+An encrypted definition whose editor sets `reveal_duration_ms: NEVER_REVEALED` (0) is never shown back, not even through System Settings' stored-secret reveal; its holder re-enters it instead. Every other editor reveals for 1,000 to 60,000 ms, and boot refuses `NEVER_REVEALED` on an unencrypted definition. `base/ai` uses it for provider API keys.
+
 Resolve using `Settings::get` or `resolve_many` from `base/settings.store`. Reads accept `&dyn bilibi_tenancy::ReadClient`, including PostgreSQL clients and transactions and the operation handler's `&dyn OperationClient`. Pass the handed client so a plan sees its earlier writes and rollback keeps every change together.
+`Settings::get_tenant(client, tenant, key)` reads one non-secret tenant-scope value for unattended work that has no session, such as mail sent from a reset token; `get_global` does the same for a global value. Use `get` wherever a `Scope` exists.
 Resolution is user → selected company → tenant → global → declared default,
 filtering to the definition's allowed scopes. A stored JSON null is a real
 nullable override; missing runtime state resolves to null. `Resolved.source`
@@ -51,7 +60,7 @@ through Tenancy's `Authorization::authorize_scope` on the same connection; a
 definition without an editor capability, or a missing grant, refuses the read.
 `Settings::new` leaves that decision unbound, so a principal is refused until `with_authorization` binds Tenancy's decision (the module factory does). Each company read,
 write, and delete calls `base/tenancy.parties` on the same DB connection. A missing
-provider refuses. Core owns this binding; Settings never queries Company tables.
+provider refuses. A read resolves an archived company's values (its reports stay readable); a write or delete needs the organisation proof, which refuses an archived company. Core owns this binding; Settings never queries Company tables.
 Global writes/delete additionally reprove the explicit platform operator.
 The calling owner/HTTP adapter must freshly guard its session and authorize
 route/field capabilities on **every** save, delete and reveal. The storage API

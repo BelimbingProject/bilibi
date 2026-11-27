@@ -23,7 +23,7 @@ pub struct InstanceBadge<'a> {
 }
 
 /// The banner at the top of a review or confirmation: the label in large
-/// type, then one sentence on what a change here does.
+/// type, followed by any environment explanation.
 #[derive(Template, Debug, Default)]
 #[template(
     source = r#"{% import "feedback.html" as ui %}{% call ui::instance_banner(banner=self) %}{% endcall %}"#,

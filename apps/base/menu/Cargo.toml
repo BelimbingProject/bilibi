@@ -8,3 +8,6 @@ license.workspace = true
 [dependencies]
 bilibi-module-registry.workspace = true
 inventory.workspace = true
+
+[lints]
+workspace = true

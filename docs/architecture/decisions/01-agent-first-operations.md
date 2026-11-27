@@ -4,7 +4,7 @@
 **Status:** Accepted. The first Platform slice is built (contracts for every caller, page callers, the page-write check, step-up on the contract); the rest is in "Status of each door today".
 **Agents:** claude-cloud/sonnet-5.5-default (author), amp/gpt-6-luna-default (review), oracle amp/gpt-6-astra
 **Scope:** How a business action is defined once and reached from the GUI, a CLI, an HTTP API and MCP, with the same rules for a human and for an agent acting for a human
-**Last Updated:** 2026-11-02
+**Last Updated:** 2026-11-19
 
 > The `Agents` value is self-reporting: what the agent reports about itself.
 >
@@ -12,7 +12,7 @@
 
 ## Context
 
-**People should not key data by hand. Agents do the routine work.** A person should be able to do all daily work on Bilibi by talking to an agent in a harness, including administration. The harness runs the model. Bilibi runs no model.
+**People should not key data by hand. Agents do the routine work.** A person should be able to do all daily work on Bilibi by talking to an agent in a harness, including administration. The harness runs the model. Bilibi runs no model, except simple one-shot calls through configured providers, never agent loops ([ADR 34](./34-one-shot-model-calls-through-configured-providers.md)).
 
 Bilibi has four doors. Each serves a different caller.
 
@@ -65,7 +65,7 @@ A contract declares:
 - **Step-up protects sensitive actions** (section 4), for agents and humans alike. A capability alone is not the guard on a sensitive action.
 - **Impersonation is the one exception to agent/person parity.** An agent does not impersonate. The agent acts as its person, and an agent switching to another identity would break that in the audit trail: the actor would no longer be the person who granted the connection. This is a named exception. Every other action follows the parity rule and is guarded by authorization and step-up, not by channel restrictions.
 - **Reads and searches are first-class.** Search, describe, guide and read are contracts too. They are cheap, fresh and capability-filtered.
-- **Writes are dry run, then commit.** The dry run writes nothing and returns the complete owner review. The client shows it and waits for the person's explicit approval. Commit takes the unchanged operations, rechecks schemas, capabilities and owner previews in one transaction, and rolls back all writes and audit rows together if any step fails. Bilibi does not attest the person's approval.
+- **Writes are dry run, then commit.** The client shows the owner review and waits for the person's explicit approval before submitting the unchanged operations. [Agent API owns the plan and rollback contract](../../../apps/base/agent_api/README.md#reviewed-safe-writes).
 - **Operating rule: a human is present for every agent write and approves it in the harness.** The human enforces this rule. Bilibi does not technically verify the approval: the same agent credential can preview and commit (`apps/base/agent_api/src/plans.rs`). Bilibi's enforced controls are authorization (the capability check) and the tenant's step-up policy (2FA, section 4, `apps/base/step_up/README.md`).
 - **Accountability.** The person the agent acts for is accountable for each write it commits. The audit trail names that person as the actor.
 - **Audit evidence is append-only.** Every change leaves an audit record that cannot be altered. Each module defines its own correction behaviour. Financial and other evidentiary records (ledger entries, posted documents) are corrected by reversal: a new, dated, audited record that reverses or replaces the old one. Ordinary master data may be deleted, with the change audited. Today's code already deletes some master data and keeps the old value in a `Change` (for example department delete, `apps/core/company/src/departments.rs`).
@@ -108,8 +108,8 @@ Verified against the code on 2026-10-19.
 | --- | --- | --- |
 | GUI | Built. Core Address, Core Person, Core Affiliation, Core Company's relationship screens, Core Tenant and Base Events' replay page call their contracts for every write (`PageContracts`). Other pages still write through facades, each on a listed allowance the page-write check enforces | `apps/base/agent_api/README.md` (Pages as callers, Page writes declaration and check) |
 | API `/api/v1` | Built. Search, describe, guide, call, plans, commit. OAuth device grant, per-person grants, live proof on every request; tenant search/read and atomic tenant-and-companies creation | `apps/web/src/api.rs`, `apps/web/README.md` |
-| MCP `/mcp` | Built. Stateless Streamable HTTP. Six tools: `search`, `describe`, `guide`, `read`, `plan`, `commit`; the same tenant contracts are discovered without plugin changes | `apps/web/src/mcp.rs`, `apps/base/agent_api/src/mcp.rs` |
-| CLI | **Client not built.** `bilibi-web` has only operator commands (`migrate`, `seed`, `seed-production`, `create-owner`, `tenant-provision`, `platform-provision`, `authz-reconcile`, `geonames-import`, `media-cleanup`, `plugin-export`), none of which calls an operation contract | `apps/web/src/main.rs` |
+| MCP `/mcp` | Built. Stateless Streamable HTTP. Generic tools: `hello`, `search`, `describe`, `guide`, `read`, `plan`, `commit`; the same tenant contracts are discovered without plugin changes | `apps/web/src/mcp.rs`, `apps/base/agent_api/src/mcp.rs` |
+| CLI | **Built for agents (remote).** `bilibi-axi` signs in with the OAuth device grant and calls `/api/v1`: `hello`, search, describe, guide, read, plan and commit, printed as TOON with next-step hints. It links no Bilibi crate and holds no decision; a guard-rail script and a two-doors walkthrough against MCP keep it so. `bilibi-web` keeps the operator commands (`migrate`, `seed`, …), none of which calls an operation contract | `apps/cli/README.md` |
 | Harness plugins | **Built for ChatGPT.** `core/agent` generates the downloadable package: a thin adapter over `/mcp`, with skills generated from the registry, including the agent self-report instruction. Its AI connections page (`/settings/ai-connections`) shows one prompt for the person to paste into their AI app; the ChatGPT ZIP stays a download for administrators. Other harnesses are added when needed | `apps/core/agent/README.md` |
 
 The registry is `base/agent_api` (`apps/base/agent_api/README.md`):

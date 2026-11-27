@@ -149,7 +149,7 @@ impl LiveState<Scope, Error> for State {
                         } else if value == "server-error" {
                             Some(CommitStatus::failure())
                         } else if version != record.version {
-                            Some(CommitStatus::Error("The record changed elsewhere. Your draft is kept. Press Escape in the editor to discard it and use the latest value.".into()))
+                            Some(CommitStatus::stale("The record changed elsewhere. Your draft is kept. Press Escape in the editor to discard it and use the latest value."))
                         } else if field == "name" && value.trim().chars().count() < 3 {
                             Some(CommitStatus::refusal(
                                 "Name",
@@ -165,13 +165,27 @@ impl LiveState<Scope, Error> for State {
                                 value,
                                 &["must be a valid date"],
                             ))
-                        } else if field == "kind" && !["customer", "vendor"].contains(&value) {
+                        } else if field == "kind"
+                            && !match record.values.get("kind").map(String::as_str) {
+                                Some("vendor") => ["vendor", "partner"],
+                                Some("partner") => ["partner", "customer"],
+                                _ => ["customer", "vendor"],
+                            }
+                            .contains(&value)
+                        {
                             Some(CommitStatus::refusal(
                                 "Relationship",
                                 value,
                                 &["is unavailable"],
                             ))
-                        } else if field == "region" && !["my", "sg", "au"].contains(&value) {
+                        } else if field == "region"
+                            && !match record.values.get("region").map(String::as_str) {
+                                Some("sg") => ["sg", "au"],
+                                Some("au") => ["au", "my"],
+                                _ => ["my", "sg"],
+                            }
+                            .contains(&value)
+                        {
                             Some(CommitStatus::refusal("Region", value, &["is unavailable"]))
                         } else {
                             record.values.insert(field.into(), value.into());
@@ -227,7 +241,7 @@ async fn main() -> Result<()> {
     println!("Inline reference listening at {origin}/inline-reference");
     axum::serve(
         listener,
-        bilibi_web::router(bilibi_web::App::new(db, &origin)?),
+        bilibi_web::staff_router(bilibi_web::App::new(db, &origin)?),
     )
     .with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;

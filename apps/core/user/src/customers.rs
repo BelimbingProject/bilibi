@@ -112,11 +112,20 @@ pub async fn customer_account(
     user: i64,
     lock: bool,
 ) -> Result<Option<CustomerAccount>> {
+    customer_account_in_tenant(client, scope.tenant(), user, lock).await
+}
+
+pub(crate) async fn customer_account_in_tenant(
+    client: &impl GenericClient,
+    tenant: i64,
+    user: i64,
+    lock: bool,
+) -> Result<Option<CustomerAccount>> {
     let lock = if lock { " FOR UPDATE" } else { "" };
     client
         .query_opt(
             &format!("SELECT {CUSTOMER_COLUMNS} FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.kind='customer' AND u.deleted_at IS NULL{lock}"),
-            &[&scope.tenant(), &user],
+            &[&tenant, &user],
         )
         .await?
         .map(|row| CustomerAccount::from_row(&row))
@@ -283,7 +292,7 @@ impl UserService {
                 Box::pin(async move {
                     let row = sql
                         .query_one(
-                            &format!("UPDATE users SET status=$3 WHERE tenant_id=$1 AND id=$2 RETURNING {CUSTOMER_COLUMNS}"),
+                            &format!("UPDATE users u SET status=$3 FROM user_identities i WHERE u.tenant_id=$1 AND u.id=$2 AND i.id=u.identity_id RETURNING {CUSTOMER_COLUMNS}"),
                             &[&tenant, &user, &status],
                         )
                         .await?;
@@ -310,17 +319,31 @@ impl UserService {
     /// [`UserService::request_password_reset`], but the address is looked up
     /// among the customers of `tenant`, which the caller resolved from the
     /// portal address the customer opened, and the link opens that portal's
-    /// reset page (`/portal/reset/{site}/{token}`).
+    /// reset page (`/portal/reset/{token}`) on the public site at `origin`.
     pub async fn request_portal_password_reset(
         &self,
         tenant: i64,
-        site: &str,
+        origin: &str,
         email: &str,
     ) -> std::result::Result<(), CredentialError> {
-        if tenant <= 0 || !crate::reset::site_shaped(site) {
+        if tenant <= 0 || !crate::reset::origin_shaped(origin) {
             return Err(CredentialError::Rejected);
         }
-        self.request_reset(Audience::Customer { tenant }, Some(site), email)
+        self.request_reset(Audience::Customer { tenant }, Some(origin), email)
+            .await
+    }
+
+    /// Check the customer's reset link before showing password fields.
+    pub async fn portal_reset_link_valid(
+        &self,
+        tenant: i64,
+        email: &str,
+        token: &str,
+    ) -> Result<bool> {
+        if tenant <= 0 {
+            return Ok(false);
+        }
+        self.reset_link_valid_for(Audience::Customer { tenant }, email, token)
             .await
     }
 

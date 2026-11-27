@@ -8,7 +8,7 @@ use bilibi_agent_api::Error as ContractError;
 use bilibi_ui::{
     BackLink, Badge, BadgeKind, Button, ButtonVariant, Card, CommitStates, CommitStatus,
     ConfirmDialog, Fact, Facts, Field, Header, InlineChoice, InlineEdit, InlineField, InputKind,
-    PageVariant, Restricted, SectionHeading,
+    LivePanelStack, PageVariant, Restricted, SectionHeading,
 };
 use std::collections::BTreeMap;
 
@@ -24,9 +24,7 @@ struct Reveal {
 struct View<'a> {
     person: &'a Person,
     header: Html,
-    identity: Html,
-    contacts: Html,
-    panels: Vec<PanelSpec>,
+    sections: Html,
     dialog: Html,
 }
 #[derive(Template)]
@@ -49,10 +47,15 @@ pub(super) struct Detail {
     /// shown only while the reader still may reveal it and the record has not
     /// changed.
     revealed: BTreeMap<String, (String, i64)>,
+    /// The page is framed in a workspace tile.
+    framed: bool,
+    picking: BTreeMap<String, String>,
 }
 impl Detail {
-    pub fn new(pages: Pages, id: PersonId, _framed: bool) -> Self {
+    pub fn new(pages: Pages, id: PersonId, framed: bool) -> Self {
         Self {
+            framed,
+            picking: BTreeMap::new(),
             pages,
             id,
             active_panels: Vec::new(),
@@ -89,6 +92,7 @@ impl Detail {
     pub async fn contacts(
         &self,
         scope: &Scope,
+        words: &bilibi_grid::RecordWords,
         person: &Person,
         prefix: &str,
         revealable: bool,
@@ -106,20 +110,13 @@ impl Detail {
                 .map(|(value, _)| value.as_str())
         };
         let mut items = Vec::new();
-        for (key, label, value) in [
-            (
-                "email",
-                "Personal email",
-                person.email.as_deref().unwrap_or(""),
-            ),
-            (
-                "phone",
-                "Personal phone",
-                person.phone.as_deref().unwrap_or(""),
-            ),
+        for (key, value) in [
+            ("email", person.email.as_deref().unwrap_or("")),
+            ("phone", person.phone.as_deref().unwrap_or("")),
         ] {
+            let label = words.get(&super::fields::get(key));
             items.push(Fact {
-                title: super::fields::get(key).label,
+                title: words.get(&super::fields::get(key)),
                 value: if person.masked.iter().any(|m| m == key) {
                     // A partial value, or the full one revealed in this view.
                     let full = revealed(key);
@@ -159,13 +156,15 @@ impl Detail {
         })?);
         render(Card {
             id: &format!("{prefix}-card"),
-            class: "mt-6",
             role: "region",
             body,
             ..Card::default()
         })
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "persons").await?;
+        drop(client);
         let person = self.pages.persons.read(scope, self.id).await?;
         self.active_panels.clear();
         for panel in &self.pages.person_panels {
@@ -223,7 +222,7 @@ impl Detail {
         let kind_field = self.inline(
             &person,
             "kind",
-            "Kind",
+            words.get(&super::fields::KIND),
             kind,
             editable && person.system_key.is_none(),
             "person-field",
@@ -232,7 +231,7 @@ impl Detail {
             Field::named("kind")
                 .id("person-kind-editor")
                 .label_class("sr-only")
-                .label("Kind")
+                .label(words.get(&super::fields::KIND))
                 .kind(InputKind::Select)
                 .value(kind)
                 .options(bilibi_ui::choices(&[
@@ -240,19 +239,19 @@ impl Detail {
                     ("Agent", "agent"),
                 ])),
         )?;
-        let items = vec![
+        let mut items = vec![
             Fact {
-                title: super::fields::CODE.label,
+                title: words.get(&super::fields::CODE),
                 value: Html::text(&person.code),
                 ..Fact::default()
             },
             Fact {
-                title: super::fields::NAME.label,
+                title: words.get(&super::fields::NAME),
                 value: render(InlineEdit {
                     field: self.inline(
                         &person,
                         "name",
-                        "Name",
+                        words.get(&super::fields::NAME),
                         &person.name,
                         editable,
                         "person-field",
@@ -261,7 +260,7 @@ impl Detail {
                 ..Fact::default()
             },
             Fact {
-                title: super::fields::KIND.label,
+                title: words.get(&super::fields::KIND),
                 value: render(InlineChoice {
                     field: kind_field,
                     display: render(Badge {
@@ -273,7 +272,7 @@ impl Detail {
                 ..Fact::default()
             },
             Fact {
-                title: super::fields::IDENTITY.label,
+                title: words.get(&super::fields::IDENTITY),
                 value: render(Badge::status(
                     if person.retired_at.is_some() {
                         BadgeKind::Neutral
@@ -289,6 +288,61 @@ impl Detail {
                 ..Fact::default()
             },
         ];
+        // The tenant's own fields, edited in place through
+        // `core.person.update` (`save_custom_field`).
+        // A record field's pick saves through the same contract at once.
+        let definitions = super::custom::active(&self.pages, scope).await?;
+        // Resolved once for every date field, not once per field, and every
+        // record field's record named in one call.
+        let display = self.pages.display(scope).await?;
+        let names = super::custom::Names::read(
+            scope,
+            &definitions.iter().collect::<Vec<_>>(),
+            [&person.custom],
+        )
+        .await?;
+        let shown = super::custom::Shown {
+            pages: &self.pages,
+            scope,
+            display: &display,
+            names: &names,
+            framed: self.framed,
+        };
+        for definition in &definitions {
+            let name = crate::custom::name(&definition.key);
+            let stored = person.custom.get(&definition.key);
+            let value = super::custom::inline_value(definition, stored);
+            let mut field = self.inline(
+                &person,
+                &name,
+                &definition.label,
+                &value,
+                editable,
+                "person-field",
+            );
+            field.id = format!("person-field-{}", name.replace('_', "-"));
+            field.save_event = "save_custom_field".into();
+            field = field.allow_empty();
+            let query = self.picking.get(&name).map_or("", String::as_str);
+            let hits = if editable && definition.kind == bilibi_custom_fields::Kind::Reference {
+                super::custom::hits(scope, definition, query).await?
+            } else {
+                Vec::new()
+            };
+            let picking = editable.then(|| super::custom::Picking {
+                query,
+                hits: &hits,
+                errors: match self.statuses.get(&name) {
+                    CommitStatus::Error(message) => vec![message],
+                    _ => Vec::new(),
+                },
+            });
+            items.push(Fact {
+                title: &definition.label,
+                value: shown.fact(definition, stored, field, picking).await?,
+                ..Fact::default()
+            });
+        }
         let mut identity = render(SectionHeading {
             title: "Identity and contact details",
             ..SectionHeading::default()
@@ -347,25 +401,33 @@ impl Detail {
             })?
         } else if let Some((name, _)) = &self.pending_retire {
             render(ConfirmDialog {
-            id: "person-retire-confirm", consequence: &format!("{name} will be retired."),
-            detail: "Their details, history and affiliations are kept. The contact cannot be edited or linked again.",
-            confirm: "Retire", working: "Retiring…", confirm_event: "retire", cancel_event: "cancel_retire",
-        })?
+                id: "person-retire-confirm",
+                consequence: &format!("{name} will be retired."),
+                detail: "Their details, history and affiliations are kept. The contact cannot be edited or linked again.",
+                confirm: "Retire",
+                working: "Retiring…",
+                confirm_event: "retire",
+                cancel_event: "cancel_retire",
+            })?
         } else {
             Html::EMPTY
         };
+        let panels = self.panels();
+        let panel_ids: Vec<_> = panels
+            .iter()
+            .filter(|panel| panel.id != "person-record-history")
+            .map(|panel| panel.id.as_str())
+            .collect();
+        let contacts = self
+            .contacts(scope, &words, &person, "person-contact", true)
+            .await?;
         let body = render(View {
             person: &person,
             header,
-            identity,
-            contacts: self
-                .contacts(scope, &person, "person-contact", true)
-                .await?,
-            panels: self
-                .panels()
-                .into_iter()
-                .filter(|p| p.id != "person-record-history")
-                .collect(),
+            sections: render(LivePanelStack {
+                parts: &[identity, contacts],
+                panel_ids: &panel_ids,
+            })?,
             dialog,
         })?;
         Ok(LiveBody {
@@ -380,6 +442,90 @@ impl Detail {
             rows: 1,
             ..LiveBody::default()
         })
+    }
+    /// Saves one custom field (`field` is `cf_<key>`) through
+    /// `core.person.update` with the identity as it stands and records the
+    /// outcome on its fact; `true` when it was saved. A record field's
+    /// refusal is the contract's own sentence (never the id); another
+    /// field's repeats what was typed.
+    async fn save_custom(
+        &mut self,
+        scope: &Scope,
+        credential: &str,
+        field: &str,
+        definition: Option<&bilibi_custom_fields::Definition>,
+        version: i64,
+        pair: Value,
+        submitted: &str,
+    ) -> Result<bool> {
+        let person = self.pages.persons.read(scope, self.id).await?;
+        let identity = current_identity(person);
+        // A refusal names the field as the page does.
+        let label = definition.map_or("This field", |definition| definition.label.as_str());
+        let record = definition
+            .is_some_and(|definition| definition.kind == bilibi_custom_fields::Kind::Reference);
+        let result = self
+            .pages
+            .contracts
+            .submit(
+                &self.pages.call(scope, credential, "save_custom_field", "core.person.update"),
+                json!({"person_id": self.id.get(), "version": version, "identity": identity_json(&identity), "custom": [pair]}),
+            )
+            .await;
+        let status = match result {
+            Ok(_) => CommitStatus::Saved,
+            Err(ContractError::Backend(
+                error @ (Error::Unauthorized | Error::StepUpRequired { .. }),
+            )) => return Err(error),
+            Err(ContractError::Forbidden | ContractError::Backend(Error::Forbidden)) => {
+                self.notice =
+                    "You do not have permission to edit this contact, or it is retired.".into();
+                self.statuses.clear_saved();
+                CommitStatus::Error(self.notice.clone())
+            }
+            Err(ContractError::InvalidInput(errors)) => {
+                let messages: Vec<&str> = errors
+                    .values()
+                    .flat_map(|messages| messages.iter().map(String::as_str))
+                    .collect();
+                if record {
+                    CommitStatus::Error(if messages.is_empty() {
+                        bilibi_ui::error_sentence(label, "is not valid")
+                    } else {
+                        messages
+                            .iter()
+                            .map(|message| bilibi_ui::error_sentence(label, message))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                } else {
+                    CommitStatus::refusal(
+                        label,
+                        submitted,
+                        if messages.is_empty() {
+                            &["is not valid"]
+                        } else {
+                            &messages
+                        },
+                    )
+                }
+            }
+            Err(ContractError::Backend(Error::Conflict)) if record => {
+                CommitStatus::Error(bilibi_ui::error_sentence(
+                    label,
+                    "has changed since this edit began; reload before trying again",
+                ))
+            }
+            Err(ContractError::Backend(Error::Conflict)) => CommitStatus::refusal(
+                label,
+                submitted,
+                &["has changed since this edit began; reload before trying again"],
+            ),
+            Err(_) => CommitStatus::failure(),
+        };
+        let saved = status == CommitStatus::Saved;
+        self.statuses.put(field, status);
+        Ok(saved)
     }
     pub async fn handle(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         self.notice.clear();
@@ -397,16 +543,7 @@ impl Detail {
                     .and_then(|v| v.parse::<i64>().ok())
                     .ok_or(Error::Invalid)?;
                 let person = self.pages.persons.read(scope, self.id).await?;
-                // Never carry a restricted contact into a replacement input: a
-                // masked one holds only its partial value. Left out, the owner
-                // keeps the stored value.
-                let masked = |key: &str| person.masked.iter().any(|m| m == key);
-                let mut identity = PersonInput {
-                    email: person.email.clone().filter(|_| !masked("email")),
-                    phone: person.phone.clone().filter(|_| !masked("phone")),
-                    name: person.name,
-                    kind: person.kind,
-                };
+                let mut identity = current_identity(person);
                 match field {
                     "name" => identity.name = submitted.into(),
                     "email" => identity.email = Some(submitted.into()),
@@ -484,6 +621,93 @@ impl Detail {
                 };
                 self.statuses.put(field, status);
             }
+            // One custom field (`cf_<key>`): the identity is sent as it is, so
+            // only that value changes; the owner checks it against the
+            // tenant's definitions. Several choices arrive as the ticked
+            // codes joined by `,`.
+            "save_custom_field" => {
+                let field = value["field"].as_str().ok_or(Error::Invalid)?.to_owned();
+                let Some(key) = field.strip_prefix("cf_").map(str::to_owned) else {
+                    return Err(Error::Invalid);
+                };
+                if value["id"].as_str() != Some(&self.id.get().to_string()) {
+                    return Err(Error::Invalid);
+                }
+                let submitted = value["value"].as_str().ok_or(Error::Invalid)?;
+                let version = value["version"]
+                    .as_str()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .ok_or(Error::Invalid)?;
+                let definition = super::custom::active(&self.pages, scope)
+                    .await?
+                    .into_iter()
+                    .find(|definition| definition.key == key);
+                let pair = match definition.as_ref().map(|d| d.kind) {
+                    Some(bilibi_custom_fields::Kind::Choices) => {
+                        let codes = bilibi_custom_fields::codes_value([submitted]);
+                        json!({"key": key, "values": if codes.is_null() { json!([]) } else { codes }})
+                    }
+                    _ => json!({"key": key, "value": submitted}),
+                };
+                self.save_custom(
+                    scope,
+                    credential,
+                    &field,
+                    definition.as_ref(),
+                    version,
+                    pair,
+                    submitted,
+                )
+                .await?;
+            }
+            // A record field's picker: typing searches, a hit saves the field
+            // at once with the record's version, and clearing saves none.
+            super::custom::REFERENCE_SEARCH => {
+                let form = bilibi_ui::params::form_values_checked(
+                    value,
+                    super::custom::REFERENCE_FORM,
+                    bilibi_ui::params::FIELD_LIMIT,
+                )
+                .map_err(Error::refused)?;
+                let definitions = super::custom::active(&self.pages, scope).await?;
+                for (posted, query) in form {
+                    let Some(name) = posted.strip_suffix("_search") else {
+                        continue;
+                    };
+                    reference_field(&definitions, name)?;
+                    let query: String = query.chars().take(100).collect();
+                    self.picking.insert(name.to_owned(), query);
+                }
+            }
+            name @ (super::custom::PICK_EVENT | super::custom::CLEAR_EVENT) => {
+                let picked = name == super::custom::PICK_EVENT;
+                let field = value["key"].as_str().ok_or(Error::Invalid)?;
+                let definitions = super::custom::active(&self.pages, scope).await?;
+                let definition = reference_field(&definitions, field)?;
+                let id = if picked {
+                    let raised = value["record"].as_str().ok_or(Error::Invalid)?;
+                    Some(bilibi_custom_fields::picked(definition, raised).ok_or(Error::Invalid)?)
+                } else {
+                    None
+                };
+                let version = self.pages.persons.read(scope, self.id).await?.version;
+                let key = definition.key.clone();
+                let field = field.to_owned();
+                if self
+                    .save_custom(
+                        scope,
+                        credential,
+                        &field,
+                        Some(definition),
+                        version,
+                        json!({"key": key, "value": id}),
+                        "",
+                    )
+                    .await?
+                {
+                    self.picking.remove(&field);
+                }
+            }
             // Retiring is the contract's dry run, then its rechecked commit
             // once the person confirms.
             "request_retire" => {
@@ -547,13 +771,18 @@ impl Detail {
             }
             "close_reveal" => self.reveal = None,
             "reveal" => {
+                let reason = bilibi_ui::params::form_values_checked(
+                    value,
+                    "reveal",
+                    bilibi_ui::params::FIELD_LIMIT,
+                )
+                .map_err(Error::refused)?
+                .get("reason")
+                .cloned()
+                .unwrap_or_default();
                 let Some(open) = self.reveal.take() else {
                     return Ok(());
                 };
-                let reason = bilibi_ui::params::form_values(value, "reveal")
-                    .get("reason")
-                    .cloned()
-                    .unwrap_or_default();
                 let version = self.pages.persons.read(scope, self.id).await?.version;
                 // The privacy contract checks the capability, reason and Step-up
                 // and records the reveal before it answers.
@@ -607,6 +836,34 @@ impl LiveState<Scope, Error> for Detail {
     }
     fn panels(&self) -> Vec<PanelSpec> {
         self.active_panels.clone()
+    }
+}
+
+/// The active record field named `name` (`cf_<key>`); any other is a
+/// tampered event.
+fn reference_field<'a>(
+    definitions: &'a [bilibi_custom_fields::Definition],
+    name: &str,
+) -> Result<&'a bilibi_custom_fields::Definition> {
+    definitions
+        .iter()
+        .find(|definition| {
+            definition.kind == bilibi_custom_fields::Kind::Reference
+                && crate::custom::name(&definition.key) == name
+        })
+        .ok_or(Error::Invalid)
+}
+
+/// The person's identity as a replacement input. A restricted contact is
+/// never carried: a masked one holds only its partial value, and left out the
+/// owner keeps the stored value.
+fn current_identity(person: Person) -> PersonInput {
+    let masked = |key: &str| person.masked.iter().any(|m| m == key);
+    PersonInput {
+        email: person.email.clone().filter(|_| !masked("email")),
+        phone: person.phone.clone().filter(|_| !masked("phone")),
+        name: person.name,
+        kind: person.kind,
     }
 }
 

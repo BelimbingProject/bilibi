@@ -54,6 +54,10 @@ struct Disk {
     free: i64,
     total: i64,
 }
+#[expect(
+    unsafe_code,
+    reason = "the standard library has no filesystem capacity call"
+)]
 fn root_filesystem() -> Option<Disk> {
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     // SAFETY: the path is a NUL-terminated literal and `stat` is only read after
@@ -156,12 +160,26 @@ pub(super) async fn page(pages: &Pages, scope: &Scope) -> Result<String> {
     .await
     .ok()
     .and_then(|result| result.ok());
+    let readers = tokio::time::timeout(Duration::from_secs(3), async {
+        let client = pages.db.get().await?;
+        bilibi_residents::health_status(&**client).await
+    })
+    .await
+    .ok()
+    .and_then(|result| result.ok());
     let performance = match (diagnostics.recorder, diagnostics.store) {
         (bilibi_perf::Health::Unavailable, _) | (_, bilibi_perf::Store::Unavailable) => {
             "Unavailable".to_owned()
         }
         _ if !diagnostics.recording => "Disabled (history available)".to_owned(),
         _ => pages.perf.health_status().await,
+    };
+    // What the mailer would do with a message now: a dev mailbox outside a
+    // development installation refuses, and this is where an operator sees why.
+    let mail = match tokio::time::timeout(Duration::from_secs(3), pages.mailer.ready()).await {
+        Ok(Ok(())) => Some(pages.mailer.describe()),
+        Ok(Err(bilibi_mail::Error::Config(why))) => Some(format!("Not sending: {why}")),
+        _ => None,
     };
     let runtime = tokio::runtime::Handle::try_current()
         .ok()
@@ -252,6 +270,8 @@ pub(super) async fn page(pages: &Pages, scope: &Scope) -> Result<String> {
                 ("Database", text(connected)),
                 ("Cache", text("Settings read directly from PostgreSQL")),
                 ("Queue", queue),
+                ("Resident readers", readers),
+                ("Mail", mail),
                 ("Performance", text(performance)),
             ],
         )?,

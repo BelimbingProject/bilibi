@@ -14,24 +14,87 @@ use axum::{
 };
 use bilibi_base::{authz, menu, tenancy};
 use bilibi_database::{Error, Result};
-use bilibi_module_registry::contributions::{
-    Access, Embed, EmbedContext, Method, Route, Viewer, EMBEDS,
-};
+use bilibi_module_registry::contributions::{Access, Embed, EmbedContext, Viewer, EMBEDS};
 use bilibi_security::Scope;
 use bilibi_ui::page::{PageRequest, PageService};
 use bilibi_ui::{
-    page::PageChrome, AppShell, CompanyChoice, DisplayPreferences, Framed, Html, NavNode,
-    SearchPage, ShellContext, StandaloneReview, TenantChoice,
+    page::PageChrome, AppShell, CompanyChoice, DisplayPreferences, Framed, Html, Instant,
+    InstantView, NavNode, ShellContext, StandaloneReview, TenantChoice,
 };
 use bilibi_user::{ChoiceRefusal, PreferenceError, Presentation};
 use serde::Deserialize;
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
 
+#[derive(Template)]
+#[template(
+    source = r#"<div id="app-user-session-security" class="mb-3 border-b border-line pb-3">{% if first %}<p id="app-user-previous-sign-in">No earlier sign-in on record</p>{% else %}<p id="app-user-previous-sign-in" class="break-words"><span class="text-muted">Previous sign-in:</span> {{ at|safe }} · {{ device }}{% if !ip.is_empty() %} · <span class="text-muted">IP address</span> <span class="tabular-nums">{{ ip }}</span>{% endif %}{% if !place.is_empty() %} · {{ place }}{% endif %}</p>{% endif %}<a id="app-user-sessions" href="/settings/sessions" class="mt-1 inline-flex items-center gap-1 text-link hover:underline">Your sessions</a></div>"#,
+    ext = "html"
+)]
+struct AccountSessionSecurity {
+    first: bool,
+    at: Html,
+    device: String,
+    ip: String,
+    place: String,
+}
+
+fn account_session_security(
+    previous: Option<bilibi_base::session::PreviousSignIn>,
+    display: &bilibi_base::datetime::DisplayContext,
+) -> Result<Html> {
+    let (first, at, device, ip, place) = match previous {
+        Some(previous) => {
+            let at =
+                jiff::Timestamp::try_from(previous.signed_in_at).map_err(|_| Error::Internal)?;
+            let rendered = display.render(
+                at,
+                bilibi_base::datetime::Format::DateTime,
+                bilibi_base::datetime::Precision::Minute,
+            );
+            let instant = Instant::new(
+                &rendered.iso,
+                &rendered.text,
+                &rendered.company,
+                &rendered.utc,
+                rendered.mode.as_str(),
+            );
+            (
+                false,
+                Html::render(&InstantView {
+                    id: "app-user-previous-sign-in-at",
+                    instant: &instant,
+                })
+                .map_err(|_| Error::Internal)?,
+                bilibi_base::session::client_name(previous.user_agent.as_deref()),
+                previous.ip_address.unwrap_or_default(),
+                previous.place.unwrap_or_default(),
+            )
+        }
+        None => (
+            true,
+            Html::EMPTY,
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
+    };
+    Html::render(&AccountSessionSecurity {
+        first,
+        at,
+        device,
+        ip,
+        place,
+    })
+    .map_err(|_| Error::Internal)
+}
+
 /// A rendered page body and the explicit theme to stamp on `<html>`.
 pub struct Rendered {
     pub html: String,
     pub theme: &'static str,
+    /// The brand the chrome was drawn under, for the document around it.
+    pub brand: bilibi_ui::Brand,
 }
 
 /// Renders `body` inside the full shell, the chromeless framed root, or as is
@@ -53,6 +116,7 @@ pub async fn render(
         .as_ref()
         .map_or_else(DisplayPreferences::default, preferences);
     let theme = presentation.as_ref().map_or("system", |p| p.theme);
+    let brand = app.branding.current().await;
     let html = if chrome == PageChrome::Framed {
         Framed {
             body,
@@ -73,6 +137,7 @@ pub async fn render(
             .map_err(|_| Error::Internal)?;
         StandaloneReview {
             body,
+            brand: &brand,
             instance: &instance,
             live,
             tenant_id: scope.tenant(),
@@ -84,7 +149,22 @@ pub async fn render(
         }
         .render()
     } else if let Some(scope) = scope {
-        let context = context(app, scope, path, preferences, topbar_actions).await?;
+        let presentation = presentation.as_ref().ok_or(Error::Internal)?;
+        let display = bilibi_base::datetime::DisplayContext {
+            mode: presentation.mode,
+            timezone: presentation.timezone.clone(),
+            locale: presentation.locale,
+        };
+        let context = context(
+            app,
+            scope,
+            path,
+            &brand,
+            preferences,
+            display,
+            topbar_actions,
+        )
+        .await?;
         AppShell {
             context: &context,
             live,
@@ -95,12 +175,11 @@ pub async fn render(
         return Ok(Rendered {
             html: body.to_owned(),
             theme,
+            brand,
         });
     };
-    Ok(Rendered {
-        html: html.map_err(|_| Error::Internal)?,
-        theme,
-    })
+    let html = html.map_err(|_| Error::Internal)?;
+    Ok(Rendered { html, theme, brand })
 }
 
 /// The account's theme and time display: its own saved choices over the
@@ -117,7 +196,9 @@ async fn context<'a>(
     app: &'a App,
     scope: &'a Scope,
     path: &str,
+    brand: &'a bilibi_ui::Brand,
     preferences: DisplayPreferences,
+    display: bilibi_base::datetime::DisplayContext,
     topbar_actions: Html,
 ) -> Result<ShellContext<'a>> {
     let client = app.db.get().await?;
@@ -129,15 +210,23 @@ async fn context<'a>(
         Err(Error::Forbidden) => false,
         Err(error) => return Err(error),
     };
-    let tree = app.menu.visible_tree(&|key| {
-        if key == menu::OWNER_STANDING {
-            owner
-        } else {
-            capabilities.contains(key)
-        }
-    });
+    let mut tree = app.menu.visible_staff_tree(&capabilities, owner);
+    app.services
+        .get::<bilibi_base::menu_order::MenuOrder>(bilibi_base::menu_order::SERVICE)?
+        .orders(&**client, scope)
+        .await?
+        .apply(&mut tree);
     let active = active_item(&tree, path);
-    let nodes: Vec<_> = tree.iter().map(|node| nav_node(node, active)).collect();
+    // The tenant's own words for menu items (ADR 28); keys and routes stay.
+    let labels = app
+        .services
+        .get::<bilibi_base::labels::Labels>(bilibi_base::labels::SERVICE)?
+        .labels(&**client, scope)
+        .await?;
+    let nodes: Vec<_> = tree
+        .iter()
+        .map(|node| nav_node(node, active, &labels))
+        .collect();
     // The tenant's standing, from the explicit operator proof only.
     let platform_operator = match tenancy::prove_operator(&**client, scope).await {
         Ok(_) => true,
@@ -151,10 +240,12 @@ async fn context<'a>(
     let parties = app
         .services
         .get::<tenancy::PartyProofs>("base/tenancy.parties")?;
-    let current_company = match scope.current_company() {
-        Some(id) => company_name(&parties, &**client, scope, id).await,
-
-        None => None,
+    let (current_company, current_archived) = match scope.current_company() {
+        Some(id) => match company_name(&parties, &**client, scope, id).await {
+            Some(organisation) => (Some(organisation.name), organisation.archived),
+            None => (None, false),
+        },
+        None => (None, false),
     };
     let organisations = parties
         .reachable_organisations(&**client, scope)
@@ -173,6 +264,7 @@ async fn context<'a>(
         .map(|organisation| CompanyChoice {
             id: organisation.id.get(),
             current: Some(organisation.id) == scope.current_company(),
+            archived: organisation.archived,
             name: organisation.name,
             image_url: image_urls.get(&organisation.id.get()).cloned(),
         })
@@ -185,6 +277,7 @@ async fn context<'a>(
     );
     let company_bar = bilibi_ui::company_bar(
         current_company.as_deref(),
+        current_archived,
         scope
             .current_company()
             .and_then(|company| image_urls.get(&company.get()))
@@ -217,6 +310,14 @@ async fn context<'a>(
         );
     let pins = bilibi_user::list_pins(&**client, scope).await?;
     let profile_image_url = app.user.profile_image_url(&**client, scope).await;
+    let session_security = if scope.impersonator().is_none() {
+        let sessions = app
+            .services
+            .get::<bilibi_base::session::Sessions>("base/session.sessions")?;
+        account_session_security(sessions.previous_sign_in(&**client, scope).await?, &display)?
+    } else {
+        Html::EMPTY
+    };
     // Everything below takes connections of its own. Holding this one across
     // them would let as many simultaneous renders as the pool holds take every
     // connection and wait on each other for good (every live reply renders
@@ -251,33 +352,21 @@ async fn context<'a>(
             .get::<bilibi_base::system::Instances>(bilibi_base::system::SERVICE)?
             .is_core_administrator(scope)
             .await?;
-    // The search lists the pages the person may open, decided by the shared
-    // display check (`Access::admits`, as tiles and record hits are): display
-    // only and unlogged, since each route checks its own access again. Two
-    // pages the status bar links to under a condition use the same condition
-    // here: Instance settings also
-    // needs the Core Administrator standing, and the operator setup page only
-    // helps while the operator stands on no primary company (afterwards it
-    // sends everyone to that company).
-    let viewer = Viewer {
-        capabilities: &capabilities,
-        operator: platform_operator,
-        owner,
-    };
-    let may_open = |access: Access| match access.base() {
-        // Sign-in and the other public pages are no place to send someone
-        // already signed in.
-        Access::Public => false,
-        Access::OperatorCapability(bilibi_base::system::INSTANCE_MANAGE) => manage_instance,
-        access => access.admits(&viewer),
-    };
-    let pages = search_pages(app, &tree, |route| {
-        may_open(route.access) && (route.path != OPERATOR_SETUP || operator_company_missing)
-    });
-    let served = served_routes(app);
+    let pages = crate::page_search::pages(
+        app,
+        &tree,
+        Viewer {
+            capabilities: &capabilities,
+            operator: platform_operator,
+            owner,
+        },
+        manage_instance,
+        operator_company_missing,
+    );
+    let served = app.user.pin_routes();
     let pins: Vec<_> = pins
         .into_iter()
-        .filter(|pin| is_served(&served, &pin.url))
+        .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
         .collect();
     let mut pin_icons: Vec<String> = pins
         .iter()
@@ -298,7 +387,9 @@ async fn context<'a>(
         .filter_map(|part| part.chars().next())
         .collect::<String>()
         .to_uppercase();
+    let composition = crate::composition();
     Ok(ShellContext {
+        brand,
         user: &scope.user_name,
         email: &scope.email,
         tenant: &scope.tenant_name,
@@ -312,6 +403,7 @@ async fn context<'a>(
             &initials,
         ))
         .map_err(|_| Error::Internal)?,
+        session_security,
         tenant_bar,
         platform_operator,
         operator_company_missing,
@@ -322,13 +414,13 @@ async fn context<'a>(
         notifications,
         ai,
         home,
-        served_routes: serde_json::to_string(&served).map_err(|_| Error::Internal)?,
+        served_routes: serde_json::to_string(served).map_err(|_| Error::Internal)?,
         pins: serde_json::to_string(&pins).map_err(|_| Error::Internal)?,
         pin_icons,
-        instance: if instance.role == bilibi_base::system::Role::Dev {
-            Html::EMPTY
-        } else {
+        instance: if instance.role == bilibi_base::system::Role::Staging {
             instance.badge().map_err(|_| Error::Internal)?
+        } else {
+            Html::EMPTY
         },
         instance_status: instance
             .status(manage_instance)
@@ -339,7 +431,12 @@ async fn context<'a>(
         } else {
             None
         },
-        versions: bilibi_ui::version_badges(&crate::composition()),
+        version: crate::application_version::application_version(
+            instance.role,
+            composition.version,
+            &display,
+        ),
+        can_view_software: platform_operator && capabilities.contains(bilibi_base::software::VIEW),
         topbar_actions,
         page_search: bilibi_ui::page_search(&pages, records).map_err(|_| Error::Internal)?,
     })
@@ -352,122 +449,12 @@ async fn company_name(
     client: &(impl tokio_postgres::GenericClient + Sync),
     scope: &Scope,
     id: bilibi_base::party_ids::OrganisationId,
-) -> Option<String> {
+) -> Option<tenancy::NamedOrganisation> {
     parties
         .organisation_name(client, scope, id)
         .await
         .ok()
         .flatten()
-        .map(|organisation| organisation.name)
-}
-
-/// The address of Company's operator setup page, which the status bar links to
-/// while the operator stands on no primary company (`shell.html`).
-const OPERATOR_SETUP: &str = "/setup/platform-operator";
-
-/// The pages the shell's search lists: each page route the person `may` open,
-/// named by its title, else its menu row, and placed where it lives: at its
-/// menu row, else under the deepest row its address sits beneath. A personal
-/// settings page takes its tab's label under `SETTINGS_LOCATION`. A route with
-/// a path parameter and a page with no name are left out. A route that only
-/// redirects is listed under its title when the person may also open where it
-/// leads (Create Contact opens the Contacts list's dialog), so an old address
-/// that redirects returns no title.
-fn search_pages(app: &App, tree: &[menu::Node], may: impl Fn(&Route) -> bool) -> Vec<SearchPage> {
-    let mut rows = Vec::new();
-    menu_rows(tree, &[], &mut rows);
-    let settings = bilibi_ui::SettingsTab::pages();
-    let mut pages = Vec::new();
-    let mut account = Vec::new();
-    for bound in app.routes.staff.iter() {
-        let route = bound.route;
-        if route.method != Method::Get || route.path.contains('{') || !may(route) {
-            continue;
-        }
-        if let Some(target) = bound.page.0.redirect(route.operation) {
-            let path = target.split('?').next().unwrap_or(target);
-            match crate::routes::resolve(app, path) {
-                Ok((to, _)) if may(to.route) => {}
-                _ => continue,
-            }
-        }
-        if let Some(at) = settings.iter().position(|(_, href)| *href == route.path) {
-            let label = settings[at].0;
-            account.push((
-                at,
-                SearchPage {
-                    label: label.to_owned(),
-                    location: bilibi_ui::SETTINGS_LOCATION
-                        .iter()
-                        .chain([&label])
-                        .map(|part| (*part).to_owned())
-                        .collect(),
-                    href: route.path.to_owned(),
-                    account: true,
-                },
-            ));
-            continue;
-        }
-        let row = rows.iter().find(|(path, _)| *path == route.path);
-        let Some(label) = bound
-            .page
-            .0
-            .title(route.operation)
-            .or(row.and_then(|(_, labels)| labels.last().copied()))
-        else {
-            continue;
-        };
-        let location: Vec<&str> = match row {
-            Some((_, labels)) => labels.clone(),
-            None => rows
-                .iter()
-                .filter(|(path, _)| {
-                    *path != "/"
-                        && route
-                            .path
-                            .strip_prefix(path)
-                            .is_some_and(|rest| rest.starts_with('/'))
-                })
-                .max_by_key(|(path, _)| path.len())
-                .map(|(_, labels)| labels.iter().copied().chain([label]).collect())
-                .unwrap_or_default(),
-        };
-        pages.push(SearchPage {
-            label: label.to_owned(),
-            location: location.into_iter().map(str::to_owned).collect(),
-            href: route.path.to_owned(),
-            account: false,
-        });
-    }
-    // Sections read alphabetically, as the menu does; settings in tab order.
-    pages.sort_by_cached_key(|page| {
-        if page.location.is_empty() {
-            page.label.to_lowercase()
-        } else {
-            page.path().to_lowercase()
-        }
-    });
-    account.sort_by_key(|(at, _)| *at);
-    pages.extend(account.into_iter().map(|(_, page)| page));
-    pages
-}
-
-/// Each visible menu row that opens a page, with the labels from its section
-/// down to it.
-fn menu_rows(
-    nodes: &[menu::Node],
-    above: &[&'static str],
-    rows: &mut Vec<(&'static str, Vec<&'static str>)>,
-) {
-    for node in nodes {
-        let item = node.item.item;
-        let mut labels = above.to_vec();
-        labels.push(item.label);
-        if let Some(route) = item.route {
-            rows.push((route, labels.clone()));
-        }
-        menu_rows(&node.children, &labels, rows);
-    }
 }
 
 /// One `EmbedContext::Shell` contribution and the id of the element it
@@ -503,7 +490,7 @@ async fn permits(app: &App, scope: &Scope, access: Access) -> Result<bool> {
     let client = app.db.get().await?;
     let client = &**client;
     let result = match access.base() {
-        Access::Public | Access::SignedIn | Access::StepUp { .. } => Ok(()),
+        Access::SignedIn | Access::StepUp { .. } => Ok(()),
         Access::Capability(key) => authz::authorize_key(client, scope, key).await,
         Access::Operator => tenancy::prove_operator(client, scope).await.map(|_| ()),
         Access::AnyOf(keys) => authz::authorize_any(client, scope, keys).await,
@@ -524,17 +511,19 @@ async fn permits(app: &App, scope: &Scope, access: Access) -> Result<bool> {
 async fn render_embed(app: &App, scope: &Scope, embed: &Embed) -> Result<Html> {
     let service: Arc<PageService<Scope, Error>> = app.services.get(embed.service)?;
     let empty = HashMap::new();
-    let body = service
-        .0
-        .render(PageRequest {
+    let body = crate::render_fields(
+        app,
+        Some(scope),
+        service.0.render(PageRequest {
             operation: embed.operation,
             scope: Some(scope),
             path: &empty,
             query: &empty,
             body: &[],
             framed: false,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     // The owner rendered and escaped it, as for a page body.
     Ok(Html::raw(body.html))
 }
@@ -546,6 +535,7 @@ fn active_item(tree: &[menu::Node], path: &str) -> Option<&'static str> {
         for node in nodes {
             let item = node.item.item;
             if let Some(route) = item.route {
+                let route = route.split('?').next().unwrap_or(route);
                 let under = route == path
                     || route == "/"
                     || path
@@ -563,38 +553,26 @@ fn active_item(tree: &[menu::Node], path: &str) -> Option<&'static str> {
     best.map(|(id, _)| id)
 }
 
-fn nav_node(node: &menu::Node, active: Option<&str>) -> NavNode {
+fn nav_node(
+    node: &menu::Node,
+    active: Option<&str>,
+    labels: &bilibi_base::labels::LabelSet,
+) -> NavNode {
     let item = node.item.item;
     // The contributed icon name is used unchanged.
     let icon = item.icon.unwrap_or("square-3-stack-3d").to_owned();
     NavNode {
         id: item.id.to_owned(),
-        label: item.label.to_owned(),
+        label: labels.menu(item.id, item.label),
         icon,
         route: item.route.map(str::to_owned),
         active: active == Some(item.id),
         children: node
             .children
             .iter()
-            .map(|child| nav_node(child, active))
+            .map(|child| nav_node(child, active, labels))
             .collect(),
     }
-}
-
-/// Whether a normalized pin URL names a page this deployment serves; a route
-/// pattern's `{param}` segments match any one segment. A pin to a page that is
-/// gone stays stored but is not drawn.
-fn is_served(routes: &[&str], url: &str) -> bool {
-    let path = url.split('?').next().unwrap_or("");
-    let actual: Vec<_> = path.split('/').filter(|s| !s.is_empty()).collect();
-    routes.iter().any(|route| {
-        let pattern: Vec<_> = route.split('/').filter(|s| !s.is_empty()).collect();
-        pattern.len() == actual.len()
-            && pattern
-                .iter()
-                .zip(&actual)
-                .all(|(p, a)| p.starts_with('{') || p == a)
-    })
 }
 
 /// The session behind a write of the account's own preferences: same Origin
@@ -785,9 +763,8 @@ pub async fn choose_tenant(
     {
         Ok(bilibi_user::TenantEntry::Entered(login)) => {
             let cookie = format!(
-                "bilibi_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400{}",
-                login.token,
-                crate::auth::secure(&app)
+                "__Host-bilibi_session={}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=86400",
+                login.token
             );
             let mut response = Redirect::to("/dashboard").into_response();
             response.headers_mut().insert(
@@ -824,6 +801,14 @@ pub async fn choose_tenant(
                 header::CACHE_CONTROL,
                 "no-store".parse().map_err(|_| Error::Internal)?,
             );
+            crate::auth::set_tenant_entry(&app, &mut response, form.tenant)?;
+            Ok(response)
+        }
+        Ok(bilibi_user::TenantEntry::Reauthenticate { tenant, provider }) => {
+            let location =
+                provider.map_or_else(|| "/login".into(), |public| format!("/login?sso={public}"));
+            let mut response = Redirect::to(&location).into_response();
+            crate::auth::set_tenant_entry(&app, &mut response, tenant)?;
             Ok(response)
         }
         Err(bilibi_user::TenantChoiceRefusal::Unavailable) => {
@@ -867,7 +852,13 @@ pub async fn tenant_changed(
         Html::EMPTY,
     )
     .await?;
-    Ok(crate::document_themed("Tenant changed", &rendered.html, rendered.theme)?.into_response())
+    Ok(crate::document_themed(
+        "Tenant changed",
+        &rendered.html,
+        rendered.theme,
+        &rendered.brand,
+    )?
+    .into_response())
 }
 /// The account's pins for a client that must refresh: the shell renders the
 /// same list into `data-pins`.
@@ -877,22 +868,13 @@ pub async fn pins(
 ) -> std::result::Result<Response, HttpError> {
     let scope = app.security.guard(&token(&headers)?).await?;
     let client = app.db.get().await.map_err(Error::from)?;
-    let served = served_routes(&app);
+    let served = app.user.pin_routes();
     let pins: Vec<_> = bilibi_user::list_pins(&**client, &scope)
         .await?
         .into_iter()
-        .filter(|pin| is_served(&served, &pin.url))
+        .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
         .collect();
     Ok(json_response(StatusCode::OK, json!({"pins": pins})))
-}
-
-fn served_routes(app: &App) -> Vec<&'static str> {
-    app.routes
-        .staff
-        .iter()
-        .filter(|bound| bound.route.method == Method::Get)
-        .map(|bound| bound.route.path)
-        .collect()
 }
 
 #[derive(Deserialize)]
@@ -928,10 +910,10 @@ pub async fn toggle_pin(
         .await
     {
         Ok((pinned, pins)) => {
-            let served = served_routes(&app);
+            let served = app.user.pin_routes();
             let pins: Vec<_> = pins
                 .into_iter()
-                .filter(|pin| is_served(&served, &pin.url))
+                .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
                 .collect();
             Ok(json_response(
                 StatusCode::OK,
@@ -980,10 +962,10 @@ pub async fn reorder_pins(
     };
     match app.user.reorder_pins(&credential, &scope.csrf, &ids).await {
         Ok(pins) => {
-            let served = served_routes(&app);
+            let served = app.user.pin_routes();
             let pins: Vec<_> = pins
                 .into_iter()
-                .filter(|pin| is_served(&served, &pin.url))
+                .filter(|pin| bilibi_user::pin_route_is_served(served, &pin.url))
                 .collect();
             Ok(json_response(StatusCode::OK, json!({"pins": pins})))
         }

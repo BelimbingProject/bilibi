@@ -29,22 +29,44 @@ fn args(input: &Value) -> bilibi_agent_api::Result<(i64, i64, bool)> {
     ))
 }
 struct Set;
+impl Set {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let (company, person, assigned) = args(input)?;
+        desks::check(client, scope, company, person, false, assigned).await?;
+        Ok(json!({"summary":if assigned {"Give this person a desk in the company"} else {"Remove this person's desk in the company"},"person_id":person,"company_id":company,"assigned":assigned}).into())
+    }
+}
 impl WriteHandler for Set {
     fn owner(&self) -> &'static str {
         "core/user"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let users = USERS.get().ok_or(Error::Internal)?;
-            let client = users.db.get().await.map_err(Error::from)?;
-            let (company, person, assigned) = args(input)?;
-            desks::check(&**client, scope, company, person, false).await?;
-            Ok(json!({"summary":if assigned {"Give this person a desk in the company"} else {"Remove this person's desk in the company"},"person_id":person,"company_id":company,"assigned":assigned}).into())
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = USERS
+                        .get()
+                        .ok_or(Error::Internal)?
+                        .db
+                        .get()
+                        .await
+                        .map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
+                }
+            }
         })
     }
     fn commit<'a>(
@@ -65,7 +87,7 @@ impl WriteHandler for Set {
     }
 }
 fn schema() -> Value {
-    json!({"type":"object","required":["company_id","person_id","assigned"],"properties":{"company_id":{"type":"integer","minimum":1},"person_id":{"type":"integer","minimum":1},"assigned":{"type":"boolean"}}})
+    json!({"type":"object","required":["company_id","person_id","assigned"],"properties":{"company_id":{"type":"integer","minimum":1},"person_id":crate::record_fields::PERSON_ID.input(json!({"minimum":1})),"assigned":{"type":"boolean"}}})
 }
 fn output() -> Value {
     json!({"type":"object"})

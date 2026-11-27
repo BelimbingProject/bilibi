@@ -2,7 +2,7 @@
 //! every five minutes, once an operator enables it on the Schedule board. The
 //! cutoff is the live `session.lifetime_minutes` setting, read by the sweep.
 use crate::Sessions;
-use bilibi_database::{Db, Error, Result};
+use bilibi_database::{Db, Error, MutationBoundary, Result};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_queue::{
     Execution, Handler, HandlerBinding, HandlerFuture, Outcome, Worker, HANDLERS, WORKERS,
@@ -42,15 +42,12 @@ pub(crate) struct Expiry {
     pub schedule: Arc<Schedule>,
     pub sessions: Arc<Sessions>,
     pub db: Db,
+    pub boundary: Arc<MutationBoundary>,
 }
 impl Handler for Expiry {
     fn perform<'a>(&'a self, execution: &'a Execution, args: Value) -> HandlerFuture<'a> {
         Box::pin(self.schedule.run(execution, args, |_| async {
-            let pruned = async {
-                let client = self.db.get().await?;
-                self.sessions.prune_expired(&**client).await
-            }
-            .await;
+            let pruned = self.sessions.prune_expired(&self.db, &self.boundary).await;
             match pruned {
                 Ok(_) => Outcome::Completed,
                 Err(_) => Outcome::Retry("session_store_unavailable"),

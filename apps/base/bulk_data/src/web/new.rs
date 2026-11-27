@@ -108,7 +108,8 @@ impl Upload {
         scope: &Scope,
         value: &serde_json::Value,
     ) -> Result<Option<String>> {
-        let form = params::form_values(value, "import");
+        let form = params::form_values_checked(value, "import", params::FIELD_LIMIT)
+            .map_err(Error::refused)?;
         self.record_type = form.get("record_type").cloned().unwrap_or_default();
         self.error = None;
         self.flash = None;

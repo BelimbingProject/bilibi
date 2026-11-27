@@ -1,17 +1,30 @@
 //! Durable mutation and action evidence. Capture runs inside the owner's
 //! transaction and fails closed: a refused audit row refuses the business commit.
+mod receipts;
+pub use receipts::{customisation_receipts, is_current_customisation_mutation};
+mod account_actions;
 pub mod console;
 mod erasure;
+mod latest_changes;
+mod partitions;
 mod privacy;
+pub use account_actions::{count_account_actions, export_account_actions};
+pub use latest_changes::{latest_changes, LatestChange};
+pub use partitions::{partition_preview, remove_partition, AuditLedger, PartitionRemoval};
 mod read;
+mod verification;
 pub use erasure::{
-    due_evidence, erase_deferred, erase_record, holds_values, verify, ChainBreak, ChainReport,
-    Cleared, DueEvidence, Minimums,
+    due_evidence, erase_actions, erase_deferred, erase_record, holds_values, ActionsErased,
+    Cleared, DueEvidence, Minimum,
 };
 pub use read::{
     list_actions, list_mutations, oversight_activity, recent_mutations, subject_history,
-    toggle_retained, ActionEntry, ActionPage, ActionQuery, ActionSort, MutationEntry, MutationPage,
-    MutationQuery, MutationSort, RecentMutation, EVENT_FAMILIES, MAX_PAGE_SIZE, MAX_SEARCH,
+    toggle_retained, ActionEntry, ActionPage, ActionQuery, MutationEntry, MutationPage,
+    MutationQuery, RecentMutation, EVENT_FAMILIES, MAX_COUNT, MAX_PAGE_SIZE, MAX_SEARCH,
+};
+pub use verification::{
+    advance_verification, latest_verification, request_verification, ChainBreak, ChainReport,
+    Verification, STEP_LINKS, VERIFICATION_KIND,
 };
 
 use bilibi_database::{Capture, CaptureFuture, Change, Context, Db, Error, Result};
@@ -322,7 +335,10 @@ impl AuditCapture {
                 self.policy.apply(&change.kind, &change.old),
                 self.policy.apply(&change.kind, &change.new),
             );
-            let empty = |value: &Value| value.as_object().is_some_and(Map::is_empty);
+            // An owner reports "no record on this side" as JSON null or as
+            // `{}`; both are a create or a delete, never an update.
+            let empty =
+                |value: &Value| value.is_null() || value.as_object().is_some_and(Map::is_empty);
             let event = match (empty(&old_values), empty(&new_values)) {
                 (true, true) => continue,
                 (true, false) => "created",
@@ -341,6 +357,8 @@ impl AuditCapture {
         if kinds.is_empty() {
             return Ok(());
         }
+        tx.batch_execute("SELECT base_audit_prepare_partitions()")
+            .await?;
         tx.execute("INSERT INTO base_audit_mutations(tenant_id,actor_type,actor_id,impersonator_id,system_principal,auditable_type,auditable_id,source,event,old_values,new_values,trace_id,agent_self_report,client_identity,actor_role) SELECT $1,$2,$3,$4,$5,t.kind,t.id,'boundary',t.event,t.old,t.new,$6,$12,$13,$14 FROM unnest($7::text[],$8::text[],$9::text[],$10::jsonb[],$11::jsonb[]) AS t(kind,id,event,old,new)", &[&who.tenant,&who.actor_type,&who.actor_id,&who.impersonator_id,&who.system_principal,&who.trace(),&kinds,&ids,&events,&old,&new,&who.agent_self_report,&who.client_identity,&who.actor_role]).await?;
         Ok(())
     }
@@ -366,7 +384,13 @@ impl AuditCapture {
             _ => "other",
         };
         let write = async {
-            let client = self.diagnostics.get().await?;
+            let client = self
+                .diagnostics
+                .get_detached(
+                    "a capture failure is recorded beside the write that failed, which rolls \
+                     back and so cannot carry it; the write gives up after DIAGNOSTICS_TIMEOUT",
+                )
+                .await?;
             client.execute("INSERT INTO base_audit_capture_failures(stage,auditable_type,error_type,actor_type,actor_id,impersonator_id,system_principal,tenant_id,trace_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", &[&stage,&kind,&error_type,&who.actor_type,&who.actor_id,&who.impersonator_id,&who.system_principal,&who.tenant,&who.trace_id]).await?;
             Ok::<(), Error>(())
         };
@@ -447,6 +471,9 @@ async fn insert_action(
         .map(|agent| agent.chars().take(80).collect::<String>());
     let url = request.and_then(|r| r.url.as_deref()).map(bounded_text);
     let ip = request.and_then(|r| r.ip);
+    client
+        .batch_execute("SELECT base_audit_prepare_partitions()")
+        .await?;
     let row = client.query_one("INSERT INTO base_audit_actions(tenant_id,actor_type,actor_id,impersonator_id,system_principal,ip_address,url,user_agent,event,payload,trace_id,is_retained,agent_self_report,client_identity,actor_tenant_id,actor_role) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id", &[&who.tenant,&who.actor_type,&who.actor_id,&who.impersonator_id,&who.system_principal,&ip,&url,&agent,&event,&sanitize(payload),&who.trace(),&retained,&who.agent_self_report,&who.client_identity,&actor_tenant,&who.actor_role]).await?;
     Ok(row.get(0))
 }
@@ -569,7 +596,7 @@ pub async fn recent_actions(
     if !(1..=200).contains(&limit) {
         return Err(Error::Invalid);
     }
-    let rows = client.query("SELECT a.id,a.actor_type,a.actor_id,a.impersonator_id,a.system_principal,a.event,coalesce(a.payload,'{}'::jsonb),a.trace_id,coalesce(m.is_retained,a.is_retained),a.occurred_at::text FROM base_audit_actions a LEFT JOIN base_audit_action_metadata m ON m.action_id=a.id WHERE a.tenant_id=$1 ORDER BY a.occurred_at DESC,a.id DESC LIMIT $2", &[&scope.tenant(),&limit]).await?;
+    let rows = client.query("SELECT a.id,a.actor_type,a.actor_id,a.impersonator_id,a.system_principal,a.event,coalesce(a.payload,'{}'::jsonb),a.trace_id,coalesce(m.is_retained,a.is_retained),a.occurred_at::text FROM base_audit_actions a LEFT JOIN base_audit_action_metadata m ON m.action_id=a.id AND m.partition_month=a.partition_month WHERE a.tenant_id=$1 ORDER BY a.occurred_at DESC,a.id DESC LIMIT $2", &[&scope.tenant(),&limit]).await?;
     Ok(rows
         .iter()
         .map(|row| Action {
@@ -595,7 +622,13 @@ inventory::submit! {
             ("base-audit-007-agent-self-report", include_str!("../migrations/007-agent-self-report.sql")),
             ("base-audit-008-client-identity", include_str!("../migrations/008-client-identity.sql")),
             ("base-audit-009-erasure", include_str!("../migrations/009-erasure.sql")),
-            ("base-audit-010-actor-tenant", include_str!("../migrations/010-actor-tenant.sql"))],
+            ("base-audit-010-actor-tenant", include_str!("../migrations/010-actor-tenant.sql")),
+            ("base-audit-011-bounded-evidence", include_str!("../migrations/011-bounded-evidence.sql")),
+            ("base-audit-012-partitions", include_str!("../migrations/012-partitions.sql")),
+            ("base-audit-013-partition-removal", include_str!("../migrations/013-partition-removal.sql")),
+            ("base-audit-014-account-actions", include_str!("../migrations/014-account-actions.sql")),
+            ("base-audit-015-tenant-minimum", include_str!("../migrations/015-tenant-minimum.sql")),
+            ("base-audit-016-customisation-receipts", include_str!("../migrations/016-customisation-receipts.sql"))],
         services: &[bilibi_module_registry::Service { id: "base/audit.capture", factory: |services| {
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
             let capture = Arc::new(AuditCapture::new(RedactionPolicy::from_inventory(), db));

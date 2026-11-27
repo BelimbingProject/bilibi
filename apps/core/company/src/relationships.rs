@@ -174,10 +174,193 @@ fn role_from_row(row: &Row) -> Result<RelationshipRole> {
     })
 }
 fn select(filter: &str) -> String {
-    format!("SELECT {COLUMNS},{ROLE_COLUMNS},s.name AS source_name,s.legal_name AS source_legal_name,s.code AS source_code,o.name AS target_name,o.legal_name AS target_legal_name,o.code AS target_code FROM company_relationships r JOIN company_relationship_roles t ON t.tenant_id=r.tenant_id AND t.id=r.role_id JOIN companies s ON s.tenant_id=r.tenant_id AND s.id=r.source_organisation_id LEFT JOIN companies o ON o.tenant_id=r.tenant_id AND o.id=r.target_organisation_id WHERE r.tenant_id=$1 AND {filter}")
+    format!("SELECT {COLUMNS},{ROLE_COLUMNS},s.name AS source_name,s.legal_name AS source_legal_name,s.code AS source_code,o.name AS target_name,o.legal_name AS target_legal_name,o.code AS target_code,count(*) OVER () AS total FROM company_relationships r JOIN company_relationship_roles t ON t.tenant_id=r.tenant_id AND t.id=r.role_id JOIN companies s ON s.tenant_id=r.tenant_id AND s.id=r.source_organisation_id LEFT JOIN companies o ON o.tenant_id=r.tenant_id AND o.id=r.target_organisation_id WHERE r.tenant_id=$1 AND {filter}")
 }
-/// Rows as entries from `party`'s perspective, person targets named through
-/// the Principal Directory (a retired or unnamed person keeps a durable label).
+/// The most links one page holds. Every person on a page is named in one
+/// Principal Directory call, so a page stays far below its ceiling.
+pub const MAX_PAGE_SIZE: i64 = 300;
+/// The most linked people a search can name: the Principal Directory's
+/// ceiling. A company linked to more is refused a search, never given a
+/// partial one.
+const MAX_SEARCHED_PEOPLE: usize = bilibi_principal_directory::MAX_CEILING;
+/// One page of `filter` (its page size `$4`, its offset `$5`) in the order a
+/// party's page reads: the other company's name, then the label, then id.
+/// `outgoing` is true on the rows whose source is the listed party. A person
+/// target has no name here (Person names it), so links to people follow the
+/// companies, by label and then in the order they were made; under a search
+/// they follow in the name order the Principal Directory gave.
+///
+/// A search (`$7`, an escaped ILIKE pattern) keeps the links whose other
+/// company's name, legal name or code contains it, and the links to the
+/// people of `$6`, the linked people whose names matched.
+fn page_of(filter: &str, outgoing: &str) -> String {
+    let matches = |c: &str| {
+        format!("({c}.name ILIKE $7 OR COALESCE({c}.legal_name,'') ILIKE $7 OR COALESCE({c}.code,'') ILIKE $7)")
+    };
+    format!(
+        "{} AND ($7::text IS NULL OR CASE WHEN {outgoing} THEN (r.target_person_id=ANY($6::bigint[]) OR {}) ELSE {} END) ORDER BY lower(CASE WHEN {outgoing} THEN COALESCE(NULLIF(btrim(o.legal_name),''),o.name) ELSE COALESCE(NULLIF(btrim(s.legal_name),''),s.name) END) NULLS LAST,array_position($6::bigint[],r.target_person_id),lower(CASE WHEN {outgoing} THEN t.name ELSE t.inverse_name END),r.id LIMIT $4 OFFSET $5",
+        select(filter),
+        matches("o"),
+        matches("s")
+    )
+}
+/// What narrows a party's links besides its page: `history` adds ended and
+/// unlinked links; under a search, `pattern` is the escaped text and
+/// `persons` the linked people whose names matched it.
+struct Narrow {
+    history: bool,
+    persons: Option<Vec<i64>>,
+    pattern: Option<String>,
+}
+impl Narrow {
+    /// `persons` reads the people `party` links to (`$1` tenant, `$2` party,
+    /// `$3` history, `$4` limit), only when there is a search; `None` when
+    /// the party links to no one.
+    async fn new(
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        directory: &PrincipalDirectory,
+        party: i64,
+        history: bool,
+        search: &str,
+        persons: Option<&str>,
+    ) -> Result<Self> {
+        let search = search.trim();
+        if search.is_empty() {
+            return Ok(Self {
+                history,
+                persons: None,
+                pattern: None,
+            });
+        }
+        if search.chars().count() > MAX_SEARCH {
+            return Err(Error::refused(format!(
+                "Search for at most {MAX_SEARCH} characters."
+            )));
+        }
+        let limit = MAX_SEARCHED_PEOPLE as i64 + 1;
+        let candidates = match persons {
+            Some(sql) => client
+                .query(sql, &[&scope.tenant(), &party, &history, &limit])
+                .await?
+                .iter()
+                .map(|row| PrincipalRef::new(PrincipalKind::Person, row.get(0)))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|_| Error::Internal)?,
+            None => Vec::new(),
+        };
+        if candidates.len() > MAX_SEARCHED_PEOPLE {
+            return Err(Error::refused(format!(
+                "This company is linked to more than {MAX_SEARCHED_PEOPLE} people, too many to search by name. Page through the list instead."
+            )));
+        }
+        let persons = if candidates.is_empty() {
+            Vec::new()
+        } else {
+            directory
+                .rank(
+                    client,
+                    scope,
+                    &candidates,
+                    &Query::default().search(search).ceiling(MAX_SEARCHED_PEOPLE),
+                )
+                .await
+                .map_err(|_| Error::Internal)?
+                .named
+                .iter()
+                .map(|named| named.principal.id())
+                .collect()
+        };
+        Ok(Self {
+            history,
+            persons: Some(persons),
+            pattern: Some(format!("%{}%", organisation::escape_like(search))),
+        })
+    }
+}
+/// The longest search text, the Principal Directory's own limit.
+const MAX_SEARCH: usize = 200;
+/// One page of a party's links and how many links the party has in all.
+#[derive(Clone, Debug)]
+pub struct Links {
+    pub entries: Vec<Entry>,
+    pub total: i64,
+}
+/// Which page of a party's links to read; `page` counts from 1 and the size
+/// is held to `1..=MAX_PAGE_SIZE`.
+#[derive(Clone, Copy, Debug)]
+pub struct Window {
+    pub page: i64,
+    pub page_size: i64,
+}
+impl Window {
+    fn bounds(self) -> (i64, i64) {
+        let size = self.page_size.clamp(1, MAX_PAGE_SIZE);
+        (size, (self.page.max(1) - 1).saturating_mul(size))
+    }
+}
+async fn links(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    directory: &PrincipalDirectory,
+    party: PartyId,
+    sql: &str,
+    narrow: Narrow,
+    window: Window,
+) -> Result<Links> {
+    let id = match party {
+        PartyId::Organisation(id) => id.get(),
+        PartyId::Person(id) => id.get(),
+    };
+    let (limit, offset) = window.bounds();
+    let Narrow {
+        history,
+        persons,
+        pattern,
+    } = narrow;
+    let rows = client
+        .query(
+            sql,
+            &[
+                &scope.tenant(),
+                &id,
+                &history,
+                &limit,
+                &offset,
+                &persons,
+                &pattern,
+            ],
+        )
+        .await?;
+    let total = match rows.first() {
+        Some(row) => row.get("total"),
+        // A page past the end still says how many links there are.
+        None if offset > 0 => client
+            .query(
+                sql,
+                &[
+                    &scope.tenant(),
+                    &id,
+                    &history,
+                    &1_i64,
+                    &0_i64,
+                    &persons,
+                    &pattern,
+                ],
+            )
+            .await?
+            .first()
+            .map_or(0, |row| row.get("total")),
+        None => 0,
+    };
+    Ok(Links {
+        entries: entries(client, scope, directory, party, &rows).await?,
+        total,
+    })
+}
+/// Rows as entries from `party`'s perspective, in the rows' order, person
+/// targets named through the Principal Directory (a retired or unnamed
+/// person keeps a durable label).
 async fn entries(
     client: &(impl GenericClient + Sync),
     scope: &Scope,
@@ -250,38 +433,107 @@ async fn entries(
             label,
         });
     }
-    entries.sort_by(|a, b| {
-        (
-            a.other_name.to_lowercase(),
-            a.label.to_lowercase(),
-            a.relationship.id,
-        )
-            .cmp(&(
-                b.other_name.to_lowercase(),
-                b.label.to_lowercase(),
-                b.relationship.id,
-            ))
-    });
     Ok(entries)
 }
 
-/// The links on a company's page: outgoing
-/// where it is the source and incoming where it is the target, under
-/// `admin.company.view`. `history` adds ended and unlinked links. A missing
-/// or cross-tenant company is `NotFound`.
+/// Current links only, unless `$3` asks for history too.
+const CURRENT: &str =
+    "($3 OR (r.unlinked_at IS NULL AND (r.effective_to IS NULL OR r.effective_to>=CURRENT_DATE)))";
+/// One page of the links on a company's page: outgoing where it is the
+/// source and incoming where it is the target, under `admin.company.view`.
+/// `history` adds ended and unlinked links. A non-blank `search` keeps the
+/// links whose other party's name contains it: a company's name, legal name
+/// or code, or a person's name as the Principal Directory gives it. A
+/// company linked to more people than the directory can search is refused
+/// (`Error::Refused`). A missing or cross-tenant company is `NotFound`.
 pub async fn list_for_company(
     client: &(impl GenericClient + Sync),
     scope: &Scope,
     directory: &PrincipalDirectory,
     company: OrganisationId,
     history: bool,
-) -> Result<Vec<Entry>> {
+    search: &str,
+    window: Window,
+) -> Result<Links> {
+    authorize_key(client, scope, VIEW).await?;
+    organisation::require_live(client, scope, company.get()).await?;
+    let narrow = Narrow::new(
+        client,
+        scope,
+        directory,
+        company.get(),
+        history,
+        search,
+        Some(&format!("SELECT DISTINCT r.target_person_id FROM company_relationships r WHERE r.tenant_id=$1 AND r.source_organisation_id=$2 AND r.target_person_id IS NOT NULL AND {CURRENT} LIMIT $4")),
+    )
+    .await?;
+    links(
+        client,
+        scope,
+        directory,
+        PartyId::Organisation(company),
+        &page_of(
+            &format!("(r.source_organisation_id=$2 OR r.target_organisation_id=$2) AND {CURRENT}"),
+            "r.source_organisation_id=$2",
+        ),
+        narrow,
+        window,
+    )
+    .await
+}
+/// One page of the links on a person's page: every company that relates to
+/// the person, under `admin.company.view`. A non-blank `search` keeps the
+/// companies whose name, legal name or code contains it. The person's own
+/// identity is not read here; a caller shows the page under Person's own
+/// capability.
+pub async fn list_for_person(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    directory: &PrincipalDirectory,
+    person: PersonId,
+    history: bool,
+    search: &str,
+    window: Window,
+) -> Result<Links> {
+    authorize_key(client, scope, VIEW).await?;
+    // Only companies link to a person, so no person is searched for.
+    let narrow = Narrow::new(
+        client,
+        scope,
+        directory,
+        person.get(),
+        history,
+        search,
+        None,
+    )
+    .await?;
+    links(
+        client,
+        scope,
+        directory,
+        PartyId::Person(person),
+        &page_of(&format!("r.target_person_id=$2 AND {CURRENT}"), "false"),
+        narrow,
+        window,
+    )
+    .await
+}
+/// One link on a company's page by id, from that company's perspective,
+/// under `admin.company.view`: what an edit, end or unlink of the page acts
+/// on. A link the company is no party to is `NotFound`.
+pub async fn read_for_company(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    directory: &PrincipalDirectory,
+    company: OrganisationId,
+    id: RelationshipId,
+) -> Result<Entry> {
     authorize_key(client, scope, VIEW).await?;
     organisation::require_live(client, scope, company.get()).await?;
     let rows = client
         .query(
-            &select("(r.source_organisation_id=$2 OR r.target_organisation_id=$2) AND ($3 OR (r.unlinked_at IS NULL AND (r.effective_to IS NULL OR r.effective_to>=CURRENT_DATE)))"),
-            &[&scope.tenant(), &company.get(), &history],
+            &select("r.id=$2 AND (r.source_organisation_id=$3 OR r.target_organisation_id=$3)"),
+            &[&scope.tenant(), &id.get(), &company.get()],
         )
         .await?;
     entries(
@@ -291,26 +543,9 @@ pub async fn list_for_company(
         PartyId::Organisation(company),
         &rows,
     )
-    .await
-}
-/// The links on a person's page: every company that relates to the person,
-/// under `admin.company.view`. The person's own identity is not read here;
-/// a caller shows the page under Person's own capability.
-pub async fn list_for_person(
-    client: &(impl GenericClient + Sync),
-    scope: &Scope,
-    directory: &PrincipalDirectory,
-    person: PersonId,
-    history: bool,
-) -> Result<Vec<Entry>> {
-    authorize_key(client, scope, VIEW).await?;
-    let rows = client
-        .query(
-            &select("r.target_person_id=$2 AND ($3 OR (r.unlinked_at IS NULL AND (r.effective_to IS NULL OR r.effective_to>=CURRENT_DATE)))"),
-            &[&scope.tenant(), &person.get(), &history],
-        )
-        .await?;
-    entries(client, scope, directory, PartyId::Person(person), &rows).await
+    .await?
+    .pop()
+    .ok_or(Error::NotFound)
 }
 /// One link under `admin.company.view`, from its source's perspective.
 pub async fn read(
@@ -362,20 +597,27 @@ async fn raw(
 
 /// Locks the companies a link names, ascending, each required writable. The
 /// source is the caller's own record (`Archived`/`NotFound`); an archived or
-/// missing organisation target is a refusal of the `target` field.
+/// missing organisation target is a refusal of the `target` field. `retiring`
+/// (end, unlink) accepts one archived side, so a live company can still end
+/// or unlink its link to an archived one; with both sides archived, or a
+/// person target and an archived source, it is `Archived`.
 async fn lock_parties(
     client: &tokio_postgres::Transaction<'_>,
     scope: &Scope,
     source: OrganisationId,
     target: Option<OrganisationId>,
+    retiring: bool,
 ) -> std::result::Result<Option<FieldError>, WriteError> {
     let mut companies = vec![source];
     companies.extend(target);
     companies.sort_unstable();
     companies.dedup();
+    let mut live = false;
     for company in companies {
         match lock_account_company(client, scope, company).await {
-            Ok(_) => {}
+            Ok(_) => live = true,
+            // `require_writable` took the row lock before it read the status.
+            Err(WriteError::Archived) if retiring => {}
             Err(error) if company == source => return Err(error),
             Err(WriteError::Archived) => return Ok(Some(FieldError::new("target", "is archived"))),
             Err(WriteError::NotFound) => {
@@ -383,6 +625,9 @@ async fn lock_parties(
             }
             Err(error) => return Err(error),
         }
+    }
+    if retiring && !live {
+        return Err(WriteError::Archived);
     }
     Ok(None)
 }
@@ -513,6 +758,7 @@ pub async fn assign(
         scope,
         input.source_organisation_id,
         target_organisation,
+        false,
     )
     .await?
     {
@@ -550,13 +796,15 @@ pub struct RelationshipUpdate {
     pub version: i64,
 }
 /// The link a write will change, locked with its companies: reach over the
-/// source or the organisation target, both companies writable, `Stale` on a
-/// version mismatch, `NotFound` once unlinked.
+/// source or the organisation target, both companies writable (one archived
+/// side is enough to end or unlink, `retiring`), `Stale` on a version
+/// mismatch, `NotFound` once unlinked.
 async fn lock_for_write(
     tx: &MutationTransaction<'_>,
     scope: &Scope,
     id: RelationshipId,
     version: i64,
+    retiring: bool,
 ) -> std::result::Result<Relationship, WriteError> {
     let before = raw(tx.sql(), scope.tenant(), id, false)
         .await?
@@ -571,6 +819,7 @@ async fn lock_for_write(
         scope,
         before.source_organisation_id,
         target_organisation,
+        retiring,
     )
     .await?
     {
@@ -667,7 +916,7 @@ pub async fn update(
     id: RelationshipId,
     update: &RelationshipUpdate,
 ) -> std::result::Result<Relationship, WriteError> {
-    let before = lock_for_write(tx, scope, id, update.version).await?;
+    let before = lock_for_write(tx, scope, id, update.version, false).await?;
     write_dates(tx, scope, before, &update.dates).await
 }
 /// Ends a link on `effective_to` (inclusive), keeping its start; the day
@@ -680,7 +929,7 @@ pub async fn end(
     version: i64,
     effective_to: &CalendarDate,
 ) -> std::result::Result<Relationship, WriteError> {
-    let before = lock_for_write(tx, scope, id, version).await?;
+    let before = lock_for_write(tx, scope, id, version, true).await?;
     let dates = EffectiveDates::new(before.dates.from().cloned(), Some(effective_to.clone()))
         .map_err(|_| {
             WriteError::Invalid(vec![FieldError::new(
@@ -698,7 +947,7 @@ pub async fn unlink(
     id: RelationshipId,
     version: i64,
 ) -> std::result::Result<Relationship, WriteError> {
-    let before = lock_for_write(tx, scope, id, version).await?;
+    let before = lock_for_write(tx, scope, id, version, true).await?;
     let tenant = scope.tenant();
     let row_id = before.id.get();
     Ok(tx

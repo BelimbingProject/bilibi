@@ -44,7 +44,14 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
             ),
             (
                 "outcome".into(),
-                Filter::one_of(&["all", "error", "create", "update", "skip"], "all"),
+                Filter::one_of(
+                    &["all", "error", "create", "update", "action", "skip"],
+                    "all",
+                ),
+            ),
+            (
+                "undo".into(),
+                Filter::one_of(&["all", "left", "removed", "edited", "error"], "all"),
             ),
         ]),
         omit_defaults: true,
@@ -62,6 +69,7 @@ fn builtins() -> Vec<BuiltinColumn> {
         BuiltinColumn::new("key", "Key"),
         BuiltinColumn::new("outcome", "Result"),
         BuiltinColumn::new("record", "Record"),
+        BuiltinColumn::new("undo", "Undo result"),
         BuiltinColumn::new("message", "Why"),
     ]
 }
@@ -69,6 +77,7 @@ fn builtins() -> Vec<BuiltinColumn> {
 enum Confirm {
     Start,
     Cancel,
+    Undo,
 }
 
 pub(super) struct Detail {
@@ -194,7 +203,16 @@ impl Detail {
                     value: Some(
                         form.get(format!("v_{}", field.name).as_str())
                             .copied()
-                            .unwrap_or("")
+                            .unwrap_or(
+                                if matches!(
+                                    field.kind,
+                                    Kind::Custom(bilibi_custom_fields::Kind::Boolean)
+                                ) {
+                                    "false"
+                                } else {
+                                    ""
+                                },
+                            )
                             .to_owned(),
                     ),
                     ..FieldMap::default()
@@ -212,6 +230,18 @@ impl Detail {
                 continue;
             };
             fields.push(entry);
+        }
+        if let Some(draft) = &self.draft {
+            fields.extend(
+                draft
+                    .fields
+                    .iter()
+                    .filter(|entry| {
+                        !info.fields.iter().any(|field| field.name == entry.field)
+                            && form.get(format!("f_{}", entry.field).as_str()).copied() != Some("")
+                    })
+                    .cloned(),
+            );
         }
         self.draft = Some(Mapping {
             fields,
@@ -334,11 +364,24 @@ impl Detail {
                 self.flash = None;
                 self.confirm = Some(Confirm::Start);
             }
-            "request_cancel" if self.run.as_ref().is_some_and(|run| run.state.working()) => {
+            "request_cancel"
+                if self.run.as_ref().is_some_and(|run| {
+                    matches!(run.state, RunState::Previewing | RunState::Running)
+                }) =>
+            {
                 self.flash = None;
                 self.confirm = Some(Confirm::Cancel);
             }
-            "request_start" | "request_cancel" => {}
+            "request_undo"
+                if self.run.as_ref().is_some_and(|run| {
+                    run.state == RunState::Completed
+                        || (run.state == RunState::Undoing && run.stopped)
+                }) =>
+            {
+                self.flash = None;
+                self.confirm = Some(Confirm::Undo);
+            }
+            "request_start" | "request_cancel" | "request_undo" => {}
             "dismiss_confirm" => self.confirm = None,
             "cancel" => {
                 self.confirm = None;
@@ -360,8 +403,29 @@ impl Detail {
                     );
                 }
             }
+            "undo" => {
+                self.confirm = None;
+                let Some(run) = &self.run else { return Ok(()) };
+                let input = json!({"run_id": run.id, "version": run.version});
+                if self
+                    .submit(
+                        scope,
+                        credential,
+                        "undo",
+                        "base.bulk_data.import.undo",
+                        input,
+                    )
+                    .await?
+                {
+                    self.state.filters.insert("pass".into(), "run".into());
+                    self.state.filters.insert("undo".into(), "left".into());
+                    self.state.put_page(None);
+                    self.say(StatusKind::Success, "Undo started. Records changed since the import are left alone and listed here.");
+                }
+            }
             "apply_mapping" => {
-                let chosen = params::form_values(value, "saved")
+                let chosen = params::form_values_checked(value, "saved", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?
                     .get("id")
                     .and_then(|id| id.parse::<i64>().ok());
                 match self.saved.iter().find(|saved| Some(saved.id) == chosen) {
@@ -378,20 +442,35 @@ impl Detail {
                             }
                         }
                         let name = saved.name.clone();
+                        self.errors = self
+                            .info
+                            .as_ref()
+                            .map(|info| {
+                                mapping
+                                    .check(
+                                        &info.fields,
+                                        &[],
+                                        self.run.as_ref().map(|run| run.header.as_slice()),
+                                        !info.matches.is_empty(),
+                                    )
+                                    .err()
+                                    .unwrap_or_default()
+                            })
+                            .unwrap_or_default();
                         self.draft = Some(mapping);
-                        self.errors.clear();
                         self.say(
-                            StatusKind::Info,
-                            format!(
+                            if self.errors.is_empty() { StatusKind::Info } else { StatusKind::Error },
+                            if self.errors.is_empty() { format!(
                                 "Applied the saved mapping {name}. Check it before you import."
-                            ),
+                            ) } else { format!("The saved mapping {name} needs fixing first; see the fields marked below.") },
                         );
                     }
                     None => self.say(StatusKind::Info, "Choose a saved mapping first."),
                 }
             }
             "save_mapping" => {
-                let name = params::form_values(value, "save")
+                let name = params::form_values_checked(value, "save", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?
                     .get("name")
                     .map(|name| name.trim().to_owned())
                     .unwrap_or_default();
@@ -427,11 +506,15 @@ impl Detail {
                     );
                 }
             }
-            FILTERS_FORM => self
-                .state
-                .apply_filters(&params::form_values(value, FILTERS_FORM)),
+            FILTERS_FORM => self.state.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
             "page" => self.state.put_page(get("page")),
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },
@@ -466,6 +549,7 @@ impl Detail {
             self.parents = pages.bulk.parents(client, scope, &run.record_type).await?;
         }
         let display = pages.display(client, scope).await?;
+        let undo = pages.bulk.undo_availability(client, scope, &run).await?;
         let pass = match self.state.filters["pass"].as_str() {
             "preview" => Pass::Preview,
             "run" => Pass::Run,
@@ -473,6 +557,10 @@ impl Detail {
             _ => Pass::Preview,
         };
         let outcome = Outcome::parse(&self.state.filters["outcome"]);
+        let undo_filter = match self.state.filters["undo"].as_str() {
+            "all" => None,
+            value => Some(value),
+        };
         let (results, total) = pages
             .bulk
             .rows(
@@ -481,6 +569,7 @@ impl Detail {
                 run.id,
                 pass,
                 outcome,
+                undo_filter,
                 self.state.offset() as i64,
                 self.state.page_size as i64,
             )
@@ -506,7 +595,17 @@ impl Detail {
             })?,
         })?);
         parts.push(self.facts(&run, &label, &display)?);
-        if run.state.open() && may_create {
+        if run.erased {
+            parts.push(render(Alert {
+                kind: StatusKind::Info,
+                id: "import-erased",
+                class: "",
+                body: Html::text(
+                    "The uploaded file and each row's key and message were removed because a person's data was erased. The results below stay. To import the file, upload it again.",
+                ),
+            })?);
+        }
+        if run.state.open() && may_create && !run.erased {
             match &info {
                 Some(info) => parts.push(self.mapping_section(&run, info)?),
                 None => parts.push(render(Alert {
@@ -520,8 +619,16 @@ impl Detail {
                 })?),
             }
         }
-        if run.state.working() || run.stopped {
+        if (run.state.working() || run.stopped) && run.state != RunState::Undoing {
             parts.push(self.working(&run, may_create)?);
+        }
+        if undo.supported
+            && matches!(
+                run.state,
+                RunState::Completed | RunState::Undoing | RunState::Undone
+            )
+        {
+            parts.push(self.undo_section(&run, undo, may_create, &display)?);
         }
         let counts = if pass == Pass::Run {
             run.run
@@ -548,7 +655,9 @@ impl Detail {
         label: &str,
         display: &bilibi_datetime::DisplayContext,
     ) -> Result<Html> {
-        let progress = if run.state.working() {
+        let progress = if run.state == RunState::Undoing {
+            format!("{} of {} created records", run.undo.done(), run.run.create)
+        } else if run.state.working() {
             format!("{} of {} rows", run.progress(), run.row_count)
         } else {
             run.row_count.to_string()
@@ -648,6 +757,18 @@ impl Detail {
                 let value = entry
                     .and_then(|entry| entry.value.clone())
                     .unwrap_or_default();
+                let value = if matches!(
+                    field.kind,
+                    Kind::Custom(bilibi_custom_fields::Kind::Boolean)
+                ) {
+                    crate::mapping::convert(field, &value)
+                        .ok()
+                        .flatten()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or(value)
+                } else {
+                    value
+                };
                 let mut input = bilibi_ui::Field::in_form("map", &format!("v_{}", field.name))
                     .id(format!("{id}-value"))
                     .label("Value")
@@ -662,13 +783,31 @@ impl Detail {
                         .kind(InputKind::Select)
                         .prompt("Choose")
                         .options(choices(&options))
+                } else if matches!(
+                    field.kind,
+                    Kind::Custom(bilibi_custom_fields::Kind::Boolean)
+                ) {
+                    input.kind(InputKind::Switch)
                 } else if field.kind == Kind::Boolean {
                     input
                         .kind(InputKind::Select)
                         .prompt("Choose")
                         .options(choices(&[("Yes", "yes"), ("No", "no")]))
-                } else if field.kind == Kind::Date {
+                } else if matches!(
+                    field.kind,
+                    Kind::Date | Kind::Custom(bilibi_custom_fields::Kind::Date)
+                ) {
                     input.kind(InputKind::Date)
+                } else if matches!(
+                    field.kind,
+                    Kind::Custom(bilibi_custom_fields::Kind::Choices)
+                ) {
+                    input.hint("Pick-list codes, separated by ;")
+                } else if matches!(
+                    field.kind,
+                    Kind::Custom(bilibi_custom_fields::Kind::Reference)
+                ) {
+                    input.hint("The record's number, as on its page address.")
                 } else {
                     input
                 };
@@ -715,6 +854,26 @@ impl Detail {
                 field.label.clone()
             };
             controls.push((title, format!("{id}-fact"), html));
+        }
+        for entry in &draft.fields {
+            if info.fields.iter().any(|field| field.name == entry.field) {
+                continue;
+            }
+            let id = format!("import-map-{}", dom(&entry.field));
+            controls.push((
+                format!("{} (unavailable)", entry.field),
+                format!("{id}-fact"),
+                render(
+                    bilibi_ui::Field::in_form("map", &format!("f_{}", entry.field))
+                        .id(id)
+                        .kind(InputKind::Select)
+                        .label("Source")
+                        .options(choices(&[("Keep mapping (unavailable)", "keep"), ("Not imported", "")]))
+                        .value("keep")
+                        .hint("This field is unavailable. Choose Not imported to remove its mapping, or restore access before importing.")
+                        .errors(errors(&format!("fields.{}", entry.field))),
+                )?,
+            ));
         }
         let source = run
             .header
@@ -869,7 +1028,11 @@ impl Detail {
             "check"
         };
         let text = if run.stopped {
-            format!("The {what} stopped before it finished, after {} of {} rows: your access changed, or it failed every attempt. Cancel it to map and start again.", run.progress(), run.row_count)
+            format!(
+                "The {what} stopped before it finished, after {} of {} rows: your access changed, or it failed every attempt. Cancel it to map and start again.",
+                run.progress(),
+                run.row_count
+            )
         } else {
             format!(
                 "{} of {} rows done. This page follows along; you can leave it.",
@@ -907,6 +1070,117 @@ impl Detail {
         })
     }
 
+    fn undo_section(
+        &self,
+        run: &Run,
+        availability: crate::undo::Availability,
+        may_create: bool,
+        display: &bilibi_datetime::DisplayContext,
+    ) -> Result<Html> {
+        let mut body = match run.state {
+            RunState::Undoing => render(Alert {
+                kind: if run.stopped {
+                    StatusKind::Warning
+                } else {
+                    StatusKind::Info
+                },
+                id: "import-undo-progress",
+                class: "",
+                body: Html::text(if run.stopped {
+                    "Undo stopped before it finished. Records already removed stay removed."
+                } else {
+                    "Untouched records created by this import are being removed. Changed records stay."
+                }),
+            })?,
+            RunState::Undone => render(Alert {
+                kind: if run.undo.left() > 0 {
+                    StatusKind::Warning
+                } else {
+                    StatusKind::Info
+                },
+                id: "import-undo-finished",
+                class: "",
+                body: Html::text(&format!(
+                    "{} removed. {} changed and {} other records were left in place.",
+                    run.undo.removed, run.undo.edited, run.undo.error
+                )),
+            })?,
+            RunState::Completed if run.erased => render(Alert {
+                kind: StatusKind::Info,
+                id: "import-undo-erased",
+                class: "",
+                body: Html::text(
+                    "This import cannot be undone because its import details were erased.",
+                ),
+            })?,
+            RunState::Completed if !availability.available => {
+                let message = availability.deadline.map_or_else(
+                    || "This import created no records that can be undone.".to_owned(),
+                    |deadline| {
+                        format!(
+                            "The undo period ended {}.",
+                            display
+                                .render(
+                                    deadline,
+                                    bilibi_datetime::Format::DateTime,
+                                    bilibi_datetime::Precision::Minute
+                                )
+                                .text
+                        )
+                    },
+                );
+                render(Alert {
+                    kind: StatusKind::Info,
+                    id: "import-undo-expired",
+                    class: "",
+                    body: Html::text(&message),
+                })?
+            }
+            RunState::Completed => {
+                let deadline = availability.deadline.ok_or(Error::Internal)?;
+                render(Alert {
+                    kind: StatusKind::Info,
+                    id: "import-undo-available",
+                    class: "",
+                    body: Html::text(&format!(
+                        "Available until {}. Only records this import created and nobody changed are removed.",
+                        display
+                            .render(
+                                deadline,
+                                bilibi_datetime::Format::DateTime,
+                                bilibi_datetime::Precision::Minute
+                            )
+                            .text
+                    )),
+                })?
+            }
+            _ => Html::EMPTY,
+        };
+        if ((run.state == RunState::Completed) || (run.state == RunState::Undoing && run.stopped))
+            && availability.available
+            && may_create
+        {
+            body.push(&render(Button {
+                variant: ButtonVariant::Danger,
+                id: "import-undo",
+                button_type: "button",
+                event: "request_undo",
+                body: Html::text(if run.state == RunState::Undoing {
+                    "Resume undo"
+                } else {
+                    "Undo import"
+                }),
+                ..Button::default()
+            })?);
+        }
+        render(Card {
+            id: "import-undo-card",
+            title: "Undo",
+            body,
+            ..Card::default()
+        })
+    }
+
     fn results(
         &mut self,
         run: &Run,
@@ -921,7 +1195,7 @@ impl Detail {
                 .load(results, |row: &crate::RowResult| row.row.to_string());
         }
         let preview = pass == Pass::Preview;
-        let download = if counts.error > 0 {
+        let download = if counts.error > 0 && !run.erased {
             let href = format!(
                 "/imports/{}/failed-rows{}",
                 run.id,
@@ -967,35 +1241,60 @@ impl Detail {
             would("Not imported", "With errors"),
         );
         let count = |n: i64| Html::text(&n.to_string());
+        let actions = self.pages.bulk.reports_actions(&run.record_type) || counts.action > 0;
+        let mut items = vec![
+            Fact {
+                title: &created,
+                id: "import-count-create",
+                value: count(counts.create),
+            },
+            Fact {
+                title: &updated,
+                id: "import-count-update",
+                value: count(counts.update),
+            },
+        ];
+        if actions {
+            items.push(Fact {
+                title: if preview {
+                    "Actions to complete"
+                } else {
+                    "Actions completed"
+                },
+                id: "import-count-action",
+                value: count(counts.action),
+            });
+        }
+        items.extend([
+            Fact {
+                title: &skipped,
+                id: "import-count-skip",
+                value: count(counts.skip),
+            },
+            Fact {
+                title: &failed,
+                id: "import-count-error",
+                value: count(counts.error),
+            },
+        ]);
         html.push(&render(Card {
             id: "import-counts",
             body: render(Facts {
                 id: "import-counts-list",
-                items: vec![
-                    Fact {
-                        title: &created,
-                        id: "import-count-create",
-                        value: count(counts.create),
-                    },
-                    Fact {
-                        title: &updated,
-                        id: "import-count-update",
-                        value: count(counts.update),
-                    },
-                    Fact {
-                        title: &skipped,
-                        id: "import-count-skip",
-                        value: count(counts.skip),
-                    },
-                    Fact {
-                        title: &failed,
-                        id: "import-count-error",
-                        value: count(counts.error),
-                    },
-                ],
+                items,
             })?,
             ..Card::default()
         })?);
+        let mut outcomes = vec![
+            ("All rows", "all"),
+            ("Errors", "error"),
+            ("Create", "create"),
+            ("Update", "update"),
+        ];
+        if actions {
+            outcomes.push(("Action", "action"));
+        }
+        outcomes.push(("Skip", "skip"));
         let form = self.state.filters_form();
         html.push(&render(FilterToolbar::new(
             "import-results-filters",
@@ -1012,17 +1311,24 @@ impl Detail {
                     ]),
                 ),
                 ToolbarControl::select(
+                    "import-results-undo",
+                    "undo",
+                    "Filter by undo result",
+                    &form["undo"],
+                    choices(&[
+                        ("All", "all"),
+                        ("Left in place", "left"),
+                        ("Removed", "removed"),
+                        ("Changed", "edited"),
+                        ("Could not remove", "error"),
+                    ]),
+                ),
+                ToolbarControl::select(
                     "import-results-outcome",
                     "outcome",
                     "Filter by result",
                     &form["outcome"],
-                    choices(&[
-                        ("All rows", "all"),
-                        ("Errors", "error"),
-                        ("Create", "create"),
-                        ("Update", "update"),
-                        ("Skip", "skip"),
-                    ]),
+                    choices(&outcomes),
                 ),
             ],
         ))?);
@@ -1034,6 +1340,8 @@ impl Detail {
             let badge = match (result.outcome, preview) {
                 (Outcome::Create, true) => Badge::status(BadgeKind::Plain, "Would create"),
                 (Outcome::Update, true) => Badge::status(BadgeKind::Plain, "Would update"),
+                (Outcome::Action, true) => Badge::status(BadgeKind::Plain, "Would complete action"),
+                (Outcome::Action, false) => Badge::status(BadgeKind::Success, "Action completed"),
                 (Outcome::Skip, true) => Badge::status(BadgeKind::Neutral, "Would skip"),
                 (Outcome::Create, false) => Badge::status(BadgeKind::Success, "Created"),
                 (Outcome::Update, false) => Badge::status(BadgeKind::Success, "Updated"),
@@ -1041,7 +1349,7 @@ impl Detail {
                 (Outcome::Error, true) => Badge::status(BadgeKind::Danger, "Error"),
                 (Outcome::Error, false) => Badge::status(BadgeKind::Danger, "Not imported"),
             };
-            let record = match (&result.record_id, path) {
+            let mut record = match (&result.record_id, path) {
                 (Some(id), Some(path)) => render(ActionLink {
                     id: &format!("import-row-record-{key}"),
                     icon: "",
@@ -1053,7 +1361,35 @@ impl Detail {
                 (Some(id), None) => Html::text(id),
                 (None, _) => Html::text("—"),
             };
+            for (index, link) in result.links.iter().enumerate() {
+                if result.record_id.is_some() || index > 0 {
+                    record.push(&Html::text(" · "));
+                } else {
+                    record = Html::EMPTY;
+                }
+                record.push(&render(ActionLink {
+                    id: &format!("import-row-link-{key}-{index}"),
+                    icon: "",
+                    title: &link.label,
+                    href: &link.path,
+                    method: "",
+                    body: Html::text(&link.label),
+                })?);
+            }
             let message = result.message.clone().unwrap_or_default();
+            let undo = match result.undo_outcome {
+                Some(crate::UndoOutcome::Removed) => {
+                    render(Badge::status(BadgeKind::Success, "Removed"))?
+                }
+                Some(crate::UndoOutcome::Edited) => {
+                    render(Badge::status(BadgeKind::Warning, "Changed; left in place"))?
+                }
+                Some(crate::UndoOutcome::Error) => {
+                    render(Badge::status(BadgeKind::Danger, "Could not remove"))?
+                }
+                None => Html::text("—"),
+            };
+            let message = result.undo_message.clone().unwrap_or(message);
             let message = if compact && message.chars().count() > 80 {
                 format!("{}…", message.chars().take(79).collect::<String>())
             } else {
@@ -1067,6 +1403,7 @@ impl Detail {
                 )
                 .slot("outcome", render(badge)?)
                 .slot("record", record)
+                .slot("undo", undo)
                 .slot("message", Html::text(&message));
             row.dom_id = Some(format!("import-row-{key}"));
             rows.push(row);
@@ -1129,6 +1466,16 @@ impl Detail {
                 confirm: "Stop",
                 working: "Stopping…",
                 confirm_event: "cancel",
+                cancel_event: "dismiss_confirm",
+                banner,
+            })?,
+            Confirm::Undo => render(Confirmation {
+                id: "import-undo-confirm",
+                consequence: "Undo this import?",
+                detail: "Records this import created are removed only when nobody changed them. Changed or referenced records stay and are listed when the undo finishes.",
+                confirm: "Undo import",
+                working: "Starting…",
+                confirm_event: "undo",
                 cancel_event: "dismiss_confirm",
                 banner,
             })?,

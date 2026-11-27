@@ -1,17 +1,16 @@
-//! The account administration screens (K16): `/users/new`,
-//! `/users/{id}` and the
+//! The account administration screens: `/users/{id}` and the
 //! signed-in account's `/settings/profile`. Each composes the
 //! shared Base UI primitives over `UserService`'s account commands; the
 //! tenant-wide `/users` index belongs to User Administration (K13).
-mod create;
 mod detail;
 mod invite;
+mod ownership;
 mod profile;
 
-pub(crate) use create::Create;
 pub(crate) use detail::Detail;
 pub(crate) use invite::Invite;
-pub(crate) use profile::Profile;
+pub(crate) use ownership::Ownership;
+pub(crate) use profile::{Profile, SERVICE as PROFILE_SERVICE};
 
 use crate::web::Pages;
 use askama::Template;
@@ -22,6 +21,11 @@ use bilibi_ui::{FlashMap, Html, Instant, StatusKind};
 use jiff::Timestamp;
 use serde_json::Value;
 use std::{collections::HashMap, time::SystemTime};
+
+pub(crate) struct PersonChoice {
+    pub(crate) id: bilibi_party_ids::PersonId,
+    pub(crate) label: String,
+}
 
 /// The page's one flash message, by kind,
 /// rendered by the page's own flash group.
@@ -68,6 +72,53 @@ impl Flash {
     }
 }
 
+/// Companies as a picker names them (`RecordPicker::named`).
+pub(crate) const COMPANY: bilibi_ui::NamedKind<'static> = bilibi_ui::NamedKind {
+    kind: "core/company",
+    prefix: "company",
+    label: "Company",
+    page: Some("/companies"),
+};
+/// A type-ahead over the companies a page may offer, instead of a list of
+/// every company. The owner still proves the chosen company on save.
+pub(crate) fn company_picker(
+    id: &str,
+    form: &str,
+    key: &str,
+    label: &str,
+    query: &str,
+    hits: &[bilibi_tenancy::NamedOrganisation],
+    chosen: Option<&bilibi_tenancy::NamedOrganisation>,
+    events: (&str, &str),
+    errors: Vec<String>,
+) -> Result<Html> {
+    let hits: Vec<(i64, String)> = hits
+        .iter()
+        .map(|company| (company.id.get(), company.name.clone()))
+        .collect();
+    render(&bilibi_ui::RecordPicker::named(
+        COMPANY,
+        id,
+        form,
+        key,
+        label,
+        query,
+        &hits,
+        chosen.map(|company| (company.id.get(), company.name.as_str())),
+        events,
+        errors,
+    ))
+}
+/// The company a picker hit raised (`record=company:<id>`).
+pub(crate) fn picked_company(event: &Value) -> Result<bilibi_party_ids::OrganisationId> {
+    event
+        .get("record")
+        .and_then(Value::as_str)
+        .and_then(|record| COMPANY.picked(record))
+        .and_then(|id| bilibi_party_ids::OrganisationId::new(id).ok())
+        .ok_or(Error::Invalid)
+}
+
 pub(crate) fn render(template: &impl Template) -> Result<Html> {
     Html::render(template).map_err(|_| Error::Internal)
 }
@@ -104,6 +155,31 @@ pub(crate) fn record_id(values: &HashMap<String, String>) -> Result<i64> {
 }
 
 impl Pages {
+    /// The live, non-system Persons the actor may list, by name; `None` when
+    /// the actor may not list people at all.
+    pub(crate) async fn person_choices(&self, scope: &Scope) -> Result<Option<Vec<PersonChoice>>> {
+        let query = bilibi_person::Search {
+            page_size: 300,
+            ..bilibi_person::Search::default()
+        };
+        match self.users.persons.search(scope, &query).await {
+            Ok(page) => Ok(Some(
+                page.entries
+                    .into_iter()
+                    .filter(|person| person.system_key.is_none())
+                    .map(|person| PersonChoice {
+                        id: person.id,
+                        label: match person.kind {
+                            bilibi_person::PersonKind::Agent => format!("{} (agent)", person.name),
+                            bilibi_person::PersonKind::Human => person.name,
+                        },
+                    })
+                    .collect(),
+            )),
+            Err(Error::Forbidden) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
     pub(crate) async fn allowed(&self, scope: &Scope, key: &str) -> Result<bool> {
         let client = self.db.get().await?;
         match bilibi_authz::authorize_key(&**client, scope, key).await {

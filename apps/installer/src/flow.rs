@@ -17,7 +17,7 @@ use crate::{
     service::Service,
 };
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf, process::Command, time::Duration};
+use std::{fs, path::PathBuf, time::Duration};
 use tokio_postgres::Client;
 
 /// How long a release gets to answer after a start.
@@ -181,18 +181,63 @@ impl<'a> Run<'a> {
     async fn finish_with_plugins(
         &mut self,
         state: &str,
-        result: Value,
+        mut result: Value,
         plugins: Option<&[Value]>,
     ) -> Db<()> {
-        self.forget_history();
-        jobs::skip_pending(&*self.client, &self.job).await?;
+        if matches!(state, "failed" | "cancelled" | "interrupted")
+            && self.job.kind == "install"
+            && self.layout.consumed_tag(&self.job.request["source"])
+        {
+            result["message"] = json!(format!(
+                "{} Publish a new setup tag before trying again.",
+                result["message"].as_str().unwrap_or("")
+            ));
+        }
         jobs::finish_with_plugins(&mut *self.client, &self.job, state, &result, plugins).await?;
+        self.forget_history();
         self.log(&format!(
             "{state}: {}",
             result["message"].as_str().unwrap_or("")
         ));
         Ok(())
     }
+    pub async fn settle_failed_restore(&mut self, key: &str) -> Db<bool> {
+        if self.state(key) != "failed" {
+            return Ok(false);
+        }
+        self.finish("failed", self.detail(key)).await?;
+        Ok(true)
+    }
+
+    pub async fn fail_restore(&mut self, key: &str, dump: &std::path::Path, why: &str) -> Db<()> {
+        let backup = self.detail("backup");
+        let mut result = json!({
+            "backup": backup["backup"], "backup_at": backup["backup_at"],
+        });
+        let manual_dump = if key == "restore" {
+            if let Ok(undone) = self.undone().await? {
+                result["release"] = json!(undone.release);
+                result["previous_release"] = json!(undone.release);
+            }
+            result["migrated"] = json!(false);
+            self.backup_file()
+        } else {
+            if let Ok(back) = self.back_plan(&self.failure_reason()).await? {
+                result = back.base;
+            }
+            result["switched_back"] = json!(false);
+            dump.to_path_buf()
+        };
+        result["restored"] = json!(false);
+        result["message"] = json!(format!(
+            "The restore step failed for {}: {why}. Restore {} by hand before starting the service. The service remains stopped.",
+            dump.display(),
+            manual_dump.display()
+        ));
+        self.fail_with(key, result.clone()).await?;
+        self.finish("failed", result).await
+    }
+
     /// The saved history of a restore in this job; see `backup::restore`.
     fn history_file(&self, key: &str) -> PathBuf {
         self.job_backups().join(format!("history-{key}.json"))
@@ -200,8 +245,6 @@ impl<'a> Run<'a> {
     fn job_backups(&self) -> PathBuf {
         self.layout.backups().join(format!("job-{}", self.job.id))
     }
-    /// Removed before the outcome is recorded, so a job that has finished
-    /// never has a saved history that could be restored again.
     fn forget_history(&self) {
         for entry in fs::read_dir(self.job_backups())
             .into_iter()
@@ -222,8 +265,8 @@ impl<'a> Run<'a> {
     }
     async fn settle_clean_failure(&mut self) -> Db<()> {
         let mut message = format!("Nothing changed. {}.", self.failure_reason());
-        if self.state("backup") != "pending" && self.service.state() != "active" {
-            let started = match self.service.start() {
+        if self.job.paused && self.service.state() != "active" {
+            let started = match self.start_current().await {
                 Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                 Err(why) => Err(why),
             };
@@ -273,12 +316,14 @@ impl<'a> Run<'a> {
     /// ended the job; false when the flow carries on from the first step not
     /// yet done.
     pub async fn resume(&mut self) -> Db<bool> {
-        let paused = self.state("backup") != "pending";
+        let paused = self.job.paused;
         if paused {
+            jobs::lock_installation(&*self.client).await?;
             // From the first moment: nothing may be entered while the
             // database is being decided on.
             if let Err(reason) = self.service.stop() {
-                self.log(&reason);
+                self.interrupted(&reason).await?;
+                return Ok(true);
             }
         }
         if self.failed_step().is_some() || self.step("switch_back").is_some() {
@@ -294,15 +339,13 @@ impl<'a> Run<'a> {
             // A release downloaded for this job is downloaded again when the
             // owner starts again; an uploaded file stays for it.
             self.drop_download();
-            self.interrupted(
-                "The installer was interrupted before the pause. Nothing changed. Start again.",
-            )
-            .await?;
+            self.interrupted("The installer was interrupted before the pause. Nothing changed.")
+                .await?;
             return Ok(true);
         }
         if self.update_committed().await? {
             if self.is_done("switch") {
-                let answered = match self.service.start() {
+                let answered = match self.start_current().await {
                     Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                     Err(why) => Err(why),
                 };
@@ -314,15 +357,19 @@ impl<'a> Run<'a> {
             }
             return Ok(false);
         }
-        let back = match self.service.start() {
+        let back = match self.start_current().await {
             Ok(()) => match self.service.wait_healthy(HEALTH_LIMIT).await {
                 Ok(_) => "The release that was in service is back and answers.".to_owned(),
-                Err(why) => format!("The release that was in service was started again but does not answer: {why}. Check the service."),
+                Err(why) => format!(
+                    "The release that was in service was started again but does not answer: {why}. Check the service."
+                ),
             },
-            Err(why) => format!("The release that was in service could not be started again: {why}. Check the service."),
+            Err(why) => format!(
+                "The release that was in service could not be started again: {why}. Check the service."
+            ),
         };
         self.interrupted(&format!(
-            "The installer was interrupted during the pause, before the database was changed. {back} Nothing changed. Start again."
+            "The installer was interrupted during the pause, before the database was changed. {back} Nothing changed."
         ))
         .await?;
         Ok(true)
@@ -370,8 +417,44 @@ impl<'a> Run<'a> {
         }
     }
 
+    // -------------------------------------------------------------- trust
+    pub async fn trust(&mut self) -> Db<()> {
+        self.start("trust", "Replacing the server's release trust record")
+            .await?;
+        match self
+            .layout
+            .replace_release_trust(self.job.requested_by, &self.job.request)
+        {
+            Ok(facts) => {
+                self.done(
+                    "trust",
+                    json!({"message": "Release trust replaced", "trust": facts}),
+                )
+                .await?;
+                self.finish(
+                    "done",
+                    json!({"message": "Release trust was replaced.", "trust": facts}),
+                )
+                .await
+            }
+            Err(reason) => {
+                self.fail("trust", &reason).await?;
+                self.finish(
+                    "failed",
+                    json!({"message": format!("Release trust was not replaced: {reason}")}),
+                )
+                .await
+            }
+        }
+    }
+
     // ------------------------------------------------------------ install
     pub async fn install(&mut self) -> Db<()> {
+        if self.job.paused && !self.is_done("fetch") {
+            self.fail("fetch", "the paused install has no completed release copy")
+                .await?;
+            return self.after_failure().await;
+        }
         let fetched = if self.is_done("fetch") {
             self.detail("fetch")
         } else {
@@ -412,6 +495,7 @@ impl<'a> Run<'a> {
                 self.log("stopped before the pause, as asked");
                 return Ok(());
             }
+            self.job.paused = true;
             match self.backup().await {
                 Ok(detail) => self.done("backup", detail).await?,
                 Err(reason) => {
@@ -432,9 +516,6 @@ impl<'a> Run<'a> {
                 json!({"message": "Updating the database", "ledger_before": before}),
             )
             .await?;
-            if let Err(reason) = self.service.stop() {
-                self.log(&reason);
-            }
             match self.migrate(release, before).await {
                 Ok(detail) => self.done("migrate", detail).await?,
                 Err(reason) => {
@@ -461,7 +542,7 @@ impl<'a> Run<'a> {
         if !self.is_done("switch") {
             self.start("switch", &format!("Switching to release {release}"))
                 .await?;
-            if let Err(reason) = self.switch_to(release) {
+            if let Err(reason) = self.switch_to(release).await {
                 self.fail("switch", &reason).await?;
                 return self.switch_back().await;
             }
@@ -541,7 +622,10 @@ impl<'a> Run<'a> {
     /// (a new try downloads again under a new job), so its folder goes
     /// whatever the outcome.
     async fn fetch(&mut self) -> Result<Value, String> {
-        let fetched = self.fetch_release().await;
+        let fetched = match self.layout.check_release(&self.job.request["source"]) {
+            Ok(()) => self.fetch_release().await,
+            Err(reason) => Err(reason),
+        };
         self.drop_download();
         fetched
     }
@@ -628,6 +712,32 @@ impl<'a> Run<'a> {
             }
             _ => return Err("the request names no source".into()),
         };
+        let admission: Value =
+            serde_json::from_reader(fs::File::open(source.from.join("admission.json")).map_err(
+                |error| format!("could not read the incoming release admission: {error}"),
+            )?)
+            .map_err(|error| format!("the incoming release admission is invalid: {error}"))?;
+        let reviewed = &request["source"];
+        for field in [
+            "proof",
+            "repository",
+            "repository_id",
+            "workflow",
+            "tag",
+            "target",
+            "fingerprint",
+        ] {
+            if admission[field] != reviewed[field] {
+                return Err(
+                    "the incoming release admission does not match the reviewed release".into(),
+                );
+            }
+        }
+        if admission["version"] != 1 || admission["archive_sha256"] != reviewed["digest"] {
+            return Err(
+                "the incoming release admission does not match the reviewed archive".into(),
+            );
+        }
         let checked = self.copy_checked(&source, wanted).await;
         if let Some(dir) = &source.uploaded {
             // An uploaded file waits for another try, unless it is now copied
@@ -660,6 +770,9 @@ impl<'a> Run<'a> {
                 "tag": request["source"]["tag"],
                 "target": request["source"]["target"],
                 "archive_sha256": request["source"]["digest"],
+                "proof": request["source"]["proof"],
+                "proof_asset_id": request["source"]["proof_asset_id"],
+                "proof_digest": request["source"]["proof_digest"],
                 "program_sha256": checked["sha256"],
                 "setup_commit": recipe["setup"]["commit"],
             });
@@ -714,6 +827,7 @@ impl<'a> Run<'a> {
                 ));
             }
         }
+        self.layout.record_release(&self.job.request["source"])?;
         let n = self.layout.next_release();
         let dst = self.layout.release(n);
         jobs::step_set(
@@ -736,7 +850,13 @@ impl<'a> Run<'a> {
                 dst.display()
             ));
         }
-        let status = program_status(&dst).inspect_err(|_| {
+        let status = composition::status(&dst).inspect_err(|_| {
+            let _ = fs::remove_dir_all(&dst);
+        })?;
+        let mode = jobs::installation_mode(&*self.client)
+            .await
+            .map_err(|error| jobs::short(&error))?;
+        let candidate = composition::admit(&status, &mode).inspect_err(|_| {
             let _ = fs::remove_dir_all(&dst);
         })?;
         let plugins = layout::read_plugins(&dst).inspect_err(|_| {
@@ -749,7 +869,7 @@ impl<'a> Run<'a> {
             .chars()
             .take(200)
             .collect();
-        let now = composition::parse(&status);
+        let now = candidate;
         let changes = composition::diff(&composition_of(&self.layout.release(current)), &now);
         Ok(json!({
             "message": format!("Copied {} as release {n}. Bilibi version: {}.", source.text, now["platform"]["version"].as_str().unwrap_or("not recorded")),
@@ -787,6 +907,9 @@ impl<'a> Run<'a> {
     }
     /// The pause begins: stop the service, then dump the database.
     async fn backup(&mut self) -> Result<Value, String> {
+        jobs::lock_installation(&*self.client)
+            .await
+            .map_err(|error| jobs::short(&error))?;
         self.service.stop()?;
         let paused_epoch = jobs::epoch(&*self.client)
             .await
@@ -811,6 +934,8 @@ impl<'a> Run<'a> {
     /// production seeds. `migrated` says whether the shape changed.
     async fn migrate(&self, release: u64, before: i64) -> Result<Value, String> {
         let program = self.layout.release(release).join("bilibi-web");
+        self.service.stop()?;
+        self.admit_release(release).await?;
         run_program(&program, "migrate", MIGRATE_LIMIT_SECONDS)?;
         run_program(&program, "seed-production", "600")?;
         let after = jobs::ledger_count(&*self.client)
@@ -823,16 +948,31 @@ impl<'a> Run<'a> {
             "ledger_before": before, "applied": applied, "migrated": applied > 0,
         }))
     }
-    fn switch_to(&self, release: u64) -> Result<(), String> {
+    async fn admit_release(&self, release: u64) -> Result<(), String> {
+        let status = composition::status(&self.layout.release(release))?;
+        let mode = jobs::installation_mode(&*self.client)
+            .await
+            .map_err(|error| jobs::short(&error))?;
+        composition::admit(&status, &mode)?;
+        Ok(())
+    }
+    async fn start_current(&self) -> Result<(), String> {
+        let release = self
+            .layout
+            .current()
+            .ok_or("There is no current release to start.")?;
+        self.admit_release(release).await?;
+        self.service.start()
+    }
+    async fn switch_to(&self, release: u64) -> Result<(), String> {
         if !self.layout.release(release).join("bilibi-web").is_file() {
             return Err(format!(
                 "release {release} is missing from {}",
                 self.layout.releases().display()
             ));
         }
-        if let Err(reason) = self.service.stop() {
-            self.log(&reason);
-        }
+        self.service.stop()?;
+        self.admit_release(release).await?;
         self.layout
             .point_current(release)
             .map_err(|error| format!("could not point current at release {release}: {error}"))?;
@@ -845,7 +985,7 @@ impl<'a> Run<'a> {
         if matches!(self.state("switch_back"), "done" | "failed") {
             let mut result = self.detail("switch_back");
             if self.is_done("switch_back") {
-                let answered = match self.service.start() {
+                let answered = match self.start_current().await {
                     Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                     Err(why) => Err(why),
                 };
@@ -868,7 +1008,7 @@ impl<'a> Run<'a> {
                         "failed",
                         json!({"message": format!("{reason}. {why} Check the service.")}),
                     )
-                    .await
+                    .await;
             }
         };
         let label = format!("Switch back to release {}", back.to);
@@ -878,7 +1018,8 @@ impl<'a> Run<'a> {
         }
         self.log(&label);
         if let Err(why) = self.service.stop() {
-            self.log(&why);
+            self.fail("switch_back", &why).await?;
+            return self.finish("failed", json!({"message": why})).await;
         }
         let mut restored = self.detail("switch_back")["restored"]
             .as_bool()
@@ -891,6 +1032,7 @@ impl<'a> Run<'a> {
                 file,
                 back.base["backup_at"].as_str().unwrap_or(""),
                 &self.history_file("switch_back"),
+                Some(&self.layout.release(back.to)),
             )
             .await
             {
@@ -905,19 +1047,11 @@ impl<'a> Run<'a> {
                     .await?;
                 }
                 Err(why) => {
-                    let mut result = back.base.clone();
-                    result["switched_back"] = json!(false);
-                    result["restored"] = json!(false);
-                    result["message"] = json!(format!(
-                        "{} The database could not be put back: {why}. The service was left stopped; restore {} by hand before starting it.",
-                        back.lead, file.display()
-                    ));
-                    self.set("switch_back", "failed", result.clone()).await?;
-                    return self.finish("failed", result).await;
+                    return self.fail_restore("switch_back", file, &why).await;
                 }
             }
         }
-        let answered = match self.switch_to(back.to) {
+        let answered = match self.switch_to(back.to).await {
             Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
             Err(why) => Err(why),
         };
@@ -985,7 +1119,9 @@ impl<'a> Run<'a> {
             .as_bool()
             .unwrap_or(false);
         let lead = if self.failed_step().is_some_and(|step| step.key == "migrate") {
-            format!("The database update of release {release} failed after it had changed the database: {reason}.")
+            format!(
+                "The database update of release {release} failed after it had changed the database: {reason}."
+            )
         } else {
             format!("Release {release} failed its check: {reason}.")
         };
@@ -1039,6 +1175,10 @@ impl<'a> Run<'a> {
                 return self.nothing_changed("backup", "the backup taken before the change is missing, so the database cannot be put back").await;
             }
         }
+        jobs::lock_installation(&*self.client).await?;
+        if let Err(reason) = self.admit_release(undone.previous).await {
+            return self.nothing_changed("backup", &reason).await;
+        }
         if !self.is_done("backup") {
             let detail = json!({"message": format!(
                 "{} pauses from here: the service stops and the database as it is now is backed up first.",
@@ -1047,6 +1187,7 @@ impl<'a> Run<'a> {
             if !jobs::begin_pause(&mut *self.client, &self.job, "backup", &detail).await? {
                 return Ok(());
             }
+            self.job.paused = true;
             match self.backup().await {
                 Ok(detail) => self.done("backup", detail).await?,
                 Err(reason) => {
@@ -1067,7 +1208,10 @@ impl<'a> Run<'a> {
                 json!({"message": format!("Restoring the backup taken at {}", undone.since), "lost": lost}),
             )
             .await?;
-            let _ = self.service.stop();
+            if let Err(why) = self.service.stop() {
+                self.fail("restore", &why).await?;
+                return self.finish("failed", json!({"message": why})).await;
+            }
             let file = undone.original.clone().unwrap_or_default();
             match backup::restore(
                 &*self.client,
@@ -1075,6 +1219,7 @@ impl<'a> Run<'a> {
                 &file,
                 &undone.since,
                 &self.history_file("restore"),
+                Some(&self.layout.release(undone.previous)),
             )
             .await
             {
@@ -1083,13 +1228,7 @@ impl<'a> Run<'a> {
                         .await?
                 }
                 Err(why) => {
-                    let result = json!({
-                        "release": undone.release, "previous_release": undone.release, "migrated": false,
-                        "backup": safety["backup"], "backup_at": safety["backup_at"], "restored": false,
-                        "message": format!("The database could not be put back: {why}. The service was left stopped; restore {} by hand (the state before this undo is in {}).", file.display(), safety["backup"].as_str().unwrap_or("the safety backup")),
-                    });
-                    self.fail_with("restore", result.clone()).await?;
-                    return self.finish("failed", result).await;
+                    return self.fail_restore("restore", &file, &why).await;
                 }
             }
         }
@@ -1097,7 +1236,7 @@ impl<'a> Run<'a> {
         if !self.is_done("switch") {
             self.start("switch", &format!("Switching back to release {previous}"))
                 .await?;
-            if let Err(reason) = self.switch_to(previous) {
+            if let Err(reason) = self.switch_to(previous).await {
                 self.fail("switch", &reason).await?;
                 return self.switch_back().await;
             }
@@ -1225,27 +1364,10 @@ impl<'a> Run<'a> {
     }
 }
 
-/// `bilibi-web status` on a release folder: it proves the program runs on
-/// this machine, and its text names what the release holds.
-fn program_status(dir: &std::path::Path) -> Result<String, String> {
-    let out = Command::new("timeout")
-        .arg("30")
-        .arg(dir.join("bilibi-web"))
-        .arg("status")
-        .output()
-        .map_err(|error| format!("could not run the copied program: {error}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "the copied program does not run on this server: {}",
-            backup::tail(&out.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
 /// What a release folder's program says it is made of; null when it does not
 /// run.
 fn composition_of(dir: &std::path::Path) -> Value {
-    program_status(dir).map_or(Value::Null, |status| composition::parse(&status))
+    composition::status(dir).map_or(Value::Null, |status| composition::parse(&status))
 }
 /// What changes in the add-ons switched on, in words, or nothing when the
 /// release does not say or the list stays the same.
@@ -1292,6 +1414,7 @@ fn pause_sentence(seconds: i64) -> String {
         if seconds == 1 { "" } else { "s" }
     )
 }
+
 fn with_pause(message: &str, seconds: Option<i64>) -> String {
     match seconds {
         Some(seconds) => format!("{message} {}", pause_sentence(seconds)),
@@ -1301,8 +1424,7 @@ fn with_pause(message: &str, seconds: Option<i64>) -> String {
 /// Runs one command of a release's program with the instance's environment
 /// (this process has it from the env file), cut off after `limit` seconds.
 fn run_program(program: &std::path::Path, command: &str, limit: &str) -> Result<(), String> {
-    let out = Command::new("timeout")
-        .arg(limit)
+    let out = layout::release_command(limit)?
         .arg(program)
         .arg(command)
         .output()

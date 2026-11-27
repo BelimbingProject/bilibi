@@ -1,0 +1,10 @@
+# Clippy configuration for the Platform workspace (and every mounted Domain and
+# Extension, which builds inside it). Each rule here replaces prose that agents
+# kept breaking: the message says what to use instead and why. Cargo.toml
+# `[workspace.lints.clippy]` sets the levels.
+#
+# `Html::raw` is held by `scripts/ratchets.py`, not Clippy: CONTRIBUTING.md,
+# "Guard rails".
+
+# A facade with more arguments than this takes a request or options type.
+too-many-arguments-threshold = 12

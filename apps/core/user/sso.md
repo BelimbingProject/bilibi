@@ -2,6 +2,14 @@
 
 Connect each company to its identity provider with OpenID Connect (OIDC); leave it unconfigured to keep password sign-in unchanged.
 
+## Tenant-bound proof
+
+**A company provider proves only its tenant and company; it never proves the installation-owned portable identity in another customer tenant.** [ADR 21](../../../docs/architecture/decisions/21-one-sign-in-several-tenant-memberships.md) is the authority boundary.
+
+Every browser admission through a provider stores `tenant_sso` authority with the connection's tenant, provider and company, including JIT creation and a pending local-factor challenge. Provider reauthentication can satisfy that tenant's step-up policy but cannot promote the session to portable proof. Such a session cannot change the shared email or 2FA and cannot switch directly into another tenant.
+
+When the holder selects another tenant, Bilibi starts target-bound admission. The person must use the portable password (and its factor) or an enabled provider belonging to the target tenant; successful admission replaces the old session. Provider links remain membership-local. An identity first created through SSO can use verified-mail recovery to establish a portable password for a tenant without a suitable provider.
+
 ## Connect Keycloak
 
 Register Bilibi as a confidential OIDC client in your Keycloak realm, then configure the connection in Bilibi.
@@ -95,6 +103,8 @@ Core retains browser binding, one-use flow state, tenant/company ownership, link
 Use a disposable database and a local Keycloak distribution; never install the fixture into an adopter's database.
 
 Run migration, then set `BILIBI_SSO_ALLOW_PRIVATE_ENDPOINTS=1` for both the app and the example, since the local Keycloak is on loopback HTTP, and run `BILIBI_SSO_WALKTHROUGH=disposable cargo run -p bilibi-user --example sso-walkthrough` with `DATABASE_URL` and the exact `APP_ORIGIN`. Without `BILIBI_SSO_ISSUER`, the command only installs the repository fixture. With that issuer and `BILIBI_SSO_CLIENT_SECRET`, it configures a local client named `bilibi`, links the fixture manager subject `bilibi-a-manager`, and prints only public connection addresses and an isolation outcome. The secret comes from the environment and is never printed.
+
+To check an agent review, run `BILIBI_SSO_AGENT_REVIEW_WALKTHROUGH=disposable cargo run -p bilibi-user --example sso-agent-review-walkthrough --locked` against a fresh migrated database. It checks the stored card, stored operations, saved outcome and audit evidence, then proves that the saved connection received the new secret entered after the review opened. The command generates both secret values in memory and never prints them.
 
 Start the app with `./bilibi start` and use the printed sign-in address in a browser at that exact origin. Record successful linked sign-in, JIT creation, role changes, ordinary pending admission without provider 2FA, trusted provider 2FA, provider re-authentication, password enforcement and emergency recovery, local/provider/back-channel logout, isolation, state replay and invalid token refusals. To prove that an unreadable connection locks nobody out, run the example with `BILIBI_SSO_CASE=unreadable-connection` and `BILIBI_SSO_LOCAL_PASSWORD` set, before the next case: it damages the sealed record of connection 1, then reports the emergency and unenforced members still signing in, the enforced member's refusal, the tolerant lists and the re-save that restores it. To prove that retiring the administrator who last saved the connection locks nobody out, run the example last with `BILIBI_SSO_CASE=offboard-configurer`. It first checks that account creation without allowed domains is refused, then enforces company sign-in, deletes that administrator, then reports that a company member and the emergency account still sign in with a password and that company sign-in still starts. Finish in the browser: a linked person still signs in, a new person with a verified email on an allowed domain (`BILIBI_SSO_JIT_DOMAINS`, default `example.test`) is created, and one on another domain is refused. Keep credentials, cookies and tokens out of screenshots and evidence. See [`docs/runtime-parity.md`](../../../docs/runtime-parity.md).
 

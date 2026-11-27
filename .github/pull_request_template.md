@@ -9,3 +9,35 @@ Say what changed that a Domain or Extension owner must update, and the exact ste
 Write None when this change does not affect Domains or Extensions.
 Delete this comment and leave the note below.
 -->
+
+## File length
+
+<!--
+Only when CI lists a Rust file over 800 lines that is new or grew: one line per file,
+`<path>: keep: <reason>` or `<path>: split: <what was split along which responsibility>`.
+Otherwise delete this section.
+-->
+
+## Platform reuse
+
+<!--
+Only when CI flags code that looks like what a Base module already does (apps/base/CAPABILITIES.md):
+one line per flagged rule, `<id>: uses <base module> (how)` or `<id>: no fit: <why the module does not fit>`.
+Otherwise delete this section.
+-->
+
+## Shared helpers
+
+<!--
+Only when CI warns that a new function has a shared helper's name (apps/base/HELPERS.md):
+one line per function, `<path>: keep: <reason>`. Otherwise delete this section.
+-->
+
+## Exceptions
+
+<!--
+Only when the Guard rails check lists a new escape hatch (`#[allow]`, `#[expect]`, `Pending::Every`, `Pending::Events`,
+`begin_view_state(`, `get_detached(`, `Html::raw(`, `|safe`): one line per file and hatch,
+`<path>: <hatch>: <why no other way works>`, with `<hatch>` as `allow`, `expect`, `Pending::Every`, `Pending::Events`,
+`begin_view_state`, `get_detached`, `Html::raw` or `safe`. Otherwise delete this section.
+-->

@@ -10,7 +10,7 @@ Core stores only the facts in [ADR 22](../../../docs/architecture/decisions/22-s
 
 - Products belong to the tenant. There is one Products list, one record page and one create operation.
 - Each price names a selling company, currency and effective date. The amount is per base unit.
-- Prices use enabled [Core currencies](../currency/README.md) and their decimal precision. Negative amounts, excess precision and duplicate effective dates for the same product, company and currency are refused.
+- Prices use [Core currencies](../currency/README.md) (any current one; the first price in a currency marks it used) and their decimal precision. Negative amounts, excess precision and duplicate effective dates for the same product, company and currency are refused.
 - Lookup returns the latest effective date on or before the requested date for exactly that product, company and currency. **A missing price is missing, never zero or a fallback to another seller.** Disabled currencies remain readable in earlier prices.
 - Stored prices are optional. Domains keep formulas, costs, terms, availability, fulfilment, discounts, account mappings and taxes.
 - Transaction owners freeze the product description, unit and agreed money facts when used. Later product edits never update transactions.
@@ -38,7 +38,7 @@ Domains contribute a Module Registry `Embed` with `EmbedContext::Record { kind: 
 
 ## Pages and operations
 
-`/products` searches by code or name and filters by category or status. Creation opens one dialog. `/products/{id}` reads first and edits in place. Selling prices follow the selected work company; switching desk reloads the page. The submitted price explicitly carries the displayed selling company and is authorized again.
+`/products` searches by code or name and filters by category or status. Creation opens one dialog. `/products/{id}` reads first and edits in place. Selling prices follow the selected work company; switching desk reloads the page. An archived company's prices read and take no new price. The submitted price explicitly carries the displayed selling company and is authorized again.
 
 | Agent operation | Capability |
 | --- | --- |

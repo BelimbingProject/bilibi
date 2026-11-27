@@ -11,7 +11,12 @@ bilibi-module-registry.workspace = true
 bilibi-tenancy = { path = "../tenancy" }
 deadpool-postgres.workspace = true
 inventory.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio-postgres.workspace = true
+
+[lints]
+workspace = true

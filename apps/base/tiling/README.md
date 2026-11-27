@@ -1,5 +1,9 @@
 # bilibi-tiling
 
+**Use it for:** the tiled `/workspace` that shows several pages side by side.
+
+**Not for:** a multi-pane page of your own.
+
 The tiled workspace at `/workspace`: several pages
 side by side in one browser tab, arranged by a Hyprland-style dwindle
 tree, with keyboard control, drag resizing, drag-to-swap, monocle and
@@ -44,6 +48,10 @@ open shows the refusal instead of a frame.
 Pin the current tiles with **Pin this layout** in the top bar. Give the pin a name; the default joins the tile titles. The pin stores the workspace address, which holds its tree, and opens that snapshot from the top bar. Unpin it from the top bar like any other page.
 
 The shared-workspaces control lists layouts published for the current workplace. `/workspace/shared-layouts` (System › Shared workspaces) lets an authorized person publish the current tree for the company or selected roles. Each tile checks the viewer's access to its page. Shared layouts live only in `ui.workspace.shared_layouts` at company scope through Settings; an account without a current desk cannot read or publish one.
+
+### Agent operations
+
+`base.tiling.read` lists the layouts visible to the caller in their current company. With `ui.workspace.publish`, `base.tiling.manage` lists all the layouts and the available role codes. Use `base.tiling.publish` with the company ID, label, audience role codes and a tree such as `h.5(/companies,/users)`. An empty role list means the whole company. Pass the label to `base.tiling.manage` and include its proposed slug and version in the publish input. A new label has an empty version. `base.tiling.withdraw` takes the company ID, slug and version. The Shared workspaces page and the **Withdraw workspace** action on Customisations use the same contracts.
 
 ## Keys
 

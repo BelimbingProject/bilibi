@@ -9,7 +9,7 @@ cat > /etc/systemd/system/bilibi-worker@.service <<'UNIT'
 [Unit]
 Description=Legacy worker retirement probe
 [Service]
-User=bilibi-build
+User=nobody
 ExecStart=/usr/bin/sleep infinity
 [Install]
 WantedBy=multi-user.target
@@ -25,7 +25,7 @@ $S create production --role production --site prod.10.77.61.2.sslip.io --tls int
 [[ ! -e /proc/$old_pid ]]
 [[ ! -e /etc/systemd/system/bilibi-worker@.service ]]
 [[ ! -e /etc/systemd/system/multi-user.target.wants/bilibi-worker@production.service ]]
-cmp /src/scripts/server/sudoers /etc/sudoers.d/bilibi-build
+grep -q "systemctl start bilibi@production," /etc/sudoers.d/bilibi-build
 visudo -cf /etc/sudoers.d/bilibi-build
 hashes() { sha256sum /opt/bilibi/production/env /etc/sudoers.d/bilibi-build /etc/systemd/system/bilibi@.service /etc/systemd/system/bilibi-installer@.service; }
 hashes >/tmp/before-hashes

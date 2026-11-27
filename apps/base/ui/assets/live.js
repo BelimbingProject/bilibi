@@ -67,7 +67,19 @@
   const params = () => Object.fromEntries(new URLSearchParams(location.search));
   const address = () => location.pathname + location.search;
   let shown = address(); // The path and query the page on screen was mounted for.
-  const mountIntent = () => ({type: 'mount', path: location.pathname, params: params()});
+  const addressIntent = () => ({type: 'mount', path: location.pathname, params: params()});
+  const gateSelector = '[data-hook="StepUpGate"]';
+  const promptIntent = (prompt, returnTo) => ({
+    type: 'mount',
+    path: prompt.pathname,
+    params: Object.fromEntries(prompt.searchParams),
+    step_up_return: returnTo,
+  });
+  const mountIntent = () => {
+    const gate = document.querySelector(gateSelector);
+    if (!gate?.dataset.stepUpPrompt || shown !== address()) return addressIntent();
+    return promptIntent(new URL(gate.dataset.stepUpPrompt, location.href), gate.dataset.stepUpReturn);
+  };
 
   function connect() {
     if (stopped || !document.querySelector('[data-live]')) return;
@@ -100,6 +112,7 @@
     // was open (or while it was down) follow it in the order they were raised.
     const held = queued.splice(0);
     enqueue(mountIntent(), {loading: true, navigation: !resumed});
+    if (document.hidden) reportVisibility();
     // Hooks that carry work across the drop (resumable uploads) send it now,
     // right behind the remount, which the server answers first.
     if (resumed) window.dispatchEvent(new CustomEvent('bilibi:remounted'));
@@ -150,6 +163,13 @@
     }, retryDelay);
   }
 
+  // A tab out of view tells the server, which stops this page's 15-second
+  // refresh until the tab is shown again; the answer to that is a fresh page.
+  function reportVisibility() {
+    if (document.querySelector('[data-live]')) enqueue({type: 'visibility', hidden: document.hidden});
+  }
+  document.addEventListener('visibilitychange', reportVisibility);
+
   // A tab that comes back or a network that returns need not wait out the backoff.
   for (const name of ['online', 'focus']) {
     window.addEventListener(name, () => { if (reconnecting && !socket && retryTimer) connect(); });
@@ -158,9 +178,18 @@
   function enqueue(intent, meta = {}) {
     const entry = {intent, source: meta.source || null, form: meta.form || null,
       loading: !!meta.loading, navigation: !!meta.navigation, onReply: meta.onReply,
+      prepareOriginal: meta.prepareOriginal,
       history: meta.history === 'replace' ? 'replace' : null};
     entry.ownerForm = entry.form || (entry.source?.tagName === 'FORM' ? entry.source : entry.source?.closest('form'));
     entry.id = ++sequence;
+    if (!entry.prepareOriginal && !encode(entry)) return;
+    if (entry.source) busy(entry.source);
+    queued.push(entry);
+    flush();
+  }
+
+  function encode(entry) {
+    const {intent} = entry;
     entry.wire = JSON.stringify({...intent, request_id: entry.id});
     // Count the actual UTF-8 wire bytes, including escaping and metadata, for
     // every intent (forms, filters, panels and hooks), even while disconnected.
@@ -170,17 +199,23 @@
       showError(eventTooLarge);
       entry.onReply?.({type: 'error', target: intent.target || 'page',
         message: eventTooLarge, clear: false, request_id: entry.id});
-      return;
+      return false;
     }
-    if (entry.source) busy(entry.source);
-    queued.push(entry);
-    flush();
+    return true;
   }
 
   function flush() {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     while (queued.length) {
-      const entry = queued.shift();
+      const entry = queued[0];
+      if (entry.prepareOriginal && [...inflight.values()].some((sent) =>
+        sent.prepareOriginal && sent.intent.target === entry.intent.target
+        && sent.intent.payload.fact === entry.intent.payload.fact)) break;
+      queued.shift();
+      if (entry.prepareOriginal) {
+        entry.intent.payload.original = entry.prepareOriginal();
+        if (!encode(entry)) continue;
+      }
       inflight.set(entry.id, entry);
       socket.send(entry.wire);
     }
@@ -275,6 +310,7 @@
       submitted: entry && entry.form && message.type !== 'error'
         && !preservedForms.has(entry.form) ? entry.form : null,
       navigation: !!(entry && entry.navigation),
+      anchor: entry?.navigation && entry.intent.type === 'mount' ? location.hash.slice(1) : '',
     };
     if (message.redirect && entry?.ownerForm && preservedForms.has(entry.ownerForm)) {
       // A previously sent save may redirect after a newer local refusal.
@@ -285,11 +321,31 @@
       loading();
       return;
     }
+    const gate = document.querySelector(gateSelector);
+    if (message.type === 'page' && message.redirect && gate && entry) {
+      const destination = new URL(message.redirect, location.href);
+      const expected = new URL(gate.dataset.stepUpReturn || location.href, location.href);
+      const sameQuery = destination.search === expected.search;
+      const actionCompleted = !gate.dataset.stepUpPrompt && !destination.search;
+      if (destination.origin === expected.origin && destination.pathname === expected.pathname && (sameQuery || actionCompleted)) {
+        enqueue({type: 'navigate', path: expected.pathname, params: Object.fromEntries(expected.searchParams), step_up_complete: true}, {loading: true});
+        loading();
+        return;
+      }
+    }
     if (message.type === 'page') {
       // Consent replies can hand the browser back to an OAuth client.
       if (message.redirect) { location.assign(message.redirect); return; }
-      if (message.html !== lastHTML) {
-        patch(document.getElementById('app'), message.html, options);
+      const saved = document.getElementById('app-shell')?.bilibiSavedPreferences;
+      let released = false;
+      if (entry && saved) for (const [name, beforeSave] of saved) {
+        if (entry.id > beforeSave) {
+          saved.delete(name);
+          released = true;
+        }
+      }
+      if (released || message.flash || message.html !== lastHTML) {
+        patch(document.getElementById('app'), message.html, {...options, flash: message.flash});
         lastHTML = message.html;
       }
       panelPath = message.panel_params ? new URL(message.url || location.href, location.href).pathname : null;
@@ -328,6 +384,17 @@
         }
       }
     }
+    // The record's return address belongs to shared navigation, not the page's
+    // query state. Keep it when a live render canonicalizes that same page.
+    if (['page', 'fragment'].includes(message.type) && message.url) {
+      const current = new URL(location.href);
+      const next = new URL(message.url, location.href);
+      const returnTo = current.searchParams.get('return_to');
+      if (returnTo && next.origin === current.origin && next.pathname === current.pathname && !next.searchParams.has('return_to')) {
+        next.searchParams.set('return_to', returnTo);
+        message.url = next.pathname + next.search + next.hash;
+      }
+    }
     if (['page', 'fragment'].includes(message.type) && message.url && message.url !== address()) {
       // Framed pages and background/history corrections replace; a person's
       // action pushes unless the intent explicitly asks to replace.
@@ -341,6 +408,7 @@
       window.dispatchEvent(new CustomEvent(`bilibi:${push.name}`, {detail: push.detail}));
     }
     entry?.onReply?.(message);
+    if (entry?.prepareOriginal) flush();
     loading();
   }
 
@@ -351,6 +419,7 @@
     template.innerHTML = html;
     const next = template.content.firstElementChild;
     if (!next) return;
+    if (options.flash) next.insertAdjacentHTML('beforeend', options.flash);
     const focus = captureFocus();
     const scroll = captureScroll(root);
     const context = {
@@ -366,7 +435,8 @@
     }
     morph(root, next, context);
     if (context.submitted && context.submitted.isConnected) context.submitted.reset();
-    restoreScroll(scroll, options.navigation);
+    const anchor = options.anchor && document.getElementById(options.anchor);
+    restoreScroll(scroll, options.navigation, anchor && root.contains(anchor) ? anchor : null);
     restoreFocus(focus);
     if (window.BilibiUI) window.BilibiUI.patched(context.touched);
   }
@@ -398,7 +468,8 @@
       attributes(from, to, context, (name) => name.startsWith('data-'));
       return from;
     }
-    attributes(from, to, context, (name) => !pinned(from, name, context));
+    const saved = from.bilibiSavedPreferences;
+    attributes(from, to, context, (name) => !saved?.has(name) && !pinned(from, name, context));
     // An iframe's document belongs to the frame; its fallback children never render.
     if (from.tagName !== 'IFRAME') children(from, to, context);
     if (following(from) && dirty(from)) follow(from);
@@ -572,9 +643,13 @@
     return {boxes, x: window.scrollX, y: window.scrollY};
   }
 
-  // A navigation starts at the top like a loaded page; every other patch keeps
-  // the person where they were, including inside a replaced scroll container.
-  function restoreScroll(saved, navigation) {
+  // An addressed section stays in view after the first live mount. Other
+  // navigations start at the top, and ordinary patches keep the scroll position.
+  function restoreScroll(saved, navigation, anchor) {
+    if (anchor) {
+      anchor.scrollIntoView();
+      return;
+    }
     if (navigation) {
       for (const box of saved.boxes) { const el = document.getElementById(box.id); if (el) el.scrollTop = el.scrollLeft = 0; }
       window.scrollTo(0, 0);
@@ -714,11 +789,19 @@
   window.addEventListener('popstate', () => {
     if (address() === shown) return;
     shown = address();
-    if (panelPath === location.pathname || document.querySelector('#app [data-history="params"]')) {
+    if (!document.querySelector(gateSelector) && (panelPath === location.pathname || document.querySelector('#app [data-history="params"]'))) {
       enqueue({type: 'params', path: location.pathname, params: params()}, {loading: true});
       return;
     }
-    enqueue(mountIntent(), {loading: true, navigation: true});
+    enqueue(addressIntent(), {loading: true, navigation: true});
+  });
+
+  document.addEventListener('click', event => {
+    const link = event.target instanceof Element && event.target.closest('[data-step-up-methods] a[href]');
+    const gate = link && link.closest(gateSelector);
+    if (!gate?.dataset.stepUpPrompt) return;
+    event.preventDefault();
+    enqueue(promptIntent(new URL(link.href), gate.dataset.stepUpReturn), {loading: true});
   });
 
   document.addEventListener('bilibi:navigate', ({detail}) => {
@@ -771,14 +854,15 @@
     const detail = event.detail || {};
     let payload = detail.payload;
     if (!payload) {
-      const {event: type, target: _target, onReply: _onReply, history: _history, ...values} = detail;
+      const {event: type, target: _target, onReply: _onReply, history: _history, prepareOriginal: _prepareOriginal, ...values} = detail;
       if (!type) return;
       payload = {type, ...values};
     }
     const origin = event.target instanceof Element ? event.target : null;
     const owner = origin && origin.closest('[data-target]');
     enqueue({type: 'event', target: detail.target || (owner && owner.dataset.target) || 'page', payload},
-      {onReply: typeof detail.onReply === 'function' ? detail.onReply : null, history: detail.history});
+      {onReply: typeof detail.onReply === 'function' ? detail.onReply : null, history: detail.history,
+        prepareOriginal: typeof detail.prepareOriginal === 'function' ? detail.prepareOriginal : null});
   });
 
   // ---- Uploads -------------------------------------------------------------
@@ -789,6 +873,10 @@
   // named. A frame cannot wait for a remount, since the remounted state holds
   // no entries; sendBytes reports whether it went.
   window.BilibiLive = {
+    preferenceSaved(shell, name) {
+      (shell.bilibiSavedPreferences ||= new Map()).set(name, sequence);
+      if (!document.hidden) reportVisibility();
+    },
     send(intent, meta = {}) {
       if (!['upload', 'upload_cancel'].includes(intent.type)) return;
       enqueue(intent, {source: meta.source, onReply: typeof meta.onReply === 'function' ? meta.onReply : null});

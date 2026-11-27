@@ -1,5 +1,9 @@
 # bilibi-ports
 
+**Use it for:** asking another Domain or Extension a question and getting the answer now, or `Unavailable` when it is not mounted.
+
+**Not for:** a crate dependency between Domains or reading another module's tables.
+
 Ports (`base/ports`) let a module ask another Domain or Extension a question and get the answer straight away, without either module depending on the other.
 
 ## What is a port?
@@ -82,6 +86,8 @@ Notice the three helpers it uses:
 
 The facade checks the provider's own capability against the caller's scope, exactly as it does for any other caller. **A port is never a way around authorization.** A consumer that holds its own capability but not the provider's is refused by the provider.
 
+A consumer's system job that calls a provider it may run without declares the provider's capability for its own principal through Authz's `OPTIONAL_CAPABILITIES` (`apps/base/authz/README.md`, "Optional capabilities"). The provider checks its own capability; it never accepts the consumer's instead.
+
 ### Documenting the shape
 
 Write the request and the answer in the provider module's README. **That documented shape is the whole contract.** The consumer never sees the provider's Rust types; it reads only what the README says.
@@ -151,3 +157,9 @@ With nothing mounted, the example shows `Unavailable`. With the provider mounted
 
 - **Reacting after another Domain commits:** see events in `apps/base/events/README.md`.
 - **Writes, transactions and `MutationTransaction`:** see `apps/base/database/README.md`.
+
+## Record facts
+
+Contribute a `RecordFact` to `RECORD_FACTS` with a record kind and an ordinary port owned by the same module. The port accepts `{ "id": "<record id>" }` and returns `{ "label": "...", "value": "..." }`; it must check the reader and resolve the record within the supplied scope; for display checks use Authz `holds_proof`, whose read-only decision does not write the authorization log. Its read must be cheap and return no markup.
+
+Record pages call `Ports::record_facts` and render the results with `bilibi_ui::RecordFacts`. Boot rejects more than eight contributions for one record kind. Each page runs at most four providers concurrently. This is a deliberate exception to the one-connection rule: independent providers must stay concurrent and separately bounded, so one slow provider cannot hold up the others. Each uses the named detached checkout `record fact provider` for its independent read-only transaction, with a 75 ms PostgreSQL statement timeout and a 100 ms deadline that includes waiting for the concurrency bound and a pool slot. Refusals, errors, oversized values and timeouts are omitted. A provider must use asynchronous, bounded reads and never perform writes or blocking work.

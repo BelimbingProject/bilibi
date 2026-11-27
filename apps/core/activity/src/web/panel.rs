@@ -76,11 +76,12 @@ impl Panel {
             columns: ListColumns::mount(
                 &format!("{anchor}-activities"),
                 vec![
-                    BuiltinColumn::new("title", "Subject"),
-                    BuiltinColumn::new("kind", "Kind"),
-                    BuiltinColumn::new("status", "Status"),
+                    BuiltinColumn::new("title", "Subject").grid_field("activities.subject"),
+                    BuiltinColumn::new("kind", "Kind").grid_field("activities.kind"),
+                    BuiltinColumn::new("status", "Status").grid_field("activities.status"),
                     BuiltinColumn::new("when", "When"),
-                    BuiltinColumn::new("assignee", "Assigned to"),
+                    BuiltinColumn::new("assignee", "Assigned to")
+                        .grid_field("activities.assignee_user_id"),
                 ],
             )
             .map_err(|_| Error::Internal)?,
@@ -94,7 +95,10 @@ impl Panel {
     async fn handle(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         let name = event(value)?;
         if let Some(dialog) = &mut self.dialog {
-            if dialog.event(&self.pages, scope, name, value).await? {
+            if dialog
+                .event(&self.pages, scope, credential, name, value)
+                .await?
+            {
                 return Ok(());
             }
         }
@@ -116,6 +120,7 @@ impl Panel {
                 }
                 let kind = match value["kind"].as_str() {
                     Some("call") => Kind::Call,
+                    Some("meeting") => Kind::Meeting,
                     Some("note") => Kind::Note,
                     _ => Kind::Task,
                 };
@@ -129,7 +134,7 @@ impl Panel {
                 self.dialog = Some(Dialog::new(kind, related));
             }
             "close_modal" => self.dialog = None,
-            "create_task" | "log_call" | "create_note" => {
+            "save_event" => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {
@@ -143,10 +148,7 @@ impl Panel {
                     .await?
                     .is_some()
                 {
-                    self.notice = Some((
-                        NoticeKind::Success,
-                        format!("{} created.", dialog.kind.label()),
-                    ));
+                    self.notice = Some((NoticeKind::Success, dialog.created_message()));
                     self.dialog = None;
                     self.history = false;
                 }
@@ -198,6 +200,7 @@ impl Panel {
         clock: &Clock,
         activity: &Activity,
         names: &HashMap<i64, String>,
+        soon: jiff::SignedDuration,
     ) -> Result<FlexRow> {
         let id = activity.id.to_string();
         let mut kind = render(Icon {
@@ -218,7 +221,7 @@ impl Panel {
                 })?,
             )
             .slot("kind", kind)
-            .slot("status", status_badge(activity)?)
+            .slot("status", status_badge(activity, soon)?)
             .slot(
                 "assignee",
                 Html::text(
@@ -248,6 +251,10 @@ impl Panel {
     }
 
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "activities").await?;
+        drop(client);
+
         let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
         let state = if self.history {
             State::Closed
@@ -261,15 +268,17 @@ impl Panel {
             .await?;
         let users: Vec<i64> = page.entries.iter().map(|a| a.assignee_user_id).collect();
         let names = self.pages.names(scope, &users).await?;
+        let soon = self.pages.activities.imminent_window(scope).await?;
         let mut rows = Vec::with_capacity(page.entries.len());
         for activity in &page.entries {
-            rows.push(self.row(scope, &clock, activity, &names).await?);
+            rows.push(self.row(scope, &clock, activity, &names, soon).await?);
         }
         let anchor = self.anchor.clone();
         let mut actions = Html::EMPTY;
         if self.pages.activities.may_create(scope).await? {
             for (kind, label) in [
                 ("call", "Log call"),
+                ("meeting", "New meeting"),
                 ("task", "New task"),
                 ("note", "New note"),
             ] {
@@ -343,7 +352,7 @@ impl Panel {
         if page.total > ROWS {
             let state = if self.history { "closed" } else { "open" };
             let href = format!(
-                "/activities?related={}:{}&state={state}",
+                "/activities?display=list&related={}:{}&state={state}",
                 self.record.kind, self.record.id
             );
             content.push(&render(ActionLink {
@@ -367,7 +376,9 @@ impl Panel {
         if let Some(dialog) = &self.dialog {
             content.push(&dialog.render(
                 &self.pages,
+                scope,
                 &clock,
+                &words,
                 &format!("{anchor}-new"),
                 "close_modal",
                 self.framed,

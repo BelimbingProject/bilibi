@@ -1,0 +1,9 @@
+{#- The installation ownership review, inside the shared account settings shell. -#}
+{% import "settings.html" as settings %}
+{% import "components.html" as ui %}
+{{ flash }}
+{% call ui::page(variant=bilibi_ui::PageVariant::Form) %}
+{% call settings::layout(header=header, current=current, heading=heading, subheading=subheading) %}
+{{ card }}
+{% endcall %}
+{% endcall %}

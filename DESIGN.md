@@ -24,7 +24,7 @@ Professional, compact, warm, trustworthy. Dense enough for operations, calm enou
 
 **One thing one door, one door many keys.**
 
-**One thing one door.** Each kind of record has exactly one list and one record page, reached from one menu item. Its stages (draft, waiting for approval, posted, rejected, archived) and its sources (typed in, imported, created by another module) are columns and filters on that list, never separate pages or menu items. One action creates it ("+ Journal"), wherever it is started. Approvals may also surface in a shared queue such as "Waiting for my approval", but that queue links back to the record's one home.
+**One thing one door.** Each kind of record has exactly one list and one record page, reached from one menu item. Its stages (draft, waiting for approval, posted, rejected, archived) and its sources (typed in, imported, created by another module) are columns and filters on that list, never separate pages or menu items. One action creates it ("+ Journal"), wherever it is started. Views of one subject are tabs on its one page, not sub-items in the menu: Currencies is one menu item with Base currency and Exchange rates tabs. Approvals may also surface in a shared queue such as "Waiting for my approval", but that queue links back to the record's one home.
 
 *Example:* journals. Posted entries and manual journals waiting for approval are one Journals list with a status filter, not "Journal entries" and "Manual journals".
 
@@ -37,8 +37,10 @@ Professional, compact, warm, trustworthy. Dense enough for operations, calm enou
 *Ledger geometry:* compact scale, hairline rules, tabular numerals, warm stone base.
 
 - Controls use `rounded-md`. Surfaces use `rounded-xl`.
-- Lime marks orientation only: card top edge, active navigation, selection, unseen markers. Lime never reports status.
+- The accent marks orientation only: card top edge, active navigation, selection, unseen markers. Accent colours never report status.
 - Font: Instrument Sans, vendored locally (SIL OFL). No remote font requests.
+- **Default wordmark:** the mark, then "bilibi" in lowercase Lexend SemiBold (600), on one line. Use the shared `wordmark` macro on credential pages and in the workspace top bar. On phones the top bar uses a smaller wordmark and keeps the company label readable. Capitalise "Bilibi" when using the default product name outside the wordmark. No other text uses Lexend: the vendored file holds only the letters b, i and l (SIL OFL, `OFL-Lexend.txt`). A tenant's portal shows its own title in the interface font, never the wordmark.
+- **Adopter brand:** use the shared wordmark and the installation accent. The account menu footer is small and muted. See [Branding](apps/base/branding/README.md#where-it-shows).
 - Tailwind CSS 4.3.0 builds one generated stylesheet, embedded by Cargo. Commit its sources only; Node is needed on build machines.
 
 ## Tokens
@@ -66,6 +68,7 @@ Reuse the shared macros and typed models. Do not hand-write markup or copy class
 | Need | Use | Source |
 | --- | --- | --- |
 | Page, card, section, stack, cluster, narrowing, removable, button, badge, icon | `templates/components.html` and `src/components.rs` | `apps/base/ui` |
+| The brand in the top bar and on credential pages: the installation's own logo and name, or the Bilibi name beside its mark | `wordmark` over the host's `Brand`, sized by `WordmarkSize` | `apps/base/ui`, `apps/base/branding` |
 | Company mark or account picture with a fixed-size fallback | `IdentityImage` and `identity_image` | `apps/base/ui` |
 | Form control | `templates/forms.html` and `src/forms.rs` | `apps/base/ui` |
 | Form layout (`form`, `section`, `fields`, `field_row`, `control_group`) | `templates/forms.html` | `apps/base/ui` |
@@ -77,13 +80,18 @@ Reuse the shared macros and typed models. Do not hand-write markup or copy class
 | List and table | `templates/lists.html`, `flex_table.html` | `apps/base/ui` |
 | Chart (KPI, bar, stacked bar, line, pie, donut); `Chart::drill` makes bars and slices raise a page event, with the Data table as the keyboard route | `templates/chart.html` and `src/chart.rs` (`Chart`, `ChartKind`, `Series`) | `apps/base/ui` |
 | A resolved day (working, rest, off, holiday) and a month of them, Monday first | `day_tile` and `day_month` in `templates/components.html`, through `DayTile`, `DayMonth` and `DayKind` in `src/components.rs` | `apps/base/ui` |
-| Calendar (day, week, month and shared views of records with a start and end; drag to move, drag the edge to resize, Move… for keyboard and touch) | `templates/calendar.html` and `src/calendar.rs` (`Calendar`, `CalendarState`, `CalendarItem`, `CalendarMove`); owner contract in `apps/base/ui/README.md` | `apps/base/ui` |
+| Calendar (day, week, month, agenda and shared views of records with a start and end; a mini month beside it; scoped keyboard shortcuts; drag to move, drag the edge to resize, Move… for keyboard and touch) | `templates/calendar.html` and `src/calendar.rs` (`Calendar`, `CalendarState`, `CalendarItem`, `CalendarMove`); owner contract in `apps/base/ui/README.md` | `apps/base/ui` |
+| Safe Markdown reading view beside the existing plain-text textarea | `Markdown` in `src/markdown.rs`; syntax and trust boundary in `apps/base/ui/README.md` | `apps/base/ui` |
+| File preview (an image, PDF or plain text from the owner's own authorized route, in a modal) | `file_preview` in `templates/components.html`, through `FilePreview` in `src/file_preview.rs`, served with `FileBody::preview` | `apps/base/ui` |
+| Read-only contributed key facts at the top of a record | `RecordFacts`, gathered through `base/ports` | `apps/base/ui` |
 | Status board (columns by a status, cards dragged between them; Move… for keyboard and touch) | `templates/board.html` and `src/board.rs` (`Board`, `BoardState`, `BoardCard`, `BoardMove`); owner contract in `apps/base/ui/README.md` | `apps/base/ui` |
 
 - Name variants through the enums (`ButtonVariant`, `BadgeKind`, `PageVariant`), not class strings.
 - Icons use bare names from `base/ui` (`edit`, `pencil`, `bookmark-solid`), rendered as inline SVG. Use the Belimbing equivalent for a familiar action; see `apps/base/ui/README.md` for names and missing-icon behaviour.
-- Icon-only actions need an accessible label and a title. Inline controls are 24 px; table and toolbar controls are 28 px. Touch screens expand icon, tab, pager and choice targets to 40 px; the labelled button stays 24 px.
-- Links navigate; buttons act.
+- Dismiss controls use the X icon, never a “Close” text button.
+- Icon-only actions need an accessible label and a title. Inline controls are 24 px; table and toolbar controls are 28 px. Touch sizing follows the [Compact scale](#compact-scale).
+- Links navigate; buttons act. Navigation in a page header ("Chart of accounts", "Open book") is the standard `button` with `href`, a link drawn as a button, never a bare text link. Back is always `BackLink`, never a button naming the parent list.
+- **On/off is a `Toggle`**, never a badge beside a check-mark action or a button whose label flips ("Enabled" + ✓ → one On/Off switch).
 - Destructive actions use calm danger text, never a solid red button.
 - Secrets use `SecretInput`. It starts masked. A stored value shows a keep-current mask, never plaintext.
 - Specimens: the Design Library (`/assets/ui-components.html`, `/assets/ui-feedback.html`) is the screenshot baseline. Extend it with each new primitive.
@@ -101,7 +109,7 @@ Shared UI sizes follow the sidebar's 12 px text and tight row rhythm; pages do n
 | Floating fields | 40 px minimum; toolbar and table fields 28 px (`.ui-compact-controls`) |
 | Buttons | 24 px with 8 px side padding, one size everywhere (`ui-button`); a caller's padding, height and text-size classes are discarded (`button_class`) |
 | Header actions | The page header's actions slot is one row: buttons of every variant centred on one line, 8 px apart, wrapping at phone width with the same gap. Callers pass bare buttons, never a wrapper, margin or alignment class |
-| Touch targets | Utility `IconButton`, tabs, pagination and choice labels on coarse pointers: 40 px minimum. `Button` keeps 24 px on phones and touch screens |
+| Touch targets | Utility `IconButton`, tabs, pagination and choice labels on coarse pointers: 40 px minimum, with the exceptions under [Lists](#lists) and [Record pages](#record-pages). `Button` keeps 24 px on phones and touch screens |
 | Card | 12 px body padding; header 8 px vertically and 12 px horizontally; table frames stay at zero |
 | Feedback | 8 px vertically and 12 px horizontally; panel notices use 6 px vertically |
 | Spacing | 4 px steps: 4 within a group, 8 between controls, 12 within surfaces, 16 between groups |
@@ -120,27 +128,42 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 - Never set a page's own max width.
 - Compact does not mean cramped. Keep related controls close and the primary action clear.
+- **Standard gaps only.** Sections, cards, toolbars and tables are spaced by the shared stack and the Compact scale, never page-owned margins. No element touches another; a missing gap is a bug, not a style.
+- **Touch screens.** Targets follow the [Compact scale](#compact-scale); every close button and icon button must still sit inside its box (a flash's ✕ once hung outside the message). Check each page in touch mode.
+- **Flow.** Every page leads somewhere and never in a circle:
+  - No loop between two pages (Book → Chart of accounts → Book). Each link leads forward or Back.
+  - A "Go to X" button lands where the person acts (the company's open-book form), not on a list of all of them.
+  - After a step is finished, land on the next step.
+  - Set a prerequisite in place rather than sending people elsewhere first: a combobox of every currency, the ones already used first, not "Enable it on the Currencies page first".
 - Layouts are responsive. There is no separate mobile product.
 
 ## Forms
 
 *One field, one box.* The label sits inside the field, so each field is one element and the value is what the eye lands on. *built* (`apps/base/ui/src/forms.rs`, `LabelPlacement`)
 
+- **Required fields:** Keep the star on the label line, immediately after its text with a small gap and the same colour.
 - **Text fields float the label.** Empty, it rests where the value goes. On focus, once filled, or when the browser autofills, it moves up small in muted ink. It never leaves the box.
 - **Selects, textareas, date-like inputs and the combobox pin it small at the top.** They always show something (a prompt, a mask, a selection) that a resting label would cover.
 - **Multi-selects:** one box holds the inset label and `(N selected)` count, with removable selected chips beneath. The default keeps complete chips on one line and shows “…” for overflow; `wrap_chips` expands the box onto multiple lines. The chevron stays beside the label. Empty fields show the label, `(0 selected)` and a selection prompt. For a small fixed set, `MultiSelect` exposes every option. For records, `SearchMultiSelect` sends a debounced query to the owner and shows bounded server results, disabled notes and an optional trailing create action.
 - **Choice chevrons:** selects and multi-selects use the same 16 px outline chevron, aligned 11 px inside the field's right edge.
 - **Colour choices use `ColourInput`.** Each named choice and the selected value are one chip: that status role's banner surface, border and text colour, with the name inside, including the default choice. Chips follow the light and dark themes. The pinned label, keyboard controls and native select keep it usable with assistive technology and without JavaScript.
 - **Compact.** A single-value inset box is 40 px with a 14 px value (`text-base`); the floated or pinned label is 11 px. A multi-select starts at 48 px to hold its label and chip row, and grows when wrapping is enabled. Inset fields sit 12 px apart.
+- **2FA status:** Before setup say “Not set up”; after setup say “On”. For a lost phone, staff can ask their company administrator or the server owner; customers contact the portal company.
 - **2FA method choice:** Settings and Confirm access show each installed method’s own setup or prompt destination. A single authenticator retains its existing flow. Reading a choice never starts or sends a challenge.
 - **2FA before saving:** use `StepUp` (`base/ui`) for the protected submit actions, with `ProofInput` for a live method choice and code. Without 2FA, show a plain setup notice and link first. Keep unrelated changes available.
+- **2FA step-up:** keep the requested shell, menu, title and layout in place and float the shared prompt over the main panel. Draw only skeleton placeholders behind it; never render or send the protected content until the code is accepted, then load it in place without losing the page address or filters. The same prompt covers a protected page and a protected action.
 - **Sections:** draw a bordered part of a form with `forms::section` (one shared 12 px box and heading), not page-owned box classes. Create Address uses it.
 - **Classic label above** stays for a field with no visible label (toolbars, `sr-only`), a field with its own `class` or `label_class`, checkboxes and radio groups. Multi-selects keep their canonical inset label.
 - Placeholder text shows only once the person is in the field, as an example, never as the label.
+- **No enable step.** A choice from a standard list (currencies) offers every current entry, the ones this tenant has already used first; using one is what marks it. Never a table of on/off switches to curate before a first use.
 - Help and error lines sit under the box. An error is a sentence that names its field (`error_sentence`): "Parse confidence must be a number from 0 to 1…".
 - After a refused save, `ErrorSummary` lists the problems above the form, each linking to its field. Inline errors stay.
 - Keep rarely used parts out of the way: `Fold` folds a part under a one-line summary of what it holds and opens itself on an error; `AddMore` ("+ Add address line 2") reveals one more optional field.
 - A greyed field says why, in one line near the field that unlocks it.
+- **Coded choices are a searchable `Combobox`** showing code and name ("MYR · Malaysian ringgit"), never a plain select of codes. Typing also finds the common name people use (RMB for CNY, RM for MYR); the field stores the standard code.
+- **A field that picks another record uses the same combobox.** It needs no hint telling people to type. See [Record references](apps/base/ui/README.md#record-references) for how `RecordPicker` displays matches.
+- **Show results live.** A calculator or preview updates as the person types or chooses; no Convert or Calculate button.
+- **Familiar patterns win.** A currency converter is two rows of amount + currency, as on Google, with the rate's date and source in one small muted line above them.
 - This departs from the label-above layout on purpose; the shared macros own it, so no page styles its own label.
 
 ## Lists
@@ -148,13 +171,21 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 *Every list is a `FlexTable`.* Never the plain `Table`.
 
 - **State:** `ListState` keeps page, search, filters, sort and page size in the URL. Reload and shared links reopen the same view.
-- **Toolbar:** search sits first, with filter boxes to its right, above the table in the open. Leave 12 px between the page header and the toolbar. On narrow screens filters wrap below search in the same order. No second card.
+- **Toolbar:** search sits first, with filter boxes to its right, above the table in the open. A list a person reads whole (exchange rates) has no search box. Leave 12 px between the page header and the toolbar. On a phone (below `sm`) only search stays in the row, beside one "Filters" button that says how many filters are set ("Filters (2)"); it opens the filters as a sheet along the bottom, and each set filter shows under search as a chip whose × clears it (as Gmail, Linear and Shopify Admin do). Filters apply as they change, so the sheet stays open until Done, Close, Escape or a tap outside. Desktop is unchanged. No second card.
+- **Phone column order:** A list may name its most useful columns to show first on phones; the API and ordering contract are in [Shared UI](apps/base/ui/README.md#phone-lists-and-header-actions).
+- **Row links:** Below `sm` (640 px) or on a coarse pointer, every row link has a real tap target at least 44 × 44 px; targets never overlap.
 - **Rows:** `py-0.5`, `px-2`. Headers `py-1`, sunken background, `text-xs font-semibold`.
+- **Wide grids:** Scroll horizontally within their container, keeping headers aligned with their columns; never widen the page.
 - **Numbers:** tabular numerals for IDs, counts, dates and amounts.
+- **Dates:** one date format, "6 Nov 2026", and one date and time format, "6 Nov 2026, 09:13" plus the zone, on every page, in every field and in every display mode the top bar offers. Never ISO `2026-11-06`, `06/11/2026` or the browser's own order. A calendar heading or a day tile may name the weekday or spell the month out ("Wed 3 November 2026"); it keeps the day, month, year order. A time alone is "14:30" (24-hour). Show a date through `bilibi_datetime` (`render_date`, `render`, the `instant` markup) and take one with the shared date, date-and-time or time input, which reads "6 Nov 2026", "6/11/2026" (day first), "2026-11-06" or "2:30 pm" and shows what it understood.
 - **Corners:** table frames are square. A card is flat only where it frames the table.
 - **Pagination:** the results count shows whenever there are rows. The rows-per-page selector and pager show only when another page exists; an empty list shows none. They live in the component.
 - **Settings:** the operator and company settings table opens each Value cell as a form with Save and Cancel (`InlineForm`). Enter saves; Escape cancels. Protected values ask for 2FA in the row.
-- **Empty:** `EmptyState` says why and what to do next.
+- **Empty:** `EmptyState` says why and offers the fix itself: a button straight to the form that clears it. Its words stay true: "Add the first rate" shows only while there is none.
+- **Every row has a next step.** A row whose obvious action is not visible gets one ("Open book" on a company without a book).
+- **Row actions:** a *local* action works on the row's own record where it stands (edit, delete, archive, an on/off). It is a plain icon button on the row, with a tooltip that names it (`IconButton`). A *non-local* action takes the record to another module or kind of record ("Invite as customer" from a contact, "Add as customer" when Finance is mounted); other modules register them for that kind of record. Non-local actions sit in one "Non-local actions" icon button (Font Awesome `arrow-up-right-from-square`, `AddToMenu` in `apps/base/ui/src/drops.rs`) on the row and on the selection bar, and nowhere else. A row with no non-local action shows no "Non-local actions" button. No row of separate text action links.
+  - Before: an exchange rate row had a menu button whose only item was Delete, so deleting took two clicks and hid what the row can do.
+  - After: the rate row shows its delete icon (tooltip "Delete rate") and no "Non-local actions" button, because no other module takes a rate. A contact row keeps "Non-local actions" for "Invite as customer".
 - **Bulk actions:** a list whose records may be exported or changed together sets `FlexTable.selection`: a tick at the start of each row and one for the page, and, while anything is ticked, a bar above the table saying how many, offering every row the filters match, a Clear, and the bulk actions. The page keeps the ticks on the server and clears them when the filters or sort change. People who may take no bulk action see no ticks.
 
 ### Flexible columns
@@ -166,12 +197,15 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - The arrangement is remembered per account and page (`PageColumns`). An address that carries it wins. "Reset to default columns" forgets it.
 - Every scalar detail field is available in the column picker under its detail label; shared `RecordField` definitions keep them together. Existing defaults stay unchanged. Long text, files and nested collections stay on the detail page. Restrictions apply to the picker and cells as they do to the record.
 - Catalog and field contract: `apps/base/grid/README.md`.
+- Named list views use the shared strip and notch save form; see [Grid's shared list views contract](apps/base/grid/README.md#shared-list-views-686).
 
 ## Record pages
 
+- **Named actions on phones:** Header icon actions show their names beside the icons below `sm` (640 px) or on a coarse pointer, with targets at least 44 × 44 px. The same controls keep their events, links, disabled states and destructive colours; no action depends on a hover tooltip.
+
 *Read first, edit in place.* No Edit button and no separate edit route for the same facts.
 
-- A detail page is the header plus a stack of sections.
+- A detail page is the header plus a stack of sections. See the [live panel layout contract](docs/live-pages.md#server-declared-panels-and-background-updates).
 - A section is a card with a heading, optional count, description and actions, then its facts or table.
 - Facts wrap long identifiers without changing the copied text. They read like the filled-in form without its boxes: a small muted label (the floated label's size and ink) over the value, no dividers. They flow on a grid that follows the card's width: one column on a phone, two on a normal screen, three on a wide one. A long text or `pre` value takes the whole row. Split a card's facts into several `Facts` to start a new row, as Address Details does for its street lines.
 - An inline editor opens as the floating field in the fact's place and size, so nothing moves between reading and editing (`[data-fact]` in `assets/css/app.css`).
@@ -188,12 +222,14 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 *Built.* A calendar is another way to look at records that already have a list and a record page; it keeps nothing of its own. See `apps/base/ui/README.md` for the owner contract.
 
 - **One door, many keys.** An item links to its record's one page. Dragging, resizing, the Move dialog and an AI agent all reach the same operation of the owning module, with the record's version; the calendar only asks. A refused or stale move leaves the item where it was and the page says why in the owner's words.
-- **Views.** Day, week (Monday first), month and shared (one column per person or resource, at most 20). The address holds the view, the date and the lanes, so Back, reload and a shared link reopen the same view.
+- **Views.** Day, week (Monday first), month, year and shared (one column per person or resource, at most 20). The year is twelve small months; each day shows how many items it holds and links to its day view. The address holds the view, the date and the lanes, so Back, reload and a shared link reopen the same view.
 - **Time.** Times are drawn in the display zone, and the page says which. A drop names a wall-clock time, so a move across a daylight-saving change keeps it. All-day items are dates.
 - **Colour is a kind, not a status.** An item's colour is a `cat-1..8` data role on its left edge, and the kind is also written in words. A day mark uses the `day-*` tints with its word.
+- **Late and soon are marks, not kinds.** The owner may mark an open item `Overdue` (danger tint) or `Due soon` (warning tint) with `Urgency`; the tint sits on the item's box, the kind colour stays on its left edge, and the word is always written beside the time. A board card carries the same two marks.
+- **Create from a free slot.** A calendar the viewer may create in (`Calendar::creatable`) reports `calendar_slot` for a click or a drag down a free time (a tap on touch) and for a click, a tap or Enter on an empty day; the owner opens its own create dialog with the time filled in. A viewer who may not create gets no such events, and the page says what to do beside the title.
 - **Hidden, not refused.** Someone who may not update a record sees no drag handle and no Move action on it.
 - **Keyboard, touch and small screens.** Every movable item has a Move action that opens a dialog with date and time fields; the month is a grid with arrow keys. On a phone the grids become an agenda list, drag is off on coarse pointers, and Move is the path.
-- **Bounded.** At most 500 items are drawn; past that the calendar asks for a narrower filter.
+- **Bounded.** At most 500 items are drawn; past that the calendar asks for a narrower filter. The year is the exception: its numbers come from the owner's count of each day, so it is right however many items the year holds.
 
 ## Board
 
@@ -209,7 +245,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 | Pattern | Rule |
 | --- | --- |
-| Modal | Native `<dialog>`. Focus enters, stays, and returns. Escape and Cancel are one action. A click on the backdrop does nothing |
+| Modal | Native `<dialog>`. Focus enters, stays, and returns. Escape and Cancel are one action. A click on the backdrop does nothing. Every popup can always be closed (Close or Cancel, and Escape) in every state: loading, after an error, after a dismissed error |
 | Confirmation | `ConfirmDialog` for irreversible actions: consequence first, Cancel beside the destructive verb. Its shared macro accepts a body for a reason field. Never `window.confirm` |
 | Flash | Stacks at the right above the page, most severe first, reserving space so messages never cover page actions. A message that arrives with a redirect floats top right instead. Info, warning and error stay until dismissed. Success clears after 8 s |
 | Shell preferences | Theme and time-display saves use the shared floating flash, with the same success timeout and persistent errors |
@@ -218,7 +254,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 | Panel notice | Where a panel cannot reach the page flash |
 | Connection | Banners announce a dropped socket. The page reconnects with backoff and remounts in place |
 | Error pages | One shell from `apps/web/src/errors.rs`. Debug detail only in debug builds |
-| Which Bilibi | The status bar always shows the stored server role, instance label and colour. A Core Administrator can click it to open Instance settings. Staging also shows the top-bar badge; Dev and Staging show a badge on sign-in. A review or confirmation opens with the instance banner on every instance, production included. The colour is the operator's `instance.colour` status role, and the label is the operator's `instance.label`, so the name is always in words |
+| Which Bilibi | The status bar always shows the stored server role, instance label and colour. A Core Administrator can click it to open Server Instance. Staging also shows the top-bar badge; Every role shows a badge on sign-in. A review or confirmation opens with the instance banner on every instance, production included. Dev and Staging use the operator's `instance.colour` status role. Production uses a neutral badge. Dev and Staging explain the effect of changes in sign-in tooltips and reviews. The operator's `instance.label` keeps the name in words |
 
 - A failure says what happened, what it cost, and what to do next.
 - Recover before reporting. Users are not an error channel.
@@ -227,24 +263,29 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 *Three shells, all minimal.*
 
-- **Credential layout:** a centered card with no navigation. Sign-in and password recovery show the Bilibi mark and the Dev or Staging badge. A signed-in OAuth review shows the Bilibi mark and the instance banner on every environment, including Production, then the guarded live review card. When the sign-in policy requires 2FA, a second card shows enrolled methods, explicit start/resend, code entry and Cancel before opening the workspace. Reading it sends no challenge.
-- **Portal layout** (ADR 16, `templates/portal.html`): what a tenant's customers see on `/portal`. A top bar, at least 28 px high and taller on touch screens, with the tenant's portal title and logo, the customer's name, My account and Sign out; the portal menu as one row of links below it, in its owners' `order` (not alphabetical), the longest route that is the page or its ancestor marked current; pages take their width from `PageVariant` like staff pages. The tab reads "page · portal title" with the tenant's logo as its icon. No sidebar, pins, tiles, search, bell, company switcher or status bar. Its anonymous pages use the credential layout branded with the portal site's title (`templates/portal_card.html`), never Bilibi's name, around one `PortalForm` (`templates/portal_form.html`): heading, intro, the outcome notice, the form posting to its own address and demoted links below, as the staff credential cards are laid out. *built*
-- **Workspace shell:** `h-7` top bar, sidebar menu, status bar.
-  - Top bar: sidebar toggle, brand mark, the current company, search, notification bell, timezone and clock selector, theme selector.
+- **Credential layout** (`templates/credential.html`): calm, balanced, one clear action. One centred column, 384 px at most, with no navigation, on sign-in, password recovery, invitation and the 2FA step alike.
+  - Above the card, centre the wordmark, with the installation owner's company on sign-in and the instance badge below. Stack an adopter logo above the display name when both are available.
+  - The card is a 16 px stack: a heading with one sentence, notices, the fields 12 px apart, full-width primary actions, then demoted links centred below it ("Forgot your password?", Back, Cancel). Sign-in shows no heading: the wordmark and the button already say it. When a company sign-in link offers SSO, both sign-in buttons use the primary style.
+  - A password the person types has a show/hide eye. It starts masked and is masked again as the form is sent.
+  - A signed-in OAuth review shows the wordmark and the instance banner on every environment, including Production, then the guarded live review card. Connecting an app with a code (`/oauth/device`) is the same card in three steps: one field for the code, then "Approve this app?" naming the app with the code to compare, then the outcome; a complete code in the app's link opens the second step. When the sign-in policy requires 2FA, a second card shows enrolled methods, explicit start/resend, code entry and Cancel before opening the workspace. Reading it sends no challenge.
+- **Portal layout** (ADR 16, `templates/portal.html`): what a tenant's customers see on `/portal`. A top bar, at least 28 px high and taller on touch screens, with the tenant's portal title and logo, the customer's name, My account and Sign out; the portal menu as one row of links below it, in its owners' `order` (not alphabetical), the longest route that is the page or its ancestor marked current; pages take their width from `PageVariant` like staff pages. The tab reads "page · portal title" with the tenant's logo as its icon. No sidebar, pins, tiles, search, bell, company switcher or status bar. Its anonymous pages use `PortalCard` for the portal site's title and logo and `PortalForm` for the form and links. *built*
+- **Workspace shell:** compact top bar, sidebar menu, status bar. Below `sm`, pins and secondary controls sit on a separate row so they leave room for the wordmark and company label.
+  - Top bar: sidebar toggle, the wordmark (it opens the dashboard), the current company, search, notification bell, timezone and clock selector, theme selector. A saved time-display choice updates the selector and timestamps that follow it even while a page is loading. Earlier live replies leave the choice in effect. The same protection applies to a saved theme.
   - The operator hosts tenants, each a separate customer with its own users, data, trading contacts and portal. A tenant may run one company or a group of legal entities. Desks switch between that group’s own companies; customers and suppliers are never switch targets. Accountants serving separate clients will switch tenants when that feature is built.
-  - **Contacts you trade with, workplaces you work in.** A company becomes a workplace when people have desks there; the switcher lists your desks only; the top bar always means “I am working in X”. The company label stays visible on every staff page. **Switch desk** opens **Your desks**, listing the person's explicit desks, marking the current one, with a type-to-find box past eight. On company-scoped pages the choice filters the work. Office-wide pages keep the label as plain text, without the switcher. Choosing a desk reloads the page; other tabs reload at their next action. A person with one desk sees a plain label. Company managers assign and remove desks on the company's **People with a desk here** section or the person's **Desks** section, through the same operation; they may assign themselves, with the same audit.
-  - Sidebar: the menu, pinned items, account entry at the bottom.
-  - Status bar: the Platform version, then each mounted Domain's version (`finance 0.1.0`), with commits in the tooltip (`docs/versions.md`). It also shows the server role and instance label in the configured colour, plus the listen address when the role is Dev. The role comes from `instance.role`, never the build mode.
-  - In the status bar's centre, the AI tag: the text AI in a bordered box, drawn like the role tag. A faint border means every AI connection is off or none exists; the success colours (green surface, line and text) mean at least one is switched on. The tooltip says which ("One or more AI connections are on" or "AI is off"), so colour is never the only cue. It stays visible at phone width. Clicking it opens a panel upward: when nothing is connected, the prompt to paste into an AI app and the Bilibi address, each with a Copy button, plus a note to use an AI program on this computer when the server is a Dev copy or not reachable from the internet; when connected, under the heading Connected AI the connected apps, each with its own on/off pill toggle, its last use as the shared datetime component in the time zone chosen in the top bar and the client it was approved from, a Manage link (the only link to the settings page), and Recent activity, newest first. Each activity line says what the AI operated on ("Read 12 companies", "Saved a change to Company Acme Sdn Bhd", "Prepared a change to 3 invoices for you to review"): the kind of record, how many and, for one record, its name as the reader's own field access and company reach show it, never a masked or out-of-reach name. Asking what the AI can do or how an action works is left to the full activity page, which the heading links to for readers who can open it. The panel follows new requests and connection changes live. Approvals, bot notifications and an in-app assistant are later stages.
+  - **Contacts you trade with, workplaces you work in.** A company becomes a workplace when people have desks there; the switcher lists your desks only; the top bar always means “I am working in X”. The company label stays visible on every staff page. **Switch desk** opens **Your desks**, listing the person's explicit desks, marking the current one, with a type-to-find box past eight. A desk in an archived company stays listed with an Archived badge, also shown beside the top bar label while it is the current one: its records read, and nothing in it can be changed. On company-scoped pages the choice filters the work. Office-wide pages keep the label as plain text, without the switcher. Choosing a desk reloads the page; other tabs reload at their next action. A person with one desk sees a plain label. Company managers assign and remove desks on the company's **People with a desk here** section or the person's **Desks** section, through the same operation; they may assign themselves, with the same audit.
+  - Sidebar: the menu, pinned items and account entry at the bottom.
+  - Status bar: the server role and instance label use the role's badge treatment. Staging and Production show the [packaged application version](apps/web/README.md#versions-bilibi-web-status). Dev shows the working version, a marker for uncommitted changes, and the listen address. The version label links to Software for viewers with access to the page, which shows installed Domain and Extension versions. The role comes from `instance.role`, never the build mode. See `docs/versions.md`.
+  - In the status bar's centre, the AI tag: the text AI in a bordered box, drawn like the role tag. A faint border means every AI connection is off or none exists; the success colours (green surface, line and text) mean at least one is switched on. The tooltip says which ("One or more AI connections are on" or "AI is off"), so colour is never the only cue. It stays visible at phone width. Clicking it opens a panel upward: when nothing is connected, the prompt to paste into an AI app and the server address, each with a Copy button, a link to enter the code a cloud app or bot shows, plus a note to use an AI program on this computer when the server is a Dev copy or not reachable from the internet; when connected, under the heading Connected AI the connected apps, each with its own on/off pill toggle, its last use as the shared datetime component in the time zone chosen in the top bar and the client it was approved from, a Manage link (the only link to the settings page), and Recent activity, newest first. Each activity line says what the AI operated on ("Read 12 companies", "Saved a change to Company Acme Sdn Bhd", "Prepared a change to 3 invoices for you to review"): the kind of record, how many and, for one record, its name as the reader's own field access and company reach show it, never a masked or out-of-reach name. Asking what the AI can do or how an action works is left to the full activity page, which the heading links to for readers who can open it. The panel follows new requests and connection changes live. Approvals, bot notifications and an in-app assistant are later stages.
   - Below `lg` the menu is an off-canvas drawer.
 - Pages never render chrome. The host wraps them (`apps/web/src/shell.rs`).
 - The bell has **To do** and **Notifications** tabs, with separate counts for actionable work and unread notifications. To do starts with approvals waiting for the signed-in person; each row links to its record and See all opens the full approvals page. There is no approvals sidebar entry. Opening the bell or marking notifications read never completes a to-do. Notifications continue to follow new deliveries live.
-- Search is the button before the bell, or `/` when not typing in a field. It opens a dialog that finds every page the person may open that has a name (its page title or menu row): menu pages, account pages and pages with no menu row. A query matches a page's name or any place it lives under, ignoring case, and each result shows where it lives (`Administration › Authorization › Roles`, `Account › My Settings › Password`). ↑/↓ and Enter open one; Esc or a click outside closes it. On a phone it fills the screen.
+- Search is the button before the bell, or `/` when not typing in a field. It opens a dialog that finds every page the person may open that has a name (its page title or menu row): menu pages, account pages and pages with no menu row. A query matches a page's name or any place it lives under, ignoring case, and each result shows where it lives (`Administration › Authorization › Roles`, `Account › My Settings › Password`). A section result shows its title and the page path. Opening it goes straight to that section, on the right tab when the page has tabs. Use ↑/↓ and Enter to open a result. Escape or a click outside closes the dialog. On a phone it fills the screen.
+- Complete names and parts of names appear in Pages or Account. Close spellings appear in Close matches, below the other results.
 - For a person who may search records, the same dialog lists records between Pages and Account once the query is two characters long: a group per kind (Contacts, Companies, a Domain's kinds), each row the record's name with its facts underneath, a record that is no longer current marked with its state, and "All results" for the `/search` page. Records come from the server (`apps/base/search/README.md`); "Nothing found" waits for them.
 - Theme, clock mode and pins belong to the account. They are not `localStorage`.
 - "Viewing as … · Stop" appears only while impersonating.
 - A platform-operator row appears in the account menu. Operator-only screens carry their own caution where reach is unfiltered.
-- Navigation: shared records (Addresses, Companies, Contacts, Documents, Products, Reports) sit together in the Core group; sorted alphabetically, chevron toggles, the active route in lime text, ancestors accented. A page joins the menu when it ships.
+- Navigation groups shared records (Addresses, Companies, Contacts, Documents, Products, Reports, Teams) under Core. Chevrons toggle groups, the active route uses the installation accent, and its ancestors are accented. A page joins the menu when it ships. See [tenant menu order](apps/base/menu_order/README.md) for how the sidebar orders staff items.
 - An empty menu says no destinations are available and names the recovery.
 
 ## Tiled workspace
@@ -262,7 +303,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 ### Drag and drop between tiles *built* (`apps/base/records/README.md`, Drop targets)
 
-- **A shortcut, never the only way.** A row of a list, or every ticked row, can be dragged onto a tile that accepts that kind of record. Every drop target is also an "Add to…" item on the row and on the selection bar, a plain link that opens the same review, so a phone, the keyboard, a screen reader and an AI assistant reach it without dragging.
+- **A shortcut, never the only way.** A row of a list, or every ticked row, can be dragged onto a tile that accepts that kind of record. Every drop target is also an item of the "Non-local actions" menu (the arrow-out-of-a-box icon button) on the row and on the selection bar, a plain link that opens the same review, so a phone, the keyboard, a screen reader and an AI assistant reach it without dragging.
 - **Only tiles that accept the records light up** while a drag lasts (a dashed selection-line outline and the action's name); the one under the pointer fills. A tile that does not accept them shows no change and refuses the drop.
 - **A drop opens the target's own review**, the dialog its button opens, with the record chosen. Nothing is written until the person confirms, and the confirm runs the target's existing operation: its permission check, rules and history. A drop carries references only (`kind:id`) and the target re-reads every record under the person's own scope.
 - **Rows are draggable only when a page the person may use accepts their kind;** the menu shows the same targets. A target that takes fewer records than are ticked stays in the menu, greyed, saying how many it takes.
@@ -272,15 +313,60 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Scan before reading.** Headings, labels, badges, counts and table structure carry the workflow. Do not explain what a visible label already says.
 - **Put information where it acts.** A page title stays true across tabs. Tab guidance lives in the tab.
 - **Consistency.** Same thing, same look, same place.
+- **Sentence case.** Titles, buttons, labels, options and badges raise only the first word and names: "Set up", "Past due", "Debits equal credits", never "Set Up". The shared badge raises the first letter of a stored lower-case value ("draft" reads "Draft") and nothing else.
 - **Calm.** No urgency, no badge spam, no dark patterns.
-- **Plain language.** Write for the person doing the work. Show the idea, not its internal code.
-- **Help text** (subtitles, section descriptions, field hints, empty states) is one short sentence a business user would say, telling them what they can do here. Leave it out when the title already says it or no short plain sentence helps; no text beats text that leaves the reader wondering. No internal terms (actor, tenant, scope, principal, capability, operation, contributed, registered). Keep a rule the reader needs, such as "This cannot be undone." Say "2FA", not "two-factor" or "MFA".
+- **Versions.** Show a version and commit date-time, never a commit hash as a version. Put the full hash in a tooltip at most.
+- **Details.** Every expandable summary names what it contains.
+- **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator", commands to install something are "Installation commands".
+- **Never "your developer".** A label or sentence never sends the reader to another person ("Code for your developer", "Ask your developer to test it first"): the reader may be that person, and the others learn nothing. Say what the thing is and let the reader decide who acts.
+- **Facts, not advice.** State what is true in one short line ("Works with Bilibi 0.2.1") and stop. No paragraph of cautions, and no instruction for a step the control already makes plain ("Run these in your local code folder, then test it in the browser").
+- **True words.** Fact-check every word against what this page does for this reader: "Manage" on a read-only page is false; "Add the first rate" is false once a rate exists.
+- **No product notes.** Notes for builders ("Draft, awaiting accountant review" on a template) never show to users.
+- **No internals in hints.** Do not explain how the system works behind the page (how filters relate to the top bar, how reports roll up, which rows are hidden). Say what the person can do.
+- **Help text** (subtitles, section descriptions, field hints, empty states) uses plain sentences a business user would say. A page hint explains the concept the page manages as well as what the person can do. Leave help text out when the title already says it or no short plain sentence helps; no text beats text that leaves the reader wondering. No internal terms (actor, tenant, scope, principal, capability, operation, contributed, registered). Keep a rule the reader needs, such as "This cannot be undone." Say "2FA", not "two-factor" or "MFA".
 
 | Before | After |
 | --- | --- |
 | Which operations ask for the account holder's 2FA code before they go ahead | Set the actions that require 2FA. |
 | Every live company in this tenant | *(removed: the title says it)* |
 | Lowercase letters, digits and underscores. Unique within this tenant. | Lowercase letters, digits and underscores; must be unique. |
+| This filter does not change the current company in the top bar. Each account opens in its named company. | *(removed: explains internals)* |
+| Reports roll amounts up in the base currency. A company can use its own. | *(removed: explains internals)* |
+| Companies you cannot work in are not listed. A row shows one company in its own currency; figures are never added across companies… | *(removed: explains internals)* |
+| The book and fiscal calendar of each company you can work in | Company books you can access |
+| Leave empty to set it when you issue. | Leave empty to use the actual date of issue. |
+| The numbering the document takes when it is issued | Issued ref no, settings *(with a link icon to the setting)* |
+| A draft has no number and posts nothing until you issue it. | Draft: no ref no and no posting until issued. |
+| Not set. Conversions to the base currency are refused until you choose one. | Required for currency conversions. |
+| No exchange rates yet. Enable the currencies you trade in, then add a rate. | No exchange rates yet. *(with an "Add a rate" button; no step before it)* |
+| Check a conversion / Try the conversion other modules use… | Currency conversion calculator *(no hint)* |
+| Code for your developer | Installation commands *(a row icon that opens them with a copy icon)* |
+| Version 0.2.0 supports Bilibi 0.2.1. There is no test record for the exact code running here. Ask your developer to test it first. | Works with Bilibi 0.2.1 |
+| Run these in your local Bilibi code folder, then test it in the browser. | *(removed: the commands say it)* |
+
+## Page review checklist
+
+Summary badges equal the sum of the counts on what they open; never render a link to an empty list or an unlabeled “See all”.
+
+Run this on every page you changed, in the browser at `APP_ORIGIN`, once with a mouse and once in touch mode (DevTools device emulation, coarse pointer). Every answer must be yes.
+
+1. Does every subtitle, hint and empty state say something the title and labels do not?
+2. Is every word true for this page and this reader (no "manage" on read-only, no "first" once done)?
+3. Is every hint free of internals and product notes, and short enough to read at a glance?
+4. Is each thing named for what it is, in the words a business user would say, with no "your developer" and no advice paragraph where one fact does?
+5. Does every page lead forward, with no loop between two pages and no dead end?
+6. Does every "Go to X" land on the exact place to act, and does a finished step land on the next one?
+7. Does every empty state and every list row offer its next step?
+8. Is every prerequisite settable in place, rather than "do it on another page first"?
+9. Can every popup be closed with Close and Escape in every state, including after an error?
+10. Is every on/off a `Toggle`?
+11. Is header navigation the standard button, and Back the standard `BackLink`?
+12. Is every coded choice a searchable combobox with code and name, finding common names too?
+13. Do results update live, with no Convert or Calculate button?
+14. Does "Non-local actions" hold only actions that take the record to another module, with local ones (edit, delete, archive, on/off) as plain icon buttons on the row?
+15. Do sections, cards, toolbars and tables keep the standard gaps, with nothing touching, and do icon and close buttons stay inside their box on a touch screen?
+
+How to build each part with the shared components: `apps/base/ui/AGENTS.md`.
 
 ## Accessibility and resilience
 

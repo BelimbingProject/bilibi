@@ -2,26 +2,35 @@
 //! type and status filters and `related=<kind>:<id>` in the address, the New
 //! document dialog, and Export CSV of the filtered metadata.
 use super::{
-    dialog::{self, NewDocument},
+    dialog::{self, NewDocument, QuickDocument},
     event, file_path, filter_of, path, related_of, render, Clock, Pages, Region, INDEX,
 };
-use crate::{Document, Filter, Reference, Sort, Source, LIST_CATEGORY, LIST_STATUS, LIST_TYPE};
+use crate::{
+    Document, Filter, Marks, Reference, Sort, Source, LIST_CATEGORY, LIST_STATUS, LIST_TYPE,
+};
 use bilibi_database::{Error, Result};
+use bilibi_records::Resolved;
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
+    download::FileBody,
     list_state::{InvalidPageSize, FILTERS_FORM},
     lists::RecordLink,
     page::*,
     params, ActionLink, BuiltinColumn, Button, ButtonVariant, Card, Choice, ColumnsOutcome,
     EmptyState, Filter as ListFilter, FilterToolbar, FlashGroup, FlexRow, FlexTable, Header, Html,
-    ListColumns, ListSpec, ListState, PageCounts, Pagination, SortDir, StatusKind, TableEmpty,
-    ToolbarControl, NO_FLASH,
+    IconButton, IconKind, ListColumns, ListSpec, ListState, PageCounts, Pagination, Selection,
+    SortDir, StatusKind, TableEmpty, ToolbarControl, NO_FLASH,
 };
+use jiff::Timestamp;
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, LazyLock},
+    time::SystemTime,
 };
+
+mod actions;
+use actions::{Deletion, Outcome, Previewing};
 
 const SIZES: [u64; 3] = [25, 50, 100];
 static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
@@ -41,6 +50,8 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
             ("category".into(), ListFilter::string("all")),
             ("type".into(), ListFilter::string("all")),
             ("status".into(), ListFilter::string("all")),
+            ("show".into(), ListFilter::string("all")),
+            ("expiry".into(), ListFilter::string("all")),
         ]),
         omit_blank: vec!["search".into()],
         ..ListSpec::default()
@@ -53,14 +64,23 @@ fn columns() -> Result<ListColumns> {
     ListColumns::mount(
         "documents",
         vec![
-            BuiltinColumn::new("name", "Name").sortable("name"),
-            BuiltinColumn::new("file", "Latest file"),
-            BuiltinColumn::new("category", "Category"),
-            BuiltinColumn::new("type", "Type"),
-            BuiltinColumn::new("status", "Status"),
-            BuiltinColumn::new("revision", "Revision"),
-            BuiltinColumn::new("publish_date", "Published").sortable("publish_date"),
-            BuiltinColumn::new("last_revision", "Last revision").sortable("last_revision"),
+            BuiltinColumn::new("name", "Name")
+                .grid_field("documents.name")
+                .sortable("name"),
+            BuiltinColumn::new("file", "Latest file").grid_field("document_revisions.file_name"),
+            BuiltinColumn::new("category", "Category").grid_field("documents.category"),
+            BuiltinColumn::new("type", "Type").grid_field("documents.document_type"),
+            BuiltinColumn::new("status", "Status").grid_field("documents.status"),
+            BuiltinColumn::new("marks", "Marks"),
+            BuiltinColumn::new("expires", "Expires").grid_field("documents.expires_on"),
+            BuiltinColumn::new("retention", "Retention ended"),
+            BuiltinColumn::new("revision", "Revision").grid_field("documents.revision"),
+            BuiltinColumn::new("publish_date", "Published")
+                .grid_field("documents.publish_date")
+                .sortable("publish_date"),
+            BuiltinColumn::new("last_revision", "Last revision")
+                .grid_field("documents.last_revision_at")
+                .sortable("last_revision"),
         ],
     )
     .map_err(|_| Error::Internal)
@@ -83,6 +103,14 @@ fn with_all(label: &str, mut options: Vec<Choice>) -> Vec<Choice> {
     options
 }
 
+struct RowState {
+    marks: Marks,
+    can_delete: bool,
+    can_download: bool,
+    can_preview: bool,
+    retention_due_at: Option<SystemTime>,
+}
+
 pub(crate) struct Index {
     pages: Pages,
     list: ListState,
@@ -91,7 +119,17 @@ pub(crate) struct Index {
     framed: bool,
     uploads: Uploads,
     dialog: Option<NewDocument>,
+    quick: Option<QuickDocument>,
     flash: Option<(StatusKind, String)>,
+    /// The ticked documents, which `Selection::apply` keeps: by id, or every
+    /// match less those unticked since; cleared when the filters or sort
+    /// change.
+    selection: Selection,
+    /// The keys of the rows on screen, which the page tick takes.
+    page_keys: Vec<String>,
+    confirm: Option<Deletion>,
+    outcome: Option<Outcome>,
+    preview: Option<Previewing>,
     /// Each list's choices, read once at mount.
     categories: Vec<Choice>,
     types: Vec<Choice>,
@@ -107,19 +145,45 @@ impl Index {
         let categories = pages.choices(scope, LIST_CATEGORY, None).await?;
         let types = pages.choices(scope, LIST_TYPE, None).await?;
         let statuses = pages.choices(scope, LIST_STATUS, None).await?;
-        Ok(Self {
+        let uploads = dialog::uploads(pages.documents.upload_limit(scope).await?);
+        let mut index = Self {
             pages,
             list: ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?,
             columns: columns()?,
             related: related_of(query),
             framed,
-            uploads: dialog::uploads(),
+            uploads,
             dialog: None,
+            quick: None,
             flash: None,
+            selection: Selection {
+                event: "select".into(),
+                noun: "documents".into(),
+                ..Selection::default()
+            },
+            page_keys: Vec::new(),
+            confirm: None,
+            outcome: None,
+            preview: None,
             categories,
             types,
             statuses,
-        })
+        };
+        index.reopen(scope, query).await?;
+        Ok(index)
+    }
+    /// Opens the New document dialog the address names (`new=1`), so a
+    /// remount after a dropped connection or a reload shows it again and a
+    /// resumable upload in it carries on.
+    async fn reopen(&mut self, scope: &Scope, query: &HashMap<String, String>) -> Result<()> {
+        if query.get("new").map(String::as_str) == Some("1")
+            && self.dialog.is_none()
+            && self.pages.documents.may_manage(scope).await?
+        {
+            let fixed = self.related_record(scope).await?;
+            self.dialog = Some(NewDocument::new(&self.pages, scope, fixed).await?);
+        }
+        Ok(())
     }
     /// The filters in the address form `filter_of` reads.
     fn query(&self) -> HashMap<String, String> {
@@ -128,6 +192,30 @@ impl Index {
             query.insert("related".into(), format!("{}:{}", related.kind, related.id));
         }
         query
+    }
+    /// What the ticks belong to: the filters and the sort, not the page.
+    fn fingerprint(&self) -> Vec<(String, String)> {
+        let mut query: Vec<_> = self
+            .query()
+            .into_iter()
+            .filter(|(key, _)| key != "page" && key != "per_page")
+            .collect();
+        query.sort();
+        query
+    }
+    /// The record the list is filtered to, as the dialogs relate new documents
+    /// to it, when the reader may see it.
+    async fn related_record(&self, scope: &Scope) -> Result<Option<Resolved>> {
+        match &self.related {
+            Some(related) => Ok(self
+                .pages
+                .records
+                .resolve(scope, std::slice::from_ref(related))
+                .await?
+                .into_iter()
+                .next()),
+            None => Ok(None),
+        }
     }
     fn filter(&self) -> Filter {
         let mut query = self.query();
@@ -161,6 +249,11 @@ impl Index {
                 return Ok(None);
             }
         }
+        if let Some(quick) = &mut self.quick {
+            if quick.event(name, value)? {
+                return Ok(None);
+            }
+        }
         match name {
             "filters" => {
                 let filters = params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
@@ -174,6 +267,8 @@ impl Index {
                     ("category".into(), "all".into()),
                     ("type".into(), "all".into()),
                     ("status".into(), "all".into()),
+                    ("show".into(), "all".into()),
+                    ("expiry".into(), "all".into()),
                 ]));
             }
             "page" => self
@@ -191,7 +286,8 @@ impl Index {
             }
             "new" => {
                 if self.pages.documents.may_manage(scope).await? {
-                    self.dialog = Some(NewDocument::new(&self.pages, scope, None).await?);
+                    let fixed = self.related_record(scope).await?;
+                    self.dialog = Some(NewDocument::new(&self.pages, scope, fixed).await?);
                 } else {
                     self.flash = Some((
                         StatusKind::Error,
@@ -199,7 +295,64 @@ impl Index {
                     ));
                 }
             }
-            "close_modal" => self.dialog = None,
+            "close_modal" => {
+                if let Some(mut dialog) = self.dialog.take() {
+                    dialog.discard(&self.pages, scope).await;
+                }
+                self.uploads.clear(dialog::UPLOAD);
+            }
+            "quick" => {
+                if self.pages.documents.may_manage(scope).await? {
+                    let fixed = self.related_record(scope).await?;
+                    self.quick = Some(QuickDocument::new(&self.pages, scope, fixed).await?);
+                } else {
+                    self.flash = Some((
+                        StatusKind::Error,
+                        "You do not have permission to create documents.".into(),
+                    ));
+                }
+            }
+            "close_quick" => {
+                if let Some(mut quick) = self.quick.take() {
+                    quick.discard(&self.pages, scope).await;
+                }
+                self.uploads.clear(dialog::UPLOAD);
+            }
+            "quick_create" => {
+                let pages = self.pages.shared();
+                let Some(quick) = &mut self.quick else {
+                    return Ok(None);
+                };
+                if let Some(added) = quick
+                    .submit(&pages, scope, credential, &mut self.uploads, value)
+                    .await?
+                {
+                    self.quick = None;
+                    self.flash = Some((
+                        StatusKind::Success,
+                        match added.duplicates {
+                            0 => format!("Document “{}” added.", added.name),
+                            n => format!(
+                                "Document “{}” added. {n} other document{} you may see already hold{} this file.",
+                                added.name,
+                                if n == 1 { "" } else { "s" },
+                                if n == 1 { "s" } else { "" },
+                            ),
+                        },
+                    ));
+                }
+            }
+            "select" => self.selection.apply(
+                value["op"].as_str().unwrap_or(""),
+                value["key"].as_str(),
+                &self.page_keys,
+            ),
+            "request_delete" => self.request_delete(scope, value).await?,
+            "cancel_delete" => self.confirm = None,
+            "delete" => self.delete(scope, credential).await?,
+            "close_result" => self.outcome = None,
+            "preview" => self.open_preview(scope, value).await?,
+            "close_preview" => self.preview = None,
             "create" => {
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {
@@ -225,7 +378,15 @@ impl Index {
         clock: &Clock,
         d: &Document,
         latest: Option<&crate::Revision>,
+        state: RowState,
     ) -> Result<FlexRow> {
+        let RowState {
+            marks,
+            can_delete,
+            can_download,
+            can_preview,
+            retention_due_at,
+        } = state;
         let id = d.id.to_string();
         let file = match (d.source, latest) {
             (Source::External, _) => match &d.external_url {
@@ -237,13 +398,21 @@ impl Index {
                 })?,
                 None => Html::text("—"),
             },
+            (Source::Internal, Some(r)) if r.scan_status != crate::ScanStatus::Clean => {
+                Html::text(&format!(
+                    "{} ({})",
+                    r.file_name.as_deref().unwrap_or("File"),
+                    r.scan_status.label()
+                ))
+            }
             (Source::Internal, Some(r)) => match &r.file_name {
-                Some(name) => render(ActionLink {
+                Some(name) if can_download => render(ActionLink {
                     id: &format!("documents-{id}-file"),
                     href: &file_path(d.id, r.revision),
                     body: Html::text(name),
                     ..ActionLink::default()
                 })?,
+                Some(name) => Html::text(name),
                 None => Html::text("—"),
             },
             _ => Html::text("—"),
@@ -273,6 +442,32 @@ impl Index {
                 "status",
                 Html::text(&label(&self.statuses, Some(&d.status))),
             )
+            .slot(
+                "marks",
+                Html::text(match (marks.favourite, marks.following) {
+                    (true, true) => "Favourite · Following",
+                    (true, false) => "Favourite",
+                    (false, true) => "Following",
+                    (false, false) => "",
+                }),
+            )
+            .slot(
+                "expires",
+                Html::text(&match d.expires_on {
+                    Some(on) if on < clock.today() => format!("{} (expired)", clock.date(on)),
+                    Some(on) => clock.date(on),
+                    None => String::new(),
+                }),
+            )
+            .slot(
+                "retention",
+                Html::text(
+                    &retention_due_at
+                        .and_then(|at| Timestamp::try_from(at).ok())
+                        .map(|at| clock.text(at))
+                        .unwrap_or_default(),
+                ),
+            )
             .slot("revision", Html::text(&d.revision.to_string()))
             .slot("publish_date", Html::text(&clock.date(d.publish_date)));
         row.cells.insert(
@@ -280,10 +475,36 @@ impl Index {
             bilibi_ui::flex_table::Cell::instant(clock.instant(d.last_revision_at)),
         );
         row.dom_id = Some(format!("documents-{id}"));
+        row.label = Some(d.name.clone());
+        if can_preview {
+            row.actions.push(&render(IconButton {
+                id: &format!("documents-{id}-preview"),
+                event: "preview",
+                name: "id",
+                value: &id,
+                ..IconButton::new("eye", &format!("Preview {}", d.name))
+            })?);
+        }
+        if can_delete {
+            row.actions.push(&render(IconButton {
+                kind: IconKind::Danger,
+                id: &format!("documents-{id}-delete"),
+                event: "request_delete",
+                name: "id",
+                value: &id,
+                ..IconButton::new("delete", &format!("Delete {}", d.name))
+            })?);
+        }
         Ok(row)
     }
 
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "documents").await?;
+        let revision_words =
+            bilibi_grid::RecordWords::load(&**client, scope, "document_revisions").await?;
+        drop(client);
+
         let clock = self.pages.clock(scope).await?;
         let mut page = self.pages.documents.list(scope, &self.filter()).await?;
         let total_pages = (page.total.max(0) as u64).div_ceil(self.list.page_size);
@@ -291,18 +512,50 @@ impl Index {
             page = self.pages.documents.list(scope, &self.filter()).await?;
         }
         let _ = self.columns.load(&page.entries, |d| d.id.to_string());
-        let latest = if self.pages.documents.may_download(scope).await? {
+        let latest = self
+            .pages
+            .documents
+            .latest_revisions(scope, &page.entries)
+            .await?;
+        let ids: Vec<i64> = page.entries.iter().map(|d| d.id).collect();
+        let marks = self.pages.documents.marks(scope, &ids).await?;
+        let may_manage = self.pages.documents.may_manage(scope).await?;
+        let changeable = if may_manage {
+            self.pages.documents.granted(scope, &ids, "manage").await?
+        } else {
+            HashSet::new()
+        };
+        let downloadable = if latest.is_empty() {
+            HashSet::new()
+        } else {
             self.pages
                 .documents
-                .latest_revisions(scope, &page.entries)
+                .granted(scope, &ids, "download")
                 .await?
-        } else {
-            HashMap::new()
         };
+        self.page_keys = ids.iter().map(i64::to_string).collect();
         let rows = page
             .entries
             .iter()
-            .map(|d| self.row(&clock, d, latest.get(&d.id)))
+            .map(|d| {
+                self.row(
+                    &clock,
+                    d,
+                    latest.get(&d.id),
+                    RowState {
+                        marks: marks.get(&d.id).copied().unwrap_or_default(),
+                        can_delete: changeable.contains(&d.id),
+                        can_download: downloadable.contains(&d.id),
+                        can_preview: downloadable.contains(&d.id)
+                            && latest
+                                .get(&d.id)
+                                .filter(|r| r.scan_status == crate::ScanStatus::Clean)
+                                .and_then(|r| r.content_type.as_deref())
+                                .is_some_and(FileBody::previewable),
+                        retention_due_at: page.retention_due_at.get(&d.id).copied(),
+                    },
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
 
         let mut actions = render(ActionLink {
@@ -311,7 +564,14 @@ impl Index {
             body: Html::text("Export CSV"),
             ..ActionLink::default()
         })?;
-        if self.pages.documents.may_manage(scope).await? {
+        if may_manage {
+            actions.push(&render(Button {
+                id: "documents-quick",
+                button_type: "button",
+                event: "quick",
+                body: Html::text("Quick add"),
+                ..Button::default()
+            })?);
             actions.push(&render(Button {
                 id: "documents-new",
                 button_type: "button",
@@ -332,9 +592,17 @@ impl Index {
             id: "documents-flash",
             flash,
         })?;
-        let subtitle = match &self.related {
-            Some(_) => "Linked to one record. Clear the filters to see every document.",
-            None => "Agreements, brochures and other files, with every revision.",
+        let subtitle = if self
+            .query()
+            .get("show")
+            .is_some_and(|v| v == "retention_due")
+        {
+            "Private documents whose every file revision has passed its retention date and has no legal hold. Deletion remains a separate reviewed action."
+        } else {
+            match &self.related {
+                Some(_) => "Linked to one record. Clear the filters to see every document.",
+                None => "Agreements, brochures and other files, with every revision.",
+            }
         };
         body.push(&render(Header {
             title: Html::text("Documents"),
@@ -343,6 +611,14 @@ impl Index {
             ..Header::default()
         })?);
         let form = self.list.filters_form();
+        let mut show_choices = vec![
+            Choice::new("All documents", "all"),
+            Choice::new("My favourites", "favourites"),
+            Choice::new("Documents I follow", "following"),
+        ];
+        if may_manage {
+            show_choices.push(Choice::new("Retention due", "retention_due"));
+        }
         body.push(&render(FilterToolbar::new(
             "documents-filters",
             vec![
@@ -359,21 +635,43 @@ impl Index {
                     "Category",
                     &form["category"],
                     with_all("All categories", self.categories.clone()),
-                ),
+                )
+                .grid_field("documents.category"),
                 ToolbarControl::select(
                     "documents-type",
                     "type",
                     "Type",
                     &form["type"],
                     with_all("All types", self.types.clone()),
-                ),
+                )
+                .grid_field("documents.document_type"),
                 ToolbarControl::select(
                     "documents-status",
                     "status",
                     "Status",
                     &form["status"],
                     with_all("All statuses", self.statuses.clone()),
+                )
+                .grid_field("documents.status"),
+                ToolbarControl::select(
+                    "documents-show",
+                    "show",
+                    "Show",
+                    &form["show"],
+                    show_choices,
                 ),
+                ToolbarControl::select(
+                    "documents-expiry",
+                    "expiry",
+                    "Expiry",
+                    &form["expiry"],
+                    vec![
+                        Choice::new("Any expiry", "all"),
+                        Choice::new("Expired", "expired"),
+                        Choice::new("Expiring in 30 days", "soon"),
+                    ],
+                )
+                .grid_field("documents.expires_on"),
             ],
         ))?);
         let mut table = FlexTable::new("documents", self.columns.flex_columns(), rows)
@@ -385,6 +683,23 @@ impl Index {
         table.add_query = &self.columns.add_query;
         table.caption = "Documents";
         table.framed = false;
+        // Ticks, the bar and a Delete on each row only for people who may
+        // delete; a document they hold no manage grant on shows none.
+        if may_manage {
+            self.selection.matching = page.total.max(0) as u64;
+            table.selection = Some(Selection {
+                actions: render(Button {
+                    id: "documents-delete-selected",
+                    button_type: "button",
+                    event: "request_delete",
+                    variant: ButtonVariant::Danger,
+                    body: Html::text("Delete…"),
+                    ..Button::default()
+                })?,
+                ..self.selection.clone()
+            });
+        }
+        table.actions = may_manage || !downloadable.is_empty();
         if page.entries.is_empty() {
             let clear = render(Button {
                 id: "documents-clear",
@@ -393,12 +708,23 @@ impl Index {
                 body: Html::text("Clear filters"),
                 ..Button::default()
             })?;
-            table.empty = Some(TableEmpty::State(
-                EmptyState::missing(
+            let (title, detail) = if self
+                .query()
+                .get("show")
+                .is_some_and(|v| v == "retention_due")
+            {
+                (
+                    "No documents due",
+                    "A private document is due only after every file revision's retention date passes and no legal hold remains.",
+                )
+            } else {
+                (
                     "No documents match",
                     "Clear the filters to see every document you may see.",
                 )
-                .action(clear),
+            };
+            table.empty = Some(TableEmpty::State(
+                EmptyState::missing(title, detail).action(clear),
             ));
         }
         let mut card = render(table)?;
@@ -421,11 +747,22 @@ impl Index {
             body.push(&dialog.render(
                 &self.pages,
                 &self.uploads,
+                (&words, &revision_words),
                 "documents-new",
                 "close_modal",
                 self.framed,
             )?);
         }
+        if let Some(quick) = &self.quick {
+            body.push(&quick.render(
+                &self.uploads,
+                &words,
+                "documents-quick",
+                "close_quick",
+                self.framed,
+            )?);
+        }
+        body.push(&self.dialogs(&page.entries)?);
         let region = render(Region {
             id: "documents-region",
             target: false,
@@ -437,26 +774,31 @@ impl Index {
             ..bilibi_ui::Page::default()
         })?
         .to_string();
+        let mut query = self.query();
+        if self.dialog.is_some() {
+            query.insert("new".into(), "1".into());
+        }
         Ok(LiveBody {
             html,
-            query: self.query(),
+            query,
             rows: page.entries.len(),
             ..LiveBody::default()
         })
     }
 }
 
-/// The export's address: the list's filters, no paging.
 fn export_href(query: &HashMap<String, String>) -> String {
-    let mut pairs: Vec<String> = ["search", "category", "type", "status", "related"]
-        .iter()
-        .filter_map(|key| {
-            query
-                .get(*key)
-                .filter(|v| !v.is_empty() && *v != "all")
-                .map(|v| format!("{key}={}", encode(v)))
-        })
-        .collect();
+    let mut pairs: Vec<String> = [
+        "search", "category", "type", "status", "show", "expiry", "related",
+    ]
+    .iter()
+    .filter_map(|key| {
+        query
+            .get(*key)
+            .filter(|v| !v.is_empty() && *v != "all")
+            .map(|v| format!("{key}={}", encode(v)))
+    })
+    .collect();
     pairs.sort();
     if pairs.is_empty() {
         format!("{INDEX}/export.csv")
@@ -479,12 +821,14 @@ fn encode(value: &str) -> String {
 impl LiveState<Scope, Error> for Index {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
+            let before = self.fingerprint();
             match request.input {
                 LiveInput::Refresh => {}
                 LiveInput::Params(query) => {
                     self.list =
                         ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?;
                     self.related = related_of(query);
+                    self.reopen(request.scope, query).await?;
                 }
                 LiveInput::Event(value) => {
                     if let Some(body) = self
@@ -494,6 +838,9 @@ impl LiveState<Scope, Error> for Index {
                         return Ok(body);
                     }
                 }
+            }
+            if self.fingerprint() != before {
+                self.selection.clear();
             }
             self.view(request.scope).await
         })

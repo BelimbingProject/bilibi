@@ -19,7 +19,7 @@
 //! shape is refused.
 use bilibi_authz::grants::Grants;
 use bilibi_database::{pool, Error, MutationBoundary, Result};
-use bilibi_module_registry::{verify_composition, Services};
+use bilibi_module_registry::Services;
 use bilibi_ports::{PortError, Ports, SERVICE};
 use bilibi_tenancy::Authentication;
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ struct LineRequest {
     line_id: i64,
 }
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Printed through Debug only.
+#[expect(dead_code, reason = "the field is printed through Debug only")]
 struct Line {
     order_number: String,
     quantity: String,
@@ -48,7 +48,10 @@ struct Line {
 }
 /// A shape the provider does not answer.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the shape is only parsed to prove the provider answers a different one"
+)]
 struct Receipts {
     received_quantity: String,
 }
@@ -79,11 +82,7 @@ async fn main() -> Result<()> {
     bilibi_extensions::link();
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     let modules = bilibi_module_registry::discover()?;
-    verify_composition(
-        &modules,
-        bilibi_domains::MODULES,
-        bilibi_extensions::MODULES,
-    )?;
+    bilibi_web::verify_composition(&db).await?;
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
     let mut services = Services::default();
@@ -171,7 +170,7 @@ async fn main() -> Result<()> {
             .call::<_, Line>(&tx, &admin, ORDER_LINE, &line(1, pending))
             .await,
     );
-    let elsewhere = db.get().await?;
+    let elsewhere = db.get_detached("a single visibility observer must use another connection to prove the open transaction's line is not committed; walkthrough only").await?;
     show(
         &format!("admin reads line {pending} on another connection"),
         ports

@@ -17,6 +17,8 @@ pub enum RunState {
     Previewed,
     Running,
     Completed,
+    Undoing,
+    Undone,
     Cancelled,
 }
 impl RunState {
@@ -27,6 +29,8 @@ impl RunState {
             "previewed" => Self::Previewed,
             "running" => Self::Running,
             "completed" => Self::Completed,
+            "undoing" => Self::Undoing,
+            "undone" => Self::Undone,
             "cancelled" => Self::Cancelled,
             _ => return Err(Error::Internal),
         })
@@ -38,6 +42,8 @@ impl RunState {
             Self::Previewed => "previewed",
             Self::Running => "running",
             Self::Completed => "completed",
+            Self::Undoing => "undoing",
+            Self::Undone => "undone",
             Self::Cancelled => "cancelled",
         }
     }
@@ -47,7 +53,47 @@ impl RunState {
     }
     /// Whether a job is working through the file.
     pub fn working(self) -> bool {
-        matches!(self, Self::Previewing | Self::Running)
+        matches!(self, Self::Previewing | Self::Running | Self::Undoing)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UndoOutcome {
+    Removed,
+    Edited,
+    Error,
+}
+impl UndoOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Removed => "removed",
+            Self::Edited => "edited",
+            Self::Error => "error",
+        }
+    }
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        match text {
+            "removed" => Some(Self::Removed),
+            "edited" => Some(Self::Edited),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct UndoCounts {
+    pub removed: i64,
+    pub edited: i64,
+    pub error: i64,
+}
+impl UndoCounts {
+    pub fn done(&self) -> i64 {
+        self.removed + self.edited + self.error
+    }
+    pub fn left(&self) -> i64 {
+        self.edited + self.error
     }
 }
 
@@ -81,6 +127,7 @@ pub enum Outcome {
     Create,
     Update,
     Skip,
+    Action,
     Error,
 }
 impl Outcome {
@@ -89,6 +136,7 @@ impl Outcome {
             Self::Create => "create",
             Self::Update => "update",
             Self::Skip => "skip",
+            Self::Action => "action",
             Self::Error => "error",
         }
     }
@@ -97,6 +145,7 @@ impl Outcome {
             "create" => Some(Self::Create),
             "update" => Some(Self::Update),
             "skip" => Some(Self::Skip),
+            "action" => Some(Self::Action),
             "error" => Some(Self::Error),
             _ => None,
         }
@@ -108,11 +157,12 @@ pub struct Counts {
     pub create: i64,
     pub update: i64,
     pub skip: i64,
+    pub action: i64,
     pub error: i64,
 }
 impl Counts {
     pub fn done(&self) -> i64 {
-        self.create + self.update + self.skip + self.error
+        self.create + self.update + self.skip + self.action + self.error
     }
 }
 
@@ -135,14 +185,25 @@ pub struct Run {
     pub finished_at: Option<Timestamp>,
     pub preview: Counts,
     pub run: Counts,
+    pub undo: UndoCounts,
     /// The job working on the run ended without finishing it: its person
     /// lost access, or it failed every attempt. Cancel to start again.
     pub stopped: bool,
+    /// An owner erased a person whose data this run's file or row details
+    /// could hold: the file is gone (or about to go) and each row's source
+    /// key and message are blank. Outcomes and record ids stay.
+    pub erased: bool,
     pub(crate) next_row: i32,
+    pub(crate) undo_next_row: i32,
+    pub undo_started_at: Option<Timestamp>,
+    pub undo_finished_at: Option<Timestamp>,
     pub(crate) source: Option<String>,
 }
 
-pub(crate) const COLUMNS: &str = "id,record_type,company_id,file_name,source_artifact,header,row_count,mapping,state,pass,next_row,job_id,trace_id,version,floor(extract(epoch FROM created_at))::bigint AS created,floor(extract(epoch FROM updated_at))::bigint AS updated,floor(extract(epoch FROM finished_at))::bigint AS finished";
+/// The only file name an erased import run exposes.
+pub(crate) const ERASED_FILE_NAME: &str = "[erased]";
+
+pub(crate) const COLUMNS: &str = "id,record_type,company_id,file_name,source_artifact,header,row_count,mapping,state,pass,next_row,undo_next_row,job_id,trace_id,version,floor(extract(epoch FROM created_at))::bigint AS created,floor(extract(epoch FROM updated_at))::bigint AS updated,floor(extract(epoch FROM finished_at))::bigint AS finished,floor(extract(epoch FROM undo_started_at))::bigint AS undo_started,floor(extract(epoch FROM undo_finished_at))::bigint AS undo_finished,cardinality(erased_for)>0 AS erased";
 
 pub(crate) fn instant(seconds: i64) -> Timestamp {
     Timestamp::from_second(seconds).unwrap_or(Timestamp::UNIX_EPOCH)
@@ -150,19 +211,32 @@ pub(crate) fn instant(seconds: i64) -> Timestamp {
 
 impl Run {
     pub(crate) fn from_row(row: &Row) -> Result<Self> {
-        let header: Value = row.get("header");
-        let mapping: Option<Value> = row.get("mapping");
+        let erased: bool = row.get("erased");
+        let header = if erased {
+            Vec::new()
+        } else {
+            serde_json::from_value(row.get("header")).map_err(|_| Error::Internal)?
+        };
+        let mapping = if erased {
+            None
+        } else {
+            row.get::<_, Option<Value>>("mapping")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| Error::Internal)?
+        };
         Ok(Self {
             id: row.get("id"),
             record_type: row.get("record_type"),
             company: row.get("company_id"),
-            file_name: row.get("file_name"),
-            header: serde_json::from_value(header).map_err(|_| Error::Internal)?,
+            file_name: if erased {
+                ERASED_FILE_NAME.to_owned()
+            } else {
+                row.get("file_name")
+            },
+            header,
             row_count: row.get("row_count"),
-            mapping: mapping
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|_| Error::Internal)?,
+            mapping,
             state: RunState::parse(row.get("state"))?,
             pass: row
                 .get::<_, Option<&str>>("pass")
@@ -176,9 +250,19 @@ impl Run {
             finished_at: row.get::<_, Option<i64>>("finished").map(instant),
             preview: Counts::default(),
             run: Counts::default(),
+            undo: UndoCounts::default(),
             stopped: false,
+            erased,
             next_row: row.get("next_row"),
-            source: row.get("source_artifact"),
+            undo_next_row: row.get("undo_next_row"),
+            undo_started_at: row.get::<_, Option<i64>>("undo_started").map(instant),
+            undo_finished_at: row.get::<_, Option<i64>>("undo_finished").map(instant),
+            // Not offered once erased, even while the bytes wait for clean-up.
+            source: if erased {
+                None
+            } else {
+                row.get("source_artifact")
+            },
         })
     }
 
@@ -197,16 +281,20 @@ impl Run {
             "columns": self.header,
             "rows": self.row_count,
             "state": if self.stopped { "stopped" } else { self.state.as_str() },
+            "erased": self.erased,
             "pass": self.pass.map(Pass::as_str),
             "progress": self.next_row,
             "mapping": self.mapping,
             "preview": self.preview,
             "result": self.run,
+            "undo": self.undo,
             "trace_id": self.trace_id,
             "version": self.version,
             "created_at": self.created_at.to_string(),
             "updated_at": self.updated_at.to_string(),
             "finished_at": self.finished_at.map(|at| at.to_string()),
+            "undo_started_at": self.undo_started_at.map(|at| at.to_string()),
+            "undo_finished_at": self.undo_finished_at.map(|at| at.to_string()),
         })
     }
 }
@@ -219,6 +307,11 @@ pub struct RowResult {
     pub record_id: Option<String>,
     pub source_key: Option<String>,
     pub message: Option<String>,
+    pub links: Vec<crate::ResultLink>,
+    #[serde(skip_serializing)]
+    pub(crate) record_version: Option<i64>,
+    pub undo_outcome: Option<UndoOutcome>,
+    pub undo_message: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -231,13 +324,26 @@ pub struct SavedMapping {
     pub version: i64,
 }
 
-/// The person's own run, optionally locked for an update.
+/// The person's own run with its counts, optionally locked for an update.
 pub(crate) async fn load(
     client: &impl GenericClient,
     scope: &Scope,
     id: i64,
     lock: bool,
 ) -> Result<Run> {
+    let mut run = row(client, scope, id, lock).await?;
+    count(client, scope.tenant(), std::slice::from_mut(&mut run)).await?;
+    Ok(run)
+}
+
+/// The person's own run, locked, without its counts. The import job takes
+/// this once per row: `count` reads every recorded row of the run, so
+/// counting here would make an import quadratic in its rows.
+pub(crate) async fn lock(client: &impl GenericClient, scope: &Scope, id: i64) -> Result<Run> {
+    row(client, scope, id, true).await
+}
+
+async fn row(client: &impl GenericClient, scope: &Scope, id: i64, lock: bool) -> Result<Run> {
     let company = scope.current_company().ok_or(Error::Forbidden)?.get();
     let sql = format!(
         "SELECT {COLUMNS} FROM base_bulk_data_runs WHERE tenant_id=$1 AND id=$2 AND started_by=$3 AND company_id=$4{}",
@@ -247,9 +353,7 @@ pub(crate) async fn load(
         .query_opt(&sql, &[&scope.tenant(), &id, &scope.user(), &company])
         .await?
         .ok_or(Error::NotFound)?;
-    let mut run = Run::from_row(&row)?;
-    count(client, scope.tenant(), std::slice::from_mut(&mut run)).await?;
-    Ok(run)
+    Run::from_row(&row)
 }
 
 /// Fills each run's counts and whether its job stopped short.
@@ -282,7 +386,25 @@ pub(crate) async fn count(
             Some(Outcome::Create) => counts.create = n,
             Some(Outcome::Update) => counts.update = n,
             Some(Outcome::Skip) => counts.skip = n,
+            Some(Outcome::Action) => counts.action = n,
             _ => counts.error = n,
+        }
+    }
+    for row in client
+        .query(
+            "SELECT run_id,undo_outcome,count(*) FROM base_bulk_data_rows WHERE tenant_id=$1 AND run_id=ANY($2) AND undo_outcome IS NOT NULL GROUP BY run_id,undo_outcome",
+            &[&tenant, &ids],
+        )
+        .await?
+    {
+        let Some(run) = runs.iter_mut().find(|run| run.id == row.get::<_, i64>(0)) else {
+            continue;
+        };
+        let n: i64 = row.get(2);
+        match UndoOutcome::parse(row.get(1)) {
+            Some(UndoOutcome::Removed) => run.undo.removed = n,
+            Some(UndoOutcome::Edited) => run.undo.edited = n,
+            _ => run.undo.error = n,
         }
     }
     let jobs: Vec<i64> = runs
@@ -330,7 +452,8 @@ pub(crate) async fn list(
 }
 
 /// The person's completed runs of these record types in this company:
-/// the parents a child import may name.
+/// the parents a child import may name. A run an erasure cleaned keeps no
+/// source keys, so it is not offered.
 pub(crate) async fn completed(
     client: &impl GenericClient,
     scope: &Scope,
@@ -340,7 +463,7 @@ pub(crate) async fn completed(
     let types: Vec<String> = record_types.iter().map(|key| (*key).to_owned()).collect();
     client
         .query(
-            &format!("SELECT {COLUMNS} FROM base_bulk_data_runs WHERE tenant_id=$1 AND started_by=$2 AND company_id=$3 AND record_type=ANY($4) AND state='completed' ORDER BY id DESC LIMIT 50"),
+            &format!("SELECT {COLUMNS} FROM base_bulk_data_runs WHERE tenant_id=$1 AND started_by=$2 AND company_id=$3 AND record_type=ANY($4) AND state='completed' AND cardinality(erased_for)=0 ORDER BY id DESC LIMIT 50"),
             &[&scope.tenant(), &scope.user(), &company, &types],
         )
         .await?
@@ -355,21 +478,22 @@ pub(crate) async fn rows(
     run: i64,
     pass: Pass,
     outcome: Option<Outcome>,
-    offset: i64,
-    limit: i64,
+    undo: Option<&str>,
+    page: (i64, i64),
 ) -> Result<(Vec<RowResult>, i64)> {
+    let (offset, limit) = page;
     let outcome = outcome.map(Outcome::as_str);
     let total: i64 = client
         .query_one(
-            "SELECT count(*) FROM base_bulk_data_rows WHERE tenant_id=$1 AND run_id=$2 AND pass=$3 AND ($4::text IS NULL OR outcome=$4)",
-            &[&tenant, &run, &pass.as_str(), &outcome],
+            "SELECT count(*) FROM base_bulk_data_rows WHERE tenant_id=$1 AND run_id=$2 AND pass=$3 AND ($4::text IS NULL OR outcome=$4) AND ($5::text IS NULL OR ($5='left' AND undo_outcome IN ('edited','error')) OR undo_outcome=$5)",
+            &[&tenant, &run, &pass.as_str(), &outcome, &undo],
         )
         .await?
         .get(0);
     let rows = client
         .query(
-            "SELECT row_number,outcome,record_id,source_key,message FROM base_bulk_data_rows WHERE tenant_id=$1 AND run_id=$2 AND pass=$3 AND ($4::text IS NULL OR outcome=$4) ORDER BY row_number OFFSET $5 LIMIT $6",
-            &[&tenant, &run, &pass.as_str(), &outcome, &offset, &limit],
+            "SELECT row_number,outcome,record_id,source_key,message,links,record_version,undo_outcome,undo_message FROM base_bulk_data_rows WHERE tenant_id=$1 AND run_id=$2 AND pass=$3 AND ($4::text IS NULL OR outcome=$4) AND ($5::text IS NULL OR ($5='left' AND undo_outcome IN ('edited','error')) OR undo_outcome=$5) ORDER BY row_number OFFSET $6 LIMIT $7",
+            &[&tenant, &run, &pass.as_str(), &outcome, &undo, &offset, &limit],
         )
         .await?
         .iter()
@@ -380,6 +504,13 @@ pub(crate) async fn rows(
                 record_id: row.get(2),
                 source_key: row.get(3),
                 message: row.get(4),
+                links: serde_json::from_value(row.get(5)).map_err(|_| Error::Internal)?,
+                record_version: row.get(6),
+                undo_outcome: row
+                    .get::<_, Option<&str>>(7)
+                    .map(|value| UndoOutcome::parse(value).ok_or(Error::Internal))
+                    .transpose()?,
+                undo_message: row.get(8),
             })
         })
         .collect::<Result<Vec<_>>>()?;

@@ -133,6 +133,83 @@ fn validate_observers(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
 }
 inventory::submit! { Consumer::new::<ObserverBinding>(OBSERVERS,"base/queue",validate_observers) }
 
+/// Contributed by a worker's owner, entry id = the worker id: what that owner
+/// does when one of its jobs ends without finishing. See [`EndingBinding`].
+pub const ENDINGS: &str = "base/queue.endings";
+/// A job that ended without finishing, as its owner's [`Ending`] hears of it:
+/// how it ended and its arguments (references, validated again), never its
+/// actor or lease.
+#[derive(Clone, Debug)]
+pub struct Ended {
+    pub job_id: i64,
+    pub worker_id: String,
+    /// `Cancelled` (its actor was refused, its arguments or the handler
+    /// cancelled it, or an owner cancelled it) or `Discarded` (out of attempts).
+    pub state: store::State,
+    /// The bounded code the job ended with, such as `actor_refused`.
+    pub failure_code: Option<String>,
+    pub args: Value,
+}
+pub type EndingFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+/// The owner's way out for a record that waits on a job. Queue calls it once
+/// per ended job, in `tx`, which it commits together with marking the job
+/// told: either both happen or neither, and a failure is tried again later.
+/// Move the waiting record to its named state through the owner's normal
+/// path with `scope` (the binding's principal in the job's tenant). Return
+/// `Ok` when nothing waits on this job any more (the record moved on, or is
+/// gone): the call is level-triggered, not a command.
+pub trait Ending: Send + Sync {
+    fn ended<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        job: &'a Ended,
+    ) -> EndingFuture<'a>;
+}
+pub struct EndingService(pub Arc<dyn Ending>);
+/// How a worker's owner is told that a job ended without finishing. The
+/// owner's `service` resolves to [`EndingService`]. Queue seals the scope of
+/// `principal`, a system principal the same module declares, in the job's
+/// tenant and decides `capability` (inside that principal's declaration) in
+/// the same transaction before calling it. The tenant's grant decides, so a
+/// principal that must always be able to record the way out also needs a
+/// standing grant (`bilibi_authz::STANDING_GRANTS`).
+#[derive(Clone, Copy)]
+pub struct EndingBinding {
+    pub service: &'static str,
+    pub principal: &'static str,
+    pub capability: &'static str,
+}
+fn validate_endings(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
+    for entry in entries {
+        let binding = entry.get::<EndingBinding>()?;
+        if !binding
+            .service
+            .starts_with(&format!("{}.", entry.provenance.module))
+            || [binding.principal, binding.capability]
+                .iter()
+                .any(|key| key.is_empty() || key.len() > 200)
+        {
+            return Err(RegistryError::Contribution(format!(
+                "invalid ending binding {}",
+                entry.id
+            )));
+        }
+    }
+    Ok(())
+}
+inventory::submit! { Consumer::new::<EndingBinding>(ENDINGS,"base/queue",validate_endings) }
+struct BoundEnding {
+    service: Arc<EndingService>,
+    principal: &'static str,
+    capability: &'static str,
+}
+/// Ended jobs told per poll and process; the rest wait for the next poll.
+const ENDING_BATCH: i64 = 100;
+/// The most one owner's ending hook may take. It is one short transaction, so
+/// a stalled owner costs the endings behind it this, not a whole attempt.
+const ENDING_BOUND: Duration = Duration::from_secs(60);
+
 /// Who the job runs as, re-proven on every attempt and again in `begin`.
 #[derive(Clone, Debug)]
 pub enum Identity {
@@ -219,6 +296,27 @@ impl Execution {
         }
         Ok(tx)
     }
+
+    pub async fn defer_until(
+        &self,
+        tx: &MutationTransaction<'_>,
+        run_at: std::time::SystemTime,
+    ) -> Result<()> {
+        let tenant = self.tenant();
+        if tx.context().tenant != tenant {
+            return Err(Error::Forbidden);
+        }
+        let updated = tx.sql().execute(
+            "UPDATE base_queue_jobs SET state='scheduled',attempt=attempt-1,available_at=$4,
+                updated_at=clock_timestamp(),lease_token=NULL,lease_expires_at=NULL
+            WHERE tenant_id=$1 AND id=$2 AND state='executing' AND lease_token=$3 AND lease_expires_at>clock_timestamp()",
+            &[&tenant, &self.job_id, &self.token, &run_at],
+        ).await?;
+        if updated == 0 {
+            return Err(Error::Conflict);
+        }
+        Ok(())
+    }
 }
 fn same_actor(a: &Scope, b: &Scope) -> bool {
     a.tenant() == b.tenant()
@@ -287,6 +385,12 @@ impl BoundHandler {
         })
     }
 }
+/// The loops one executor runs: the job slots and the endings teller.
+#[derive(Clone, Copy, Debug)]
+enum Loop {
+    Slot,
+    Endings,
+}
 pub struct Executor {
     db: Db,
     queue: Arc<Queue>,
@@ -294,6 +398,7 @@ pub struct Executor {
     boundary: Arc<MutationBoundary>,
     handlers: BTreeMap<&'static str, BoundHandler>,
     observers: Vec<Arc<ObserverService>>,
+    endings: BTreeMap<&'static str, BoundEnding>,
     config: Config,
 }
 impl Executor {
@@ -344,6 +449,32 @@ impl Executor {
             .iter()
             .map(|entry| services.get(entry.get::<ObserverBinding>()?.service))
             .collect::<bilibi_module_registry::Result<_>>()?;
+        let mut endings = BTreeMap::new();
+        for entry in catalog.entries::<EndingBinding>(ENDINGS)? {
+            let binding = *entry.get::<EndingBinding>()?;
+            let worker = queue.workers().get(entry.id)?;
+            let vocabulary = bilibi_authz::vocabulary()?;
+            // The owner's own principal, deciding a key it declared: a module
+            // can never record its way out as another module's principal.
+            if worker.module != entry.provenance.module
+                || vocabulary.principal_module(binding.principal) != Some(entry.provenance.module)
+                || !vocabulary.capabilities.contains_key(binding.capability)
+                || !vocabulary
+                    .system_principals
+                    .get(binding.principal)
+                    .is_some_and(|declared| declared.capabilities.contains(&binding.capability))
+            {
+                return Err(Error::Invalid);
+            }
+            endings.insert(
+                entry.id,
+                BoundEnding {
+                    service: services.get(binding.service)?,
+                    principal: binding.principal,
+                    capability: binding.capability,
+                },
+            );
+        }
         Ok(Arc::new(Self {
             db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
             queue,
@@ -351,33 +482,65 @@ impl Executor {
             boundary: services.get("base/database.mutations")?,
             handlers,
             observers,
+            endings,
             config: config.validate()?,
         }))
     }
     /// One loop per slot, bounded by config; each app process runs independently.
     /// Stopping drops in-flight handlers (transactions roll back). Their leases
     /// remain durable and are recovered by a subsequent worker process.
+    /// A slot (or the endings loop) that ends while the process still runs, by
+    /// a panic or an unexpected return, is started again after a poll interval:
+    /// the pages keep serving, so a silently idle executor would go unnoticed.
     pub async fn run(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) -> Result<()> {
         let mut slots = JoinSet::new();
+        let mut running = BTreeMap::new();
         for _ in 0..self.config.concurrency {
-            let executor = self.clone();
-            let stop = shutdown.clone();
-            slots.spawn(async move { executor.slot(stop).await });
+            self.start(&mut slots, &mut running, Loop::Slot, &shutdown, false);
         }
+        self.start(&mut slots, &mut running, Loop::Endings, &shutdown, false);
         loop {
             if *shutdown.borrow() {
                 break;
             }
             tokio::select! {
                 change = shutdown.changed() => { if change.is_err() || *shutdown.borrow() { break; } }
-                result = slots.join_next() => {
-                    return match result { Some(Ok(result)) => result, _ => Err(Error::Internal) };
+                ended = slots.join_next_with_id() => {
+                    let Some(ended) = ended else { break };
+                    let id = match &ended { Ok((id, _)) => *id, Err(error) => error.id() };
+                    let Some(which) = running.remove(&id) else { continue };
+                    eprintln!("queue {which:?} loop ended; restarting it");
+                    self.start(&mut slots, &mut running, which, &shutdown, true);
                 }
             }
         }
         slots.abort_all();
         while slots.join_next().await.is_some() {}
         Ok(())
+    }
+    fn start(
+        self: &Arc<Self>,
+        slots: &mut JoinSet<Result<()>>,
+        running: &mut BTreeMap<tokio::task::Id, Loop>,
+        which: Loop,
+        shutdown: &watch::Receiver<bool>,
+        delayed: bool,
+    ) {
+        let executor = self.clone();
+        let mut stop = shutdown.clone();
+        let handle = slots.spawn(async move {
+            if delayed {
+                tokio::select! {
+                    _ = tokio::time::sleep(executor.config.poll_interval) => {}
+                    _ = stop.changed() => { return Ok(()); }
+                }
+            }
+            match which {
+                Loop::Slot => executor.slot(stop).await,
+                Loop::Endings => executor.endings(stop).await,
+            }
+        });
+        running.insert(handle.id(), which);
     }
     async fn slot(self: Arc<Self>, mut stop: watch::Receiver<bool>) -> Result<()> {
         loop {
@@ -388,10 +551,15 @@ impl Executor {
             // executor; abandoned claims are reconciled by DB lease recovery.
             match store::claim(&self.db, self.config.lease_seconds).await {
                 Ok(Some(claim)) => {
-                    if self.execute(claim).await.is_err() {
-                        eprintln!("queue execution infrastructure unavailable");
+                    if self.execute(claim).await.is_ok() {
+                        // More jobs may be waiting: claim the next at once. A
+                        // job that failed backs off in the database (its
+                        // `available_at`), so this never claims it again early.
+                        continue;
                     }
+                    eprintln!("queue execution infrastructure unavailable");
                 }
+                // Only an empty queue or an error waits a poll interval.
                 Ok(None) => {}
                 Err(_) => eprintln!("queue claim infrastructure unavailable"),
             }
@@ -400,6 +568,106 @@ impl Executor {
                 _ = stop.changed() => { return Ok(()); }
             }
         }
+    }
+    /// Tells owners about their jobs that ended without finishing, one
+    /// transaction per job. Level-triggered: a cancelled or discarded job of a
+    /// worker with an [`Ending`] is due until told, so a crash between ending
+    /// and telling only delays it. Several processes skip each other's rows.
+    async fn endings(self: Arc<Self>, mut stop: watch::Receiver<bool>) -> Result<()> {
+        let workers: Vec<String> = self.endings.keys().map(|id| (*id).to_owned()).collect();
+        loop {
+            if *stop.borrow() {
+                return Ok(());
+            }
+            if !workers.is_empty() {
+                match store::due_endings(&self.db, &workers, ENDING_BATCH).await {
+                    Ok(due) => {
+                        // A full batch may leave more waiting: take the next
+                        // at once, but only when every job in it was told; a
+                        // row another process holds, or a failure that could
+                        // not be recorded, would come straight back.
+                        let mut more = due.len() as i64 == ENDING_BATCH;
+                        for (id, tenant, worker) in due {
+                            if *stop.borrow() {
+                                return Ok(());
+                            }
+                            // Its own task and deadline: an owner's panic or
+                            // stall fails this ending, never the executor.
+                            let executor = self.clone();
+                            let told = tokio::spawn(async move {
+                                tokio::time::timeout(
+                                    executor.config.max_runtime.min(ENDING_BOUND),
+                                    executor.tell(id, tenant, &worker),
+                                )
+                                .await
+                            })
+                            .await;
+                            match told {
+                                Ok(Ok(Ok(true))) => {}
+                                Ok(Ok(Ok(false))) => more = false,
+                                _ => {
+                                    more = false;
+                                    if store::ending_failed(&self.db, id).await.is_err() {
+                                        eprintln!("queue ending infrastructure unavailable");
+                                    }
+                                }
+                            }
+                        }
+                        if more {
+                            continue;
+                        }
+                    }
+                    Err(_) => eprintln!("queue ending infrastructure unavailable"),
+                }
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(self.config.poll_interval) => {}
+                _ = stop.changed() => { return Ok(()); }
+            }
+        }
+    }
+    /// One ended job: the principal's scope, its capability, the owner's
+    /// hook and the told mark, in one audited transaction attributed to the
+    /// principal. A job already told, retried or taken by another process
+    /// is left alone: `false`, as nothing was told.
+    async fn tell(&self, id: i64, tenant: i64, worker_id: &str) -> Result<bool> {
+        let bound = self.endings.get(worker_id).ok_or(Error::Invalid)?;
+        let worker = self.queue.workers().get(worker_id)?;
+        let mut client = self.db.get().await?;
+        let system = SystemScope::rehydrate(&**client, tenant, Some(bound.principal)).await?;
+        if system.principal() != Some(bound.principal) {
+            return Err(Error::Unauthorized);
+        }
+        let scope = self.authentication.for_system(&**client, &system).await?;
+        let mut tx = self
+            .boundary
+            .begin(&mut client, scope.mutation_context("queue.job.ended"))
+            .await?;
+        let Some(row) = tx.sql().query_opt("SELECT worker_module,state,failure_code,args FROM base_queue_jobs WHERE id=$1 AND tenant_id=$2 AND worker_id=$3 AND state IN ('cancelled','discarded') AND ending IS NULL FOR UPDATE SKIP LOCKED", &[&id,&tenant,&worker.id]).await? else {
+            return tx.rollback().await.map(|()| false);
+        };
+        if row.get::<_, &str>(0) != worker.module {
+            return Err(Error::Invalid);
+        }
+        bilibi_authz::authorize_system(tx.sql(), &system, bound.capability).await?;
+        let args: Value = row.get(3);
+        arguments::validate(&args)?;
+        let args = (worker.definition.validate)(args)?;
+        arguments::validate(&args)?;
+        let state: String = row.get(1);
+        let ended = Ended {
+            job_id: id,
+            worker_id: worker.id.to_owned(),
+            state: store::State::parse(&state)?,
+            failure_code: row.get(2),
+            args,
+        };
+        bound.service.0.ended(&mut tx, &scope, &ended).await?;
+        tx.mutate(move |sql| Box::pin(async move {
+            sql.execute("UPDATE base_queue_jobs SET ending='told',updated_at=clock_timestamp() WHERE id=$1 AND tenant_id=$2", &[&id,&tenant]).await?;
+            Ok(((), vec![bilibi_database::Change {kind:"base/queue.job".into(),id,old:serde_json::json!({"state":state,"ending":null}),new:serde_json::json!({"state":state,"ending":"told"})}]))
+        })).await?;
+        tx.commit().await.map(|()| true)
     }
     async fn prepare(
         &self,
@@ -515,21 +783,36 @@ impl Executor {
                 })
                 .await
         });
-        let mut heartbeat =
-            tokio::time::interval(Duration::from_secs(self.config.lease_seconds as u64 / 3));
+        let lease = Duration::from_secs(self.config.lease_seconds as u64);
+        let beat = lease / 3;
+        let mut heartbeat = tokio::time::interval(beat);
+        // A renewal that waits (behind the row lock of an owner's fenced
+        // transaction, or for a busy pool) must not time out independently:
+        // keep it in flight while the attempt runs. Its answer that the lease
+        // is gone stops the handler; the attempt deadline still applies.
+        let mut beats = JoinSet::new();
+        let mut renewed_at = tokio::time::Instant::now();
         let deadline = tokio::time::sleep(self.config.max_runtime);
         tokio::pin!(deadline);
         let outcome = loop {
             tokio::select! {
                 result = child.join_next() => break match result {Some(Ok(outcome))=>outcome,_=>Outcome::Retry("worker_panicked")},
                 _ = &mut deadline => break Outcome::Retry("worker_timed_out"),
-                _ = heartbeat.tick() => {
-                    let renewed = tokio::time::timeout(
-                        Duration::from_secs(self.config.lease_seconds as u64 / 3),
-                        store::heartbeat(&self.db,id,&token,self.config.lease_seconds),
-                    ).await.map_err(|_|Error::Internal)??;
-                    if !renewed { return Ok(()); }
+                _ = heartbeat.tick(), if beats.is_empty() => {
+                    let (db, token, seconds) = (self.db.clone(), token.clone(), self.config.lease_seconds);
+                    let asked = tokio::time::Instant::now();
+                    beats.spawn(async move { (asked, store::heartbeat(&db, id, &token, seconds).await) });
                 }
+                Some(answer) = beats.join_next() => match answer {
+                    Ok((asked, Ok(true))) => renewed_at = asked,
+                    Ok((_, Ok(false))) => return Ok(()),
+                    // A database error fails one renewal, not the attempt: the
+                    // handler keeps running while the next beat still falls
+                    // inside the lease it holds, and is dropped before that
+                    // lease can run out.
+                    _ if renewed_at.elapsed() + beat < lease => {}
+                    _ => return Err(Error::Internal),
+                },
             }
         };
         child.abort_all();

@@ -12,7 +12,7 @@
 //! review being confirmed, and a flash. Every render reads the status again,
 //! and a mounted page is woken by each job write through `follow.rs`, so the
 //! installer's progress rows appear as they are written.
-use crate::{follow::Follow, MANAGE};
+use crate::{follow::Follow, release_files::UpdatePrompt, MANAGE};
 use askama::Template;
 use bilibi_agent_api::{
     page::{Call, PageContracts},
@@ -32,8 +32,8 @@ use bilibi_ui::{
     },
     params, Alert, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, Choice,
     ColumnType, ColumnsOutcome, ConfirmDialog, Fact, Facts, Field, FlashMap, FlexRow, FlexTable,
-    Fold, Header, Html, InputKind, Instant, ListColumns, ListSpec, ListState, Modal, ModalWidth,
-    SectionHeading, StatusKind, Tab, TableEmpty, Tabs, NO_FLASH,
+    Fold, Header, Html, InputKind, Instant, ListColumns, ListSpec, ListState, StatusKind, Tab,
+    TableEmpty, Tabs, NO_FLASH,
 };
 use jiff::Timestamp;
 use serde_json::{json, Value};
@@ -42,6 +42,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+
+mod modules;
 
 pub const PATH: &str = "/system/software";
 pub(crate) const PAGES: &str = "base/software.pages";
@@ -191,6 +193,7 @@ struct Review {
 enum Dialog {
     Review(Review),
     Cancel { job: i64, running: bool },
+    Commands { kind: String, id: String },
 }
 
 struct View {
@@ -199,6 +202,7 @@ struct View {
     releases: crate::release_files::ReleaseFiles,
     backups: ListColumns,
     backup_list: ListState,
+    modules: modules::Modules,
     propose: Vec<String>,
     bundle: String,
     dialog: Option<Dialog>,
@@ -210,16 +214,16 @@ struct View {
 }
 
 // The job panel and history use one schema.
-bilibi_ui::record_fields! { mod job_fields {
-    ID: bilibi_ui::RecordField::new("id", "Job"),
-    KIND: bilibi_ui::RecordField::new("kind", "What"),
-    STATE: bilibi_ui::RecordField::new("state", "Outcome"),
-    SUMMARY: bilibi_ui::RecordField::new("summary", "Change"),
-    REQUESTED_AT: bilibi_ui::RecordField::new("requested_at", "Requested"),
-    FINISHED_AT: bilibi_ui::RecordField::new("finished_at", "Finished"),
-    WORKER: bilibi_ui::RecordField::new("worker", "Worker"),
-    STEPS: bilibi_ui::RecordField::new("steps", "Steps").excluded("Nested progress and developer details stay on the job panel"),
-    RESULT: bilibi_ui::RecordField::new("result", "Result").excluded("Long outcome messages stay on the job panel"),
+bilibi_ui::record_fields! { "base/software", mod job_fields {
+    ID: bilibi_ui::RecordField::new("id", "Job", bilibi_ui::RecordFieldType::Integer),
+    KIND: bilibi_ui::RecordField::new("kind", "What", bilibi_ui::RecordFieldType::String),
+    STATE: bilibi_ui::RecordField::new("state", "Outcome", bilibi_ui::RecordFieldType::String),
+    SUMMARY: bilibi_ui::RecordField::new("summary", "Change", bilibi_ui::RecordFieldType::String),
+    REQUESTED_AT: bilibi_ui::RecordField::new("requested_at", "Requested", bilibi_ui::RecordFieldType::DateTime),
+    FINISHED_AT: bilibi_ui::RecordField::new("finished_at", "Finished", bilibi_ui::RecordFieldType::DateTime),
+    WORKER: bilibi_ui::RecordField::new("worker", "Worker", bilibi_ui::RecordFieldType::String),
+    STEPS: bilibi_ui::RecordField::new("steps", "Steps", bilibi_ui::RecordFieldType::Array).excluded("Nested progress and developer details stay on the job panel"),
+    RESULT: bilibi_ui::RecordField::new("result", "Result", bilibi_ui::RecordFieldType::Object).excluded("Long outcome messages stay on the job panel"),
 } }
 
 fn history_columns() -> Vec<BuiltinColumn> {
@@ -282,6 +286,7 @@ impl View {
             )
             .map_err(|_| Error::Internal)?,
             backup_list: ListState::parse(query, backup_spec).map_err(|_| Error::Internal)?,
+            modules: modules::Modules::new(query)?,
             pages,
             query: query.clone(),
             propose,
@@ -331,7 +336,16 @@ impl View {
         let values =
             params::string_values_checked(value, params::FIELD_LIMIT).map_err(Error::refused)?;
         let get = |key: &str| value.get(key).and_then(Value::as_str);
-        match get("type").ok_or(Error::Invalid)? {
+        let kind = get("type").ok_or(Error::Invalid)?;
+        if self.modules.event(kind, value)? {
+            self.modules.write_query(&mut self.query);
+            return Ok(());
+        }
+        match kind {
+            "commands" => {
+                self.dialog = modules::commands_target(get("module").unwrap_or_default())
+                    .map(|(kind, id)| Dialog::Commands { kind, id });
+            }
             "request_install" => {
                 self.bundle = values.get("bundle").cloned().unwrap_or_default();
                 if value.get("asset").is_some() {
@@ -623,6 +637,9 @@ impl View {
     }
 
     async fn render(&mut self, scope: &Scope) -> Result<String> {
+        if let Some(gate) = self.releases.github_gate(scope).await? {
+            return Ok(gate.to_string());
+        }
         let pages = self.pages.clone();
         let client = pages.db.get().await?;
         let locale = pages.locales.resolve(&**client, scope, None).await?.locale;
@@ -634,13 +651,7 @@ impl View {
         let can_manage = effective_capabilities(&**client, scope)
             .await?
             .contains(MANAGE);
-        let status = read(&pages.contracts, scope, "base.software.status").await?;
-        let releases = self.query.get("tab").is_some_and(|tab| tab == "releases");
-        let catalogue = if releases {
-            Value::Null
-        } else {
-            self.catalogue(scope).await?
-        };
+        drop(client);
         let lost = match &self.dialog {
             Some(Dialog::Review(review)) if review.kind == Kind::Undo => {
                 match review.facts["job"].as_i64() {
@@ -650,68 +661,57 @@ impl View {
             }
             _ => None,
         };
-        let transfer = if releases {
+        if let Some(Dialog::Review(review)) = &self.dialog {
+            let methods = pages
+                .software
+                .step_up
+                .enrolled_methods(scope)
+                .await?
+                .into_iter()
+                .map(|m| bilibi_ui::ProofMethod::new(m.id, m.label, m.code_length, m.numeric))
+                .collect::<Vec<_>>();
+            return Ok(self
+                .review_dialog(&instance, lost, review, &methods)?
+                .to_string());
+        }
+        let status = read(&pages.contracts, scope, "base.software.status").await?;
+        let releases = self.query.get("tab").is_some_and(|tab| tab == "releases");
+        let catalogue = if releases {
+            Value::Null
+        } else {
+            self.catalogue(scope).await?
+        };
+        let content = if releases {
             let active = status["job"]["state"] == "queued" || status["job"]["state"] == "running";
-            let install = if can_manage {
+            let mut details = if can_manage {
                 self.install_card(&instance, &status, active)?
             } else {
                 Html::EMPTY
             };
-            self.releases.body(scope, install).await?
-        } else {
-            Html::EMPTY
-        };
-        let mut content = Html::EMPTY;
-        if releases {
-            content.push(&self.instance_card(&instance, &status)?);
-            if status["job"].is_null() {
-                content.push(&render(Card {
-                    id: "software-job",
-                    title: "Last install",
-                    body: Html::text("No install or undo has been requested on this server yet."),
-                    ..Card::default()
-                })?);
-            } else {
-                content.push(&self.job_card(&display, &instance, can_manage, &status)?);
+            details.push(&self.instance_card(&instance, &status)?);
+            let state = text(&status["job"]["state"]);
+            let mut job = Html::EMPTY;
+            if !status["job"].is_null() {
+                let card = self.job_card(&display, &instance, can_manage, &status)?;
+                if active || matches!(state, "failed" | "interrupted") {
+                    job = card;
+                } else {
+                    details.push(&card);
+                }
             }
-            content.push(&self.backups_card(&display, &status)?);
-            content.push(&render(SectionHeading {
-                title: "Get an update",
-                description:
-                    "Install a verified setup file from GitHub or upload a saved copy of one.",
-                ..SectionHeading::default()
-            })?);
-            content.push(&transfer);
-            let history = self.history_card(&display, &status)?;
-            content.push(&render(Fold {
-                id: "software-history-details",
-                title: "Install history",
-                body: history,
-                ..Fold::default()
-            })?);
+            details.push(&self.backups_card(&display, &status)?);
+            details.push(&self.history_card(&display, &status)?);
+            self.releases.body(scope, active, job, details).await?
         } else {
-            content.push(&self.discovery_card(&status, &catalogue)?);
-        }
-        let methods = pages
-            .software
-            .step_up
-            .enrolled_methods(scope)
-            .await?
-            .into_iter()
-            .map(|m| bilibi_ui::ProofMethod::new(m.id, m.label, m.code_length, m.numeric))
-            .collect::<Vec<_>>();
-        self.page(&instance, lost, content, &methods)
+            self.modules
+                .body(&status, &catalogue, &self.propose, &display)?
+        };
+        self.page(&instance, content)
     }
 
-    fn page(
-        &mut self,
-        instance: &Instance,
-        lost: Option<u64>,
-        content: Html,
-        methods: &[bilibi_ui::ProofMethod],
-    ) -> Result<String> {
+    fn page(&mut self, instance: &Instance, content: Html) -> Result<String> {
         let label = instance.label.clone();
-        let subtitle = "Browse domains and extensions, or get an update for this server.";
+        let subtitle = "See what this server runs and install updates from the Releases tab.";
         let header = render(Header {
             title: Html::text("Software"),
             subtitle,
@@ -734,7 +734,7 @@ impl View {
             tabs: vec![
                 Tab {
                     id: "software-tab-domains",
-                    ..Tab::patch(&domains_url, "Domains and Extensions", !releases)
+                    ..Tab::patch(&domains_url, "Domains and extensions", !releases)
                 },
                 Tab {
                     id: "software-tab-releases",
@@ -743,7 +743,7 @@ impl View {
             ],
         })?;
         let dialog = match &self.dialog {
-            Some(Dialog::Review(review)) => self.review_dialog(instance, lost, review, methods)?,
+            Some(Dialog::Review(_)) => Html::EMPTY,
             Some(Dialog::Cancel { job, running }) => {
                 let consequence = if *running {
                     format!("Stop job {job}?")
@@ -765,6 +765,10 @@ impl View {
                     cancel_event: "cancel_dialog",
                 })?
             }
+            Some(Dialog::Commands { kind, id }) => match &self.catalogue {
+                Some((_, catalogue)) => modules::commands_dialog(catalogue, kind, id)?,
+                None => Html::EMPTY,
+            },
             None => Html::EMPTY,
         };
         let mut flash = NO_FLASH;
@@ -781,6 +785,7 @@ impl View {
             header,
             banner,
             tabs,
+            list: !releases,
             content,
             dialog,
         }
@@ -802,23 +807,30 @@ impl View {
         }
         let pin = match text(&platform["pin"]) {
             "pinned" => "The program records the exact versions it contains.".to_owned(),
-            "stale" => "The saved version list does not match this build. Ask your developer to rebuild with an up-to-date version list.".to_owned(),
-            _ => "This build has no exact version list. Ask your developer to record module versions when building the next update.".to_owned(),
+            "stale" => "The saved version list does not match this build. Rebuild with an up-to-date version list.".to_owned(),
+            _ => "This build has no exact version list. Record module versions when building the next update.".to_owned(),
         };
-        let domains: Vec<String> = installed["domains"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|d| match d["version"].as_str() {
-                Some(version) => format!("{} {version}", text(&d["id"])),
-                None => format!("{} (version unknown)", text(&d["id"])),
-            })
-            .collect();
-        let domains = if domains.is_empty() {
-            "None".to_owned()
-        } else {
-            domains.join(", ")
+        let installed_components = |kind: &str| {
+            let components: Vec<_> = installed[kind]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|item| match item["version"].as_str() {
+                    Some(version) => format!(
+                        "{} v{}",
+                        text(&item["name"]),
+                        version.trim_start_matches('v')
+                    ),
+                    None => text(&item["name"]).to_owned(),
+                })
+                .collect();
+            if components.is_empty() {
+                "None".to_owned()
+            } else {
+                components.join(", ")
+            }
         };
+        let domains = installed_components("domains");
         let plugins: Vec<String> = status["plugins"]
             .as_array()
             .into_iter()
@@ -831,23 +843,7 @@ impl View {
         } else {
             plugins.join(", ")
         };
-        let extensions: Vec<String> = installed["extensions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|extension| {
-                format!(
-                    "{} {}",
-                    text(&extension["id"]),
-                    extension["version"].as_str().unwrap_or("(version unknown)")
-                )
-            })
-            .collect();
-        let extensions = if extensions.is_empty() {
-            "None".to_owned()
-        } else {
-            extensions.join(", ")
-        };
+        let extensions = installed_components("extensions");
         let mut facts = render(Facts {
             id: "software-instance-facts",
             items: vec![
@@ -1000,7 +996,29 @@ impl View {
             });
         }
         let result = &job["result"];
-        let result_message = text(&result["message"]).to_owned();
+        let failed = matches!(state, "failed" | "interrupted");
+        let failed_step = steps_json
+            .iter()
+            .find(|step| step["state"] == "failed")
+            .or_else(|| {
+                steps_json.iter().find(|step| {
+                    !step["started_at"].is_null()
+                        && matches!(text(&step["state"]), "running" | "skipped")
+                })
+            });
+        let result_message = if failed {
+            result["message"]
+                .as_str()
+                .filter(|message| !message.trim().is_empty())
+                .or_else(|| {
+                    failed_step
+                        .and_then(|step| step["detail"]["message"].as_str())
+                        .filter(|message| !message.trim().is_empty())
+                })
+                .unwrap_or("No failure reason was recorded.")
+        } else {
+            text(&result["message"])
+        };
         let result_kind = match state {
             "done" => Some(StatusKind::Success),
             "failed" => Some(StatusKind::Error),
@@ -1020,7 +1038,7 @@ impl View {
         }
         let undo = &status["undo"];
         let undo_offered =
-            can_manage && undo["available"] == true && undo["job"].as_i64() == Some(id);
+            can_manage && undo["available"] == true && (failed || undo["job"].as_i64() == Some(id));
         if state == "done" && kind == "install" {
             if instance.role == bilibi_system::Role::Staging {
                 notes.push("Next: try it here.".to_owned());
@@ -1070,11 +1088,11 @@ impl View {
         let steps = render(Fold {
             id: "software-job-details",
             title: "Install steps",
-            open: active || state == "failed" || state == "interrupted",
+            open: active || failed,
             body: render(JobSteps { steps })?,
             ..Fold::default()
         })?;
-        let body = render(JobBody {
+        let mut body = render(JobBody {
             id,
             heading,
             summary,
@@ -1083,10 +1101,22 @@ impl View {
             worker: job["worker"].as_str().map(str::to_owned),
             steps,
             result_kind,
-            result_message,
+            result_message: result_message.to_owned(),
             notes,
             actions,
         })?;
+        if failed && can_manage {
+            let step = failed_step.map_or("No step was recorded", |step| text(&step["label"]));
+            let message = result_message
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            body.push(&render(UpdatePrompt {
+                id: "software-diagnosis-prompt",
+                label: "Copy AI diagnosis prompt",
+                prompt: &format!("Diagnose and help fix Bilibi software job {id} at {}. Step: {step}. Message: {message}", instance.origin),
+            })?);
+        }
         let title = match state {
             "queued" | "running" => "Current job",
             _ => "Last install",
@@ -1097,117 +1127,6 @@ impl View {
             body,
             ..Card::default()
         })
-    }
-
-    /// Catalogue descriptions, compatibility and local build steps.
-    fn discovery_card(&self, status: &Value, catalogue: &Value) -> Result<Html> {
-        let mut cards = Html::EMPTY;
-        for kind in ["domains", "extensions"] {
-            let description = if kind == "domains" {
-                "Domains add business features, such as Finance."
-            } else {
-                "Extensions adapt Bilibi or connect it to other software."
-            };
-            cards.push(&render(SectionHeading {
-                title: if kind == "domains" {
-                    "Available domains"
-                } else {
-                    "Available extensions"
-                },
-                description,
-                ..SectionHeading::default()
-            })?);
-            let mut body = Html::EMPTY;
-            if catalogue["available"] != true {
-                body.push(&render(Alert {
-                    kind: StatusKind::Warning,
-                    body: Html::text(text(&catalogue["message"])),
-                    ..Alert::default()
-                })?);
-            } else if catalogue[kind].as_array().is_none_or(Vec::is_empty) {
-                body.push(&Html::text(&format!(
-                    " No {kind} are listed in the catalogue."
-                )));
-            }
-            for item in catalogue[kind].as_array().into_iter().flatten() {
-                let id = text(&item["id"]);
-                let installed = status["installed"][kind]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|d| d["id"] == id);
-                let proposed = self.propose.iter().any(|p| p == id);
-                let mut facts = Vec::new();
-                if let Some(d) = installed {
-                    facts.push(Fact {
-                        title: "Installed version",
-                        value: Html::text(d["version"].as_str().unwrap_or("Version unknown")),
-                        ..Fact::default()
-                    });
-                }
-                facts.push(status_fact(
-                    item,
-                    text(&catalogue["running_platform"]["version"]),
-                ));
-                let mut item_body = render(Facts {
-                    items: facts,
-                    ..Facts::default()
-                })?;
-                let mut developer = render(Facts {
-                    items: vec![
-                        Fact {
-                            title: "Code for your developer",
-                            value: Html::text(text(&item["repository"])),
-                            ..Fact::default()
-                        },
-                        Fact {
-                            title: "Version checks",
-                            value: Html::text(text(&item["compatibility"])),
-                            ..Fact::default()
-                        },
-                    ],
-                    ..Facts::default()
-                })?;
-                if let Some(steps) = item["local_steps"].as_array() {
-                    developer.push(&render(
-                        Field::named("local_steps")
-                            .id(format!("software-local-{kind}-{id}"))
-                            .label("Commands")
-                            .hint("Run these in your local Bilibi code folder, then test it in the browser.")
-                            .kind(InputKind::Textarea)
-                            .value(steps.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n"))
-                            .readonly()
-                            .attr("rows", "12"),
-                    )?);
-                }
-                item_body.push(&render(Fold {
-                    id: &format!("software-developer-{kind}-{id}"),
-                    title: "Developer commands",
-                    body: developer,
-                    ..Fold::default()
-                })?);
-                let title = format!(
-                    "{}{}",
-                    text(&item["name"]),
-                    if proposed { " · requested" } else { "" }
-                );
-                body.push(&render(Card {
-                    id: &format!("software-discovery-{kind}-{id}"),
-                    title: &title,
-                    body: {
-                        let mut content = render(SectionHeading {
-                            description: text(&item["description"]),
-                            ..SectionHeading::default()
-                        })?;
-                        content.push(&item_body);
-                        content
-                    },
-                    ..Card::default()
-                })?);
-            }
-            cards.push(&body);
-        }
-        Ok(cards)
     }
 
     /// Recorded backups remain visible after another job becomes the latest.
@@ -1653,16 +1572,9 @@ impl View {
             step_up,
             error,
         })?;
-        render(Modal {
-            id: "software-review",
-            title: &title,
-            cancel_event: "cancel_dialog",
-            width: ModalWidth::Narrow,
-            description: "Nothing changes until you confirm with your code.",
-            role: "",
-            flash: None,
-            body,
-        })
+        render(
+            bilibi_ui::StepUpGate::action("Software", &title, body).map_err(|_| Error::Internal)?,
+        )
     }
 }
 
@@ -1729,6 +1641,7 @@ struct PageView<'a> {
     header: Html,
     banner: Html,
     tabs: Html,
+    list: bool,
     content: Html,
     dialog: Html,
 }
@@ -1795,7 +1708,9 @@ impl LiveState<Scope, Error> for View {
             self.rows_changed = true;
             match request.input {
                 LiveInput::Params(query) => {
+                    self.releases.cancel_github();
                     self.query = query.clone();
+                    self.modules.params(query)?;
                     self.backup_list = ListState::parse(
                         query,
                         self.backup_list
@@ -1879,68 +1794,5 @@ impl Page<Scope, Error> for Pages {
                 Box::new(View::new(self.clone(), request.query)?);
             Ok(Some(state))
         })
-    }
-}
-
-/// Official modules show one status; the operator's own catalogue keeps the
-/// compatibility wording because nothing checks it against this Platform.
-fn status_fact<'a>(item: &'a Value, platform: &'a str) -> Fact<'a> {
-    if item["official"] != true {
-        return Fact {
-            title: "Compatibility",
-            value: Html::text(&compatibility(item, platform)),
-            ..Fact::default()
-        };
-    }
-    let status = match item["status"].as_str() {
-        Some("installed") => "Installed".to_owned(),
-        Some("update_available") => format!(
-            "Update available: {}",
-            item["latest_version"].as_str().unwrap_or_default()
-        ),
-        _ => "Not installed".to_owned(),
-    };
-    Fact {
-        title: "Status",
-        value: Html::text(&match item["warning"].as_str() {
-            Some(warning) => format!("{status} · {warning}"),
-            None => status,
-        }),
-        ..Fact::default()
-    }
-}
-
-/// Plain-words compatibility of the recommended version with the running platform.
-fn compatibility(item: &Value, platform: &str) -> String {
-    let versions = item["versions"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    match item["recommended_version"].as_str() {
-        Some(version) => {
-            let tested = versions
-                .iter()
-                .any(|v| v["version"] == version && v["tested_with_running"] == true);
-            if tested {
-                format!("Yes · tested with Bilibi {platform}")
-            } else {
-                format!(
-                    "Yes, not tested yet · supports Bilibi {platform}; test it before installing"
-                )
-            }
-        }
-        None => {
-            let newest = versions
-                .iter()
-                .filter_map(|v| {
-                    let parsed = crate::catalogue::Version::parse(v["version"].as_str()?)?;
-                    Some((parsed, v["platform"].as_str()?))
-                })
-                .max_by_key(|(parsed, _)| *parsed);
-            match newest {
-                Some((_, requirement)) => format!("No · needs Bilibi {requirement}"),
-                None => format!("No · no published version supports Bilibi {platform}"),
-            }
-        }
     }
 }

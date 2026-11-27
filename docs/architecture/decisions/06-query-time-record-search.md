@@ -4,7 +4,7 @@
 **Status:** Proposed
 **Agents:** claude-code/opus-5.5 (author)
 **Scope:** How Bilibi finds records across mounted modules: the search box, the results page and the agent operation
-**Last Updated:** 2026-10-22
+**Last Updated:** 2026-11-18
 
 > Source: [issue 130](https://github.com/BelimbingProject/bilibi/issues/130). There is no prior art to cite.
 
@@ -29,7 +29,7 @@ What a search must not do:
 | Query | `base/search` | A fresh Grid catalog for the scope; one read-only statement whose branches match and rank inside each kind's source, merged by rank and grouped by kind, under Grid's timeouts and cost check |
 | Callers | Top bar, `/search`, agents | One contract, `base.search.records`, over one facade; one capability, `base.search.records.list` |
 
-- **Trimming by construction.** The catalog keeps only the tables the reader may read and drops restricted fields; each branch binds the scope's tenant and user into the owner's source, so its tenant predicate, soft delete and company filters apply in the same statement as the match. A kind is also offered only when its record page admits the reader.
+- **Trimming by construction.** The catalog keeps only the tables the reader may read and drops restricted fields; each branch applies the owner's [scoped Grid source](../../../apps/base/search/README.md#what-a-search-does) in the same statement as the match. A kind is also offered only when its record page admits the reader.
 - **No oracle.** The vector holds only fields no operator can restrict. A restrictable field (a personal email) may be a prefix field, matched only for a reader no held role restricts.
 - **Zero lag.** The vector is a generated column of the owner's row, so it changes in the same transaction as the record. There is no indexing pipeline, queue or reindex job.
 - **Bound input.** Words are letters and digits, bound as parameters; user text never becomes `tsquery` syntax. 200 characters and 8 words count.
@@ -44,9 +44,9 @@ Bilibi is PostgreSQL-only. An external engine would hold a second copy of every 
 - A Domain makes a table searchable with one contribution and one migration; no host, Menu or template change.
 - Each searchable table carries a generated column and a GIN index; writes pay for keeping them.
 - The GIN index does not include the tenant, so a very common prefix is matched across tenants before the tenant predicate filters it. The cost check refuses a search too broad to rank and asks for another word.
-- Typo tolerance, matching inside a word and scripts written without spaces need `pg_trgm` or another extension, which would be the Platform's first; each needs its own decision.
+- **2026-11-18 amendment.** A `Searchable` can opt its protected title into substring and close-spelling matches. The owning module indexes `lower(title)` with GIN and `gin_trgm_ops`, as allowed by [ADR 29](./29-pg-trgm-is-allowed.md). Exact titles and full-text or prefix matches rank ahead of substring and close-spelling matches. The fallback runs inside the same scoped Grid source and uses the same timeouts and cost check. A common title fragment can increase query cost and trigger that check.
 - If an adopter outgrows PostgreSQL search, a later port can let an Extension provide another engine behind the same contribution.
 
 ## Status
 
-Built in `apps/base/search` (`README.md` is the contract), with Core Person and Core Company contributing.
+Built in `apps/base/search` (`README.md` is the contract), with Core Person, Core Company and Core Document contributing.

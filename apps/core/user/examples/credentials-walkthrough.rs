@@ -1,10 +1,15 @@
 //! Manual walkthrough of password, reset and verification flows against an
 //! explicitly supplied disposable database, run after `migrate`.
-//! No test harness or assertions; prints each outcome for inspection, and reads
-//! the dev mailbox exactly as a developer would to follow an emailed link.
-use bilibi_database::{pool, Error, Result};
-use bilibi_mail::{Mailbox, Mailer};
+//! Prints outcomes for inspection, checks single-use reset tokens, and reads
+//! the dev mailbox exactly as a developer would to follow an emailed link. It
+//! stores the development instance role first: the dev mailbox sends nowhere
+//! else.
+use bilibi_agent_api::plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans};
+use bilibi_database::{pool, Error};
+use bilibi_mail::{parse, Mailbox, Mailer, ParseLimits, Parsed};
 use bilibi_module_registry::Services;
+use bilibi_session::Sessions;
+use bilibi_tenancy::ProofFuture;
 use bilibi_user::{CredentialError, UserService};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -24,45 +29,59 @@ fn count(mailbox: &Mailbox) -> usize {
 }
 /// The newest message after `before` arrived, giving the sender a moment: reset
 /// mail is delivered after the request returns.
-async fn arrival(mailbox: &Mailbox, before: usize) -> Option<String> {
+async fn arrival(mailbox: &Mailbox, before: usize) -> Option<Parsed> {
     for _ in 0..50 {
         if count(mailbox) > before {
             let newest = mailbox.entries().ok()?.into_iter().next()?;
-            return mailbox.read(&newest.id).ok();
+            let wire = mailbox.read(&newest.id).ok()?;
+            return parse(wire.as_bytes(), &ParseLimits::default()).ok();
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     None
 }
 /// The first http link in a message body.
-fn link(message: &str) -> Option<String> {
+fn link(message: &Parsed) -> Option<String> {
     message
+        .text
+        .as_deref()?
         .lines()
         .find(|line| line.starts_with("http"))
         .map(str::to_owned)
 }
-fn show_mail(label: &str, message: &str) {
-    let header = |name: &str| {
-        message
-            .lines()
-            .find_map(|line| line.strip_prefix(name))
-            .unwrap_or("?")
-            .trim()
-            .to_owned()
-    };
+fn show_mail(label: &str, message: &Parsed) {
     println!(
-        "{label}: To={} Subject={} Link={}",
-        header("To:"),
-        header("Subject:"),
-        link(message).unwrap_or_default()
+        "{label}: To={} Subject={} Link received={}",
+        message.to.first().map_or("?", |to| to.email.as_str()),
+        message.subject.as_deref().unwrap_or("?"),
+        link(message).is_some()
     );
 }
 
+struct Browser<'a> {
+    sessions: &'a Sessions,
+    token: &'a str,
+}
+
+impl PlanAuthority for Browser<'_> {
+    fn verify<'a>(
+        &'a self,
+        tx: &'a tokio_postgres::Transaction<'_>,
+    ) -> ProofFuture<'a, PlanIdentity> {
+        Box::pin(async move {
+            Ok(PlanIdentity {
+                scope: self.sessions.hold(tx, self.token).await?,
+                credential_binding: format!("browser:{}", self.token),
+            })
+        })
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // The explicit opt-in protects normal development data from fixture writes.
     if std::env::var("BILIBI_DISPOSABLE_CREDENTIALS_DEMO").as_deref() != Ok("yes") {
-        return Err(Error::Invalid);
+        return Err(Error::Invalid.into());
     }
     bilibi_base::link();
     bilibi_core::link();
@@ -70,6 +89,7 @@ async fn main() -> Result<()> {
     bilibi_walkthrough_fixture::install(&db).await?;
     let modules = bilibi_module_registry::discover()?;
     bilibi_database::migrate(&db, &modules).await?;
+    bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
     let mut services = Services::default();
     services.provide("bootstrap.database", Arc::new(db.clone()))?;
     services.provide(
@@ -81,7 +101,9 @@ async fn main() -> Result<()> {
     let mailer = services.get::<Mailer>("base/mail.mailer")?;
     println!("transport: {}", mailer.describe());
     let mailbox = Mailbox::new(mailbox_dir(), 100);
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
 
     // Fixture account: Sam Staff, tenant 1. A rerun starts from the fixture password.
     let (email, seeded) = ("staff@example.test", "bilibi-dev");
@@ -142,7 +164,10 @@ async fn main() -> Result<()> {
             db.get()
                 .await
                 .ok()?
-                .query_one("SELECT count(*) FROM sessions WHERE id=$1", &[&token])
+                .query_one(
+                    "SELECT count(*) FROM sessions WHERE id=$1",
+                    &[&bilibi_session::session_id(&token)],
+                )
                 .await
                 .ok()
                 .map(|r| r.get::<_, i64>(0))
@@ -272,7 +297,7 @@ async fn main() -> Result<()> {
                 .await
         )
     );
-    client.execute("INSERT INTO password_reset_tokens(identity_id,token_hash,created_at,expires_at) VALUES((SELECT identity_id FROM users WHERE tenant_id=1 AND id=1),decode(repeat('ab',32),'hex'),now()-interval '3 hours',now()-interval '2 hours')", &[]).await?;
+    assert!(!users.reset_link_valid(email, &fresh).await?);
     let before = count(&mailbox);
     users
         .request_password_reset(email)
@@ -287,16 +312,37 @@ async fn main() -> Result<()> {
         .to_owned();
     let rows: i64 = client
         .query_one(
-            "SELECT count(*) FROM password_reset_tokens WHERE expires_at<now()",
+            "SELECT count(*) FROM password_reset_tokens WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=1 AND id=3) AND expires_at<now()",
             &[],
         )
         .await?
         .get(0);
-    println!("expired rows left after the next request: {rows}");
+    println!("the next request replaced the expired token: {}", rows == 0);
+    assert!(rows == 0 && users.reset_link_valid(email, &racing).await?);
+    let seconds: f64 = client.query_one("SELECT extract(epoch FROM expires_at-created_at)::float8 FROM password_reset_tokens WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=1 AND id=3)", &[]).await?.get(0);
+    assert_eq!(seconds, 3.0 * 24.0 * 60.0 * 60.0);
+
     let (a, b) = tokio::join!(
-        users.reset_password(email, &racing, "race-secret-5"),
-        users.reset_password(email, &racing, "race-secret-6")
+        tokio::spawn({
+            let users = users.clone();
+            let racing = racing.clone();
+            async move { users.reset_password(email, &racing, "race-secret-5").await }
+        }),
+        tokio::spawn({
+            let users = users.clone();
+            let racing = racing.clone();
+            async move { users.reset_password(email, &racing, "race-secret-6").await }
+        })
     );
+    let (a, b) = (
+        a.map_err(|_| Error::Internal)?,
+        b.map_err(|_| Error::Internal)?,
+    );
+    assert!(matches!(
+        (&a, &b),
+        (Ok(_), Err(CredentialError::InvalidOrExpiredToken))
+            | (Err(CredentialError::InvalidOrExpiredToken), Ok(_))
+    ));
     println!(
         "two simultaneous resets with one token: {} / {}",
         outcome(&a),
@@ -365,7 +411,95 @@ async fn main() -> Result<()> {
         None => println!("no verification mail arrived (is BILIBI_USER_SIGNING_KEY set?)"),
     }
 
+    println!("\n== platform wording and workspace sender name ==");
+    let admin = users
+        .login("admin@example.test", seeded)
+        .await
+        .map_err(|_| Error::Unauthorized)?;
+    let sessions = services.get::<Sessions>("base/session.sessions")?;
+    let plans = services.get::<Plans>("base/agent_api.plans")?;
+    let browser = Browser {
+        sessions: &sessions,
+        token: &admin.token,
+    };
+    let result = plans
+        .preview(
+            &browser,
+            &[PlannedOperation {
+                key: "base.templates.template.publish".into(),
+                input: serde_json::json!({
+                    "key": "core.user.password_reset",
+                    "language": "en",
+                    "revision": 0,
+                    "slots": {
+                        "subject": "Reset your Example Trading password",
+                        "intro": "Open this link to choose a new password:",
+                        "closing": "Ask the Example Trading help desk if you did not request this.",
+                    },
+                }),
+            }],
+        )
+        .await?;
+    assert_eq!(result["valid"], false);
+    assert_eq!(
+        result["results"][0]["error"]["fields"]["key"][0],
+        "This template uses platform-controlled wording.",
+    );
+    client
+        .execute(
+            "INSERT INTO base_settings (key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES ('mail.sender_name',1,'tenant',1,'\"Example Trading\"',false)",
+            &[],
+        )
+        .await?;
+    client
+        .execute("DELETE FROM password_reset_tokens", &[])
+        .await?;
+    let before = count(&mailbox);
+    println!(
+        "reset requested: {}",
+        outcome(&users.request_password_reset(email).await)
+    );
+    let message = arrival(&mailbox, before).await.ok_or(Error::Internal)?;
+    show_mail("received", &message);
+    let text = message.text.as_deref().unwrap_or_default();
+    let html = message.html.as_deref().unwrap_or_default();
+    let checks = [
+        (
+            "sender name",
+            message.from.first().and_then(|from| from.name.as_deref()) == Some("Example Trading"),
+        ),
+        (
+            "subject",
+            message.subject.as_deref() == Some("Reset your password"),
+        ),
+        (
+            "platform wording in the plain-text alternative",
+            text.contains("Reset your password by opening this link:")
+                && text.contains("If you did not request this, you can ignore this email."),
+        ),
+        (
+            "the same owner-built link is the only HTML action",
+            link(&message).is_some_and(|url| {
+                url.contains("/reset-password/")
+                    && html.matches("href=").count() == 1
+                    && html.contains(&format!("href=\"{url}\""))
+            }),
+        ),
+    ];
+    for (name, passed) in checks {
+        println!("{}: {name}", if passed { "PASS" } else { "FAIL" });
+    }
+    if checks.iter().any(|(_, passed)| !passed) {
+        return Err(Error::refused("the workspace's reset mail is wrong").into());
+    }
+
     println!("\n== audit (secrets redacted) ==");
+    for row in client
+        .query("SELECT a.event,m.actor_type,m.new_values::text FROM base_audit_mutations m JOIN base_audit_actions a ON a.trace_id=m.trace_id AND a.tenant_id=m.tenant_id WHERE m.auditable_type='user_identity' AND a.event IN ('user.reset_requested','user.reset_withdrawn') ORDER BY m.id DESC LIMIT 3", &[])
+        .await?
+    {
+        println!("{} by {} new={}", row.get::<_, String>(0), row.get::<_, String>(1), row.get::<_, String>(2));
+    }
     for row in client
         .query("SELECT auditable_id,event,actor_type,actor_id,old_values::text,new_values::text FROM base_audit_mutations WHERE auditable_type='user' AND tenant_id=1 ORDER BY id DESC LIMIT 5", &[])
         .await?

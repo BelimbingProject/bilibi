@@ -1,12 +1,38 @@
 //! This is the deliberately small
 //! input-schema dialect. Unknown keywords fail
-//! discovery; unknown input fields fail dispatch, including nested objects.
+//! discovery; unknown input fields fail dispatch unless explicitly permitted.
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 pub type FieldErrors = BTreeMap<String, Vec<String>>;
 const MAX_DEPTH: usize = 32;
+
+/// Removes schema-marked write-only fields before an input is persisted or
+/// returned. The owner still receives the original input for preview/commit.
+pub(crate) fn scrub_write_only(schema: &Value, value: &mut Value) {
+    if schema["type"] == "array" {
+        if let Some(items) = value.as_array_mut() {
+            for item in items {
+                scrub_write_only(&schema["items"], item);
+            }
+        }
+        return;
+    }
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(properties) = schema["properties"].as_object() else {
+        return;
+    };
+    for (key, child) in properties {
+        if child["writeOnly"] == true {
+            object.remove(key);
+        } else if let Some(value) = object.get_mut(key) {
+            scrub_write_only(child, value);
+        }
+    }
+}
 
 pub fn check(schema: &Value) -> Result<(), String> {
     if schema.get("type").and_then(Value::as_str) != Some("object") {
@@ -24,13 +50,51 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
         .and_then(Value::as_str)
         .ok_or("schema needs type")?;
     let keywords: &[&str] = match kind {
-        "object" => &["properties", "required"],
+        "object" => &["properties", "required", "additionalProperties"],
         "string" => &["enum", "maxLength", "format", "nullable"],
         "integer" | "number" => &["enum", "minimum", "maximum", "nullable"],
         "boolean" => &["nullable"],
         "array" => &["items"],
         _ => return Err(format!("unknown schema type {kind}")),
     };
+    if let Some(reference) = node.get("x-bilibi-field") {
+        let field = reference
+            .as_str()
+            .and_then(bilibi_ui::record_field)
+            .ok_or("unknown record field vocabulary reference")?;
+        let expected = field.schema();
+        for key in [
+            "type",
+            "title",
+            "format",
+            "x-bilibi-picklist",
+            "x-bilibi-personal-data",
+        ] {
+            if node.get(key) != expected.get(key) {
+                return Err(format!(
+                    "{} disagrees with vocabulary {} ({key})",
+                    field.id, field.vocabulary
+                ));
+            }
+        }
+        // A particular operation may accept fewer of the owner's choices (e.g. creation).
+        if let Some(values) = expected.get("enum").and_then(Value::as_array) {
+            if node
+                .get("enum")
+                .and_then(Value::as_array)
+                .is_none_or(|actual| {
+                    actual.is_empty() || actual.iter().any(|value| !values.contains(value))
+                })
+            {
+                return Err(format!(
+                    "{} disagrees with vocabulary choices",
+                    field.vocabulary
+                ));
+            }
+        }
+    } else if node.get("x-bilibi-personal-data").is_some() {
+        return Err("personal-data metadata needs a record field reference".into());
+    }
     for key in object.keys() {
         if ![
             "type",
@@ -40,6 +104,8 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
             "x-bilibi-reference",
             "x-bilibi-picklist",
             "x-bilibi-money",
+            "x-bilibi-field",
+            "x-bilibi-personal-data",
         ]
         .contains(&key.as_str())
             && !keywords.contains(&key.as_str())
@@ -82,11 +148,26 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
         return Err("nullable must be boolean".into());
     }
     if kind == "object" {
+        if node
+            .get("additionalProperties")
+            .is_some_and(|v| !v.is_boolean())
+        {
+            return Err("additionalProperties must be boolean".into());
+        }
         let properties = match node.get("properties") {
             Some(v) => v.as_object().ok_or("properties must be an object")?.clone(),
             None => Default::default(),
         };
-        for child in properties.values() {
+        for (key, child) in &properties {
+            if let Some(field) = child
+                .get("x-bilibi-field")
+                .and_then(Value::as_str)
+                .and_then(bilibi_ui::record_field)
+            {
+                if key != field.id {
+                    return Err(format!("property {key} refers to field {}", field.id));
+                }
+            }
             check_node(child, depth + 1)?;
         }
         if let Some(required) = node.get("required") {
@@ -217,6 +298,9 @@ fn errors_at(
         for (key, value) in object {
             let child = &schema["properties"][key];
             let child_path = join(path, key);
+            if child.is_null() && schema["additionalProperties"] == true {
+                continue;
+            }
             if child.is_null() {
                 add(
                     errors,
@@ -246,16 +330,21 @@ fn errors_at(
             );
         }
     }
-    if schema
-        .get("enum")
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.contains(input))
-    {
-        add(
-            errors,
-            path,
-            "must be one of the declared enum values".into(),
-        );
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        if !values.contains(input) {
+            add(
+                errors,
+                path,
+                format!(
+                    "must be one of the declared values: {}",
+                    values
+                        .iter()
+                        .map(Value::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
     }
     for (key, holds, message) in [
         ("minimum", true, "must be at least"),

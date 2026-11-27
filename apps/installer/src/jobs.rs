@@ -7,7 +7,8 @@ use tokio_postgres::{Client, GenericClient};
 /// The channel `base/software` notifies on; the payload is the job id.
 pub const CHANNEL: &str = "bilibi_software_jobs";
 const TIME: &str = "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'";
-const JOB_COLUMNS: &str = "id, tenant_id, kind, request, undo_of, result";
+const JOB_COLUMNS: &str =
+    "id, tenant_id, kind, request, requested_by, undo_of, result, paused_at IS NOT NULL";
 
 #[derive(Clone, Debug)]
 pub struct Job {
@@ -15,8 +16,11 @@ pub struct Job {
     pub tenant: i64,
     pub kind: String,
     pub request: Value,
+    pub requested_by: i64,
     pub undo_of: Option<i64>,
     pub result: Option<Value>,
+    /// The pause began: recorded with the pausing step by `begin_pause`.
+    pub paused: bool,
 }
 impl Job {
     fn from_row(row: &tokio_postgres::Row) -> Self {
@@ -25,8 +29,10 @@ impl Job {
             tenant: row.get(1),
             kind: row.get(2),
             request: row.get(3),
-            undo_of: row.get(4),
-            result: row.get(5),
+            requested_by: row.get(4),
+            undo_of: row.get(5),
+            result: row.get(6),
+            paused: row.get(7),
         }
     }
 }
@@ -65,14 +71,14 @@ pub async fn mine_running(
     Ok(row.as_ref().map(Job::from_row))
 }
 /// The oldest job waiting that an installer carries out: an install or an
-/// undo. An install whose release is still being downloaded by the program (its `download` step is
+/// undo or release-trust change. An install whose release is still being downloaded by the program (its `download` step is
 /// not done) waits for that.
 pub async fn next_waiting(
     client: &impl GenericClient,
 ) -> Result<Option<Job>, tokio_postgres::Error> {
     let row = client
         .query_opt(
-            &format!("SELECT {JOB_COLUMNS} FROM base_software_jobs WHERE state='queued' AND kind IN ('install','undo') AND NOT EXISTS (SELECT 1 FROM base_software_steps s WHERE s.tenant_id=base_software_jobs.tenant_id AND s.job_id=base_software_jobs.id AND s.key='download' AND s.state<>'done') ORDER BY id LIMIT 1"),
+            &format!("SELECT {JOB_COLUMNS} FROM base_software_jobs WHERE state='queued' AND kind IN ('install','undo','trust') AND NOT EXISTS (SELECT 1 FROM base_software_steps s WHERE s.tenant_id=base_software_jobs.tenant_id AND s.job_id=base_software_jobs.id AND s.key='download' AND s.state<>'done') ORDER BY id LIMIT 1"),
             &[],
         )
         .await?;
@@ -92,19 +98,19 @@ pub async fn claim(
         .await?;
     Ok(changed == 1)
 }
-/// Whether a job's outcome is recorded. Job tables that do not exist, or
-/// that lack the job, say no.
-pub async fn is_finished(
+pub async fn restore_job(
     client: &impl GenericClient,
     id: i64,
-) -> Result<bool, tokio_postgres::Error> {
+) -> Result<Option<(Job, String)>, tokio_postgres::Error> {
     match client
-        .query_opt("SELECT state FROM base_software_jobs WHERE id=$1", &[&id])
+        .query_opt(
+            &format!("SELECT {JOB_COLUMNS}, state FROM base_software_jobs WHERE id=$1"),
+            &[&id],
+        )
         .await
     {
-        Ok(row) => Ok(row
-            .is_some_and(|row| !matches!(row.get::<_, String>(0).as_str(), "queued" | "running"))),
-        Err(error) if table_missing(&error) => Ok(false),
+        Ok(row) => Ok(row.as_ref().map(|row| (Job::from_row(row), row.get(8)))),
+        Err(error) if table_missing(&error) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -212,9 +218,10 @@ pub async fn finish(
         .await?;
     Ok(())
 }
-/// The job's final state and result, with the add-on list the release
-/// switches on put in `base_software_plugins` in the same transaction: the
-/// list and the outcome are recorded together or not at all.
+/// The job's final state and result, with the steps not reached skipped and
+/// the add-on list the release switches on put in `base_software_plugins` in
+/// the same transaction: they are recorded together or not at all, so a
+/// restart never finds a running job whose steps are already skipped.
 pub async fn finish_with_plugins(
     client: &mut Client,
     job: &Job,
@@ -226,6 +233,7 @@ pub async fn finish_with_plugins(
     if let Some(plugins) = plugins {
         set_plugins(&tx, job, plugins).await?;
     }
+    skip_pending(&tx, job).await?;
     finish(&tx, job, state, result).await?;
     tx.commit().await
 }
@@ -310,6 +318,11 @@ pub async fn begin_pause(
         finish(&tx, job, "cancelled", &result).await?;
     } else {
         step_set(&tx, job, key, "running", detail).await?;
+        tx.execute(
+            "UPDATE base_software_jobs SET paused_at=now() WHERE tenant_id=$1 AND id=$2",
+            &[&job.tenant, &job.id],
+        )
+        .await?;
     }
     tx.commit().await?;
     Ok(!cancelled)
@@ -330,6 +343,35 @@ pub async fn database_size(client: &impl GenericClient) -> Result<i64, tokio_pos
         .query_one("SELECT pg_database_size(current_database())", &[])
         .await?;
     Ok(row.get(0))
+}
+pub async fn lock_installation(client: &impl GenericClient) -> Result<(), tokio_postgres::Error> {
+    client
+        .batch_execute(
+            "SELECT pg_advisory_lock_shared(hashtextextended('base/system.installation-mode',0))",
+        )
+        .await
+}
+
+/// The installation-owned code admission policy. No stored row means the safe default.
+pub async fn installation_mode(
+    client: &impl GenericClient,
+) -> Result<String, tokio_postgres::Error> {
+    if !client
+        .query_one("SELECT to_regclass('base_settings') IS NOT NULL", &[])
+        .await?
+        .get::<_, bool>(0)
+    {
+        return Ok("shared".into());
+    }
+    let row = client
+        .query_opt(
+            "SELECT value #>> '{}' FROM base_settings WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0",
+            &[],
+        )
+        .await?;
+    Ok(row
+        .and_then(|row| row.get::<_, Option<String>>(0))
+        .unwrap_or_else(|| "shared".into()))
 }
 /// What was entered after an instant, from the audit trail: the number of
 /// recorded changes and how they split by kind of record. Software jobs are
@@ -372,16 +414,14 @@ pub async fn now(client: &impl GenericClient) -> Result<String, tokio_postgres::
 /// The software history (jobs, steps, add-ons) as JSON, taken before a
 /// restore so the restore cannot erase what it is part of: for each table
 /// its columns (so the table can be made again) and its rows.
-const HISTORY_TABLES: [&str; 3] = [
+const HISTORY_TABLES: [&str; 4] = [
+    "base_settings",
     "base_software_jobs",
     "base_software_steps",
     "base_software_plugins",
 ];
-/// The audit rows of the software changes themselves, written after a
-/// backup: the 2FA check and the queue record of the job doing a restore, and
-/// the recorded outcomes of the jobs carried with it. A restore would drop
-/// them with everything else entered since, so they are carried like the
-/// history: (table, which rows).
+/// Audit rows selected for replay after a restore (table and row predicate).
+/// See the restore caveats in the installer README.
 const AUDIT_TABLES: [(&str, &str); 2] = [
     (
         "base_audit_actions",
@@ -389,7 +429,7 @@ const AUDIT_TABLES: [(&str, &str); 2] = [
     ),
     (
         "base_audit_mutations",
-        "auditable_type = 'base/software.job'",
+        "auditable_type IN ('base/software.job', 'user.bootstrap', 'user.ownership_transfer')",
     ),
 ];
 /// Takes the history aside: for each table its columns (so a history table
@@ -408,7 +448,12 @@ pub async fn history(
             } else {
                 "id"
             };
-            (*table, format!("SELECT row_to_json(t)::jsonb FROM {table} t ORDER BY {order}"), false)
+            let predicate = if *table == "base_settings" {
+                " WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0"
+            } else {
+                ""
+            };
+            (*table, format!("SELECT row_to_json(t)::jsonb FROM {table} t{predicate} ORDER BY {order}"), false)
         })
         .chain(AUDIT_TABLES.iter().map(|(table, which)| {
             (
@@ -498,6 +543,18 @@ pub async fn restore_history(
     client: &impl GenericClient,
     history: &Value,
 ) -> Result<(i64, Vec<String>), tokio_postgres::Error> {
+    let policy = history["base_settings"]["rows"]
+        .as_array()
+        .and_then(|rows| rows.first());
+    if let Some(row) = policy {
+        client.execute(
+            "WITH removed AS (DELETE FROM base_settings WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0 RETURNING id) INSERT INTO base_settings OVERRIDING SYSTEM VALUE SELECT r.* FROM (SELECT count(*) FROM removed) d CROSS JOIN LATERAL jsonb_populate_record(NULL::base_settings, jsonb_set($1, '{id}', to_jsonb((SELECT COALESCE(max(id),0)+1 FROM base_settings)))) r",
+            &[row],
+        ).await?;
+    } else {
+        client.execute("DELETE FROM base_settings WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0", &[]).await?;
+    }
+    client.execute("SELECT setval(pg_get_serial_sequence('base_settings', 'id'), coalesce((SELECT max(id) FROM base_settings), 0) + 1, false)", &[]).await?;
     let mut carried = 0;
     let mut problems = Vec::new();
     let mut present = Vec::new();
@@ -525,12 +582,12 @@ pub async fn restore_history(
     for table in present
         .iter()
         .rev()
-        .filter(|table| HISTORY_TABLES.contains(table))
+        .filter(|table| **table != "base_settings" && HISTORY_TABLES.contains(table))
     {
         client.execute(&format!("DELETE FROM {table}"), &[]).await?;
     }
     for table in all.iter().copied() {
-        if !present.contains(&table) {
+        if table == "base_settings" || !present.contains(&table) {
             continue;
         }
         let columns: Vec<String> = client
@@ -542,8 +599,27 @@ pub async fn restore_history(
             .iter()
             .map(|row| row.get(0))
             .collect();
-        for row in history[table]["rows"].as_array().into_iter().flatten() {
-            let kept: serde_json::Map<String, Value> = row
+        let rows = history[table]["rows"].as_array();
+        let audit = AUDIT_TABLES.iter().any(|(name, _)| *name == table);
+        let partition_month = if audit
+            && columns.iter().any(|name| name == "partition_month")
+            && rows.is_some_and(|rows| !rows.is_empty())
+        {
+            client
+                .execute("SELECT base_audit_prepare_partitions()", &[])
+                .await?;
+            let month = client
+                .query_one(
+                    "SELECT date_trunc('month', clock_timestamp() AT TIME ZONE 'UTC')::date::text",
+                    &[],
+                )
+                .await?;
+            Some(month.get::<_, String>(0))
+        } else {
+            None
+        };
+        for row in rows.into_iter().flatten() {
+            let mut kept: serde_json::Map<String, Value> = row
                 .as_object()
                 .map(|fields| {
                     fields
@@ -553,6 +629,15 @@ pub async fn restore_history(
                         .collect()
                 })
                 .unwrap_or_default();
+            if audit {
+                // Append the original evidence to the restored chain. Its
+                // previous link may depend on changes the restore discarded.
+                kept.remove("chain_seq");
+                kept.remove("chain_hash");
+                if let Some(month) = &partition_month {
+                    kept.insert("partition_month".into(), json!(month));
+                }
+            }
             let inserted = client
                 .execute(
                     &format!("INSERT INTO {table} OVERRIDING SYSTEM VALUE SELECT * FROM jsonb_populate_record(NULL::{table}, $1)"),

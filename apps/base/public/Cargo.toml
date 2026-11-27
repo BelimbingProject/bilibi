@@ -1,0 +1,28 @@
+[package]
+name = "bilibi-public"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+askama.workspace = true
+bilibi-agent-api.workspace = true
+bilibi-authz = { path = "../authz" }
+bilibi-database.workspace = true
+bilibi-media.workspace = true
+bilibi-menu.workspace = true
+bilibi-module-registry.workspace = true
+bilibi-settings = { path = "../settings" }
+bilibi-tenancy = { path = "../tenancy" }
+bilibi-ui.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+inventory.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio-postgres.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

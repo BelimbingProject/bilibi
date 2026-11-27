@@ -1,24 +1,98 @@
 # Shared UI
 
-`base/ui` supplies the shared components, form controls and browser behaviour used by every Bilibi page.
+**Use it for:** every page element: components, forms, `FlexTable` lists, dialogs, the shell and live pages.
+
+**Not for:** hand-written markup, copied classes, or CSS and JavaScript in a module.
+
+`base/ui` supplies the shared components, form controls and browser behaviour used by every Bilibi page. `Tab::count` adds an optional count circle to a button tab label.
 
 Use the typed models exported by the crate or their Askama macros; [`DESIGN.md`](../../../DESIGN.md) sets the design rules and [`AGENTS.md`](AGENTS.md) records the recurring mistakes. The DOM uses Bilibi's floating labels.
+
+`Field::kind(InputKind::Switch)` uses the shared Toggle for a form boolean, posting `"true"` or `"false"` through a hidden input. It also works inside `InlineChoice`; the owner keeps its usual save contract. Disabled and readonly switches cannot change the value.
 
 Single selects and multi-selects share the 16 px outline chevron and right alignment. Single selects retain native keyboard and popup behaviour; multi-row selects have no dropdown chevron.
 
 Multi-selects show the inset label and selected count above removable chips inside one field. The default keeps chips on one line with “…” for hidden selections; `.wrap_chips()` lets the field grow onto multiple lines. The empty prompt defaults to “Select options…”. Removal uses the checkbox's normal change event; `.chips(event)` can retain an owner's explicit remove event. Every selection remains available in the dropdown, including chips hidden by overflow.
 
-List toolbars put search first and filter boxes to its right, wrapping below search on narrow screens. `FilterToolbar::new` preserves the order of filters while placing search first.
+List toolbars put search first and filter boxes to its right, and on a phone fold them into one Filters button that opens a sheet, with each set filter shown as a removable chip. `FilterToolbar::new` preserves the order of filters while placing search first. Controls are `ToolbarControl::search`, `select`, `multi_select`, `date` and `text` (a typed value in the sheet, such as a custom field's text; `.numeric()` gives a phone the decimal keypad). A toolbar label is screen-reader only, so a text control shows its label as the placeholder and a date control says what it bounds in its hint.
 
 Page headers include a pin for the current address in signed-in pages, including workspace tiles. The shell keeps its state with the account. Dialogs do not show it.
 
+Opening a record from a `FlexTable` carries the grid path and query into the record page when a record opens in the same tab or tile as the grid. `BackLink` restores that address when it matches the link’s same-origin destination. Page pins and workspace layouts omit the grid return address.
+
+`StepUpGate` is the host-owned cover for a page or action that still owes 2FA. It embeds only the factor provider's prompt over shared skeleton placeholders; the protected page owner is not rendered until proof succeeds. `Page::step_up_title` may retain a route-specific title only from route parameters, never a protected read. Its browser hook moves focus into the prompt, traps Tab there and lets Escape leave the page.
+
+## Phone lists and header actions
+
+Header action labels and row-link touch targets follow [DESIGN.md’s record-page](../../../DESIGN.md#record-pages) and [list rules](../../../DESIGN.md#lists).
+
+Declare a list’s phone order with `.phone_columns(&["number", "status", "date"])` on `FlexTable::new(...)`, using the visible columns’ exact `spec` values. Below 640 px, matching columns move first in that order; missing specs are ignored and unlisted columns retain their current order. The browser moves headings and cells together, including after live patches, and restores the server’s arrangement at desktop width. The default is empty, preserving every existing list’s column order and saved settings.
+
+## Record facts
+
+Use `RecordFacts` for the read-only strip at the top of a record page, with facts gathered through [`base/ports`](../ports/README.md#record-facts). It hides itself when no facts are available.
+
+## Record field vocabulary
+
+Declare a field once so record labels, Grid columns and operation inputs use the same meaning.
+
+For example, Contacts declares personal email with a key, label, type and personal-data class:
+
+```rust
+bilibi_ui::record_fields! { "core/person", pub(crate) mod fields {
+    EMAIL: bilibi_ui::RecordField::new("email", "Personal email", bilibi_ui::RecordFieldType::String)
+        .personal(bilibi_ui::PersonalDataClass::Email),
+} }
+```
+
+- `fields::EMAIL.fact(value)` supplies the module's default title; for tenant-aware record titles, follow [Grid's label rendering](../grid/README.md#shared-label-rendering). Use `bilibi_grid::Field::record(fields::EMAIL)` in the Grid table. SQL source keys, protection and links stay in Grid.
+- Use `fields::EMAIL.input(json!({"maxLength":254}))` for the corresponding operation property. Required fields, limits, null handling and record references stay with that operation.
+- Declare closed choices with `RecordFieldType::Enum` and `.choices(...)`, or an operator list with `RecordFieldType::String` and `.picklist("owner.list")`. An operation may narrow closed choices, but cannot introduce another choice.
+- Classify personal values with `PersonalDataClass`; `NonPersonal` means the owner reviewed the field. An absent class remains unknown, so adopting this vocabulary cannot enable oversight accidentally.
+- Use `.path(...)`, `.slot(...)` and `.excluded(...)` for read presentation. A linked display can show a name while the write takes an integer ID. Collections and structured facts use `Array` or `Object` and remain excluded from scalar Grid columns.
+
+The macro registers each named field under `RECORD_FIELDS`, with the declaring module and source location. Boot refuses duplicate or invalid vocabulary entries, unknown input references, properties with a different key, and conflicting labels, types, pick-lists or personal-data classes. Grid also refuses a direct record fact backed by an independent field declaration. Contract schemas expose the reference as `x-bilibi-field` and classification as `x-bilibi-personal-data`; neither grants access or changes owner validation.
+
+See [Grid projections](../grid/README.md#detail-fields-become-columns) and the [input schema contract](../agent_api/README.md). Run `cargo run -p bilibi-web --example field-vocabulary` to exercise discovery and disagreement refusals without changing business data.
+
+## Markdown
+
+Use `Markdown::new(source)` for a reading view of untrusted plain-text Markdown; render it with `Html::render` like other typed components.
+
+```rust
+use bilibi_ui::{Html, Markdown};
+
+let reading = Html::render(&Markdown::new(&stored_source))?;
+// Pass stored_source itself to Field::value or InlineLongText for editing.
+```
+
+- **Syntax:** CommonMark paragraphs, headings (levels 1–6), emphasis/strong emphasis, ordered/unordered and nested lists, blockquotes, links (including reference links and autolinks), fenced/indented code and inline code. Soft line breaks follow ordinary paragraph layout; CommonMark hard breaks produce a line break.
+- **Literal content:** raw HTML, image syntax and thematic breaks display as escaped text. Optional extensions (tables, task lists, strikethrough, footnotes, math) are disabled; their punctuation remains plain text under CommonMark rules. Code stays literal, without highlighting or execution.
+- **Links:** only `http`, `https`, `mailto`, relative paths, query links and fragments become anchors. Unsafe links keep their readable labels without an anchor. Protocol-relative destinations, backslashes, whitespace and control characters are refused. Links open in the current tab; rendering never fetches destinations.
+- **Trust boundary:** `pulldown-cmark` parses the source on the server. Base UI converts raw HTML to text, keeps images literal, checks destinations, then uses the parser's escaping HTML writer. Only that filtered output, held privately by `Markdown`, reaches the page; there is no template macro for Markdown. Domain code passes source into `Markdown`, never into `Html::raw` or a `safe` filter. No media, scripts, styles or browser hooks come from the source.
+- **Source and editing:** store the original Markdown and pass it unchanged to the existing textarea/`InlineLongText`. The component borrows input during rendering and retains only the reading view; it does not normalize or save source. Owners retain their field limits, authorization and write operations. No editor toolbar or WYSIWYG is added.
+- **Typography:** the shared `ui-markdown` rules reuse the compact type scale, link, ink, line and sunken code roles in both themes. No Domain CSS or JavaScript is needed.
+
+The running specimen at `/assets/ui-components.html#specimen-markdown` pairs the reading view with an ordinary textarea and includes literal HTML, unsafe links, images and plain text.
+
+## Wordmark and credential pages
+
+`ui::wordmark` draws the [installation wordmark](../branding/README.md#where-it-shows).
+
+- **Brand:** pass the `Brand` the host put on the layout (`ShellContext::brand`, `AuthLayout::brand`). `Brand::default()` is Bilibi's own. [Branding](../branding/README.md) owns the settings behind it; `Document` uses the same brand for the tab title, the tab icon and the accent.
+
+- **Sizes:** `WordmarkSize::Bar` for the workspace top bar, with a smaller one-line wordmark below `sm`. Use `WordmarkSize::Credential` above a credential card.
+- **Link:** pass the home or dashboard address as `href`. The `label` says where it goes after the brand's name ("home", "dashboard") for assistive technology.
+- **Font:** `static/fonts/lexend-wordmark.woff2` holds only the letters b, i and l. See [assets](assets/README.md#pinned-sources-and-licenses).
+- **Credential pages:** `AuthLayout` wraps one card body with the wordmark and instance badge. On sign-in, the installation owner's company (`LoginWorkspace`) appears between them. Card bodies use the macros in `templates/credential.html` (`heading`, `link`, `back`).
+
 ## Signed-in standalone reviews
 
-Return `PageChrome::StandaloneReview` from a page operation that needs the signed-in credential layout instead of the workspace shell. Web keeps the normal route guard, session binding, CSRF and live transport, then `StandaloneReview` draws the Bilibi mark, the installation banner and one review card. OAuth consent is the running use. The page supplies only the card body; it never draws its own logo, instance banner or shell.
+Return `PageChrome::StandaloneReview` from a page operation that needs the signed-in credential layout instead of the workspace shell. Web keeps the normal route guard, session binding, CSRF and live transport, then `StandaloneReview` draws the wordmark, the installation banner and one review card. OAuth consent is the running use. The page supplies only the card body; it never draws its own logo, instance banner or shell.
 
 ## Embedded application frames
 
-Use `AppFrame` for a self-contained same-origin interactive document inside a Bilibi live page. The frame is stable across patches and `assets/app_frame.js` translates its MCP Apps `tools/call`, `ui/open-link`, size and model-context messages into owner events. The page owns authentication and authorization, then handles each call through the existing operation contract; the frame adds no write path.
+Use `AppFrame` for a self-contained same-origin interactive document inside a Bilibi live page. The frame is stable across patches and loads its document after the bridge registers its listeners and the live client is available. The bridge in `assets/app_frame.js` translates its MCP Apps `tools/call`, `ui/open-link`, size and model-context messages into owner events. The page owns authentication and authorization, then handles each call through the existing operation contract; the frame adds no write path.
 
 A module publishes a self-contained document under `/assets` by contributing one `PublicAsset` to `PUBLIC_ASSETS`. Paths are unique and must start with `/assets/`; give sensitive documents a narrow response Content Security Policy. The asset must not contain credentials. Use a contributed asset and `AppFrame` instead of adding a host router entry, copying the frame markup or writing a page-specific message bridge.
 
@@ -68,7 +142,7 @@ Theme and time-display saves use the shared flash UI through `feedback::local_fl
 - Match each field's `maxlength` to its owner's validation. Character limits are not byte limits: CJK commonly needs three UTF-8 bytes per character, and JSON escaping can need six bytes per UTF-16 code unit.
 - Budget the whole form: all field names, values, selected arrays, hidden values and transport metadata. Leave headroom below `bilibi_ui::LIVE_EVENT_LIMIT`; two 10,000-character fields fit even when every code unit needs escaping.
 - Existing Platform declarations, including Address's 10,000-character raw input, fit this budget. New repeating forms must bound their total content as well as each field. Use the shared file uploader for larger documents; never put file bytes into JSON.
-- **A field's text limit belongs to its owner; read posted text with the checked extractors.** `params::form_values_checked(payload, form, limit)` and `params::string_values_checked(payload, limit)` return `Result<_, params::TooLong>`: a string over `limit` characters is an error, not an empty field. Pass `params::FIELD_LIMIT` (1,024) unless the owner allows more (Address 10,000, a saved query 100,000). Refuse the event with `.map_err(Error::refused)?` (`bilibi_database::Error::Refused`, shown as its message, nothing cleared) and the browser keeps the draft; the owner's validation still reports each field's own, shorter limit on the field. `params::form_values` and `params::string_values` keep their old signatures and silently drop a string over 1 KiB; they are deprecated, so move to the checked ones. `PeriodFilter::event` is deprecated the same way; use `event_checked`. Code that reads `payload` keys directly keeps its own limits.
+- **A field's text limit belongs to its owner; read posted text with the checked extractors.** `params::form_values_checked(payload, form, limit)` and `params::string_values_checked(payload, limit)` return `Result<_, params::TooLong>`: a string over `limit` characters is an error, not an empty field. Pass `params::FIELD_LIMIT` (1,024) unless the owner allows more (Address 10,000, a saved query 100,000). Refuse the event with `.map_err(Error::refused)?` (`bilibi_database::Error::Refused`, shown as its message, nothing cleared) and the browser keeps the draft; the owner's validation still reports each field's own, shorter limit on the field. The unchecked `params::form_values` and `params::string_values` have been removed. For period controls, follow the [DateTime event contract](../datetime/README.md). Code that reads `payload` keys directly keeps its own limits.
 - Keep using `Form`, `Field` and the shared adapter. Forms, change events, hooks and mounted panels receive the same protection without a module-owned size check or script.
 
 The constants and refusal copy live in [`src/live_transport.rs`](src/live_transport.rs). [Live pages](../../../docs/live-pages.md#transport) defines the server's additional socket cap and reconnect behaviour.
@@ -139,7 +213,7 @@ A work calendar's resolved day is a `DayTile` (Belimbing's `x-ui.day-tile`): the
 
 ## Calendar
 
-`Calendar` (`src/calendar.rs`, `templates/calendar.html`, hook `Calendar` in `assets/calendar.js`) draws a Domain's records on a day, week, month or shared view (one column per person or resource) without the Domain owning any markup, CSS or JavaScript. The component never writes; the owner does. The running owner is `apps/web/examples/schedule-reference.rs`, and the specimens are at `/assets/ui-components.html#specimen-calendars`.
+`Calendar` (`src/calendar.rs`, `templates/calendar.html`, hook `Calendar` in `assets/calendar.js`) draws a Domain's records on a day, week, month, agenda, year or shared view (one column per person or resource) without the Domain owning any markup, CSS or JavaScript. The component never writes; the owner does. The running owner is `apps/web/examples/schedule-reference.rs`, and the specimens are at `/assets/ui-components.html#specimen-calendars`.
 
 The owner's side, in order:
 
@@ -149,9 +223,19 @@ The owner's side, in order:
 4. **Handle the four events.** `calendar::MOVE` (a drop or a resize) and `calendar::MOVE_SUBMIT` (the Move dialog) decode with `CalendarMove::from_event(event, zone)` into one `CalendarMove { id, version, when, lane }`: a wall-clock date and minute in the display zone, resolved with the zone's own rules, so a move across a daylight-saving change keeps its wall-clock time (a time in the gap becomes the first valid instant, one in the fold the earlier). The `Err` is a sentence to show. `calendar::MOVE_OPEN` carries the item to open in the dialog (`calendar::item_id`); set `Calendar::moving`, and clear it on `calendar::MOVE_CANCEL`. Keep an `Err` of the dialog in `Calendar::move_errors`.
 5. **Write through your own operation.** Pass the `CalendarMove` and its `version` to the facade that rechecks the capability and the version inside its `MutationBoundary` and refuses a stale one. Show the result in `Calendar::notice` (`StatusKind::Success`, or `Error` with the owner's own message, never a lower module's error text); a refusal must not be an `Error::Forbidden` or `Error::Internal`, which the transport treats as fatal. Re-read after every event: the browser never moves an item itself, so a refused move leaves the item where the server drew it.
 
+6. **Optional: create from a free slot.** Set `Calendar::creatable` only for a viewer who may create the record. A click or a drag down a free time column (a tap on touch), and a click, a tap or Enter on an empty day cell, raise `calendar::SLOT`; decode it with `CalendarSlot::from_event(event, zone)` (`when` is `Timed` for a time column, a one-date `AllDay` for a day) and open your own create dialog with the time filled in. The create itself goes through your own create operation, as every other key to that door does.
+7. **Optional: focus the time grid.** Set `Calendar::focus_hour` to the relevant hour (0–23) in the display zone to open a scrollable day, week or shared grid around it. The day headings stay visible, and live updates in the same range keep the reader’s scroll position.
+8. **Optional: mark late and soon.** `CalendarItem::urgency(Some(Urgency::Overdue | Urgency::Imminent))` (and `BoardCard::urgency`) tints the item's box and writes "Overdue" or "Due soon" beside its time; the owner decides which items qualify and the window. Never use it as the kind colour.
+
+The year view draws twelve small months: each day shows how many items fall on it (with a `!` and the danger colour when one is overdue) and links to that day's view; the month's name links to the month. **Give it `Calendar::day_totals`** (one `DayTotal { date, count, late }` per day that holds something, from one grouped count in your own facade under the same rule as the items) so a year is right however many items it holds; the year is then drawn from the totals and needs no items. Without `day_totals` it counts `items`, which is right only while the year stays under the 500-item bound.
+
 `Calendar::day_marks` puts a `DayKind` tint and word on a week or month cell (the same colours as `DayTile`). Snap is 15 minutes (`snap_minutes` 5, 10, 15, 30 or 60). Positions are classes on a grid of five-minute rows, never a `style` attribute.
 
 Below `md` the grids become an agenda list with the same items and the same Move action. Drag is off on coarse pointers; "Move…" opens the dialog, and is shown when a keyboard reaches it. The month view is a `grid` with arrow keys between days. A timed item that runs past midnight is drawn in each day it touches, and only the part holding its start can be dragged.
+
+**Agenda** (`CalendarView::Agenda`) is that same chronological list at every width: the month's days, each with its items, for a reader who wants the sequence rather than the grid. **The mini month** (`nav aria-label="Mini month"`) sits beside every grid view except Year: one month of days, each linking to its date in the current view, with the previous and next month arrows, a dot on a day that holds something (from `items`, or `day_totals` when the owner gives them), and the today ring. It is hidden below `md`.
+
+**Keyboard shortcuts** are scoped to the calendar: when no text field or open dialog holds the focus, `D`/`W`/`M`/`A` choose the view, `T` goes to today, the left and right arrows step the range and `?` toggles the legend. They activate the same links the toolbar draws, so every shortcut has its visible control. The grid keeps its own keys (arrows between month days, Enter to create), and a text field or dialog keeps every key.
 
 ## Board
 
@@ -169,8 +253,40 @@ Below `md` the board shows one column at a time with a column switcher whose lin
 
 ## Record references
 
-`RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven type-ahead inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md).
+`RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven combobox inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md). The picker shares the `Combobox` dropdown and keyboard controls, while typing still posts the search field after a 300 ms debounce. Hits show the record name. `PickerHit::kind_label` is empty when returned matches have one kind, or a singular noun when matches span several kinds. A picker that is a record page's fact (saving a pick or clear at once) uses `in_fact()`: its label is for screen readers and its clear button says Remove. Several pickers on one page share fixed pick and clear events and tell them apart with `key(field)`, sent as `key`.
+
+Set `PickerHit::instant` from the reader’s `DisplayContext::render` when a hit needs a timestamp. It appears on its own line below the name, so a truncated name leaves the timestamp visible. The timestamp follows the reader’s time display, including device-local time.
+
+## File preview
+
+**Show a file in place with `FilePreview { id, src, title }`** (an image, PDF or plain text in a same-origin frame), never a hand-written `<iframe>`, `<img>` or `<embed>` of your own.
+
+- `src` is a route the owner contributes under `DOWNLOADS` and answers with `FileBody::preview(bytes, content_type, filename)`, behind the same authorization and audit as its download. `preview` returns `None` for anything but PNG, JPEG, GIF, WebP, PDF and plain text (`FileBody::PREVIEW_TYPES`, `FileBody::previewable` for deciding whether to offer one), and the route answers not found: the shared contract refuses an SVG or HTML upload, not each owner's own list. The inline policy forbids scripts and framing by another origin.
+- The frame adds no write path and no second way to the bytes. Put it in a `Modal` with a Download link beside it; Close and Escape are the modal's.
+- Give it a stable `id` (the live patcher keys an iframe by it). The component specimen's File preview card is the running example; Documents' list preview is its first owner.
+
+## Received mail
+
+**Show received mail HTML with `MailFrame::new(id, title, html)`**, never `Html::raw`. `html` is `bilibi_mail::sanitise_html` output, with `cid:` images rewritten by `bilibi_mail::inline_images` (see [Mail](../mail/README.md#received-html)).
+
+- The document is escaped into an `<iframe sandbox srcdoc>`; the sandbox only lets a clicked link open in a new tab, so no script, form or same-origin access.
+- The frame keeps the page's CSP and adds its own: images only from `data:`, nothing fetched from elsewhere. Inline `style` attributes are not applied; `/assets/mail-frame.css` gives a paper surface in both themes.
+- Give it a stable `id` (the live patcher keys an iframe by it). The component specimen's Received mail card is the running example.
 
 ## Where to go next
 
-See [`base/system`](../system/README.md) for Banner colour on Instance settings.
+See [`base/system`](../system/README.md) for Banner colour on Server Instance.
+
+## Softphone
+
+`Softphone` renders a Domain-owned call projection: its last confirmed `CallPhase`, separate `PhoneHealth`, caller, action availability and an escaped `Html` screen-pop. Omit actions the actor cannot use; supply an unavailable reason for a temporarily disabled supported action. The shared control sends the enclosing page or panel its event with `action` and an opaque `version`. The owner binds the call in mounted state, checks the actor, current version and action again, and renders only an authoritative response. It owns transfer and conference inputs, provider I/O and the refusal text. Phone unavailability disables controls while preserving the last call phase and the rest of the page. On reconnect the owner reloads a scoped projection; event wakes are hints and must not be treated as ordered state.
+
+The disposable `softphone-walkthrough` web example is a fake source for manual browser verification; it is not registered by the production application. Its state and action controls exercise the live transport without a phone system.
+
+Several-choice inline editors preserve held code order and append new selections in tick order; opening and leaving an untouched editor sends no write. Contact and Company create forms preserve held order across redraws; selections added within one form event follow checkbox option order.
+
+## Tenant field labels
+
+The host scopes `FieldLabels` to each render; shared form controls and `ListColumns` apply the tenant word at that boundary. The context never survives a render or crosses tenants. UI has no dependency on Grid or the database, and a render without a tenant context uses the owner's default word.
+
+`BuiltinColumn`, `Field`, `Combobox`, `RestrictedField` and `ToolbarControl` accept `grid_field("table.field")`, keeping the field identity separate from the column slot, filter key, input name or DOM ID; a filter applies the tenant word to its label and its chip. `ListColumns::mount` and `projection` default to `list_id.column_id`; declare an explicit identity when those names differ from Grid. `RecordField::builtin` supplies its registered vocabulary identity, which [Grid resolves through the declared column path](../grid/README.md#shared-label-rendering). Composite display columns without a single Grid field keep their owner's label.

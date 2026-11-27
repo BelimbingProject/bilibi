@@ -61,6 +61,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "ammonia"
+version = "4.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f45dfa685e1ec33b1bf1a3b93b8047cbdbef41b6040deebbe6bea7720a45574"
+dependencies = [
+ "cssparser",
+ "html5ever",
+ "maplit",
+ "url",
+]
+
+[[package]]
 name = "argon2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -273,18 +291,26 @@ dependencies = [
  "bilibi-notifications",
  "bilibi-party-ids",
  "bilibi-person",
+ "bilibi-picklists",
  "bilibi-principal-directory",
+ "bilibi-public",
  "bilibi-queue",
  "bilibi-records",
  "bilibi-schedule",
  "bilibi-settings",
+ "bilibi-step-up",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-user",
+ "bilibi-watchers",
+ "bilibi-work-calendar",
+ "getrandom 0.4.3",
  "inventory",
  "jiff",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "thiserror",
  "tokio-postgres",
  "uuid",
@@ -330,6 +356,7 @@ dependencies = [
  "bilibi-agent-api",
  "bilibi-audit",
  "bilibi-authz",
+ "bilibi-base",
  "bilibi-bulk-data",
  "bilibi-company",
  "bilibi-database",
@@ -345,10 +372,12 @@ dependencies = [
  "bilibi-ui",
  "bilibi-walkthrough-fixture",
  "bilibi-web",
+ "hmac 0.13.0",
  "inventory",
  "jiff",
  "serde",
  "serde_json",
+ "sha1 0.11.0",
  "thiserror",
  "tokio",
  "tokio-postgres",
@@ -372,7 +401,9 @@ dependencies = [
  "bilibi-locale",
  "bilibi-module-registry",
  "bilibi-party-ids",
+ "bilibi-queue",
  "bilibi-records",
+ "bilibi-schedule",
  "bilibi-session",
  "bilibi-settings",
  "bilibi-step-up",
@@ -420,10 +451,43 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
- "sha2 0.11.1",
  "thiserror",
  "tokio",
  "tokio-postgres",
+ "uuid",
+]
+
+[[package]]
+name = "bilibi-ai"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "axum",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-base",
+ "bilibi-core",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-grid",
+ "bilibi-integration",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-queue",
+ "bilibi-schedule",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "data-encoding",
+ "inventory",
+ "jiff",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "url",
  "uuid",
 ]
 
@@ -436,6 +500,7 @@ dependencies = [
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-base",
+ "bilibi-branding",
  "bilibi-core",
  "bilibi-database",
  "bilibi-module-registry",
@@ -443,6 +508,7 @@ dependencies = [
  "bilibi-personal-data",
  "bilibi-queue",
  "bilibi-settings",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-walkthrough-fixture",
  "bilibi-web",
@@ -450,6 +516,7 @@ dependencies = [
  "hmac 0.13.0",
  "inventory",
  "libc",
+ "serde",
  "serde_json",
  "sha2 0.11.1",
  "thiserror",
@@ -467,6 +534,7 @@ dependencies = [
  "bilibi-personal-data",
  "bilibi-tenancy",
  "bytes",
+ "deadpool-postgres",
  "inventory",
  "serde",
  "serde_json",
@@ -480,6 +548,8 @@ name = "bilibi-audit-views"
 version = "0.2.1"
 dependencies = [
  "askama",
+ "axum",
+ "bilibi-agent-api",
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-base",
@@ -487,9 +557,12 @@ dependencies = [
  "bilibi-dashboard",
  "bilibi-database",
  "bilibi-datetime",
+ "bilibi-grid",
  "bilibi-locale",
  "bilibi-menu",
  "bilibi-module-registry",
+ "bilibi-queue",
+ "bilibi-settings",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-walkthrough-fixture",
@@ -536,6 +609,8 @@ dependencies = [
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-schedule",
+ "bilibi-settings",
+ "bilibi-system",
  "bilibi-tenancy",
  "bilibi-ui",
  "inventory",
@@ -544,28 +619,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-axi"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "bilibi-agent",
+ "bilibi-base",
+ "bilibi-core",
+ "bilibi-database",
+ "bilibi-tenancy",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "reqwest",
+ "rustls",
+ "rustls-native-certs",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
+ "webpki-roots",
+]
+
+[[package]]
 name = "bilibi-base"
 version = "0.2.1"
 dependencies = [
  "bilibi-agent-api",
+ "bilibi-ai",
  "bilibi-artifacts",
  "bilibi-audit",
  "bilibi-audit-views",
  "bilibi-authz",
  "bilibi-authz-agent",
+ "bilibi-branding",
  "bilibi-bulk-data",
  "bilibi-custom-fields",
  "bilibi-dashboard",
+ "bilibi-dashboard-agent",
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-design-library",
  "bilibi-events",
  "bilibi-grid",
  "bilibi-integration",
+ "bilibi-labels",
+ "bilibi-language-detection",
  "bilibi-locale",
  "bilibi-mail",
  "bilibi-media",
  "bilibi-menu",
+ "bilibi-menu-order",
  "bilibi-module-registry",
  "bilibi-notifications",
  "bilibi-party-ids",
@@ -575,22 +677,49 @@ dependencies = [
  "bilibi-ports",
  "bilibi-principal-directory",
  "bilibi-privacy",
+ "bilibi-public",
  "bilibi-queue",
  "bilibi-records",
  "bilibi-reports",
+ "bilibi-residents",
  "bilibi-schedule",
  "bilibi-search",
  "bilibi-security",
  "bilibi-session",
  "bilibi-settings",
  "bilibi-settings-editor",
+ "bilibi-setup-packs",
  "bilibi-software",
  "bilibi-step-up",
  "bilibi-system",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-tiling",
  "bilibi-ui",
+ "bilibi-visitor",
+ "bilibi-watchers",
  "bilibi-workflow",
+]
+
+[[package]]
+name = "bilibi-branding"
+version = "0.2.1"
+dependencies = [
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-labels",
+ "bilibi-mail",
+ "bilibi-media",
+ "bilibi-module-registry",
+ "bilibi-settings",
+ "bilibi-settings-editor",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "inventory",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
 ]
 
 [[package]]
@@ -603,6 +732,7 @@ dependencies = [
  "bilibi-authz",
  "bilibi-base",
  "bilibi-core",
+ "bilibi-custom-fields",
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-grid",
@@ -612,6 +742,7 @@ dependencies = [
  "bilibi-notifications",
  "bilibi-party-ids",
  "bilibi-personal-data",
+ "bilibi-picklists",
  "bilibi-queue",
  "bilibi-schedule",
  "bilibi-settings",
@@ -625,6 +756,7 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
  "tokio-postgres",
 ]
@@ -639,6 +771,8 @@ dependencies = [
  "bilibi-artifacts",
  "bilibi-audit",
  "bilibi-authz",
+ "bilibi-base",
+ "bilibi-core",
  "bilibi-custom-fields",
  "bilibi-dashboard",
  "bilibi-database",
@@ -649,12 +783,14 @@ dependencies = [
  "bilibi-media",
  "bilibi-menu",
  "bilibi-module-registry",
- "bilibi-notifications",
  "bilibi-party",
  "bilibi-party-ids",
  "bilibi-person",
+ "bilibi-personal-data",
  "bilibi-picklists",
+ "bilibi-ports",
  "bilibi-principal-directory",
+ "bilibi-privacy",
  "bilibi-records",
  "bilibi-reports",
  "bilibi-search",
@@ -664,14 +800,61 @@ dependencies = [
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-walkthrough-fixture",
+ "bilibi-watchers",
  "bilibi-web",
+ "bilibi-workflow",
+ "hmac 0.13.0",
  "inventory",
  "jiff",
  "serde",
  "serde_json",
+ "sha1 0.11.0",
  "thiserror",
  "tokio",
  "tokio-postgres",
+ "zip",
+]
+
+[[package]]
+name = "bilibi-consent"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-base",
+ "bilibi-company",
+ "bilibi-core",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-party-ids",
+ "bilibi-person",
+ "bilibi-personal-data",
+ "bilibi-picklists",
+ "bilibi-principal-directory",
+ "bilibi-privacy",
+ "bilibi-records",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "bilibi-user",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "bilibi-workflow",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
+ "inventory",
+ "jiff",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.1",
+ "thiserror",
+ "tokio",
+ "tokio-postgres",
+ "zip",
 ]
 
 [[package]]
@@ -683,6 +866,7 @@ dependencies = [
  "bilibi-affiliation",
  "bilibi-agent",
  "bilibi-company",
+ "bilibi-consent",
  "bilibi-currency",
  "bilibi-document",
  "bilibi-geonames",
@@ -690,6 +874,7 @@ dependencies = [
  "bilibi-person",
  "bilibi-portal",
  "bilibi-product",
+ "bilibi-team",
  "bilibi-tenant",
  "bilibi-user",
  "bilibi-work-calendar",
@@ -734,18 +919,27 @@ dependencies = [
  "bilibi-agent-api",
  "bilibi-audit",
  "bilibi-authz",
+ "bilibi-base",
+ "bilibi-core",
  "bilibi-database",
+ "bilibi-grid",
+ "bilibi-labels",
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-picklists",
+ "bilibi-records",
  "bilibi-settings",
  "bilibi-tenancy",
  "bilibi-ui",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
  "inventory",
  "jiff",
  "serde",
  "serde_json",
+ "tokio",
  "tokio-postgres",
+ "url",
 ]
 
 [[package]]
@@ -762,7 +956,24 @@ dependencies = [
  "inventory",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "bilibi-dashboard-agent"
+version = "0.2.1"
+dependencies = [
+ "bilibi-agent-api",
+ "bilibi-dashboard",
+ "bilibi-database",
+ "bilibi-labels",
+ "bilibi-module-registry",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "inventory",
+ "serde_json",
 ]
 
 [[package]]
@@ -792,6 +1003,8 @@ dependencies = [
  "bilibi-settings",
  "bilibi-tenancy",
  "bilibi-ui",
+ "icu_datetime",
+ "icu_locale",
  "inventory",
  "jiff",
  "serde_json",
@@ -821,34 +1034,55 @@ name = "bilibi-document"
 version = "0.2.1"
 dependencies = [
  "askama",
+ "axum",
+ "bilibi-activity",
  "bilibi-agent-api",
  "bilibi-artifacts",
+ "bilibi-audit",
  "bilibi-authz",
+ "bilibi-base",
  "bilibi-company",
+ "bilibi-core",
+ "bilibi-custom-fields",
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-grid",
  "bilibi-locale",
+ "bilibi-mail",
  "bilibi-media",
  "bilibi-menu",
  "bilibi-module-registry",
+ "bilibi-notifications",
  "bilibi-party-ids",
+ "bilibi-personal-data",
  "bilibi-picklists",
+ "bilibi-portal",
  "bilibi-principal-directory",
+ "bilibi-privacy",
+ "bilibi-queue",
  "bilibi-records",
+ "bilibi-search",
  "bilibi-settings",
+ "bilibi-step-up",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-user",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "bilibi-workflow",
+ "hmac 0.13.0",
  "inventory",
  "jiff",
  "serde_json",
+ "sha1 0.11.0",
  "sha2 0.11.1",
  "thiserror",
  "tokio",
  "tokio-postgres",
  "url",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -869,6 +1103,8 @@ dependencies = [
  "bilibi-module-registry",
  "bilibi-personal-data",
  "bilibi-queue",
+ "bilibi-schedule",
+ "bilibi-settings",
  "bilibi-step-up",
  "bilibi-tenancy",
  "bilibi-ui",
@@ -916,10 +1152,12 @@ dependencies = [
 name = "bilibi-grid"
 version = "0.2.1"
 dependencies = [
+ "bilibi-agent-api",
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-database",
  "bilibi-datetime",
+ "bilibi-labels",
  "bilibi-module-registry",
  "bilibi-personal-data",
  "bilibi-settings",
@@ -928,9 +1166,11 @@ dependencies = [
  "bytes",
  "inventory",
  "jiff",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-postgres",
+ "url",
 ]
 
 [[package]]
@@ -948,6 +1188,7 @@ version = "0.2.1"
 dependencies = [
  "askama",
  "axum",
+ "bilibi-agent-api",
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-base",
@@ -973,6 +1214,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "rustls-native-certs",
+ "serde",
  "serde_json",
  "sha2 0.11.1",
  "thiserror",
@@ -981,6 +1223,52 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots",
+]
+
+[[package]]
+name = "bilibi-labels"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-audit",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-principal-directory",
+ "bilibi-settings",
+ "bilibi-system",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "inventory",
+ "jiff",
+ "serde",
+ "serde_json",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "bilibi-language-detection"
+version = "0.2.1"
+dependencies = [
+ "bilibi-base",
+ "bilibi-core",
+ "bilibi-database",
+ "bilibi-module-registry",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "fasttext",
+ "inventory",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
+ "tokio-postgres",
 ]
 
 [[package]]
@@ -994,6 +1282,7 @@ dependencies = [
  "icu_decimal",
  "icu_locale",
  "inventory",
+ "rust_decimal",
  "serde_json",
  "tokio-postgres",
 ]
@@ -1002,14 +1291,26 @@ dependencies = [
 name = "bilibi-mail"
 version = "0.2.1"
 dependencies = [
+ "ammonia",
+ "askama",
+ "bilibi-base",
+ "bilibi-core",
  "bilibi-database",
  "bilibi-module-registry",
  "bilibi-settings",
+ "bilibi-ui",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "data-encoding",
  "inventory",
+ "jiff",
  "lettre",
+ "mail-parser",
+ "memchr",
  "serde_json",
  "thiserror",
  "tokio",
+ "url",
  "uuid",
 ]
 
@@ -1020,6 +1321,7 @@ dependencies = [
  "askama",
  "axum",
  "bilibi-agent-api",
+ "bilibi-audit",
  "bilibi-authz",
  "bilibi-base",
  "bilibi-core",
@@ -1029,6 +1331,7 @@ dependencies = [
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-notifications",
+ "bilibi-party-ids",
  "bilibi-personal-data",
  "bilibi-queue",
  "bilibi-schedule",
@@ -1057,6 +1360,24 @@ version = "0.2.1"
 dependencies = [
  "bilibi-module-registry",
  "inventory",
+]
+
+[[package]]
+name = "bilibi-menu-order"
+version = "0.2.1"
+dependencies = [
+ "bilibi-agent-api",
+ "bilibi-audit",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-labels",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-tenancy",
+ "inventory",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio-postgres",
 ]
 
 [[package]]
@@ -1137,6 +1458,7 @@ dependencies = [
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-bulk-data",
+ "bilibi-custom-fields",
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-grid",
@@ -1147,6 +1469,7 @@ dependencies = [
  "bilibi-party",
  "bilibi-party-ids",
  "bilibi-personal-data",
+ "bilibi-picklists",
  "bilibi-principal-directory",
  "bilibi-privacy",
  "bilibi-records",
@@ -1156,6 +1479,7 @@ dependencies = [
  "bilibi-system",
  "bilibi-tenancy",
  "bilibi-ui",
+ "bilibi-user",
  "bilibi-walkthrough-fixture",
  "bilibi-web",
  "inventory",
@@ -1212,6 +1536,7 @@ dependencies = [
  "bilibi-company",
  "bilibi-database",
  "bilibi-datetime",
+ "bilibi-events",
  "bilibi-locale",
  "bilibi-mail",
  "bilibi-media",
@@ -1220,8 +1545,12 @@ dependencies = [
  "bilibi-notifications",
  "bilibi-party-ids",
  "bilibi-person",
+ "bilibi-personal-data",
+ "bilibi-privacy",
+ "bilibi-public",
  "bilibi-records",
  "bilibi-settings",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-user",
@@ -1243,10 +1572,12 @@ dependencies = [
  "bilibi-module-registry",
  "bilibi-tenancy",
  "deadpool-postgres",
+ "futures-util",
  "inventory",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
  "tokio-postgres",
 ]
 
@@ -1333,6 +1664,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-public"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-media",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
+ "inventory",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio-postgres",
+ "url",
+]
+
+[[package]]
 name = "bilibi-queue"
 version = "0.2.1"
 dependencies = [
@@ -1362,6 +1716,7 @@ dependencies = [
  "bilibi-grid",
  "bilibi-module-registry",
  "bilibi-settings",
+ "bilibi-step-up",
  "bilibi-tenancy",
  "bilibi-ui",
  "inventory",
@@ -1383,6 +1738,7 @@ dependencies = [
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-grid",
+ "bilibi-labels",
  "bilibi-locale",
  "bilibi-mail",
  "bilibi-menu",
@@ -1394,6 +1750,7 @@ dependencies = [
  "bilibi-records",
  "bilibi-schedule",
  "bilibi-settings",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-ui",
  "inventory",
@@ -1401,6 +1758,32 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "bilibi-residents"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "axum",
+ "bilibi-authz",
+ "bilibi-base",
+ "bilibi-core",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "inventory",
+ "jiff",
+ "serde_json",
+ "tokio",
  "tokio-postgres",
 ]
 
@@ -1477,8 +1860,11 @@ dependencies = [
  "bilibi-authz",
  "bilibi-dashboard",
  "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-locale",
  "bilibi-menu",
  "bilibi-module-registry",
+ "bilibi-personal-data",
  "bilibi-principal-directory",
  "bilibi-queue",
  "bilibi-schedule",
@@ -1487,6 +1873,8 @@ dependencies = [
  "bilibi-tenancy",
  "bilibi-ui",
  "inventory",
+ "jiff",
+ "maxminddb",
  "serde_json",
  "sha2 0.11.1",
  "tokio",
@@ -1518,9 +1906,11 @@ name = "bilibi-settings-editor"
 version = "0.2.1"
 dependencies = [
  "askama",
+ "bilibi-agent-api",
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-database",
+ "bilibi-labels",
  "bilibi-media",
  "bilibi-menu",
  "bilibi-module-registry",
@@ -1531,6 +1921,28 @@ dependencies = [
  "bilibi-ui",
  "inventory",
  "serde_json",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "bilibi-setup-packs"
+version = "0.2.1"
+dependencies = [
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-custom-fields",
+ "bilibi-database",
+ "bilibi-grid",
+ "bilibi-labels",
+ "bilibi-module-registry",
+ "bilibi-tenancy",
+ "bilibi-walkthrough-fixture",
+ "bilibi-watchers",
+ "bilibi-web",
+ "inventory",
+ "serde",
+ "serde_json",
+ "tokio",
  "tokio-postgres",
 ]
 
@@ -1549,14 +1961,17 @@ dependencies = [
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-notifications",
+ "bilibi-schedule",
  "bilibi-settings",
  "bilibi-step-up",
  "bilibi-system",
  "bilibi-tenancy",
  "bilibi-ui",
+ "data-encoding",
  "flate2",
  "inventory",
  "jiff",
+ "jsonwebtoken",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -1589,10 +2004,12 @@ dependencies = [
  "bilibi-authz",
  "bilibi-database",
  "bilibi-locale",
+ "bilibi-mail",
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-perf",
  "bilibi-queue",
+ "bilibi-residents",
  "bilibi-settings",
  "bilibi-step-up",
  "bilibi-tenancy",
@@ -1601,8 +2018,72 @@ dependencies = [
  "inventory",
  "libc",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
  "tokio-postgres",
+]
+
+[[package]]
+name = "bilibi-team"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-base",
+ "bilibi-company",
+ "bilibi-core",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-grid",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-picklists",
+ "bilibi-ports",
+ "bilibi-records",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "bilibi-user",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "inventory",
+ "jiff",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "bilibi-templates"
+version = "0.2.1"
+dependencies = [
+ "base64 0.23.1",
+ "bilibi-agent-api",
+ "bilibi-artifacts",
+ "bilibi-authz",
+ "bilibi-branding",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-labels",
+ "bilibi-module-registry",
+ "bilibi-party-ids",
+ "bilibi-queue",
+ "bilibi-schedule",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "icu_locale",
+ "inventory",
+ "jiff",
+ "qrcode",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio-postgres",
+ "url",
 ]
 
 [[package]]
@@ -1634,14 +2115,18 @@ dependencies = [
  "bilibi-locale",
  "bilibi-menu",
  "bilibi-module-registry",
+ "bilibi-session",
  "bilibi-settings",
  "bilibi-step-up",
  "bilibi-system",
  "bilibi-tenancy",
  "bilibi-ui",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
  "inventory",
  "jiff",
  "serde_json",
+ "tokio",
  "tokio-postgres",
 ]
 
@@ -1650,8 +2135,10 @@ name = "bilibi-tiling"
 version = "0.2.1"
 dependencies = [
  "askama",
+ "bilibi-agent-api",
  "bilibi-authz",
  "bilibi-database",
+ "bilibi-labels",
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-settings",
@@ -1660,6 +2147,7 @@ dependencies = [
  "inventory",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tokio-postgres",
 ]
 
@@ -1671,10 +2159,12 @@ dependencies = [
  "bilibi-module-registry",
  "inventory",
  "jiff",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -1695,8 +2185,10 @@ dependencies = [
  "bilibi-dashboard",
  "bilibi-database",
  "bilibi-datetime",
+ "bilibi-events",
  "bilibi-grid",
  "bilibi-integration",
+ "bilibi-labels",
  "bilibi-locale",
  "bilibi-mail",
  "bilibi-media",
@@ -1714,6 +2206,7 @@ dependencies = [
  "bilibi-settings",
  "bilibi-step-up",
  "bilibi-system",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-walkthrough-fixture",
@@ -1740,6 +2233,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-visitor"
+version = "0.2.1"
+dependencies = [
+ "bilibi-audit",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-module-registry",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "getrandom 0.4.3",
+ "inventory",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
+ "tokio-postgres",
+ "url",
+]
+
+[[package]]
 name = "bilibi-walkthrough-fixture"
 version = "0.2.1"
 dependencies = [
@@ -1751,11 +2263,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-watchers"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-ai",
+ "bilibi-authz",
+ "bilibi-custom-fields",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-events",
+ "bilibi-grid",
+ "bilibi-labels",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-principal-directory",
+ "bilibi-queue",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "inventory",
+ "jiff",
+ "libc",
+ "rlimit",
+ "rquickjs",
+ "rust_decimal",
+ "seccompiler",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "bilibi-web"
 version = "0.2.1"
 dependencies = [
  "askama",
  "axum",
+ "bilibi-activity",
  "bilibi-address",
  "bilibi-agent",
  "bilibi-agent-api",
@@ -1768,15 +2317,18 @@ dependencies = [
  "bilibi-extensions",
  "bilibi-geonames",
  "bilibi-grid",
+ "bilibi-locale",
  "bilibi-mail",
  "bilibi-module-registry",
  "bilibi-notifications",
+ "bilibi-person",
  "bilibi-portal",
  "bilibi-ports",
  "bilibi-queue",
  "bilibi-records",
  "bilibi-security",
  "bilibi-step-up",
+ "bilibi-team",
  "bilibi-tenancy",
  "bilibi-tenant",
  "bilibi-ui",
@@ -1784,14 +2336,19 @@ dependencies = [
  "bilibi-walkthrough-fixture",
  "bilibi-workflow",
  "futures-core",
+ "futures-util",
  "http-body-util",
+ "icu_properties",
  "inventory",
  "jiff",
- "libc",
+ "mmdb-writer",
+ "rust_decimal",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
  "tokio-postgres",
+ "tokio-tungstenite",
  "tower-http",
  "url",
  "uuid",
@@ -1903,6 +2460,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "bon"
+version = "3.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a05442cd7005532d0cfedec676b5b9333d2b4c7c3afabe2b1a9ce2742fbe2ee6"
+dependencies = [
+ "bon-macros",
+]
+
+[[package]]
+name = "bon-macros"
+version = "3.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93833e97ac7c46ba97045afcf247238c27057538fcf2f06344662ddd5f567be6"
+dependencies = [
+ "darling",
+ "ident_case",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "borsh"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1964,6 +2544,16 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
+name = "calendrical_calculations"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5abbd6eeda6885048d357edc66748eea6e0268e3dd11f326fff5bd248d779c26"
+dependencies = [
+ "core_maths",
+ "displaydoc",
+]
 
 [[package]]
 name = "cc"
@@ -2072,6 +2662,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
+name = "core_maths"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77745e017f5edba1a9c1d854f6f3a52dac8a12dd5af5d2f54aecf61e43d80d30"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "cpubits"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2105,6 +2710,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-deque"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
+
+[[package]]
 name = "crypto-bigint"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2135,6 +2765,17 @@ dependencies = [
  "getrandom 0.4.3",
  "hybrid-array",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "cssparser"
+version = "0.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11119743ad110e8c1bdccd930d7f5c30c99e5fc76a7b63ec9807e84eef0c5f59"
+dependencies = [
+ "dtoa-short",
+ "itoa",
+ "smallvec",
 ]
 
 [[package]]
@@ -2180,6 +2821,40 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "darling"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
+dependencies = [
+ "darling_core",
+ "darling_macro",
+]
+
+[[package]]
+name = "darling_core"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6837e2cf7485aaae18f86181d2f0e9a7ed297a025e220aeabf63fdebd3a2ddff"
+dependencies = [
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 3.0.9",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
+dependencies = [
+ "darling_core",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -2299,6 +2974,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dtoa"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590"
+
+[[package]]
+name = "dtoa-short"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87"
+dependencies = [
+ "dtoa",
+]
+
+[[package]]
 name = "ecdsa"
 version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2335,6 +3025,12 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
+
+[[package]]
+name = "either"
+version = "1.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "elliptic-curve"
@@ -2374,6 +3070,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89253175e704ab869b04f9db224d38630e0211a53841a79181deae0889e169f5"
+dependencies = [
+ "cfg-if",
+ "core_detect",
+ "multiversion_no_op",
+ "rustversion",
+ "scopeguard",
+ "simdutf8",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2400,6 +3110,16 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
+name = "fasttext"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d6a02b4f252e7185802dd69fecc0d14ce21ea6c7a98dd7ad359fcea1117fdb"
+dependencies = [
+ "rayon",
+ "thiserror",
+]
 
 [[package]]
 name = "ff"
@@ -2435,9 +3155,9 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "fixed_decimal"
-version = "0.7.2"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79c3c892f121fff406e5dd6b28c1b30096b95111c30701a899d4f2b18da6d1bd"
+checksum = "2214fb00f669ee96bee5bb29dfb1ddabe058b2bc426817efc79afa03c9bc55ae"
 dependencies = [
  "displaydoc",
  "smallvec",
@@ -2460,6 +3180,12 @@ name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+
+[[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
@@ -2493,6 +3219,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
 
 [[package]]
+name = "futures-macro"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "futures-sink"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2512,6 +3249,7 @@ checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
  "futures-io",
+ "futures-macro",
  "futures-sink",
  "futures-task",
  "memchr",
@@ -2618,6 +3356,23 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
+
+[[package]]
+name = "hashify"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd1246c0e5493286aeb2dde35b1f4eb9c4ce00e628641210a5e553fc001a1f26"
+dependencies = [
+ "indexmap",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "hkdf"
@@ -2644,6 +3399,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
 dependencies = [
  "digest 0.11.3",
+]
+
+[[package]]
+name = "html5ever"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "456a1a377e608e555d22ddab27ac0114bc7a7b4199078108e34c2aeae6c9b130"
+dependencies = [
+ "log",
+ "markup5ever",
+ "memchr",
 ]
 
 [[package]]
@@ -2762,10 +3528,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "icu_collections"
-version = "2.3.0"
+name = "icu_calendar"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa68d21081c4a05d5a901a1c62add574c77048b6a1c67be3b50ce0b60d4ca513"
+checksum = "a68ffb801cc7acb8dcae62da7c692c47934698d2dd4f479ddee1eb442763dea1"
+dependencies = [
+ "calendrical_calculations",
+ "displaydoc",
+ "icu_calendar_data",
+ "icu_locale_core",
+ "icu_locale_fallback",
+ "icu_provider",
+ "ixdtf",
+ "tinystr",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_calendar_data"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "514da54e79efa36b5976232d5b3d1d8ee1b47b19ab658f1b1ebe39221696c2d8"
+
+[[package]]
+name = "icu_collections"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe090a42a0d3140fed8c63263ed1fecc02422cb2f4bfe55cd8de2de1b8e105dd"
 dependencies = [
  "displaydoc",
  "potential_utf",
@@ -2776,10 +3565,39 @@ dependencies = [
 ]
 
 [[package]]
-name = "icu_decimal"
-version = "2.3.0"
+name = "icu_datetime"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9eb8f655bba2d0c0459e43a5b0e6cd3cd388109898fb3d85d048165e8b0abd08"
+checksum = "3c338aa7ebff734470e216a4196fa84b123a366cc786c445741b6f5647412c3c"
+dependencies = [
+ "displaydoc",
+ "fixed_decimal",
+ "icu_calendar",
+ "icu_datetime_data",
+ "icu_decimal",
+ "icu_locale_core",
+ "icu_locale_fallback",
+ "icu_pattern",
+ "icu_plurals",
+ "icu_provider",
+ "icu_time",
+ "potential_utf",
+ "tinystr",
+ "writeable",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_datetime_data"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bddb757c2df1635453c4e8cb2d4ba7ad026e904893f29699315826c0951bbd9"
+
+[[package]]
+name = "icu_decimal"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1150ad5e272740670464934ee76facda43ef2e11f85c27b7ba76ccb33edf2d05"
 dependencies = [
  "displaydoc",
  "fixed_decimal",
@@ -2794,15 +3612,15 @@ dependencies = [
 
 [[package]]
 name = "icu_decimal_data"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4c887fc7d4c297cf3f9436864af9e3dba7f8be9415a6c2a7f392f3b1636298c"
+checksum = "5595ab78370d48abd24a062f3db115d5108dd0b65634352036cae532aebb0df8"
 
 [[package]]
 name = "icu_locale"
-version = "2.3.1"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "785f595c61ef57169a467eeed7b4b6936a66f6cacbb116a96ee86da983251bf4"
+checksum = "fe8fa57bcddc15cb921582ee5259c5b77da39f946f188ca5213fad24d9241236"
 dependencies = [
  "icu_collections",
  "icu_locale_core",
@@ -2815,9 +3633,9 @@ dependencies = [
 
 [[package]]
 name = "icu_locale_core"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d56e28588da92eee5c3201a6eff33fabdd49b62269c8938d4ff050ce4d900deb"
+checksum = "25d29b57c17c6528d0dc4c2141cfa2d08200465acb537a3909c8b9b8a4a984c0"
 dependencies = [
  "displaydoc",
  "litemap",
@@ -2829,15 +3647,15 @@ dependencies = [
 
 [[package]]
 name = "icu_locale_data"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d37d91460e362a5cf58907cd7ce871411775ee6294e49a5cc8e6cec16dfa75ea"
+checksum = "a64014dac577a11d8d2cee48517c73c1984bd72ab11031e934269bd3cefb2ad9"
 
 [[package]]
 name = "icu_locale_fallback"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "251af8e57c9400e3eb58242fe5b8b1152b2a64fdf4cf632f923c38ccee6f2fa9"
+checksum = "406e9ae5b95d8aa37db6293405931b766a6172d1848daee22d70eb44aa78a43c"
 dependencies = [
  "icu_locale_core",
  "icu_locale_fallback_data",
@@ -2849,15 +3667,15 @@ dependencies = [
 
 [[package]]
 name = "icu_locale_fallback_data"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "decf2a22ec8fa68f1a0c1129a3f8583f8f8bc24e8b9ccbe98ead99f62a4dc3a8"
+checksum = "3632ebbd0c5c3637ba1a40bdf8288f2cb9d2268e73441a69d5fc73d7cfbaa87c"
 
 [[package]]
 name = "icu_normalizer"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12f9cf5f235641ed274641dd81c3f28d870e276763d0797aeeab72317b1c646f"
+checksum = "404a3b8c486f205c87fe7f23ab6894d84a4ad76d6e4671ae1981ba7def87c599"
 dependencies = [
  "icu_collections",
  "icu_normalizer_data",
@@ -2869,15 +3687,28 @@ dependencies = [
 
 [[package]]
 name = "icu_normalizer_data"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1563da1ed3e0b3bf3d74c9b85917ac9c56464d2f57242270c09c9e752f8021a0"
+checksum = "20f0088bfb7441f7a37fa0c9e20cb1e9cba1cac6b9ce8cd2a6dc44294f8e8cbc"
+
+[[package]]
+name = "icu_pattern"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc43ce0e76ee8cb0482dc6e2dbb9b76278e8038f45daabf2a2877577e2ceb18f"
+dependencies = [
+ "displaydoc",
+ "either",
+ "serde",
+ "writeable",
+ "zerovec",
+]
 
 [[package]]
 name = "icu_plurals"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e475e6766ef87b1d3c1f97be6363995b0bfaeddbc789671615df598a97ff0593"
+checksum = "2ef046647b445acf95ce0f8083fa292467d3df649959fa9a20f3f8abfd957c5d"
 dependencies = [
  "fixed_decimal",
  "icu_locale_fallback",
@@ -2888,15 +3719,15 @@ dependencies = [
 
 [[package]]
 name = "icu_plurals_data"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1251aa39a95e1333888e499b1263e1c196447a28948acf5bdabd82c046f153bf"
+checksum = "d43ff7df2c1a1d41588a6ddcba354d513d4a3e10eec22c06fe56d13c12a848ea"
 
 [[package]]
 name = "icu_properties"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e7ca276ad3145661a65914e6daf131ca5120cd3dcee8f8f3214b8875184a148"
+checksum = "2ea83d991c56158f7cf898bf86436c1dfe7c07ee82fe88951f2695c9f37a379f"
 dependencies = [
  "displaydoc",
  "icu_collections",
@@ -2909,15 +3740,15 @@ dependencies = [
 
 [[package]]
 name = "icu_properties_data"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e590f038c1464a96894fd6d10127e90a8be4509f56ff7ecef851b15cee0b7caa"
+checksum = "b98f29af82d02b163fe50161388350e743bb3107cc8e8c2f7314cb505faddfcf"
 
 [[package]]
 name = "icu_provider"
-version = "2.3.1"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d27bbb9d3abbefac45d55f647c9de1d44aafcd1186eb91879afef17c396c3e73"
+checksum = "413099315636c588ee8f011190b329b971a09a8fae9d157e01dcae8379468514"
 dependencies = [
  "displaydoc",
  "icu_locale_core",
@@ -2929,6 +3760,37 @@ dependencies = [
  "zerotrie",
  "zerovec",
 ]
+
+[[package]]
+name = "icu_time"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17d45ee651f21433b1c6352311f2ad9b5253c26be0e25d9a0869cb8247b8cfde"
+dependencies = [
+ "calendrical_calculations",
+ "displaydoc",
+ "icu_calendar",
+ "icu_locale_core",
+ "icu_provider",
+ "icu_time_data",
+ "ixdtf",
+ "serde",
+ "writeable",
+ "zerotrie",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_time_data"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6d7d711f44237fa9300406ab6e521148594056862343370b5df265a0d15c088"
+
+[[package]]
+name = "ident_case"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
 name = "idna"
@@ -2984,12 +3846,27 @@ name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "ipnetwork"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
 
 [[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "ixdtf"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4754a1731458af0443709c9667302793d3f63cc90ec4ba4c8259f2b9515478e5"
 
 [[package]]
 name = "jiff"
@@ -3213,10 +4090,49 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "mail-parser"
+version = "0.11.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ec00bda90c6e645a54506c630c2820cd6b1890cfd2b0a169b50f74b2b8c7c86"
+dependencies = [
+ "encoding_rs",
+ "hashify",
+]
+
+[[package]]
+name = "maplit"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e2e65a1a2e43cfcb47a895c4c8b10d1f4a61097f9f254f183aee60cad9c651d"
+
+[[package]]
+name = "markup5ever"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ab3dc68ac4a0f5719e560136778c1ee716e296030d75dbd4484e37e39e3a842"
+dependencies = [
+ "log",
+ "tendril",
+ "web_atoms",
+]
+
+[[package]]
 name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "maxminddb"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "317d6b918ba3893345af072f52cb56bcfcb532a9d0ebcf861ab3c25b37a316ac"
+dependencies = [
+ "ipnetwork",
+ "memchr",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "md-5"
@@ -3260,6 +4176,30 @@ dependencies = [
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "mmdb-writer"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3945ac8140abc6265c52434cc39bccb7163116e9a2f3d22965f8cd8827f24cdc"
+dependencies = [
+ "bon",
+ "ipnet",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "multiversion_no_op"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
+
+[[package]]
+name = "new_debug_unreachable"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nix"
@@ -3446,8 +4386,38 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
 dependencies = [
- "phf_shared",
+ "phf_shared 0.13.1",
  "serde",
+]
+
+[[package]]
+name = "phf"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "010378780309880b08997fae13be7834dba947d36393bd372f2b1556deb2a2f6"
+dependencies = [
+ "phf_shared 0.14.0",
+ "serde",
+]
+
+[[package]]
+name = "phf_codegen"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b585a510fb76fdebead6897982ef2a03a21d8e6cbcca904999742a4afc6ffe"
+dependencies = [
+ "phf_generator",
+ "phf_shared 0.14.0",
+]
+
+[[package]]
+name = "phf_generator"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeb62e0959d5a1bebc965f4d15d9e2b7cea002b6b0f5ba8cde6cc26738467100"
+dependencies = [
+ "fastrand",
+ "phf_shared 0.14.0",
 ]
 
 [[package]]
@@ -3455,6 +4425,15 @@ name = "phf_shared"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6fd9027e2d9319be6349febd1db4e8d02aa544921200c9b777720ac34a3aa89"
 dependencies = [
  "siphasher",
 ]
@@ -3565,6 +4544,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "precomputed-hash"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
+
+[[package]]
+name = "prettyplease"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
+dependencies = [
+ "proc-macro2",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "primeorder"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3590,6 +4585,24 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "pulldown-cmark-escape",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "qrcode"
@@ -3701,12 +4714,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags 2.13.2",
+]
+
+[[package]]
+name = "relative-path"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38540a682c6e9bca04a8bca9e5ec5a6ba168dfbb04c9998fe517a9befb92eb68"
+dependencies = [
+ "serde_core",
 ]
 
 [[package]]
@@ -3766,6 +4808,44 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rlimit"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f35ee2729c56bb610f6dba436bf78135f728b7373bdffae2ec815b2d3eb98cc3"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "rquickjs"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0a22bf72f515cc4189dd7c63d016f6de92a11eee98ddf7dd64794198f6eb34e"
+dependencies = [
+ "rquickjs-core",
+]
+
+[[package]]
+name = "rquickjs-core"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6657979a24d543e5fc66f32cef2f47ca82ce8eb55cec5f7d59a12b7b570bbf24"
+dependencies = [
+ "hashbrown",
+ "relative-path",
+ "rquickjs-sys",
+]
+
+[[package]]
+name = "rquickjs-sys"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cee271d0eeba64f0915b846cb7ae02e16faf3dfdffdca91731101d9d30fe3423"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -3956,6 +5036,15 @@ dependencies = [
  "pkcs8",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -4196,6 +5285,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "string_cache"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffa8a5dbe8b3f0bbe29d4c3225daafaeead63afdc1b65fc4c01a1384166038e6"
+dependencies = [
+ "new_debug_unreachable",
+ "parking_lot",
+ "phf_shared 0.14.0",
+ "precomputed-hash",
+]
+
+[[package]]
+name = "string_cache_codegen"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928dcdf75e47626b3617a976ec205d9f057584c371c1f23b782129268d0e6edc"
+dependencies = [
+ "phf_generator",
+ "phf_shared 0.14.0",
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
 name = "stringprep"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4205,6 +5318,12 @@ dependencies = [
  "unicode-normalization",
  "unicode-properties",
 ]
+
+[[package]]
+name = "strsim"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "subtle"
@@ -4266,6 +5385,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tendril"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fed54709c5b3a53d09bb1c113ea4f5ceafd1e772ddcb0030a82e1d56c087b08"
+dependencies = [
+ "new_debug_unreachable",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4287,9 +5415,9 @@ dependencies = [
 
 [[package]]
 name = "tinystr"
-version = "0.8.4"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1e27c91459209c2986af3dcf603a5a74a4368754ce37414f59acc971167f643"
+checksum = "abc840c238154d58f9e86b2792261edfde565a17696e1cda1a449de27979801a"
 dependencies = [
  "displaydoc",
  "serde_core",
@@ -4345,7 +5473,7 @@ dependencies = [
  "log",
  "parking_lot",
  "percent-encoding",
- "phf",
+ "phf 0.13.1",
  "pin-project-lite",
  "postgres-protocol",
  "postgres-types",
@@ -4547,6 +5675,12 @@ dependencies = [
  "rand 0.10.3",
  "web-time",
 ]
+
+[[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-bidi"
@@ -4756,6 +5890,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "web_atoms"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7572660c8890448ba236b7376f27e389c6a7e1c70195622faced601f855c0ada"
+dependencies = [
+ "phf 0.14.0",
+ "phf_codegen",
+ "string_cache",
+ "string_cache_codegen",
+]
+
+[[package]]
 name = "webpki-root-certs"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4903,6 +6049,9 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+dependencies = [
+ "either",
+]
 
 [[package]]
 name = "xattr"
@@ -4916,9 +6065,9 @@ dependencies = [
 
 [[package]]
 name = "yoke"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "709fe23a0424b6a435d82152b1bd3fdfb0833487d5fa90d05d42762a9891fef5"
+checksum = "417ef3fcf6c300b7dbd25c85531a746931c02ad536f3cf4786ed1e88223340b3"
 dependencies = [
  "stable_deref_trait",
  "yoke-derive",
@@ -5012,9 +6161,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec"
-version = "0.11.8"
+version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb0464e17806c1d976d5cba29399c7f08e516e279e2ba493f63123b5fca67dd8"
+checksum = "f58a2799cfe9a1670c7ea8edbd52ef8edb93cb37a7f83bf31ba9e35d9dae6a40"
 dependencies = [
  "serde",
  "yoke",
@@ -5024,9 +6173,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec-derive"
-version = "0.11.6"
+version = "0.11.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34df6fc39dbd26ddc9c10e6a2984476e13acce22e64e4487636ef494369225da"
+checksum = "c3743ddbf47738d929cd1ae2e199d40d0162979dfe31aef8ae646d2bf00bf97a"
 dependencies = [
  "proc-macro2",
  "quote",

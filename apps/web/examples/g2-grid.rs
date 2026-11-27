@@ -55,7 +55,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get::<Authentication>("base/tenancy.authentication")?;
     let grants = app.services.get::<Grants>("base/authz.grants")?;
     grants.reconcile().await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
     let manager = auth
         .authenticate(client, 1, 1, std::string::String::new())
@@ -183,7 +185,12 @@ INSERT INTO base_grid_ref_movements(id,tenant_id,item_id,delta,moved_on) VALUES 
         )
         .await?;
     grants
-        .set_direct(&admin, viewer.user(), "grid.reference.view", Some(false))
+        .set_direct(
+            &admin,
+            viewer.user(),
+            "grid.reference.view",
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     println!(
         "revoked: {:?}",

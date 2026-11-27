@@ -1,20 +1,23 @@
 //! User's personal-data store (ADR 05, `base/personal_data`): the accounts linked to
-//! the person and their notifications. Erasure closes each account the way
-//! `delete_account` does (sessions ended, step-up factors removed, reset
-//! tokens dropped) and anonymises it: the row, its ID and its links stay, the
-//! name and sign-in email do not. Single sign-on links, pending sign-ins and
-//! failed-attempt counters have no business value and are deleted, as are
+//! the person, their notifications and action evidence. Erasure closes accounts as
+//! `remove_membership` does (membership sessions ended) and anonymises it: the
+//! row and its ID stay, while its tenant-owned name and links do not. The
+//! installation-owned sign-in email, password, factors, pending sign-ins and
+//! failed-attempt counters are outside a customer's erasure. Single sign-on links are deleted, as are
 //! notifications, each unless a legal hold names it. The account's SCIM
 //! document keeps only its resource ID, and a first administrator's receipt
 //! its placeholder email. Accounts that only share an email are counted, never
 //! touched. A membership invitation is found by its address: erasure closes it
 //! and anonymises the address and the sign-in-less account prepared for it.
+//! Session's sign-in history (time, address, device) is security evidence:
+//! the export lists it, erasure leaves it and reports it kept, and Session's
+//! expiry sweep deletes each record 90 days after the sign-in.
 use bilibi_database::{Change, Error, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_personal_data::{
     Action, Disclosure, Erased, ErasedRecord, Erasure, Exported, Handler, HandlerFuture, Holds,
-    Identifier, Kept, KindCount, Located, PersonalData, RecordKind, Subject, ERASED, PERSONAL_DATA,
-    RECORD_KINDS,
+    Identifier, Kept, KeptReason, KindCount, Located, PersonalData, RecordKind, Subject, ERASED,
+    PERSONAL_DATA, RECORD_KINDS,
 };
 use bilibi_security::Sessions;
 use bilibi_tenancy::Scope;
@@ -22,9 +25,19 @@ use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 use tokio_postgres::Client;
 
+pub(crate) mod invitations;
+use invitations::{
+    anonymise_accepted_invitations, anonymise_invitations, held_accepted_invitations,
+    held_prepared_accounts,
+};
+
 const USER_KIND: &str = "user";
 pub(crate) const IDENTITY_KIND: &str = "user_identity";
 const NOTIFICATION_KIND: &str = "notification";
+/// The certificate's name for an account's retained sign-in history; not an
+/// audit record kind, so no store erases it.
+const SIGN_IN_HISTORY_KIND: &str = "session.sign_in_history";
+const AUDIT_ACTIONS_KIND: &str = "audit.account_actions";
 /// A membership invitation: the invitee's address, and the name on the
 /// account prepared for it, which has no sign-in yet.
 pub(crate) const INVITATION_KIND: &str = "user.invitation";
@@ -34,24 +47,24 @@ const SCIM_KIND: &str = "user.scim_user";
 pub(crate) const EXTERNAL_IDENTITY_KIND: &str = "user.external_identity";
 /// The first administrator's receipt, as the bootstrap records it.
 const BOOTSTRAP_KIND: &str = "user.bootstrap";
+pub(crate) const OWNERSHIP_TRANSFER_KIND: &str = "user.ownership_transfer";
+const OWNERSHIP_TRANSFERS: &str =
+    "FROM user_ownership_transfers WHERE tenant_id=$1 AND (from_user_id=ANY($2) OR to_user_id=ANY($2))";
 /// An agent's two-factor reset, which once recorded the account's name and
 /// email.
 const TWO_FACTOR_RESET_KIND: &str = "user_two_factor_reset";
+const TWO_FACTOR_RESET_REQUEST_KIND: &str = "user_two_factor_reset_request";
 /// Every top-level attribute of a SCIM document: an identity provider may
 /// send any attribute or vendor extension, all of them about the person.
 const SCIM_FIELDS: [&str; 1] = ["*"];
 
 struct Bound {
     sessions: Arc<Sessions>,
-    step_up: Arc<bilibi_step_up::StepUp>,
 }
 static BOUND: OnceLock<Bound> = OnceLock::new();
 /// Bound once by the User service factory.
-pub(crate) fn bind(
-    sessions: Arc<Sessions>,
-    step_up: Arc<bilibi_step_up::StepUp>,
-) -> bilibi_module_registry::Result<()> {
-    BOUND.set(Bound { sessions, step_up }).map_err(|_| {
+pub(crate) fn bind(sessions: Arc<Sessions>) -> bilibi_module_registry::Result<()> {
+    BOUND.set(Bound { sessions }).map_err(|_| {
         bilibi_module_registry::RegistryError::Service("duplicate user privacy binding".into())
     })
 }
@@ -72,15 +85,17 @@ static ACCOUNTS: Accounts = Accounts;
 impl Handler for Accounts {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let row = client
                 .query_one(
                     "SELECT count(*) FILTER (WHERE u.person_id=$2), count(*) FILTER (WHERE u.person_id IS DISTINCT FROM $2 AND lower(i.email)=ANY($3)), \
-                     (SELECT count(*) FROM notifications n JOIN users u ON u.tenant_id=n.tenant_id AND u.id=n.user_id WHERE n.tenant_id=$1 AND u.person_id=$2) \
+                     (SELECT count(*) FROM notifications n JOIN users u ON u.tenant_id=n.tenant_id AND u.id=n.user_id WHERE n.tenant_id=$1 AND u.person_id=$2), \
+                     (SELECT count(*) FROM user_two_factor_reset_requests r JOIN users u ON u.tenant_id=r.tenant_id AND u.id=r.user_id WHERE r.tenant_id=$1 AND u.person_id=$2) \
                      FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1",
                     &[&scope.tenant(), &subject.person.get(), &emails(subject)],
                 )
@@ -92,8 +107,35 @@ impl Handler for Accounts {
                 )
                 .await?
                 .get(0);
+            let users: Vec<i64> = client
+                .query(
+                    "SELECT id FROM users WHERE tenant_id=$1 AND person_id=$2",
+                    &[&scope.tenant(), &subject.person.get()],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            let actions = bilibi_audit::count_account_actions(client, scope, &users).await?;
+            let ownership_transfers = client
+                .query_one(
+                    &format!("SELECT count(*) {OWNERSHIP_TRANSFERS}"),
+                    &[&scope.tenant(), &users],
+                )
+                .await?
+                .get(0);
             Ok(Located {
                 kinds: vec![
+                    KindCount {
+                        kind: OWNERSHIP_TRANSFER_KIND.into(),
+                        by_person: ownership_transfers,
+                        by_identifier: 0,
+                    },
+                    KindCount {
+                        kind: AUDIT_ACTIONS_KIND.into(),
+                        by_person: actions,
+                        by_identifier: 0,
+                    },
                     KindCount {
                         kind: INVITATION_KIND.into(),
                         by_person: 0,
@@ -107,6 +149,11 @@ impl Handler for Accounts {
                     KindCount {
                         kind: NOTIFICATION_KIND.into(),
                         by_person: row.get(2),
+                        by_identifier: 0,
+                    },
+                    KindCount {
+                        kind: TWO_FACTOR_RESET_REQUEST_KIND.into(),
+                        by_person: row.get(3),
                         by_identifier: 0,
                     },
                 ],
@@ -129,19 +176,50 @@ impl Handler for Accounts {
                      coalesce((SELECT jsonb_agg(jsonb_build_object('type',n.type,'title',n.title,'body',n.body,'url',n.url,'read_at',n.read_at::text,'created_at',n.created_at::text) ORDER BY n.id) \
                        FROM notifications n WHERE n.tenant_id=u.tenant_id AND n.user_id=u.id),'[]'::jsonb), \
                      coalesce((SELECT jsonb_agg(s.document ORDER BY s.id) FROM user_scim_users s \
-                       WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id),'[]'::jsonb) \
+                       WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id),'[]'::jsonb), \
+                     coalesce((SELECT jsonb_agg(jsonb_build_object('company',r.company_name,'recipient',r.recipient_kind,'requested_at',r.requested_at::text,'closed_at',r.closed_at::text) ORDER BY r.id) FROM user_two_factor_reset_requests r WHERE r.tenant_id=u.tenant_id AND r.user_id=u.id),'[]'::jsonb) \
                      FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.person_id=$2 ORDER BY u.id",
                     &[&scope.tenant(), &subject.person.get()],
                 )
                 .await?;
+            let bound = BOUND.get().ok_or(Error::Internal)?;
+            let user_ids: Vec<i64> = accounts.iter().map(|row| row.get(0)).collect();
+            let actions =
+                bilibi_audit::export_account_actions(client, scope, grant, &user_ids).await?;
+            let sign_ins = bound
+                .sessions
+                .sign_in_history(client, scope, grant, &user_ids)
+                .await?;
             let records: Vec<Value> = accounts
                 .iter()
                 .map(|row| {
+                    let user = row.get::<_, i64>(0);
+                    let history: Vec<Value> = sign_ins
+                        .sign_ins
+                        .iter()
+                        .filter(|sign_in| sign_in.user_id == user)
+                        .map(|sign_in| {
+                            json!({
+                                "signed_in_at": sign_in.signed_in_at, "device": sign_in.device,
+                                "ip_address": sign_in.ip_address, "place": sign_in.place,
+                                "user_agent": sign_in.user_agent,
+                                "retained_until": sign_in.retained_until,
+                            })
+                        })
+                        .collect();
+                    let alerts: Vec<Value> = sign_ins
+                        .alerts
+                        .iter()
+                        .filter(|alert| alert.user_id == user)
+                        .map(|alert| json!({"device": alert.device, "alerted_on": alert.alerted_on}))
+                        .collect();
                     json!({
+                        "sign_ins": history, "new_device_email_claims": alerts,
                         "id": row.get::<_, i64>(0), "name": row.get::<_, String>(1), "email": row.get::<_, String>(2),
                         "status": row.get::<_, String>(3), "email_verified_at": row.get::<_, Option<String>>(4),
                         "deleted_at": row.get::<_, Option<String>>(5), "notifications": row.get::<_, Value>(6),
                         "scim_documents": row.get::<_, Value>(7),
+                        "two_factor_reset_requests": row.get::<_, Value>(8),
                     })
                 })
                 .collect();
@@ -162,8 +240,25 @@ impl Handler for Accounts {
                     })
                 })
                 .collect();
+            let ownership_transfers: Vec<Value> = client
+                .query(
+                    &format!("SELECT id,from_user_id=ANY($2),to_user_id=ANY($2),status,created_at::text,expires_at::text,resolved_at::text {OWNERSHIP_TRANSFERS} ORDER BY id"),
+                    &[&scope.tenant(), &user_ids],
+                )
+                .await?
+                .iter()
+                .map(|row| json!({
+                    "id": row.get::<_, i64>(0),
+                    "offered": row.get::<_, bool>(1),
+                    "received": row.get::<_, bool>(2),
+                    "status": row.get::<_, String>(3),
+                    "created_at": row.get::<_, String>(4),
+                    "expires_at": row.get::<_, String>(5),
+                    "resolved_at": row.get::<_, Option<String>>(6),
+                }))
+                .collect();
             Ok(Exported {
-                records: json!({"accounts": records, "invitations": invitations}),
+                records: json!({"accounts": records, "invitations": invitations, "audit_actions": actions, "ownership_transfers": ownership_transfers}),
                 files: Vec::new(),
             })
         })
@@ -183,24 +278,46 @@ impl Handler for Accounts {
             let users = tx
                 .sql()
                 .query(
-                    "SELECT u.id,u.name,i.email,u.status,(u.name=$3 AND u.status='deleted' AND (NOT (i.home_tenant_id=u.tenant_id AND i.home_user_id=u.id) OR i.email LIKE 'erased-%@erased.invalid')),i.id,(i.home_tenant_id=u.tenant_id AND i.home_user_id=u.id) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.person_id=$2 ORDER BY u.id FOR UPDATE OF u,i",
+                    "SELECT u.id,u.name,i.email,u.status,(u.name=$3 AND u.status='deleted'),i.id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.person_id=$2 ORDER BY u.id FOR UPDATE OF u",
                     &[&tenant, &subject.person.get(), &ERASED],
                 )
                 .await?;
             let ids: Vec<i64> = users.iter().map(|row| row.get(0)).collect();
-            let held_users = holds.records(grant, USER_KIND, &ids).await?;
-            let identities: Vec<i64> = users.iter().map(|row| row.get(5)).collect();
-            let held_identities = holds.records(grant, IDENTITY_KIND, &identities).await?;
+            let held_users = holds.records(tx.sql(), grant, USER_KIND, &ids).await?;
             let mut erased = Erased::default();
+            let transfers: Vec<i64> = tx
+                .sql()
+                .query(
+                    &format!("SELECT id {OWNERSHIP_TRANSFERS} ORDER BY id"),
+                    &[&tenant, &ids],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            let held_transfers = holds
+                .records(tx.sql(), grant, OWNERSHIP_TRANSFER_KIND, &transfers)
+                .await?;
+            for id in transfers {
+                erased.kept.push(match held_transfers.get(&id) {
+                    Some(hold) => Kept::held(OWNERSHIP_TRANSFER_KIND, id, *hold),
+                    None => Kept {
+                        kind: OWNERSHIP_TRANSFER_KIND.into(),
+                        id: id.to_string(),
+                        reason: KeptReason::Evidence,
+                        until: None,
+                        hold: None,
+                    },
+                });
+            }
             for row in users {
-                let (user, name, email, status, done, identity, home): (
+                let (user, name, email, status, done, identity): (
                     i64,
                     String,
                     String,
                     String,
                     bool,
                     i64,
-                    bool,
                 ) = (
                     row.get(0),
                     row.get(1),
@@ -208,20 +325,126 @@ impl Handler for Accounts {
                     row.get(3),
                     row.get(4),
                     row.get(5),
-                    row.get(6),
                 );
+                // The address and credentials belong to the installation,
+                // not this customer privacy store. Name the retained shared
+                // identity on the certificate instead of claiming its email
+                // was erased with this membership.
+                erased.kept.push(Kept {
+                    kind: IDENTITY_KIND.into(),
+                    id: identity.to_string(),
+                    reason: KeptReason::Shared,
+                    until: None,
+                    hold: None,
+                });
+                if bilibi_audit::count_account_actions(tx.sql(), scope, &[user]).await? > 0 {
+                    erased.kept.push(Kept {
+                        kind: AUDIT_ACTIONS_KIND.into(),
+                        id: user.to_string(),
+                        reason: KeptReason::Evidence,
+                        until: None,
+                        hold: None,
+                    });
+                }
                 if let Some(hold) = held_users.get(&user) {
                     erased.kept.push(Kept::held(USER_KIND, user, *hold));
                     continue;
                 }
-                if let Some(hold) = held_identities.get(&identity).filter(|_| home) {
-                    erased.kept.push(Kept::held(IDENTITY_KIND, identity, *hold));
+                let held_accepted =
+                    held_accepted_invitations(tx.sql(), holds, grant, tenant, &[user]).await?;
+                if let Some((_, _, hold)) = held_accepted.first() {
+                    for (invitation, _, hold) in &held_accepted {
+                        erased
+                            .kept
+                            .push(Kept::held(INVITATION_KIND, invitation, *hold));
+                    }
                     erased.kept.push(Kept::held(USER_KIND, user, *hold));
                     continue;
                 }
                 if user == scope.user() {
                     // The approver's own account cannot be the one erased.
                     return Err(Error::Forbidden);
+                }
+                let reset_requests: Vec<i64> = tx
+                    .sql()
+                    .query(
+                        "SELECT id FROM user_two_factor_reset_requests WHERE tenant_id=$1 AND user_id=$2 ORDER BY id FOR UPDATE",
+                        &[&tenant, &user],
+                    )
+                    .await?
+                    .iter()
+                    .map(|row| row.get(0))
+                    .collect();
+                let held_reset_requests = holds
+                    .records(
+                        tx.sql(),
+                        grant,
+                        TWO_FACTOR_RESET_REQUEST_KIND,
+                        &reset_requests,
+                    )
+                    .await?;
+                for (request, hold) in &held_reset_requests {
+                    erased
+                        .kept
+                        .push(Kept::held(TWO_FACTOR_RESET_REQUEST_KIND, request, *hold));
+                }
+                let reset_requests: Vec<i64> = reset_requests
+                    .into_iter()
+                    .filter(|id| !held_reset_requests.contains_key(id))
+                    .collect();
+                if !reset_requests.is_empty() {
+                    let removed = tx
+                        .mutate(move |sql| {
+                            Box::pin(async move {
+                                let rows = sql
+                                    .query(
+                                        "DELETE FROM user_two_factor_reset_requests WHERE tenant_id=$1 AND id=ANY($2) RETURNING id",
+                                        &[&tenant, &reset_requests],
+                                    )
+                                    .await?;
+                                let ids: Vec<i64> =
+                                    rows.iter().map(|row| row.get(0)).collect();
+                                let changes = ids
+                                    .iter()
+                                    .map(|id| Change {
+                                        kind: TWO_FACTOR_RESET_REQUEST_KIND.into(),
+                                        id: *id,
+                                        old: json!({"status":"recorded"}),
+                                        new: json!({"status":"erased"}),
+                                    })
+                                    .collect();
+                                Ok((ids, changes))
+                            })
+                        })
+                        .await?;
+                    erased.count(
+                        TWO_FACTOR_RESET_REQUEST_KIND,
+                        Action::Deleted,
+                        removed.len() as i64,
+                    );
+                    erased
+                        .records
+                        .extend(removed.into_iter().map(|id| ErasedRecord {
+                            kind: TWO_FACTOR_RESET_REQUEST_KIND.into(),
+                            id,
+                            person: None,
+                        }));
+                }
+                // The sign-in history (time, address, device) is security
+                // evidence: erasure leaves it, and Session's expiry sweep
+                // deletes each record 90 days after the sign-in.
+                if let Some(until) = bound
+                    .sessions
+                    .sign_in_retained_until(tx.sql(), scope, grant, user)
+                    .await?
+                {
+                    erased.kept.push(Kept {
+                        kind: SIGN_IN_HISTORY_KIND.into(),
+                        id: user.to_string(),
+                        reason: KeptReason::RetainedUntil,
+                        until: Some(until),
+                        hold: None,
+                    });
                 }
                 // Each notification on its own: a held one stays.
                 let notices: Vec<i64> = tx
@@ -234,7 +457,9 @@ impl Handler for Accounts {
                     .iter()
                     .map(|row| row.get(0))
                     .collect();
-                let held_notices = holds.records(grant, NOTIFICATION_KIND, &notices).await?;
+                let held_notices = holds
+                    .records(tx.sql(), grant, NOTIFICATION_KIND, &notices)
+                    .await?;
                 for (notice, hold) in &held_notices {
                     erased
                         .kept
@@ -260,6 +485,7 @@ impl Handler for Accounts {
                     .collect();
                 let held_scim = holds
                     .records(
+                        tx.sql(),
                         grant,
                         SCIM_KIND,
                         &scim_rows.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
@@ -284,7 +510,7 @@ impl Handler for Accounts {
                     .map(|row| row.get(0))
                     .collect();
                 let held_identities = holds
-                    .records(grant, EXTERNAL_IDENTITY_KIND, &identities)
+                    .records(tx.sql(), grant, EXTERNAL_IDENTITY_KIND, &identities)
                     .await?;
                 // Ending an account removes every sign-in link it has (the
                 // sign-in factor's lifecycle), so a hold on one keeps the
@@ -309,7 +535,11 @@ impl Handler for Accounts {
                 let bootstrap = match receipt {
                     None => false,
                     Some(clean) => {
-                        match holds.records(grant, BOOTSTRAP_KIND, &[1]).await?.get(&1) {
+                        match holds
+                            .records(tx.sql(), grant, BOOTSTRAP_KIND, &[1])
+                            .await?
+                            .get(&1)
+                        {
                             Some(hold) => {
                                 erased.kept.push(Kept::held(BOOTSTRAP_KIND, 1, *hold));
                                 false
@@ -324,7 +554,7 @@ impl Handler for Accounts {
                 // kind: an erasure change of that kind lets the database clear
                 // that history too.
                 let reset = match holds
-                    .records(grant, TWO_FACTOR_RESET_KIND, &[user])
+                    .records(tx.sql(), grant, TWO_FACTOR_RESET_KIND, &[user])
                     .await?
                     .get(&user)
                 {
@@ -337,13 +567,10 @@ impl Handler for Accounts {
                     None => bilibi_audit::holds_values(tx, TWO_FACTOR_RESET_KIND, user).await?,
                 };
                 let user_history = done && bilibi_audit::holds_values(tx, USER_KIND, user).await?;
-                let identity_history =
-                    done && home && bilibi_audit::holds_values(tx, IDENTITY_KIND, identity).await?;
                 let reset_before = json!({"name": name, "email": email});
-                let before = json!({"name": name, "email": email, "status": status});
+                let before = json!({"name": name, "status": status});
                 let writes = !done
                     || user_history
-                    || identity_history
                     || !gone.is_empty()
                     || !scim.is_empty()
                     || bootstrap
@@ -363,14 +590,7 @@ impl Handler for Accounts {
                                     &[&tenant, &user, &ERASED],
                                 )
                                 .await?;
-                                if home {
-                                sql.execute(
-                                    "UPDATE user_identities SET email=$2,password_hash='!erased',status='deleted',deleted_at=coalesce(deleted_at,now()),updated_at=now() WHERE id=$1",
-                                    &[&identity, &placeholder],
-                                )
-                                .await?;
-                                }
-                                let links = remove_links(sql, tenant, user, &[], home).await?;
+                                let links = remove_links(sql, tenant, user, &[]).await?;
                                 other.extend(
                                     links
                                         .iter()
@@ -381,16 +601,12 @@ impl Handler for Accounts {
                                     kind: USER_KIND.into(),
                                     id: user,
                                     old: before,
-                                    new: json!({"name": ERASED, "email": ERASED, "status": "deleted", "links_removed": links.len()}),
+                                    new: json!({"name": ERASED, "status": "deleted", "links_removed": links.len()}),
                                 });
-                                if home {
-                                changes.push(Change {
-                                    kind: IDENTITY_KIND.into(),
-                                    id: identity,
-                                    old: json!({"email": email}),
-                                    new: json!({"email": ERASED, "status": "deleted"}),
-                                });
-                                other.push((IDENTITY_KIND, identity));
+                                if let Some(change) =
+                                    crate::identity_lifecycle::mark_orphaned(sql, identity).await?
+                                {
+                                    changes.push(change);
                                 }
                                 changes.extend(links);
                                 let (invitation_changes, records) =
@@ -409,23 +625,9 @@ impl Handler for Accounts {
                                     kind: USER_KIND.into(),
                                     id: user,
                                     old: before,
-                                    new: json!({"name": ERASED, "email": ERASED, "status": "deleted"}),
+                                    new: json!({"name": ERASED, "status": "deleted"}),
                                 });
                                 other.push((USER_KIND, user));
-                            }
-                            if identity_history {
-                                sql.execute(
-                                    "UPDATE user_identities SET updated_at=now() WHERE id=$1",
-                                    &[&identity],
-                                )
-                                .await?;
-                                changes.push(Change {
-                                    kind: IDENTITY_KIND.into(),
-                                    id: identity,
-                                    old: json!({"email": email}),
-                                    new: json!({"email": ERASED}),
-                                });
-                                other.push((IDENTITY_KIND, identity));
                             }
                             // The identity provider keeps the resource ID; its
                             // document keeps nothing about the person.
@@ -482,12 +684,6 @@ impl Handler for Accounts {
                     .await?
                 };
                 if !done {
-                    if home {
-                        bound
-                            .step_up
-                            .lifecycle(tx, user, bilibi_step_up::Lifecycle::Delete)
-                            .await?;
-                    }
                     let ended = bound.sessions.revoke(tx, user, None).await?;
                     let sessions = bound.sessions.clone();
                     tx.after_commit(move || sessions.announce(ended));
@@ -528,13 +724,27 @@ impl Handler for Accounts {
                 .iter()
                 .map(|row| row.get(0))
                 .collect();
-            let held_invitations = holds.records(grant, INVITATION_KIND, &invitations).await?;
+            let held_invitations = holds
+                .records(tx.sql(), grant, INVITATION_KIND, &invitations)
+                .await?;
             for (id, hold) in &held_invitations {
                 erased.kept.push(Kept::held(INVITATION_KIND, id, *hold));
             }
-            let due: Vec<i64> = invitations
+            let open: Vec<i64> = invitations
                 .into_iter()
                 .filter(|id| !held_invitations.contains_key(id))
+                .collect();
+            let held_accounts =
+                held_prepared_accounts(tx.sql(), holds, grant, tenant, &open).await?;
+            for (invitation, account, hold) in &held_accounts {
+                erased.kept.push(Kept::held(USER_KIND, account, *hold));
+                erased
+                    .kept
+                    .push(Kept::held(INVITATION_KIND, invitation, *hold));
+            }
+            let due: Vec<i64> = open
+                .into_iter()
+                .filter(|id| !held_accounts.iter().any(|(held, _, _)| held == id))
                 .collect();
             if !due.is_empty() {
                 let records = tx
@@ -567,74 +777,9 @@ impl Handler for Accounts {
     }
 }
 
-/// Anonymises the accepted invitation(s) of an account being closed.
-pub(crate) async fn anonymise_accepted_invitations(
-    sql: &tokio_postgres::Transaction<'_>,
-    tenant: i64,
-    user: i64,
-) -> bilibi_database::Result<(Vec<Change>, Vec<(&'static str, i64)>)> {
-    let ids: Vec<i64> = sql
-        .query(
-            "SELECT id FROM user_invitations WHERE tenant_id=$1 AND user_id=$2 AND accepted_at IS NOT NULL AND email NOT LIKE 'erased-inv-%@erased.invalid' ORDER BY id FOR UPDATE",
-            &[&tenant, &user],
-        )
-        .await?
-        .iter()
-        .map(|row| row.get(0))
-        .collect();
-    anonymise_invitations(sql, tenant, &ids).await
-}
-
-/// Anonymises invitations (the caller holds their rows locked): the address
-/// goes, an unaccepted one is closed, and the account prepared for it, which
-/// has no sign-in, is closed and loses its name. Returns the changes and the
-/// records they touched.
-pub(crate) async fn anonymise_invitations(
-    sql: &tokio_postgres::Transaction<'_>,
-    tenant: i64,
-    ids: &[i64],
-) -> bilibi_database::Result<(Vec<Change>, Vec<(&'static str, i64)>)> {
-    let mut changes = Vec::new();
-    let mut records = Vec::new();
-    for row in sql
-        .query(
-            "UPDATE user_invitations v SET email='erased-inv-'||v.id||'@erased.invalid',revoked_at=CASE WHEN v.accepted_at IS NULL THEN coalesce(v.revoked_at,now()) END \
-             FROM (SELECT id,email,user_id FROM user_invitations WHERE tenant_id=$1 AND id=ANY($2)) o WHERE v.id=o.id RETURNING v.id,o.email,o.user_id",
-            &[&tenant, &ids],
-        )
-        .await?
-    {
-        let (id, email, user): (i64, String, i64) = (row.get(0), row.get(1), row.get(2));
-        changes.push(Change {
-            kind: INVITATION_KIND.into(),
-            id,
-            old: json!({"email": email}),
-            new: json!({"email": ERASED}),
-        });
-        records.push((INVITATION_KIND, id));
-        if let Some(row) = sql
-            .query_opt(
-                "UPDATE users u SET name=$3,status='deleted',deleted_at=coalesce(u.deleted_at,now()),anonymised_at=now(),version=u.version+1,updated_at=now() \
-                 FROM (SELECT id,name FROM users WHERE tenant_id=$1 AND id=$2) o WHERE u.tenant_id=$1 AND u.id=o.id AND u.identity_id IS NULL RETURNING o.name",
-                &[&tenant, &user, &ERASED],
-            )
-            .await?
-        {
-            changes.push(Change {
-                kind: USER_KIND.into(),
-                id: user,
-                old: json!({"name": row.get::<_, String>(0)}),
-                new: json!({"name": ERASED, "status": "deleted"}),
-            });
-            records.push((USER_KIND, user));
-        }
-    }
-    Ok((changes, records))
-}
-
 inventory::submit! { Contribution::new(PERSONAL_DATA, "core/user.accounts",
 Provenance { module: "core/user", source: file!(), line: line!() },
-&PersonalData { label: "User accounts and notifications", kinds: &[USER_KIND, IDENTITY_KIND, NOTIFICATION_KIND, INVITATION_KIND, SCIM_KIND, EXTERNAL_IDENTITY_KIND, BOOTSTRAP_KIND, TWO_FACTOR_RESET_KIND], person_subjects: &[], handler: &ACCOUNTS }) }
+&PersonalData { label: "User accounts and notifications", kinds: &[USER_KIND, IDENTITY_KIND, NOTIFICATION_KIND, INVITATION_KIND, SCIM_KIND, EXTERNAL_IDENTITY_KIND, BOOTSTRAP_KIND, TWO_FACTOR_RESET_KIND, TWO_FACTOR_RESET_REQUEST_KIND, OWNERSHIP_TRANSFER_KIND], person_subjects: &[], handler: &ACCOUNTS }) }
 inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.user",
 Provenance { module: "core/user", source: file!(), line: line!() },
 &RecordKind { kind: USER_KIND, fields: &["name", "email"], subject_identifier: false, person: false }) }
@@ -656,48 +801,31 @@ Provenance { module: "core/user", source: file!(), line: line!() },
 inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.bootstrap",
 Provenance { module: "core/user", source: file!(), line: line!() },
 &RecordKind { kind: BOOTSTRAP_KIND, fields: &["admin_email"], subject_identifier: false, person: false }) }
+inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.ownership_transfer",
+Provenance { module: "core/user", source: file!(), line: line!() },
+&RecordKind { kind: OWNERSHIP_TRANSFER_KIND, fields: &["from_user_id", "to_user_id"], subject_identifier: false, person: false }) }
 inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.two_factor_reset",
 Provenance { module: "core/user", source: file!(), line: line!() },
 &RecordKind { kind: TWO_FACTOR_RESET_KIND, fields: &["name", "email"], subject_identifier: false, person: false }) }
+inventory::submit! { Contribution::new(RECORD_KINDS, "core/user.two_factor_reset_request",
+Provenance { module: "core/user", source: file!(), line: line!() },
+&RecordKind { kind: TWO_FACTOR_RESET_REQUEST_KIND, fields: &["company"], subject_identifier: false, person: false }) }
 
-/// Deletes an account's sign-in and credential rows, one `Change` per row
-/// with its key and owner only: never a token, hash or external subject. A
-/// single sign-on link in `keep_identities` (a legal hold names it) stays.
+/// Deletes a tenant membership's provider links and external sessions, one
+/// `Change` per row. The installation-owned identity and credentials stay.
 pub(crate) async fn remove_links(
     sql: &tokio_postgres::Transaction<'_>,
     tenant: i64,
     user: i64,
     keep_identities: &[i64],
-    home: bool,
 ) -> bilibi_database::Result<Vec<Change>> {
     let mut changes = Vec::new();
-    let identity: i64 = sql
-        .query_one(
-            "SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2",
-            &[&tenant, &user],
-        )
-        .await?
-        .get(0);
-    let identity: Vec<i64> = if home { vec![identity] } else { Vec::new() };
     let removed = |kind: &str, id: i64, old: Value| Change {
         kind: kind.into(),
         id,
         old,
         new: json!({}),
     };
-    for row in sql
-        .query(
-            "DELETE FROM password_reset_tokens WHERE identity_id=ANY($1) RETURNING identity_id",
-            &[&identity],
-        )
-        .await?
-    {
-        changes.push(removed(
-            "password_reset_token",
-            row.get(0),
-            json!({"user": user}),
-        ));
-    }
     for row in sql
         .query(
             "DELETE FROM user_external_sessions WHERE tenant_id=$1 AND user_id=$2 RETURNING id",
@@ -720,28 +848,6 @@ pub(crate) async fn remove_links(
             row.get(0),
             json!({"user": user, "provider": row.get::<_, i64>(1)}),
         ));
-    }
-    for row in sql
-        .query(
-            "DELETE FROM user_credential_attempts WHERE identity_id=ANY($1) RETURNING kind",
-            &[&identity],
-        )
-        .await?
-    {
-        changes.push(removed(
-            "user_credential_attempts",
-            user,
-            json!({"user": user, "kind": row.get::<_, String>(0)}),
-        ));
-    }
-    for row in sql
-        .query(
-            "DELETE FROM user_sign_ins WHERE identity_id=ANY($1) RETURNING id",
-            &[&identity],
-        )
-        .await?
-    {
-        changes.push(removed("user_sign_in", row.get(0), json!({"user": user})));
     }
     Ok(changes)
 }

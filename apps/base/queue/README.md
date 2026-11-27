@@ -1,5 +1,9 @@
 # Durable Queue
 
+**Use it for:** background work: a durable job enqueued in your write's transaction, retried, and run as a named system principal.
+
+**Not for:** `tokio::spawn`, a jobs table or a worker loop of your own, or a reader that never finishes (a live connection is a `base/residents` reader, which takes no job slot).
+
 Queue stores every job in PostgreSQL. Owners contribute a `Worker` through the
 `base/queue.workers` typed catalog, using `Contribution::new` and source provenance.
 Boot rejects invalid/duplicate worker IDs and attempts outside 1–100. The worker's
@@ -22,6 +26,8 @@ sessions and passwords are never copied. These are historical references, not
 proofs of current authority. There are no foreign keys to Core identities: a job
 survives deletion so execution can record an explicit refusal.
 
+`Queue::enqueue_system_at_within` takes the same principal, worker and arguments as `enqueue_system_within`, plus a UTC `SystemTime`. The job commits with the caller's writes and is eligible only at that instant. A future instant starts in `scheduled`; an instant already past runs immediately. This controls the first eligible instant of that job. Infrastructure failures and expired leases continue to use Queue's existing retry policy. Owners can use a new delayed job for each business retry, recording their retry count and chosen delay in their own transaction.
+
 Owners also contribute a `HandlerBinding` through `HANDLERS`, using
 exactly the same worker ID and module provenance. Its `service` must belong to
 that module and resolve to `HandlerService(Arc<dyn Handler>)`; its `capability`
@@ -43,6 +49,8 @@ tried as one of several, and `Execution::begin` rechecks the same key. Without
 a policy the binding's `capability` decides everywhere. Schedule's
 `TENANT_POLICY` is the one user of this today (per-tenant scheduled work, ADR 17).
 
+Workers can contribute `TenantFifo` under `TENANT_FIFO` with their own worker ID and a function that derives an order key from validated arguments. A constant key orders all of that worker's jobs in a tenant. Among jobs with the same tenant, worker and key, only the oldest pending job can be claimed. Its scheduled time, lease or retry backoff leaves followers in that group waiting.
+
 PostgreSQL `FOR UPDATE SKIP LOCKED` claims serialize across app processes.
 Claims increment the durable attempt before invoking owner code. An expired
 lease is recovered as retryable, or discarded at the attempt limit. Retry delay
@@ -52,7 +60,26 @@ are likewise fenced. A stale executor cannot overwrite a newer claim or a
 cancellation. Shutdown drops in-flight futures and leaves their leases for
 recovery. Handler/validator panics, timeouts and invalid results retry within
 the captured attempt budget; infrastructure errors preserve durable recovery.
+A handler that must wait uses `Execution::defer_until` inside the transaction
+from `Execution::begin`. Queue schedules the same job under its lease fence and
+restores the attempt used to claim it. After committing the deferral, the handler
+returns `Outcome::Completed` to release the worker slot.
 Only bounded safe failure codes are stored, never error payloads or arguments.
+One failed heartbeat (a database error) does not end the attempt if the next beat still falls inside its lease; otherwise the handler is dropped. A pending heartbeat (behind the row lock of an owner's fenced transaction, or waiting for a busy pool) stays in flight while the attempt runs, without a separate heartbeat timeout. An answer that the lease is gone stops the handler; the overall attempt timeout and shutdown still apply.
+
+A slot or the endings loop that ends while the process runs, by a panic or an unexpected return, is started again after a poll interval.
+
+A slot that ran a job claims the next at once, so a busy process is not capped at
+one job a second per slot; it waits a poll interval only when it claimed nothing
+(or hit an error). A job that failed waits in the database (`available_at`, the
+retry backoff), so claiming at once never runs it early.
+
+Every slot polls once a second when idle. A poll reads expired leases
+(`base_queue_expired_leases`) and due ordinary jobs (`base_queue_claim_ordinary`), and seeks directly to the oldest job in each FIFO group (`base_queue_tenant_fifo`).
+It considers due times only for those heads and ordinary jobs.
+Both time searches compare with
+`now()`, the claim transaction's start, because a volatile `clock_timestamp()`
+cannot bound an index scan. Keep it that way when you change `store::claim`.
 
 Each attempt reconstructs a current `Scope` through Tenancy Authentication and
 requires the same captured identity and the exact captured desk (`work_company_id`). Every attempt and `Execution::begin` re-proves access to that desk. A removed desk refuses execution; a browser switch never changes queued work. Inactive,
@@ -108,6 +135,46 @@ and uniqueness policy remain separate extensions.
 Impersonation is refused until Tenancy supplies a sealed impersonator facet;
 caller-supplied audit attribution cannot create execution authority.
 
+## When a job ends without finishing
+
+**A worker whose owner keeps a record waiting on its job declares an `EndingBinding` under `ENDINGS`; Queue then tells the owner once when that job is cancelled or discarded.** Without one, a record waiting on a job that Queue cancelled (actor refused, arguments refused, the handler's own cancel, an owner cancel) or discarded (out of attempts) waits for ever.
+
+| Part | Rule |
+| --- | --- |
+| Contribution | `Contribution::new(ENDINGS, <worker id>, provenance, &EndingBinding { service, principal, capability })` from the worker's own module |
+| `service` | The owner's service, resolving to `EndingService(Arc<dyn Ending>)` |
+| `principal` | A system principal the same module declares; boot refuses another module's |
+| `capability` | Inside that principal's declaration; decided (`authorize_system`) in the telling transaction. Give the principal a standing grant (`bilibi_authz::STANDING_GRANTS`) so no tenant has to switch the way out on; a tenant's deny still wins |
+| Call | `Ending::ended(tx, scope, &Ended)`: `scope` is the principal's sealed scope in the job's tenant, `Ended` has the job ID, worker, `State::Cancelled` or `State::Discarded`, failure code and validated arguments, never the actor |
+| Transaction | One audited transaction per job, attributed to `System · <principal>` (action `queue.job.ended`); the owner's writes and the job's `ending='told'` commit together, so the owner is told exactly once |
+| Idempotent | Level-triggered: return `Ok` when nothing waits on the job any more (the record moved on or is gone) |
+| Failure | An error, panic or timeout rolls back and is tried again with the job backoff (`min(3600, 2^n)` seconds), 25 times, then `ending='failed'`, counted on System Info |
+| Retry | `retry_for` makes the job alive again and clears its ending, so a second ending is told again |
+
+- Each executor runs one endings loop beside its slots, up to 100 jobs a pass, told serially with each telling bounded at 60 seconds (or the attempt timeout, if shorter); after a full pass in which every job was told it goes straight to the next, otherwise it waits a poll; processes skip each other's rows (`FOR UPDATE SKIP LOCKED`).
+- Move the waiting record to a named state through the owner's normal path (a Workflow edge for a business status), and give people a permission-gated way to run it again. `base/privacy` is the first user: a request job that ends moves the request `running → failed`, as `privacy-monitor`.
+
+## Retention and the status line
+
+**Finished jobs are deleted after `queue.jobs.keep_days` days (default 30) by the daily `base/schedule.queue-retention` task.**
+
+| Part | Rule |
+| --- | --- |
+| Setting | `queue.jobs.keep_days`, global, 0 to 3650, on System Settings under Schedule; 0 keeps every job |
+| Task | `base/schedule.queue-retention`, 03:47 UTC, forbid overlap. Schedule contributes it because Queue is upstream of Schedule (`apps/base/schedule/src/queue_retention.rs`). Like every definition it runs only after an operator enables it on the Schedule board |
+| Deleted | `completed`, `cancelled` and `discarded` jobs last touched before the cutoff, 10,000 per statement (`Queue::prune`) |
+| Kept | Jobs that are not finished, and a cancelled or discarded job of a worker with an `EndingBinding` until its owner was told (untold and `failed` endings stay) |
+| Audit | None per deleted job: housekeeping over transport state. The audit rows of the enqueue and of owner commands stay |
+| Owners | `lookup` answers `NotFound` and `states` leaves out a deleted job. Record what you need from a job when it ends; do not read a job older than the retention as proof |
+
+System Info's Queue line (`health_status`) counts waiting, retryable, discarded and unrecorded jobs from partial indexes (`base_queue_claim`, `base_queue_jobs_discarded`, `base_queue_jobs_ending_failed`), so it never reads the finished jobs. With retention on, the discarded count covers the retention period.
+
+```sh
+BILIBI_DISPOSABLE_QUEUE_DEMO=yes cargo run -p bilibi-queue --example retention-walkthrough
+```
+
+On a fresh disposable database it migrates, then prints the setting's default, that 0 keeps every job, the refusal of a number of days out of range, the status line equal to a full count, which of ten seeded jobs a 30-day pass deletes and keeps, a 25,000-job pass over several batches, and the indexes.
+
 ## Running proof (no unit tests)
 
 Use an explicitly disposable PostgreSQL database, never the normal development
@@ -137,6 +204,8 @@ decrypted and its length), and records its effect; `revoke-secret` keeps the
 job running but makes Settings refuse the secret (`secret_refused`).
 `inspect` prints the audit rows of the effects with their principal.
 
+`enqueue-delayed complete 60` queues the same principal's specimen for one minute later. Run the worker immediately and inspect the job while it waits. It stays `scheduled` with no effect until its `available_at`, then runs once. A cancelled scheduled job remains cancelled after its due instant. An enqueue rolled back by its caller leaves no scheduled job.
+
 
 ## Private executor walkthrough
 
@@ -160,7 +229,7 @@ stops the private executable gracefully. It never drives Herdr or shared app
 processes. The contributed worker/handler is absent from production.
 
 Other enqueue modes: `retry`, `discard`, `cancel`, `panic`, `invalid`,
-`heartbeat`, `timeout`, `late-write`, `fenced-write`, `company-write`, `complete`, `secret`
+`heartbeat`, `slow-fence` (holds the fence open `QUEUE_DEMO_HOLD` ms, 2500 by default, past two heartbeats yet inside the lease), `timeout`, `late-write`, `fenced-write`, `company-write`, `complete`, `secret`
 (reads the company secret as the actor; `enqueue-system secret` as the
 principal; `BILIBI_SETTINGS_KEY` must be set for `prepare` and `worker`).
 `grant`, `revoke-secret` and `revoke` change the principal's grants as the
@@ -181,4 +250,12 @@ disposable specimen DB.
 
 User job scopes carry `Channel::Job` through `Execution::scope`, `Execution::identity` and live reproof. Passing a job scope directly to an owner facade keeps background restrictions, including Workflow's refusal to approve.
 
-Queue's implementation modules are private. Import `Execution`, `Executor`, `Config`, handlers, observers and job-state types from `bilibi_queue`; use its root `lookup`, `states`, `cancel_for`, `retry_for` and `validate_arguments` APIs. Their authorization and lease rules are unchanged.
+Queue's implementation modules are private. Import `Execution`, `Executor`, `Config`, handlers, observers, endings and job-state types from `bilibi_queue`; use its root `lookup`, `states`, `cancel_for`, `retry_for` and `validate_arguments` APIs. Their authorization and lease rules are unchanged.
+
+## Throughput walkthrough
+
+```sh
+BILIBI_DISPOSABLE_QUEUE_DEMO=yes cargo run -p bilibi-queue --example throughput-walkthrough
+```
+
+On a fresh disposable database it runs one slot with a one-second poll interval and proves that 30 quick jobs finish in a fraction of 30 seconds, each exactly once; that an idle queue is polled about once a second rather than spun on; that a failing job still waits its backoff before its next attempt and is discarded after its last; and that 250 cancelled jobs with an ending hook are all told in less than one ten-second poll, the loop going straight from one full batch to the next.

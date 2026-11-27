@@ -1,0 +1,698 @@
+//! The watcher record's shape and its pure evaluation: no I/O, no side effects,
+//! no AI. A definition is a match mode, conditions over a trigger table's
+//! fields and the actions to run when it matches. Values compare exactly:
+//! numbers as decimals (never floating point), dates and times as instants,
+//! text as written. A missing value matches only `empty`.
+use bilibi_grid::FieldType;
+use rust_decimal::Decimal;
+use serde_json::{json, Map, Value};
+use std::str::FromStr;
+
+/// Bounds on one watcher's size; the agent schema states the same.
+pub(crate) const MAX_CONDITIONS: usize = 20;
+pub(crate) const MAX_ACTIONS: usize = 10;
+pub(crate) const MAX_EXAMPLES: usize = 10;
+pub(crate) const MAX_CHOICES: usize = 50;
+pub(crate) const MAX_FACTS: usize = MAX_CONDITIONS + 1;
+const MAX_TEXT: usize = 500;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Match {
+    All,
+    Any,
+}
+impl Match {
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Any => "any",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Op {
+    Eq,
+    Ne,
+    In,
+    NotIn,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Empty,
+    NotEmpty,
+}
+impl Op {
+    pub(crate) const ALL: [&'static str; 10] = [
+        "eq",
+        "ne",
+        "in",
+        "not_in",
+        "lt",
+        "le",
+        "gt",
+        "ge",
+        "empty",
+        "not_empty",
+    ];
+    pub(crate) fn parse(key: &str) -> Option<Self> {
+        Some(match key {
+            "eq" => Self::Eq,
+            "ne" => Self::Ne,
+            "in" => Self::In,
+            "not_in" => Self::NotIn,
+            "lt" => Self::Lt,
+            "le" => Self::Le,
+            "gt" => Self::Gt,
+            "ge" => Self::Ge,
+            "empty" => Self::Empty,
+            "not_empty" => Self::NotEmpty,
+            _ => return None,
+        })
+    }
+    pub(crate) fn key(self) -> &'static str {
+        Self::ALL[self as usize]
+    }
+    /// How a person reads it: "is", "is one of", "is above" …
+    pub(crate) fn words(self) -> &'static str {
+        match self {
+            Self::Eq => "is",
+            Self::Ne => "is not",
+            Self::In => "is one of",
+            Self::NotIn => "is none of",
+            Self::Lt => "is below",
+            Self::Le => "is at most",
+            Self::Gt => "is above",
+            Self::Ge => "is at least",
+            Self::Empty => "is empty",
+            Self::NotEmpty => "is not empty",
+        }
+    }
+    pub(crate) fn ordered(self) -> bool {
+        matches!(self, Self::Lt | Self::Le | Self::Gt | Self::Ge)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Condition {
+    /// A Grid column path on the trigger's table (`priority`, `company.name`).
+    pub field: String,
+    pub op: Op,
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ActionCall {
+    /// An installed action: an owner's write contract key.
+    pub operation: String,
+    /// Its approved parameters. The action's subject field is never here: the
+    /// runner binds it to the trigger's record.
+    #[serde(default)]
+    pub input: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum Step {
+    Operation(ActionCall),
+    Script { script: crate::script::Script },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Definition {
+    pub matching: Match,
+    pub conditions: Vec<Condition>,
+    pub steps: Vec<Step>,
+    /// One AI observation asked before the conditions (`observe.rs`).
+    pub observe: Option<crate::observe::Observe>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Example {
+    pub facts: Map<String, Value>,
+    pub expect: bool,
+}
+
+/// One field problem, keyed by the input path the agent schema uses.
+pub(crate) type Problems = Vec<(String, String)>;
+
+impl Definition {
+    pub(crate) fn actions(&self) -> impl Iterator<Item = &ActionCall> {
+        self.steps.iter().flat_map(|step| match step {
+            Step::Operation(action) => std::slice::from_ref(action),
+            Step::Script { script } => script.calls.as_slice(),
+        })
+    }
+
+    pub(crate) fn scripts(&self) -> impl Iterator<Item = &crate::script::Script> {
+        self.steps.iter().filter_map(|step| match step {
+            Step::Script { script } => Some(script),
+            Step::Operation(_) => None,
+        })
+    }
+
+    pub(crate) fn script_fact_fields(&self, version: &str) -> Vec<String> {
+        let mut fields = vec![version.to_owned()];
+        for field in self.scripts().flat_map(|script| &script.fields) {
+            if !fields.contains(field) {
+                fields.push(field.clone());
+            }
+        }
+        fields
+    }
+
+    pub(crate) fn to_json(&self) -> Value {
+        let mut value = json!({
+            "do": self.steps,
+        });
+        if let Some(observe) = &self.observe {
+            value["observe"] = json!(observe);
+        }
+        if !self.conditions.is_empty() {
+            value["if"] = json!({"match": self.matching.key(), "conditions": self.conditions.iter().map(|c| json!({"field": c.field, "op": c.op.key(), "value": c.value})).collect::<Vec<_>>()});
+        }
+        value
+    }
+    /// Reads a stored or submitted definition; shape problems are listed by path.
+    pub(crate) fn parse(value: &Value, problems: &mut Problems) -> Option<Self> {
+        Self::parse_definition(value, problems, true)
+    }
+
+    pub(crate) fn parse_draft(value: &Value, problems: &mut Problems) -> Option<Self> {
+        Self::parse_definition(value, problems, false)
+    }
+
+    fn parse_definition(value: &Value, problems: &mut Problems, stored: bool) -> Option<Self> {
+        let filter = value.get("if");
+        if filter.is_some_and(|filter| !filter.is_object()) {
+            problems.push(("if".into(), "must be an object".into()));
+            return None;
+        }
+        let matching = match filter.and_then(|filter| filter.get("match")) {
+            None => Match::All,
+            Some(mode) if mode == "all" => Match::All,
+            Some(mode) if mode == "any" => Match::Any,
+            _ => {
+                problems.push(("if.match".into(), "must be all or any".into()));
+                Match::All
+            }
+        };
+        let mut conditions = Vec::new();
+        let listed = match filter {
+            None => &[][..],
+            Some(filter) => match filter.get("conditions").and_then(Value::as_array) {
+                Some(items) if !items.is_empty() => items.as_slice(),
+                _ => {
+                    problems.push(("if.conditions".into(), "give at least one condition".into()));
+                    return None;
+                }
+            },
+        };
+        if listed.len() > MAX_CONDITIONS {
+            problems.push((
+                "if.conditions".into(),
+                format!("at most {MAX_CONDITIONS} conditions"),
+            ));
+        }
+        for (i, item) in listed.iter().take(MAX_CONDITIONS).enumerate() {
+            let at = |part: &str| format!("if.conditions.{i}.{part}");
+            let field = item
+                .get("field")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !crate::observe::observed(field) && bilibi_grid::column::parse(field).is_err() {
+                problems.push((at("field"), "is not a field path".into()));
+            }
+            let Some(op) = item.get("op").and_then(Value::as_str).and_then(Op::parse) else {
+                problems.push((at("op"), format!("must be one of {}", Op::ALL.join(", "))));
+                continue;
+            };
+            let value = item.get("value").cloned().unwrap_or(Value::Null);
+            match op {
+                Op::Empty | Op::NotEmpty if !value.is_null() => {
+                    problems.push((at("value"), "takes no value".into()))
+                }
+                Op::In | Op::NotIn => match value.as_array() {
+                    Some(items)
+                        if (1..=MAX_CHOICES).contains(&items.len()) && items.iter().all(scalar) => {
+                    }
+                    _ => problems.push((
+                        at("values"),
+                        format!("must be a list of 1 to {MAX_CHOICES} values"),
+                    )),
+                },
+                Op::Empty | Op::NotEmpty => {}
+                _ if !scalar(&value) => {
+                    problems.push((at("value"), "must be one text, number or true/false".into()))
+                }
+                _ => {}
+            }
+            conditions.push(Condition {
+                field: field.to_owned(),
+                op,
+                value,
+            });
+        }
+        let observe = match value.get("observe") {
+            None | Some(Value::Null) => None,
+            Some(observe) => crate::observe::Observe::parse(observe, problems),
+        };
+        let mut steps = Vec::new();
+        let listed = value
+            .get("do")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        if listed.is_empty() || listed.len() > MAX_ACTIONS {
+            problems.push(("do".into(), format!("give 1 to {MAX_ACTIONS} actions")));
+        }
+        for (i, item) in listed.iter().take(MAX_ACTIONS).enumerate() {
+            if let Some(value) = item.get("script") {
+                match crate::script::Script::parse(value, stored) {
+                    Some(script) if item.as_object().is_some_and(|item| item.len() == 1) => {
+                        steps.push(Step::Script { script });
+                    }
+                    _ => {
+                        problems.push((format!("do.{i}.script"), "Supply a named script with its source, fields, allowed calls and examples.".into()));
+                        if stored {
+                            return None;
+                        }
+                    }
+                }
+                continue;
+            }
+            let operation = item
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let input = match item.get("input") {
+                None => Map::new(),
+                Some(Value::Object(input)) => input.clone(),
+                Some(_) => {
+                    problems.push((format!("do.{i}.input"), "must be a JSON object".into()));
+                    Map::new()
+                }
+            };
+            if operation.is_empty() {
+                problems.push((format!("do.{i}.operation"), "is required".into()));
+            }
+            steps.push(Step::Operation(ActionCall {
+                operation: operation.to_owned(),
+                input,
+            }));
+        }
+        Some(Self {
+            matching,
+            conditions,
+            steps,
+            observe,
+        })
+    }
+
+    /// Checks each condition's value against its field's type and choices.
+    pub(crate) fn check_types(
+        &self,
+        field: impl Fn(&str) -> Option<(FieldType, &'static [&'static str])>,
+        problems: &mut Problems,
+    ) {
+        for (i, condition) in self.conditions.iter().enumerate() {
+            let at = |part: &str| format!("if.conditions.{i}.{part}");
+            if crate::observe::observed(&condition.field) {
+                self.check_observed(condition, &at, problems);
+                continue;
+            }
+            let Some((ty, choices)) = field(&condition.field) else {
+                problems.push((
+                    at("field"),
+                    format!("{} is not a field this trigger offers", condition.field),
+                ));
+                continue;
+            };
+            if condition.op.ordered() && !ty.numeric() {
+                problems.push((
+                    at("op"),
+                    format!("{} only applies to numbers and dates", condition.op.key()),
+                ));
+            }
+            if ty == FieldType::Boolean
+                && !matches!(condition.op, Op::Eq | Op::Ne | Op::Empty | Op::NotEmpty)
+            {
+                problems.push((at("op"), "true/false fields take is or is not".into()));
+            }
+            let (part, values) = match &condition.value {
+                Value::Array(items) => ("values", items.as_slice()),
+                Value::Null => ("value", &[][..]),
+                value => ("value", std::slice::from_ref(value)),
+            };
+            for value in values {
+                if let Err(why) = typed(ty, choices, value) {
+                    problems.push((at(part), why));
+                }
+            }
+        }
+    }
+
+    fn check_observed(
+        &self,
+        condition: &Condition,
+        at: &dyn Fn(&str) -> String,
+        problems: &mut Problems,
+    ) {
+        let Some(observe) = &self.observe else {
+            problems.push((
+                at("field"),
+                format!("{} needs an AI observation (observe)", condition.field),
+            ));
+            return;
+        };
+        let values = match &condition.value {
+            Value::Array(items) => items.as_slice(),
+            Value::Null => &[][..],
+            value => std::slice::from_ref(value),
+        };
+        if condition.op.ordered() {
+            problems.push((
+                at("op"),
+                "a label takes is, is not, is one of, is none of, empty or not empty".into(),
+            ));
+        }
+        for value in values {
+            if !value
+                .as_str()
+                .is_some_and(|label| observe.accepts_label(label))
+            {
+                problems.push((
+                    at("value"),
+                    format!("must be one of {}", observe.labels.join(", ")),
+                ));
+            }
+        }
+    }
+
+    /// Each condition's outcome on `facts` (field path → value), and whether
+    /// the definition matches.
+    pub(crate) fn evaluate(
+        &self,
+        facts: &Map<String, Value>,
+        types: &impl Fn(&str) -> FieldType,
+    ) -> (bool, Vec<bool>) {
+        let outcomes: Vec<bool> = self
+            .conditions
+            .iter()
+            .map(|c| {
+                holds(
+                    c,
+                    facts.get(&c.field).unwrap_or(&Value::Null),
+                    crate::observe::fact_type(&c.field).unwrap_or_else(|| types(&c.field)),
+                )
+            })
+            .collect();
+        let matched = match self.matching {
+            Match::All => outcomes.iter().all(|o| *o),
+            Match::Any => outcomes.iter().any(|o| *o),
+        };
+        (matched, outcomes)
+    }
+
+    pub(crate) fn fact_fields(&self, version: &str, include_script: bool) -> Vec<String> {
+        let mut fields = if include_script {
+            self.fields()
+        } else {
+            self.condition_fields()
+        };
+        if !fields.iter().any(|field| field == version) {
+            fields.push(version.to_owned());
+        }
+        fields
+    }
+
+    /// The record fields the conditions read (never `ai:` facts).
+    pub(crate) fn condition_fields(&self) -> Vec<String> {
+        self.example_fields()
+            .into_iter()
+            .filter(|path| !crate::observe::observed(path))
+            .collect()
+    }
+
+    /// The facts examples are written in: every condition's field,
+    /// including the observation's `ai:label`.
+    pub(crate) fn example_fields(&self) -> Vec<String> {
+        let mut fields: Vec<String> = Vec::new();
+        for condition in &self.conditions {
+            if !fields.contains(&condition.field) {
+                fields.push(condition.field.clone());
+            }
+        }
+        fields
+    }
+
+    /// Every record field the version reads: conditions, scripts and the
+    /// fields its observation sends.
+    pub(crate) fn fields(&self) -> Vec<String> {
+        let mut fields = self.condition_fields();
+        let observed = self.observe.iter().flat_map(|observe| &observe.fields);
+        for field in self
+            .scripts()
+            .flat_map(|script| &script.fields)
+            .chain(observed)
+        {
+            if !fields.contains(field) {
+                fields.push(field.clone());
+            }
+        }
+        fields
+    }
+}
+
+pub(crate) fn parse_examples(value: &Value, problems: &mut Problems) -> Vec<Example> {
+    let listed = value.as_array().map_or(&[][..], Vec::as_slice);
+    if !value.is_null() && !value.is_array() {
+        problems.push(("examples".into(), "must be an array".into()));
+    }
+    if listed.len() > MAX_EXAMPLES {
+        problems.push((
+            "examples".into(),
+            format!(
+                "give at most {MAX_EXAMPLES} examples of records that should and should not match"
+            ),
+        ));
+    }
+    listed
+        .iter()
+        .take(MAX_EXAMPLES)
+        .enumerate()
+        .filter_map(|(i, item)| {
+            let facts = item.get("facts").and_then(Value::as_object).cloned();
+            let expect = match item.get("expect").and_then(Value::as_str) {
+                Some("match") => Some(true),
+                Some("no_match") => Some(false),
+                _ => None,
+            };
+            match (facts, expect) {
+                (Some(facts), Some(expect)) if facts.values().all(|v| v.is_null() || scalar(v)) => {
+                    Some(Example { facts, expect })
+                }
+                _ => {
+                    problems.push((
+                        format!("examples.{i}"),
+                        "needs facts (field → value) and expect (match or no_match)".into(),
+                    ));
+                    None
+                }
+            }
+        })
+        .collect()
+}
+pub(crate) fn examples_json(examples: &[Example]) -> Value {
+    Value::Array(
+        examples
+            .iter()
+            .map(|e| json!({"facts": e.facts, "expect": if e.expect {"match"} else {"no_match"}}))
+            .collect(),
+    )
+}
+
+fn scalar(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.chars().count() <= MAX_TEXT,
+        Value::Number(_) | Value::Bool(_) => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn script_fact(ty: FieldType, choices: &[&str], value: &Value) -> Result<Value, String> {
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+    let number = || {
+        value
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| value.as_number().map(ToString::to_string))
+    };
+    let text = match ty {
+        FieldType::Integer => number()
+            .and_then(|text| text.parse::<i64>().ok())
+            .map(|n| n.to_string()),
+        FieldType::Float => number()
+            .and_then(|text| text.parse::<f64>().ok())
+            .filter(|n| n.is_finite())
+            .map(|n| n.to_string()),
+        FieldType::Decimal => number().filter(|text| {
+            let digits = text.strip_prefix('-').unwrap_or(text);
+            let (whole, fraction) = digits
+                .split_once('.')
+                .map_or((digits, None), |(whole, fraction)| (whole, Some(fraction)));
+            !whole.is_empty()
+                && whole.bytes().all(|byte| byte.is_ascii_digit())
+                && (whole.len() == 1 || !whole.starts_with('0'))
+                && fraction.is_none_or(|part| {
+                    !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                && (!text.starts_with('-')
+                    || digits.bytes().any(|byte| matches!(byte, b'1'..=b'9')))
+        }),
+        FieldType::Date => value
+            .as_str()
+            .and_then(|text| text.parse::<jiff::civil::Date>().ok())
+            .map(|date| date.to_string()),
+        FieldType::DateTime => value
+            .as_str()
+            .and_then(|text| text.parse::<jiff::Timestamp>().ok())
+            .map(|timestamp| timestamp.to_string()),
+        FieldType::Boolean => {
+            return boolean(value)
+                .map(Value::Bool)
+                .ok_or_else(|| "must be true or false".into())
+        }
+        FieldType::String | FieldType::Enum => {
+            typed(ty, choices, value)?;
+            return Ok(value.clone());
+        }
+    };
+    text.map(Value::String)
+        .ok_or_else(|| format!("must be a valid {ty:?} field value"))
+}
+
+/// Whether `value` is a value of a field of type `ty`.
+fn typed(ty: FieldType, choices: &[&str], value: &Value) -> Result<(), String> {
+    match ty {
+        FieldType::Integer | FieldType::Float | FieldType::Decimal => decimal(value)
+            .map(|_| ())
+            .ok_or_else(|| "must be a number representable exactly; write decimals as text".into()),
+        FieldType::Boolean => boolean(value)
+            .map(|_| ())
+            .ok_or_else(|| "must be true or false".into()),
+        FieldType::Date => value
+            .as_str()
+            .and_then(|text| jiff::civil::Date::from_str(text).ok())
+            .map(|_| ())
+            .ok_or_else(|| "must be a date (2026-11-16)".into()),
+        FieldType::DateTime => value
+            .as_str()
+            .and_then(|text| jiff::Timestamp::from_str(text).ok())
+            .map(|_| ())
+            .ok_or_else(|| "must be a time with an offset (2026-11-16T09:00:00Z)".into()),
+        FieldType::String | FieldType::Enum => match value.as_str() {
+            Some(text) if choices.is_empty() || choices.contains(&text) => Ok(()),
+            Some(_) => Err(format!("must be one of {}", choices.join(", "))),
+            None => Err("must be text".into()),
+        },
+    }
+}
+
+/// `true`/`false`, as JSON or as the text the agent schema carries.
+fn boolean(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(b) => Some(*b),
+        Value::String(text) => match text.as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// An exact number: a JSON integer or a decimal string, never a float.
+fn decimal(value: &Value) -> Option<Decimal> {
+    match value {
+        Value::Number(number) if number.is_i64() || number.is_u64() => {
+            Decimal::from_str_exact(&number.to_string()).ok()
+        }
+        Value::String(text) => Decimal::from_str_exact(text.trim()).ok(),
+        _ => None,
+    }
+}
+
+fn holds(condition: &Condition, fact: &Value, ty: FieldType) -> bool {
+    let present = !(fact.is_null() || fact.as_str().is_some_and(str::is_empty));
+    match condition.op {
+        Op::Empty => return !present,
+        Op::NotEmpty => return present,
+        _ if !present => return false,
+        _ => {}
+    }
+    let compare = |expected: &Value| order(ty, fact, expected);
+    match condition.op {
+        Op::Eq => compare(&condition.value) == Some(std::cmp::Ordering::Equal),
+        Op::Ne => compare(&condition.value).is_some_and(|o| o != std::cmp::Ordering::Equal),
+        Op::In => condition.value.as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|v| compare(v) == Some(std::cmp::Ordering::Equal))
+        }),
+        Op::NotIn => condition.value.as_array().is_some_and(|items| {
+            items
+                .iter()
+                .all(|v| compare(v).is_some_and(|o| o != std::cmp::Ordering::Equal))
+        }),
+        Op::Lt => compare(&condition.value) == Some(std::cmp::Ordering::Less),
+        Op::Le => compare(&condition.value).is_some_and(|o| o != std::cmp::Ordering::Greater),
+        Op::Gt => compare(&condition.value) == Some(std::cmp::Ordering::Greater),
+        Op::Ge => compare(&condition.value).is_some_and(|o| o != std::cmp::Ordering::Less),
+        Op::Empty | Op::NotEmpty => unreachable!("answered above"),
+    }
+}
+
+/// `fact` compared with `expected` under the field's type; `None` when either
+/// is not a value of that type (the condition is then false).
+fn order(ty: FieldType, fact: &Value, expected: &Value) -> Option<std::cmp::Ordering> {
+    match ty {
+        FieldType::Integer | FieldType::Float | FieldType::Decimal => {
+            Some(decimal(fact)?.cmp(&decimal(expected)?))
+        }
+        FieldType::Boolean => Some(boolean(fact)?.cmp(&boolean(expected)?)),
+        FieldType::Date => {
+            let date = |v: &Value| jiff::civil::Date::from_str(v.as_str()?.get(..10)?).ok();
+            Some(date(fact)?.cmp(&date(expected)?))
+        }
+        FieldType::DateTime => {
+            let at = |v: &Value| jiff::Timestamp::from_str(v.as_str()?).ok();
+            Some(at(fact)?.cmp(&at(expected)?))
+        }
+        FieldType::String | FieldType::Enum => Some(fact.as_str()?.cmp(expected.as_str()?)),
+    }
+}
+
+/// "Priority is urgent", "Amount is above 1000", "Queue is one of a, b".
+pub(crate) fn sentence(condition: &Condition, label: &str) -> String {
+    let value = match &condition.value {
+        Value::Null => String::new(),
+        Value::Array(items) => items.iter().map(shown).collect::<Vec<_>>().join(", "),
+        value => shown(value),
+    };
+    if value.is_empty() {
+        format!("{label} {}", condition.op.words())
+    } else {
+        format!("{label} {} {value}", condition.op.words())
+    }
+}
+pub(crate) fn shown(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => "—".into(),
+        value => value.to_string(),
+    }
+}

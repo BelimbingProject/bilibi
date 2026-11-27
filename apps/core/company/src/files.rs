@@ -73,7 +73,9 @@ impl SubjectOwner for CompanyFiles {
         Box::pin(async move {
             let id = company_id(subject_id)?;
             match action {
-                SubjectAction::Download => authorize(client, scope, id, VIEW, false).await,
+                SubjectAction::Download | SubjectAction::Inspect => {
+                    authorize(client, scope, id, VIEW, false).await
+                }
                 SubjectAction::Upload
                 | SubjectAction::Submit
                 | SubjectAction::Retain

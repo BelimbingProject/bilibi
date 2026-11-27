@@ -80,19 +80,25 @@ pub struct RolePage {
     pub total_entries: u64,
 }
 
+/// One capability a role gives, and how far it reaches (#683).
+#[derive(Clone, Debug)]
+pub struct Granted {
+    pub key: String,
+    pub reach: crate::Reach,
+}
 pub struct RoleDetails {
     pub role: RoleSummary,
-    /// Sorted capability keys stored on the role.
-    pub capabilities: Vec<String>,
+    /// The capabilities stored on the role, by key.
+    pub capabilities: Vec<Granted>,
     /// User ids holding the role, ascending.
     pub principals: Vec<i64>,
 }
 
-const SUMMARY: &str = "r.id,r.name,r.code,r.description,r.is_system,r.grant_all,r.company_id,\
+pub(crate) const SUMMARY: &str = "r.id,r.name,r.code,r.description,r.is_system,r.grant_all,r.company_id,\
  (SELECT count(*) FROM role_capabilities c WHERE c.tenant_id=r.tenant_id AND c.role_id=r.id),\
  (SELECT count(DISTINCT user_id) FROM effective_principal_roles p WHERE p.tenant_id=r.tenant_id AND p.role_id=r.id)";
 
-fn summary(row: &tokio_postgres::Row) -> RoleSummary {
+pub(crate) fn summary(row: &tokio_postgres::Row) -> RoleSummary {
     RoleSummary {
         id: row.get(0),
         name: row.get(1),
@@ -217,28 +223,68 @@ pub async fn provider_assignments(
     let rows = client.query(&format!("SELECT DISTINCT {SUMMARY} FROM roles r JOIN authz_identity_roles p ON p.tenant_id=r.tenant_id AND p.role_id=r.id WHERE p.tenant_id=$1 AND p.user_id=$2 ORDER BY r.name,r.id"), &[&scope.tenant(),&user]).await?;
     Ok(rows.iter().map(summary).collect())
 }
-/// The capabilities each listed role grants, keyed by role id, for the
-/// escalation guard an assigning screen applies (a role is grantable only by
-/// an actor holding everything it grants). A grant-all role has `grant_all`.
+/// A role one account holds because it belongs to a group (a Core team)
+/// that carries it: "via team Line 2 crew".
+#[derive(Clone, Debug)]
+pub struct GroupAssignment {
+    pub role: RoleSummary,
+    /// The group owner's noun ("team").
+    pub source: String,
+    pub group_id: i64,
+    /// The group's name as its owner last recorded it.
+    pub label: String,
+    /// The group's company: the role applies there only. `None` is tenant-wide.
+    pub company_id: Option<i64>,
+}
+/// The roles an account holds through its groups, one row per group and role.
+/// Like [`provider_assignments`], kept apart from manual assignments; the
+/// caller decides whether the reader may see each group's name.
+pub async fn group_assignments(
+    client: &impl GenericClient,
+    scope: &Scope,
+    user: i64,
+) -> Result<Vec<GroupAssignment>> {
+    let rows = client.query(&format!("SELECT {SUMMARY},o.source,o.group_id,o.label,o.company_id FROM authz_group_members m JOIN authz_groups o ON o.tenant_id=m.tenant_id AND o.source=m.source AND o.group_id=m.group_id JOIN authz_group_roles g ON g.tenant_id=m.tenant_id AND g.source=m.source AND g.group_id=m.group_id JOIN roles r ON r.tenant_id=g.tenant_id AND r.id=g.role_id WHERE m.tenant_id=$1 AND m.user_id=$2 AND NOT r.grant_all AND NOT r.requires_engagement ORDER BY r.name,r.id,o.label,o.group_id"), &[&scope.tenant(),&user]).await?;
+    Ok(rows
+        .iter()
+        .map(|row| GroupAssignment {
+            role: summary(row),
+            source: row.get(9),
+            group_id: row.get(10),
+            label: row.get(11),
+            company_id: row.get(12),
+        })
+        .collect())
+}
+/// The capabilities each listed role grants and how far each reaches, keyed
+/// by role id, for the escalation guard an assigning screen applies (a role
+/// is grantable only by an actor holding everything it grants at least as
+/// far, [`crate::Effective::reaches`]). A grant-all role has `grant_all`.
 pub async fn grants_of(
     client: &impl GenericClient,
     scope: &Scope,
     roles: &[i64],
-) -> Result<std::collections::BTreeMap<i64, (bool, Vec<String>)>> {
+) -> Result<std::collections::BTreeMap<i64, (bool, Vec<(String, crate::Reach)>)>> {
     let tenant = scope.tenant();
     let rows = client
         .query(
-            "SELECT r.id, r.grant_all, COALESCE(array_agg(c.capability ORDER BY c.capability) FILTER (WHERE c.capability IS NOT NULL), '{}') FROM roles r LEFT JOIN role_capabilities c ON c.tenant_id=r.tenant_id AND c.role_id=r.id WHERE r.tenant_id=$1 AND r.id=ANY($2) GROUP BY r.id, r.grant_all",
+            "SELECT r.id, r.grant_all, COALESCE(array_agg(c.capability ORDER BY c.capability) FILTER (WHERE c.capability IS NOT NULL), '{}'), COALESCE(array_agg(c.reach ORDER BY c.capability) FILTER (WHERE c.capability IS NOT NULL), '{}') FROM roles r LEFT JOIN role_capabilities c ON c.tenant_id=r.tenant_id AND c.role_id=r.id WHERE r.tenant_id=$1 AND r.id=ANY($2) GROUP BY r.id, r.grant_all",
             &[&tenant, &roles],
         )
         .await?;
     Ok(rows
         .iter()
         .map(|row| {
-            (
-                row.get::<_, i64>(0),
-                (row.get::<_, bool>(1), row.get::<_, Vec<String>>(2)),
-            )
+            let keys = row
+                .get::<_, Vec<String>>(2)
+                .into_iter()
+                .zip(row.get::<_, Vec<String>>(3))
+                .map(|(key, reach)| {
+                    let reach = crate::Reach::parse(&reach).unwrap_or(crate::Reach::All);
+                    (key, reach)
+                })
+                .collect();
+            (row.get::<_, i64>(0), (row.get::<_, bool>(1), keys))
         })
         .collect())
 }
@@ -265,12 +311,15 @@ pub async fn get(
     };
     let capabilities = client
         .query(
-            "SELECT capability FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 ORDER BY capability",
+            "SELECT capability,reach FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 ORDER BY capability",
             &[&tenant, &id],
         )
         .await?
         .iter()
-        .map(|row| row.get(0))
+        .map(|row| Granted {
+            key: row.get(0),
+            reach: crate::Reach::parse(row.get(1)).unwrap_or(crate::Reach::All),
+        })
         .collect();
     let principals = client
         .query(

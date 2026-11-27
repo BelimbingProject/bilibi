@@ -11,7 +11,7 @@ use crate::{
 use bilibi_audit::{record_action, Attribution};
 use bilibi_database::{Change, Db, Error, MutationTransaction, Result};
 use bilibi_party_ids::OrganisationId;
-use bilibi_tenancy::{Scope, TenantIdentity};
+use bilibi_tenancy::{ProofClient, Scope, TenantIdentity};
 use serde_json::json;
 use std::collections::HashSet;
 use tokio_postgres::{GenericClient, Transaction};
@@ -19,7 +19,10 @@ use tokio_postgres::{GenericClient, Transaction};
 /// The tenant's primary company, or `None` while the tenant has none. An
 /// assignment that names a soft-deleted or missing company is an invariant
 /// violation (`Error::Internal`), never silently `None`.
-pub async fn primary_company(client: &impl GenericClient, tenant: i64) -> Result<Option<Identity>> {
+pub async fn primary_company(
+    client: &(impl ProofClient + ?Sized),
+    tenant: i64,
+) -> Result<Option<Identity>> {
     let Some(row) = client
         .query_opt(
             "SELECT a.company_id, c.code, c.legal_name, c.name, c.deleted_at IS NULL FROM tenant_primary_companies a LEFT JOIN companies c ON c.tenant_id=a.tenant_id AND c.id=a.company_id WHERE a.tenant_id=$1",
@@ -47,7 +50,9 @@ pub async fn primary_company(client: &impl GenericClient, tenant: i64) -> Result
 /// before sign-in for the login card's workspace strip. `None` until an
 /// active operator tenant with a primary company is provisioned
 /// (`platform-provision`, or the dev seed's one-time bootstrap).
-pub async fn platform_operator_company(client: &impl GenericClient) -> Result<Option<Identity>> {
+pub async fn platform_operator_company(
+    client: &(impl GenericClient + Sync),
+) -> Result<Option<Identity>> {
     let Some(row) = client
         .query_opt(
             "SELECT t.id FROM platform_operator o JOIN tenants t ON t.id=o.tenant_id WHERE o.singleton AND t.status='active' AND t.deleted_at IS NULL",
@@ -228,24 +233,33 @@ pub async fn provision_tenant(
     tenant_name: &str,
     company: &NewCompany,
 ) -> Result<ProvisionOutcome> {
+    let mut client = db.get().await?;
+    let tx = client.transaction().await?;
+    let outcome = provision_tenant_in(&tx, tenant_name, company).await?;
+    match outcome {
+        ProvisionOutcome::Provisioned(_) => tx.commit().await?,
+        ProvisionOutcome::Refused(_) => tx.rollback().await?,
+    }
+    Ok(outcome)
+}
+
+pub async fn provision_tenant_in(
+    sql: &Transaction<'_>,
+    tenant_name: &str,
+    company: &NewCompany,
+) -> Result<ProvisionOutcome> {
     if tenant_name.trim().is_empty() {
         return Ok(ProvisionOutcome::Refused(vec![FieldError::new(
             "tenant_name",
             "can't be blank",
         )]));
     }
-    let mut client = db.get().await?;
-    let tx = client.transaction().await?;
-    let sql: &Transaction<'_> = &tx;
     let tenant = bilibi_tenancy::provision_tenant(sql, tenant_name).await?;
     crate::relationship_roles::ensure_defaults(sql, tenant.id).await?;
     bilibi_picklists::provision_deployment(sql, tenant.id).await?;
     let created = match provisioned_company(sql, tenant.id, company).await? {
         Ok(created) => created,
-        Err(errors) => {
-            tx.rollback().await?;
-            return Ok(ProvisionOutcome::Refused(errors));
-        }
+        Err(errors) => return Ok(ProvisionOutcome::Refused(errors)),
     };
     insert_assignment(sql, tenant.id, created.id, None).await?;
     record(
@@ -255,7 +269,6 @@ pub async fn provision_tenant(
         json!({"summary":format!("Provisioned tenant “{}” on company “{}”",tenant.name,created.name),"subject":{"kind":"company","id":created.id,"name":created.name},"context":{"tenant_id":tenant.id,"tenant_name":tenant.name,"code":created.code}}),
     )
     .await?;
-    tx.commit().await?;
     Ok(ProvisionOutcome::Provisioned(Box::new(Provisioned {
         tenant,
         tenant_created: true,

@@ -34,3 +34,6 @@ tokio-postgres.workspace = true
 [dev-dependencies]
 bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-web = { path = "../../web" }
+
+[lints]
+workspace = true

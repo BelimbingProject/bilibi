@@ -97,6 +97,7 @@ pub struct Pages {
     pub display: Arc<DisplayPolicy>,
     pub locales: Arc<Locales>,
     pub views: Arc<PageViews>,
+    pub contracts: Arc<bilibi_agent_api::page::PageContracts>,
 }
 
 impl Pages {
@@ -256,9 +257,7 @@ impl Index {
             period: None,
             filter: PeriodFilter::new("exchange-period", period, &clock),
             browser_zone: None,
-            columns: PageColumns::mount(views, "integration-exchanges", builtins())
-                .and_then(|columns| columns.with_record_slots(fields::ALL))
-                .map_err(|_| Error::Internal)?,
+            columns: exchange_columns(views)?,
             reload: true,
         })
     }
@@ -374,6 +373,7 @@ impl Index {
     }
 
     async fn render(&mut self, scope: &Scope) -> Result<String> {
+        self.columns.refresh_views(scope).await?;
         let client = self.pages.db.get().await?;
         let display = self.pages.context(&**client, scope).await?;
         let clock = display.clock(self.browser_zone.as_deref(), Timestamp::now());
@@ -487,14 +487,15 @@ impl Index {
                     self.list.page,
                     self.list.page_size,
                     page.total_entries.max(0) as u64,
-                ),
+                )
+                .or_more(page.more),
                 &PAGE_SIZES,
             ))?,
         };
         view.render().map_err(|_| Error::Internal)
     }
 
-    async fn event(&mut self, scope: &Scope, value: &Value) -> Result<()> {
+    async fn event(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         let get = |key: &str| value.get(key).and_then(Value::as_str);
         let kind = get("type").ok_or(Error::Invalid)?;
         match kind {
@@ -510,6 +511,7 @@ impl Index {
                 self.reload = true;
             }
             "grid" => {
+                let query = self.query();
                 // No column sorts: the log stays newest first. A changed
                 // arrangement is already remembered; the rows load again
                 // under it.
@@ -517,8 +519,14 @@ impl Index {
                     .columns
                     .handle(
                         scope,
-                        &params::string_values_checked(value, params::FIELD_LIMIT)
-                            .map_err(Error::refused)?,
+                        &PageColumns::event_values(value)?,
+                        bilibi_grid::ViewCaller {
+                            contracts: &self.pages.contracts,
+                            credential,
+                            service: "base/integration.pages",
+                            event: "grid",
+                            query,
+                        },
                     )
                     .await?
                 {
@@ -568,7 +576,9 @@ impl LiveState<Scope, Error> for Index {
                     self.open(request.scope, values).await?;
                     self.reload = true;
                 }
-                LiveInput::Event(value) => self.event(request.scope, value).await?,
+                LiveInput::Event(value) => {
+                    self.event(request.scope, request.credential, value).await?
+                }
             }
             let html = self.render(request.scope).await?;
             Ok(LiveBody {
@@ -817,25 +827,25 @@ impl Page<Scope, Error> for Pages {
 }
 
 // Metadata facts, shared with the list columns.
-bilibi_ui::record_fields! { pub(crate) mod fields {
-    DIRECTION: bilibi_ui::RecordField::new("direction", "Direction"),
-    OPERATION: bilibi_ui::RecordField::new("operation", "Operation"),
-    METHOD: bilibi_ui::RecordField::new("method", "Method"),
-    ENDPOINT: bilibi_ui::RecordField::new("endpoint", "Endpoint"),
-    OUTCOME: bilibi_ui::RecordField::new("outcome", "Outcome"),
-    STATUS: bilibi_ui::RecordField::new("status", "HTTP status").excluded("The default Status column shows it"),
-    DURATION_MS: bilibi_ui::RecordField::new("duration_ms", "Duration").excluded("The default Duration (ms) column shows it"),
-    OCCURRED_AT: bilibi_ui::RecordField::new("occurred_at", "Time"),
-    TENANT: bilibi_ui::RecordField::new("tenant", "Tenant"),
-    OWNER: bilibi_ui::RecordField::new("owner", "Owner"),
-    USER_ID: bilibi_ui::RecordField::new("user_id", "Person"),
-    IMPERSONATOR: bilibi_ui::RecordField::new("impersonator", "Impersonator"),
-    CONNECTION: bilibi_ui::RecordField::new("connection", "Connection"),
-    AGENT: bilibi_ui::RecordField::new("agent", "Agent"),
-    RUN: bilibi_ui::RecordField::new("run", "Run"),
-    CLIENT_IDENTITY: bilibi_ui::RecordField::new("client_identity", bilibi_tenancy::ClientIdentity::LABEL),
-    SELF_REPORT: bilibi_ui::RecordField::new("self_report", bilibi_tenancy::SelfReport::LABEL),
-    ERROR: bilibi_ui::RecordField::new("error", "Error"),
+bilibi_ui::record_fields! { "base/integration", pub(crate) mod fields {
+    DIRECTION: bilibi_ui::RecordField::new("direction", "Direction", bilibi_ui::RecordFieldType::String),
+    OPERATION: bilibi_ui::RecordField::new("operation", "Operation", bilibi_ui::RecordFieldType::String),
+    METHOD: bilibi_ui::RecordField::new("method", "Method", bilibi_ui::RecordFieldType::String),
+    ENDPOINT: bilibi_ui::RecordField::new("endpoint", "Endpoint", bilibi_ui::RecordFieldType::String),
+    OUTCOME: bilibi_ui::RecordField::new("outcome", "Outcome", bilibi_ui::RecordFieldType::String),
+    STATUS: bilibi_ui::RecordField::new("status", "HTTP status", bilibi_ui::RecordFieldType::Integer).excluded("The default Status column shows it"),
+    DURATION_MS: bilibi_ui::RecordField::new("duration_ms", "Duration", bilibi_ui::RecordFieldType::Integer).excluded("The default Duration (ms) column shows it"),
+    OCCURRED_AT: bilibi_ui::RecordField::new("occurred_at", "Time", bilibi_ui::RecordFieldType::DateTime),
+    TENANT: bilibi_ui::RecordField::new("tenant", "Tenant", bilibi_ui::RecordFieldType::String),
+    OWNER: bilibi_ui::RecordField::new("owner", "Owner", bilibi_ui::RecordFieldType::String),
+    USER_ID: bilibi_ui::RecordField::new("user_id", "Person", bilibi_ui::RecordFieldType::Integer),
+    IMPERSONATOR: bilibi_ui::RecordField::new("impersonator", "Impersonator", bilibi_ui::RecordFieldType::String),
+    CONNECTION: bilibi_ui::RecordField::new("connection", "Connection", bilibi_ui::RecordFieldType::String),
+    AGENT: bilibi_ui::RecordField::new("agent", "Agent", bilibi_ui::RecordFieldType::String),
+    RUN: bilibi_ui::RecordField::new("run", "Run", bilibi_ui::RecordFieldType::String),
+    CLIENT_IDENTITY: bilibi_ui::RecordField::new("client_identity", bilibi_tenancy::ClientIdentity::LABEL, bilibi_ui::RecordFieldType::String),
+    SELF_REPORT: bilibi_ui::RecordField::new("self_report", bilibi_tenancy::SelfReport::LABEL, bilibi_ui::RecordFieldType::String),
+    ERROR: bilibi_ui::RecordField::new("error", "Error", bilibi_ui::RecordFieldType::String),
 } }
 
 fn exchange_facts(
@@ -903,3 +913,32 @@ fn exchange_facts(
         (fields::ERROR, dash(exchange.error_class.as_deref())),
     ])
 }
+
+fn exchange_columns(views: Arc<PageViews>) -> Result<PageColumns> {
+    PageColumns::mount(views, "integration-exchanges", builtins())
+        .and_then(|columns| columns.with_record_slots(fields::ALL))
+        .map_err(|_| Error::Internal)
+}
+
+fn agent_columns<'a>(
+    _client: &'a tokio_postgres::Client,
+    _scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(async move { exchange_columns(views) })
+}
+bilibi_grid::contribute_page_metadata!(
+    "base/integration",
+    "base/integration.grid-page",
+    "integration-exchanges",
+    Some("/system/api-exchanges"),
+    crate::LIST,
+    Some(|| SPEC.clone()),
+    &[
+        ("period", "Period selection"),
+        ("from", "Start date"),
+        ("to", "End date")
+    ],
+    None,
+    agent_columns
+);

@@ -78,6 +78,9 @@ pub enum ControlKind {
     Select,
     MultiSelect(Box<MultiSelect>),
     Date,
+    /// A typed value in the filter sheet (text or a number), unlike the
+    /// toolbar's one search box.
+    Text,
 }
 
 /// One toolbar cell. Framing, the magnifier, debounce, length cap and the
@@ -89,6 +92,8 @@ pub struct ToolbarControl {
     pub label: String,
     pub hint: String,
     pub field: Field,
+    /// The Grid field identity behind `label`; empty keeps the owner's word.
+    identity: String,
 }
 
 impl ToolbarControl {
@@ -128,6 +133,30 @@ impl ToolbarControl {
         Self::new(ControlKind::Date, id, label, field)
     }
 
+    /// A text field in the filter sheet posting `filters[key]`, debounced like
+    /// search, for a value the list matches or compares (a custom field's
+    /// text, a number bound). Its chip shows the value while it is set.
+    pub fn text(id: &str, key: &str, label: &str, value: &str) -> Self {
+        let mut field = Field::in_form(FILTERS_FORM, key)
+            .id(id)
+            .kind(InputKind::Text)
+            .wrapper_class("mb-0")
+            .value(value)
+            .attr("data-debounce", "300")
+            .autocomplete("off")
+            // A toolbar label is screen-reader only: the empty box says what
+            // it filters.
+            .placeholder(label);
+        field.attrs.maxlength = Some("256".into());
+        Self::new(ControlKind::Text, id, label, field)
+    }
+
+    /// A text control for a number: the decimal keypad on a phone.
+    pub fn numeric(mut self) -> Self {
+        self.field = self.field.attr("inputmode", "decimal");
+        self
+    }
+
     /// A multi-select; its label is rendered by the control, screen-reader only.
     pub fn multi_select(control: MultiSelect) -> Self {
         let mut control = control;
@@ -140,7 +169,20 @@ impl ToolbarControl {
             label,
             hint: String::new(),
             field: Field::default(),
+            identity: String::new(),
         }
+    }
+
+    /// The `table.field` Grid identity this filter narrows, so its label and
+    /// chip show the tenant's word for that field. The filter key and DOM ID
+    /// are not field identities.
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.identity = identity.into();
+        self
+    }
+
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.identity, &self.label)
     }
 
     /// Helper text below the control.
@@ -148,7 +190,9 @@ impl ToolbarControl {
         match &mut self.kind {
             ControlKind::Search => self.hint = hint.into(),
             ControlKind::MultiSelect(control) => control.hint = hint.into(),
-            ControlKind::Select | ControlKind::Date => self.field.hint = hint.into(),
+            ControlKind::Select | ControlKind::Date | ControlKind::Text => {
+                self.field.hint = hint.into()
+            }
         }
         self
     }
@@ -160,6 +204,7 @@ impl ToolbarControl {
             label: label.into(),
             hint: String::new(),
             field,
+            identity: String::new(),
         }
     }
 
@@ -179,9 +224,83 @@ impl ToolbarControl {
     }
 }
 
+/// A set filter as its chip shows it on a narrow screen ("Status: Posted").
+#[derive(Clone, Debug)]
+pub struct FilterChip {
+    /// The control's id; the chip's × resets the control of that id.
+    pub id: String,
+    pub label: String,
+    pub value: String,
+}
+
+impl ToolbarControl {
+    /// What this filter is set to, or `None` while it shows everything: a
+    /// select away from its first choice (the "All" a list offers first), a
+    /// date with a day, a multi-select with a tick, a text with a value. A
+    /// search is never a chip.
+    pub fn chip(&self) -> Option<FilterChip> {
+        let value = match &self.kind {
+            ControlKind::Search => return None,
+            ControlKind::Select => {
+                let field = &self.field;
+                let first = if field.prompt.is_empty() {
+                    field.options.first().map(|choice| choice.value.as_str())
+                } else {
+                    Some("")
+                };
+                if field.value.is_empty() || first == Some(field.value.as_str()) {
+                    return None;
+                }
+                field
+                    .options
+                    .iter()
+                    .find(|choice| choice.value == field.value)
+                    .map(|choice| choice.label.clone())
+                    .unwrap_or_else(|| field.value.clone())
+            }
+            ControlKind::Date => {
+                if self.field.value.is_empty() {
+                    return None;
+                }
+                // The chip reads the day as the pages do ("6 Nov 2026").
+                self.field
+                    .value
+                    .parse::<jiff::civil::Date>()
+                    .map(|date| date.strftime("%-d %b %Y").to_string())
+                    .unwrap_or_else(|_| self.field.value.clone())
+            }
+            ControlKind::Text => {
+                if self.field.value.trim().is_empty() {
+                    return None;
+                }
+                self.field.value.trim().to_owned()
+            }
+            ControlKind::MultiSelect(control) => {
+                let labels: Vec<&str> = control
+                    .options
+                    .iter()
+                    .filter(|choice| control.values.contains(&choice.value))
+                    .map(|choice| choice.label.as_str())
+                    .collect();
+                if labels.is_empty() {
+                    return None;
+                }
+                labels.join(", ")
+            }
+        };
+        Some(FilterChip {
+            id: self.id.clone(),
+            label: self.label_text(),
+            value,
+        })
+    }
+}
+
 /// The filter toolbar framed above a list. The form raises `event` on change
 /// and on submit (Enter filters in place), carrying `filters[...]` values.
-/// Search comes first, with filters to its right and wrapping below on narrow screens.
+/// Search comes first, with filters to its right. Below `sm` the filters
+/// fold behind a Filters button into a sheet, and each set one shows as a
+/// chip under the search (DESIGN.md, Lists).
 #[derive(Template, Clone, Debug)]
 #[template(
     source = r#"{% import "lists.html" as lists %}{% call lists::filter_toolbar(toolbar=self) %}{% endcall %}"#,
@@ -208,6 +327,20 @@ impl<'a> FilterToolbar<'a> {
             target: "",
             controls,
         }
+    }
+
+    /// Whether any control other than search exists: only then is there a
+    /// Filters button and a sheet.
+    pub fn has_filters(&self) -> bool {
+        self.controls.iter().any(|control| !control.is_search())
+    }
+
+    /// The filters that are set, in toolbar order, as chips.
+    pub fn active_filters(&self) -> Vec<FilterChip> {
+        self.controls
+            .iter()
+            .filter_map(ToolbarControl::chip)
+            .collect()
     }
 }
 

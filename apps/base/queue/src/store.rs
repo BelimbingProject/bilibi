@@ -18,7 +18,7 @@ impl State {
     pub fn terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Cancelled | Self::Discarded)
     }
-    fn parse(state: &str) -> Result<Self> {
+    pub(crate) fn parse(state: &str) -> Result<Self> {
         Ok(match state {
             "available" => Self::Available,
             "scheduled" => Self::Scheduled,
@@ -72,19 +72,29 @@ pub async fn states(
 }
 /// The one-line queue status System Info shows: platform-wide backlog and
 /// recovery counts only, no job, tenant or actor detail. It
-/// counts `available` and `scheduled` jobs as pending.
+/// counts `available` and `scheduled` jobs as pending, and names ended jobs
+/// whose owner's ending hook gave up. Each count reads one partial index
+/// (`base_queue_claim`, `base_queue_jobs_discarded`,
+/// `base_queue_jobs_ending_failed`), never the finished jobs: keep every
+/// predicate here equal to its index's.
 pub async fn health_status(client: &impl GenericClient) -> Result<String> {
     let row = client
         .query_one(
-            "SELECT count(*) FILTER (WHERE state IN ('available','scheduled')), count(*) FILTER (WHERE state='retryable'), count(*) FILTER (WHERE state='discarded') FROM base_queue_jobs",
+            "SELECT waiting.pending, waiting.retryable, (SELECT count(*) FROM base_queue_jobs WHERE state='discarded'), (SELECT count(*) FROM base_queue_jobs WHERE ending='failed') FROM (SELECT count(*) FILTER (WHERE state<>'retryable') AS pending, count(*) FILTER (WHERE state='retryable') AS retryable FROM base_queue_jobs WHERE state IN ('available','scheduled','retryable')) waiting",
             &[],
         )
         .await?;
+    let unrecorded = row.get::<_, i64>(3);
     Ok(format!(
-        "Available ({} pending, {} retryable, {} discarded)",
+        "Available ({} pending, {} retryable, {} discarded{})",
         row.get::<_, i64>(0),
         row.get::<_, i64>(1),
-        row.get::<_, i64>(2)
+        row.get::<_, i64>(2),
+        if unrecorded > 0 {
+            format!(", {unrecorded} ended without their owner recording it")
+        } else {
+            String::new()
+        }
     ))
 }
 fn actor_matches(tx: &MutationTransaction<'_>, scope: &Scope) -> bool {
@@ -100,6 +110,7 @@ pub async fn cancel_for(tx: &mut MutationTransaction<'_>, scope: &Scope, id: i64
 }
 /// Explicitly retry a failed/cancelled job with a fresh attempt budget. Completed
 /// jobs are never replayed. This is an owner command, not automatic backoff.
+/// A retried job is alive again, so its owner is told again if it ends again.
 pub async fn retry_for(tx: &mut MutationTransaction<'_>, scope: &Scope, id: i64) -> Result<State> {
     control(tx, scope, id, true).await
 }
@@ -122,7 +133,7 @@ async fn control(
         let old_state = State::parse(&old)?;
         let state = if retry {
             if !matches!(old_state, State::Cancelled | State::Discarded | State::Retryable | State::Scheduled) { return Err(Error::Conflict); }
-            sql.execute("UPDATE base_queue_jobs SET state='available',attempt=0,available_at=clock_timestamp(),updated_at=clock_timestamp(),cancelled_at=NULL,discarded_at=NULL,failure_code=NULL WHERE id=$1", &[&id]).await?;
+            sql.execute("UPDATE base_queue_jobs SET state='available',attempt=0,available_at=clock_timestamp(),updated_at=clock_timestamp(),cancelled_at=NULL,discarded_at=NULL,failure_code=NULL,ending=NULL,ending_attempts=0,ending_after=NULL WHERE id=$1", &[&id]).await?;
             State::Available
         } else if old_state.terminal() {
             old_state
@@ -140,12 +151,54 @@ pub(crate) struct Claim {
 }
 /// Reaping and claiming are one transaction. SKIP LOCKED lets independent app
 /// processes claim different jobs. An expired final attempt is discarded.
+/// Both searches compare with `now()` (this transaction's start), not
+/// `clock_timestamp()`: a volatile clock cannot bound an index scan, so every
+/// poll would read every running or waiting job; with `now()` a poll reads
+/// only the expired leases and the due jobs (`base_queue_expired_leases`,
+/// `base_queue_claim`). The times written still come from the clock.
 pub(crate) async fn claim(db: &Db, lease_seconds: i32) -> Result<Option<Claim>> {
     let mut client = db.get().await?;
     let tx = client.transaction().await?;
-    tx.execute("WITH expired AS (SELECT id FROM base_queue_jobs WHERE state='executing' AND lease_expires_at<=clock_timestamp() ORDER BY lease_expires_at,id FOR UPDATE SKIP LOCKED LIMIT 100) UPDATE base_queue_jobs j SET state=CASE WHEN attempt>=max_attempts THEN 'discarded' ELSE 'retryable' END,available_at=clock_timestamp()+make_interval(secs=>LEAST(3600, power(2,LEAST(attempt,12))::integer)),discarded_at=CASE WHEN attempt>=max_attempts THEN clock_timestamp() ELSE NULL END,lease_token=NULL,lease_expires_at=NULL,failure_code='lease_expired',updated_at=clock_timestamp() FROM expired e WHERE j.id=e.id", &[]).await?;
+    tx.execute("WITH expired AS (SELECT id FROM base_queue_jobs WHERE state='executing' AND lease_expires_at<=now() ORDER BY lease_expires_at,id FOR UPDATE SKIP LOCKED LIMIT 100) UPDATE base_queue_jobs j SET state=CASE WHEN attempt>=max_attempts THEN 'discarded' ELSE 'retryable' END,available_at=clock_timestamp()+make_interval(secs=>LEAST(3600, power(2,LEAST(attempt,12))::integer)),discarded_at=CASE WHEN attempt>=max_attempts THEN clock_timestamp() ELSE NULL END,lease_token=NULL,lease_expires_at=NULL,failure_code='lease_expired',updated_at=clock_timestamp() FROM expired e WHERE j.id=e.id", &[]).await?;
     let token = uuid::Uuid::new_v4().to_string();
-    let row = tx.query_opt("WITH candidate AS (SELECT id FROM base_queue_jobs WHERE state IN ('available','scheduled','retryable') AND available_at<=clock_timestamp() AND attempt<max_attempts ORDER BY available_at,id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE base_queue_jobs j SET state='executing',attempt=attempt+1,attempted_at=clock_timestamp(),updated_at=clock_timestamp(),lease_token=$1,lease_expires_at=clock_timestamp()+make_interval(secs=>$2::integer) FROM candidate c WHERE j.id=c.id RETURNING j.*", &[&token,&lease_seconds]).await?;
+    let row = tx.query_opt(
+        "WITH RECURSIVE heads AS (
+            (SELECT tenant_id,worker_id,fifo_key,id,state,available_at,attempt,max_attempts FROM base_queue_jobs
+             WHERE fifo_key IS NOT NULL AND state IN ('available','scheduled','retryable','executing')
+             ORDER BY tenant_id,worker_id,fifo_key,id LIMIT 1)
+            UNION ALL
+            SELECT successor.* FROM heads h CROSS JOIN LATERAL (
+                SELECT tenant_id,worker_id,fifo_key,id,state,available_at,attempt,max_attempts FROM base_queue_jobs
+                WHERE (tenant_id,worker_id,fifo_key) > (h.tenant_id,h.worker_id,h.fifo_key)
+                    AND fifo_key IS NOT NULL AND state IN ('available','scheduled','retryable','executing')
+                ORDER BY tenant_id,worker_id,fifo_key,id LIMIT 1
+            ) successor
+        ), fifo AS (
+            SELECT locked.id,h.available_at FROM (
+                SELECT id,available_at FROM heads
+                WHERE state IN ('available','scheduled','retryable') AND available_at<=now()
+                    AND attempt<max_attempts
+                ORDER BY available_at,id
+            ) h CROSS JOIN LATERAL (
+                SELECT q.id FROM base_queue_jobs q WHERE q.id=h.id
+                    AND q.state IN ('available','scheduled','retryable') AND q.available_at<=now()
+                    AND q.attempt<q.max_attempts
+                FOR UPDATE SKIP LOCKED
+            ) locked ORDER BY h.available_at,h.id LIMIT 1
+        ), ordinary AS (
+            SELECT id,available_at FROM base_queue_jobs
+            WHERE fifo_key IS NULL AND state IN ('available','scheduled','retryable') AND available_at<=now()
+                AND attempt<max_attempts
+            ORDER BY available_at,id FOR UPDATE SKIP LOCKED LIMIT 1
+        ), candidate AS (
+            SELECT id,available_at FROM fifo UNION ALL SELECT id,available_at FROM ordinary
+            ORDER BY available_at,id LIMIT 1
+        )
+        UPDATE base_queue_jobs j SET state='executing',attempt=attempt+1,attempted_at=clock_timestamp(),
+            updated_at=clock_timestamp(),lease_token=$1,lease_expires_at=clock_timestamp()+make_interval(secs=>$2::integer)
+        FROM candidate c WHERE j.id=c.id RETURNING j.*",
+        &[&token, &lease_seconds],
+    ).await?;
     tx.commit().await?;
     Ok(row.map(|row| Claim { row, token }))
 }
@@ -160,4 +213,45 @@ pub(crate) async fn finish(
     code: Option<&str>,
 ) -> Result<bool> {
     Ok(db.get().await?.execute("UPDATE base_queue_jobs SET state=$3,failure_code=$4,lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp(),available_at=CASE WHEN $3='retryable' THEN clock_timestamp()+make_interval(secs=>LEAST(3600,power(2,LEAST(attempt,12))::integer)) ELSE available_at END,completed_at=CASE WHEN $3='completed' THEN clock_timestamp() ELSE NULL END,cancelled_at=CASE WHEN $3='cancelled' THEN clock_timestamp() ELSE NULL END,discarded_at=CASE WHEN $3='discarded' THEN clock_timestamp() ELSE NULL END WHERE id=$1 AND state='executing' AND lease_token=$2 AND lease_expires_at>clock_timestamp()", &[&id,&token,&state,&code]).await? == 1)
+}
+
+/// Owner attempts at recording one ended job before Queue stops asking.
+const ENDING_ATTEMPTS: i32 = 25;
+/// Cancelled and discarded jobs of `workers` (the ones with an ending hook)
+/// whose owner has not been told, oldest first: id, tenant and worker.
+pub(crate) async fn due_endings(
+    db: &Db,
+    workers: &[String],
+    limit: i64,
+) -> Result<Vec<(i64, i64, String)>> {
+    Ok(db.get().await?.query("SELECT id,tenant_id,worker_id FROM base_queue_jobs WHERE state IN ('cancelled','discarded') AND ending IS NULL AND worker_id=ANY($1) AND (ending_after IS NULL OR ending_after<=clock_timestamp()) ORDER BY id LIMIT $2", &[&workers,&limit]).await?.iter().map(|row| (row.get(0), row.get(1), row.get(2))).collect())
+}
+/// One failed telling: backs off like a job attempt, and stops at
+/// `ENDING_ATTEMPTS` with `ending='failed'` (counted by System Info).
+pub(crate) async fn ending_failed(db: &Db, id: i64) -> Result<()> {
+    db.get().await?.execute("UPDATE base_queue_jobs SET ending_attempts=ending_attempts+1,ending_after=clock_timestamp()+make_interval(secs=>LEAST(3600,power(2,LEAST(ending_attempts+1,12))::integer)),ending=CASE WHEN ending_attempts+1>=$2 THEN 'failed' ELSE NULL END,updated_at=clock_timestamp() WHERE id=$1 AND state IN ('cancelled','discarded') AND ending IS NULL", &[&id,&ENDING_ATTEMPTS]).await?;
+    Ok(())
+}
+
+/// Finished jobs one statement deletes; a pass repeats until fewer are left.
+const PRUNE_BATCH: i64 = 10_000;
+/// Deletes jobs that finished (`completed`, `cancelled`, `discarded`) and were
+/// last touched before `cutoff`, a batch per statement so no long lock or
+/// transaction is held. A cancelled or discarded job of a worker in `told`
+/// (the ones with an ending hook) stays until its owner was told: untold and
+/// `failed` endings are kept. Rows another transaction holds are skipped and
+/// go with the next pass.
+pub(crate) async fn prune(
+    client: &impl GenericClient,
+    told: &[String],
+    cutoff: std::time::SystemTime,
+) -> Result<u64> {
+    let mut pruned = 0;
+    loop {
+        let deleted = client.execute("DELETE FROM base_queue_jobs WHERE id IN (SELECT id FROM base_queue_jobs WHERE state IN ('completed','cancelled','discarded') AND updated_at<$1 AND NOT (state<>'completed' AND ending IS DISTINCT FROM 'told' AND worker_id=ANY($2)) LIMIT $3 FOR UPDATE SKIP LOCKED)", &[&cutoff,&told,&PRUNE_BATCH]).await?;
+        pruned += deleted;
+        if deleted < PRUNE_BATCH as u64 {
+            return Ok(pruned);
+        }
+    }
 }

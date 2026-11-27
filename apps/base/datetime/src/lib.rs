@@ -19,7 +19,7 @@ pub mod filter;
 mod period;
 
 pub use filter::PeriodFilter;
-pub use period::{Clock, Period, Preset, BACKWARDS, INVALID_DATES, UNRESOLVABLE};
+pub use period::{Clock, FinancialYears, Period, Preset, BACKWARDS, INVALID_DATES, UNRESOLVABLE};
 
 use bilibi_database::{Error, MutationTransaction, Result};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance, Service};
@@ -143,7 +143,20 @@ impl DisplayContext {
 
     /// A calendar date is zone-free: no mode logic, no zone suffix.
     pub fn render_date(&self, date: civil::Date) -> String {
-        date.strftime("%d/%m/%Y").to_string()
+        date.strftime(DATE).to_string()
+    }
+
+    /// A Gregorian month column heading in the reader's regional locale,
+    /// e.g. "Nov 2026" (English) or "nov. 2026" (French). No timezone applies.
+    pub fn month_label(&self, date: civil::Date) -> String {
+        use icu_datetime::{fieldsets::YM, input::Date, FixedCalendarDateTimeFormatter};
+        let locale = bilibi_locale::normalize(self.locale).unwrap_or(bilibi_locale::FALLBACK);
+        let locale: icu_locale::Locale = locale.parse().expect("catalogue locales are valid");
+        let formatter = FixedCalendarDateTimeFormatter::try_new(locale.into(), YM::medium())
+            .expect("compiled Gregorian month formatting data");
+        let date = Date::try_new_gregorian(date.year().into(), date.month() as u8, 1)
+            .expect("jiff year and month are valid Gregorian fields");
+        formatter.format(&date).to_string()
     }
 
     /// The calendar a period filter reads "today" against.
@@ -151,6 +164,12 @@ impl DisplayContext {
         Clock::resolve(self, browser_zone, now)
     }
 }
+
+/// The one date format every page shows: "6 Nov 2026". The day has no
+/// leading zero and the month is a short English word, so no reader takes
+/// 06/11 for 11 June; the shared date input (`base/ui`) reads and shows the
+/// same, and `assets/datetime.js` formats the `local` mode the same way.
+pub(crate) const DATE: &str = "%-d %b %Y";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
@@ -170,9 +189,9 @@ impl Format {
             Precision::Second => "%H:%M:%S",
         };
         match self {
-            Self::Date => "%d/%m/%Y".to_owned(),
+            Self::Date => DATE.to_owned(),
             Self::Time => clock.to_owned(),
-            Self::DateTime => format!("%d/%m/%Y, {clock}"),
+            Self::DateTime => format!("{DATE}, {clock}"),
         }
     }
 }

@@ -3,11 +3,12 @@
 //! boot, discovered with no central list. A module that is not mounted
 //! declares nothing, so its kind's references show as unavailable.
 use bilibi_module_registry::{Consumer, Entry, Module, RegistryError, Result};
-use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
+use bilibi_tenancy::{PortalScope, ProofClient, ProofFuture, Scope};
 use std::collections::BTreeSet;
 
 pub const KINDS: &str = "base/records.kinds";
 pub const HOLDERS: &str = "base/records.holders";
+pub const PORTAL_STEP_UP: &str = "base/records.portal_step_up";
 
 /// What an owner answers for one record and one reader.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +41,39 @@ pub trait RecordOwner: Send + Sync {
         scope: &'a Scope,
         id: &'a str,
     ) -> ProofFuture<'a, Access>;
+}
+
+/// Which records of one kind currently require the portal session to hold a
+/// declared Base Step-up operation. The owner answers in one batch from its
+/// own records; a holder such as Core Document never copies that decision.
+pub trait PortalProtection: Send + Sync {
+    fn protected<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        portal: &'a PortalScope,
+        ids: &'a [String],
+    ) -> ProofFuture<'a, BTreeSet<String>>;
+}
+
+/// A record owner's portal step-up rule. When the session does not hold
+/// `operation`, holders hide references to the ids `protection` returns.
+pub struct PortalStepUp {
+    pub kind: &'static str,
+    pub operation: &'static str,
+    pub protection: &'static dyn PortalProtection,
+}
+impl PortalStepUp {
+    pub const fn new(
+        kind: &'static str,
+        operation: &'static str,
+        protection: &'static dyn PortalProtection,
+    ) -> Self {
+        Self {
+            kind,
+            operation,
+            protection,
+        }
+    }
 }
 
 /// One kind of record an owner lets other modules point at.
@@ -117,6 +151,24 @@ macro_rules! holder {
                 HOLDER.table,
                 $crate::Provenance { module: $module, source: file!(), line: line!() },
                 &HOLDER,
+            )
+        }}
+    };
+}
+
+/// Declares the portal step-up rule for one record kind. The record owner and
+/// the rule contributor must be the same module, so another module cannot
+/// hide or relax its records.
+#[macro_export]
+macro_rules! portal_step_up {
+    ($module:literal, $rule:expr) => {
+        $crate::inventory::submit! {{
+            const RULE: $crate::PortalStepUp = $rule;
+            $crate::Contribution::new(
+                $crate::PORTAL_STEP_UP,
+                RULE.kind,
+                $crate::Provenance { module: $module, source: file!(), line: line!() },
+                &RULE,
             )
         }}
     };
@@ -204,5 +256,26 @@ fn validate_holders(entries: &[Entry]) -> Result<()> {
     Ok(())
 }
 
+fn validate_portal_step_up(entries: &[Entry]) -> Result<()> {
+    for entry in entries {
+        let rule = entry.get::<PortalStepUp>()?;
+        if entry.id != rule.kind || !key_shaped(rule.kind) || rule.operation.is_empty() {
+            return Err(RegistryError::Contribution(format!(
+                "portal step-up rule {} must be keyed by a shaped record kind and name an operation",
+                at(entry)
+            )));
+        }
+        if !depends(entry) {
+            return Err(RegistryError::Contribution(format!(
+                "portal step-up rule {} is contributed by {}, which does not depend on base/records",
+                at(entry),
+                entry.provenance.module
+            )));
+        }
+    }
+    Ok(())
+}
+
 inventory::submit! { Consumer::new::<RecordKind>(KINDS, "base/records", validate_kinds) }
 inventory::submit! { Consumer::new::<Holder>(HOLDERS, "base/records", validate_holders) }
+inventory::submit! { Consumer::new::<PortalStepUp>(PORTAL_STEP_UP, "base/records", validate_portal_step_up) }

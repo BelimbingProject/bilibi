@@ -7,6 +7,12 @@
 </div></div>
 <p class="text-xs text-ink-muted">Each variant is centered on a 1280px stage at full scale; scroll to follow the widest.</p>
 {% endcall %}
+{% call ui::card(id="specimen-wordmark", title="Wordmark", inner_class="space-y-3") %}
+<div class="flex items-center gap-3"><span class="text-xs text-ink-muted">Top bar</span>{% call ui::wordmark(href="/", brand=brand) %}{% endcall %}</div>
+<div class="flex items-center gap-3"><span class="text-xs text-ink-muted">Credential page, as the way home</span>{% call ui::wordmark(size=bilibi_ui::WordmarkSize::Credential, href="/", brand=brand) %}{% endcall %}</div>
+<div class="flex items-center gap-3"><span class="text-xs text-ink-muted">An installation's own name, top bar</span>{% call ui::wordmark(href="/", brand=own_brand) %}{% endcall %}</div>
+<div class="flex items-center gap-3"><span class="text-xs text-ink-muted">An installation's own logo and name, credential page</span>{% call ui::wordmark(size=bilibi_ui::WordmarkSize::Credential, href="/", brand=own_logo_brand) %}{% endcall %}</div>
+{% endcall %}
 {% call ui::card(id="specimen-identity-images", title="Identity images", inner_class="space-y-3") %}
 <div class="flex items-center gap-3"><span class="text-xs text-ink-muted">Company fallback</span>{% call ui::identity_image() %}{% endcall %}<span class="text-xs text-ink-muted">Account fallback</span>{% call ui::identity_image(kind=bilibi_ui::IdentityImageKind::Person, initials="AA") %}{% endcall %}</div>
 <div class="flex items-center gap-3"><span class="text-xs text-ink-muted">Editor previews</span>{% call ui::identity_image(size=bilibi_ui::IdentityImageSize::Preview) %}{% endcall %}{% call ui::identity_image(kind=bilibi_ui::IdentityImageKind::Person, size=bilibi_ui::IdentityImageSize::Preview, initials="AA") %}{% endcall %}</div>

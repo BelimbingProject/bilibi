@@ -15,8 +15,10 @@ bilibi-dashboard.workspace = true
 bilibi-database.workspace = true
 bilibi-datetime.workspace = true
 bilibi-grid.workspace = true
+bilibi-labels.workspace = true
 bilibi-locale.workspace = true
 bilibi-mail.workspace = true
+bilibi-templates.workspace = true
 bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-records.workspace = true
@@ -33,4 +35,8 @@ jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tokio-postgres.workspace = true
+
+[lints]
+workspace = true

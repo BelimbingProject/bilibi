@@ -116,6 +116,7 @@ fn field(c: &Value, state: &State) -> Field {
         "textarea" => InputKind::Textarea,
         "select" => InputKind::Select,
         "checkbox" => InputKind::Checkbox,
+        "switch" => InputKind::Switch,
         "date" => InputKind::Date,
         "time" => InputKind::Time,
         "datetime-local" => InputKind::DatetimeLocal,
@@ -487,8 +488,11 @@ impl View<'_> {
             .state
             .display
             .clock(self.state.browser_zone.as_deref(), jiff::Timestamp::now());
-        let period =
-            bilibi_datetime::Period::parse(|key| self.state.period.get(key).cloned(), clock.today);
+        let period = bilibi_datetime::Period::parse_with_financial_years(
+            |key| self.state.period.get(key).cloned(),
+            clock.today,
+            Some(crate::state::financial_years(clock.today)),
+        );
         let Some(mut filter) = self
             .state
             .period_filters
@@ -498,6 +502,7 @@ impl View<'_> {
         else {
             return Ok(Html::EMPTY);
         };
+        filter = filter.financial_years(Some(crate::state::financial_years(clock.today)));
         filter.set(period, &clock);
         render(filter)
     }

@@ -1,5 +1,9 @@
 # Operation contracts
 
+**Use it for:** exposing an operation to agents (`/api/v1`, MCP) and to pages as one operation contract, and the review card for agent writes.
+
+**Not for:** an API endpoint, MCP tool or page-only write path of your own.
+
 Every action that reads or changes business data is one operation contract here, and it does not know who calls it (ADR 01, `docs/architecture/decisions/01-agent-first-operations.md`). `/api/v1` and `/mcp` call contracts for agents; pages call them through [Pages as callers](#pages-as-callers). The module keeps its historical name.
 
 Use the `base/agent_api.registry` service for search, describe, guide and read
@@ -9,13 +13,19 @@ with the registry's `Contribution` and source `Provenance`. No central host list
 or module-specific endpoint is needed. [src/reference.rs](src/reference.rs) is a
 complete non-business contribution example.
 
+A reviewed write handler can declare `local_script_action` if its effects stay within the installation. One that sends data outside declares `outbound` instead (an `Outbound`: what the destination is and every data field it can send) and implements `resolve_outbound`, which returns the `OutboundSend` (destination and data fields) this input would send, read under the same lock its `commit` takes. An action is one or the other, never both. Watchers also requires the owner’s registered Watcher action and checks its normal contract and permissions.
+
+An approved tenant script validates its complete selection through `Registry::preview_script_calls` before the first effect and applies it through `commit_script_calls` on the caller's existing `MutationTransaction`. Each call is a `ScriptCall` (operation, input and the approved `OutboundTerms` when its owner is outbound). Both methods admit only `local_script_action` owners and `outbound` owners whose resolved send stays within those terms (the same destination, no data field beyond them), checking again right before each commit; otherwise they refuse with `script_outbound_refused`. Queued runs that commit through the job door call `check_outbound_call` on the action's transaction before the commit. Both methods reject step-up and unavailable channels, and repeat each operation's schema, capability, preview and owner commit checks. Script engines never call a handler directly or open one transaction per selected action.
+
 Keys start with the contributing module ID with `/` changed to `.`. Operations
 need an additional segment; guides may use the module prefix itself. Keys must
 be unique across operations and guides. Discovery rejects malformed metadata,
 foreign handler ownership, unsupported schema keywords, undeclared capabilities,
 read operations on write capabilities, and impersonation capabilities (`*.impersonate`).
-Titles have a 120-character limit, summaries 500, guide bodies 8 KiB. Registry
+Titles have a 120-character limit, summaries 500, guide bodies 8 KiB. A guide may include `{{contract:operation.key}}` to expand the current accessible operation metadata and schemas at read time, or `{{plan_limit}}` for the current installation plan limit. The guide marks inaccessible contracts as unavailable and returns an error if it cannot resolve the plan limit. Registry
 entries retain source provenance and materialized schemas.
+
+A read or safe-write operation may declare `capability: SIGNED_IN` for owner-authorized self-service. Reads must enforce their owner’s visibility and field restrictions in the handler. It is discoverable by authenticated accounts without a capability grant; its preview and commit must prove ownership of the target, or authorize the capability required for another owner's target. System principals are refused. Discovery, plans, page submissions and jobs apply the same admission. All other capability strings must name declared vocabulary keys.
 
 Two more contract properties, both checked at boot:
 
@@ -34,7 +44,15 @@ service, with the host supplying a per-request `Session`. System scopes cannot
 enter this API. Never deserialize a scope, infer an actor from operation input,
 or cache reach across requests.
 
-**Doors hold no connection while a read runs.** The `/api/v1`, MCP and page doors call `Registry::read(db, scope, key, input)`: it checks the capability on a pooled connection and returns it before the read handler runs. The handler's `OperationClient` takes one connection on its first query and keeps it until the read ends; a handler that only calls its facade (Base Search, Base Records) takes none. So a facade that takes connections of its own, such as Grid's reads, never waits on a pool filled by its own callers. MCP's `Session` carries the pool (`db`), and `search`, `describe` and `guide` each take a connection for that call only. `Registry::call(client, scope, key, input)` runs the same checks and handler on a connection the caller already holds, for walkthroughs and fixtures; a door never uses it.
+**Doors release the capability-check connection before dispatch.** The `/api/v1`, MCP and page doors call `Registry::read(db, scope, key, input)`. The handler's `OperationClient` takes one connection on its first query and keeps it until the read ends. A handler that only calls its facade (Base Search, Base Records) takes none. A handler that requires a transaction declares `ReadHandler::requires_transaction`. The registry supplies one on the read connection. Normal owner refusals retain authorization decisions, while infrastructure failures roll back. MCP's `Session` carries the pool, and `search`, `describe` and `guide` each take a connection for that call only.
+
+`Registry::call(&mut client, scope, key, input)` and `JobContracts::read(&mut client, execution, key, input)` reuse the caller's connection and open a transaction only when the handler requires one. A read handler that gathers other owners' reads calls `Registry::call_on(client, scope, key, input)` with the `OperationClient` it was handed: the same admission and logged capability decision on that one connection, for direct reads. Transaction-required handlers use `Registry::call_in`. [Customisation discovery](../labels/README.md#what-can-be-changed-agents) is the first caller. `Registry::call_in(tx, scope, key, input)` runs the same checks and handler on an existing transaction, with the caller responsible for completion.
+
+A bounded simulation can call `JobContracts::preview_principal` with a freshly authenticated system-principal scope. It checks that the principal is admitted to the job action, validates the input and capability, and calls the same owner preview in the caller’s transaction. The caller owns transaction completion and recovery. The caller must apply its reader's record and field access before returning any evidence, and must not expose an owner preview body that the reader cannot see. Watcher trials use this contract and require detached read dispatch through `Registry::read`.
+
+On `Backend(UnrecoveredTransaction)`, a caller supplying the connection follows [Database's connection recovery contract](../database/README.md#transaction-continuations). The registry and plan service discard the connections they own. Job preview bounds its rollback attempt before returning that error, and job commit marks the caller's transaction poisoned if the owner preview returns it.
+
+Agent discovery returns operations and guides in `result`. The HTTP and MCP doors also return `pages`, with links to matching pages and their contributed sections. These links use the same page access rules as the top bar. [Page sections](../menu/README.md#make-a-page-section-searchable).
 
 Search uses one fresh capability snapshot without per-candidate decision logs.
 Direct deny wins over grants and `grant_all`; platform capabilities additionally
@@ -54,14 +72,18 @@ call their scoped facade and enforce field restrictions. All direct writes are
 refused. Unsupported writes remain discoverable. Supported `WriteHandler`
 operations use the plan service below, sharing its audited transaction.
 
+Record input properties use the owner’s [record field vocabulary](../ui/README.md#record-field-vocabulary): `fields::EMAIL.input(json!({"maxLength":254}))` supplies the label, type, choices or pick-list and personal-data class. Boot validates the `x-bilibi-field` reference and refuses disagreement, including a property with another key. Limits, required fields, null handling and operation-specific choice subsets stay in the contract. Read queries and write handlers remain separate.
+
 The [schema dialect](src/schema.rs) accepts object/properties/required,
 string/enum/maxLength/format, integer/number/enum/minimum/maximum, boolean and
 array/items, plus title/description and the editor annotations below. Scalar nodes may declare
 `nullable: true` to accept JSON `null`; null remains invalid everywhere else. Every node needs a type and
-root input must be an object. Input objects refuse unknown fields. Validation
+root input must be an object. Input objects refuse unknown fields unless their schema explicitly sets `additionalProperties: true`; the receiving contract must validate those fields before use. Validation
 returns dotted field paths, including array indexes. Null is never implicit.
 String formats are date, date-time with offset, and email. Nesting is bounded
 at discovery. Output schemas describe data without runtime enforcement.
+
+Read text input with `text_field` and `optional_text_field` (trimmed; blank is empty or `None`) and refuse a field with `invalid(field, message)`, all in [src/input.rs](src/input.rs); the schema has already checked the types.
 
 Use [json::Data](src/json.rs) for results and its `Restricted` variant for a
 withheld field. The marker stores no original value and serializes only as
@@ -71,7 +93,14 @@ exact decimals as strings; Rust's JSON value type excludes functions and opaque
 runtime handles. Pages carry page/page_size/total metadata. Every envelope has
 the untrusted-content notice.
 
-For a runtime walkthrough, migrate an isolated database, then run:
+For a runtime walkthrough, prepare an isolated database (`DATABASE_URL`). Initialize the Dev instance role through the production seeds first; ordinary grant changes otherwise ask for a second factor nobody enrolled and the walkthrough stops with `StepUpRequired { reason: "not_enrolled" }`:
+
+```sh
+cargo run -p bilibi-web --locked -- migrate
+BILIBI_ENV=development cargo run -p bilibi-web --locked -- seed-production
+```
+
+Then run:
 
 ```sh
 BILIBI_AGENT_DEMO=disposable cargo run -p bilibi-agent-api --example agent-walkthrough --locked
@@ -84,6 +113,10 @@ live grant/revocation, cross-tenant denial, deny precedence and decision logs.
 Temporary grants and sessions are removed on successful completion. This is a
 manual runtime specimen, with no unit tests or assertions.
 
+## The connection check
+
+`hello(instance, message)` in [src/lib.rs](src/lib.rs) is what every agent door answers to its connection check: the caller's message (at most `HELLO_MESSAGE_LIMIT` characters), the server name and the instance. The MCP adapter lists it first among the generic tools; the host serves the same body at `GET /api/v1/hello` (`apps/web/README.md`). It is not an operation contract: it reads nothing and decides nothing, so it proves the transport and the session and leaves every permission answer to the operations.
+
 ## MCP agent and client labels
 
 A model can report itself directly through any generic tool, with no local client configuration:
@@ -92,7 +125,7 @@ A model can report itself directly through any generic tool, with no local clien
 {"name":"search","arguments":{"query":"companies","agent_self_report":"claude-code/sonnet-4.5-default"}}
 ```
 
-The optional `agent_self_report` argument is available on `search`, `describe`, `guide`, `read`, `plan`, `commit` and every app tool (`review_entries`, `open_software`): the host consumes it before the tool sees its input, and each tool's schema declares it. MCP connect instructions and tool descriptions ask agents to include it on every call, ask their user for unknown harness/model/version/effort parts, never guess, and omit parts nobody can give. The example is a shape example, not a value to copy.
+The optional `agent_self_report` argument is available on `hello`, `search`, `describe`, `guide`, `read`, `plan`, `commit` and every app tool (`review_entries`, `open_software`): the host consumes it before the tool sees its input, and each tool's schema declares it. MCP connect instructions and tool descriptions ask agents to include it on every call, ask their user for unknown harness/model/version/effort parts, never guess, and omit parts nobody can give. The example is a shape example, not a value to copy.
 
 - The host consumes the argument before operation dispatch; it is never business input.
 - The argument is the highest-precedence source of the report. Precedence, the shape check, what is recorded and the separate **Client identity** transport evidence are owned by the [host contract](../../web/README.md).
@@ -115,9 +148,22 @@ A read, a plan preview and commit, and a job each decide a company-scoped grant 
 
 Credential and workplace reproofs use a 150 ms transaction-local lock timeout. Lock timeout or deadlock becomes `Error::Backend(Error::Conflict)`: an initial reproof refuses before an owner runs, while a final reproof rolls back the owner's work. The [host contract](../../web/README.md#agent-edge-srcapirs) owns the HTTP and MCP response.
 
-`PlannedOperation` refuses unknown wire keys. Dry runs and commits accept 1–20 ordered key/input objects by default, at most 1 MiB encoded. The global `agent_api.plan_max_operations` setting controls the 1–100 operation bound. A dry run validates every schema and normal Authz capability and calls owner previews without changing business records. It returns the ordered operations, restricted review results and indexed errors.
+`PlannedOperation` refuses unknown wire keys. Dry runs and commits accept 1–20 ordered key/input objects by default, at most 1 MiB encoded. The global `agent_api.plan_max_operations` setting controls the 1–100 operation bound. A dry run validates every schema and normal Authz capability and calls owner previews without changing business records. It returns the ordered operations, restricted review results and indexed errors. Refused operations return an empty input object. Successful operation inputs omit schema-marked `writeOnly` fields. Keep the original request separately for approval and commit.
 
-The caller shows the dry-run result and waits for the person's explicit approval. Commit takes the unchanged ordered operations directly; Bilibi does not attest that the caller showed the review or obtained consent. Commit starts a fresh `MutationTransaction`, rechecks the credential, workplace, schemas, capabilities and every owner preview, then calls each owner on that same transaction. Every owner error, audit capture error or final identity failure rolls back all writes and audit rows together. Owner version fences recognize changed records and repeated writes. No dry-run state or review content is stored.
+The caller shows the dry-run result and waits for the person's explicit approval. Commit takes the unchanged ordered operations directly; Bilibi does not attest that the caller showed the review or obtained consent. Commit starts a fresh `MutationTransaction`, rechecks the credential, workplace, schemas, capabilities and every owner preview, then calls each owner on that same transaction. Every owner error, audit capture error or final identity failure rolls back all business writes and their transaction's audit rows together. [Grid's oversight probe](../grid/README.md#reads-inside-an-existing-transaction) owns its read audit boundary. Owner version fences recognize changed records and repeated writes. No dry-run state or review content is stored.
+
+### Work staged before the write
+
+**An owner that must stage work outside the write's transaction prepares it first, with no connection held.** Copying files through a store that commits on its own connections cannot run inside commit's transaction: it would take more pooled connections while commit holds one (#758 refuses that), and a slow store would keep the transaction open (BelimbingProject/bilibi#790).
+
+- **Declare it.** The owner's `WriteHandler` answers `prepares() == true` and implements `prepare(scope, input)`, which answers what it staged (`Option<Value>`), and `commit_prepared(tx, scope, input, prepared)`, which revalidates and binds it in the transaction. Both default to "nothing staged" and plain `commit`.
+- **When it runs.** `Plans::commit` and `Plans::submit` first run their own checks (credential, shape, workplace, every owner preview) in a transaction they roll back, release its connection, then call each staging owner's `prepare` on the scope commit will use. A plan those checks refuse stages nothing. Then commit runs as above and hands each owner what it staged. A step whose input names an earlier step's new record (`$ref`) is not prepared.
+- **What to stage.** Only private work that expires on its own, reproved and authorized as a facade call is. Commit's checks run again in its transaction and may still refuse, so staged work must be safe to leave behind.
+- **Retries and abandoned commits.** A prepare can run with no commit after it (commit refuses, the caller gives up or retries, the connection drops), and a retried write prepares again. So the owner:
+  - makes prepare idempotent by the caller's request key, reusing what an earlier prepare or committed write already made rather than staging it twice;
+  - audits what prepare writes through `MutationBoundary`, as any write;
+  - cleans up staged work no commit bound, on its own schedule (an expiry and a job), never relying on commit to do it.
+- **Doors that hold a transaction** (queued jobs, `job::JobContracts::commit`) do not prepare: they call `commit_prepared` with `None`, and the owner does without, as it did before.
 
 ### New records in later steps
 
@@ -139,7 +185,7 @@ References are one-based and accept only `N.id`, with an exact single-key `$ref`
 
 `describe` exposes `creates` (`kind` and the owner-declared `id_pointer` within its result). Owners opt in through `WriteHandler::creates` and `preview_dependent`; the default refuses unresolved references. `PlanReferences::require` checks permitted fields and record kinds. Owners validate all independent input, restrictions, existing records and permissions now, and show defaults and remaining checks in their deterministic preview. Core Company and Person declare created records; relationship assignment, affiliation creation (including namecard contacts) and Address Create & Attach accept their appropriate endpoint references. Other writes fail closed until their owners provide a dependent preview.
 
-Commit repeats the symbolic review, resolves each placeholder from the actual earlier commit result, validates the concrete input schema, and calls the ordinary owner's commit on the shared audited transaction. The owner locks and proves the newly created record through its usual checks. Any failure rolls back every step and its audit rows. Changing a reference or another input requires a new dry run and approval.
+Commit repeats the symbolic review, resolves each placeholder from the actual earlier commit result, validates the concrete input schema, and calls the ordinary owner's commit on the shared audited transaction. The owner locks and proves the newly created record through its usual checks. Changing a reference or another input requires a new dry run and approval.
 
 ### Which Bilibi a write lands on
 
@@ -165,7 +211,7 @@ The non-business reference write demonstrates version fencing and audited
 mutation. There is no product UI; the HTTP endpoints are the host's `/api/v1`
 edge (`apps/web/README.md`).
 
-Run the real safe-write walkthrough after migrating an isolated DB:
+Run the real safe-write walkthrough on an isolated DB prepared as above (migrated, with `seed-production` run under `BILIBI_ENV=development`):
 
 ```sh
 BILIBI_AGENT_DEMO=disposable cargo run -p bilibi-agent-api --example write-walkthrough --locked
@@ -174,6 +220,10 @@ BILIBI_AGENT_DEMO=disposable cargo run -p bilibi-agent-api --example write-walkt
 It prints dry-run reviews and outcomes for a successful write, a second-operation rollback, capability revocation, changed owner facts, audit failure and session revocation. Bounded SQL output shows reference state and audit counts. The audit refusal fixture alters only the explicitly disposable database. This is a manual app-service specimen with no test runner,
 mocked identities or assertions. Sessions and temporary grants are removed on
 successful completion; reference/audit evidence remains for inspection.
+
+## Audience previews
+
+Use `AudiencePreview` for a shared customisation review. It names the tenant audience or selected roles and shows the result as the current reader can see it. The owner checks access to the page or menu and permission to inspect role names. Each recipient's own permissions apply when they open the result.
 
 ## MCP Apps: a module's card in the chat
 
@@ -204,9 +254,9 @@ After discovering `core.company.create`, draft its inputs:
 {"name":"review_entries","arguments":{"key":"core.company.create","entries":[{"name":"Acme Supplies","status":"active"}]}}
 ```
 
-The person edits the draft directly. A review holds at most 1,000 entries. A larger request is refused with the exact size to split at. Rows and previews render 50 at a time. **Update review** calls `plan` as a dry-run check in the configured groups, shows progress and lets the person stop after the current group; a stopped check keeps no approvable review. It shows the values the owner checked and any errors when checking finishes. Empty optional fields and internal details stay hidden; required fields and supplied values remain editable. Code-generation instructions stay with the agent, outside the card. Possible duplicates appear as one warning naming the matches. New values read as one line per field; edits show old → new only for changed fields. Linked steps name the records they connect. These presentation choices never remove draft inputs or change approval rules. Every edit invalidates approval. **Approve** sends the reviewed ordered operations to `commit`, which runs the full check again before writing. A `step_up_required` answer opens a 2FA field inline; its code goes only to the repeated commit request for that operation, never to model context. Secret inputs remain only while the draft is active or the exact write can be retried. A saved, failed, uncertain or cancelled review clears them from the card. **Cancel** discards uncommitted work.
+The person edits the draft directly. A review holds at most 1,000 entries. A larger request is refused with the exact size to split at. Rows and previews render 50 at a time. **Update review** calls `plan` as a dry-run check in the configured groups, shows progress and lets the person stop after the current group; a stopped check keeps no approvable review. It shows the values the owner checked and any errors when checking finishes. Empty optional fields and internal details stay hidden; required fields and supplied values remain editable. Code-generation instructions stay with the agent, outside the card. Possible duplicates appear as one warning naming the matches. New values read as one line per field; edits show old → new only for changed fields. Linked steps name the records they connect. Every edit invalidates approval. **Approve** sends the reviewed ordered operations to `commit`, which runs the full check again before writing. A `step_up_required` answer opens a 2FA field inline; its code goes only to the repeated commit request for that operation, never to model context. Secret inputs remain only while the draft is active or the exact write can be retried. A saved, failed, uncertain or cancelled review clears them from the card. **Cancel** discards uncommitted work.
 
-The browser link has no credential. A pending review opens only for the same account and tenant while the originating AI connection remains switched on by a live browser session; another signed-in session of that account may open it, while another account is refused. Pending reviews also appear in that account's bell **To do** tab and link to the same page. A transfer, switch-off, sign-out or session expiry cancels the review; its owner may still open the link after signing in again to see that it ended and how to recover, but cannot edit or approve it. A pending review embeds the same card through `AppFrame`, and the frame's `tools/call` bridge invokes the same MCP dispatcher with the connection's agent scope. Approve therefore keeps the owner's capability, step-up, transaction and AI-audit checks instead of adding a browser write path. The unguessable review id names one review and stays open after a refused batch, so the person can correct it and approve again in the browser; `review_status` reports the latest state (refused, then saved). It becomes terminal after saved, edited-and-saved, cancelled or uncertain, and the browser page then shows its terminal state instead of the editor. A failed outcome call is shown in the card, never swallowed. Schema-marked `writeOnly` values are removed from the durable browser copy and outcome; the person enters them again in the card. `review_status` waits for up to 25 seconds and returns the terminal outcome and final non-secret operations, so a text-only agent can learn the result without asking the person to paste it back. Inline cards send the same outcome through `ui/update-model-context`.
+The browser link has no credential. A pending review opens only for the same account and tenant while the originating AI connection remains switched on by a live browser session; another signed-in session of that account may open it, while another account is refused. Pending reviews also appear in that account's bell **To do** tab and link to the same page. A transfer, switch-off, sign-out or session expiry cancels the review; the sign-out and expiry events reach it only while the program listens, so wherever pending reviews are read (the bell's To do list, the review page, `review_status`) `Reviews::end_orphaned` also cancels the account's pending reviews whose browser session no longer lives ("The browser session ended."), which a restart would otherwise leave open for ever. Its owner may still open the link after signing in again to see that it ended and how to recover, but cannot edit or approve it. A pending review embeds the same card through `AppFrame`, and the frame's `tools/call` bridge invokes the same MCP dispatcher with the connection's agent scope. Approve therefore keeps the owner's capability, step-up, transaction and AI-audit checks instead of adding a browser write path. The unguessable review id names one review and stays open after a refused batch, so the person can correct it and approve again in the browser; `review_status` reports the latest state (refused, then saved). It becomes terminal after saved, edited-and-saved, cancelled or uncertain, and the browser page then shows its terminal state instead of the editor. A failed outcome call is shown in the card, never swallowed. See [Field controls from schemas](#field-controls-from-schemas) for write-only inputs. `review_status` waits for up to 25 seconds and returns the terminal outcome and final non-secret operations, so a text-only agent can learn the result without asking the person to paste it back. Inline cards send the same outcome through `ui/update-model-context`.
 
 For a spreadsheet, paste tab-separated cells into the first target field; column order follows the displayed schema fields. Quoted cells support tabs, line breaks and doubled quotes. An empty pasted cell is omitted; clearing a plain text field sends an empty string and the review marks it for clearing, while clearing a typed choice or value omits it. Tab moves between controls; Alt + arrows moves between cells. Add or remove entries with the row controls. A refused entry stays visible with its reason and field errors: correct it, or untick it and update the review before approving the others. A restricted field cannot be edited. An optional restricted value is omitted from the next plan, including inside a grouped field; the owner still enforces every restriction at plan and commit.
 
@@ -218,7 +268,9 @@ Check the review door against a running instance with a disposable database and 
 
 ### Field controls from schemas
 
-The shared editor reads the operation's own input schema, including nested objects and arrays. String, boolean, enum, date, email, integer and number fields get typed controls. Untouched optional blank fields are omitted; directly cleared plain strings retain their explicit empty value, typed controls are omitted when cleared, and nullable fields can explicitly send null. Exact decimal money stays text so its scale is preserved. String fields marked `writeOnly: true` use masked password controls; owners still redact their previews and results.
+The shared editor reads the operation's own input schema, including nested objects and arrays. String, boolean, enum, date, email, integer and number fields get typed controls. Untouched optional blank fields are omitted; directly cleared plain strings retain their explicit empty value, typed controls are omitted when cleared, and nullable fields can explicitly send null. Exact decimal money stays text so its scale is preserved. The person enters strings marked `writeOnly: true` in masked controls. Review opener responses, persisted browser drafts and the card’s final operation inputs omit those fields. The card retains the original dry-run request for approval, including a 2FA retry. Owners still redact their previews and results.
+
+`WriteHandler::check_review_draft` can check each input before a review opens and tailor the review schema to the caller. The opener shares one mutable schema per operation key across its entries. The plan and commit still use the registered operation schema and enforce the owner’s checks. A review-only field annotated with `x-bilibi-review-requires-choice` names a sibling top-level enum field. The card enables the dependent field after an allowed choice and clears its previous value when the choice changes unless the same edit supplies a replacement.
 
 Owners may add these annotations to scalar schemas; boot validates their shape and they confer no authority:
 
@@ -255,14 +307,19 @@ A job a person started calls a write contract as that person through `base/agent
 | Call | Does |
 |---|---|
 | `writable(key)`, `readable(key)` | Whether a job may call the contract: a registered reviewed write (or a read), open to `Channel::Job`, with no step-up. Owners check theirs at boot |
-| `preview(client, execution, key, input)` | Schema, live capability, the owner's preview; writes nothing (a dry run) |
-| `commit(tx, execution, key, input)` | The owner's preview, then its commit on `tx`, which must come from `Execution::begin`: the lease, the person and the enqueue's trace ID hold. Record your own result in the same `tx`, then commit it |
-| `read(client, execution, key, input)` | A read contract, as `Registry::call` |
+| `principal_writable(key, principal)` | `writable`, and the contract's owner admits that principal (`PRINCIPAL_WRITES`) |
+| `preview(&mut client, execution, key, input)` | Schema, live capability and the owner's dry run on a transaction borrowed from the supplied connection. Normal owner refusals retain authorization decisions. |
+| `commit(tx, execution, key, input)` | The owner's preview, then its commit on `tx`, which must come from `Execution::begin`: the lease, the caller's identity and the enqueue's trace ID hold. Record your own result in the same `tx`, then commit it |
+| `read(&mut client, execution, key, input)` | A read contract, as `Registry::call` |
+| `read_in(tx, execution, key, input)` | A read contract on the supplied transaction, which can also hold the caller’s authorization checks. Takes ownership of the transaction and uses the registry’s read completion rules |
 
-- The scope is the job's person, re-sealed by Queue and marked `Scope::in_job` (`Channel::Job`). A system principal's job is refused, as system scopes are at the other doors.
-- No agent approval round-trip: the person reviewed the job when they started it. A contract that declares step-up is refused, since no one is present to give a code.
+- The scope is the job's person, re-sealed by Queue and marked `Scope::in_job` (`Channel::Job`). A system principal's job is refused, as system scopes are at the other doors, except where the contract's owner admits that principal by name.
+- **Principal callers.** A contract's owner contributes `PrincipalWrite { principals }` under `job::PRINCIPAL_WRITES`, keyed by its own contract key, to let a named principal's job call it (`principal_writable(key, principal)`). Boot refuses another module's contract, a read, a contract closed to the job door or asking step-up, and an undeclared principal. The commit's transaction must be the job's (`System · <principal>`); the capability is decided live on the principal's own grants. Base Watchers is the first caller ([ADR 31](../../../docs/architecture/decisions/31-tenant-watchers-run-after-commit-as-one-bounded-principal.md)). `validate(key, input)` checks an input against the contract's schema, for a caller that stores one to commit later.
+- No agent approval round-trip occurs during execution. A person reviews a job they start; principal callers arrange their own prior authorization ([Watchers approval](../watchers/README.md#versions-and-approval)). A contract that declares step-up is refused, since no one is present to give a code.
 - Owner refusals come back typed as at the other doors; a database failure comes back as `Backend` so the job retries.
-- `base/bulk_data` (CSV import) is the first caller.
+- `base/bulk_data` (CSV import) is the first person's caller; `base/watchers` the first principal's.
+
+A list owner can implement `ReadHandler::selection_grid_paths` to declare the Grid root table and paths whose access can affect which rows the list returns. Declare dependencies even when a caller might omit those fields from its output. See [Bulk Data export access](../bulk_data/README.md#an-export) for how filtered exports use the declaration.
 
 ## Page writes declaration and check
 
@@ -276,7 +333,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, SERVICE, provenance!(), &Pag
 }) }
 ```
 
-- **Boot.** Module Registry refuses a malformed declaration (a service of another module, an event named twice, an allowance without a reason). `PageContracts` refuses a contract that is not a registered write, and a service no route or embed serves.
+- **Boot.** Module Registry refuses a malformed declaration (a service of another module, a duplicate contract or allowance, an allowance without a reason). `PageContracts` refuses a contract that is not a registered write, and a service no route or embed serves.
 - **Every live event.** The host dispatches a page or panel event under the permit its declaration gives (`bilibi_database::page_write`). `MutationBoundary::begin` then refuses a business transaction the permit does not cover: only the event's contracts (marked by `PageContracts`), or anything for an event listed as pending. An undeclared service or event may write nothing. The refusal is `Error::Internal`, logged with the service, event and action.
 - **The call.** `PageContracts` refuses a contract the page did not declare for that event.
 - A person's own view state (list columns, dashboard arrangement, theme, pins) is not business data: its owner opens `MutationBoundary::begin_view_state`, which the check leaves alone.
@@ -284,11 +341,12 @@ inventory::submit! { Contribution::new(PAGE_WRITES, SERVICE, provenance!(), &Pag
 
 ### Allowance: pages not yet migrated
 
-Each gap is a `Pending` declaration in the owning module, with its reason. Remove it when the event calls its contract. `grep -rn "Pending::Every\|Pending::Events" apps` lists them.
+Each gap is a `Pending` declaration in the owning module, with its reason. A form that saves several values may list its migrated contracts and keep an explicit `Pending::Events` allowance for writes still handled by its facade. Remove the allowance once the remaining writes use contracts. `grep -rn "Pending::Every\|Pending::Events" apps` lists them.
 
 | Service | Why it is pending |
 |---|---|
 | `base/audit_views.pages` | Action-log export writes through the Audit Views facade |
+| `base/audit_views.integrity` (`verify` only) | Starting a verification and its queued job writes through the Audit facade |
 | `base/bulk_data.pages` (`receive` only) | Receiving a CSV stores it as a private artifact and opens its run; Artifacts takes bytes outside a contract, whose input is bounded at 1 MiB |
 | `base/authz.pages` | Roles, field restrictions and two-factor policy; the Users page calls `base/authz_agent` for role assignment |
 | `base/integration.pages` | Exchange actions |
@@ -296,7 +354,6 @@ Each gap is a `Pending` declaration in the owning module, with its reason. Remov
 | `base/session.pages` | Ending sessions |
 | `base/settings_editor.pages` | Saving and restoring settings |
 | `base/system.pages` | Localization changes |
-| `base/tiling.pages` | Workspace and shared layouts |
 | `base/workflow.pages` | The workflow reference page |
 | `core/agent.pages` | Device approval and connection revocation |
 | `core/company.pages` | Company edits, lifecycle, activities, departments, reference types; the create form records activities `core.company.create` does not take |
@@ -305,7 +362,7 @@ Each gap is a `Pending` declaration in the owning module, with its reason. Remov
 
 ## Agent connection context
 
-MCP initialization and generated plugin workflow skills use `BUSINESS_CONTEXT` from [src/lib.rs](src/lib.rs): Bilibi is the person's business system, and agents search its operations and guides before answering or claiming a field or action is missing. `REVIEW_INSTRUCTIONS` supplies the same review and approval rule to initialization, plan/commit descriptions and the plugin workflow. `INSTANCE_INSTRUCTIONS` tells agents to announce the label, role and canonical address in their first answer and every plan review and confirmation. MCP `serverInfo.title` names all three; plan and commit results carry them in `instance` through `bilibi_system::Instance::agent_json`.
+MCP initialization and generated plugin workflow skills use `BUSINESS_CONTEXT` from [src/lib.rs](src/lib.rs): Bilibi is the person's business system, and agents search its operations and guides before answering or claiming a field or action is missing. `REVIEW_INSTRUCTIONS` supplies the same review and approval rule to initialization, plan/commit descriptions and the plugin workflow. `INSTANCE_INSTRUCTIONS` tells agents to announce the label, role and canonical address in their first answer and every plan review and confirmation. MCP `serverInfo.name` is `Instance::server_name` (the address with hyphens, the name the connection prompt and the plugin use) and `serverInfo.title` names all three; plan and commit results carry them in `instance` through `bilibi_system::Instance::agent_json`.
 
 ## Tenant provisioning
 
@@ -319,4 +376,4 @@ A shared page may opt into owner-contributed writes through `page::PAGE_FAMILIES
 
 Boot requires the family to belong to the page service's owner, the target service to serve a page, the event to match its opted-in prefix and the contract to be a registered reviewed write of the binding's owner. Duplicate events are refused. At runtime the ordinary page permit and `PageContracts` check the exact binding; a prefix grants no permission by itself. Workflow's shared approval page uses this to call statically authorized per-case operations contributed by mounted owners.
 
-Reviewed preview adapters expose the caller's existing transaction through `OperationClient::transaction()`. Approval uses it for live owner and routing proofs, avoiding a second pool connection while the write door holds its transaction. Ordinary read clients return `None`; a preview must use only read operations on the borrowed transaction.
+Reviewed preview adapters and transactional read handlers expose the caller's transaction through `OperationClient::transaction()`. Approval uses it for live owner and routing proofs. A preview must use only read operations on the borrowed transaction. `OperationClient::sql_client()` borrows the underlying client for owner APIs that take `GenericClient`. When an adapter holds a transaction, it returns the transaction's `client()` and the queries run in that transaction.

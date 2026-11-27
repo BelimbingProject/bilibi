@@ -122,8 +122,16 @@ inventory::submit! { Contribution::new(DEFINITIONS, TENANT_KEY, provenance!(), &
     name: "Every minute, in every tenant", expression: "* * * * *", timezone: "Etc/UTC", task_name: "Every minute, in every tenant",
     worker: TENANT_WORKER, args: || json!({}), overlap: Overlap::Forbid, misfire: Misfire::Coalesce, reach: Reach::EachTenant, owner_route: None,
 }) }
-const KEYS: [&str; 6] = [
+// #558: an each-tenant definition that allows overlap, for a tenant
+// administrator's Run now.
+const ALLOW_KEY: &str = "schedule/walkthrough.each-tenant-allow";
+inventory::submit! { Contribution::new(DEFINITIONS, ALLOW_KEY, provenance!(), &Definition {
+    name: "Every minute, in every tenant, overlap allowed", expression: "* * * * *", timezone: "Etc/UTC", task_name: "Every minute, in every tenant, overlap allowed",
+    worker: TENANT_WORKER, args: || json!({}), overlap: Overlap::Allow, misfire: Misfire::Coalesce, reach: Reach::EachTenant, owner_route: None,
+}) }
+const KEYS: [&str; 7] = [
     TENANT_KEY,
+    ALLOW_KEY,
     "schedule/walkthrough.fold",
     "schedule/walkthrough.gap",
     "schedule/walkthrough.hourly",
@@ -461,7 +469,9 @@ async fn jobs(db: &Db) -> Result<()> {
 
 async fn prepare(services: &Services, db: &Db) -> Result<()> {
     let (schedule, admin) = admin(services, db).await?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client.batch_execute("INSERT INTO platform_operator(tenant_id) VALUES(1) ON CONFLICT DO NOTHING; DELETE FROM base_schedule_occurrences; DELETE FROM base_schedule_runs; DELETE FROM base_schedule_suppressions; DELETE FROM base_queue_jobs WHERE worker_id IN ('schedule/walkthrough','schedule/walkthrough-tenant','base/schedule-fan-out')").await?;
     for key in KEYS {
         schedule.review(&mut client, &admin, key, true).await?;
@@ -533,7 +543,9 @@ async fn overlap(services: &Services, db: &Db) -> Result<()> {
     poll(services, db, next).await?;
     poll(services, db, next).await?;
     println!("-- the operator cancels job {job} through Queue; the next poll reconciles the lease");
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
     let mut tx = boundary
         .begin(
@@ -621,7 +633,9 @@ async fn walkthrough_tenant(db: &Db, name: &str, status: &str) -> Result<i64> {
     {
         client
             .execute(
-                "UPDATE tenants SET status=$2 WHERE name=$1",
+                "UPDATE tenants SET status=$2, \
+                 suspended_at=CASE WHEN $2='suspended' THEN now() END, \
+                 suspension_reason=CASE WHEN $2='suspended' THEN 'walkthrough' END WHERE name=$1",
                 &[&name, &status],
             )
             .await?;
@@ -630,7 +644,9 @@ async fn walkthrough_tenant(db: &Db, name: &str, status: &str) -> Result<i64> {
     let tenant = bilibi_tenancy::provision_tenant(&**client, name).await?;
     client
         .execute(
-            "UPDATE tenants SET status=$2 WHERE id=$1",
+            "UPDATE tenants SET status=$2, \
+             suspended_at=CASE WHEN $2='suspended' THEN now() END, \
+             suspension_reason=CASE WHEN $2='suspended' THEN 'walkthrough' END WHERE id=$1",
             &[&tenant.id, &status],
         )
         .await?;
@@ -784,6 +800,154 @@ async fn each_tenant(services: &Services, db: &Db) -> Result<()> {
     running.await.map_err(|_| Error::Internal)??;
     SLOW_TENANT.store(0, std::sync::atomic::Ordering::Relaxed);
     tenant_runs(db).await?;
+    Ok(())
+}
+fn check(label: &str, ok: bool) -> Result<()> {
+    println!("{} {label}", if ok { "ok  " } else { "FAIL" });
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Internal)
+    }
+}
+/// #558: a tenant administrator's Run now waits for its manual run to end,
+/// even when the definition allows overlap; and reconciliation settles a run
+/// whose job is gone although 300 older runs are still waiting.
+async fn reconcile(services: &Services, db: &Db) -> Result<()> {
+    prepare(services, db).await?;
+    only(services, db, &[ALLOW_KEY]).await?;
+    let schedule = services.get::<Schedule>("base/schedule.store")?;
+    let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
+    // User 5 administers tenant 2, which is not the operator tenant.
+    client.execute(
+        "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES(2,5,$1,true) ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=true",
+        &[&bilibi_schedule::TENANT_RUN],
+    ).await?;
+    let tenant_admin = authentication
+        .authenticate(&**client, 2, 5, String::new())
+        .await?;
+    println!("== Run now in tenant 2 for {ALLOW_KEY} (overlap allowed), no executor running");
+    let first = schedule
+        .run_now_for_tenant(&mut client, &tenant_admin, ALLOW_KEY, Timestamp::now())
+        .await?;
+    let job = match &first {
+        Ok(claimed) => claimed.job.id(),
+        Err(refusal) => {
+            println!("first Run now refused: {}", refusal.as_str());
+            return Err(Error::Internal);
+        }
+    };
+    println!("first Run now queued job {job}");
+    let second = schedule
+        .run_now_for_tenant(&mut client, &tenant_admin, ALLOW_KEY, Timestamp::now())
+        .await?;
+    check(
+        "a second Run now is refused while the first manual run is unfinished",
+        second.as_ref().err() == Some(&Refusal::Overlap),
+    )?;
+    let queued: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_queue_jobs WHERE worker_id=$1 AND tenant_id=2",
+            &[&TENANT_WORKER],
+        )
+        .await?
+        .get(0);
+    check("only one job was queued", queued == 1)?;
+    // The job ends without the owner's wrapper recording it (an owner's
+    // cancel): the next Run now settles that run and is accepted.
+    client.execute("UPDATE base_queue_jobs SET state='cancelled',cancelled_at=now(),failure_code='owner_cancelled' WHERE id=$1", &[&job]).await?;
+    let third = schedule
+        .run_now_for_tenant(&mut client, &tenant_admin, ALLOW_KEY, Timestamp::now())
+        .await?;
+    check(
+        "once that job has ended, Run now is accepted again",
+        third.is_ok(),
+    )?;
+    let alive = match third {
+        Ok(claimed) => claimed.job.id(),
+        Err(_) => return Err(Error::Internal),
+    };
+    // The operator's Run now fans a manual run out to every tenant without
+    // this bound, so a tenant can hold two unfinished manual runs of one key.
+    // The administrator's Run now must still answer `overlap`, not an error.
+    let args: Value = client
+        .query_one("SELECT args FROM base_queue_jobs WHERE id=$1", &[&alive])
+        .await?
+        .get(0);
+    let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
+    let queue = services.get::<Queue>("base/queue.store")?;
+    let mut tx = boundary
+        .begin(
+            &mut client,
+            tenant_admin.mutation_context("schedule.walkthrough.second_run"),
+        )
+        .await?;
+    let second_job = queue
+        .enqueue_for(&mut tx, &tenant_admin, TENANT_WORKER, args)
+        .await?
+        .id();
+    tx.commit().await?;
+    client.execute(
+        "WITH o AS (INSERT INTO base_schedule_occurrences(key,intended_at,trigger,state,tenant_id,job_id) VALUES($1,'2026-03-01T00:00:00Z','manual','queued',2,$2) RETURNING id) \
+         INSERT INTO base_schedule_tenant_runs(occurrence_id,key,tenant_id,trigger,status,job_id) SELECT id,$1,2,'manual','queued',$2 FROM o",
+        &[&ALLOW_KEY, &second_job],
+    ).await?;
+    let fourth = schedule
+        .run_now_for_tenant(&mut client, &tenant_admin, ALLOW_KEY, Timestamp::now())
+        .await;
+    check(
+        "with two manual runs unfinished, Run now still answers overlap",
+        matches!(&fourth, Ok(Err(Refusal::Overlap))),
+    )?;
+
+    println!("\n== 300 older runs whose job is still waiting, then one whose job is gone");
+    client.execute(
+        "INSERT INTO base_schedule_occurrences(key,intended_at,trigger,state,tenant_id,job_id,claimed_at) \
+         SELECT $1,'2026-01-01T00:00:00Z'::timestamptz+make_interval(mins=>n),'scheduled','queued',2,$2,now()-interval '1 hour' FROM generate_series(1,300) n",
+        &[&ALLOW_KEY, &alive],
+    ).await?;
+    let gone: i64 = client.query_one(
+        "INSERT INTO base_schedule_occurrences(key,intended_at,trigger,state,tenant_id,job_id) VALUES($1,'2026-02-01T00:00:00Z','scheduled','queued',2,2147483000) RETURNING id",
+        &[&ALLOW_KEY],
+    ).await?.get(0);
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
+    schedule
+        .review(&mut client, &admin(services, db).await?.1, ALLOW_KEY, false)
+        .await?;
+    drop(client);
+    let report = poll(services, db, Timestamp::now()).await?;
+    let client = db.get().await?;
+    let row = client
+        .query_one(
+            "SELECT state,finished_at IS NOT NULL FROM base_schedule_occurrences WHERE id=$1",
+            &[&gone],
+        )
+        .await?;
+    let (state, finished): (String, bool) = (row.get(0), row.get(1));
+    println!(
+        "settled {} in one poll; the run whose job is gone: {state}",
+        report.settled
+    );
+    check(
+        "the run whose job is gone settles in the same poll, past the 300 waiting ones",
+        state == "failed" && finished,
+    )?;
+    let waiting: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_schedule_occurrences WHERE key=$1 AND job_id=$2 AND finished_at IS NULL",
+            &[&ALLOW_KEY, &alive],
+        )
+        .await?
+        .get(0);
+    check(
+        "the runs whose job is still waiting stay unfinished",
+        waiting >= 300,
+    )?;
     Ok(())
 }
 /// Manual clock-setting evidence against the real facade, Queue and Audit.
@@ -1044,7 +1208,9 @@ async fn live(services: &Services, db: &Db) -> Result<()> {
 }
 async fn inspect(services: &Services, db: &Db) -> Result<()> {
     let (schedule, admin) = admin(services, db).await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     println!(
         "== operator tenant: {:?}",
         operator_tenant(&**client).await?
@@ -1132,6 +1298,7 @@ async fn main() -> Result<()> {
         "overlap" => overlap(&services, &db).await,
         "execute" => execute(&services, &db, instant(0)?).await,
         "each-tenant" => each_tenant(&services, &db).await,
+        "reconcile" => reconcile(&services, &db).await,
         "worker" => live(&services, &db).await,
         "inspect" => inspect(&services, &db).await,
         _ => Err(Error::Invalid),

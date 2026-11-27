@@ -29,6 +29,40 @@ pub fn parse(status: &str) -> Value {
     json!({"platform": platform, "domains": domains, "extensions": extensions})
 }
 
+pub fn admit(status: &str, mode: &str) -> Result<Value, String> {
+    if !matches!(mode, "shared" | "isolated") {
+        return Err("The saved installation.mode is invalid.".into());
+    }
+    let candidate = parse(status);
+    if candidate["platform"].is_null() {
+        return Err("The release does not report its Platform composition.".into());
+    }
+    let (_, extensions) = status
+        .split_once("\nExtensions:")
+        .ok_or("The release does not report its Extension composition.")?;
+    if extensions.trim() == "none mounted" {
+        return Ok(candidate);
+    }
+    if !extensions.starts_with('\n') || extensions.trim().is_empty() {
+        return Err("The release reports an invalid Extension composition.".into());
+    }
+    for line in extensions.lines().filter(|line| !line.is_empty()) {
+        let extension = line
+            .starts_with("  ")
+            .then(|| container(line))
+            .flatten()
+            .ok_or("The release reports an invalid Extension declaration.")?;
+        let id = extension["id"].as_str().unwrap_or("unknown");
+        match extension["code"].as_str() {
+            Some("reviewed") => {}
+            Some("customer") if mode == "isolated" => {}
+            Some("customer") => return Err(format!("Extension {id} requires an isolated installation; use an isolated installation, or prepare a code-free release.")),
+            _ => return Err(format!("Extension {id} must declare reviewed or customer code.")),
+        }
+    }
+    Ok(candidate)
+}
+
 /// `Bilibi 0.1.1, release v0.1.1, commit abc` and its shorter forms.
 fn platform(line: &str) -> Option<Value> {
     let mut parts = line.strip_prefix("Bilibi ")?.split(", ");
@@ -47,10 +81,13 @@ fn platform(line: &str) -> Option<Value> {
     Some(json!({"version": version, "release": release, "commit": commit}))
 }
 
-/// `  finance 0.1.0, commit abc, modules: a, b`, `  finance untagged,
+/// `  connector 0.1.0, commit abc, code: reviewed, modules: a, b`, `  finance untagged,
 /// commit abc, modules: a` or `  finance unpinned, modules: a`.
 fn container(line: &str) -> Option<Value> {
     let (id, rest) = line.split_once(", modules:")?.0.trim().split_once(' ')?;
+    let (rest, code) = rest
+        .rsplit_once(", code: ")
+        .map_or((rest, None), |(rest, code)| (rest, Some(code)));
     let (version, commit) = match rest {
         "unpinned" => (None, None),
         _ => match rest.split_once(", commit ") {
@@ -58,7 +95,7 @@ fn container(line: &str) -> Option<Value> {
             None => (None, None),
         },
     };
-    Some(json!({"id": id, "version": version, "commit": commit}))
+    Some(json!({"id": id, "version": version, "commit": commit, "code": code}))
 }
 
 /// What differs from one release to another: a Platform change as
@@ -184,4 +221,21 @@ fn older(a: &Value, b: &Value) -> bool {
             .collect()
     };
     matches!((numbers(a), numbers(b)), (Some(a), Some(b)) if a < b)
+}
+
+/// `bilibi-web status` on a release folder: it proves the program runs on
+/// this machine, and its text names what the release holds.
+pub fn status(dir: &std::path::Path) -> Result<String, String> {
+    let out = crate::layout::release_command("30")?
+        .arg(dir.join("bilibi-web"))
+        .arg("status")
+        .output()
+        .map_err(|error| format!("could not run the copied program: {error}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "the copied program does not run on this server: {}",
+            crate::backup::tail(&out.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }

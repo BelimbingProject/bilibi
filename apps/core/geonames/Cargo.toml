@@ -31,3 +31,6 @@ bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-base = { path = "../../base" }
 bilibi-core = { path = ".." }
 axum.workspace = true
+
+[lints]
+workspace = true

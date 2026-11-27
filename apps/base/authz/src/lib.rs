@@ -6,6 +6,7 @@ mod effective;
 pub mod field_catalog;
 pub mod fields;
 pub mod grants;
+mod reach;
 pub mod restrictions;
 mod restrictions_web;
 pub mod roles;
@@ -18,17 +19,19 @@ use bilibi_database::{Error, Result};
 use bilibi_tenancy::{Authentication, ProofClient, ProofFuture, Scope};
 pub use effective::{
     effective_capabilities, effective_capabilities_in_company, effective_capabilities_of,
-    effective_system, has_effective_role, holder_page, holders, role_page, Effective, RoleChoice,
+    effective_grants, effective_system, has_effective_role, holder_page, holders,
+    holds_everything_of, role_page, Effective, RoleChoice,
 };
+pub use reach::{reach_admits, reach_proof, Reach, TEAM_SOURCE};
 use std::{
     collections::HashSet,
     sync::{Arc, OnceLock},
 };
 use tokio_postgres::{types::ToSql, GenericClient, Row};
 pub use vocabulary::{
-    Audience, CapabilityDefinition, EngagementRole, RoleDefinition, StandingGrant,
-    SystemPrincipalDefinition, Vocabulary, VocabularyContribution, ENGAGEMENT_ROLES,
-    STANDING_GRANTS, VOCABULARY,
+    Audience, CapabilityDefinition, EngagementRole, OfferedCapabilities, OptionalCapabilities,
+    RoleDefinition, StandingGrant, SystemPrincipalDefinition, Vocabulary, VocabularyContribution,
+    ENGAGEMENT_ROLES, OFFERED_CAPABILITIES, OPTIONAL_CAPABILITIES, STANDING_GRANTS, VOCABULARY,
 };
 
 /// Immutable deployment snapshot. Database grants/restrictions are never cached.
@@ -141,36 +144,17 @@ pub async fn decide_in_company(
     if let Some(principal) = scope.principal() {
         return system_decision(client, scope.tenant(), Some(principal), key).await;
     }
-    let decision = match vocabulary()?.capabilities.get(key) {
-        None => Decision::deny("denied_unknown_capability"),
-        Some(cap) => {
-            let live = client
-                .query_opt(LIVE_TENANT_SQL, &[&scope.tenant()])
-                .await?
-                .is_some();
-            if !live {
-                Decision::deny("denied_invalid_actor_context")
-            } else if !cap.definition.admits(scope.actor().kind()) {
-                Decision::deny("denied_audience")
-            } else if cap.definition.is_platform() && !is_operator(client, scope.tenant()).await? {
-                Decision::deny("denied_platform_scope")
-            } else {
-                let row = client
-                    .query_one(
-                        GRANTS_SQL,
-                        &[
-                            &scope.tenant(),
-                            &scope.user(),
-                            &key,
-                            &company.filter(|_| cap.definition.company_scoped),
-                        ],
-                    )
-                    .await?;
-                judge(&row, cap.definition.audience == Audience::Portal)
-            }
-        }
-    };
-    log(client, scope.tenant(), scope.user(), None, key, decision).await?;
+    let (decision, via) = user_decision_proof(client.client(), scope, key, company).await?;
+    log(
+        client,
+        scope.tenant(),
+        scope.user(),
+        None,
+        key,
+        decision,
+        via.as_deref(),
+    )
+    .await?;
     Ok(decision)
 }
 /// `decide` for an owner adapter that holds only Tenancy's sealed proof
@@ -199,7 +183,7 @@ pub async fn decide_company_proof(
     if let Some(principal) = scope.principal() {
         return system_decision(&Proof(client), scope.tenant(), Some(principal), key).await;
     }
-    let decision = user_decision_proof(client, scope, key, company).await?;
+    let (decision, via) = user_decision_proof(client, scope, key, company).await?;
     let kind = "user";
     let principal: Option<&str> = None;
     client
@@ -213,6 +197,7 @@ pub async fn decide_company_proof(
                 &decision.reason,
                 &kind,
                 &principal,
+                &via,
             ],
         )
         .await?;
@@ -237,6 +222,7 @@ pub async fn holds_proof(client: &dyn ProofClient, scope: &Scope, key: &str) -> 
         scope.current_company().map(|id| id.get()),
     )
     .await?
+    .0
     .allowed)
 }
 async fn user_decision_proof(
@@ -244,9 +230,41 @@ async fn user_decision_proof(
     scope: &Scope,
     key: &str,
     company: Option<i64>,
-) -> Result<Decision> {
+) -> Result<(Decision, Option<String>)> {
+    let judged = user_judgement(client, scope, key, company).await?;
+    Ok((judged.decision, judged.via))
+}
+/// One live user decision and the reach it carries.
+pub(crate) struct Judged {
+    pub(crate) decision: Decision,
+    /// The group a role came from, for the decision log.
+    pub(crate) via: Option<String>,
+    /// How far an allow reaches (`All` for a key without reach, or a deny).
+    pub(crate) reach: Reach,
+}
+/// One live user decision on either database connection shape. An
+/// impersonated scope is the intersection of the viewed account and the
+/// operator for the same company. A direct deny on either account therefore
+/// wins, even when the other account has a direct allow or grant-all role.
+/// The text beside the decision names the group a role came from ("team Line
+/// 2 crew") when only a group role allowed it, for the decision log. The
+/// reach is the widest of the grants that allow it; while impersonating, a
+/// key that supports reach is refused unless the operator reaches all of it
+/// (`denied_impersonation_reach`): the viewed account's records are not the
+/// operator's own or team's.
+pub(crate) async fn user_judgement(
+    client: &dyn ProofClient,
+    scope: &Scope,
+    key: &str,
+    company: Option<i64>,
+) -> Result<Judged> {
+    let denied = |reason| Judged {
+        decision: Decision::deny(reason),
+        via: None,
+        reach: Reach::All,
+    };
     Ok(match vocabulary()?.capabilities.get(key) {
-        None => Decision::deny("denied_unknown_capability"),
+        None => denied("denied_unknown_capability"),
         Some(cap) => {
             let live = client
                 .query_opt(LIVE_TENANT_SQL, &[&scope.tenant()])
@@ -258,25 +276,74 @@ async fn user_decision_proof(
                     .await?
                     .is_some();
             if !live {
-                Decision::deny("denied_invalid_actor_context")
+                denied("denied_invalid_actor_context")
             } else if !cap.definition.admits(scope.actor().kind()) {
-                Decision::deny("denied_audience")
+                denied("denied_audience")
             } else if !operator {
-                Decision::deny("denied_platform_scope")
+                denied("denied_platform_scope")
             } else {
+                let company = company.filter(|_| cap.definition.company_scoped);
+                let portal = cap.definition.audience == Audience::Portal;
                 let row = client
                     .query_opt(
                         GRANTS_SQL,
-                        &[
-                            &scope.tenant(),
-                            &scope.user(),
-                            &key,
-                            &company.filter(|_| cap.definition.company_scoped),
-                        ],
+                        &[&scope.tenant(), &scope.user(), &key, &company],
                     )
                     .await?
                     .ok_or(Error::Internal)?;
-                judge(&row, cap.definition.audience == Audience::Portal)
+                let viewed = judge(&row, portal, cap.definition.reach);
+                match scope.impersonator() {
+                    None if cap.definition.audience == Audience::Owner
+                        || (cap.definition.audience == Audience::PlatformOrOwner
+                            && !viewed.decision.allowed) =>
+                    {
+                        if viewed.decision.reason == "denied_explicitly" {
+                            viewed
+                        } else {
+                            match bilibi_tenancy::prove_owner(client, scope).await {
+                                Ok(_) => Judged {
+                                    decision: Decision::allow("installation_owner"),
+                                    via: None,
+                                    reach: Reach::All,
+                                },
+                                Err(Error::Forbidden | Error::Unauthorized)
+                                    if cap.definition.audience == Audience::Owner =>
+                                {
+                                    denied("denied_owner_standing")
+                                }
+                                Err(Error::Forbidden | Error::Unauthorized) => viewed,
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                    Some(_) if cap.definition.audience == Audience::Owner => {
+                        denied("denied_owner_standing")
+                    }
+                    None => viewed,
+                    Some(impersonator) => {
+                        let row = client
+                            .query_opt(
+                                GRANTS_SQL,
+                                &[&scope.tenant(), &impersonator.user(), &key, &company],
+                            )
+                            .await?
+                            .ok_or(Error::Internal)?;
+                        let operator = judge(&row, portal, cap.definition.reach);
+                        let decision = intersection(viewed.decision, operator.decision);
+                        if decision.allowed && operator.reach != Reach::All {
+                            denied("denied_impersonation_reach")
+                        } else {
+                            let via = (decision.reason == GROUP_ROLE)
+                                .then(|| viewed.via.or(operator.via))
+                                .flatten();
+                            Judged {
+                                decision,
+                                via,
+                                reach: viewed.reach,
+                            }
+                        }
+                    }
+                }
             }
         }
     })
@@ -302,24 +369,61 @@ pub async fn authorize_proof(client: &dyn ProofClient, scope: &Scope, key: &str)
 const LIVE_TENANT_SQL: &str =
     "SELECT id FROM tenants WHERE id=$1 AND status='active' AND deleted_at IS NULL";
 const OPERATOR_SQL: &str = "SELECT o.tenant_id FROM platform_operator o JOIN tenants t ON t.id=o.tenant_id WHERE o.singleton AND o.tenant_id=$1 AND t.status='active' AND t.deleted_at IS NULL";
-const GRANTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND NOT is_allowed), EXISTS(SELECT 1 FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND is_allowed), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN roles r ON r.tenant_id=p.tenant_id AND r.id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.grant_all AND p.company_id IS NULL), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3)";
+const GRANTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND NOT is_allowed), (SELECT CASE reach WHEN 'all' THEN 2 WHEN 'team' THEN 1 ELSE 0 END FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND is_allowed), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN roles r ON r.tenant_id=p.tenant_id AND r.id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.grant_all AND p.company_id IS NULL), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3 AND p.via IS NULL), (SELECT min(p.via) FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3 AND p.via IS NOT NULL), (SELECT max(CASE r.reach WHEN 'all' THEN 2 WHEN 'team' THEN 1 ELSE 0 END) FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3)";
 const SYSTEM_GRANT_SQL: &str = "SELECT is_allowed FROM authz_system_grants WHERE tenant_id=$1 AND principal=$2 AND capability=$3";
-const LOG_SQL: &str = "INSERT INTO authz_decision_log(tenant_id,user_id,capability,allowed,reason,principal_type,system_principal) VALUES($1,$2,$3,$4,$5,$6,$7)";
-const LOG_RETURNING_SQL: &str = "INSERT INTO authz_decision_log(tenant_id,user_id,capability,allowed,reason,principal_type,system_principal) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id";
+const LOG_SQL: &str = "INSERT INTO authz_decision_log(tenant_id,user_id,capability,allowed,reason,principal_type,system_principal,via) VALUES($1,$2,$3,$4,$5,$6,$7,$8)";
+const LOG_RETURNING_SQL: &str = "INSERT INTO authz_decision_log(tenant_id,user_id,capability,allowed,reason,principal_type,system_principal,via) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id";
+/// The reason of an allow that only a group's role (a Core team's) carried.
+const GROUP_ROLE: &str = "group_role_capability";
 /// Deny wins over every allow; an allow names the grant that carried it.
 /// Grant-all is a staff role: it never satisfies a portal capability, which
-/// needs a direct allow or a role that lists it (ADR 16).
-fn judge(row: &tokio_postgres::Row, portal: bool) -> Decision {
-    if row.get::<_, bool>(0) {
-        Decision::deny("denied_explicitly")
-    } else if row.get::<_, bool>(1) {
-        Decision::allow("direct_capability")
+/// needs a direct allow or a role that lists it (ADR 16). When the key
+/// supports reach, a direct allow reaches as far as it says, capping every
+/// role and team role; otherwise grant-all reaches all and a role grant as
+/// far as the widest role that gives the key.
+fn judge(row: &tokio_postgres::Row, portal: bool, ranged: bool) -> Judged {
+    let ranked = |rank: Option<i32>| {
+        if ranged {
+            Reach::from_rank(rank.unwrap_or(2))
+        } else {
+            Reach::All
+        }
+    };
+    let role_reach = || ranked(row.get::<_, Option<i32>>(5));
+    let direct = row.get::<_, Option<i32>>(1);
+    let (decision, reach) = if row.get::<_, bool>(0) {
+        (Decision::deny("denied_explicitly"), Reach::All)
+    } else if direct.is_some() {
+        (Decision::allow("direct_capability"), ranked(direct))
     } else if row.get::<_, bool>(2) && !portal {
-        Decision::allow("grant_all")
+        (Decision::allow("grant_all"), Reach::All)
     } else if row.get::<_, bool>(3) {
-        Decision::allow("role_capability")
+        (Decision::allow("role_capability"), role_reach())
+    } else if row.get::<_, Option<String>>(4).is_some() {
+        (Decision::allow(GROUP_ROLE), role_reach())
     } else {
-        Decision::deny("denied_missing_capability")
+        (Decision::deny("denied_missing_capability"), Reach::All)
+    };
+    let via = (decision.reason == GROUP_ROLE)
+        .then(|| row.get::<_, Option<String>>(4))
+        .flatten();
+    Judged {
+        decision,
+        via,
+        reach,
+    }
+}
+/// Both identities must allow the capability. Preserve an explicit denial as
+/// the reason even when the other identity also lacks the capability.
+fn intersection(viewed: Decision, impersonator: Decision) -> Decision {
+    if viewed.reason == "denied_explicitly" || impersonator.reason == "denied_explicitly" {
+        Decision::deny("denied_explicitly")
+    } else if !viewed.allowed {
+        viewed
+    } else if !impersonator.allowed {
+        impersonator
+    } else {
+        viewed
     }
 }
 /// Whether `tenant` is the live, marked platform-operator tenant. Platform
@@ -338,6 +442,7 @@ async fn log(
     principal: Option<&str>,
     key: &str,
     decision: Decision,
+    via: Option<&str>,
 ) -> Result<()> {
     let kind = if user == 0 { "system" } else { "user" };
     client
@@ -351,6 +456,7 @@ async fn log(
                 &decision.reason,
                 &kind,
                 &principal,
+                &via,
             ],
         )
         .await?;
@@ -417,7 +523,7 @@ pub async fn decide_system(
 }
 /// The one read the named-principal rule needs, so the same decision runs on
 /// a pooled client, a transaction or Tenancy's sealed proof connection.
-trait Reader {
+pub(crate) trait Reader {
     async fn one(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Option<Row>>;
 }
 impl<T: GenericClient> Reader for T {
@@ -425,7 +531,7 @@ impl<T: GenericClient> Reader for T {
         Ok(self.query_opt(sql, params).await?)
     }
 }
-struct Proof<'a>(&'a dyn ProofClient);
+pub(crate) struct Proof<'a>(pub(crate) &'a dyn ProofClient);
 impl Reader for Proof<'_> {
     async fn one(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Option<Row>> {
         self.0.query_opt(sql, params).await
@@ -454,7 +560,7 @@ async fn system_decision(
         Some(name) => {
             let definition = vocab.capabilities[key].definition;
             // A named principal is the tenant's own work: staff, never a customer.
-            if definition.audience == vocabulary::Audience::Portal {
+            if matches!(definition.audience, Audience::Portal | Audience::Owner) {
                 Decision::deny("denied_audience")
             } else if definition.is_platform()
                 && client.one(OPERATOR_SQL, &[&tenant]).await?.is_none()
@@ -483,6 +589,7 @@ async fn system_decision(
         }
     };
     let kind = "system";
+    let via: Option<&str> = None;
     client
         .one(
             LOG_RETURNING_SQL,
@@ -494,6 +601,7 @@ async fn system_decision(
                 &decision.reason,
                 &kind,
                 &principal,
+                &via,
             ],
         )
         .await?;
@@ -550,6 +658,7 @@ pub async fn authorize_operator(
             scope.principal(),
             key,
             Decision::deny("denied_platform_scope"),
+            None,
         )
         .await?;
         return Err(Error::Forbidden);
@@ -638,12 +747,14 @@ pub async fn restrictions_for(
     if scope.principal().is_some() {
         return Ok(client.query("SELECT DISTINCT field_id FROM field_restrictions WHERE tenant_id=$1 AND table_id=$2",&[&scope.tenant(),&table]).await?.iter().map(|row|row.get(0)).collect());
     }
-    Ok(client.query("SELECT DISTINCT f.field_id FROM field_restrictions f JOIN effective_principal_roles p ON p.tenant_id=f.tenant_id AND p.role_id=f.role_id WHERE f.tenant_id=$1 AND p.user_id=$2 AND f.table_id=$3",&[&scope.tenant(),&scope.user(),&table]).await?.iter().map(|row|row.get(0)).collect())
+    let mut users = vec![scope.user()];
+    users.extend(scope.impersonator().map(|operator| operator.user()));
+    Ok(client.query("SELECT DISTINCT f.field_id FROM field_restrictions f JOIN effective_principal_roles p ON p.tenant_id=f.tenant_id AND p.role_id=f.role_id WHERE f.tenant_id=$1 AND p.user_id=ANY($2) AND f.table_id=$3",&[&scope.tenant(),&users,&table]).await?.iter().map(|row|row.get(0)).collect())
 }
 inventory::submit! { bilibi_module_registry::Module {
     id:"base/authz",layer:bilibi_module_registry::Layer::Base,
     dependencies:&["base/module_registry","base/database","base/tenancy","base/audit","base/menu","base/settings","base/ui","base/locale","base/datetime","base/step_up"],
-    migrations:&[("base-authz-012-external-roles",include_str!("../migrations/012-external-roles.sql")),("007-authz-policy",include_str!("../migrations/007-policy.sql")),("base-authz-008-decision-log-restrictions",include_str!("../migrations/008-decision-log-restrictions.sql")),("base-authz-009-roles-admin",include_str!("../migrations/009-roles-admin.sql")),("base-authz-010-decision-log-retention",include_str!("../migrations/010-decision-log-retention.sql")),("base-authz-011-role-company",include_str!("../migrations/011-role-company.sql")),("base-authz-013-field-masks",include_str!("../migrations/013-field-masks.sql")),("base-authz-014-assignment-bounds",include_str!("../migrations/014-assignment-bounds.sql")),("base-authz-015-optional-engagement-dates",include_str!("../migrations/015-optional-engagement-dates.sql"))],
+    migrations:&[("base-authz-012-external-roles",include_str!("../migrations/012-external-roles.sql")),("007-authz-policy",include_str!("../migrations/007-policy.sql")),("base-authz-008-decision-log-restrictions",include_str!("../migrations/008-decision-log-restrictions.sql")),("base-authz-009-roles-admin",include_str!("../migrations/009-roles-admin.sql")),("base-authz-010-decision-log-retention",include_str!("../migrations/010-decision-log-retention.sql")),("base-authz-011-role-company",include_str!("../migrations/011-role-company.sql")),("base-authz-013-field-masks",include_str!("../migrations/013-field-masks.sql")),("base-authz-014-assignment-bounds",include_str!("../migrations/014-assignment-bounds.sql")),("base-authz-015-optional-engagement-dates",include_str!("../migrations/015-optional-engagement-dates.sql")),("base-authz-016-group-roles",include_str!("../migrations/016-group-roles.sql")),("base-authz-017-grant-reach",include_str!("../migrations/017-grant-reach.sql"))],
     services:&[bilibi_module_registry::Service {id:"base/authz.grants",factory:|services| Ok(Arc::new(grants::Grants::new(
         services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
         services.get("base/database.mutations")?, vocabulary::Vocabulary::from_inventory()?, services.get("base/tenancy.authentication")?,
@@ -672,10 +783,10 @@ inventory::submit! { bilibi_module_registry::Module {
 
 // Tenancy's capability keys: declared here
 // because the vocabulary type is Authz's and Tenancy sits below it; the keys
-// themselves are `bilibi_tenancy::{LIST, CREATE}`.
+// themselves are `bilibi_tenancy::{LIST, CREATE, SUSPEND, REACTIVATE}`.
 inventory::submit! { bilibi_module_registry::Contribution::new(VOCABULARY,"authz.tenancy",bilibi_module_registry::Provenance {module:"base/authz",source:file!(),line:line!()}, &VocabularyContribution {
-    domains:&["admin","tenancy"], verbs:&["list","create","manage","read"],
-    capabilities:&[CapabilityDefinition::platform(bilibi_tenancy::LIST), CapabilityDefinition::platform(bilibi_tenancy::CREATE), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_MANAGE), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_VIEW), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_READ)],
+    domains:&["admin","tenancy"], verbs:&["list","create","suspend","reactivate","manage","read","rename"],
+    capabilities:&[CapabilityDefinition::platform(bilibi_tenancy::LIST), CapabilityDefinition::platform(bilibi_tenancy::CREATE), CapabilityDefinition::platform(bilibi_tenancy::SUSPEND), CapabilityDefinition::platform(bilibi_tenancy::REACTIVATE), CapabilityDefinition::tenant(bilibi_tenancy::VIEW), CapabilityDefinition::tenant(bilibi_tenancy::RENAME), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_MANAGE), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_VIEW), CapabilityDefinition::tenant(bilibi_tenancy::OVERSIGHT_READ)],
     roles:&[], system_principals:&[],
 }) }
 bilibi_step_up::declare!(

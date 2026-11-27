@@ -6,7 +6,7 @@ use bilibi_agent_api::{
     plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
     Registry, SearchOptions,
 };
-use bilibi_database::{pool, Error};
+use bilibi_database::pool;
 use bilibi_person::{PersonInput, PersonKind, PersonService};
 use bilibi_tenancy::ProofFuture;
 use serde_json::{json, Value};
@@ -29,14 +29,8 @@ struct Browser<'a> {
 impl PlanAuthority for Browser<'_> {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(Error::Unauthorized)?;
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.check(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })
@@ -62,8 +56,10 @@ async fn main() -> Result<(), Failure> {
     let viewer_login = app.user.login("viewer@example.test", password).await?;
     let manager = app.security.guard(&manager_login.token).await?;
     let viewer = app.security.guard(&viewer_login.token).await?;
-    let client = db.get().await?;
-    let client: &tokio_postgres::Client = &client;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
+    let client: &mut tokio_postgres::Client = &mut client;
 
     // Discovery: ranked search, describe and the guide, as an agent sees them.
     let found = registry

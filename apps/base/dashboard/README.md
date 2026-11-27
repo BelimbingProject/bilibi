@@ -1,5 +1,9 @@
 # bilibi-dashboard
 
+**Use it for:** contributing widgets and sections to the `/dashboard` landing page.
+
+**Not for:** a landing or summary page of your own.
+
 The workspace landing page at `/dashboard`. Installed modules contribute its
 widgets and sections; this module owns the catalogue, the page and each
 account's arrangement, and reads no contributor's tables.
@@ -35,11 +39,11 @@ bilibi_dashboard::provide!("base/reports", Provider {
     prefix: "report",                 // entry ids are report-<key>: never rename
     embed: "base/reports.dashboard",  // an Embed with the Dashboard context
     placement: Placement::Grid, capability: Some("reports.view"), refresh_interval: 60_000,
-    entries: panel::entries,          // fn(&Scope, placed keys, offers) -> Provided entries
+    entries: panel::entries,          // fn(&Client, &Scope, placed keys, offers) -> Provided entries
 });
 ```
 
-- The page calls `entries` with the reader's sealed scope, the keys of that provider's entries the reader has placed and `offers` (true only in Customize). The owner rechecks placed keys on every update and answers only what that reader may see; with `offers = false` it must not read the unplaced offer list. A provider with no placed keys is skipped outside Customize. Every placed key it still answers stays, however many entries sort before it; at most `MAX_PROVIDED` others per provider are offered in Customize.
+- Dashboard calls `entries` with its SQL client, the reader’s sealed scope, the provider’s placed or proposed keys, and `offers`. Use that client for access checks and metadata reads so a review can revalidate a proposal inside its transaction. Answer only entries the reader can see. Read the unplaced offer list only when `offers` is true (Customize or the agent arrangement read). A provider without relevant keys is skipped when there are no offers. Every placed key it still answers stays, however many entries sort before it; at most `MAX_PROVIDED` others per provider are offered in Customize.
 - A `Provided` entry carries its `key`, `label` and an optional `revision`. Owners can batch access checks with discovery and supply a revision that changes whenever the cached panel becomes stale or unsafe. Dashboard carries it in the server-owned panel spec; a change remounts that panel and drops its cache. It is not stored in the arrangement. Reports uses this to build one reader catalog per provider call, not one per panel.
 - Provided entries are offered in Customize and placed only by the reader, never by default, so a new report does not appear on everyone's dashboard. A placed one that is no longer offered drops out like a contributed one.
 - A page holds at most 32 panels, counting hidden stored pins so restoring access cannot overflow the limit; adding past that is refused with a message.
@@ -67,6 +71,10 @@ so that tick is the floor of `refresh_interval`.
   capability is gone leaves the page (its panel state is dropped) and returns in
   its stored place when the grant does; an embed whose own access is refused
   empties only its anchor while siblings keep running.
+
+## Agent operations
+
+Use `base.dashboard_agent.read` for the account's placed, available and default entries, plus the current version of each region. `base.dashboard_agent.set` takes the desired order for the grid or full-width sections and preserves hidden entries. `base.dashboard_agent.restore` clears the saved region. The connector and dashboard page use the same owner checks and audited settings writes. **My dashboard** in Customisations shows each saved region and offers **Restore default**.
 
 ## Try it
 

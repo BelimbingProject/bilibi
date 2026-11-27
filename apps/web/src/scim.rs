@@ -26,9 +26,7 @@ async fn handle(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0);
-    let sender = api::client_address(peer, request.headers())
-        .map_or_else(|| "unknown".into(), |ip| ip.to_string());
-    match api::allowed(&app, "scim", &sender).await {
+    match api::allowed(&app, "scim", api::client_address(peer, request.headers())).await {
         Ok(true) => {}
         Ok(false) => return failure(429, "Too many provisioning requests."),
         Err(_) => return failure(503, "Provisioning is temporarily unavailable."),

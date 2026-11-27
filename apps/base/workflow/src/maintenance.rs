@@ -16,6 +16,10 @@ use std::sync::Arc;
 
 pub const WORKER: &str = "base/workflow-maintenance";
 pub const RETENTION_DAYS: &str = "workflow.outbox.keep_days";
+/// Running process runs one scheduled pass visits. A run with nothing to
+/// repair costs a few reads, so a pass stays within seconds, and a lap over
+/// every running run takes one minute per thousand of them.
+const RUNS_PER_PASS: i64 = 1000;
 macro_rules! provenance {
     () => {
         Provenance {
@@ -44,7 +48,7 @@ fn delivery_arguments(args: Value) -> Result<Value> {
         _ => Err(Error::Invalid),
     }
 }
-inventory::submit! {Contribution::new(WORKERS,outbox::DELIVERY_WORKER,provenance!(),&Worker {max_attempts:5,validate:delivery_arguments})}
+inventory::submit! {Contribution::new(WORKERS,outbox::DELIVERY_WORKER,provenance!(),&Worker {max_attempts:outbox::DELIVERY_ATTEMPTS,validate:delivery_arguments})}
 inventory::submit! {Contribution::new(HANDLERS,outbox::DELIVERY_WORKER,provenance!(),&HandlerBinding {service:"base/workflow.delivery",capability:outbox::DELIVER})}
 inventory::submit! {Contribution::new(bilibi_authz::VOCABULARY,"workflow.delivery.vocabulary",provenance!(),&bilibi_authz::VocabularyContribution {
     domains:&[],verbs:&["deliver"],capabilities:&[bilibi_authz::CapabilityDefinition::tenant(outbox::DELIVER)],
@@ -80,32 +84,44 @@ impl Engine {
         bilibi_authz::authorize_operator(&*tx, &scope, EXECUTE).await?;
         tx.commit().await?;
         drop(client);
-        self.maintenance_batch(limit, keep_days).await
+        self.maintenance_batch(limit, limit, keep_days).await
     }
+    /// `limit` bounds the events delivered, the rows pruned and each tenant's
+    /// approval page; `runs` bounds the running process runs visited.
     pub(crate) async fn maintenance_batch(
         &self,
         limit: i64,
+        runs: i64,
         keep_days: i64,
     ) -> Result<MaintenanceSummary> {
-        if !(1..=1000).contains(&limit) || !(1..=3650).contains(&keep_days) {
+        if !(1..=1000).contains(&limit)
+            || !(1..=1000).contains(&runs)
+            || !(1..=3650).contains(&keep_days)
+        {
             return Err(Error::Invalid);
         }
-        // Delivery still runs if one run's owner or definition is unavailable.
-        let runs = self.sweep_processes(limit).await;
+        // Delivery and pruning come first, so neither waits for the sweeps
+        // or is lost when a sweep fails or outlasts the attempt.
+        let delivery = self.deliver_due_transitions(limit).await;
+        let pruned = self.prune_delivered(limit, keep_days).await;
+        let runs = self.sweep_processes(runs).await;
         let approvals = self.sweep_approvals(limit).await;
-        let delivery = self.deliver_due_transitions(limit).await?;
+        let (delivery, pruned) = (delivery?, pruned?);
         let (reconciled, skipped) = runs?;
         approvals?;
-        let client = self.db.get().await?;
-        // Pending/leased/failed deliveries and append-only business facts are
-        // never deleted. SKIP LOCKED avoids a concurrent dispatcher.
-        let pruned = client.execute("DELETE FROM base_workflow_transition_outbox WHERE id IN (SELECT id FROM base_workflow_transition_outbox WHERE delivered_at<clock_timestamp()-make_interval(days=>$1::integer) AND lease_token IS NULL ORDER BY delivered_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)", &[&(keep_days as i32),&limit]).await?;
         Ok(MaintenanceSummary {
             reconciled,
             skipped,
             delivery,
             pruned,
         })
+    }
+    async fn prune_delivered(&self, limit: i64, keep_days: i64) -> Result<u64> {
+        let client = self.db.get().await?;
+        // Pending/leased/failed deliveries and append-only business facts are
+        // never deleted. SKIP LOCKED avoids a concurrent dispatcher.
+        let pruned = client.execute("DELETE FROM base_workflow_transition_outbox WHERE id IN (SELECT id FROM base_workflow_transition_outbox WHERE delivered_at<clock_timestamp()-make_interval(days=>$1::integer) AND lease_token IS NULL ORDER BY delivered_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)", &[&(keep_days as i32),&limit]).await?;
+        Ok(pruned)
     }
 }
 pub(crate) struct Maintenance {
@@ -125,7 +141,9 @@ impl Handler for Maintenance {
                     .as_i64()
                     .ok_or(Error::Invalid)?;
                 drop(client);
-                self.engine.maintenance_batch(100, days).await
+                self.engine
+                    .maintenance_batch(100, RUNS_PER_PASS, days)
+                    .await
             }
             .await;
             match result {

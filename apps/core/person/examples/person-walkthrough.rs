@@ -1,15 +1,15 @@
 //! Manual inspection through real application services on a disposable DB.
-//! Prints behavior/evidence; no assertions, mocks, test runner or People module.
+//! Prints behavior and checks the concurrent writes through the owner services.
 use bilibi_agent_api::{
     plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
     Registry,
 };
-use bilibi_database::{pool, Error, MutationBoundary};
+use bilibi_database::{pool, Error, MutationBoundary, MutationTransaction};
 use bilibi_person::{
-    create_person, lock_for_account_binding, DuplicateQuery, PersonInput, PersonKind,
-    PersonService, Search, Update, SERVICE,
+    create_person, lock_for_account_binding, update_person, DuplicateQuery, Person, PersonId,
+    PersonInput, PersonKind, PersonService, Search, Update, WriteError, SERVICE,
 };
-use bilibi_tenancy::{PartyProofs, ProofFuture};
+use bilibi_tenancy::{PartyProofs, ProofFuture, Scope};
 use serde_json::json;
 use tokio_postgres::Transaction;
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
@@ -26,14 +26,8 @@ struct Browser<'a> {
 impl PlanAuthority for Browser<'_> {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(Error::Unauthorized)?;
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.check(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })
@@ -46,6 +40,27 @@ fn human(name: &str) -> PersonInput {
         email: Some("contact@example.test".into()),
         phone: Some("+60 12 3456789".into()),
     }
+}
+fn contact(version: i64, name: &str) -> Update {
+    Update {
+        custom: Default::default(),
+        version,
+        identity: human(name),
+    }
+}
+/// A Domain-style operation: its own check first, then the Core person change,
+/// in one caller transaction. `assured` stands in for the caller's gate.
+async fn case_contact_update(
+    tx: &mut MutationTransaction<'_>,
+    scope: &Scope,
+    assured: bool,
+    id: PersonId,
+    update: &Update,
+) -> Result<Person, Failure> {
+    if !assured {
+        return Err("case identity assurance is below its minimum".into());
+    }
+    Ok(update_person(tx, scope, id, update).await?)
 }
 #[tokio::main]
 async fn main() -> Result<(), Failure> {
@@ -80,8 +95,10 @@ async fn main() -> Result<(), Failure> {
     let viewer = app.security.guard(&viewer_login.token).await?;
     let staff = app.security.guard(&staff_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
-    let client = db.get().await?;
-    let client: &tokio_postgres::Client = &client;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
+    let client: &mut tokio_postgres::Client = &mut client;
     let before: i64 = client
         .query_one("SELECT count(*) FROM users", &[])
         .await?
@@ -122,6 +139,7 @@ async fn main() -> Result<(), Failure> {
             &manager,
             second.id,
             &Update {
+                custom: Default::default(),
                 version: second.version,
                 identity: human("Amina Renamed"),
             },
@@ -139,10 +157,22 @@ async fn main() -> Result<(), Failure> {
     );
     let concurrent = human("Concurrent Contact");
     let (left, right) = tokio::join!(
-        people.create(&manager, &concurrent),
-        people.create(&manager, &concurrent)
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let concurrent = concurrent.clone();
+            async move { people.create(&manager, &concurrent).await }
+        }),
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let concurrent = concurrent.clone();
+            async move { people.create(&manager, &concurrent).await }
+        })
     );
-    show("concurrent same-name codes", (left?.code, right?.code));
+    let (left, right) = (left??, right??);
+    assert_ne!(left.code, right.code);
+    show("concurrent same-name codes", (left.code, right.code));
     show(
         "non-Latin name gets a generated code",
         people.create(&manager, &human("林美玲")).await?.code,
@@ -243,6 +273,7 @@ async fn main() -> Result<(), Failure> {
                 &other,
                 alice.id,
                 &Update {
+                    custom: Default::default(),
                     version: 1,
                     identity: human("Cross Tenant"),
                 },
@@ -308,17 +339,36 @@ async fn main() -> Result<(), Failure> {
     );
     // Two real concurrent writes of the same version: row lock serializes them.
     let first_edit = Update {
+        custom: Default::default(),
         version: 1,
         identity: human("Amina First"),
     };
     let second_edit = Update {
+        custom: Default::default(),
         version: 1,
         identity: human("Amina Second"),
     };
+    let id = alice.id;
     let (first, second_save) = tokio::join!(
-        people.update(&manager, alice.id, &first_edit),
-        people.update(&manager, alice.id, &second_edit)
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let first_edit = first_edit.clone();
+            async move { people.update(&manager, id, &first_edit).await }
+        }),
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let second_edit = second_edit.clone();
+            async move { people.update(&manager, id, &second_edit).await }
+        })
     );
+    let (first, second_save) = (first?, second_save?);
+    assert!(matches!(
+        (&first, &second_save),
+        (Ok(_), Err(WriteError::Backend(Error::Conflict)))
+            | (Err(WriteError::Backend(Error::Conflict)), Ok(_))
+    ));
     show("concurrent version writes", (&first, &second_save));
     let current = people.read(&manager, alice.id).await?;
     show(
@@ -328,7 +378,9 @@ async fn main() -> Result<(), Failure> {
             .await
             .map(|p| p.id()),
     );
-    let mut connection = db.get().await?;
+    let mut connection = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let tx = boundary
         .begin(
             &mut connection,
@@ -379,6 +431,7 @@ async fn main() -> Result<(), Failure> {
                 &staff,
                 alice.id,
                 &Update {
+                    custom: Default::default(),
                     version: current.version,
                     identity: human("Forbidden Contact"),
                 },
@@ -390,6 +443,7 @@ async fn main() -> Result<(), Failure> {
             &staff,
             alice.id,
             &Update {
+                custom: Default::default(),
                 version: current.version,
                 identity: PersonInput {
                     name: "Amina Revised".into(),
@@ -438,6 +492,177 @@ async fn main() -> Result<(), Failure> {
         people.read(&manager, rolled_back.id).await,
     );
     show("rollback publishes no change", changes.try_recv());
+
+    // A Domain operation changes a Core person on its own transaction.
+    let gated = people.create(&manager, &human("Gate Contact")).await?;
+    let gated_id = gated.id.get().to_string();
+    let audit_rows =
+        "SELECT count(*) FROM base_audit_mutations WHERE auditable_type='person' AND auditable_id=$1";
+    let sql = &*client;
+    let audited = |label: &'static str| {
+        let gated_id = gated_id.clone();
+        async move {
+            let rows: i64 = sql.query_one(audit_rows, &[&gated_id]).await?.get(0);
+            show(label, rows);
+            Ok::<_, Failure>(())
+        }
+    };
+    while changes.try_recv().is_ok() {}
+    audited("caller transaction: person audit rows at start").await?;
+    show(
+        "caller previews the change",
+        bilibi_person::preview_update_person(
+            client,
+            &manager,
+            gated.id,
+            &contact(gated.version, "Gate Previewed"),
+        )
+        .await?,
+    );
+    let mut tx = boundary
+        .begin(
+            &mut connection,
+            manager.mutation_context("case.contact.refused-specimen"),
+        )
+        .await?;
+    show(
+        "caller's check refuses before the write",
+        case_contact_update(
+            &mut tx,
+            &manager,
+            false,
+            gated.id,
+            &contact(gated.version, "Gate Refused"),
+        )
+        .await
+        .map_err(|e| e.to_string()),
+    );
+    tx.rollback().await?;
+    let read = people.read(&manager, gated.id).await?;
+    show(
+        "refused: name/version unchanged",
+        (&read.name, read.version),
+    );
+    audited("refused: person audit rows").await?;
+    show("refused: no change published", changes.try_recv());
+    let mut tx = boundary
+        .begin(
+            &mut connection,
+            viewer.mutation_context("case.contact.viewer-specimen"),
+        )
+        .await?;
+    show(
+        "caller passes but its user lacks core/person.update",
+        case_contact_update(
+            &mut tx,
+            &viewer,
+            true,
+            gated.id,
+            &contact(gated.version, "Gate Viewer"),
+        )
+        .await
+        .map_err(|e| e.to_string()),
+    );
+    tx.rollback().await?;
+    let mut tx = boundary
+        .begin(
+            &mut connection,
+            manager.mutation_context("case.contact.foreign-scope-specimen"),
+        )
+        .await?;
+    show(
+        "another user's scope on this transaction refused",
+        case_contact_update(
+            &mut tx,
+            &staff,
+            true,
+            gated.id,
+            &contact(gated.version, "Gate Foreign"),
+        )
+        .await
+        .map_err(|e| e.to_string()),
+    );
+    tx.rollback().await?;
+    let mut tx = boundary
+        .begin(
+            &mut connection,
+            manager.mutation_context("case.contact.rollback-specimen"),
+        )
+        .await?;
+    let inside = case_contact_update(
+        &mut tx,
+        &manager,
+        true,
+        gated.id,
+        &contact(gated.version, "Gate Rolled Back"),
+    )
+    .await?;
+    show(
+        "inside the caller transaction",
+        (&inside.name, inside.version),
+    );
+    tx.rollback().await?;
+    let read = people.read(&manager, gated.id).await?;
+    show(
+        "caller rollback: name/version unchanged",
+        (&read.name, read.version),
+    );
+    audited("caller rollback: person audit rows").await?;
+    show("caller rollback: no change published", changes.try_recv());
+    let mut tx = boundary
+        .begin(
+            &mut connection,
+            manager.mutation_context("case.contact.update-specimen"),
+        )
+        .await?;
+    let changed = case_contact_update(
+        &mut tx,
+        &manager,
+        true,
+        gated.id,
+        &contact(gated.version, "Gate Changed"),
+    )
+    .await?;
+    tx.commit().await?;
+    show(
+        "permitted: committed with the caller's operation",
+        (&changed.name, changed.version),
+    );
+    show(
+        "permitted: change published after commit",
+        changes.try_recv(),
+    );
+    for row in client
+        .query(
+            "SELECT a.event,m.event,m.old_values->>'name',m.new_values->>'name' FROM base_audit_mutations m JOIN base_audit_actions a ON a.trace_id=m.trace_id WHERE m.auditable_type='person' AND m.auditable_id=$1 ORDER BY m.id",
+            &[&gated_id],
+        )
+        .await?
+    {
+        show(
+            "person audit row (action, event, old name, new name)",
+            (
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, Option<String>>(2),
+                row.get::<_, Option<String>>(3),
+            ),
+        );
+    }
+    // Issue 574: the create reports its old side as JSON null, and is
+    // recorded as a create, not an update.
+    let first: String = client
+        .query_one(
+            "SELECT event FROM base_audit_mutations WHERE auditable_type='person' AND auditable_id=$1 ORDER BY id LIMIT 1",
+            &[&gated_id],
+        )
+        .await?
+        .get(0);
+    show("person create is recorded as", &first);
+    if first != "created" {
+        return Err(format!("a person create was recorded as {first:?}, not \"created\"").into());
+    }
+    while changes.try_recv().is_ok() {}
     client.batch_execute("CREATE FUNCTION k7_refuse_action() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event='person.update' THEN RAISE EXCEPTION 'K7 deliberate audit refusal'; END IF; RETURN NEW; END $$; CREATE TRIGGER k7_refuse_action BEFORE INSERT ON base_audit_actions FOR EACH ROW EXECUTE FUNCTION k7_refuse_action()").await?;
     show(
         "audit failure rejects person update",
@@ -446,6 +671,7 @@ async fn main() -> Result<(), Failure> {
                 &manager,
                 alice.id,
                 &Update {
+                    custom: Default::default(),
                     version: updated.version,
                     identity: human("Audit Failure"),
                 },
@@ -476,15 +702,22 @@ async fn main() -> Result<(), Failure> {
         )
         .await?;
     let (first_provision, concurrent_provision) = tokio::join!(
-        people.ensure_platform_orchestrator(&manager),
-        people.ensure_platform_orchestrator(&manager)
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            async move { people.ensure_platform_orchestrator(&manager).await }
+        }),
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            async move { people.ensure_platform_orchestrator(&manager).await }
+        })
     );
-    let (system, created) = first_provision?;
-    show("operator system identity created", (&system, created));
-    show(
-        "concurrent provisioning resolves same identity",
-        concurrent_provision?,
-    );
+    let (system, created) = first_provision??;
+    let (concurrent, concurrently_created) = concurrent_provision??;
+    assert_eq!(system.id, concurrent.id);
+    assert_ne!(created, concurrently_created);
+    show("concurrent provisioning resolves one identity", system.id);
     show(
         "repeat system provisioning preserves identity",
         people.ensure_platform_orchestrator(&manager).await?,
@@ -496,6 +729,7 @@ async fn main() -> Result<(), Failure> {
                 &manager,
                 system.id,
                 &Update {
+                    custom: Default::default(),
                     version: 1,
                     identity: human("Forged Human"),
                 },

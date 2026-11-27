@@ -3,7 +3,9 @@
 //! `/settings/two-factor/confirm` (the step-up prompt). Both are live: the
 //! setup key and QR code exist only in the socket's state after the request
 //! that produced them and are dropped with it, so a reload never shows them
-//! again. Typed values are never echoed back.
+//! again. Typed values are never echoed back. A customer has the same two
+//! pages on the portal ([`PortalTwoFactor`], [`PortalConfirm`]), drawn
+//! without the settings shell; Core Portal mounts them.
 use crate::{
     two_factor::{Enrollment, TwoFactorError, TwoFactorStatus},
     UserService,
@@ -36,6 +38,16 @@ fn code_field(id: &str, errors: &[String]) -> Result<Html, Error> {
     fragment(Html::render(
         &CodeInput::new(id, "two_factor[code]", "Authentication code", 6)
             .numeric()
+            .errors(errors.to_vec()),
+    ))
+}
+
+fn confirm_code_field(id: &str, errors: &[String]) -> Result<Html, Error> {
+    fragment(Html::render(
+        &CodeInput::new(id, "two_factor[code]", "Authentication code", 6)
+            .numeric()
+            .hidden_label()
+            .without_hint()
             .errors(errors.to_vec()),
     ))
 }
@@ -77,6 +89,7 @@ pub struct TwoFactorPage {
     return_to: Option<String>,
     errors: Vec<String>,
     notice: String,
+    recovery_hint: String,
     success: &'static str,
     /// Drawn for a customer's portal page, not inside the settings shell.
     portal: bool,
@@ -117,6 +130,7 @@ struct TwoFactorView<'a> {
     description: Html,
     stage: &'static str,
     notice: &'a str,
+    recovery_hint: &'a str,
     password: Html,
     qr: Html,
     key: &'a str,
@@ -148,6 +162,7 @@ impl TwoFactorPage {
             } else {
                 String::new()
             },
+            recovery_hint: "2FA stays on once set up. Lost your phone? Your company administrator or the server owner can reset it.".to_owned(),
             success: "",
             portal: false,
         })
@@ -319,16 +334,10 @@ impl TwoFactorPage {
             current: bilibi_ui::SettingsTab::TwoFactor,
             portal: self.portal,
             heading,
-            description: fragment(Html::render(&Bullets {
-                first,
-                second: if self.portal {
-                    "Lost your phone? Ask an admin to reset your 2FA, then set it up again."
-                } else {
-                    "If you lose your phone, ask your admin to reset your 2FA, then set it up again."
-                },
-            }))?,
+            description: Html::text(first),
             stage,
             notice: &self.notice,
+            recovery_hint: &self.recovery_hint,
             password,
             qr: enrollment.map(|e| e.qr.clone()).unwrap_or_default(),
             key: enrollment.map_or("", |e| e.key.as_str()),
@@ -353,16 +362,6 @@ impl TwoFactorPage {
         };
         view.render().map_err(|_| Error::Internal)
     }
-}
-
-#[derive(Template)]
-#[template(
-    source = r#"<ul class="mt-1 list-disc space-y-0.5 pl-4"><li>{{ first }}</li><li>{{ second }}</li></ul>"#,
-    ext = "html"
-)]
-struct Bullets<'a> {
-    first: &'a str,
-    second: &'a str,
 }
 
 impl LiveState<Scope, Error> for TwoFactorPage {
@@ -401,11 +400,12 @@ impl LiveState<Scope, Error> for TwoFactorPage {
 pub struct ConfirmPage {
     users: Arc<UserService>,
     enabled: bool,
-    minutes: i64,
-    hours: i64,
     return_to: Option<String>,
     errors: Vec<String>,
     notice: String,
+    /// Drawn for a customer on the portal: plain words, the portal's setup
+    /// page, and back to the portal.
+    portal: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -422,10 +422,17 @@ enum ConfirmEvent {
 struct ConfirmView<'a> {
     header: Html,
     notice: &'a str,
-    enabled: bool,
-    minutes: i64,
-    hours: i64,
     step_up: Html,
+}
+
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::header(subtitle=subtitle, title_actions=bilibi_ui::Html::EMPTY, actions=bilibi_ui::Html::EMPTY, pin=false) %}{{ title }}{% endcall %}"#,
+    ext = "html"
+)]
+struct ConfirmHeader<'a> {
+    title: &'a str,
+    subtitle: &'a str,
 }
 
 impl ConfirmPage {
@@ -434,27 +441,43 @@ impl ConfirmPage {
         scope: &Scope,
         query: &HashMap<String, String>,
     ) -> Result<Self, Error> {
+        let portal = scope.actor().kind() == bilibi_tenancy::AccountKind::Customer;
+        let return_to = return_to(query).filter(|path| !portal || portal_path(path));
         let enabled = users.two_factor_status(scope).await?.enabled;
-        let window = users.step_up.window(scope).await?;
         Ok(Self {
             users,
             enabled,
-            minutes: window.window_minutes,
-            hours: window.cap_hours,
-            return_to: return_to(query),
+            return_to,
             errors: Vec::new(),
             notice: if scope.impersonator().is_some() {
                 TwoFactorError::Impersonating.to_string()
             } else {
                 String::new()
             },
+            portal,
         })
     }
 
-    fn render(&self) -> Result<String, Error> {
+    /// The prompt's own part of the form. A customer with no authenticator
+    /// yet gets the portal's setup page, which comes back to the same
+    /// address; the shared component's link is the staff settings page.
+    fn step(&self) -> Result<Html, Error> {
+        if self.portal && !self.enabled {
+            return fragment(Html::render(&bilibi_ui::ActionLink {
+                id: "confirm-access-setup",
+                icon: "shield-check",
+                title: "Set up your authenticator app",
+                href: &crate::two_factor::with_return(
+                    crate::two_factor::PORTAL_SETTINGS_PATH,
+                    self.return_to.as_deref(),
+                ),
+                body: Html::text("Set up your authenticator app"),
+                ..bilibi_ui::ActionLink::default()
+            }));
+        }
         let mut step =
             bilibi_ui::StepUp::new(self.enabled, self.return_to.as_deref().unwrap_or_default());
-        step.code = code_field("two_factor_code", &self.errors)?;
+        step.code = confirm_code_field("two_factor_code", &self.errors)?;
         step.actions = fragment(Html::render(&Button {
             id: "confirm-access-verify",
             button_type: "submit",
@@ -463,22 +486,25 @@ impl ConfirmPage {
             body: Html::text("Verify"),
             ..Button::default()
         }))?;
+        fragment(Html::render(&step))
+    }
+
+    fn render(&self) -> Result<String, Error> {
         ConfirmView {
-            header: fragment(Html::render(&Header {
-                title: Html::text("Confirm access"),
-                subtitle: if self.enabled {
-                    "Enter your 2FA code to continue."
+            header: fragment(Html::render(&ConfirmHeader {
+                title: if self.portal {
+                    "Confirm it is you"
                 } else {
-                    ""
+                    "Confirm access"
                 },
-                title_actions: Html::EMPTY,
-                actions: Html::EMPTY,
+                subtitle: match (self.enabled, self.portal) {
+                    (true, _) => "Enter the 6-digit code from your authenticator app.",
+                    (false, true) => "This page needs a code from an authenticator app, and you have not set one up yet.",
+                    (false, false) => "",
+                },
             }))?,
             notice: &self.notice,
-            enabled: self.enabled,
-            minutes: self.minutes,
-            hours: self.hours,
-            step_up: fragment(Html::render(&step))?,
+            step_up: self.step()?,
         }
         .render()
         .map_err(|_| Error::Internal)
@@ -505,11 +531,9 @@ impl LiveState<Scope, Error> for ConfirmPage {
                                         return Ok(LiveBody {
                                             html: self.render()?,
                                             rows: 1,
-                                            redirect: Some(
-                                                self.return_to
-                                                    .clone()
-                                                    .unwrap_or_else(|| "/".into()),
-                                            ),
+                                            redirect: Some(self.return_to.clone().unwrap_or_else(
+                                                || if self.portal { "/portal" } else { "/" }.into(),
+                                            )),
                                             flash: Some((
                                                 StatusKind::Success,
                                                 "Access confirmed.".into(),
@@ -541,13 +565,80 @@ impl LiveState<Scope, Error> for ConfirmPage {
 /// for a second sign-in step admit the customer.
 pub struct PortalTwoFactor(TwoFactorPage);
 impl PortalTwoFactor {
+    /// `query` carries the portal address a step-up sent the customer from
+    /// (`return`); a finished setup goes back there.
     pub async fn new(
         users: Arc<UserService>,
         portal: &bilibi_tenancy::PortalScope,
+        query: &HashMap<String, String>,
     ) -> Result<Self, Error> {
-        let mut page = TwoFactorPage::new(users, portal.scope(), &HashMap::new()).await?;
+        let mut page = TwoFactorPage::new(users, portal.scope(), query).await?;
+        page.return_to = page.return_to.filter(|path| portal_path(path));
         page.portal = true;
+        let client = page.users.db.get().await?;
+        let company = client.query_opt(
+            "SELECT c.name FROM tenant_primary_companies p JOIN companies c ON c.tenant_id=p.tenant_id AND c.id=p.company_id AND c.deleted_at IS NULL WHERE p.tenant_id=$1",
+            &[&portal.scope().tenant()],
+        ).await?.map(|row| row.get::<_, String>(0));
+        page.recovery_hint = match company.filter(|name| !name.trim().is_empty()) {
+            Some(name) => format!("2FA stays on once set up. Lost your phone? Contact {name}."),
+            None => "2FA stays on once set up. Lost your phone? Contact the company.".to_owned(),
+        };
         Ok(Self(page))
+    }
+}
+
+/// A return address a customer may be sent to: a portal page. Anything else
+/// would only meet the staff sign-in. A dot segment (`/portal/../settings`,
+/// also written `%2e`) and an encoded slash or backslash (`%2f`, `%5c`) are
+/// refused: the browser or a proxy may resolve them before the request, so
+/// the address would leave the portal.
+pub(crate) fn portal_path(path: &str) -> bool {
+    let address = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    (address == "/portal" || address.starts_with("/portal/"))
+        && !address.contains("%2f")
+        && !address.contains("%5c")
+        && !address.split('/').any(|segment| {
+            let segment = segment.replace("%2e", ".");
+            segment == "." || segment == ".."
+        })
+}
+
+/// A customer's step-up prompt on the portal
+/// (`/portal/account/two-factor/confirm`): the staff prompt over the
+/// customer's own sealed scope, in the portal's words. A current code opens
+/// the portal session's window and returns to `return`, a portal address.
+pub struct PortalConfirm(Box<dyn LiveState<Scope, Error>>);
+impl PortalConfirm {
+    pub async fn new(
+        users: Arc<UserService>,
+        portal: &bilibi_tenancy::PortalScope,
+        query: &HashMap<String, String>,
+    ) -> Result<Self, Error> {
+        Ok(Self(
+            crate::factor_choice::state(users, portal.scope(), query, true).await?,
+        ))
+    }
+}
+impl LiveState<bilibi_tenancy::PortalScope, Error> for PortalConfirm {
+    fn update<'a>(
+        &'a mut self,
+        request: LiveRequest<'a, bilibi_tenancy::PortalScope>,
+    ) -> LiveFuture<'a, Error> {
+        let LiveRequest {
+            scope,
+            credential,
+            input,
+        } = request;
+        self.0.update(LiveRequest {
+            scope: scope.scope(),
+            credential,
+            input,
+        })
     }
 }
 impl LiveState<bilibi_tenancy::PortalScope, Error> for PortalTwoFactor {

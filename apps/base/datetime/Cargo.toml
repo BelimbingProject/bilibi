@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+icu_datetime.workspace = true
+icu_locale.workspace = true
 askama.workspace = true
 bilibi-database.workspace = true
 bilibi-locale = { path = "../locale" }
@@ -18,3 +20,6 @@ jiff = { version = "0.2.38", features = ["tzdb-bundle-always"] }
 serde_json.workspace = true
 bilibi-party-ids = { path = "../party_ids" }
 tokio-postgres.workspace = true
+
+[lints]
+workspace = true

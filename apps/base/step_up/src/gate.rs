@@ -11,7 +11,7 @@ use bilibi_audit::{record_action, Attribution};
 use bilibi_database::{Change, Db, Error, MutationTransaction, Result};
 use bilibi_module_registry::Catalog;
 use bilibi_settings::{Settings, Target};
-use bilibi_tenancy::{Channel, ProofClient, ProofFuture, Scope};
+use bilibi_tenancy::{Channel, ProofClient, ProofFuture, ReadClient, Scope};
 use serde_json::{json, Map, Value};
 use std::{
     collections::BTreeMap,
@@ -407,11 +407,24 @@ impl StepUp {
         })
         .await
     }
+    /// Step-up's own connection. An owner asks `require` from inside its
+    /// write, and what the check leaves behind (a spent code, an opened
+    /// window, the audited outcome) must stay when that write rolls back, so
+    /// none of it can ride the caller's transaction.
+    async fn connection(&self) -> Result<bilibi_database::Connection> {
+        Ok(self
+            .db
+            .get_independent(
+                "step-up is asked from inside the caller's write and keeps its evidence when \
+                 that write rolls back; each call returns the connection before the next",
+            )
+            .await?)
+    }
     /// Whether one provider holds an enrollment for the scope's account holder.
     /// The connection is released on return, so a caller may then ask the
     /// provider for destinations that read through its owner's facade.
     async fn provider_enrolled(&self, provider: &dyn Provider, scope: &Scope) -> Result<bool> {
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
         provider
             .enrolled(
                 &**client,
@@ -840,7 +853,7 @@ impl StepUp {
     /// Opens (or restarts) the window of this agent connection for its
     /// holder, after the holder's code was accepted.
     async fn open_agent_window(&self, scope: &Scope, connection: i64) -> Result<()> {
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
         client
             .execute(
                 "DELETE FROM base_step_up_agent_windows WHERE tenant_id=$1 AND checked_at<now()-interval '1 day'",
@@ -864,7 +877,7 @@ impl StepUp {
         cap_seconds: i64,
         extend: bool,
     ) -> Result<WindowState> {
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
         let row = client
             .query_opt(
                 "SELECT checked_at>now()-make_interval(secs => $5::double precision), used_at>now()-make_interval(secs => $4::double precision) FROM base_step_up_agent_windows WHERE tenant_id=$1 AND user_id=$2 AND connection_id=$3",
@@ -923,7 +936,7 @@ impl StepUp {
                 fields.insert("on_behalf_of".into(), json!(scope.user()));
             }
         }
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
         record_action(
             &**client,
             &Attribution::from_scope(scope),
@@ -942,16 +955,24 @@ impl StepUp {
     }
 
     async fn stored(&self, scope: &Scope) -> Result<(Map<String, Value>, Map<String, Value>)> {
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
+        self.stored_on(&**client, scope).await
+    }
+
+    /// [`Self::stored`] on the caller's connection: a policy edit reads it in
+    /// its own transaction, after [`lock_policy`], so two edits never merge
+    /// into the same stale copy.
+    async fn stored_on(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+    ) -> Result<(Map<String, Value>, Map<String, Value>)> {
         let choices = self
             .settings
-            .get(&**client, scope, Target::Tenant, policy::POLICY_KEY)
+            .get(client, scope, Target::Tenant, policy::POLICY_KEY)
             .await?
             .value;
-        let floors = self
-            .settings
-            .get_global(&**client, policy::FLOOR_KEY)
-            .await?;
+        let floors = self.settings.get_global(client, policy::FLOOR_KEY).await?;
         let object = |value: Value| match value {
             Value::Object(map) => map,
             _ => Map::new(),
@@ -982,7 +1003,7 @@ impl StepUp {
 
     /// The tenant's web window after the installation limits.
     pub async fn window(&self, scope: &Scope) -> Result<Window> {
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
         let int = |value: Value| value.as_i64().ok_or(Error::Internal);
         let tenant_window = int(self
             .settings
@@ -1024,7 +1045,8 @@ impl StepUp {
         mode: Option<Mode>,
     ) -> Result<()> {
         let declared = self.declared(key).ok_or(Error::NotFound)?;
-        let (mut choices, floors) = self.stored(scope).await?;
+        lock_policy(tx, scope.tenant()).await?;
+        let (mut choices, floors) = self.stored_on(tx.sql(), scope).await?;
         let (floor, _) = effective(declared, &choices, &floors);
         if declared.operation.always || (floor && mode == Some(Mode::Off)) {
             return Err(Error::Conflict);
@@ -1057,7 +1079,8 @@ impl StepUp {
         if self.declared(key).ok_or(Error::NotFound)?.operation.always {
             return Err(Error::Conflict);
         }
-        let (_, mut floors) = self.stored(scope).await?;
+        lock_policy(tx, GLOBAL_POLICY).await?;
+        let (_, mut floors) = self.stored_on(tx.sql(), scope).await?;
         match floor {
             Some(floor) => floors.insert(key.to_owned(), json!(floor)),
             None => floors.remove(key),
@@ -1200,4 +1223,22 @@ fn local_destination(path: &str) -> bool {
         && path.len() <= 4096
         && !path.contains('\\')
         && !path.chars().any(char::is_control)
+}
+
+/// The lock [`lock_policy`] takes for the installation floor, which no
+/// tenant id can be.
+const GLOBAL_POLICY: i64 = 0;
+
+/// Serializes the read-merge-write of one stored policy object (a tenant's
+/// choices, or the installation floor with [`GLOBAL_POLICY`]) until the
+/// caller's transaction ends. Without it two administrators changing two
+/// operations at once each write their own copy, and one change is lost.
+async fn lock_policy(tx: &MutationTransaction<'_>, tenant: i64) -> Result<()> {
+    tx.sql()
+        .execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended('base-step-up-policy-' || $1::bigint::text, 0))",
+            &[&tenant],
+        )
+        .await?;
+    Ok(())
 }

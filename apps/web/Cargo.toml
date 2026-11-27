@@ -28,7 +28,8 @@ uuid.workspace = true
 url.workspace = true
 askama.workspace = true
 tokio-postgres.workspace = true
-libc.workspace = true
+jiff.workspace = true
+icu_properties.workspace = true
 
 bilibi-base.workspace = true
 bilibi-core.workspace = true
@@ -39,8 +40,15 @@ bilibi-authz = { path = "../base/authz" }
 bilibi-tenancy = { path = "../base/tenancy" }
 http-body-util = "0.1.5"
 futures-core.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
+# Core modules record-reach uses; a mounted composition may not compose them.
+bilibi-activity.workspace = true
+bilibi-person.workspace = true
+bilibi-team.workspace = true
+mmdb-writer.workspace = true
+tokio-tungstenite.workspace = true
 bilibi-mail.workspace = true
 bilibi-notifications.workspace = true
 bilibi-queue.workspace = true
@@ -52,4 +60,9 @@ bilibi-workflow = { path = "../base/workflow" }
 bilibi-records = { path = "../base/records" }
 bilibi-grid = { path = "../base/grid" }
 bilibi-agent-api = { path = "../base/agent_api" }
-jiff = "0.2.38"
+bilibi-locale = { path = "../base/locale" }
+rust_decimal.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

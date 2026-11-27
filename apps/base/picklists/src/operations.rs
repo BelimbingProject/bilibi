@@ -56,9 +56,6 @@ fn found(error: Error) -> bilibi_agent_api::Error {
         other => other.into(),
     }
 }
-fn text(input: &Value, field: &str) -> String {
-    input[field].as_str().unwrap_or_default().to_owned()
-}
 fn texts(input: &Value, field: &str) -> Vec<String> {
     input[field]
         .as_array()
@@ -87,8 +84,8 @@ fn hint(input: &Value) -> Option<String> {
 }
 fn new_value(input: &Value) -> NewValue {
     NewValue {
-        code: text(input, "code"),
-        label: text(input, "label"),
+        code: bilibi_agent_api::text_field(input, "code"),
+        label: bilibi_agent_api::text_field(input, "label"),
         labels: labels(input),
         hint: hint(input),
         parents: texts(input, "parents"),
@@ -96,7 +93,7 @@ fn new_value(input: &Value) -> NewValue {
 }
 fn update(input: &Value) -> bilibi_agent_api::Result<ValueUpdate> {
     Ok(ValueUpdate {
-        label: text(input, "label"),
+        label: bilibi_agent_api::text_field(input, "label"),
         labels: labels(input),
         hint: hint(input),
         parents: texts(input, "parents"),
@@ -176,84 +173,100 @@ enum Write {
     Retire,
     Restore,
 }
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let bound = bound()?;
+        let lists = &bound.lists;
+        let list = input["list"].as_str().ok_or(Error::Invalid)?;
+        let code = input["code"].as_str();
+        let value = match self {
+            Self::Create => {
+                let value = checked(
+                    lists
+                        .preview_create(client, scope, list, &new_value(input))
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":format!("Add “{}” ({}) to {list}", value.label, value.code),"value":value})
+            }
+            Self::Update => {
+                let code = code.ok_or(Error::Invalid)?;
+                let (before, after) = checked(
+                    lists
+                        .preview_update(client, scope, list, code, &update(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":format!("Change {code} in {list}; its code stays"),"before":before,"after":after})
+            }
+            Self::Reorder => {
+                let moves = checked(
+                    lists
+                        .preview_reorder(client, scope, list, &texts(input, "codes"))
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":format!("Reorder {list}: {} value(s) move", moves.len()),
+                    "moves":moves.iter().map(|(code, from, to)| json!({"code":code,"from":from,"to":to})).collect::<Vec<_>>()})
+            }
+            Self::Default => {
+                let (before, after) = checked(
+                    lists
+                        .preview_default(client, scope, list, code)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":match &after { Some(code) => format!("Make {code} the default of {list}"), None => format!("Clear the default of {list}") },"before":before,"after":after})
+            }
+            Self::Retire => {
+                let code = code.ok_or(Error::Invalid)?;
+                let before = checked(
+                    lists
+                        .preview_retire(client, scope, list, code, version(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":format!("Retire {code} in {list}; records holding it keep it"),"before":before})
+            }
+            Self::Restore => {
+                let code = code.ok_or(Error::Invalid)?;
+                let before = checked(
+                    lists
+                        .preview_restore(client, scope, list, code, version(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":format!("Restore {code} in {list}"),"before":before})
+            }
+        };
+        Ok(value.into())
+    }
+}
 impl WriteHandler for Write {
     fn owner(&self) -> &'static str {
         "base/picklists"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let bound = bound()?;
-            let lists = &bound.lists;
-            let client = bound.db.get().await.map_err(Error::from)?;
-            let client = &**client;
-            let list = input["list"].as_str().ok_or(Error::Invalid)?;
-            let code = input["code"].as_str();
-            let value = match self {
-                Self::Create => {
-                    let value = checked(
-                        lists
-                            .preview_create(client, scope, list, &new_value(input))
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Add “{}” ({}) to {list}", value.label, value.code),"value":value})
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = bound()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
                 }
-                Self::Update => {
-                    let code = code.ok_or(Error::Invalid)?;
-                    let (before, after) = checked(
-                        lists
-                            .preview_update(client, scope, list, code, &update(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Change {code} in {list}; its code stays"),"before":before,"after":after})
-                }
-                Self::Reorder => {
-                    let moves = checked(
-                        lists
-                            .preview_reorder(client, scope, list, &texts(input, "codes"))
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Reorder {list}: {} value(s) move", moves.len()),
-                        "moves":moves.iter().map(|(code, from, to)| json!({"code":code,"from":from,"to":to})).collect::<Vec<_>>()})
-                }
-                Self::Default => {
-                    let (before, after) = checked(
-                        lists
-                            .preview_default(client, scope, list, code)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":match &after { Some(code) => format!("Make {code} the default of {list}"), None => format!("Clear the default of {list}") },"before":before,"after":after})
-                }
-                Self::Retire => {
-                    let code = code.ok_or(Error::Invalid)?;
-                    let before = checked(
-                        lists
-                            .preview_retire(client, scope, list, code, version(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Retire {code} in {list}; records holding it keep it"),"before":before})
-                }
-                Self::Restore => {
-                    let code = code.ok_or(Error::Invalid)?;
-                    let before = checked(
-                        lists
-                            .preview_restore(client, scope, list, code, version(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Restore {code} in {list}"),"before":before})
-                }
-            };
-            Ok(value.into())
+            }
         })
     }
     fn commit<'a>(

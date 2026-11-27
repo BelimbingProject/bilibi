@@ -5,14 +5,17 @@
 //! bell when ready.
 //! Only the requester reads it, and only while what they may see of the
 //! report is what it was when the file was made. A job Queue ends without
-//! running (the requester lost the right first) shows as failed. Each export
-//! is audited like a download.
+//! finishing it (the requester lost the right first, or it ran out of
+//! attempts) moves its export to `failed` through Queue's ending hook, as the
+//! `reports-monitor` principal. Each export is audited like a download.
 use crate::{authorize, contributions, export::Format, store, ReportError, Reports, EXPORT};
 use bilibi_artifacts::{Metadata, Operation, Owner, Reference};
 use bilibi_database::{Change, Error, MutationTransaction};
 use bilibi_notifications::Notice;
 use bilibi_party_ids::OrganisationId;
-use bilibi_queue::{self as jobs, Execution, Handler, HandlerFuture, Outcome as JobOutcome};
+use bilibi_queue::{
+    Ended, Ending, EndingFuture, Execution, Handler, HandlerFuture, Outcome as JobOutcome,
+};
 use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -20,6 +23,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 /// The queue worker that prepares one export.
 pub const WORKER: &str = "base/reports-export";
+/// The system principal Queue's ending hook runs as to fail an export whose
+/// job ended without finishing (`System · reports-monitor`).
+pub const MONITOR: &str = "reports-monitor";
 const KIND: &str = "base_report_export";
 /// Exports one person's list shows at most.
 const LISTED: i64 = 20;
@@ -50,9 +56,8 @@ pub fn path(id: i64) -> String {
 /// export finishing it.
 const STOPPED: &str = "This export stopped before it was prepared. Prepare it again.";
 
-/// One row as its requester sees it; `stopped` when its job has ended
-/// while the row still waits.
-fn prepared(row: &tokio_postgres::Row, stopped: bool) -> Prepared {
+/// One row as its requester sees it.
+fn prepared(row: &tokio_postgres::Row) -> Prepared {
     let id: i64 = row.get(0);
     let state: String = row.get(4);
     let expired: bool = row.get(10);
@@ -60,7 +65,6 @@ fn prepared(row: &tokio_postgres::Row, stopped: bool) -> Prepared {
         ("ready", true) => "expired",
         ("ready", false) => "ready",
         ("failed", _) => "failed",
-        _ if stopped => "failed",
         _ => "queued",
     };
     let message: Option<String> = row.get(7);
@@ -73,17 +77,13 @@ fn prepared(row: &tokio_postgres::Row, stopped: bool) -> Prepared {
         state,
         filename: row.get(5),
         rows: row.get(6),
-        message: if stopped && message.is_none() {
-            Some(STOPPED.into())
-        } else {
-            message
-        },
+        message,
         created_at: row.get(8),
         expires_at: row.get(9),
         path: (state == "ready").then(|| path(id)),
     }
 }
-const COLUMNS: &str = "id, report_id, report_name, format, state, filename, rows, message, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), COALESCE(expires_at <= now(), false), job_id";
+const COLUMNS: &str = "id, report_id, report_name, format, state, filename, rows, message, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), COALESCE(expires_at <= now(), false)";
 
 /// The artifact owner: an export's bytes belong to its requester, in the
 /// company the export was asked in.
@@ -159,6 +159,25 @@ impl Reports {
                 "Oversight results cannot be retained in the parent. Use a live download.".into(),
             ));
         }
+        // Each waiting export takes a Queue slot of the whole installation
+        // when it runs: one person holds only a few at once.
+        let limit = self
+            .setting(tx.sql(), scope, contributions::MAX_QUEUED_EXPORTS_KEY)
+            .await? as i64;
+        let waiting: i64 = tx
+            .sql()
+            .query_one(
+                "SELECT count(*) FROM base_report_exports WHERE tenant_id=$1 AND requester_id=$2 AND state='queued'",
+                &[&scope.tenant(), &scope.user()],
+            )
+            .await
+            .map_err(Error::from)?
+            .get(0);
+        if waiting >= limit {
+            return Err(ReportError::Refused(format!(
+                "You already have {waiting} exports being prepared, the most allowed at once. Wait for one to be ready, then prepare this one."
+            )));
+        }
         let answers: BTreeMap<String, Value> = answers
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
@@ -226,42 +245,19 @@ impl Reports {
             )
             .await
             .map_err(Error::from)?;
-        // A request still waiting whose job has ended (Queue refused the
-        // requester before it ran, or gave up) is failed, not preparing.
-        let waiting: Vec<i64> = rows
-            .iter()
-            .filter(|row| row.get::<_, String>(4) == "queued")
-            .filter_map(|row| row.get::<_, Option<i64>>(11))
-            .collect();
-        let ended: Vec<i64> = if waiting.is_empty() {
-            Vec::new()
-        } else {
-            jobs::states(&**client, scope.tenant(), &waiting)
-                .await?
-                .into_iter()
-                .filter(|job| job.state.terminal())
-                .map(|job| job.id)
-                .collect()
-        };
-        Ok(rows
-            .iter()
-            .map(|row| {
-                let job: Option<i64> = row.get(11);
-                prepared(row, job.is_some_and(|job| ended.contains(&job)))
-            })
-            .collect())
+        Ok(rows.iter().map(prepared).collect())
     }
 
     /// A ready export's file, for its requester only, until it expires, and
     /// only while what they may see of the report is what it was when the
     /// file was made: a lost share, source or field refuses it.
     pub async fn exported(&self, scope: &Scope, export: i64) -> Result<crate::File, ReportError> {
-        let mut client = self.db.get().await.map_err(Error::from)?;
+        let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, EXPORT).await?;
         let current = scope.current_company().ok_or(ReportError::NotFound)?.get();
         let row = client
             .query_opt(
-                "SELECT artifact_id, filename, format, rows, company_id, report_id, access FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND company_id=$4 AND state='ready'",
+                "SELECT artifact_id, filename, format, rows, company_id, report_id, access, reference_names, answers FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND company_id=$4 AND state='ready' AND (expires_at IS NULL OR expires_at > now())",
                 &[&scope.tenant(), &export, &scope.user(), &current],
             )
             .await
@@ -271,15 +267,41 @@ impl Reports {
             (row.get(0), row.get(1), row.get(2), row.get(3));
         let company = OrganisationId::new(row.get(4)).map_err(|_| Error::Internal)?;
         let (report, made): (i64, Option<String>) = (row.get(5), row.get(6));
-        let now = match self.access(scope, report).await {
+        let reference_names: Vec<crate::ReferenceName> =
+            serde_json::from_value(row.get(7)).map_err(|_| Error::Internal)?;
+        let answers: Value = row.get(8);
+        drop(client);
+        let current_report = match self.access_report(scope, report).await {
             Err(ReportError::Database(error)) => return Err(error.into()),
             other => other.ok(),
         };
-        if made.is_none() || now != made {
+        let Some((definition, access)) =
+            current_report.filter(|(_, access)| Some(access) == made.as_ref())
+        else {
+            return Err(ReportError::Refused(
+                "What you may see of this report has changed since the file was made. Prepare it again.".into(),
+            ));
+        };
+        if access.contains(":subject:") {
+            let format = Format::from_key(&format).ok_or(Error::Internal)?;
+            let cap = self.queued_rows(scope).await?;
+            let input = crate::RunInput {
+                answers: serde_json::from_value(answers).map_err(|_| Error::Internal)?,
+                ..crate::RunInput::default()
+            };
+            return self
+                .export_within(scope, definition, &input, format, cap, true)
+                .await;
+        }
+        if !self
+            .reference_names_current(scope, &reference_names)
+            .await?
+        {
             return Err(ReportError::Refused(
                 "What you may see of this report has changed since the file was made. Prepare it again.".into(),
             ));
         }
+        let mut client = self.db.get().await.map_err(Error::from)?;
         let document = self
             .artifacts
             .for_owner(scope, company, &ExportOwner)
@@ -287,6 +309,7 @@ impl Reports {
             .await
             .map_err(|_| ReportError::NotFound)?;
         Ok(crate::File {
+            reference_names,
             filename,
             content_type: Format::from_key(&format)
                 .unwrap_or(Format::Csv)
@@ -351,24 +374,25 @@ impl Reports {
         // Expired exports of the company go first; a failure here is not
         // this export's concern.
         let _ = owned.purge_expired(&mut client).await;
+        drop(client);
         let cap = match self.queued_rows(scope).await {
             Ok(cap) => cap,
             Err(_) => {
                 return self
                     .give_up(execution, scope, export, "settings_unavailable", quiet)
-                    .await
+                    .await;
             }
         };
         // What the requester may see is taken before the run: if it changes
         // during the run, the file is refused at download either way.
         let made = async {
-            let access = self.access(scope, report).await?;
+            let (definition, access) = self.access_report(scope, report).await?;
             let input = crate::RunInput {
                 answers,
                 ..crate::RunInput::default()
             };
             let file = self
-                .export_within(scope, report, &input, format, cap, true)
+                .export_within(scope, definition, &input, format, cap, true)
                 .await?;
             Ok::<_, ReportError>((access, file))
         }
@@ -389,7 +413,7 @@ impl Reports {
             Err(ReportError::Database(_)) => {
                 return self
                     .give_up(execution, scope, export, "report_unavailable", quiet)
-                    .await
+                    .await;
             }
             Err(refused) => {
                 let message = refused.to_string();
@@ -402,22 +426,21 @@ impl Reports {
                 };
             }
         };
-        let days = {
-            let Ok(client) = self.db.get().await else {
+        let Ok(mut client) = self.db.get().await else {
+            return self
+                .give_up(execution, scope, export, "database_unavailable", quiet)
+                .await;
+        };
+        let days = match self
+            .setting(&**client, scope, contributions::EXPORT_DAYS_KEY)
+            .await
+        {
+            Ok(days) => days as i64,
+            Err(_) => {
+                drop(client);
                 return self
-                    .give_up(execution, scope, export, "database_unavailable", quiet)
+                    .give_up(execution, scope, export, "settings_unavailable", quiet)
                     .await;
-            };
-            match self
-                .setting(&**client, scope, contributions::EXPORT_DAYS_KEY)
-                .await
-            {
-                Ok(days) => days as i64,
-                Err(_) => {
-                    return self
-                        .give_up(execution, scope, export, "settings_unavailable", quiet)
-                        .await
-                }
             }
         };
         let reference = Reference {
@@ -427,12 +450,13 @@ impl Reports {
         let stored = owned
             .put_expiring(&mut client, reference, &file.bytes, file.content_type, days)
             .await;
+        drop(client);
         let metadata = match stored {
             Ok(metadata) => metadata,
             Err(_) => {
                 return self
                     .give_up(execution, scope, export, "store_failed", quiet)
-                    .await
+                    .await;
             }
         };
         match self
@@ -464,7 +488,9 @@ impl Reports {
             return JobOutcome::Retry(code);
         }
         let message = match code {
-            "store_failed" => "The file could not be stored. Ask an administrator to check the private document folder setting.",
+            "store_failed" => {
+                "The file could not be stored. Ask an administrator to check the private document folder setting."
+            }
             _ => "The export could not be prepared after several tries. Try again later.",
         };
         match self
@@ -511,14 +537,20 @@ impl Reports {
                 None,
             ),
         };
+        let reference_names = match &outcome {
+            Finished::Ready(_, file, _) => {
+                serde_json::to_value(&file.reference_names).map_err(|_| Error::Internal)?
+            }
+            Finished::Failed(_) => json!([]),
+        };
         let new = json!({"state": state, "rows": rows});
         let name: String = tx
             .mutate(move |sql| {
                 Box::pin(async move {
                     let row = sql
                         .query_opt(
-                            "UPDATE base_report_exports SET state=$4, artifact_id=$5, filename=$6, rows=$7, message=$8, expires_at=$9::text::timestamptz, access=$10, finished_at=now() WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND state='queued' RETURNING report_name",
-                            &[&tenant, &export, &user, &state, &artifact, &filename, &rows, &message, &expires, &access],
+                            "UPDATE base_report_exports SET state=$4, artifact_id=$5, filename=$6, rows=$7, message=$8, expires_at=$9::text::timestamptz, access=$10, reference_names=$11, finished_at=now() WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND state='queued' RETURNING report_name",
+                            &[&tenant, &export, &user, &state, &artifact, &filename, &rows, &message, &expires, &access, &reference_names],
                         )
                         .await?
                         .ok_or(Error::Conflict)?;
@@ -579,6 +611,69 @@ impl Handler for Preparer {
                 }
                 _ => JobOutcome::Cancel("invalid_arguments"),
             }
+        })
+    }
+}
+
+/// Queue's ending hook for [`WORKER`] (`bilibi_queue::ENDINGS`): an export
+/// job that ended without finishing (its requester was refused before it ran,
+/// or it ran out of attempts) fails its export, as the monitor principal, so
+/// the request never waits in `queued` for a job that is gone. The requester
+/// prepares it again from the report.
+pub(crate) struct ExportEnded(pub Arc<Reports>);
+impl Ending for ExportEnded {
+    fn ended<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        job: &'a Ended,
+    ) -> EndingFuture<'a> {
+        Box::pin(async move {
+            if scope.principal() != Some(MONITOR) {
+                return Err(Error::Forbidden);
+            }
+            let Some(export) = job.args["export"].as_i64() else {
+                return Ok(());
+            };
+            let (tenant, job_id) = (scope.tenant(), job.job_id);
+            // Fenced by the job the export waits on: an ending told late for
+            // an earlier job changes nothing, and a settled export owes nothing.
+            let Some(row) = tx
+                .sql()
+                .query_opt(
+                    "SELECT report_name, requester_id FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND job_id=$3 AND state='queued' FOR UPDATE",
+                    &[&tenant, &export, &job_id],
+                )
+                .await?
+            else {
+                return Ok(());
+            };
+            let (name, requester): (String, i64) = (row.get(0), row.get(1));
+            tx.mutate(move |sql| {
+                Box::pin(async move {
+                    sql.execute(
+                        "UPDATE base_report_exports SET state='failed', message=$4, finished_at=now() WHERE tenant_id=$1 AND id=$2 AND job_id=$3 AND state='queued'",
+                        &[&tenant, &export, &job_id, &STOPPED],
+                    )
+                    .await?;
+                    let change = Change {
+                        kind: KIND.into(),
+                        id: export,
+                        old: json!({"state": "queued"}),
+                        new: json!({"state": "failed"}),
+                    };
+                    Ok(((), vec![change]))
+                })
+            })
+            .await?;
+            let notice = Notice::new("Your export could not be prepared")
+                .body(format!("{name}: {STOPPED}"))
+                .url("/reports")
+                .icon("error");
+            self.0
+                .notifications
+                .notify(tx, scope, &[requester], &notice)
+                .await
         })
     }
 }

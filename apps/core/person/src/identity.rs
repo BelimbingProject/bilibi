@@ -5,10 +5,16 @@ use bilibi_authz::{authorize_key, restrictions_for};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_tenancy::{PersonProvider, ProofClient, ProofFuture, Scope};
 use serde_json::Value;
-use std::collections::HashSet;
 use tokio_postgres::GenericClient;
 
 pub const SYSTEM_KEY: &str = "platform-orchestrator";
+
+pub(crate) const CONTACT_SEARCH_PATHS: &[&str] = &[
+    "work.work_email:list",
+    "work.work_phone:list",
+    "work.title:list",
+    "work.company.name:list",
+];
 
 async fn fields(client: &impl GenericClient, scope: &Scope) -> Result<Restrictions> {
     Ok(Restrictions {
@@ -16,8 +22,20 @@ async fn fields(client: &impl GenericClient, scope: &Scope) -> Result<Restrictio
         masks: bilibi_authz::fields::masks_for(client, scope, "persons").await?,
     })
 }
-async fn raw(
-    client: &impl GenericClient,
+pub(crate) async fn read_fields(
+    client: &dyn bilibi_tenancy::ReadClient,
+    scope: &Scope,
+) -> Result<Restrictions> {
+    Ok(Restrictions {
+        fields: bilibi_authz::fields::restricted_read(client, scope)
+            .await?
+            .remove("persons")
+            .unwrap_or_default(),
+        masks: bilibi_authz::fields::masks_for_read(client, scope, "persons").await?,
+    })
+}
+pub(crate) async fn raw<C: bilibi_tenancy::ReadClient + ?Sized>(
+    client: &C,
     scope: &Scope,
     id: PersonId,
     lock: bool,
@@ -47,17 +65,15 @@ pub async fn read(
         .await?
         .ok_or(Error::NotFound)?;
     // Masked contacts keep their partial value, as on every other read.
-    let restrictions = Restrictions {
-        fields: bilibi_authz::fields::restricted_read(client, scope)
-            .await?
-            .remove("persons")
-            .unwrap_or_default(),
-        masks: bilibi_authz::fields::masks_for_read(client, scope, "persons").await?,
-    };
+    let restrictions = read_fields(client, scope).await?;
     Ok(Person::from_row(&row)?.redact(&restrictions))
 }
 
-pub async fn search(client: &impl GenericClient, scope: &Scope, query: &Search) -> Result<Page> {
+pub async fn search(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    query: &Search,
+) -> Result<Page> {
     authorize_key(client, scope, LIST).await?;
     query.check()?;
     let masked = fields(client, scope).await?;
@@ -66,59 +82,119 @@ pub async fn search(client: &impl GenericClient, scope: &Scope, query: &Search) 
     // A hidden email/phone must not act as an existence oracle through search.
     let email = !masked.contains("email");
     let phone = !masked.contains("phone");
-    // Work data follows owner-contributed Grid paths so
-    // Person never reads affiliation/company tables or bypasses their masking.
-    let work = if needle.is_empty() {
-        "SELECT NULL::bigint WHERE $2::bigint IS NULL".to_owned()
+    type Arg = Box<dyn tokio_postgres::types::ToSql + Sync + Send>;
+    let mut args: Vec<Arg> = vec![Box::new(scope.tenant())];
+    let mut predicate = "tenant_id=$1".to_owned();
+    // A term is a top-level `id IN (..)`, never an OR beside the other
+    // conditions, so the planner reads only the matching contacts through the
+    // trigram indexes (migration 008) instead of every contact of the tenant.
+    if !needle.is_empty() {
+        // Work data follows owner-contributed Grid paths so Person never
+        // reads affiliation/company tables or bypasses their masking. Its
+        // statement binds $1 tenant, $2 actor, $3 selected company and $4 the term.
+        let work =
+            bilibi_grid::query::text_search_sql(client, scope, "persons", CONTACT_SEARCH_PATHS)
+                .await?;
+        let pattern = format!(
+            "%{}%",
+            needle
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        args.push(Box::new(scope.user()));
+        args.push(Box::new(
+            scope.current_company().map(|company| company.get()),
+        ));
+        args.push(Box::new(needle.clone()));
+        args.push(Box::new(email));
+        args.push(Box::new(phone));
+        args.push(Box::new(pattern));
+        predicate.push_str(&format!(" AND id IN (SELECT id FROM persons WHERE tenant_id=$1 AND (lower(name) LIKE $7 OR lower(code) LIKE $7 OR ($5 AND lower(email) LIKE $7) OR ($6 AND lower(phone) LIKE $7)) UNION ALL {work})"));
+    }
+    args.push(Box::new(query.include_retired));
+    let retired = args.len();
+    args.push(Box::new(kind));
+    let kind = args.len();
+    predicate.push_str(&format!(
+        " AND (${retired} OR retired_at IS NULL) AND (${kind}::text IS NULL OR kind=${kind})"
+    ));
+    // Custom field conditions and sort name active fields only; each key and
+    // value is a bound parameter. An unknown or archived field, an operator
+    // that does not suit it or a value it cannot hold is refused.
+    let custom_sort = query.sort.strip_prefix("cf_");
+    let active = if query.custom.is_empty() && custom_sort.is_none() {
+        Vec::new()
     } else {
-        bilibi_grid::query::text_search_sql(
-            client,
-            scope,
-            "persons",
-            &[
-                "work.work_email:list",
-                "work.work_phone:list",
-                "work.title:list",
-                "work.company.name:list",
-            ],
-        )
-        .await?
+        crate::custom::fields()?
+            .active(client, scope, crate::custom::RECORD_TYPE)
+            .await?
     };
-    let predicate = format!("tenant_id=$1 AND ($4 OR retired_at IS NULL) AND ($5::text IS NULL OR kind=$5) AND ($3='' OR position($3 in lower(name))>0 OR position($3 in lower(code))>0 OR ($6 AND position($3 in lower(email))>0) OR ($7 AND position($3 in lower(phone))>0) OR id IN ({work}))");
-    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[
-        &scope.tenant(),
-        &scope.user(),
-        &needle,
-        &query.include_retired,
-        &kind,
-        &email,
-        &phone,
-    ];
+    for filter in &query.custom {
+        let definition = active
+            .iter()
+            .find(|d| d.key == filter.key)
+            .ok_or(Error::Invalid)?;
+        args.push(Box::new(filter.key.clone()));
+        let key = args.len();
+        args.push(Box::new(filter.value.trim().to_owned()));
+        let condition =
+            crate::custom::condition(definition, filter, key, args.len()).ok_or(Error::Invalid)?;
+        predicate.push_str(" AND ");
+        predicate.push_str(&condition);
+    }
+    fn binds(args: &[Arg]) -> Vec<&(dyn tokio_postgres::types::ToSql + Sync)> {
+        args.iter()
+            .map(|arg| arg.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+            .collect()
+    }
     let total = client
         .query_one(
             &format!("SELECT count(*) FROM persons WHERE {predicate}"),
-            params,
+            &binds(&args),
         )
         .await?
         .get(0);
-    let limit = query.page_size;
-    let offset = (query.page - 1) * limit;
-    let mut paged = params.to_vec();
-    paged.extend([
-        &limit as &(dyn tokio_postgres::types::ToSql + Sync),
-        &offset,
-    ]);
     // Only owner-declared sort expressions reach SQL; contacts never sort
-    // through a hidden field, and ties retain stable IDs across pages.
-    let sort = match query.sort.as_str() {
-        "code" => "code",
-        "kind" => "kind",
-        "state" => "(retired_at IS NOT NULL)",
-        "created_at" => "created_at",
-        _ => "lower(name)",
-    };
+    // through a hidden field, and ties retain stable IDs across pages. A
+    // custom sort key is bound in the page statement only, so the count above
+    // has no unused parameter; contacts without a value come last.
     let direction = if query.descending { "DESC" } else { "ASC" };
-    let rows = client.query(&format!("SELECT {COLUMNS} FROM persons WHERE {predicate} ORDER BY {sort} {direction},id {direction} LIMIT $8 OFFSET $9"), &paged).await?;
+    let sort = match custom_sort {
+        Some(key) => {
+            // Several choices and a record have no order: refused as an
+            // unknown field is.
+            let definition = active
+                .iter()
+                .find(|d| d.key == key && crate::custom::sortable(d.kind))
+                .ok_or(Error::Invalid)?;
+            args.push(Box::new(key.to_owned()));
+            format!(
+                "{} {direction} NULLS LAST",
+                crate::custom::expression(args.len(), definition.kind)
+            )
+        }
+        None => format!(
+            "{} {direction}",
+            match query.sort.as_str() {
+                "code" => "code",
+                "kind" => "kind",
+                "state" => "(retired_at IS NOT NULL)",
+                "created_at" => "created_at",
+                _ => "lower(name)",
+            }
+        ),
+    };
+    args.push(Box::new(query.page_size));
+    let limit = args.len();
+    args.push(Box::new((query.page - 1) * query.page_size));
+    let offset = args.len();
+    let rows = client
+        .query(
+            &format!("SELECT {COLUMNS} FROM persons WHERE {predicate} ORDER BY {sort},id {direction} LIMIT ${limit} OFFSET ${offset}"),
+            &binds(&args),
+        )
+        .await?;
     Ok(Page {
         entries: rows
             .iter()
@@ -131,14 +207,16 @@ pub async fn search(client: &impl GenericClient, scope: &Scope, query: &Search) 
 }
 
 /// Exact normalized name/email/phone candidates, never inferred identity.
+/// A phone also matches by its canonical international key (`+60 12-345 6789`
+/// and `0060123456789`); a national or ambiguous number matches as typed.
 /// A supplied restricted criterion is refused rather than silently searching it.
 /// Retired records are returned too so their identity/history is not recreated.
 pub async fn duplicates(
-    client: &impl GenericClient,
+    client: &dyn bilibi_tenancy::ReadClient,
     scope: &Scope,
     query: &DuplicateQuery,
 ) -> Result<Vec<Person>> {
-    authorize_key(client, scope, LIST).await?;
+    bilibi_authz::authorize_proof(client, scope, LIST).await?;
     if !(1..=100).contains(&query.limit) {
         return Err(Error::Invalid);
     }
@@ -158,14 +236,14 @@ pub async fn duplicates(
     {
         return Err(Error::Invalid);
     }
-    let masked = fields(client, scope).await?;
+    let masked = read_fields(client, scope).await?;
     if (email.is_some() && masked.contains("email"))
         || (phone.is_some() && masked.contains("phone"))
     {
         return Err(Error::Forbidden);
     }
     let except = query.except_id.map(PersonId::get);
-    let rows = client.query(&format!("SELECT {COLUMNS} FROM persons WHERE tenant_id=$1 AND id IS DISTINCT FROM $2 AND (($3::text IS NOT NULL AND lower(name)=$3) OR ($4::text IS NOT NULL AND lower(email)=$4) OR ($5::text IS NOT NULL AND phone=$5)) ORDER BY lower(name),id LIMIT $6"), &[&scope.tenant(), &except, &name, &email, &phone, &query.limit]).await?;
+    let rows = client.query(&format!("SELECT {COLUMNS} FROM persons WHERE tenant_id=$1 AND id IS DISTINCT FROM $2 AND (($3::text IS NOT NULL AND lower(name)=$3) OR ($4::text IS NOT NULL AND lower(email)=$4) OR ($5::text IS NOT NULL AND (phone=$5 OR core_person_phone_key(phone)=core_person_phone_key($5)))) ORDER BY lower(name),id LIMIT $6"), &[&scope.tenant(), &except, &name, &email, &phone, &query.limit]).await?;
     rows.iter()
         .map(|r| Person::from_row(r).map(|p| p.redact(&masked)))
         .collect()
@@ -176,15 +254,17 @@ pub async fn preview(
     scope: &Scope,
     input: &PersonInput,
 ) -> std::result::Result<CreatePreview, WriteError> {
-    preview_with_code(client, scope, input, None).await
+    preview_with_code(client, scope, input, None, &Custom::new()).await
 }
 
-/// Preview a person with an optional explicitly chosen fixed code.
+/// Preview a person with an optional explicitly chosen fixed code and custom
+/// field values (checked against the tenant's person fields, not locked).
 pub async fn preview_with_code(
     client: &dyn bilibi_tenancy::ReadClient,
     scope: &Scope,
     input: &PersonInput,
     code: Option<&str>,
+    custom: &Custom,
 ) -> std::result::Result<CreatePreview, WriteError> {
     bilibi_authz::authorize_proof(client, scope, CREATE).await?;
     let input = validate(input).map_err(WriteError::Validation)?;
@@ -228,9 +308,13 @@ pub async fn preview_with_code(
         }
         None => available_code(client, scope.tenant(), &input.name).await?,
     };
+    let custom = crate::custom::check(client, None, scope, custom, &Custom::new())
+        .await?
+        .map_err(WriteError::CustomFields)?;
     Ok(CreatePreview {
         identity: input,
         code,
+        custom: crate::custom::merge(&Custom::new(), &custom),
     })
 }
 fn restricted_input(input: &PersonInput, masked: &Restrictions) -> Result<()> {
@@ -242,7 +326,8 @@ fn restricted_input(input: &PersonInput, masked: &Restrictions) -> Result<()> {
     Ok(())
 }
 
-// Retired identities keep their codes; choose the first available suffix.
+// Retired identities keep their codes; choose the unsuffixed code when it is
+// free, else the suffix after the highest one taken.
 pub(crate) async fn available_code(
     client: &dyn bilibi_tenancy::ReadClient,
     tenant: i64,
@@ -268,30 +353,56 @@ async fn available_code_matching<C: bilibi_tenancy::ReadClient + ?Sized>(
     name: &str,
     mut accept: impl FnMut(&str) -> bool,
 ) -> Result<String> {
-    const BATCH: u64 = 128;
-    const MAX: u64 = 9_999_999_999;
-    let mut start = 1;
-    while start <= MAX {
-        let end = (start + BATCH - 1).min(MAX);
-        let candidates: Vec<_> = (start..=end)
-            .map(|suffix| bilibi_party::default_code(name, bilibi_party::CodeKind::Person, suffix))
-            .collect();
-        let taken: HashSet<String> = client
-            .query(
-                "SELECT code FROM persons WHERE tenant_id=$1 AND code=ANY($2::text[])",
-                &[&tenant, &candidates],
+    let code = |suffix| bilibi_party::default_code(name, bilibi_party::CodeKind::Person, suffix);
+    let unsuffixed = code(1);
+    let taken = client
+        .query_opt(
+            "SELECT 1 FROM persons WHERE tenant_id=$1 AND code=$2",
+            &[&tenant, &unsuffixed],
+        )
+        .await?
+        .is_some();
+    if !taken && accept(&unsuffixed) {
+        return Ok(unsuffixed);
+    }
+    // Every suffix of one length shares its base (the base shortens as the
+    // suffix grows), and those codes sort as their numbers do. So one probe of
+    // `persons_code_suffix` per length finds the highest taken, however many
+    // people share the base (#591); a number after it is free, and `accept`
+    // passes over values this plan already reserved. Gaps below it are not
+    // reused.
+    for digits in 1..=10u32 {
+        let low = if digits == 1 {
+            2
+        } else {
+            10u64.pow(digits - 1)
+        };
+        let high = 10u64.pow(digits) - 1;
+        let first = code(low);
+        let prefix = &first[..first.len() - digits as usize];
+        let last = code(high);
+        let length = i32::try_from(first.len()).map_err(|_| Error::Internal)?;
+        let highest = client
+            .query_opt(
+                r#"SELECT code FROM persons WHERE tenant_id=$1 AND length(code)=$2 AND (code COLLATE "C") BETWEEN $3 AND $4 AND code ~ $5 ORDER BY (code COLLATE "C") DESC LIMIT 1"#,
+                &[
+                    &tenant,
+                    &length,
+                    &first,
+                    &last,
+                    &format!("^{prefix}[0-9]{{{digits}}}$"),
+                ],
             )
             .await?
-            .iter()
-            .map(|row| row.get(0))
-            .collect();
-        if let Some(candidate) = candidates
-            .into_iter()
-            .find(|code| !taken.contains(code) && accept(code))
-        {
-            return Ok(candidate);
+            .map(|row| row.get::<_, String>(0)[prefix.len()..].parse::<u64>())
+            .transpose()
+            .map_err(|_| Error::Internal)?;
+        for suffix in highest.map_or(low, |n| n + 1)..=high {
+            let candidate = code(suffix);
+            if accept(&candidate) {
+                return Ok(candidate);
+            }
         }
-        start = end + 1;
     }
     Err(Error::Internal)
 }
@@ -312,6 +423,7 @@ async fn insert(
     input: PersonInput,
     system: Option<&'static str>,
     explicit_code: Option<String>,
+    custom: Custom,
 ) -> Result<Person> {
     lock_code_allocation(tx.sql(), tenant).await?;
     let code = match explicit_code {
@@ -319,7 +431,8 @@ async fn insert(
         None => available_code(tx.sql(), tenant, &input.name).await?,
     };
     let person = tx.mutate(move |sql| Box::pin(async move {
-        let row = sql.query_one(&format!("INSERT INTO persons(tenant_id,name,kind,email,phone,system_key,code) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING {COLUMNS}"), &[&tenant, &input.name, &kind_key(input.kind), &input.email, &input.phone, &system, &code]).await?;
+        let custom = Value::Object(custom);
+        let row = sql.query_one(&format!("INSERT INTO persons(tenant_id,name,kind,email,phone,system_key,code,custom_fields) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING {COLUMNS}"), &[&tenant, &input.name, &kind_key(input.kind), &input.email, &input.phone, &system, &code, &custom]).await?;
         let person = Person::from_row(&row)?;
         let change = Change { kind: "person".into(), id: person.id.get(), old: Value::Null, new: person.json() };
         Ok((person, vec![change]))
@@ -338,33 +451,47 @@ pub async fn provision(
     }
     let input = validate(input).map_err(WriteError::Validation)?;
     let tenant = tx.context().tenant;
-    Ok(insert(tx, tenant, input, None, None).await?)
+    Ok(insert(tx, tenant, input, None, None, Custom::new()).await?)
 }
 pub async fn create(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
     input: &PersonInput,
 ) -> std::result::Result<Person, WriteError> {
-    create_with_code(tx, scope, input, None).await
+    create_with_code(tx, scope, input, None, &Custom::new()).await
 }
 
-/// Create with an explicit code, or allocate a short default when omitted.
+/// Create with an explicit code, or allocate a short default when omitted,
+/// and custom field values checked on this transaction (a changed pick-list
+/// code held until commit).
 pub async fn create_with_code(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
     input: &PersonInput,
     code: Option<&str>,
+    custom: &Custom,
 ) -> std::result::Result<Person, WriteError> {
     check_context(tx, scope)?;
     lock_code_allocation(tx.sql(), scope.tenant()).await?;
-    let input = preview_with_code(tx.sql(), scope, input, code).await?;
+    let input = preview_with_code(tx.sql(), scope, input, code, &Custom::new()).await?;
+    let custom = crate::custom::check(tx.sql(), Some(tx.sql()), scope, custom, &Custom::new())
+        .await?
+        .map_err(WriteError::CustomFields)?;
     let masked = fields(tx.sql(), scope).await?;
-    Ok(
-        insert(tx, scope.tenant(), input.identity, None, Some(input.code))
-            .await?
-            .redact(&masked),
+    Ok(insert(
+        tx,
+        scope.tenant(),
+        input.identity,
+        None,
+        Some(input.code),
+        crate::custom::merge(&Custom::new(), &custom),
     )
+    .await?
+    .redact(&masked))
 }
+/// Change a person in the caller's audited transaction (`update_person`):
+/// the owner's `UPDATE` check, version, validation, field restrictions,
+/// custom fields and audit, written as one `Change` of that transaction.
 pub async fn update(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
@@ -373,9 +500,13 @@ pub async fn update(
 ) -> std::result::Result<Person, WriteError> {
     check_context(tx, scope)?;
     let (old, input, masked) = prepare_update(tx.sql(), scope, id, update, true).await?;
+    let custom = crate::custom::check(tx.sql(), Some(tx.sql()), scope, &update.custom, &old.custom)
+        .await?
+        .map_err(WriteError::CustomFields)?;
+    let custom = Value::Object(crate::custom::merge(&old.custom, &custom));
     let tenant = scope.tenant();
     let person = tx.mutate(move |sql| Box::pin(async move {
-        let row = sql.query_one(&format!("UPDATE persons SET name=$3,kind=$4,email=$5,phone=$6,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"), &[&tenant, &id.get(), &input.name, &kind_key(input.kind), &input.email, &input.phone]).await?;
+        let row = sql.query_one(&format!("UPDATE persons SET name=$3,kind=$4,email=$5,phone=$6,custom_fields=$7,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"), &[&tenant, &id.get(), &input.name, &kind_key(input.kind), &input.email, &input.phone, &custom]).await?;
         let person = Person::from_row(&row)?;
         let change = Change { kind: "person".into(), id: id.get(), old: old.json(), new: person.json() };
         Ok((person, vec![change]))
@@ -384,15 +515,15 @@ pub async fn update(
     Ok(person.redact(&masked))
 }
 async fn prepare_update(
-    client: &impl GenericClient,
+    client: &dyn bilibi_tenancy::ReadClient,
     scope: &Scope,
     id: PersonId,
     update: &Update,
     lock: bool,
 ) -> std::result::Result<(Person, PersonInput, Restrictions), WriteError> {
-    authorize_key(client, scope, UPDATE).await?;
+    bilibi_authz::authorize_proof(client, scope, UPDATE).await?;
     let mut input = validate(&update.identity).map_err(WriteError::Validation)?;
-    let masked = fields(client, scope).await?;
+    let masked = read_fields(client, scope).await?;
     restricted_input(&input, &masked)?;
     let old = raw(client, scope, id, lock).await?;
     if old.version != update.version {
@@ -412,23 +543,30 @@ async fn prepare_update(
     }
     Ok((old, input, masked))
 }
+/// What `update` would do (`preview_update_person`), on the caller's read
+/// connection or transaction: the person before, the identity it would store,
+/// and its custom values after the patch. Locks and writes nothing.
 pub async fn preview_update(
-    client: &impl GenericClient,
+    client: &dyn bilibi_tenancy::ReadClient,
     scope: &Scope,
     id: PersonId,
     update: &Update,
-) -> std::result::Result<(Person, PersonInput), WriteError> {
+) -> std::result::Result<(Person, PersonInput, Custom), WriteError> {
     let (old, mut input, masked) = prepare_update(client, scope, id, update, false).await?;
+    let custom = crate::custom::check(client, None, scope, &update.custom, &old.custom)
+        .await?
+        .map_err(WriteError::CustomFields)?;
+    let custom = crate::custom::merge(&old.custom, &custom);
     if masked.contains("email") {
         input.email = None;
     }
     if masked.contains("phone") {
         input.phone = None;
     }
-    Ok((old.redact(&masked), input))
+    Ok((old.redact(&masked), input, custom))
 }
 pub async fn preview_retire(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     id: PersonId,
     version: i64,
@@ -477,7 +615,57 @@ pub async fn retire(
     crate::publish(tx, scope.tenant(), person.id);
     Ok(person.redact(&masked))
 }
-fn check_context(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<()> {
+
+pub(crate) async fn preview_import_undo(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    id: PersonId,
+    version: i64,
+) -> std::result::Result<Person, WriteError> {
+    authorize_key(client, scope, IMPORT).await?;
+    let person = raw(client, scope, id, false).await?;
+    if person.version != version {
+        return Err(Error::Conflict.into());
+    }
+    if person.system_key.is_some() {
+        return Err(WriteError::SystemIdentity);
+    }
+    Ok(person.redact(&fields(client, scope).await?))
+}
+
+/// Remove one untouched Person whose import undo claim is held in the same
+/// transaction. Any record that now refers to it is left in place.
+pub(crate) async fn undo_import(
+    tx: &mut MutationTransaction<'_>,
+    scope: &Scope,
+    id: PersonId,
+    version: i64,
+) -> std::result::Result<(), WriteError> {
+    check_context(tx, scope)?;
+    authorize_key(tx.sql(), scope, IMPORT).await?;
+    let old = raw(tx.sql(), scope, id, true).await?;
+    if old.version != version {
+        return Err(Error::Conflict.into());
+    }
+    if old.system_key.is_some() {
+        return Err(WriteError::SystemIdentity);
+    }
+    let tenant = scope.tenant();
+    tx.mutate(move |sql| Box::pin(async move {
+        match sql.query_opt(&format!("DELETE FROM persons WHERE tenant_id=$1 AND id=$2 AND version=$3 RETURNING {COLUMNS}"), &[&tenant, &id.get(), &version]).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(Error::Conflict),
+            Err(error) if error.code() == Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION) => {
+                return Err(Error::refused("Another record now uses this contact, so it was left alone."));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(((), vec![Change { kind: "person".into(), id: id.get(), old: old.json(), new: Value::Null }]))
+    })).await?;
+    crate::publish(tx, tenant, id);
+    Ok(())
+}
+pub(crate) fn check_context(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<()> {
     let context = tx.context();
     if context.tenant != scope.tenant()
         || context.actor.kind != "user"
@@ -538,9 +726,16 @@ pub async fn ensure_platform_orchestrator(
         phone: None,
     };
     Ok((
-        insert(tx, scope.tenant(), input, Some(SYSTEM_KEY), None)
-            .await?
-            .redact(&masked),
+        insert(
+            tx,
+            scope.tenant(),
+            input,
+            Some(SYSTEM_KEY),
+            None,
+            Custom::new(),
+        )
+        .await?
+        .redact(&masked),
         true,
     ))
 }
@@ -585,6 +780,9 @@ impl BindingIdentity<'_> {
     }
 }
 
+const LIVE_ACCOUNT_PERSON: &str =
+    "SELECT id FROM persons WHERE tenant_id=$1 AND id=$2 AND retired_at IS NULL AND system_key IS NULL";
+
 /// Authentication-edge read for the account binder (K9): whether a linked
 /// Person still stands, on the caller's connection and before any Scope
 /// exists. A retired identity, a cross-tenant or missing id and the protected
@@ -595,9 +793,32 @@ pub async fn account_standing(client: &dyn ProofClient, tenant: i64, id: PersonI
         return Err(Error::Unauthorized);
     }
     Ok(client
+        .query_opt(LIVE_ACCOUNT_PERSON, &[&tenant, &id.get()])
+        .await?
+        .is_some())
+}
+
+pub async fn hold_account_standing(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+) -> Result<()> {
+    if let Some(person) = scope.actor().person() {
+        if !hold_account_person(tx, scope.tenant(), person).await? {
+            return Err(Error::Unauthorized);
+        }
+    }
+    Ok(())
+}
+
+pub async fn hold_account_person(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant: i64,
+    person: PersonId,
+) -> Result<bool> {
+    Ok(tx
         .query_opt(
-            "SELECT id FROM persons WHERE tenant_id=$1 AND id=$2 AND retired_at IS NULL AND system_key IS NULL",
-            &[&tenant, &id.get()],
+            &format!("{LIVE_ACCOUNT_PERSON} FOR SHARE"),
+            &[&tenant, &person.get()],
         )
         .await?
         .is_some())

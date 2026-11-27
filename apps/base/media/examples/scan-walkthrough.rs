@@ -1,6 +1,6 @@
 //! Manual walkthrough of malware scanning and quarantine (issue 141) against an
-//! explicitly supplied disposable DB. No test harness or assertions; it prints
-//! outcomes to inspect. The fixture scanner lives only in this executable:
+//! explicitly supplied disposable DB. The owner-scoped inspection seam has
+//! explicit assertions; the rest of the walkthrough prints outcomes to inspect. The fixture scanner lives only in this executable:
 //! production builds carry none.
 //!
 //! The fixture scanner calls a file holding the EICAR test string infected,
@@ -19,13 +19,23 @@
 //! be recorded settling `failed`, a purge that cannot be recorded leaving the
 //! bytes, purge and its removal job, and the audit trail. `no-scanner` shows
 //! the policy without a scanner: `when_available` stores unscanned, `required`
-//! refuses. `serve` runs the real Bilibi host with the fixture scanner (unless
+//! refuses, and the quarantine list over more than 10,000 unscanned files
+//! counts at most that many while every file stays reachable by id. `serve` runs the real Bilibi host with the fixture scanner (unless
 //! `BILIBI_SCAN_FIXTURE=none`), the fixture ticket owner and the executor, for
 //! the Quarantined Files page and `/media/attachments/{public_id}`.
-use bilibi_database::{pool, MutationBoundary, Result as DbResult};
+//!
+//! `prepare` ends with a declared system principal (`walkthrough-mailbox`, the
+//! fixture's mail import) storing, submitting and discarding attachments under
+//! the same checks as a person.
+use bilibi_authz::{
+    SystemAuthentication, SystemPrincipalDefinition, SystemScope, VocabularyContribution,
+    VOCABULARY,
+};
+use bilibi_database::{pool, Context, MutationBoundary, Principal, Result as DbResult};
 use bilibi_media::{
     AttachmentSubject, Media, NewAsset, Placement, QuarantineQuery, Rules, ScanFacts, ScanFuture,
-    ScanState, Scanner, Subject, SubjectAction, SubjectOwner, Upload, Verdict, SUBJECTS,
+    ScanState, Scanner, Subject, SubjectAction, SubjectOwner, Upload, Verdict, QUARANTINE_LIST_CAP,
+    SUBJECTS,
 };
 use bilibi_module_registry::{Contribution, Provenance, Services};
 use bilibi_queue::{Config, Executor};
@@ -46,6 +56,17 @@ bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 const TICKET: &str = "walkthrough.ticket";
+/// The fixture's mail import: a declared principal the ticket owner accepts.
+const MAILBOX: &str = "walkthrough-mailbox";
+/// Declared too, but the ticket owner never lets it store files.
+const IMPORTER: &str = "walkthrough-importer";
+inventory::submit! { Contribution::new(VOCABULARY, "walkthrough.media.principals", Provenance { module: "base/media", source: file!(), line: line!() }, &VocabularyContribution {
+    domains: &[], verbs: &[], capabilities: &[], roles: &[],
+    system_principals: &[
+        SystemPrincipalDefinition { name: MAILBOX, capabilities: &[] },
+        SystemPrincipalDefinition { name: IMPORTER, capabilities: &[] },
+    ],
+}) }
 /// The fixture scanner's `max_bytes`.
 const SCAN_LIMIT: usize = 1024 * 1024;
 /// The last attempt that asks the scanner (`SCAN_ATTEMPTS` in `src/scan.rs`).
@@ -126,7 +147,8 @@ impl Scanner for FixtureScanner {
 }
 
 /// Fixture owner, as in `attachments-walkthrough`: a ticket is live while its
-/// row is open in the scope's tenant.
+/// row is open in the scope's tenant. Of the system principals it accepts only
+/// the mailbox: the owner, not Media, decides which principal may store.
 struct Tickets;
 impl SubjectOwner for Tickets {
     fn authorize<'a>(
@@ -137,6 +159,9 @@ impl SubjectOwner for Tickets {
         subject_id: &'a str,
     ) -> ProofFuture<'a, ()> {
         Box::pin(async move {
+            if scope.principal().is_some_and(|name| name != MAILBOX) {
+                return Err(bilibi_database::Error::Forbidden);
+            }
             let action = format!("{action:?}").to_lowercase();
             let live = client
                 .query_opt(
@@ -417,7 +442,7 @@ async fn serve(db: bilibi_database::Db) -> DbResult<()> {
         .await
         .map_err(internal)?;
     println!("Bilibi (with the fixture ticket owner) at {origin}");
-    let served = axum::serve(listener, bilibi_web::router(app)).await;
+    let served = axum::serve(listener, bilibi_web::staff_router(app)).await;
     let _ = stop.send(true);
     let _ = running.await;
     served.map_err(internal)
@@ -476,6 +501,69 @@ async fn no_scanner(db: bilibi_database::Db) -> DbResult<()> {
     let policy = json!("when_available");
     setting(&setup, &mut client, "media.scan.policy", policy).await?;
     println!("policy back to when_available");
+
+    // Issue 599: with no scanner every file is unscanned, and the list must
+    // not count all of them on each render. Rows only, no bytes: the list
+    // reads metadata.
+    println!("== the quarantine list counts at most {QUARANTINE_LIST_CAP} files");
+    let bulk = i32::try_from(QUARANTINE_LIST_CAP + 50).map_err(internal)?;
+    client.execute("INSERT INTO base_media_assets(tenant_id,disk,storage_key,original_filename,kind) \
+                    SELECT 1,'local','walkthrough/bulk-'||n,'bulk-'||n||'.txt','original' FROM generate_series(1,$1) n", &[&bulk]).await?;
+    let admin = actor(&setup, &client, 1, 6).await?;
+    let unscanned = [ScanState::Unscanned];
+    let window = |before, offset| QuarantineQuery {
+        states: &unscanned,
+        search: "",
+        before,
+        offset,
+        limit: 1_000,
+    };
+    let first = media
+        .quarantine(&**client, &admin, window(None, 0))
+        .await
+        .map_err(internal)?;
+    let past = media
+        .quarantine(&**client, &admin, window(None, QUARANTINE_LIST_CAP))
+        .await
+        .map_err(internal)?;
+    let (mut reached, mut before) = (0, None);
+    loop {
+        let page = media
+            .quarantine(&**client, &admin, window(before, 0))
+            .await
+            .map_err(internal)?;
+        let Some(last) = page.files.last() else { break };
+        reached += page.files.len();
+        before = Some(last.id);
+    }
+    let searched = media
+        .quarantine(
+            &**client,
+            &admin,
+            QuarantineQuery {
+                search: "UNSCANNED",
+                ..window(None, 0)
+            },
+        )
+        .await
+        .map_err(internal)?;
+    let stored = usize::try_from(bulk).map_err(internal)? + 1;
+    println!(
+        "first page: total {} more {}; window at offset {QUARANTINE_LIST_CAP}: {} files; read on by id: {reached} of {stored}; search \"UNSCANNED\": total {} more {}",
+        first.total, first.more, past.files.len(), searched.total, searched.more
+    );
+    if first.total != QUARANTINE_LIST_CAP
+        || !first.more
+        || !past.files.is_empty()
+        || reached != stored
+        || (searched.total, searched.more) != (1, false)
+    {
+        println!(
+            "  FAIL the count stops at {QUARANTINE_LIST_CAP} and every file stays reachable by id"
+        );
+        return Err(bilibi_database::Error::Internal);
+    }
+    println!("  ok: the count stops at {QUARANTINE_LIST_CAP} and every file stays reachable by id");
     Ok(())
 }
 
@@ -540,6 +628,18 @@ async fn prepare(db: bilibi_database::Db) -> DbResult<()> {
         infected.scan_state.as_str(),
         logo.scan_state.as_str()
     );
+    let pending = media
+        .inspect_attachment(&**client, &manager, &infected.public_id)
+        .await
+        .map_err(internal)?;
+    assert_eq!(pending.scan_state, ScanState::Pending);
+    assert!(media
+        .inspect_attachment(&**client, &other, &infected.public_id)
+        .await
+        .is_err());
+    println!(
+        "owner-scoped inspection sees pending without a quarantine grant; other tenant refused"
+    );
     show(
         "download receipt.txt while pending",
         media
@@ -563,6 +663,39 @@ async fn prepare(db: bilibi_database::Db) -> DbResult<()> {
         settled(&client, infected_id, 30).await?,
         settled(&client, logo.id, 30).await?
     );
+    assert_eq!(
+        media
+            .inspect_attachment(&**client, &manager, &clean.public_id)
+            .await
+            .map_err(internal)?
+            .scan_state,
+        ScanState::Clean
+    );
+    assert_eq!(
+        media
+            .inspect_attachment(&**client, &manager, &infected.public_id)
+            .await
+            .map_err(internal)?
+            .scan_state,
+        ScanState::Infected
+    );
+    client
+        .execute(
+            "UPDATE walkthrough_tickets SET denied=array_append(denied,'inspect') WHERE tenant_id=1 AND id='1'",
+            &[],
+        )
+        .await?;
+    assert!(media
+        .inspect_attachment(&**client, &manager, &infected.public_id)
+        .await
+        .is_err());
+    client
+        .execute(
+            "UPDATE walkthrough_tickets SET denied=array_remove(denied,'inspect') WHERE tenant_id=1 AND id='1'",
+            &[],
+        )
+        .await?;
+    println!("owner-scoped inspection follows clean/infected verdicts and live owner refusal");
     show(
         "download receipt.txt",
         media
@@ -605,15 +738,36 @@ async fn prepare(db: bilibi_database::Db) -> DbResult<()> {
         show(label, result.map(|rows| rows[0].state));
     }
     println!("== notices for the quarantined file");
-    for row in client.query("SELECT user_id,title,coalesce(url,'') FROM notifications WHERE type='media.quarantined' ORDER BY user_id", &[]).await? {
-        println!("user {}: {} {}", row.get::<_, i64>(0), row.get::<_, String>(1), row.get::<_, String>(2));
+    let notices = client.query("SELECT user_id,title,coalesce(url,''),body FROM notifications WHERE type='media.quarantined' ORDER BY user_id", &[]).await?;
+    for row in &notices {
+        println!(
+            "user {}: {} {} — {}",
+            row.get::<_, i64>(0),
+            row.get::<_, String>(1),
+            row.get::<_, String>(2),
+            row.get::<_, String>(3)
+        );
     }
+    // A file name can be personal data and a notice is never erased, so the
+    // notice names the file by id and the record it is attached to (#702).
+    let named = format!("File {infected_id}, attached to {TICKET} 1,");
+    if notices.is_empty()
+        || notices.iter().any(|row| {
+            let body: String = row.get(3);
+            body.contains("invoice.txt") || !body.starts_with(&named)
+        })
+    {
+        println!("  FAIL every quarantine notice names {named} and never invoice.txt");
+        return Err(bilibi_database::Error::Internal);
+    }
+    println!("  ok: every quarantine notice names {named} and not the file name");
 
     println!("== quarantine list per tenant");
     let attention = [ScanState::Infected, ScanState::Failed];
     let newest = QuarantineQuery {
         states: &attention,
         search: "",
+        before: None,
         offset: 0,
         limit: 100,
     };
@@ -955,6 +1109,7 @@ async fn prepare(db: bilibi_database::Db) -> DbResult<()> {
         )
         .await?;
 
+    system_principal(&setup, &media, &boundary, &mut client).await?;
     println!("== audit evidence");
     for row in client.query("SELECT auditable_id,actor_type,coalesce(system_principal,actor_id::text),new_values->>'scan_state',coalesce(new_values->>'signature',''),coalesce(new_values->>'reason',''),CASE WHEN new_values->>'purged'='true' THEN 'bytes removed' WHEN new_values->>'purge_requested'='true' THEN 'purge requested' ELSE '' END FROM base_audit_mutations WHERE auditable_type='base/media/asset' AND new_values ? 'scanner' ORDER BY id", &[]).await? {
         println!("asset {} by {} {}: {} {} {} {}", row.get::<_, String>(0), row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, Option<String>>(3).unwrap_or_default(), row.get::<_, String>(4), row.get::<_, String>(5), row.get::<_, String>(6));
@@ -972,5 +1127,363 @@ async fn prepare(db: bilibi_database::Db) -> DbResult<()> {
     println!("ledger={} (failed: scan_error)", ledger.public_id);
     let _ = stop.send(true);
     let _ = running.await;
+    Ok(())
+}
+
+/// Who stored the attachment, as its row and its asset's row record it.
+async fn recorded(client: &Client, public_id: &str) -> DbResult<String> {
+    let row = client
+        .query_one(
+            "SELECT a.uploaded_by_type,a.uploaded_by_id,a.uploaded_by_principal,s.created_by_id,s.created_by_principal FROM base_media_attachments a JOIN base_media_assets s ON s.id=a.media_asset_id WHERE a.public_id=$1",
+            &[&public_id],
+        )
+        .await?;
+    Ok(format!(
+        "uploaded_by_type={} uploaded_by_id={:?} uploaded_by_principal={:?}; asset created_by_id={:?} created_by_principal={:?}",
+        row.get::<_, String>(0),
+        row.get::<_, Option<i64>>(1),
+        row.get::<_, Option<String>>(2),
+        row.get::<_, Option<i64>>(3),
+        row.get::<_, Option<String>>(4)
+    ))
+}
+/// The sealed scope a worker runs a system principal's job under.
+async fn seal(
+    setup: &Setup,
+    client: &Client,
+    tenant: i64,
+    principal: Option<&str>,
+) -> DbResult<Scope> {
+    let system = SystemScope::rehydrate(client, tenant, principal).await?;
+    setup
+        .services
+        .get::<Authentication>("base/tenancy.authentication")?
+        .for_system(client, &system)
+        .await
+}
+
+/// A module's background job stores the files it receives (issue 434): the
+/// mailbox principal, sealed by `for_system`, through the same calls and checks
+/// as a person's upload.
+async fn system_principal(
+    setup: &Setup,
+    media: &Media,
+    boundary: &MutationBoundary,
+    client: &mut Client,
+) -> DbResult<()> {
+    println!("== a declared system principal stores attachments");
+    for name in ["down", "slow", "stale"] {
+        let _ = std::fs::remove_file(flag(&setup.root, name));
+    }
+    let mailbox = seal(setup, client, 1, Some(MAILBOX)).await?;
+    let importer = seal(setup, client, 1, Some(IMPORTER)).await?;
+    let mailbox_two = seal(setup, client, 2, Some(MAILBOX)).await?;
+    show(
+        "seal an undeclared principal through for_system",
+        seal(setup, client, 1, Some("walkthrough-stranger"))
+            .await
+            .map(|scope| scope.user_name),
+    );
+    show(
+        "seal an anonymous system scope",
+        seal(setup, client, 1, None)
+            .await
+            .map(|scope| scope.user_name),
+    );
+    // A worker that skips Authz and seals an undeclared name directly still
+    // stores nothing: Media checks the declaration itself.
+    let stranger = setup
+        .services
+        .get::<Authentication>("base/tenancy.authentication")?
+        .for_principal(&*client, 1, "walkthrough-stranger")
+        .await?;
+    let manager = actor(setup, client, 1, 1).await?;
+    let other = actor(setup, client, 2, 5).await?;
+    let admin = actor(setup, client, 1, 6).await?;
+
+    let mail = media
+        .upload_attachment(
+            client,
+            &mailbox,
+            ticket("1"),
+            upload("mail-receipt.txt", b"A receipt that arrived by mail.\n"),
+            Rules::default(),
+        )
+        .await
+        .map_err(internal)?;
+    println!(
+        "mailbox stores mail-receipt.txt: {}",
+        mail.scan_state.as_str()
+    );
+    println!("{}", recorded(client, &mail.public_id).await?);
+    println!("returned uploader: {:?}", mail.uploaded_by);
+    show(
+        "manager downloads it while pending",
+        media
+            .download_attachment(&*client, &manager, &mail.public_id)
+            .await
+            .map(|file| file.bytes.len()),
+    );
+    let mail_id = asset_of(client, &mail.public_id).await?;
+    println!("scanner: {}", settled(client, mail_id, 30).await?);
+    show(
+        "manager downloads it through the ticket owner",
+        media
+            .download_attachment(&*client, &manager, &mail.public_id)
+            .await
+            .map(|file| (file.filename.clone(), file.bytes.len())),
+    );
+    show(
+        "tenant 2 user asks for it",
+        media
+            .download_attachment(&*client, &other, &mail.public_id)
+            .await
+            .map(|file| file.bytes.len()),
+    );
+
+    println!("== the principal gets no more trust than a person");
+    let rows = "SELECT count(*) FROM base_media_attachments";
+    let before: i64 = client.query_one(rows, &[]).await?.get(0);
+    let html = b"<html><body><script>alert(1)</script></body></html>";
+    for (label, scope, name, bytes) in [
+        ("active content (html)", &mailbox, "mail.html", &html[..]),
+        (
+            "declared principal the owner does not accept",
+            &importer,
+            "import.txt",
+            b"Imported.\n",
+        ),
+        (
+            "undeclared principal sealed directly",
+            &stranger,
+            "stray.txt",
+            b"Stray.\n",
+        ),
+        (
+            "tenant 2's mailbox to tenant 1's ticket",
+            &mailbox_two,
+            "cross.txt",
+            b"Cross tenant.\n",
+        ),
+    ] {
+        show(
+            label,
+            media
+                .upload_attachment(
+                    client,
+                    scope,
+                    ticket("1"),
+                    upload(name, bytes),
+                    Rules::default(),
+                )
+                .await
+                .map(|attachment| attachment.public_id),
+        );
+    }
+    show(
+        "owner rule: only PDF",
+        media
+            .upload_attachment(
+                client,
+                &mailbox,
+                ticket("1"),
+                upload("mail.txt", b"Plain text.\n"),
+                Rules {
+                    max_bytes: None,
+                    allowed_mime_types: Some(vec!["application/pdf".into()]),
+                },
+            )
+            .await
+            .map(|attachment| attachment.public_id),
+    );
+    show(
+        "a public asset (a person's only)",
+        media
+            .put_upload(
+                client,
+                &mailbox,
+                "local",
+                "walkthrough",
+                upload("logo.png", PNG),
+                None,
+            )
+            .await
+            .map(|asset| asset.id),
+    );
+    let after: i64 = client.query_one(rows, &[]).await?.get(0);
+    println!("attachment rows {before}→{after}");
+
+    println!("== an infected file the principal stored");
+    let mark: i64 = client
+        .query_one("SELECT coalesce(max(id),0) FROM notifications", &[])
+        .await?
+        .get(0);
+    let infected = media
+        .upload_attachment(
+            client,
+            &mailbox,
+            ticket("1"),
+            upload("mail-invoice.txt", &eicar()),
+            Rules::default(),
+        )
+        .await
+        .map_err(internal)?;
+    let infected_id = asset_of(client, &infected.public_id).await?;
+    println!("scanner: {}", settled(client, infected_id, 30).await?);
+    show(
+        "manager downloads it",
+        media
+            .download_attachment(&*client, &manager, &infected.public_id)
+            .await
+            .map(|file| file.bytes.len()),
+    );
+    for row in client
+        .query(
+            "SELECT n.user_id,u.name,n.title,coalesce(n.url,'') FROM notifications n JOIN users u ON u.id=n.user_id AND u.tenant_id=n.tenant_id WHERE n.type='media.quarantined' AND n.id>$1 ORDER BY n.user_id",
+            &[&mark],
+        )
+        .await?
+    {
+        println!(
+            "told user {} ({}): {} {}",
+            row.get::<_, i64>(0),
+            row.get::<_, String>(1),
+            row.get::<_, String>(2),
+            row.get::<_, String>(3)
+        );
+    }
+    show(
+        "quarantine list names the principal",
+        media
+            .quarantined_file(&*client, &admin, infected_id)
+            .await
+            .map(|file| (file.uploaded_by_id, file.uploaded_by_principal)),
+    );
+
+    println!("== submit and discard as the principal");
+    let impersonated = Context {
+        impersonator: Some(Principal::user(4)),
+        ..manager.mutation_context("walkthrough.mail.submit")
+    };
+    for (label, context, scope, id) in [
+        (
+            "submit the infected file",
+            mailbox.mutation_context("walkthrough.mail.submit"),
+            &mailbox,
+            &infected.public_id,
+        ),
+        (
+            "submit under the importer's scope",
+            importer.mutation_context("walkthrough.mail.submit"),
+            &importer,
+            &mail.public_id,
+        ),
+        (
+            "submit as an impersonated user",
+            impersonated,
+            &manager,
+            &mail.public_id,
+        ),
+        (
+            "submit with a user's context on the mailbox scope",
+            manager.mutation_context("walkthrough.mail.submit"),
+            &mailbox,
+            &mail.public_id,
+        ),
+        (
+            "submit the clean file",
+            mailbox.mutation_context("walkthrough.mail.submit"),
+            &mailbox,
+            &mail.public_id,
+        ),
+    ] {
+        let mut tx = boundary.begin(client, context).await?;
+        let result = media
+            .submit_attachments(&mut tx, scope, ticket("1"), &[id.as_str()])
+            .await;
+        if result.is_ok() {
+            tx.commit().await?;
+        } else {
+            tx.rollback().await?;
+        }
+        show(
+            label,
+            result.map(|rows| (rows[0].state, rows[0].uploaded_by.clone())),
+        );
+    }
+    let scratch = media
+        .upload_attachment(
+            client,
+            &mailbox,
+            ticket("1"),
+            upload("mail-scratch.txt", b"A duplicate the import drops.\n"),
+            Rules::default(),
+        )
+        .await
+        .map_err(internal)?;
+    for (label, scope) in [
+        ("manager discards the mailbox's draft", &manager),
+        ("importer principal discards it", &importer),
+        ("tenant 2's mailbox discards it", &mailbox_two),
+        ("mailbox discards it", &mailbox),
+        ("mailbox discards it again", &mailbox),
+    ] {
+        show(
+            label,
+            media.discard_draft(client, scope, &scratch.public_id).await,
+        );
+    }
+
+    println!("== cleanup treats the principal's abandoned draft like a person's");
+    let abandoned = media
+        .upload_attachment(
+            client,
+            &mailbox,
+            ticket("1"),
+            upload("mail-abandoned.txt", b"Never submitted.\n"),
+            Rules::default(),
+        )
+        .await
+        .map_err(internal)?;
+    // Demonstration only: backdating bypasses the immutability trigger, which a
+    // disposable superuser session may do and the application never does.
+    client
+        .batch_execute("SET session_replication_role = replica")
+        .await?;
+    client
+        .execute(
+            "UPDATE base_media_attachments SET created_at=now()-interval '3 days' WHERE public_id=$1",
+            &[&abandoned.public_id],
+        )
+        .await?;
+    client
+        .batch_execute("SET session_replication_role = DEFAULT")
+        .await?;
+    show(
+        "cleanup_drafts(tenant 1, 1 day)",
+        media
+            .cleanup_drafts(client, 1, Duration::from_secs(86_400))
+            .await
+            .map(|report| report.removed),
+    );
+    let left: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_media_attachments WHERE public_id=$1",
+            &[&abandoned.public_id],
+        )
+        .await?
+        .get(0);
+    println!("abandoned draft rows left: {left}");
+    for row in client.query("SELECT event,actor_type,system_principal,count(*) FROM base_audit_mutations WHERE auditable_type='base/media/attachment' AND system_principal LIKE 'walkthrough-%' GROUP BY 1,2,3 ORDER BY 1", &[]).await? {
+        println!("audit: {} by {} {} x{}", row.get::<_, String>(0), row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, i64>(3));
+    }
+    println!(
+        "mail_receipt={} (stored by the mailbox, clean, submitted)",
+        mail.public_id
+    );
+    println!(
+        "mail_invoice={} (stored by the mailbox, quarantined)",
+        infected.public_id
+    );
     Ok(())
 }

@@ -40,10 +40,12 @@ jobs:
           cache-dependency-path: apps/base/ui/assets/package-lock.json
       - run: npm ci --prefix apps/base/ui/assets --no-audit --no-fund
       - run: ./scripts/build-assets.sh --check
-      - uses: dtolnay/rust-toolchain@stable
+      - name: The shared helper catalog matches the doc comments
+        run: python3 scripts/shared-helpers.py --check
+      - name: The Base capability map matches the module READMEs
+        run: python3 scripts/base-capabilities.py --check
+      - run: rustup show active-toolchain || rustup toolchain install
         if: steps.decide.outputs.affected == 'true'
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2.9.2
         if: steps.decide.outputs.affected == 'true'
         with:
@@ -55,6 +57,9 @@ jobs:
         run: python3 scripts/discover-modules.py --check
       - if: steps.decide.outputs.affected == 'true'
         run: python3 scripts/catalogue.py --check
+      - name: The agent command line links no Bilibi crate (it is only a door)
+        if: steps.decide.outputs.affected == 'true'
+        run: python3 scripts/cli-door.py
       - if: steps.decide.outputs.affected == 'true'
         run: cargo fmt --all -- --check
       - if: steps.decide.outputs.affected == 'true'

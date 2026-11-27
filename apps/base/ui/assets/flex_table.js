@@ -22,6 +22,11 @@
 (() => {
   const FlexTable = {
     mounted() {
+      this.phone = window.matchMedia('(width < 640px)')
+      this.onPhoneChange = () => this.orderColumns()
+      this.phone.addEventListener('change', this.onPhoneChange)
+      this.onLocation = () => this.applyReturnAddress()
+      window.addEventListener('bilibi:location', this.onLocation)
       this.drag = null
 
       this.onDragStart = (event) => this.dragStart(event)
@@ -40,14 +45,20 @@
       this.el.addEventListener('keydown', this.onKeyDown)
       this.el.addEventListener('click', this.onClick)
 
+      this.orderColumns()
       this.applyBars()
+      this.applyReturnAddress()
     },
 
     updated() {
+      this.orderColumns()
       this.applyBars()
+      this.applyReturnAddress()
     },
 
     destroyed() {
+      this.phone.removeEventListener('change', this.onPhoneChange)
+      window.removeEventListener('bilibi:location', this.onLocation)
       clearTimeout(this.opReset)
       this.el.removeEventListener('dragstart', this.onDragStart)
       this.el.removeEventListener('dragover', this.onDragOver)
@@ -56,6 +67,62 @@
       this.el.removeEventListener('dragend', this.onDragEnd)
       this.el.removeEventListener('keydown', this.onKeyDown)
       this.el.removeEventListener('click', this.onClick)
+    },
+
+    applyReturnAddress() {
+      const grid = new URL(location.href)
+      if (grid.searchParams.has('return_to')) grid.searchParams.delete('return_to')
+      const controls = 'a[data-record-link][href], button[data-record-select][data-path]'
+      const source = grid.pathname + grid.search
+      for (const control of this.el.querySelectorAll(`tbody td :is(${controls})`)) {
+        if (control.closest('[data-table-frame]') !== this.el) continue
+        const attribute = control.matches('a') ? 'href' : 'data-path'
+        const path = control.getAttribute(attribute)
+        const target = URL.parse(path, location.href)
+        if (!target || target.origin !== location.origin || target.pathname === location.pathname || target.pathname.startsWith('//')) continue
+        target.searchParams.set('return_to', source)
+        const address = target.pathname + target.search + target.hash
+        if (address !== path) control.setAttribute(attribute, address)
+      }
+    },
+
+    // Move the actual cells so reading and keyboard order match the display.
+    // Column indices restore the server's saved arrangement at desktop width.
+    orderColumns() {
+      for (const row of this.el.querySelectorAll('[data-viewport] > table > thead > tr, [data-viewport] > table > tbody > tr')) {
+        const cells = Array.from(row.children).filter(cell => cell.hasAttribute('data-column-index'))
+        if (!cells.length) continue
+        const end = cells[cells.length - 1].nextSibling
+        const original = [...cells]
+        cells.sort((a, b) => (this.phone.matches ? Number(a.dataset.phoneRank) - Number(b.dataset.phoneRank) : 0) || Number(a.dataset.columnIndex) - Number(b.dataset.columnIndex))
+        if (cells.every((cell, index) => cell === original[index])) continue
+        const active = document.activeElement
+        const focused = cells.some(cell => cell.contains(active))
+        const scroll = []
+        const start = focused ? active.selectionStart : null
+        const finish = focused ? active.selectionEnd : null
+        const direction = focused ? active.selectionDirection : null
+        const selection = focused && active.isContentEditable ? window.getSelection() : null
+        const range = selection?.rangeCount ? {
+          anchor: selection.anchorNode, anchorOffset: selection.anchorOffset,
+          focus: selection.focusNode, focusOffset: selection.focusOffset,
+        } : null
+        if (focused) {
+          for (let el = active; el; el = el.parentElement) {
+            scroll.push({el, top: el.scrollTop, left: el.scrollLeft})
+          }
+        }
+        for (const cell of cells) row.insertBefore(cell, end)
+        if (focused && active.isConnected) {
+          active.focus({preventScroll: true})
+          if (typeof start === 'number') active.setSelectionRange(start, finish, direction)
+          if (range) selection.setBaseAndExtent(range.anchor, range.anchorOffset, range.focus, range.focusOffset)
+          for (const {el, top, left} of scroll) {
+            if (el.scrollTop !== top) el.scrollTop = top
+            if (el.scrollLeft !== left) el.scrollLeft = left
+          }
+        }
+      }
     },
 
     push(payload) {

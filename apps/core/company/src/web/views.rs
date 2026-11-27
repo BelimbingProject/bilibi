@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
-use tokio_postgres::{Client, GenericClient};
+use tokio_postgres::GenericClient;
 
 pub(crate) fn render(value: &impl Template) -> Result<Html> {
     Html::render(value).map_err(|_| Error::Internal)
@@ -51,11 +51,17 @@ pub(super) fn columns(
     })
     .collect();
     // The page's own columns are the defaults; a tenant's custom fields are
-    // there to add from the column picker, and sort by their own key.
+    // there to add from the column picker, and sort by their own key (not
+    // several choices or a record, which have no order to sort by).
     let defaults: Vec<String> = columns.iter().map(|column| column.id.clone()).collect();
     for field in custom.iter().take(crate::list_fields::MAX_CUSTOM_COLUMNS) {
         let id = crate::list_fields::custom_id(&field.key);
-        columns.push(BuiltinColumn::new(&id, &field.label).sortable(&id));
+        let column = BuiltinColumn::new(&id, &field.label);
+        columns.push(if crate::list_fields::custom_sortable(field.kind) {
+            column.sortable(&id)
+        } else {
+            column
+        });
     }
     let record_fields = record_slots(masked)?;
     let scalar_sorts = crate::field_contributions::definitions()?
@@ -163,9 +169,8 @@ struct CompanyName<'a> {
     link: Html,
     legal: Option<&'a str>,
 }
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn list(
-    client: &(impl GenericClient + Sync),
+    db: &bilibi_database::Db,
     scope: &Scope,
     data: &crate::Page,
     params: &Params,
@@ -174,6 +179,23 @@ pub(super) async fn list(
     extension_fields: ExtensionListFields<'_>,
     add_to: &[bilibi_records::AddTo],
 ) -> Result<String> {
+    let custom_columns: Vec<&crate::list_fields::AvailableField> = extension_fields
+        .available
+        .iter()
+        .filter(|field| field.custom.is_some())
+        .filter(|field| columns.columns.iter().any(|column| column.id == field.id))
+        .collect();
+    let named = custom_references(
+        scope,
+        &custom_columns
+            .iter()
+            .filter_map(|field| field.custom.as_ref())
+            .collect::<Vec<_>>(),
+        &extension_fields.custom_values.values().collect::<Vec<_>>(),
+    )
+    .await?;
+    let connection = db.get().await?;
+    let client = &**connection;
     let mut actions = Html::EMPTY;
     if allowed(client, scope, crate::CREATE).await? {
         actions.push(&render(&CreateButton {
@@ -242,7 +264,8 @@ pub(super) async fn list(
                     ("Pending", "pending"),
                     ("Archived", "archived"),
                 ]),
-            ),
+            )
+            .grid_field("companies.status"),
         ],
     ))?;
     toolbar.push(&field_filter_controls(&extension_fields, data)?);
@@ -310,7 +333,7 @@ pub(super) async fn list(
             row.record = Some(("company".into(), id.clone()));
             row.actions.push(&render(&AddToMenu::new(
                 format!("company-{id}-add-to"),
-                format!("Add {} to…", company.name),
+                company.name.clone(),
                 add_to
                     .iter()
                     .map(|target| AddToItem {
@@ -377,20 +400,47 @@ pub(super) async fn list(
             }
         }
     }
+    let custom_fields = crate::field_contributions::custom_fields()?;
     for row in &mut rows {
         let id: i64 = row.key.parse().map_err(|_| Error::Internal)?;
-        for field in extension_fields
-            .available
-            .iter()
-            .filter(|field| field.custom_key.is_some())
-            .filter(|field| columns.columns.iter().any(|column| column.id == field.id))
-        {
-            let value = field
-                .custom_key
-                .as_deref()
-                .and_then(|key| extension_fields.custom_values.get(&id)?.get(key))
-                .and_then(Value::as_str);
+        for field in &custom_columns {
+            let definition = field.custom.as_ref().ok_or(Error::Internal)?;
+            let held = extension_fields
+                .custom_values
+                .get(&id)
+                .and_then(|values| values.get(&definition.key));
+            let value = held.and_then(Value::as_str);
+            if field.kind == crate::list_fields::ListKind::Reference {
+                let pill = reference_pill(
+                    &named,
+                    definition,
+                    value,
+                    &format!("company-{id}-{}", field.id.replace('_', "-")),
+                    workspace,
+                )?;
+                row.slots.insert(
+                    field.id.clone(),
+                    match pill {
+                        Some(pill) => render(&pill)?,
+                        None => render(&ReadValue {
+                            value: None,
+                            empty: "—",
+                        })?,
+                    },
+                );
+                continue;
+            }
             let shown = match (&field.kind, value) {
+                (crate::list_fields::ListKind::Choices, _) => {
+                    custom_fields
+                        .choice_text(client, scope, definition, held)
+                        .await?
+                }
+                (crate::list_fields::ListKind::Boolean, Some(value)) => match value {
+                    "true" => "Yes".into(),
+                    "false" => "No".into(),
+                    _ => value.to_owned(),
+                },
                 (crate::list_fields::ListKind::Date, Some(value)) => value
                     .parse::<jiff::civil::Date>()
                     .ok()
@@ -485,6 +535,60 @@ pub(super) async fn list(
     )
 }
 
+/// Names every record the tenant's record fields `definitions` hold among
+/// `values`, in one call with the reader's own access, keyed by the
+/// reference as stored. A record the reader cannot see comes back unnamed.
+pub(super) async fn custom_references(
+    scope: &Scope,
+    definitions: &[&bilibi_custom_fields::Definition],
+    values: &[&serde_json::Map<String, Value>],
+) -> Result<HashMap<bilibi_records::Reference, bilibi_records::Resolved>> {
+    let mut references: BTreeSet<bilibi_records::Reference> = BTreeSet::new();
+    for definition in definitions
+        .iter()
+        .filter(|definition| definition.kind == bilibi_custom_fields::Kind::Reference)
+    {
+        let target = definition.target.as_deref().ok_or(Error::Internal)?;
+        references.extend(
+            values
+                .iter()
+                .filter_map(|values| values.get(&definition.key)?.as_str())
+                .filter(|id| !id.is_empty())
+                .map(|id| bilibi_records::Reference::new(target, id)),
+        );
+    }
+    if references.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let references: Vec<_> = references.into_iter().collect();
+    Ok(crate::field_contributions::custom_fields()?
+        .records()
+        .resolve(scope, &references)
+        .await?
+        .into_iter()
+        .map(|resolved| (resolved.reference.clone(), resolved))
+        .collect())
+}
+
+/// A record field's value as the shared pill (unavailable when the reader
+/// cannot see it, never its raw id); `None` when it holds none.
+fn reference_pill(
+    named: &HashMap<bilibi_records::Reference, bilibi_records::Resolved>,
+    definition: &bilibi_custom_fields::Definition,
+    id: Option<&str>,
+    dom_id: &str,
+    workspace: bool,
+) -> Result<Option<RelatedRecord>> {
+    let Some(id) = id.filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    let target = definition.target.as_deref().ok_or(Error::Internal)?;
+    let resolved = named
+        .get(&bilibi_records::Reference::new(target, id))
+        .ok_or(Error::Internal)?;
+    Ok(Some(resolved.pill(format!("{dom_id}-pill"), workspace)))
+}
+
 pub(super) struct ExtensionListFields<'a> {
     pub masked: &'a HashSet<String>,
     pub values: &'a std::collections::BTreeMap<i64, crate::CompanyFieldValues>,
@@ -507,7 +611,7 @@ async fn extension_choice_labels(
         let crate::list_fields::ListKind::Choice { picklist } = &available.kind else {
             continue;
         };
-        let codes = match &available.custom_key {
+        let codes = match available.custom_key() {
             Some(key) => fields
                 .custom_values
                 .values()
@@ -559,19 +663,10 @@ struct Code<'a> {
 }
 
 struct Options {
-    parents: Vec<Choice>,
     types: Vec<Choice>,
     countries: Vec<Choice>,
 }
-async fn options(
-    client: &(impl GenericClient + Sync),
-    scope: &Scope,
-    except: Option<i64>,
-    create: bool,
-) -> Result<Options> {
-    let tenant_wide = allowed(client, scope, crate::TENANT_WIDE).await?;
-    let current = scope.current_company().map(|id| id.get());
-    let parents=client.query("SELECT id,COALESCE(NULLIF(legal_name,''),name) AS label FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND id IS DISTINCT FROM $2 AND ($3 OR id=$4 OR id IN (SELECT parent_id FROM companies WHERE tenant_id=$1 AND id=$2)) ORDER BY label,id",&[&scope.tenant(),&except,&tenant_wide,&current]).await?.into_iter().map(|r|Choice::new(r.get::<_,String>(1),r.get::<_,i64>(0).to_string())).collect();
+async fn options(client: &(impl GenericClient + Sync), create: bool) -> Result<Options> {
     let types = crate::reference_types::list_legal_entity_types(
         client,
         crate::reference_types::TypeSort::Name,
@@ -591,13 +686,115 @@ async fn options(
         .into_iter()
         .map(|r| Choice::new(r.get::<_, String>(1), r.get::<_, String>(0)))
         .collect();
-    Ok(Options {
-        parents,
-        types,
-        countries,
-    })
+    Ok(Options { types, countries })
+}
+/// The parent picker: a search over the tenant's companies (Base Records,
+/// under the reader's own permissions) instead of a list of every company.
+/// The owner still checks the chosen parent on save.
+pub(super) struct ParentPicker<'a> {
+    pub query: &'a str,
+    pub hits: Vec<PickerHit>,
+    /// The create form's chosen parent: its id and name.
+    pub chosen: Option<(i64, &'a str)>,
+    /// The record page's Change was pressed: search instead of the pill.
+    pub changing: bool,
+}
+pub(super) const PARENT_FORM: &str = "parent";
+/// The record pickers of the tenant's record fields, each keyed by its
+/// `cf_<key>` name: the typed search and its hits, and the create form's
+/// chosen record (the record page saves a pick at once).
+#[derive(Default)]
+pub(super) struct CustomPickers {
+    pub queries: HashMap<String, String>,
+    pub hits: HashMap<String, Vec<PickerHit>>,
+    pub chosen: HashMap<String, bilibi_records::Resolved>,
+}
+/// The form namespace a record field's search posts in
+/// (`custom_reference[cf_<key>]` for the held choice).
+pub(super) const CUSTOM_REFERENCE_FORM: &str = "custom_reference";
+/// The record page's search event of a record field's picker.
+pub(super) const CUSTOM_REFERENCE_SEARCH: &str = "custom_reference_search";
+/// Every record field's pick and clear events, with the field's name
+/// (`cf_<key>`) as `key`: fixed names, so the page declares them with their
+/// contract.
+pub(super) const CUSTOM_PICK: &str = "pick_custom_reference";
+pub(super) const CUSTOM_CLEAR: &str = "clear_custom_reference";
+/// The picker of the record field `definition` (named `name`), with the
+/// record it holds or was chosen, if any, and its refusal beneath.
+/// `saves` is true on the record page, where clearing saves at once.
+fn custom_picker(
+    pickers: &CustomPickers,
+    definition: &bilibi_custom_fields::Definition,
+    name: &str,
+    selected: Option<(String, RelatedRecord)>,
+    errors: Vec<String>,
+    saves: bool,
+) -> Result<Html> {
+    let picker = RecordPicker::new(
+        &format!("company-{}", name.replace('_', "-")),
+        CUSTOM_REFERENCE_FORM,
+        name,
+        &definition.label,
+        pickers
+            .queries
+            .get(name)
+            .map(String::as_str)
+            .unwrap_or_default(),
+        pickers
+            .hits
+            .get(name)
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+        selected
+            .as_ref()
+            .map(|(value, pill)| (value.as_str(), pill.clone())),
+        (CUSTOM_PICK, CUSTOM_CLEAR),
+        errors,
+    )
+    .key(name)
+    .search_name(format!("custom_reference_search[{name}]"));
+    render(&if saves { picker.in_fact() } else { picker })
+}
+fn parent_pill(id: i64, label: &str, link: bool, workspace: bool) -> RelatedRecord {
+    RelatedRecord::new(
+        "company-parent-pill",
+        "core/company",
+        id.to_string(),
+        RecordState::Named {
+            label: label.to_owned(),
+            href: link.then(|| format!("/companies/{id}")),
+        },
+    )
+    .workspace(workspace)
+}
+/// `label` names the search box: the record page's fact already says
+/// "Parent Company", the create form's field does not.
+fn parent_picker(
+    picker: &ParentPicker<'_>,
+    label: &str,
+    selected: Option<(i64, RelatedRecord)>,
+    events: (&str, &str),
+    errors: Vec<String>,
+) -> Result<Html> {
+    let value = selected
+        .as_ref()
+        .map(|(id, pill)| (format!("company:{id}"), pill.clone()));
+    render(&RecordPicker::new(
+        "company-parent",
+        PARENT_FORM,
+        "parent",
+        label,
+        picker.query,
+        &picker.hits,
+        value
+            .as_ref()
+            .map(|(value, pill)| (value.as_str(), pill.clone())),
+        events,
+        errors,
+    ))
 }
 fn choice(
+    words: &bilibi_grid::RecordWords,
     id: &str,
     name: &str,
     value: String,
@@ -610,14 +807,14 @@ fn choice(
         .iter()
         .find(|c| c.value == value)
         .map(|c| c.label.as_str())
-        .unwrap_or(if name == "parent_id" { "None" } else { "—" });
+        .unwrap_or("—");
     let editor = if name == "jurisdiction" {
         render(
             &Combobox::new(format!("{id}-input"), name)
                 .value(&value)
                 .options(options.clone())
                 .placeholder("None")
-                .aria_label("Jurisdiction")
+                .aria_label(words.get(&fields::JURISDICTION))
                 .wrapper_class("mb-0"),
         )?
     } else {
@@ -628,19 +825,24 @@ fn choice(
                 .value(&value)
                 .prompt("None")
                 .options(options.clone())
-                .aria_label(name)
+                .aria_label(words.get(&fields::get(name)))
                 .wrapper_class("mb-0"),
         )?
     };
-    let display = if value.is_empty() && name != "parent_id" {
+    let display = if value.is_empty() {
         render(&MutedValue { text: display })?
     } else {
         Html::text(display)
     };
-    let mut field = InlineField::new(id, name, format!("Edit {}", name.replace('_', " ")), value)
-        .version(company.version)
-        .status(status)
-        .allow_empty();
+    let mut field = InlineField::new(
+        id,
+        name,
+        format!("Edit {}", words.get(&fields::get(name))),
+        value,
+    )
+    .version(company.version)
+    .status(status)
+    .allow_empty();
     field.id_value = company.id.to_string();
     field.editable = editable;
     render(&InlineChoice {
@@ -651,14 +853,19 @@ fn choice(
 }
 #[derive(Template)]
 #[template(path = "detail.html")]
-struct DetailBody<'a> {
+struct DetailBody {
     id: i64,
-    panels: &'a [String],
     header: Html,
-    chain: Html,
-    notice: Html,
-    card: Html,
+    sections: Html,
     modal: Html,
+}
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::facts(container_id="company-parent-chain") %}{% call ui::fact(title="Parent chain", id="company-parent-chain-links") %}{{ links }}{% endcall %}{% endcall %}"#,
+    ext = "html"
+)]
+struct ParentChain {
+    links: Html,
 }
 #[derive(Template)]
 #[template(path = "company_status.html")]
@@ -679,6 +886,7 @@ fn operation_name(op: crate::lifecycle::Operation) -> (&'static str, &'static st
 /// What the detail page's live state hands its view: commit outcomes, the
 /// open dialog, the notice and the Departments table arrangement.
 pub(super) struct DetailState<'a> {
+    pub facts: &'a [bilibi_ports::RecordFactValue],
     pub statuses: &'a CommitStates,
     pub pending: Option<&'a Pending>,
     pub notice: &'a str,
@@ -688,16 +896,19 @@ pub(super) struct DetailState<'a> {
     pub workspace: bool,
     pub display: &'a bilibi_datetime::DisplayContext,
     /// Anchors of the contributed record panels the reader may mount.
-    pub panels: &'a [String],
+    pub panels: &'a [&'a str],
+    pub parent: ParentPicker<'a>,
+    pub custom: &'a CustomPickers,
 }
 pub(super) async fn detail(
-    client: &Client,
+    db: &bilibi_database::Db,
     scope: &Scope,
     id: i64,
     picklists: &bilibi_picklists::PickLists,
     state: DetailState<'_>,
 ) -> Result<String> {
     let DetailState {
+        facts: key_facts,
         statuses,
         pending,
         notice,
@@ -707,8 +918,30 @@ pub(super) async fn detail(
         workspace,
         display,
         panels,
+        parent,
+        custom,
     } = state;
-    let (company, masked) = crate::detail(client, scope, id).await?;
+    let (company, masked, custom_defs, held) = {
+        let connection = db.get().await?;
+        let client = &**connection;
+        let (company, masked) = crate::detail(client, scope, id).await?;
+        let custom_defs = crate::field_contributions::custom_fields()?
+            .active(
+                client,
+                scope,
+                crate::field_contributions::CUSTOM_RECORD_TYPE,
+            )
+            .await?;
+        let held = crate::field_contributions::custom_read(client, scope, &[id])
+            .await?
+            .remove(&id)
+            .unwrap_or_default();
+        (company, masked, custom_defs, held)
+    };
+    let named = custom_references(scope, &custom_defs.iter().collect::<Vec<_>>(), &[&held]).await?;
+    let connection = db.get().await?;
+    let client = &**connection;
+    let words = bilibi_grid::RecordWords::load(client, scope, "companies").await?;
     let editable = allowed(client, scope, crate::UPDATE).await? && !company.archived();
     let can_target = allowed(client, scope, crate::TENANT_WIDE).await?
         || crate::organisation::reaches_without_tenant_wide(scope, id);
@@ -736,19 +969,14 @@ pub(super) async fn detail(
         })?);
     }
     if !hierarchy.ancestors.is_empty() {
-        chain = render(&Facts {
-            id: "company-parent-chain",
-            items: vec![Fact {
-                title: "Parent chain",
-                id: "company-parent-chain-links",
-                value: chain,
-            }],
-        })?;
+        chain = render(&ParentChain { links: chain })?;
     }
     let primary = crate::primary::is_primary(client, scope, id).await?;
-    let opts = options(client, scope, Some(id), false).await?;
+    let opts = options(client, false).await?;
     let mut actions = badge(&company.status)?;
-    actions.push(&render(&History {})?);
+    actions.push(&render(&LivePanelAnchor {
+        id: "company-record-history",
+    })?);
     actions.push(&back("company-back")?);
     let header = render(&Header {
         title_actions: Html::EMPTY,
@@ -763,20 +991,32 @@ pub(super) async fn detail(
             body: actions,
         })?,
     })?;
-    let mut notices = Html::EMPTY;
-    for (show, kind, message) in [
+    let mut sections = vec![
+        render(&RecordFacts {
+            id: "company-key-facts",
+            items: key_facts
+                .iter()
+                .map(|fact| StatItem::text(&fact.label, &fact.value))
+                .collect(),
+        })?,
+        chain,
+    ];
+    for (show, id, kind, message) in [
         (
             primary,
+            "company-primary-notice",
             StatusKind::Info,
             "This is your organisation's primary company.",
         ),
         (
             company.archived(),
+            "company-archive-notice",
             StatusKind::Warning,
             "This company is archived and read-only. Archiving is final.",
         ),
         (
             !notice.is_empty(),
+            "company-action-notice",
             if notice == "Company status changed." {
                 StatusKind::Success
             } else {
@@ -786,10 +1026,10 @@ pub(super) async fn detail(
         ),
     ] {
         if show {
-            notices.push(&render(&Alert {
+            sections.push(render(&Alert {
                 kind,
-                id: "",
-                class: "mt-4",
+                id,
+                class: "",
                 body: Html::text(message),
             })?);
         }
@@ -801,13 +1041,21 @@ pub(super) async fn detail(
         ("legal_name", company.legal_name.as_deref().unwrap_or("")),
     ] {
         facts.push(Fact {
-            title: fields::get(name).label,
+            title: words.get(&fields::get(name)),
             id: "",
-            value: text_fact(&company, name, value, editable, false, statuses.get(name))?,
+            value: text_fact(
+                &words,
+                &company,
+                name,
+                value,
+                editable,
+                false,
+                statuses.get(name),
+            )?,
         });
     }
     facts.push(Fact {
-        title: fields::STATUS.label,
+        title: words.get(&fields::STATUS),
         id: "detail-status",
         value: render(&StatusBody {
             badge: badge(&company.status)?,
@@ -823,9 +1071,10 @@ pub(super) async fn detail(
         })?,
     });
     facts.push(Fact {
-        title: fields::LEGAL_ENTITY_TYPE_ID.label,
+        title: words.get(&fields::LEGAL_ENTITY_TYPE_ID),
         id: "detail-legal-entity-type",
         value: choice(
+            &words,
             "company-legal-entity-type",
             "legal_entity_type_id",
             company
@@ -846,9 +1095,10 @@ pub(super) async fn detail(
         ("tax_id", company.tax_id.as_str()),
     ] {
         facts.push(Fact {
-            title: fields::get(name).label,
+            title: words.get(&fields::get(name)),
             id: "",
             value: text_fact(
+                &words,
                 &company,
                 name,
                 value,
@@ -859,12 +1109,13 @@ pub(super) async fn detail(
         });
     }
     facts.push(Fact {
-        title: fields::JURISDICTION.label,
+        title: words.get(&fields::JURISDICTION),
         id: "detail-jurisdiction",
         value: if masked.contains("jurisdiction") {
             restricted("company-jurisdiction-restricted")?
         } else {
             choice(
+                &words,
                 "company-jurisdiction",
                 "jurisdiction",
                 company.jurisdiction.clone().unwrap_or_default(),
@@ -880,9 +1131,10 @@ pub(super) async fn detail(
         ("website", company.website.as_deref().unwrap_or("")),
     ] {
         facts.push(Fact {
-            title: fields::get(name).label,
+            title: words.get(&fields::get(name)),
             id: "",
             value: text_fact(
+                &words,
                 &company,
                 name,
                 value,
@@ -920,7 +1172,7 @@ pub(super) async fn detail(
             let mut field = InlineField::new(
                 id_attr,
                 definition.id,
-                format!("Edit {}", definition.label),
+                format!("Edit {}", words.field(definition.id, definition.label)),
                 value,
             )
             .version(company.version)
@@ -956,7 +1208,7 @@ pub(super) async fn detail(
             let mut field = InlineField::new(
                 id_attr,
                 definition.id,
-                format!("Edit {}", definition.label),
+                format!("Edit {}", words.field(definition.id, definition.label)),
                 value,
             )
             .version(company.version)
@@ -972,36 +1224,60 @@ pub(super) async fn detail(
             render(&InlineEdit { field })?
         };
         facts.push(Fact {
-            title: definition.label,
+            title: words.field(definition.id, definition.label),
             id: definition.id,
             value: value_html,
         });
     }
-    let custom_defs = crate::field_contributions::custom_fields()
-        .map_err(|_| Error::Internal)?
-        .active(
-            client,
-            scope,
-            crate::field_contributions::CUSTOM_RECORD_TYPE,
-        )
-        .await?;
+    let custom_fields = crate::field_contributions::custom_fields().map_err(|_| Error::Internal)?;
     if !custom_defs.is_empty() {
-        let held = crate::field_contributions::custom_read(client, scope, &[id])
-            .await?
-            .remove(&id)
-            .unwrap_or_default();
         for definition in &custom_defs {
             let name = crate::field_contributions::custom_name(&definition.key);
-            let value = held
-                .get(&definition.key)
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            let stored = held.get(&definition.key);
+            let value = stored.and_then(Value::as_str).unwrap_or_default();
             let id_attr = format!("company-{}", name.replace('_', "-"));
+            if definition.kind == bilibi_custom_fields::Kind::Reference {
+                let pill = reference_pill(&named, definition, Some(value), &id_attr, workspace)?;
+                let value_html = if editable {
+                    let errors = match statuses.get(&name) {
+                        CommitStatus::Error(message) => vec![message],
+                        _ => Vec::new(),
+                    };
+                    let target = definition.target.as_deref().ok_or(Error::Internal)?;
+                    let selected = pill.map(|pill| (format!("{target}:{value}"), pill));
+                    render(&Form {
+                        id: &format!("{id_attr}-form"),
+                        event: CUSTOM_REFERENCE_SEARCH,
+                        change: true,
+                        body: custom_picker(custom, definition, &name, selected, errors, true)?,
+                        ..Form::default()
+                    })?
+                } else {
+                    match pill {
+                        Some(pill) => render(&pill)?,
+                        None => render(&MutedValue { text: "—" })?,
+                    }
+                };
+                facts.push(Fact {
+                    title: &definition.label,
+                    id: "",
+                    value: value_html,
+                });
+                continue;
+            }
+            // Several choices edit as their codes joined by commas (a code
+            // never holds one), the shape the shared editor saves.
+            let codes = bilibi_custom_fields::codes_of(stored);
+            let inline_value = if definition.kind == bilibi_custom_fields::Kind::Choices {
+                codes.join(",")
+            } else {
+                value.to_owned()
+            };
             let mut field = InlineField::new(
                 id_attr,
                 name.clone(),
                 format!("Edit {}", definition.label),
-                value,
+                inline_value,
             )
             .version(company.version)
             .allow_empty()
@@ -1012,45 +1288,94 @@ pub(super) async fn detail(
             if let Some(help) = &definition.help {
                 field.hint = help.clone();
             }
-            let value_html = match (definition.kind, definition.picklist.as_deref()) {
-                (bilibi_custom_fields::Kind::Choice, Some(list)) => {
-                    let display_text = if value.is_empty() {
-                        "—".to_owned()
-                    } else {
-                        picklists
-                            .label(client, scope, list, value)
-                            .await?
-                            .map(|label| {
-                                if label.retired {
-                                    format!("{} (Retired)", label.text)
-                                } else {
-                                    label.text
-                                }
-                            })
-                            .unwrap_or_else(|| value.to_owned())
-                    };
+            let value_html = match definition.kind {
+                bilibi_custom_fields::Kind::Choice => {
+                    let display_text = custom_fields
+                        .choice_text(client, scope, definition, stored)
+                        .await?;
                     let editor = Combobox::new(format!("{name}-input"), &name)
                         .value(value)
-                        .options(picklists.choices(client, scope, list, None).await?)
+                        .options(
+                            custom_fields
+                                .choice_options(client, scope, definition, &[value])
+                                .await?,
+                        )
                         .wrapper_class("mb-0");
                     render(&InlineChoice {
                         field,
-                        display: Html::text(&display_text),
+                        display: Html::text(if display_text.is_empty() {
+                            "—"
+                        } else {
+                            &display_text
+                        }),
                         editor: render(&editor)?,
                     })?
                 }
-                (bilibi_custom_fields::Kind::Date, _) => {
+                bilibi_custom_fields::Kind::Choices => {
+                    let display_text = custom_fields
+                        .choice_text(client, scope, definition, stored)
+                        .await?;
+                    let editor = MultiSelect::new(format!("{name}-input"), &name)
+                        .label(&definition.label)
+                        .in_fact()
+                        .options(
+                            custom_fields
+                                .choice_options(client, scope, definition, &codes)
+                                .await?,
+                        )
+                        .values(codes.iter().map(|code| (*code).to_owned()).collect())
+                        .wrapper_class("mb-0");
+                    render(&InlineChoice {
+                        field,
+                        display: Html::text(if display_text.is_empty() {
+                            "—"
+                        } else {
+                            &display_text
+                        }),
+                        editor: render(&editor)?,
+                    })?
+                }
+                bilibi_custom_fields::Kind::Date => {
                     field = field.input_type("date");
                     if let Ok(date) = value.parse::<jiff::civil::Date>() {
                         field = field.display_value(display.render_date(date));
                     }
                     render(&InlineEdit { field })?
                 }
-                (bilibi_custom_fields::Kind::Number, _) => {
+                bilibi_custom_fields::Kind::LongText => {
+                    render(&bilibi_ui::InlineLongText { field, rows: 5 })?
+                }
+                bilibi_custom_fields::Kind::Boolean => {
+                    let editor = Field::named(&name)
+                        .id(format!("{name}-input"))
+                        .label(&definition.label)
+                        .value(value)
+                        .kind(InputKind::Switch);
+                    render(&InlineChoice {
+                        field,
+                        display: Html::text(match value {
+                            "true" => "Yes",
+                            "false" => "No",
+                            _ => "—",
+                        }),
+                        editor: render(&editor)?,
+                    })?
+                }
+                bilibi_custom_fields::Kind::Email => render(&InlineEdit {
+                    field: field.input_type("email"),
+                })?,
+                bilibi_custom_fields::Kind::Phone => render(&InlineEdit {
+                    field: field.input_type("tel"),
+                })?,
+                bilibi_custom_fields::Kind::Link => render(&InlineEdit {
+                    field: field.input_type("url"),
+                })?,
+                bilibi_custom_fields::Kind::Number => {
                     field = field.input_type("text");
                     render(&InlineEdit { field })?
                 }
-                _ => render(&InlineEdit { field })?,
+                bilibi_custom_fields::Kind::Text => render(&InlineEdit { field })?,
+                bilibi_custom_fields::Kind::Reference => unreachable!("handled above"),
             };
             facts.push(Fact {
                 title: &definition.label,
@@ -1059,18 +1384,70 @@ pub(super) async fn detail(
             });
         }
     }
+    let current = match company.parent_id {
+        Some(parent) => client
+            .query_opt(
+                "SELECT COALESCE(NULLIF(legal_name,''),name) FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL",
+                &[&scope.tenant(), &parent],
+            )
+            .await?
+            .map(|row| parent_pill(parent, &row.get::<_, String>(0), true, workspace))
+            .map(|pill| (parent, pill)),
+        None => None,
+    };
+    let value = if editable {
+        let errors = match statuses.get("parent_id") {
+            CommitStatus::Error(message) => vec![message],
+            _ => Vec::new(),
+        };
+        let (selected, actions) = if parent.changing || current.is_none() {
+            let mut actions = Html::EMPTY;
+            if parent.changing {
+                actions.push(&render(&Button {
+                    id: "company-parent-keep",
+                    event: "keep_parent",
+                    button_type: "button",
+                    body: Html::text("Keep current"),
+                    ..Button::default()
+                })?);
+            }
+            if current.is_some() {
+                actions.push(&render(&Button {
+                    id: "company-parent-remove",
+                    event: "remove_parent",
+                    button_type: "button",
+                    body: Html::text("Remove parent"),
+                    ..Button::default()
+                })?);
+            }
+            (None, actions)
+        } else {
+            (current, Html::EMPTY)
+        };
+        render(&Form {
+            id: "company-parent-form",
+            event: "parent_search",
+            change: true,
+            body: parent_picker(
+                &parent,
+                words.get(&fields::PARENT_ID),
+                selected,
+                ("pick_parent", "change_parent"),
+                errors,
+            )?,
+            actions,
+            ..Form::default()
+        })?
+    } else {
+        match current {
+            Some((_, pill)) => render(&pill)?,
+            None => render(&MutedValue { text: "None" })?,
+        }
+    };
     facts.push(Fact {
-        title: fields::PARENT_ID.label,
+        title: words.get(&fields::PARENT_ID),
         id: "detail-parent",
-        value: choice(
-            "company-parent",
-            "parent_id",
-            company.parent_id.map(|v| v.to_string()).unwrap_or_default(),
-            opts.parents,
-            statuses.get("parent_id"),
-            &company,
-            editable,
-        )?,
+        value,
     });
     let context = client
         .query_one(
@@ -1078,10 +1455,7 @@ pub(super) async fn detail(
             &[&scope.tenant(), &id],
         )
         .await?;
-    for (index, name, label) in [
-        (0, "scope_activities", "Business Activities"),
-        (1, "metadata", "Metadata"),
-    ] {
+    for (index, name) in [(0, "scope_activities"), (1, "metadata")] {
         let value: Option<Value> = context.get(index);
         if name == "scope_activities" && value.as_ref().is_none_or(|value| value.is_array()) {
             let activities = value
@@ -1093,7 +1467,7 @@ pub(super) async fn detail(
             let mut field = InlineField::new(
                 "company-new-activity",
                 "scope_activities",
-                "Add business activity",
+                format!("Add {}", words.get(&fields::ACTIVITIES)),
                 "",
             )
             .version(company.version)
@@ -1104,7 +1478,7 @@ pub(super) async fn detail(
             field.save_event = "add_activity".into();
             field.editable = editable;
             facts.push(Fact {
-                title: fields::get(name).label,
+                title: words.get(&fields::get(name)),
                 id: "scope-activities-section",
                 value: render(&ActivityBody {
                     activities,
@@ -1117,7 +1491,7 @@ pub(super) async fn detail(
         let mut field = InlineField::new(
             format!("company-{name}"),
             name,
-            format!("Edit {label}"),
+            format!("Edit {}", words.get(&fields::get(name))),
             value
                 .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
                 .unwrap_or_default(),
@@ -1130,7 +1504,7 @@ pub(super) async fn detail(
         field.class = "font-mono text-xs".into();
         field.input_class = "font-mono text-xs".into();
         facts.push(Fact {
-            title: fields::get(name).label,
+            title: words.get(&fields::get(name)),
             id: "",
             value: render(&InlineLongText { field, rows: 5 })?,
         });
@@ -1144,14 +1518,14 @@ pub(super) async fn detail(
         id: "company-details",
         items: facts,
     })?);
-    let mut content = render(&Card {
+    sections.push(render(&Card {
         id: "company-details-card",
         inner_class: "p-5 sm:p-6",
         role: "region",
         labelledby: "company-details-heading",
         body: details,
         ..Card::default()
-    })?;
+    })?);
     // Child-owning slices contribute the remaining panels; subsidiaries are
     // Company-owned and can be shown immediately without an upward dependency.
     // Keep the platform's bounded read; the extra row makes truncation explicit.
@@ -1223,12 +1597,9 @@ pub(super) async fn detail(
         table.framed = false;
         table.caption = "Subsidiaries";
         children_body.push(&render(&table)?);
-        content.push(&card("company-subsidiaries-card", children_body, true)?);
+        sections.push(card("company-subsidiaries-card", children_body, true)?);
     }
-    content.push(&departments_section(client, scope, id, departments_columns).await?);
-    // The Relationships section arrives as the `company.relationships` panel
-    // (`web::relationships`); the slot keeps the mounted card through patches.
-    content.push(&render(&RelationshipsSlot {})?);
+    sections.push(departments_section(client, scope, id, departments_columns).await?);
     let modal = if let Some((activity, _)) = pending_activity {
         render(&ConfirmDialog {
             id: "company-remove-activity-dialog",
@@ -1254,10 +1625,18 @@ pub(super) async fn detail(
             }
         );
         let detail = match pending.operation {
-            crate::lifecycle::Operation::Archive => "Its records are kept. Archiving is final: an archived company cannot be reactivated.",
-            crate::lifecycle::Operation::Suspend => "Its records are kept. Reactivating the company lifts the suspension.",
-            crate::lifecycle::Operation::Activate => "The company becomes active. It can be suspended later.",
-            crate::lifecycle::Operation::Reactivate => "The suspension is lifted and the company is active again.",
+            crate::lifecycle::Operation::Archive => {
+                "Its records are kept. Archiving is final: an archived company cannot be reactivated."
+            }
+            crate::lifecycle::Operation::Suspend => {
+                "Its records are kept. Reactivating the company lifts the suspension."
+            }
+            crate::lifecycle::Operation::Activate => {
+                "The company becomes active. It can be suspended later."
+            }
+            crate::lifecycle::Operation::Reactivate => {
+                "The suspension is lifted and the company is active again."
+            }
         };
         let mut reason = Field::named("reason")
             .id("company-lifecycle-reason")
@@ -1315,27 +1694,15 @@ pub(super) async fn detail(
         PageVariant::Detail,
         render(&DetailBody {
             id,
-            panels,
             header,
-            chain,
-            notice: notices,
-            card: content,
+            sections: render(&LivePanelStack {
+                parts: &sections,
+                panel_ids: panels,
+            })?,
             modal,
         })?,
     )
 }
-#[derive(Template)]
-#[template(
-    source = "<div id=\"company-record-history-slot\" data-live-ignore><div id=\"company-record-history\"></div></div>",
-    ext = "html"
-)]
-struct History {}
-#[derive(Template)]
-#[template(
-    source = "<div id=\"company-relationships-slot\" data-live-ignore><div id=\"company-relationships\"></div></div>",
-    ext = "html"
-)]
-struct RelationshipsSlot {}
 #[derive(Template)]
 #[template(path = "company_lifecycle_form.html")]
 struct LifecycleForm {
@@ -1347,6 +1714,7 @@ fn restricted(id: &str) -> Result<Html> {
     render(&Restricted::new(id))
 }
 fn text_fact(
+    words: &bilibi_grid::RecordWords,
     company: &Company,
     name: &str,
     value: &str,
@@ -1358,9 +1726,14 @@ fn text_fact(
     if masked {
         return restricted(&id);
     }
-    let mut field = InlineField::new(id, name, format!("Edit {}", name.replace('_', " ")), value)
-        .version(company.version)
-        .status(status);
+    let mut field = InlineField::new(
+        id,
+        name,
+        format!("Edit {}", words.get(&fields::get(name))),
+        value,
+    )
+    .version(company.version)
+    .status(status);
     field.id_value = company.id.to_string();
     field.editable = editable;
     field.class = match name {
@@ -1397,6 +1770,8 @@ pub(super) struct CreateState<'a> {
     pub confirming: bool,
     pub likely: bool,
     pub reason: &'a str,
+    pub parent: ParentPicker<'a>,
+    pub custom: &'a CustomPickers,
 }
 pub(super) fn duplicate_builtins() -> Vec<BuiltinColumn> {
     [
@@ -1406,7 +1781,13 @@ pub(super) fn duplicate_builtins() -> Vec<BuiltinColumn> {
         ("facts", "Matched facts"),
     ]
     .into_iter()
-    .map(|(id, label)| BuiltinColumn::new(id, label))
+    .map(|(id, label)| {
+        let column = BuiltinColumn::new(id, label);
+        match id {
+            "name" | "status" => column.grid_field(format!("companies.{id}")),
+            _ => column,
+        }
+    })
     .collect()
 }
 pub(super) async fn create(
@@ -1423,42 +1804,53 @@ pub(super) async fn create(
         confirming,
         likely,
         reason,
+        parent,
+        custom,
     } = state;
     bilibi_authz::authorize_key(client, scope, crate::CREATE).await?;
     let masked = crate::field_contributions::effective_restrictions(client, scope).await?;
-    let opts = options(client, scope, None, true).await?;
+    let words = bilibi_grid::RecordWords::load(client, scope, "companies").await?;
+    let opts = options(client, true).await?;
     let mut fields = Vec::new();
-    for (name, label, kind, placeholder) in [
-        ("parent_id", "Parent Company", InputKind::Select, ""),
-        ("status", "Status", InputKind::Select, ""),
-        ("name", "Name", InputKind::Text, "Company display name"),
-        ("code", "Code", InputKind::Text, ""),
+    for (name, kind, placeholder) in [
+        ("parent_id", InputKind::Select, ""),
+        ("status", InputKind::Select, ""),
+        ("name", InputKind::Text, "Company display name"),
+        ("code", InputKind::Text, ""),
         (
             "legal_name",
-            "Legal Name",
             InputKind::Text,
             "Registered legal entity name",
         ),
-        (
-            "legal_entity_type_id",
-            "Legal Entity Type",
-            InputKind::Select,
-            "",
-        ),
-        (
-            "registration_number",
-            "Registration Number",
-            InputKind::Text,
-            "",
-        ),
-        ("tax_id", "Tax ID", InputKind::Text, ""),
-        ("jurisdiction", "Jurisdiction", InputKind::Select, ""),
-        ("email", "Email", InputKind::Email, ""),
-        ("website", "Website", InputKind::Text, "example.com"),
+        ("legal_entity_type_id", InputKind::Select, ""),
+        ("registration_number", InputKind::Text, ""),
+        ("tax_id", InputKind::Text, ""),
+        ("jurisdiction", InputKind::Select, ""),
+        ("email", InputKind::Email, ""),
+        ("website", InputKind::Text, "example.com"),
     ] {
+        let label = words.get(&fields::get(name));
         let id = format!("company-{}", name.replace('_', "-"));
         if masked.contains(name) {
             fields.push(render(&RestrictedField::new(&id, label))?);
+            continue;
+        }
+        if name == "parent_id" {
+            let errors = errors
+                .iter()
+                .filter(|e| e.field == name)
+                .map(|e| e.message.clone())
+                .collect();
+            let selected = parent
+                .chosen
+                .map(|(id, label)| (id, parent_pill(id, label, false, false)));
+            fields.push(parent_picker(
+                &parent,
+                label,
+                selected,
+                ("pick_parent", "clear_parent"),
+                errors,
+            )?);
             continue;
         }
         let mut field = Field::named(name)
@@ -1478,14 +1870,13 @@ pub(super) async fn create(
             field = field.required();
         }
         field = match name {
-            "parent_id" => field.prompt("None").options(opts.parents.clone()),
             "legal_entity_type_id" => field.prompt("Select type...").options(opts.types.clone()),
             "jurisdiction" => field
                 .prompt("Select country...")
                 .options(opts.countries.clone()),
             "status" => field.options(choices(&[("Active", "active"), ("Pending", "pending")])),
             "code" => field
-                .hint("Clear the code to let Bilibi choose one.")
+                .hint("Clear the code to generate one automatically.")
                 .attr("maxlength", "255")
                 .attr("data-edited-marker", "code_edited"),
             _ => field.attr("maxlength", if name == "name" { "160" } else { "255" }),
@@ -1510,13 +1901,13 @@ pub(super) async fn create(
         if masked.contains(definition.id) {
             extension_fields.push(render(&RestrictedField::new(
                 format!("company-{}", definition.id),
-                definition.label,
+                words.field(definition.id, definition.label),
             ))?);
             continue;
         }
         let mut field = Field::named(definition.id)
             .id(format!("company-{}", definition.id))
-            .label(definition.label)
+            .label(words.field(definition.id, definition.label))
             .value(values.get(definition.id).cloned().unwrap_or_default())
             .errors(
                 errors
@@ -1546,7 +1937,7 @@ pub(super) async fn create(
                 };
                 extension_fields.push(render(
                     &Combobox::new(format!("company-{}", definition.id), definition.id)
-                        .label(definition.label)
+                        .label(words.field(definition.id, definition.label))
                         .value(value)
                         .options(choices)
                         .errors(
@@ -1595,6 +1986,58 @@ pub(super) async fn create(
                 .map(|error| error.message.clone())
                 .collect();
             let value = values.get(&name).cloned().unwrap_or_default();
+            match definition.kind {
+                // One value per tick, posted as `cf_<key>[]` and kept joined
+                // by commas between renders (a code never holds one).
+                bilibi_custom_fields::Kind::Choices => {
+                    let posted = values
+                        .get(&format!("{name}[]"))
+                        .cloned()
+                        .unwrap_or_default();
+                    let codes: Vec<String> =
+                        bilibi_custom_fields::codes_of(Some(&bilibi_custom_fields::codes_value([
+                            posted.as_str(),
+                        ])))
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect();
+                    let held: Vec<&str> = codes.iter().map(String::as_str).collect();
+                    let mut select =
+                        MultiSelect::new(format!("company-{}", name.replace('_', "-")), &name)
+                            .label(&definition.label)
+                            .options(
+                                crate::field_contributions::custom_fields()
+                                    .map_err(|_| Error::Internal)?
+                                    .choice_options(client, scope, definition, &held)
+                                    .await?,
+                            )
+                            .values(codes.clone())
+                            .errors(field_errors);
+                    if let Some(help) = &definition.help {
+                        select = select.hint(help);
+                    }
+                    additional_fields.push(&render(&select)?);
+                    continue;
+                }
+                bilibi_custom_fields::Kind::Reference => {
+                    let selected = custom.chosen.get(&name).map(|chosen| {
+                        (
+                            format!("{}:{}", chosen.reference.kind, chosen.id),
+                            chosen.pill(format!("company-{}-pill", name.replace('_', "-")), false),
+                        )
+                    });
+                    additional_fields.push(&custom_picker(
+                        custom,
+                        definition,
+                        &name,
+                        selected,
+                        field_errors,
+                        false,
+                    )?);
+                    continue;
+                }
+                _ => {}
+            }
             if let (bilibi_custom_fields::Kind::Choice, Some(list)) =
                 (definition.kind, definition.picklist.as_deref())
             {
@@ -1628,38 +2071,46 @@ pub(super) async fn create(
                 bilibi_custom_fields::Kind::Number => {
                     field.kind(InputKind::Text).attr("inputmode", "decimal")
                 }
-                _ => field.kind(InputKind::Text).attr("maxlength", "1000"),
+                bilibi_custom_fields::Kind::LongText => {
+                    field.kind(InputKind::Textarea).attr("rows", "5")
+                }
+                bilibi_custom_fields::Kind::Boolean => field.kind(InputKind::Switch),
+                bilibi_custom_fields::Kind::Email => field.kind(InputKind::Email),
+                bilibi_custom_fields::Kind::Phone => field.kind(InputKind::Tel),
+                bilibi_custom_fields::Kind::Link => field.kind(InputKind::Url),
+                bilibi_custom_fields::Kind::Text
+                | bilibi_custom_fields::Kind::Choice
+                | bilibi_custom_fields::Kind::Choices
+                | bilibi_custom_fields::Kind::Reference => field.kind(InputKind::Text),
             };
             additional_fields.push(&render(&field)?);
         }
     }
-    let context = [
-        ("scope_activities", "Business Activities (JSON)"),
-        ("metadata", "Metadata (JSON)"),
-    ]
-    .into_iter()
-    .map(|(name, label)| {
-        render(
-            &Field::named(name)
-                .id(format!("company-{name}"))
-                .label(label)
-                .kind(InputKind::Textarea)
-                .placeholder(if name == "metadata" {
-                    r#"{"employee_count":120}"#
-                } else {
-                    r#"{"industry":"Manufacturing"}"#
-                })
-                .value(values.get(name).cloned().unwrap_or_default())
-                .errors(
-                    errors
-                        .iter()
-                        .filter(|e| e.field == name)
-                        .map(|e| e.message.clone())
-                        .collect(),
-                ),
-        )
-    })
-    .collect::<Result<Vec<_>>>()?;
+    let context = ["scope_activities", "metadata"]
+        .into_iter()
+        .map(|name| {
+            let label = words.get(&fields::get(name));
+            render(
+                &Field::named(name)
+                    .id(format!("company-{name}"))
+                    .label(label)
+                    .kind(InputKind::Textarea)
+                    .placeholder(if name == "metadata" {
+                        r#"{"employee_count":120}"#
+                    } else {
+                        r#"{"industry":"Manufacturing"}"#
+                    })
+                    .value(values.get(name).cloned().unwrap_or_default())
+                    .errors(
+                        errors
+                            .iter()
+                            .filter(|e| e.field == name)
+                            .map(|e| e.message.clone())
+                            .collect(),
+                    ),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
     let header = render(&Header {
         title: Html::text("Create Company"),
         subtitle: "",
@@ -1871,13 +2322,22 @@ pub(super) fn new_company(
             }
         }
     }
-    // A tenant's own fields post as `cf_<key>`; the check against its
-    // definitions happens in the write, which refuses a key that is not one.
+    // A tenant's own fields post as `cf_<key>` (a record field's chosen id
+    // too), several choices as `cf_<key>[]` with their codes joined by
+    // commas; the check against the definitions happens in the write, which
+    // refuses a key that is not one or a value of the wrong shape.
     let custom: serde_json::Map<String, Value> = values
         .iter()
-        .filter_map(|(name, value)| Some((name.strip_prefix("cf_")?, value.trim())))
-        .filter(|(_, value)| !value.is_empty())
-        .map(|(key, value)| (key.to_owned(), Value::String(value.to_owned())))
+        .filter_map(|(name, value)| {
+            let key = name.strip_prefix("cf_")?;
+            match key.strip_suffix("[]") {
+                Some(key) => Some((key, bilibi_custom_fields::codes_value([value.as_str()]))),
+                None => Some((key, Value::String(value.trim().to_owned())))
+                    .filter(|(_, value)| value.as_str() != Some("")),
+            }
+        })
+        .filter(|(_, value)| !value.is_null())
+        .map(|(key, value)| (key.to_owned(), value))
         .collect();
     if !custom.is_empty() {
         company_fields.insert(
@@ -1896,6 +2356,24 @@ pub(super) fn new_company(
     };
     let activities = object("scope_activities");
     let metadata = object("metadata");
+    for (name, value) in values {
+        if let Some(field) = name
+            .strip_suffix("[]")
+            .filter(|field| field.starts_with("cf_"))
+        {
+            if value
+                .split(',')
+                .filter(|code| !code.trim().is_empty())
+                .count()
+                > bilibi_picklists::VALUES_MAX
+            {
+                errors.push(FieldError::new_owned(
+                    field.to_owned(),
+                    format!("must have at most {} choices", bilibi_picklists::VALUES_MAX),
+                ));
+            }
+        }
+    }
     (new, company_fields, activities, metadata, errors)
 }
 
@@ -1935,20 +2413,21 @@ struct MutedValue<'a> {
 // Children columns are independent of Departments.
 pub(super) fn children_builtins() -> Vec<BuiltinColumn> {
     vec![
-        BuiltinColumn::new("name", "Name"),
-        BuiltinColumn::new("status", "Status"),
-        BuiltinColumn::new("legal_entity_type", "Legal Entity Type"),
-        BuiltinColumn::new("jurisdiction", "Jurisdiction"),
+        BuiltinColumn::new("name", "Name").grid_field("companies.name"),
+        BuiltinColumn::new("status", "Status").grid_field("companies.status"),
+        BuiltinColumn::new("legal_entity_type", "Legal Entity Type")
+            .grid_field("legal_entity_types.name"),
+        BuiltinColumn::new("jurisdiction", "Jurisdiction").grid_field("companies.jurisdiction"),
     ]
 }
 /// The detail page's Departments table:
 /// built-in columns only, with Manage leading to the departments page.
 pub(super) fn department_builtins() -> Vec<BuiltinColumn> {
     vec![
-        BuiltinColumn::new("type", "Department Type"),
+        BuiltinColumn::new("type", "Department Type").grid_field("departments.type_name"),
         BuiltinColumn::new("category", "Category"),
         BuiltinColumn::new("head", "Head"),
-        BuiltinColumn::new("status", "Status"),
+        BuiltinColumn::new("status", "Status").grid_field("departments.status"),
     ]
 }
 #[derive(Template)]
@@ -2040,7 +2519,6 @@ async fn departments_section(
     }
     render(&Card {
         id: "company-departments-card",
-        class: "mt-6",
         inner_class: "p-0",
         role: "region",
         labelledby: "company-departments-heading",
@@ -2074,12 +2552,13 @@ fn field_filter_controls(state: &ExtensionListFields<'_>, page: &crate::Page) ->
         let selected = state
             .available
             .iter()
-            .find(|field| field.id == filter.field);
+            .find(|field| field.id == filter.field && field.kind.filterable());
         let mut choices = vec![Choice::new("Choose a field", "")];
         choices.extend(
             state
                 .available
                 .iter()
+                .filter(|field| field.kind.filterable())
                 .map(|field| Choice::new(&field.label, &field.id)),
         );
         if selected.is_none() && !filter.field.is_empty() {
@@ -2139,7 +2618,8 @@ fn field_filter_controls(state: &ExtensionListFields<'_>, page: &crate::Page) ->
                         value.kind(InputKind::Text)
                     }
                 }
-                crate::list_fields::ListKind::Choice { .. } => {
+                crate::list_fields::ListKind::Boolean
+                | crate::list_fields::ListKind::Choice { .. } => {
                     let mut choices = vec![Choice::new("Choose a value", "")];
                     choices.extend(field.choices.clone());
                     if !filter.value.is_empty() && !choices.iter().any(|c| c.value == filter.value)
@@ -2148,6 +2628,21 @@ fn field_filter_controls(state: &ExtensionListFields<'_>, page: &crate::Page) ->
                     }
                     value.kind(InputKind::Select).options(choices)
                 }
+                // One code the company holds among its several; none
+                // chosen applies nothing.
+                crate::list_fields::ListKind::Choices => {
+                    let mut choices = vec![Choice::new(
+                        format!("Any {}", field.label.to_lowercase()),
+                        "",
+                    )];
+                    choices.extend(field.choices.clone());
+                    if !filter.value.is_empty() && !choices.iter().any(|c| c.value == filter.value)
+                    {
+                        choices.push(Choice::new("Unavailable value", &filter.value));
+                    }
+                    value.kind(InputKind::Select).options(choices)
+                }
+                crate::list_fields::ListKind::Reference => value,
             };
             body.push(&render(&value)?);
         }
@@ -2170,7 +2665,9 @@ fn field_filter_controls(state: &ExtensionListFields<'_>, page: &crate::Page) ->
             actions: remove,
         })?);
     }
-    if !state.available.is_empty() && state.filters.len() < crate::list_fields::MAX_FILTERS {
+    if state.available.iter().any(|field| field.kind.filterable())
+        && state.filters.len() < crate::list_fields::MAX_FILTERS
+    {
         result.push(&render(&Button {
             id: "company-field-filter-add",
             event: "field_filter_add",

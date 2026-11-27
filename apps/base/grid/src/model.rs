@@ -1,7 +1,11 @@
 //! Contribution data and the validated catalog it becomes. Contributors declare
 //! static tables, fields and links; nothing here queries a database, and no part
 //! of a path or SQL identifier ever comes from a client.
-use bilibi_module_registry::{Entry, Provenance, RegistryError, Result};
+mod installed;
+
+pub use installed::Installed;
+
+use bilibi_module_registry::{Provenance, RegistryError, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_TABLES: usize = 512;
@@ -11,169 +15,91 @@ const MAX_ID: usize = 64;
 const MAX_LABEL: usize = 120;
 const MAX_SQL: usize = 20_000;
 
-/// Field types a contribution may declare.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FieldType {
-    Integer,
-    Float,
-    Decimal,
-    String,
-    Boolean,
-    Date,
-    DateTime,
-    Enum,
-}
-impl FieldType {
-    /// Whether values order on a number line (bars, bands and heat).
-    pub fn numeric(self) -> bool {
-        matches!(
-            self,
-            Self::Integer | Self::Float | Self::Decimal | Self::Date | Self::DateTime
-        )
-    }
-    /// Whether sum/avg make sense.
-    pub fn number(self) -> bool {
-        matches!(self, Self::Integer | Self::Float | Self::Decimal)
-    }
-    pub fn dated(self) -> bool {
-        matches!(self, Self::Date | Self::DateTime)
-    }
-}
-
-/// What kind of personal data a field holds (ADR 05). The kind shapes a partial
-/// mask and names the field in an audit erasure; `base/privacy` refuses boot
-/// when a table marks one and its module contributes no personal-data handler.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PersonalKind {
-    Name,
-    Email,
-    Phone,
-    Identifier,
-    Date,
-    FreeText,
-}
-impl PersonalKind {
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Name => "name",
-            Self::Email => "email",
-            Self::Phone => "phone",
-            Self::Identifier => "identifier",
-            Self::Date => "date",
-            Self::FreeText => "free_text",
-        }
-    }
-}
-
-/// One value a column can show. `column` is the key the owner's source selects it
-/// under; it defaults to the field id. `hidden` fields exist for links to join on
-/// and never appear as columns. `protected` marks a field no operator may
-/// restrict because the owner's own logic needs every reader to see it. A table's
-/// key, label and time fields, hidden fields and join fields are protected
-/// without saying so.
-#[derive(Clone, Copy, Debug)]
-pub struct Field {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub ty: FieldType,
-    pub column: Option<&'static str>,
-    pub hidden: bool,
-    /// The closed set an enum field takes, which the band lens colours.
-    pub values: &'static [&'static str],
-    pub protected: bool,
-    /// Set when the field holds a person's data; see [`PersonalKind`].
-    pub personal: Option<PersonalKind>,
-    /// Explicit owner classification, required for cross-tenant oversight.
-    /// `personal == None` alone means unknown, not non-personal.
-    pub classified: bool,
-}
-impl Field {
-    pub const fn new(id: &'static str, label: &'static str, ty: FieldType) -> Self {
-        Self {
-            id,
-            label,
-            ty,
-            column: None,
-            hidden: false,
-            values: &[],
-            protected: false,
-            personal: None,
-            classified: false,
-        }
-    }
-    pub const fn choice(
-        id: &'static str,
-        label: &'static str,
-        values: &'static [&'static str],
-    ) -> Self {
-        Self {
-            values,
-            ..Self::new(id, label, FieldType::Enum)
-        }
-    }
-    pub const fn column(self, column: &'static str) -> Self {
-        Self {
-            column: Some(column),
-            ..self
-        }
-    }
-    pub const fn hidden(self) -> Self {
-        Self {
-            hidden: true,
-            ..self
-        }
-    }
-    pub const fn protected(self) -> Self {
-        Self {
-            protected: true,
-            ..self
-        }
-    }
-    pub const fn personal(self, kind: PersonalKind) -> Self {
-        Self {
-            personal: Some(kind),
-            classified: true,
-            ..self
-        }
-    }
-    /// The owner has reviewed this value (including derived/hidden values)
-    /// and determined it contains no person's data. Not the default.
-    pub const fn non_personal(self) -> Self {
-        Self {
-            personal: None,
-            classified: true,
-            ..self
-        }
-    }
-    /// The key of the owner's source this field is read from.
-    pub fn source_key(&self) -> &'static str {
-        self.column.unwrap_or(self.id)
-    }
-}
+use crate::{Field, FieldType};
 
 /// The owner's statement for the rows a scope may read. It is static SQL that the
 /// grid wraps in a subquery, so every hop carries its owner's boundary and the
 /// grid adds no tenant predicate of its own. A tenant-scoped source takes the
-/// tenant id as `$1` (bigint) and may take the actor's user id as `$2`; a global
-/// source (reference data with no tenant) takes none. It must expose every
-/// declared field under its `column` key, and the keys it selects must not
-/// depend on the scope.
+/// tenant id as `$1` (bigint) and may take the actor's user id as `$2`. A
+/// company-scoped source also takes the selected company as `$3` (bigint); it
+/// must reference all three parameters, even when it needs `$2` only as a
+/// proof that an actor was supplied. A global source (reference data with no
+/// tenant) takes none. It must expose every declared field under its `column`
+/// key, and the keys it selects must not depend on the scope.
 #[derive(Clone, Copy, Debug)]
 pub struct Source {
     pub sql: &'static str,
     pub tenant_scoped: bool,
+    pub company_scoped: bool,
+    /// Other Grid tables whose fields supply projected values. Consumers
+    /// that cache results use these table ids to pin their field restrictions.
+    pub extra_tables: &'static [&'static str],
+    /// Projected fields whose values derive from fields on `extra_tables`.
+    /// The scoped catalog carries each source field's restriction onto the
+    /// projected field without inspecting SQL.
+    pub derived: &'static [DerivedColumn],
 }
 impl Source {
     pub const fn tenant(sql: &'static str) -> Self {
         Self {
             sql,
             tenant_scoped: true,
+            company_scoped: false,
+            extra_tables: &[],
+            derived: &[],
+        }
+    }
+    /// Rows of the selected company. `$1`, `$2` and `$3` are the tenant,
+    /// actor and sealed current company respectively.
+    pub const fn company(sql: &'static str) -> Self {
+        Self {
+            sql,
+            tenant_scoped: true,
+            company_scoped: true,
+            extra_tables: &[],
+            derived: &[],
         }
     }
     pub const fn global(sql: &'static str) -> Self {
         Self {
             sql,
             tenant_scoped: false,
+            company_scoped: false,
+            extra_tables: &[],
+            derived: &[],
+        }
+    }
+    /// Declares the extra table IDs that consumers can use to track field restrictions.
+    pub const fn reads(self, tables: &'static [&'static str]) -> Self {
+        Self {
+            extra_tables: tables,
+            ..self
+        }
+    }
+    /// Declares which of this table's fields derive from fields on tables
+    /// named by [`Source::reads`].
+    pub const fn derives(self, fields: &'static [DerivedColumn]) -> Self {
+        Self {
+            derived: fields,
+            ..self
+        }
+    }
+}
+
+/// One projected Grid field and the declared field that supplies its value.
+/// `column` is the projected table's field id, not a SQL expression or alias.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DerivedColumn {
+    pub column: &'static str,
+    pub table: &'static str,
+    pub field: &'static str,
+}
+impl DerivedColumn {
+    pub const fn new(column: &'static str, table: &'static str, field: &'static str) -> Self {
+        Self {
+            column,
+            table,
+            field,
         }
     }
 }
@@ -182,6 +108,7 @@ impl Source {
 pub struct TableDecl {
     pub id: &'static str,
     pub label: &'static str,
+    list_address: Option<&'static str>,
     /// What an account needs to read any row; checked before a path may touch it.
     pub capability: &'static str,
     pub source: Source,
@@ -195,6 +122,28 @@ pub struct TableDecl {
     /// The audit `auditable_type` values rows are recorded under, so a field
     /// restriction reaches the audit views of those rows. One table claims a type.
     pub record_types: &'static [&'static str],
+    /// The field holding the account that owns a row (a deal's owner, a
+    /// case's assignee), for record reach (#683). Required exactly when the
+    /// table's capability supports reach (`CapabilityDefinition::with_reach`).
+    pub owner: Option<&'static str>,
+    /// The field holding the Core team a row is filed under (a case's queue
+    /// team), which "my team's" reach also admits. Needs `owner`.
+    pub team: Option<&'static str>,
+    /// The record each row is about; see [`Subject`].
+    pub subject: Option<Subject>,
+}
+
+/// The record a table's rows are about (an escalation's customer): the field
+/// holding its id and its Base Records kind (#877). The field then reads as
+/// the record that id names now, so rows about records merged since group and
+/// filter under their survivor, and the report builder's reads
+/// ([`crate::report_summary`], [`crate::report_page`]) keep rows whose
+/// subject passes the Base Records owner's read rule. A row
+/// without a subject stays.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Subject {
+    pub field: &'static str,
+    pub kind: &'static str,
 }
 impl TableDecl {
     pub const fn new(
@@ -208,6 +157,7 @@ impl TableDecl {
         Self {
             id,
             label,
+            list_address: None,
             capability,
             source,
             key,
@@ -215,6 +165,23 @@ impl TableDecl {
             time_field: None,
             fields,
             record_types: &[],
+            owner: None,
+            team: None,
+            subject: None,
+        }
+    }
+    /// Names the integer or text field holding the id of the record each
+    /// row is about, and that record's Base Records kind. See [`Subject`].
+    pub const fn subject(self, field: &'static str, kind: &'static str) -> Self {
+        Self {
+            subject: Some(Subject { field, kind }),
+            ..self
+        }
+    }
+    pub const fn list_address(self, address: &'static str) -> Self {
+        Self {
+            list_address: Some(address),
+            ..self
         }
     }
     pub const fn label_field(self, field: &'static str) -> Self {
@@ -232,6 +199,22 @@ impl TableDecl {
     pub const fn record_types(self, types: &'static [&'static str]) -> Self {
         Self {
             record_types: types,
+            ..self
+        }
+    }
+    /// Names the integer field holding the account that owns a row. Grid
+    /// then keeps a reader to the rows their reach on the table's capability
+    /// admits (#683).
+    pub const fn owner(self, field: &'static str) -> Self {
+        Self {
+            owner: Some(field),
+            ..self
+        }
+    }
+    /// Names the integer field holding the Core team a row is filed under.
+    pub const fn team(self, field: &'static str) -> Self {
+        Self {
+            team: Some(field),
             ..self
         }
     }
@@ -353,8 +336,27 @@ pub struct Table {
     fields: Vec<Field>,
     links: Vec<Link>,
     protected: BTreeSet<&'static str>,
+    /// In a scoped catalog: the reader's reach on an owner-declaring table
+    /// when it is narrower than all (#683).
+    reach: Option<bilibi_authz::Reach>,
+    pub(crate) report_subjects: bool,
+    /// In a scoped catalog: the tenant's custom fields among `fields`, by id,
+    /// with their current label and value SQL over the row alias `{alias}`.
+    custom: BTreeMap<&'static str, CustomField>,
+}
+#[derive(Clone, Debug)]
+struct CustomField {
+    label: String,
+    sql: String,
+    searchable: bool,
+    reference: Option<&'static str>,
+    watcher_condition: bool,
 }
 impl Table {
+    pub fn list_address(&self) -> Option<&'static str> {
+        self.decl.list_address
+    }
+
     pub fn id(&self) -> &'static str {
         self.decl.id
     }
@@ -397,6 +399,84 @@ impl Table {
     pub fn field(&self, id: &str) -> Option<&Field> {
         self.fields.iter().find(|field| field.id == id)
     }
+    /// What a field is called: its declared label, or a tenant custom field's
+    /// current label.
+    pub fn field_label<'a>(&'a self, field: &'a Field) -> &'a str {
+        self.custom
+            .get(field.id)
+            .map_or(field.label, |custom| custom.label.as_str())
+    }
+    /// Whether `id` is one of the tenant's custom fields in this catalog.
+    pub fn is_custom(&self, id: &str) -> bool {
+        self.custom.contains_key(id)
+    }
+    /// Whether `id` is a custom field the tenant offered to watcher conditions.
+    pub fn custom_watcher_condition(&self, id: &str) -> bool {
+        self.custom
+            .get(id)
+            .is_some_and(|custom| custom.watcher_condition)
+    }
+    pub fn custom_reference(&self, id: &str) -> Option<&'static str> {
+        self.custom.get(id).and_then(|custom| custom.reference)
+    }
+    /// The record each row is about, when the owner declares one.
+    pub fn subject(&self) -> Option<Subject> {
+        self.decl.subject
+    }
+    /// The Base Records kind a field's value names: a tenant's custom record
+    /// field, or the table's subject field.
+    pub fn reference(&self, id: &str) -> Option<&'static str> {
+        self.custom_reference(id)
+            .or_else(|| self.report_subject(id).map(|subject| subject.kind))
+    }
+    pub(crate) fn report_subject(&self, id: &str) -> Option<Subject> {
+        self.subject()
+            .filter(|subject| self.report_subjects && subject.field == id)
+    }
+    pub(crate) fn remove_custom_references(&mut self) {
+        self.fields.retain(|field| {
+            !self
+                .custom
+                .get(field.id)
+                .is_some_and(|custom| custom.reference.is_some())
+        });
+        self.custom.retain(|_, custom| custom.reference.is_none());
+    }
+    pub(crate) fn custom_sql(&self, id: &str, alias: &str) -> Option<String> {
+        self.custom
+            .get(id)
+            .map(|custom| custom.sql.replace("{alias}", alias))
+    }
+    /// The values of the tenant's searchable custom fields (text, links,
+    /// phone numbers, email) on the row `alias`, as SQL text expressions.
+    pub fn custom_search_values(&self, alias: &str) -> Vec<String> {
+        self.custom
+            .values()
+            .filter(|custom| custom.searchable)
+            .map(|custom| custom.sql.replace("{alias}", alias))
+            .collect()
+    }
+    pub(crate) fn add_custom(
+        &mut self,
+        field: Field,
+        label: String,
+        sql: String,
+        searchable: bool,
+        reference: Option<&'static str>,
+        watcher_condition: bool,
+    ) {
+        self.custom.insert(
+            field.id,
+            CustomField {
+                label,
+                sql,
+                searchable,
+                reference,
+                watcher_condition,
+            },
+        );
+        self.fields.push(field);
+    }
     /// The fields a column may show: declaration order, without hidden ones.
     pub fn visible_fields(&self) -> impl Iterator<Item = &Field> {
         self.fields.iter().filter(|field| !field.hidden)
@@ -414,6 +494,44 @@ impl Table {
     /// Whether an operator may never restrict the field.
     pub fn is_protected(&self, field: &str) -> bool {
         self.protected.contains(field)
+    }
+    /// In a scoped catalog, how far the reader reaches into this table's
+    /// rows when it is narrower than all; `None` is every row the source
+    /// returns.
+    pub fn reach(&self) -> Option<bilibi_authz::Reach> {
+        self.reach
+    }
+    pub(crate) fn with_reach(mut self, reach: bilibi_authz::Reach) -> Self {
+        self.reach = (reach != bilibi_authz::Reach::All).then_some(reach);
+        self
+    }
+    /// The owner's statement for the rows this reader may read, as a
+    /// parenthesized subquery: the source itself, or, when the reader's reach
+    /// is narrower than all, the source kept to the rows the reach admits.
+    /// It binds the tenant as `$1` and the reader as `$2`, as every Grid
+    /// statement does. Put this, never `source().sql`, into a statement that
+    /// reads rows.
+    pub fn scoped_source(&self) -> String {
+        let sql = self.decl.source.sql;
+        match (self.reach, self.decl.owner) {
+            (Some(reach), Some(owner)) => {
+                let column = |id: &'static str| {
+                    let key = self
+                        .decl
+                        .fields
+                        .iter()
+                        .find(|field| field.id == id)
+                        .map_or(id, Field::source_key);
+                    format!("grid_reach.\"{}\"", key.replace('"', "\"\""))
+                };
+                let team = self.decl.team.map(column);
+                format!(
+                    "(SELECT * FROM ({sql}) grid_reach WHERE {})",
+                    reach.predicate(&column(owner), team.as_deref())
+                )
+            }
+            _ => format!("({sql})"),
+        }
     }
     /// A link to a table the actor cannot read does not exist for them: a path
     /// through it is refused exactly as an unknown one is, revealing nothing.
@@ -457,126 +575,8 @@ fn source_valid(source: &Source) -> bool {
         && (head == "select" || head == "with")
         && !sql.contains(';')
         && source.sql.contains("$1") == source.tenant_scoped
-}
-
-/// Every installed table, validated into one catalog.
-#[derive(Debug, Default)]
-pub struct Installed {
-    tables: BTreeMap<&'static str, Table>,
-}
-impl Installed {
-    /// Validates the complete sorted set. Any defect fails the snapshot build, so a
-    /// broken catalog never reaches a page. Nothing here runs a source.
-    pub fn from_entries(entries: &[Entry]) -> Result<Self> {
-        let mut tables: BTreeMap<&'static str, Table> = BTreeMap::new();
-        let mut pending = Vec::new();
-        let mut types: BTreeMap<&str, &str> = BTreeMap::new();
-        for entry in entries {
-            let contribution = entry.get::<GridContribution>()?;
-            let owner = entry.provenance.module;
-            let at = where_(&entry.provenance);
-            for decl in contribution.tables {
-                let table = Table::new(decl, owner, entry.provenance, &at)?;
-                for kind in decl.record_types {
-                    if let Some(first) = types.insert(kind, decl.id) {
-                        return Err(invalid(format!(
-                            "grid record type {kind} claimed by {first} and {} from {at}",
-                            decl.id
-                        )));
-                    }
-                }
-                if tables.insert(decl.id, table).is_some() {
-                    return Err(invalid(format!(
-                        "duplicate grid table {} from {at}",
-                        decl.id
-                    )));
-                }
-                if tables.len() > MAX_TABLES {
-                    return Err(invalid(format!("more than {MAX_TABLES} grid tables")));
-                }
-            }
-            pending.extend(
-                contribution
-                    .links
-                    .iter()
-                    .map(|link| (link, entry.provenance)),
-            );
-        }
-        for (link, provenance) in pending {
-            link_into(&mut tables, link, &provenance)?;
-        }
-        for entry in entries {
-            let contribution = entry.get::<GridContribution>()?;
-            for schema in contribution.record_fields {
-                let table = tables.get_mut(schema.table).ok_or_else(|| {
-                    invalid(format!("record fields name unknown table {}", schema.table))
-                })?;
-                if table.owner != entry.provenance.module
-                    && !contribution
-                        .links
-                        .iter()
-                        .any(|link| link.from == schema.table)
-                {
-                    return Err(invalid(format!(
-                        "record fields for {} must own the table or a panel link",
-                        schema.table
-                    )));
-                }
-                for field in schema.fields {
-                    if field.id.is_empty()
-                        || field.label.is_empty()
-                        || field.column.is_none() && field.exclusion.is_none()
-                    {
-                        return Err(invalid(format!(
-                            "invalid record field for {}",
-                            schema.table
-                        )));
-                    }
-                    if let Some(column) = field.column {
-                        if table
-                            .record_fields
-                            .iter()
-                            .any(|previous| previous.column == Some(column))
-                        {
-                            return Err(invalid(format!(
-                                "duplicate record column {column} on {}",
-                                schema.table
-                            )));
-                        }
-                    }
-                    table.record_fields.push(*field);
-                }
-            }
-        }
-        for table in tables.values() {
-            for field in &table.record_fields {
-                if let Some(path) = field.column {
-                    crate::column::resolve(path, table, &|id| tables.get(id)).map_err(|error| {
-                        invalid(format!(
-                            "record field {} on {}: {error}",
-                            field.id,
-                            table.id()
-                        ))
-                    })?;
-                }
-            }
-        }
-        Ok(Self { tables })
-    }
-    pub fn from_inventory() -> Result<Self> {
-        let catalog =
-            bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
-        Self::from_entries(catalog.entries::<GridContribution>(crate::TABLES)?)
-    }
-    pub fn tables(&self) -> impl Iterator<Item = &Table> {
-        self.tables.values()
-    }
-    pub fn table(&self, id: &str) -> Option<&Table> {
-        self.tables.get(id)
-    }
-    pub(crate) fn map(&self) -> &BTreeMap<&'static str, Table> {
-        &self.tables
-    }
+        && source.sql.contains("$3") == source.company_scoped
+        && (!source.company_scoped || source.sql.contains("$2"))
 }
 
 impl Table {
@@ -595,7 +595,7 @@ impl Table {
         }
         if !source_valid(&decl.source) {
             return Err(bad(
-                "source must be one SELECT/WITH statement that takes $1 exactly when tenant-scoped"
+                "source must be one SELECT/WITH statement that takes $1 exactly when tenant-scoped and all of $1/$2/$3 when company-scoped"
                     .into(),
             ));
         }
@@ -641,6 +641,33 @@ impl Table {
         {
             return Err(bad("time field must be a date or datetime".into()));
         }
+        for (name, id) in [("owner", decl.owner), ("team", decl.team)] {
+            if id.is_some_and(|id| {
+                decl.fields
+                    .iter()
+                    .find(|f| f.id == id)
+                    .is_none_or(|field| field.ty != FieldType::Integer)
+            }) {
+                return Err(bad(format!("{name} must be a declared integer field")));
+            }
+        }
+        if decl.team.is_some() && decl.owner.is_none() {
+            return Err(bad("a team field needs an owner field".into()));
+        }
+        if let Some(subject) = decl.subject {
+            let field_valid = subject.field != decl.key
+                && decl
+                    .fields
+                    .iter()
+                    .find(|f| f.id == subject.field)
+                    .is_some_and(|f| matches!(f.ty, FieldType::Integer | FieldType::String));
+            if !field_valid || !decl.source.tenant_scoped {
+                return Err(bad(
+                    "a subject names a declared integer or text field other than the key and needs a tenant source"
+                        .into(),
+                ));
+            }
+        }
         let mut kinds = BTreeSet::new();
         if !decl
             .record_types
@@ -667,6 +694,9 @@ impl Table {
             fields: decl.fields.to_vec(),
             links: Vec::new(),
             protected,
+            reach: None,
+            report_subjects: false,
+            custom: BTreeMap::new(),
         })
     }
 }
@@ -729,9 +759,9 @@ fn link_into(
             joined.push((decl.to, to_field));
         }
         Join::Edge(source) => {
-            if !source_valid(&source) || !source.tenant_scoped {
+            if !source_valid(&source) || !source.tenant_scoped || source.company_scoped {
                 return Err(bad(
-                    "an edge must be one tenant-scoped SELECT/WITH statement".into(),
+                    "an edge must be one tenant-wide SELECT/WITH statement".into()
                 ));
             }
         }

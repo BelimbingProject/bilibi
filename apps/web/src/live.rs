@@ -12,6 +12,7 @@ use bilibi_base::perf::{Finish, Kind, Outcome};
 use bilibi_database::{page_write, Error, Result};
 use bilibi_module_registry::contributions::{Access, Embed, Route, EMBEDS};
 use bilibi_security::Scope;
+use bilibi_ui::inline::InlineRead;
 use bilibi_ui::page::{
     Change, LiveBody, LiveInput, LiveRequest, LiveState, PageChrome, PageRequest, PanelSpec,
 };
@@ -20,7 +21,11 @@ use bilibi_ui::upload::{ClientEntry, Registration, UploadError, CHUNK_SIZE, MAX_
 use bilibi_ui::{LIVE_EVENT_LIMIT, LIVE_EVENT_TOO_LARGE};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{sync::mpsc, task::JoinSet};
 
 type State<C> = Box<dyn LiveState<C, Error>>;
@@ -44,6 +49,10 @@ type MessageWindows = HashMap<(String, bool), (u64, u32)>;
 pub struct Limits {
     sockets: std::sync::Mutex<Sockets>,
     messages: [std::sync::Mutex<MessageWindows>; 2],
+    /// The upload bytes every page's `Uploads` on this server holds in
+    /// memory, staff and portal together, bounded by
+    /// `session.live.upload_buffer_bytes`.
+    uploads: bilibi_ui::UploadBudget,
 }
 #[derive(Default)]
 struct Sockets {
@@ -90,12 +99,15 @@ pub struct Policy {
     pub messages: u32,
     pub per_customer: u32,
     pub chunks: u32,
+    /// Most upload bytes the server holds in memory (`Limits::uploads`).
+    pub upload_buffer: u64,
 }
 impl Policy {
     pub async fn read(app: &App) -> Result<Self> {
         use bilibi_base::session::{
             LIVE_CHUNKS_PER_MINUTE_KEY, LIVE_MESSAGES_PER_MINUTE_KEY,
             LIVE_SOCKETS_PER_CUSTOMER_KEY, LIVE_SOCKETS_PER_SESSION_KEY, LIVE_SOCKETS_TOTAL_KEY,
+            LIVE_UPLOAD_BUFFER_BYTES_KEY,
         };
         let client = app.db.get().await?;
         let mut values = [0u32; 5];
@@ -115,12 +127,19 @@ impl Policy {
                 .ok_or(Error::Internal)?;
         }
         let [per_session, total, messages, per_customer, chunks] = values;
+        let upload_buffer = app
+            .settings
+            .get_global(&**client, LIVE_UPLOAD_BUFFER_BYTES_KEY)
+            .await?
+            .as_u64()
+            .ok_or(Error::Internal)?;
         Ok(Self {
             per_session,
             total,
             messages,
             per_customer,
             chunks,
+            upload_buffer,
         })
     }
 }
@@ -304,11 +323,17 @@ enum Event {
         path: String,
         #[serde(default)]
         params: HashMap<String, String>,
+        /// Present only for the host-rendered 2FA cover. The socket verifies
+        /// that this address still owes step-up before mounting the prompt.
+        #[serde(default)]
+        step_up_return: Option<String>,
     },
     Navigate {
         path: String,
         #[serde(default)]
         params: HashMap<String, String>,
+        #[serde(default)]
+        step_up_complete: bool,
     },
     /// `path` is the browser's pathname after Back or Forward inside a page
     /// marked `data-history="params"`; the host keeps the mounted state when
@@ -342,6 +367,10 @@ enum Event {
         target: String,
         id: u64,
     },
+    /// The tab went out of view or came back (`visibilitychange`). A hidden
+    /// tab's page is not refreshed on the timer; coming back refreshes it at
+    /// once. Transport state only: no page sees it and it is not activity.
+    Visibility { hidden: bool },
 }
 fn decode(text: &str) -> (Option<u64>, Result<Event>) {
     // Separate transport metadata before decoding the strict module intent. Keep
@@ -410,6 +439,48 @@ struct Wake {
     target: String,
     change: Option<Change>,
 }
+/// Whom a socket's subscriptions are for. A change for another tenant, or for
+/// another person of this one, is dropped where it is heard, before it becomes
+/// a [`Wake`]: a wake costs a session guard and a capability check, and one
+/// tenant's notifications must not spend them on every other open tab.
+#[derive(Clone, Copy)]
+struct Audience {
+    tenant: i64,
+    user: i64,
+}
+impl Audience {
+    fn of(scope: &Scope) -> Self {
+        Self {
+            tenant: scope.tenant(),
+            user: scope.user(),
+        }
+    }
+    fn hears(self, change: &Change) -> bool {
+        change.tenant == self.tenant && change.user.is_none_or(|user| user == self.user)
+    }
+}
+/// The next wake to act on, with every wake already waiting merged into one
+/// per mounted target (and generation), so a burst refreshes a panel once and
+/// the subscriptions behind it are not held up by a full queue. `None` when
+/// the socket's senders are gone. Cancel-safe: nothing is taken from `wakes`
+/// that is not kept in `waiting`.
+async fn next_wake(waiting: &mut VecDeque<Wake>, wakes: &mut mpsc::Receiver<Wake>) -> Option<Wake> {
+    if waiting.is_empty() {
+        waiting.push_back(wakes.recv().await?);
+    }
+    while let Ok(wake) = wakes.try_recv() {
+        let same = waiting
+            .iter_mut()
+            .find(|held| held.generation == wake.generation && held.target == wake.target);
+        match same {
+            // Missed events (`None`) concern anyone, so they win the merge.
+            Some(held) if wake.change.is_none() => held.change = None,
+            Some(_) => {}
+            None => waiting.push_back(wake),
+        }
+    }
+    waiting.pop_front()
+}
 /// The page-write permit of one live event (ADR 01, `base/agent_api`
 /// `page`): while the owner handles it, a business write its page writes
 /// declaration does not cover is refused. Refresh and params write nothing.
@@ -443,6 +514,97 @@ async fn permitted<T>(
     }
 }
 
+async fn update_state<S: Side>(
+    app: &App,
+    state: &mut Mounted<S::Context>,
+    scope: &S::Context,
+    token: &str,
+    input: LiveInput<'_>,
+) -> Result<LiveBody> {
+    let LiveInput::Event(payload) = input else {
+        return dispatch::<S>(app, state, scope, token, input).await;
+    };
+    if payload.get("fact").is_none() {
+        return dispatch::<S>(app, state, scope, token, input).await;
+    }
+    let get = |key| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or(Error::Invalid)
+    };
+    let fact = InlineRead {
+        fact: get("fact")?,
+        id: get("id")?,
+        field: get("field")?,
+        event: get("type")?,
+        original: get("original")?,
+        ..InlineRead::default()
+    };
+    let mut payload = payload.clone();
+    for attempt in 0..=3 {
+        let (body, read) = fact
+            .clone()
+            .during(dispatch::<S>(app, state, scope, token, LiveInput::Refresh))
+            .await;
+        let body = body?;
+        if read.conflict || body.redirect.is_some() {
+            return Ok(body);
+        }
+        if attempt == 3 {
+            break;
+        }
+        let version = read.version.ok_or_else(|| {
+            Error::refused("This field is no longer available. The change was not saved.")
+        })?;
+        payload["version"] = Value::String(version);
+        let (result, write) = InlineRead {
+            writing: true,
+            ..fact.clone()
+        }
+        .during(dispatch::<S>(
+            app,
+            state,
+            scope,
+            token,
+            LiveInput::Event(&payload),
+        ))
+        .await;
+        match result {
+            Err(Error::Conflict) => {}
+            Ok(body) if write.stale && body.redirect.is_none() => {}
+            result => return result,
+        }
+    }
+    Err(Error::refused(
+        "The record kept changing. Try saving this field again.",
+    ))
+}
+
+async fn dispatch<S: Side>(
+    app: &App,
+    state: &mut Mounted<S::Context>,
+    scope: &S::Context,
+    token: &str,
+    input: LiveInput<'_>,
+) -> Result<LiveBody> {
+    let event = page_event(app, state.service, &input)?;
+    permitted(
+        event,
+        crate::render_fields(
+            app,
+            Some(S::scope(scope)),
+            state.state.update(LiveRequest {
+                scope,
+                credential: token,
+                input,
+            }),
+        ),
+    )
+    .await
+}
+
 struct Mounted<C: 'static> {
     state: State<C>,
     access: Access,
@@ -460,6 +622,7 @@ impl<C: 'static> Mounted<C> {
         generation: u64,
         target: &str,
         sender: &mpsc::Sender<Wake>,
+        audience: Audience,
     ) -> Self {
         let mut jobs = JoinSet::new();
         for mut subscription in state.subscriptions() {
@@ -468,7 +631,9 @@ impl<C: 'static> Mounted<C> {
             jobs.spawn(async move {
                 loop {
                     let change = match subscription.receiver.recv().await {
+                        Ok(change) if !audience.hears(&change) => continue,
                         Ok(change) => Some(change),
+                        // Missed events may have been this socket's.
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     };
@@ -504,6 +669,12 @@ struct Panel<C: 'static> {
     spec: PanelSpec,
     mounted: Mounted<C>,
 }
+struct StepUpView {
+    prompt: String,
+    return_to: String,
+    path: String,
+    title: String,
+}
 struct Session<S: Side> {
     identity: Identity,
     /// Set when the session no longer holds `identity`: the socket then
@@ -518,6 +689,9 @@ struct Session<S: Side> {
     /// path the page or the browser names is still this page.
     page_route: Option<&'static bilibi_module_registry::contributions::Route>,
     page: Option<Mounted<S::Context>>,
+    /// The factor prompt is mounted as the live owner while the requested
+    /// page remains only shell chrome and placeholders.
+    step_up: Option<StepUpView>,
     panels: HashMap<String, Panel<S::Context>>,
     /// `EmbedContext::Shell` panels (the bell), keyed by their element id.
     /// They outlive navigation and are never mounted in a framed page.
@@ -539,12 +713,75 @@ struct Session<S: Side> {
     /// when its entry does (consumed, removed, replaced or its state
     /// dropped), and stays when the socket does, so a reconnect resumes it.
     staged: HashMap<u64, StagedUpload>,
+    /// The server's count of upload bytes held in memory and the operator's
+    /// limit on it, as read when the socket opened.
+    upload_budget: (bilibi_ui::UploadBudget, u64),
+    /// Set while the timer or a wake renders: nobody is waiting for the
+    /// reply, so a render equal to what the browser holds is not sent.
+    background: bool,
+    /// A digest of what the browser last received for the page body (`page`)
+    /// and for each panel, by target. A sent page forgets the panels', since
+    /// the shell around it carries the shell panels' markup again.
+    sent: HashMap<String, u64>,
+}
+/// A digest of rendered parts, to tell an unchanged render from a new one.
+fn digest(parts: &[&str]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    parts.hash(&mut hasher);
+    hasher.finish()
+}
+/// What a page body shows and the address state it answers with.
+fn body_digest(body: &LiveBody) -> u64 {
+    let mut query: Vec<(&str, &str)> = body
+        .query
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    query.sort_unstable();
+    let rows = body.rows.to_string();
+    let mut parts = vec![body.html.as_str(), rows.as_str()];
+    for (key, value) in query {
+        parts.push(key);
+        parts.push(value);
+    }
+    digest(&parts)
 }
 impl<S: Side> Session<S> {
+    /// Whether the browser needs `message`. A panel fragment nobody asked for
+    /// that equals what its target already shows is dropped; an unchanged
+    /// page body never becomes a message (`update`).
+    fn changed(&mut self, message: &Value) -> bool {
+        let target = message["target"].as_str().unwrap_or_default();
+        match message["type"].as_str() {
+            Some("fragment") => {
+                let rows = message["rows"].to_string();
+                let digest = digest(&[message["html"].as_str().unwrap_or_default(), rows.as_str()]);
+                let quiet = self.background
+                    && message["redirect"].is_null()
+                    && message.get("url").is_none_or(Value::is_null)
+                    && message["notice"].as_str().is_none_or(str::is_empty)
+                    && message["events"].as_array().is_none_or(Vec::is_empty);
+                if quiet && self.sent.get(target) == Some(&digest) {
+                    return false;
+                }
+                self.sent.insert(target.to_owned(), digest);
+            }
+            // The browser replaced the target with the refusal.
+            Some("error") => {
+                self.sent.remove(target);
+            }
+            _ => {}
+        }
+        true
+    }
     async fn scope(&mut self, app: &App, token: &str) -> Result<S::Context> {
         let page = self.page.as_ref().ok_or(Error::Invalid)?;
-        let path = self.path.clone();
-        let scope = self.admit(app, page.access, token, path).await?;
+        let address = self.step_up.as_ref().map_or_else(
+            || params::address(&self.path, &self.query),
+            |gate| gate.return_to.clone(),
+        );
+        let scope = self.admit(app, page.access, token, address).await?;
         self.bound(scope)
     }
     /// A page route's access for this socket. A step-up the session owes
@@ -556,7 +793,7 @@ impl<S: Side> Session<S> {
         app: &App,
         access: bilibi_module_registry::contributions::Access,
         token: &str,
-        path: String,
+        address: String,
     ) -> Result<S::Context> {
         let admission = S::admit(app, access, token).await;
         match admission {
@@ -564,28 +801,29 @@ impl<S: Side> Session<S> {
                 // Unlike a page-owned refusal, an ended session must leave the
                 // live error view. Reload through HTTP, whose route guard sends
                 // the browser to sign-in and preserves the expiry feedback.
-                self.path = path;
+                self.path = address;
                 self.stale = true;
                 Err(Error::Unauthorized)
             }
             Err(error) => Err(error),
             Ok(Gate::Open(scope)) => scope.ok_or(Error::Forbidden),
             Ok(Gate::StepUp) => {
-                self.path = path;
+                self.path = address;
                 self.stale = true;
                 Err(Error::Unauthorized)
             }
         }
     }
     /// Where this page's browser confirms a step-up and comes back.
-    async fn prompt(&mut self, app: &App, token: &str) -> Option<String> {
+    async fn prompt(&mut self, app: &App, token: &str) -> Option<(String, String)> {
         let scope = self.scope(app, token).await.ok()?;
         let back = if self.canonical.is_empty() {
-            self.path.clone()
+            bilibi_ui::params::address(&self.path, &self.query)
         } else {
             self.canonical.clone()
         };
-        S::prompt(app, &scope, &back).await
+        let destination = S::prompt(app, &scope, &back).await?;
+        Some((destination, back))
     }
     /// An embed's access for this socket: a step-up still owed is a refusal,
     /// since a panel has no prompt to send anyone to.
@@ -609,6 +847,7 @@ impl<S: Side> Session<S> {
         token: &str,
         path: String,
         query: HashMap<String, String>,
+        step_up_return: Option<String>,
     ) -> Result<Vec<Value>> {
         let bound = S::resolve(app, &path)?;
         let params = &bound.params;
@@ -616,22 +855,68 @@ impl<S: Side> Session<S> {
             return Err(Error::Forbidden);
         }
         let scope = self
-            .admit(app, bound.route.access, token, path.clone())
+            .admit(
+                app,
+                bound.route.access,
+                token,
+                params::address(&path, &query),
+            )
             .await?;
         let scope = self.bound(scope)?;
-        let state = bound
-            .page
-            .0
-            .mount(PageRequest {
+        let step_up = if let Some(return_to) = step_up_return {
+            let (return_path, _) = routes::local_address(&return_to)?;
+            let return_path = return_path.to_owned();
+            let requested = S::resolve(app, &return_path)?;
+            let expected = S::prompt(app, &scope, &return_to)
+                .await
+                .ok_or(Error::Forbidden)?;
+            let (expected_path, expected_query) = routes::local_address(&expected)?;
+            let prompt = if expected_path == path && expected_query == query {
+                expected
+            } else {
+                let methods = app.step_up.methods(S::scope(&scope), &return_to).await?;
+                methods
+                    .into_iter()
+                    .map(|method| {
+                        if method.enrolled {
+                            method.prompt
+                        } else {
+                            method.setup
+                        }
+                    })
+                    .find(|destination| {
+                        routes::local_address(destination)
+                            .is_ok_and(|(candidate, values)| candidate == path && values == query)
+                    })
+                    .ok_or(Error::Forbidden)?
+            };
+            Some(StepUpView {
+                prompt,
+                return_to,
+                path: return_path,
+                title: requested
+                    .page
+                    .0
+                    .step_up_title(requested.route.operation, &requested.params)
+                    .unwrap_or_else(|| "Protected page".to_owned()),
+            })
+        } else {
+            None
+        };
+        let state = crate::render_fields(
+            app,
+            Some(S::scope(&scope)),
+            bound.page.0.mount(PageRequest {
                 operation: bound.route.operation,
                 scope: Some(&scope),
                 path: params,
                 query: &query,
                 body: &[],
                 framed: self.framed,
-            })
-            .await?
-            .ok_or(Error::Invalid)?;
+            }),
+        )
+        .await?
+        .ok_or(Error::Invalid)?;
         // Old state/subscribers cannot survive a route change or receive queued wakes.
         self.panels.clear();
         self.generation += 1;
@@ -642,7 +927,9 @@ impl<S: Side> Session<S> {
             self.generation,
             "page",
             &self.sender,
+            Audience::of(S::scope(&scope)),
         ));
+        self.step_up = step_up;
         self.path = path;
         self.route = bound.route.path.to_owned();
         self.page_route = Some(bound.route);
@@ -670,7 +957,12 @@ impl<S: Side> Session<S> {
             return Ok(None);
         }
         let scope = self
-            .admit(app, bound.route.access, token, path.to_owned())
+            .admit(
+                app,
+                bound.route.access,
+                token,
+                params::address(path, &self.query),
+            )
             .await?;
         self.bound(scope)?;
         self.path = path.to_owned();
@@ -684,8 +976,12 @@ impl<S: Side> Session<S> {
     /// Mounts each shell embed the actor may see, once per socket, and drops
     /// one whose access is gone. A refused embed renders nothing in the shell.
     async fn sync_shell(&mut self, app: &App, token: &str, scope: &S::Context) -> Result<()> {
+        let visible_path = self
+            .step_up
+            .as_ref()
+            .map_or(self.path.as_str(), |gate| gate.path.as_str());
         let standalone = S::SHELL
-            && S::resolve(app, &self.path).is_ok_and(|bound| {
+            && S::resolve(app, visible_path).is_ok_and(|bound| {
                 bound.page.0.chrome(bound.route.operation)
                     == bilibi_ui::page::PageChrome::StandaloneReview
             });
@@ -707,18 +1003,20 @@ impl<S: Side> Session<S> {
             }
             let service: Arc<Service<S::Context>> = app.services.get(slot.embed.service)?;
             let empty = HashMap::new();
-            let state = service
-                .0
-                .mount(PageRequest {
+            let state = crate::render_fields(
+                app,
+                Some(S::scope(scope)),
+                service.0.mount(PageRequest {
                     operation: slot.embed.operation,
                     scope: Some(scope),
                     path: &empty,
                     query: &empty,
                     body: &[],
                     framed: false,
-                })
-                .await?
-                .ok_or(Error::Invalid)?;
+                }),
+            )
+            .await?
+            .ok_or(Error::Invalid)?;
             self.generation += 1;
             let mounted = Mounted::new(
                 state,
@@ -727,6 +1025,7 @@ impl<S: Side> Session<S> {
                 self.generation,
                 &slot.id,
                 &self.sender,
+                Audience::of(S::scope(scope)),
             );
             let spec = PanelSpec {
                 id: slot.id.clone(),
@@ -748,17 +1047,9 @@ impl<S: Side> Session<S> {
         let scope = self.scope(app, token).await?;
         if target == "page" {
             let page = self.page.as_mut().ok_or(Error::Invalid)?;
-            let event = page_event(app, page.service, &input)?;
-            let mut body = permitted(
-                event,
-                page.state.update(LiveRequest {
-                    scope: &scope,
-                    credential: token,
-                    input,
-                }),
-            )
-            .await?;
+            let mut body = update_state::<S>(app, page, &scope, token, input).await?;
             hold_flash(app, token, &mut body);
+            let moved = body.path.as_deref().is_some_and(|path| path != self.path);
             // A page may move only among its own routes; any other path is a
             // module bug, not a navigation.
             if let Some(path) = body.path.as_deref().filter(|path| *path != self.path) {
@@ -769,7 +1060,23 @@ impl<S: Side> Session<S> {
             // Canonicalize child namespaces before the combined URL, but send
             // the parent first so its anchors exist when fragments arrive.
             let fragments = self.sync_panels(app, token, &scope).await?;
-            let mut messages = vec![self.page_message(app, &scope, body).await?];
+            // A timer or wake render whose body is what the browser already
+            // holds sends no page and does not render the shell around it:
+            // the shell is drawn on a mount, a navigation and a person's own
+            // event, and a shell panel follows its own wakes.
+            let digest = body_digest(&body);
+            let unchanged = self.background
+                && !moved
+                && body.redirect.is_none()
+                && body.notice.is_empty()
+                && body.events.is_empty()
+                && self.sent.get("page") == Some(&digest);
+            let mut messages = Vec::new();
+            if !unchanged {
+                messages.push(self.page_message(app, &scope, body).await?);
+                self.sent.clear();
+                self.sent.insert("page".into(), digest);
+            }
             messages.extend(fragments);
             return Ok(messages);
         }
@@ -783,16 +1090,7 @@ impl<S: Side> Session<S> {
             Some(panel) => panel,
             None => self.panels.get_mut(target).ok_or(Error::Invalid)?,
         };
-        let event = page_event(app, panel.mounted.service, &input)?;
-        let mut body = permitted(
-            event,
-            panel.mounted.state.update(LiveRequest {
-                scope: &scope,
-                credential: token,
-                input,
-            }),
-        )
-        .await?;
+        let mut body = update_state::<S>(app, &mut panel.mounted, &scope, token, input).await?;
         hold_flash(app, token, &mut body);
         let owns_query = self.merge_panel_query(target, &body.query)?;
         let mut message = fragment(target, body);
@@ -801,13 +1099,59 @@ impl<S: Side> Session<S> {
         }
         Ok(vec![message])
     }
+    /// The timer's render: the page and its panels, then each shell panel by
+    /// itself when no page went out (a sent page carries the shell, drawn
+    /// again). So a notification another process wrote still reaches the bell
+    /// without the whole shell being rendered for every open tab.
+    async fn refresh(&mut self, app: &App, token: &str) -> Result<Vec<Value>> {
+        let mut messages = self.update(app, token, "page", LiveInput::Refresh).await?;
+        if messages.iter().any(|message| message["type"] == "page") {
+            return Ok(messages);
+        }
+        let ids: Vec<String> = self.shell.keys().cloned().collect();
+        for id in ids {
+            match self.update(app, token, &id, LiveInput::Refresh).await {
+                Ok(fragments) => messages.extend(fragments),
+                Err(Error::Unauthorized) => return Err(Error::Unauthorized),
+                // An embed the account lost stops refreshing; the next drawn
+                // shell leaves it out.
+                Err(Error::Forbidden) => {
+                    self.shell.remove(&id);
+                }
+                Err(error) => {
+                    if crate::server_fault(&error) {
+                        eprintln!("error: live shell panel {id} failed to refresh: {error:?}");
+                    }
+                }
+            }
+        }
+        Ok(messages)
+    }
     async fn page_message(
         &mut self,
         app: &App,
         scope: &S::Context,
         body: LiveBody,
     ) -> Result<Value> {
-        let html = S::chrome(app, scope, &self.path, self.framed, &body.html).await?;
+        let (path, page_html) = match &self.step_up {
+            Some(gate) => {
+                let html = bilibi_ui::Html::render(&bilibi_ui::StepUpGate::rendered_page(
+                    gate.prompt.clone(),
+                    gate.return_to.clone(),
+                    gate.title.clone(),
+                    body.html.clone(),
+                ))
+                .map_err(|_| Error::Internal)?;
+                (gate.path.as_str(), html.as_str().to_owned())
+            }
+            None => (self.path.as_str(), body.html.clone()),
+        };
+        let html = S::chrome(app, scope, path, self.framed, &page_html).await?;
+        if self.step_up.is_some() {
+            return Ok(
+                json!({"type":"page", "target":"app", "html":html, "url":Value::Null, "panel_params":false, "notice":body.notice, "rows":body.rows, "redirect":body.redirect, "events":events(&body.events)}),
+            );
+        }
         let prefixes: Vec<_> = self
             .panels
             .values()
@@ -921,18 +1265,20 @@ impl<S: Side> Session<S> {
                         .get::<Embed>()?;
                     Self::check(app, embed.access, token).await?;
                     let service: Arc<Service<S::Context>> = app.services.get(embed.service)?;
-                    let state = service
-                        .0
-                        .mount(PageRequest {
+                    let state = crate::render_fields(
+                        app,
+                        Some(S::scope(scope)),
+                        service.0.mount(PageRequest {
                             operation: embed.operation,
                             scope: Some(scope),
                             path: &spec.path,
                             query: &spec.query,
                             body: &[],
                             framed: self.framed,
-                        })
-                        .await?
-                        .ok_or(Error::Invalid)?;
+                        }),
+                    )
+                    .await?
+                    .ok_or(Error::Invalid)?;
                     self.generation += 1;
                     let mounted = Mounted::new(
                         state,
@@ -941,6 +1287,7 @@ impl<S: Side> Session<S> {
                         self.generation,
                         &id,
                         &self.sender,
+                        Audience::of(S::scope(scope)),
                     );
                     self.panels.insert(id.clone(), Panel { spec, mounted });
                 }
@@ -954,15 +1301,16 @@ impl<S: Side> Session<S> {
                 } else {
                     LiveInput::Refresh
                 };
-                panel
-                    .mounted
-                    .state
-                    .update(LiveRequest {
+                crate::render_fields(
+                    app,
+                    Some(S::scope(scope)),
+                    panel.mounted.state.update(LiveRequest {
                         scope,
                         credential: token,
                         input,
-                    })
-                    .await
+                    }),
+                )
+                .await
             }
             .await;
             let result = result.and_then(|body| {
@@ -1188,13 +1536,14 @@ impl<S: Side> Session<S> {
         } else {
             None
         };
+        let (budget, limit) = self.upload_budget.clone();
         let uploads = self
             .mounted_mut(target)?
             .state
             .uploads()
             .ok_or(Error::Invalid)?;
         Ok(match finished {
-            Some(bytes) => uploads.complete(id, bytes),
+            Some(bytes) => uploads.complete(id, bytes, &budget, limit),
             None => uploads.staged(id, file.received()),
         })
     }
@@ -1246,6 +1595,7 @@ impl<S: Side> Session<S> {
             // Removed or consumed meanwhile; the hook stops streaming it.
             return Ok(vec![json!({"type":"chunk", "id":id, "error":"unknown"})]);
         };
+        let (budget, limit) = self.upload_budget.clone();
         let uploads = self
             .mounted_mut(&target)?
             .state
@@ -1255,7 +1605,7 @@ impl<S: Side> Session<S> {
             self.stage_chunk(&target, id, offset, &frame[CHUNK_HEADER..])
                 .await?
         } else {
-            uploads.append(id, offset, &frame[CHUNK_HEADER..])
+            uploads.append(id, offset, &frame[CHUNK_HEADER..], &budget, limit)
         };
         match outcome {
             Ok(outcome) => {
@@ -1331,8 +1681,28 @@ impl<S: Side> Session<S> {
     }
     async fn event(&mut self, app: &App, token: &str, event: Event) -> Result<Vec<Value>> {
         let messages = match event {
-            Event::Mount { path, params } | Event::Navigate { path, params } => {
-                self.mount(app, token, path, params).await?
+            Event::Mount {
+                path,
+                params,
+                step_up_return,
+            } => self.mount(app, token, path, params, step_up_return).await?,
+            Event::Navigate {
+                path,
+                params,
+                step_up_complete,
+            } => {
+                let mut messages = self.mount(app, token, path.clone(), params, None).await?;
+                if step_up_complete {
+                    if let Some(page) = messages
+                        .iter_mut()
+                        .find(|message| message["type"] == "page" && message["redirect"].is_null())
+                    {
+                        if let Some((kind, message)) = app.landing.take(token, &path) {
+                            page["flash"] = json!(routes::redirect_flash(kind, &message)?.as_str());
+                        }
+                    }
+                }
+                messages
             }
             // Back or Forward inside a `data-history="params"` page: the
             // historical path stays this page's state (its route parameters
@@ -1351,7 +1721,7 @@ impl<S: Side> Session<S> {
                     {
                         // A child query belongs to this record, not another
                         // record served by the same page service/operation.
-                        self.mount(app, token, path, params).await?
+                        self.mount(app, token, path, params, None).await?
                     }
                     Some(path) => match self.relocate(app, token, &path).await? {
                         Some(route_params) => {
@@ -1360,7 +1730,7 @@ impl<S: Side> Session<S> {
                             self.update(app, token, "page", LiveInput::Params(&params))
                                 .await?
                         }
-                        None => self.mount(app, token, path, params).await?,
+                        None => self.mount(app, token, path, params, None).await?,
                     },
                     None => {
                         self.update(app, token, "page", LiveInput::Params(&params))
@@ -1384,6 +1754,8 @@ impl<S: Side> Session<S> {
             Event::UploadCancel { target, id } => {
                 self.upload_cancel(app, token, &target, id).await?
             }
+            // Answered by the socket loop; it never reaches a page.
+            Event::Visibility { .. } => return Err(Error::Invalid),
         };
         let scope = S::activity(app, token).await?;
         self.bound(scope)?;
@@ -1439,6 +1811,7 @@ pub async fn run<S: Side>(
     let _slot = slot;
     let mut refused = 0u32;
     let (sender, mut wakes) = mpsc::channel(64);
+    let mut waiting = VecDeque::new();
     let mut session = Session::<S> {
         identity,
         stale: false,
@@ -1447,6 +1820,7 @@ pub async fn run<S: Side>(
         route: String::new(),
         page_route: None,
         page: None,
+        step_up: None,
         panels: HashMap::new(),
         shell: HashMap::new(),
         generation: 0,
@@ -1456,13 +1830,20 @@ pub async fn run<S: Side>(
         address: None,
         uploads: 0,
         staged: HashMap::new(),
+        upload_budget: (app.live.uploads.clone(), policy.upload_buffer),
+        background: false,
+        sent: HashMap::new(),
     };
+    // Whether the browser said its tab is out of view (`Event::Visibility`).
+    let mut hidden = false;
     // A termination of this socket's session (logout elsewhere, an operator,
     // a credential change) signs this page out at once: the browser is sent
     // back through the page it holds, whose guard forwards it to sign-in with
     // the expired-session message. A lagged receiver is covered by the next
     // guarded action or refresh, which refuses an ended session anyway.
     let mut terminations = app.security.sessions.subscribe_terminations();
+    // Endings name the stored id, the cookie's digest: hashed once here.
+    let stored = bilibi_base::session::session_id(&token);
     let mut refresh = tokio::time::interval(Duration::from_secs(15));
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     refresh.tick().await;
@@ -1470,7 +1851,8 @@ pub async fn run<S: Side>(
         let mut request_id = None;
         let mut target = "page".to_owned();
         let mut history = "replace";
-        let result = tokio::select! {
+        session.background = false;
+        let mut result = tokio::select! {
             message = socket.recv() => match message {
                 Some(Ok(Message::Text(text))) => {
                     // Over the session's budget: refused before it is read,
@@ -1499,6 +1881,15 @@ pub async fn run<S: Side>(
                     let (id, event) = decode(&text);
                     request_id = id;
                     match event {
+                        Ok(Event::Visibility { hidden: now }) => {
+                            hidden = now;
+                            if now || session.page.is_none() {
+                                Ok(vec![json!({"type":"ack", "target":"page"})])
+                            } else {
+                                // Back in view: the page catches up at once.
+                                session.update(&app, &token, "page", LiveInput::Refresh).await
+                            }
+                        },
                         Ok(event) => {
                             match &event {
                                 Event::Action {target: id, ..} | Event::Upload {target: id, ..} | Event::UploadCancel {target: id, ..} => target = id.clone(),
@@ -1532,7 +1923,7 @@ pub async fn run<S: Side>(
                 },
                 _ => break,
             },
-            wake = wakes.recv() => {
+            wake = next_wake(&mut waiting, &mut wakes) => {
                 let Some(wake) = wake else {break;};
                 let mounted = if wake.target == "page" { session.page.as_ref() } else { session.shell.get(&wake.target).or_else(|| session.panels.get(&wake.target)).map(|p| &p.mounted) };
                 if !mounted.is_some_and(|m| m.generation == wake.generation) {continue;}
@@ -1541,18 +1932,21 @@ pub async fn run<S: Side>(
                     Ok(scope) => {
                         let scope = S::scope(&scope);
                         if wake.change.as_ref().is_some_and(|c| c.tenant != scope.tenant() || c.user.is_some_and(|user| user != scope.user())) {continue;}
+                        session.background = true;
                         session.update(&app, &token, &target, LiveInput::Refresh).await
                     },
                     Err(error) => Err(error),
                 }
             },
             _ = refresh.tick() => {
-                if session.page.is_none() {continue;}
-                session.update(&app, &token, "page", LiveInput::Refresh).await
+                // A hidden tab waits: coming back into view refreshes it.
+                if session.page.is_none() || hidden {continue;}
+                session.background = true;
+                session.refresh(&app, &token).await
             },
             terminated = terminations.recv() => {
                 match terminated {
-                    Ok(event) if event.id == token => {
+                    Ok(event) if event.id == stored => {
                         reload(&mut socket, event.redirect.unwrap_or(&session.path)).await;
                         break;
                     },
@@ -1566,6 +1960,10 @@ pub async fn run<S: Side>(
         // authorization also returns through the HTTP guard, which sends an
         // ended session to sign-in with its expiry feedback. A step-up the
         // session owes reloads the same way, through the page's address.
+        // A failed render may have counted a page the browser never got.
+        if result.is_err() {
+            session.sent.clear();
+        }
         if session.stale || matches!(&result, Err(Error::Unauthorized)) {
             reload(&mut socket, &session.path).await;
             break;
@@ -1575,16 +1973,12 @@ pub async fn run<S: Side>(
         // the person repeats the action. Nothing acted.
         if let Err(Error::StepUpRequired { reason, .. }) = &result {
             if *reason != "impersonating" {
-                if let Some(destination) = session.prompt(&app, &token).await {
-                    let message = json!({"type":"page", "target":"app", "html":"", "url":Value::Null, "notice":"", "rows":0, "redirect":destination, "request_id":request_id, "history":"push"});
-                    if socket
-                        .send(Message::Text(message.to_string().into()))
-                        .await
-                        .is_err()
-                    {
-                        return;
+                if let Some((destination, return_to)) = session.prompt(&app, &token).await {
+                    if let Ok((path, query)) = routes::local_address(&destination) {
+                        result = session
+                            .mount(&app, &token, path.to_owned(), query, Some(return_to))
+                            .await;
                     }
-                    continue;
                 }
             }
         }
@@ -1618,6 +2012,9 @@ pub async fn run<S: Side>(
         // After a failed panel is gone, so its entries' staging goes too.
         session.prune_staged().await;
         for message in &mut messages {
+            if !session.changed(message) {
+                continue;
+            }
             message["request_id"] = json!(request_id);
             if message["type"] == "page" || message["type"] == "fragment" {
                 message["history"] = json!(history);

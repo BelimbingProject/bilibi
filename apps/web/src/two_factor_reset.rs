@@ -1,15 +1,14 @@
 //! `bilibi-web two-factor-reset --email ADDRESS`: turns off one account's
-//! authenticator from the server, for an owner nobody else can reset (the
-//! only admin lost their phone). There are no
-//! recovery codes, so this and another admin's reset on the account page are
-//! the two ways back. Everything is written by User: the audit row names the
+//! authenticator from the server. There are no recovery codes and customer
+//! administrators cannot reset the installation-wide factor. Everything is
+//! written by User: the audit row names the
 //! system principal `two-factor-reset`, the account is signed out and
 //! notified, and nothing here sees a secret or a code.
 use bilibi_database::{Db, Error, Result};
 use bilibi_user::{TwoFactorEmailError, TwoFactorEmailReset};
 
 const USAGE: &str = "usage: bilibi-web two-factor-reset --email ADDRESS
-Turns off the authenticator app of the account with that email, signs the account out and
+Turns off the authenticator app of the staff account with that email, signs the account out and
 notifies the person. They sign in with their password and set the app up again in Settings.
 If sign-in requires 2FA, another signed-in administrator must turn that requirement off
 while this account sets up a new method. Reset does not bypass the sign-in policy.
@@ -37,7 +36,7 @@ pub async fn two_factor_reset(db: &Db, args: &[String]) -> Result<()> {
             println!("2FA is already off for {email}. Nothing changed.")
         }
         Err(TwoFactorEmailError::NotFound) => {
-            eprintln!("No account uses {email}.");
+            eprintln!("No staff account uses {email}.");
             return Err(Error::NotFound);
         }
         Err(TwoFactorEmailError::Invalid) => {

@@ -31,7 +31,7 @@ use bilibi_ui::{
     CommitStates, CommitStatus, ConfirmDialog, CreateButton, Field, FilterToolbar, FlashMap,
     FlexRow, FlexTable, Form, Header, Html, IconButton, IconKind, InlineEdit, InlineField,
     InputKind, ListColumns, ListSpec, ListState, Modal, Pagination, RowMode, StatusKind,
-    TableEmpty, ToolbarControl, NO_FLASH,
+    TableEmpty, Toggle, ToolbarControl, NO_FLASH,
 };
 use serde_json::{json, Value};
 use std::{
@@ -167,6 +167,7 @@ fn columns() -> Vec<BuiltinColumn> {
         BuiltinColumn::new("record_type", "Record"),
         BuiltinColumn::new("kind", "Type"),
         BuiltinColumn::new("help", "Help text"),
+        BuiltinColumn::new("watcher_condition", "Watcher condition"),
         BuiltinColumn::new("status", "Status"),
     ]
 }
@@ -262,6 +263,12 @@ impl Index {
                 if !text("picklist").is_empty() {
                     input["picklist"] = json!(text("picklist"));
                 }
+                if !text("target").is_empty() {
+                    input["target"] = json!(text("target"));
+                }
+                if text("watcher_condition") == "true" {
+                    input["watcher_condition"] = json!(true);
+                }
                 let result = self
                     .pages
                     .contracts
@@ -350,6 +357,47 @@ impl Index {
                     },
                 };
                 self.statuses.put(format!("{id}-{field}"), status);
+            }
+            "switch_watcher_condition" => {
+                let Some(current) = self.definition(get("key").unwrap_or_default()).cloned() else {
+                    self.notice = "This field no longer exists; reload the page.".into();
+                    return Ok(());
+                };
+                let on = !current.watcher_condition;
+                let mut input = json!({
+                    "record_type": current.record_type,
+                    "key": current.key,
+                    "label": current.label,
+                    "watcher_condition": on,
+                    "version": current.version,
+                });
+                if let Some(help) = &current.help {
+                    input["help"] = json!(help);
+                }
+                let result = self
+                    .pages
+                    .contracts
+                    .submit(
+                        &Self::call(
+                            scope,
+                            credential,
+                            "switch_watcher_condition",
+                            "base.custom_fields.update",
+                        ),
+                        input,
+                    )
+                    .await;
+                self.flash = Some(match outcome(result)? {
+                    Ok(()) if on => (
+                        StatusKind::Success,
+                        format!("Watchers can now use “{}” in their conditions.", current.label),
+                    ),
+                    Ok(()) => (
+                        StatusKind::Success,
+                        format!("Watchers can no longer use “{}”. A rule that reads it stops until a new version is approved.", current.label),
+                    ),
+                    Err(message) => (StatusKind::Error, message),
+                });
             }
             "request_archive" | "request_restore" => {
                 let step = if get("type") == Some("request_archive") {
@@ -524,8 +572,13 @@ impl Index {
                 .fields
                 .record_type(&definition.record_type)
                 .map_or(definition.record_type.as_str(), |record| record.label);
-            let kind = match (&definition.picklist, compact) {
-                (Some(list), false) => format!("{} · {list}", definition.kind.label()),
+            let kind = match (&definition.picklist, &definition.target, compact) {
+                (Some(list), _, false) => format!("{} · {list}", definition.kind.label()),
+                (_, Some(target), false) => format!(
+                    "{} · {}",
+                    definition.kind.label(),
+                    pages.fields.records().kind_label(target)
+                ),
                 _ => definition.kind.label().to_owned(),
             };
             let mut row = FlexRow::new(row_id(definition))
@@ -554,6 +607,28 @@ impl Index {
                             edits,
                         ),
                     })?,
+                )
+                .slot(
+                    "watcher_condition",
+                    if !definition.kind.watcher_condition_kind() {
+                        Html::text("Not offered for this type")
+                    } else if edits && !definition.archived() {
+                        render(Toggle {
+                            on: definition.watcher_condition,
+                            label: &format!("Watcher condition: {}", definition.label),
+                            id: &format!("custom-field-{}-rule-condition", definition.id),
+                            event: "switch_watcher_condition",
+                            name: "key",
+                            value: &row_id(definition),
+                            disabled: false,
+                        })?
+                    } else {
+                        Html::text(if definition.watcher_condition {
+                            "On"
+                        } else {
+                            "Off"
+                        })
+                    },
                 )
                 .slot(
                     "status",
@@ -737,8 +812,27 @@ impl Index {
                         .collect(),
                 )
                 .value(value("picklist"))
-                .hint("Only for a Pick-list field: the values people choose from.")
+                .hint(
+                    "Only for a Pick-list or Several choices field: the values people choose from.",
+                )
                 .errors(errors("picklist")),
+        )?);
+        body.push(&render(
+            Field::in_form("field", "target")
+                .id("custom-field-new-target")
+                .label("Kind of record")
+                .kind(InputKind::Select)
+                .prompt("Choose…")
+                .options(
+                    fields
+                        .reference_kinds()
+                        .into_iter()
+                        .map(|(key, label)| Choice::new(label, key))
+                        .collect(),
+                )
+                .value(value("target"))
+                .hint("Only for a Record field: what it points at. It never changes.")
+                .errors(errors("target")),
         )?);
         body.push(&render(
             Field::in_form("field", "help")
@@ -747,6 +841,15 @@ impl Index {
                 .value(value("help"))
                 .attr("maxlength", &HELP_MAX.to_string())
                 .errors(errors("help")),
+        )?);
+        body.push(&render(
+            Field::in_form("field", "watcher_condition")
+                .id("custom-field-new-rule-condition")
+                .label("Watcher condition")
+                .kind(InputKind::Switch)
+                .value(if value("watcher_condition") == "true" { "true" } else { "false" })
+                .hint("Lets watchers decide on this field (text, number, date, pick-list and yes/no only). Watchers never read a field you have not offered.")
+                .errors(errors("watcher_condition")),
         )?);
         let mut actions = render(Button {
             event: "close_new",

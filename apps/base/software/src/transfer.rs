@@ -1,7 +1,7 @@
 //! GitHub downloads and manual uploads, handed to the separate installer.
 //! Archive checks live in `transport.rs`.
 use crate::{
-    jobs, review,
+    jobs, release_proof, review,
     transport::{self, Paths},
     Software, MANAGE, VIEW,
 };
@@ -86,8 +86,21 @@ impl Software {
             })
             .collect::<Vec<_>>();
         let installed = self.installed_asset(&**client, scope).await?;
-        drop(client);
-        let mut github = self.github_listing(scope, force, prerelease).await?;
+        let (policy, trust) = self
+            .paths
+            .as_ref()
+            .map(release_proof::read_facts)
+            .unwrap_or_default();
+        let mut github = match policy {
+            Some(policy) => {
+                self.github_listing(&**client, Some(scope), force, prerelease, &policy)
+                    .await?
+            }
+            None => json!({
+                "available": false,
+                "message": trust["message"].as_str().unwrap_or("This server has no release folder."),
+            }),
+        };
         let repository_id = github["repository_id"].clone();
         if let Some(releases) = github["releases"].as_array_mut() {
             for release in releases {
@@ -96,8 +109,20 @@ impl Software {
                     json!(crate::github::same_asset(release, &installed["github"]));
             }
         }
+        let mut update = crate::update::discover(self.paths.as_ref(), &github);
+        if update["current"].is_null() {
+            update["current"] = json!(format!(
+                "Bilibi v{} (release tag not recorded)",
+                self.composition.version
+            ));
+        }
+        if let Some(fields) = github.as_object_mut() {
+            fields.remove("latest");
+            fields.remove("latest_notes");
+            fields.remove("complete");
+        }
         Ok(
-            json!({"instance": review::instance_json(&instance), "installed_asset": installed, "uploads": uploads, "github": github}),
+            json!({"instance": review::instance_json(&instance), "release_trust": trust, "installed_asset": installed, "uploads": uploads, "github": github, "update": update}),
         )
     }
 
@@ -109,17 +134,26 @@ impl Software {
         scope: &Scope,
         filename: &str,
         bytes: Vec<u8>,
+        proof: Option<(String, Vec<u8>)>,
     ) -> Result<std::result::Result<Upload, String>> {
         let client = self.db.get().await?;
         authorize_operator(&**client, scope, MANAGE).await?;
         drop(client);
-        let verification = match self.github_verification(scope).await? {
-            Ok(verification) => verification,
-            Err(why) => return Ok(Err(why)),
-        };
         let paths = match self.paths() {
             Ok(paths) => paths.clone(),
             Err(why) => return Ok(Err(why)),
+        };
+        let policy = match release_proof::Policy::load(&paths) {
+            Ok(policy) => policy,
+            Err(why) => return Ok(Err(why)),
+        };
+        let token = if policy.requires_operator_proof() {
+            None
+        } else {
+            match self.github_token(scope, &policy.repository).await {
+                Ok(token) => token,
+                Err(why) => return Ok(Err(why)),
+            }
         };
         if fs::create_dir_all(paths.incoming()).is_err() || !paths.incoming().is_dir() {
             return Ok(Err(format!(
@@ -138,49 +172,63 @@ impl Software {
                 )));
             }
         }
-        let bundle = paths.next_upload();
-        let into = paths.incoming_folder(&bundle);
-        let archive = paths.incoming().join(format!("{bundle}.tar.gz.part"));
         let filename = filename.to_owned();
         let unpacked = tokio::task::spawn_blocking(move || {
-            fs::write(&archive, &bytes)
-                .map_err(|error| format!("The uploaded release could not be saved for verification: {error}."))?;
-            let checked = (|| {
-                let tag = setup_tag_of(&filename).ok_or_else(|| "The file name does not carry its setup tag (bilibi-setup-vX.Y.Z-...). Upload it under the name it was published with. Nothing was unpacked.".to_owned())?;
-                transport::verify_attestation(
-                    &archive,
-                    &verification.repository,
-                    verification.repository_id,
-                    &tag,
-                    verification.token.as_deref(),
-                )?;
-                let unpacked = transport::unpack_bundle(bytes.as_slice(), &into)?;
-                check_folder(&into)?;
-                let recipe: Value = fs::read_to_string(into.join("release.json"))
-                    .ok()
-                    .and_then(|text| serde_json::from_str(&text).ok())
-                    .ok_or_else(|| "The release has no readable release.json. Nothing was installed.".to_owned())?;
-                if recipe["setup"]["repository"].as_str() != Some(verification.repository.as_str())
-                    || recipe["setup"]["tag"].as_str() != Some(tag.as_str())
-                {
-                    return Err("The release does not identify the accepted application repository and the setup tag in its file name. Nothing was installed.".into());
-                }
-                Ok::<transport::Unpacked, String>(unpacked)
-            })();
-            let _ = fs::remove_file(&archive);
-            let unpacked = checked.inspect_err(|_| {
-                let _ = fs::remove_dir_all(&into);
+            let lock = instance_lock(&paths)?;
+            lock.try_lock().map_err(|error| format!("Could not lock the instance to receive the upload: {error}."))?;
+            let bundle = paths.next_upload();
+            let into = paths.incoming_folder(&bundle);
+            let archive = paths.incoming().join(format!("{bundle}.tar.gz.part"));
+            let proof_path = paths.incoming().join(format!("{bundle}.proof.json.part"));
+            let mut staged = StagedRelease::new(&archive, &proof_path, &into);
+        fs::write(&archive, &bytes)
+            .map_err(|error| format!("The uploaded release could not be saved for verification: {error}."))?;
+        if let Some((_, proof_bytes)) = proof.as_ref() {
+            fs::write(&proof_path, proof_bytes).map_err(|error| {
+                format!("The uploaded release proof could not be saved for verification: {error}.")
             })?;
+        }
+            let (tag, target) = release_proof::setup_identity_of(&filename).ok_or_else(|| "The file name does not carry its setup tag and target (bilibi-setup-vX.Y.Z-<target>.tar.gz, or bilibi-nightly-YYYY-MM-DD-<target>.tar.gz). Upload it under the name it was published with. Nothing was unpacked.".to_owned())?;
+            policy.verify(
+                &paths,
+                &archive,
+                proof.as_ref().map(|_| proof_path.as_path()),
+                &tag,
+                &target,
+                token.as_deref(),
+            )?;
+            let archive_sha256 = transport::sha256_of(&archive)
+                .map_err(|error| format!("The uploaded release could not be hashed: {error}."))?;
+            release_proof::check_replay(&paths, &tag)?;
+            let admission = policy.admission(&tag, &target, &archive_sha256);
+            release_proof::Policy::load(&paths)?.check_admission(&admission)?;
+            let unpacked = transport::unpack_bundle(bytes.as_slice(), &into)?;
+            check_folder(&into)?;
+            let recipe: Value = fs::read_to_string(into.join("release.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .ok_or_else(|| "The release has no readable release.json. Nothing was installed.".to_owned())?;
+            if recipe["setup"]["repository"].as_str() != Some(policy.repository.as_str())
+                || recipe["setup"]["tag"].as_str() != Some(tag.as_str())
+            {
+                return Err("The release does not identify the trusted application repository and the setup tag in its file name. Nothing was installed.".into());
+            }
+            fs::write(
+                into.join(transport::ADMISSION_FILE),
+                serde_json::to_vec(&admission).map_err(|_| "The release admission record could not be made.".to_owned())?,
+            )
+            .map_err(|error| format!("The release admission record could not be saved: {error}."))?;
             let mut facts = transport::folder_facts(&into);
-            facts["attested"] = json!(true);
+            facts["verified"] = json!(true);
             facts["uploaded_as"] = json!(filename);
             facts["program_bytes"] = json!(unpacked.bytes);
             facts["files"] = json!(unpacked.files);
-            Ok::<Value, String>(facts)
+            staged.keep_folder = true;
+            Ok::<Upload, String>(Upload { bundle, facts })
         })
         .await
         .map_err(|_| Error::Internal)?;
-        Ok(unpacked.map(|facts| Upload { bundle, facts }))
+        Ok(unpacked)
     }
     /// Removes an uploaded release file that will not be installed.
     pub async fn discard_upload(
@@ -271,6 +319,14 @@ impl Software {
     ) -> std::result::Result<bool, String> {
         let pin = crate::github::Pin::from_request(&job.request["source"])?;
         let paths = self.paths()?.clone();
+        let policy = release_proof::Policy::load(&paths)?;
+        policy.check_admission(&job.request["source"])?;
+        release_proof::check_replay(&paths, &pin.tag)?;
+        if policy.requires_operator_proof()
+            && (pin.proof_asset_id.is_none() || pin.proof_digest.is_none())
+        {
+            return Err("The release request has no operator proof asset. Publish it beside the archive and ask again.".into());
+        }
         let mut client = self.db.get().await.map_err(db)?;
         let scope = self
             .authentication
@@ -285,8 +341,11 @@ impl Software {
         let folder = format!("{}{}", transport::JOB_PREFIX, job.id);
         let into = paths.incoming_folder(&folder);
         let part = paths.incoming().join(format!("{folder}.tar.gz.part"));
+        let proof_part = paths.incoming().join(format!("{folder}.proof.json.part"));
+        let mut staged = StagedRelease::new(&part, &proof_part, &into);
         let _ = fs::remove_dir_all(&into);
         let _ = fs::remove_file(&part);
+        let _ = fs::remove_file(&proof_part);
         if fs::create_dir_all(paths.incoming()).is_err() || !paths.incoming().is_dir() {
             return Err(format!(
                 "This instance has no incoming folder ({}). Run scripts/install-server.sh create {} again on the server to add it, then ask again.",
@@ -311,7 +370,9 @@ impl Software {
         )
         .await
         .map_err(db)?;
-        crate::github::recheck(self, &scope, &pin).await?;
+        // One fresh token for the recheck, download and provenance check.
+        let token = self.github_token(&scope, &pin.repository).await?;
+        crate::github::recheck(self, &scope, &pin, token.as_deref()).await?;
         let size = pin.bytes;
         if let Some(free) = transport::free_bytes(&paths.incoming()) {
             let need = size.saturating_mul(2) + DISK_MARGIN;
@@ -378,7 +439,6 @@ impl Software {
                 }
             })
         };
-        let token = self.github_token(&scope).await.map_err(db)?;
         let request = crate::github::asset_request(&pin.repository, pin.asset_id, token.as_deref())
             .timeout(DOWNLOAD_TIMEOUT)
             .max_body_bytes(transport::MAX_BUNDLE_BYTES);
@@ -397,14 +457,11 @@ impl Software {
         ticker.abort();
         drop(sink);
         let Some(streamed) = streamed else {
-            let _ = fs::remove_file(&part);
-            let _ = fs::remove_dir_all(&into);
             return Ok(false);
         };
         let streamed = match streamed {
             Ok(streamed) if streamed.status == 200 => streamed,
             Ok(streamed) => {
-                let _ = fs::remove_file(&part);
                 let header = |name: &str| {
                     streamed
                         .headers
@@ -422,10 +479,22 @@ impl Software {
                 ));
             }
             Err(failure) => {
-                let _ = fs::remove_file(&part);
                 return Err(github_transport_sentence(&failure));
             }
         };
+        if let (Some(proof_id), Some(proof_digest)) =
+            (pin.proof_asset_id, pin.proof_digest.as_deref())
+        {
+            self.download_proof_asset(
+                &scope,
+                &pin.repository,
+                proof_id,
+                proof_digest,
+                token.as_deref(),
+                &proof_part,
+            )
+            .await?;
+        }
         jobs::download_step(
             &**client,
             tenant,
@@ -446,37 +515,46 @@ impl Software {
         let into_for_unpack = into.clone();
         let expected = pin.digest.clone();
         let file_name = pin.name.clone();
-        let verify_repository = pin.repository.clone();
-        let verify_repository_id = pin.repository_id;
         let verify_tag = pin.tag.clone();
+        let verify_target = pin.target.clone();
         let verify_token = token.clone();
+        let verify_policy = policy.clone();
+        let verify_paths = paths.clone();
+        let verify_proof = pin.proof_asset_id.map(|_| proof_part.clone());
         let checked = tokio::task::spawn_blocking(move || {
             let got = crate::github::digest_of(&part_for_check)
                 .map_err(|error| format!("The downloaded file could not be checked: {error}"))?;
             if got != expected {
-                let _ = fs::remove_file(&part_for_check);
                 return Err(format!(
                     "The downloaded file {file_name} does not match the check code that was reviewed. Nothing was unpacked."
                 ));
             }
-            transport::verify_attestation(
+            verify_policy.verify(
+                &verify_paths,
                 &part_for_check,
-                &verify_repository,
-                verify_repository_id,
+                verify_proof.as_deref(),
                 &verify_tag,
+                &verify_target,
                 verify_token.as_deref(),
             )?;
+            let lock = instance_lock(&verify_paths)?;
+        lock.try_lock_shared().map_err(|error| format!("Could not lock the instance to check the download: {error}."))?;
+            release_proof::check_replay(&verify_paths, &verify_tag)?;
+            let admission = verify_policy.admission(&verify_tag, &verify_target, &expected);
+            release_proof::Policy::load(&verify_paths)?.check_admission(&admission)?;
             let file = fs::File::open(&part_for_check)
                 .map_err(|error| format!("could not read the downloaded file: {error}"))?;
             let unpacked = transport::unpack_bundle(file, &into_for_unpack)?;
-            let sha = check_folder(&into_for_unpack).inspect_err(|_| {
-                let _ = fs::remove_dir_all(&into_for_unpack);
-            })?;
+            let sha = check_folder(&into_for_unpack)?;
+            fs::write(
+                into_for_unpack.join(transport::ADMISSION_FILE),
+                serde_json::to_vec(&admission).map_err(|_| "The release admission record could not be made.".to_owned())?,
+            )
+            .map_err(|error| format!("The release admission record could not be saved: {error}."))?;
             Ok::<(String, u64), String>((sha, unpacked.bytes))
         })
         .await
         .map_err(|_| "the check did not finish".to_owned());
-        let _ = fs::remove_file(&part);
         let (program_sha, program_bytes) = checked??;
         let detail = json!({
             "message": format!("Downloaded {} from GitHub repository {} (tag {}) and checked it", pin.name, pin.repository, pin.tag),
@@ -497,10 +575,63 @@ impl Software {
         let handed = jobs::download_done(&mut client, tenant, job.id, &detail)
             .await
             .map_err(db)?;
+        staged.keep_folder = handed;
+        drop(client);
         if !handed {
-            let _ = fs::remove_dir_all(&into);
+            return Ok(false);
         }
-        Ok(handed)
+        if let Err(error) = self.reconcile_installer_activation().await {
+            eprintln!(
+                "software job {}: ready installer jobs could not be signalled: {error:?}",
+                job.id
+            );
+        }
+        Ok(true)
+    }
+
+    async fn download_proof_asset(
+        &self,
+        scope: &Scope,
+        repository: &str,
+        asset_id: i64,
+        expected_digest: &str,
+        token: Option<&str>,
+        path: &Path,
+    ) -> std::result::Result<(), String> {
+        let file = tokio::fs::File::create(path)
+            .await
+            .map_err(|error| format!("could not save the operator proof: {error}"))?;
+        let mut sink = file;
+        let request = crate::github::asset_request(repository, asset_id, token)
+            .timeout(DOWNLOAD_TIMEOUT)
+            .max_body_bytes(64 * 1024);
+        let call = Call {
+            system: "github".into(),
+            operation: "releases.proof_download".into(),
+            ..Call::default()
+        };
+        let reply = self
+            .integration
+            .stream(Origin::User(scope), &call, request, &mut sink)
+            .await
+            .map_err(|failure| github_transport_sentence(&failure))?;
+        drop(sink);
+        if reply.status != 200 {
+            return Err(format!(
+                "GitHub refused the operator proof download with status {}.",
+                reply.status
+            ));
+        }
+        let got = crate::github::digest_of(path).map_err(|error| {
+            format!("The downloaded operator proof could not be checked: {error}")
+        })?;
+        if got != expected_digest {
+            return Err(
+                "The downloaded operator proof does not match the check code that was reviewed."
+                    .into(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -513,16 +644,38 @@ fn db<E: Into<Error>>(error: E) -> String {
 }
 /// The checks every way in shares, on an unpacked folder: the checksum and
 /// that the program was built for this server. Returns the checksum.
-/// `setup-v1.2.3` from a published name like `bilibi-setup-v1.2.3-<target>.tar.gz`.
-fn setup_tag_of(filename: &str) -> Option<String> {
-    let rest = filename.strip_prefix("bilibi-")?;
-    let version = rest.strip_prefix("setup-v")?;
-    let end = version
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(version.len());
-    let numbers: Vec<&str> = version[..end].split('.').collect();
-    (numbers.len() == 3 && numbers.iter().all(|n| !n.is_empty()))
-        .then(|| format!("setup-v{}", &version[..end]))
+struct StagedRelease<'a> {
+    archive: &'a Path,
+    proof: &'a Path,
+    folder: &'a Path,
+    keep_folder: bool,
+}
+
+impl<'a> StagedRelease<'a> {
+    fn new(archive: &'a Path, proof: &'a Path, folder: &'a Path) -> Self {
+        Self {
+            archive,
+            proof,
+            folder,
+            keep_folder: false,
+        }
+    }
+}
+
+impl Drop for StagedRelease<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.archive);
+        let _ = fs::remove_file(self.proof);
+        if !self.keep_folder {
+            let _ = fs::remove_dir_all(self.folder);
+        }
+    }
+}
+
+fn instance_lock(paths: &Paths) -> std::result::Result<fs::File, String> {
+    fs::File::open(&paths.dir).map_err(|error| {
+        format!("Could not open the instance folder for the release lock: {error}.")
+    })
 }
 
 fn check_folder(dir: &Path) -> std::result::Result<String, String> {

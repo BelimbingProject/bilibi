@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/base", "apps/core", "apps/domains", "apps/extensions", "apps/installer", "apps/web", "fixtures/walkthrough"]
+members = ["apps/base", "apps/cli", "apps/core", "apps/domains", "apps/extensions", "apps/installer", "apps/web", "fixtures/walkthrough"]
 resolver = "2"
 
 [workspace.package]
@@ -8,7 +8,24 @@ edition = "2021"
 rust-version = "1.99"
 license = "MIT"
 
+# `deny`, not `forbid`: the few audited system calls opt out with
+# `#[expect(unsafe_code, reason = "…")]`, which `forbid` would refuse.
+# Every Platform crate inherits this with `[lints] workspace = true`.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# An exception states why, and fails once it is no longer needed.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+
 [workspace.dependencies]
+rquickjs = "0.14"
+seccompiler = "0.5"
+rlimit = "0.11"
+icu_datetime = "2.3.0"
+icu_locale = "2.3.1"
+icu_properties = "2.4.0"
 jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto"] }
 tower-http = { version = "0.6.11", features = ["compression-gzip", "compression-br"] }
 axum = { version = "0.8", features = ["ws", "form"] }
@@ -24,22 +41,41 @@ libc = "0.2.190"
 thiserror = "2"
 argon2 = "0.6"
 askama = "0.16"
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Release archives: gzip-compressed tar files, checked with SHA-256.
 tar = "0.4.44"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 sha2 = "0.11"
+# Local fastText inference; pure Rust, no native toolchain or inference service.
+fasttext = "=0.8.1"
 # Keyed digests: signed streams (Media), webhook signatures (Integration, People connector).
 hmac = "0.13.0"
+# Random keys and secrets (Core User authenticator keys, Core Consent address keys).
+getrandom = "0.4.3"
 futures-core = "0.3"
-# Outgoing HTTPS (base/integration) trusts the server's own CA store too.
+# Outgoing HTTPS (base/integration, and the agent command line in apps/cli)
+# over rustls with the ring provider; both trust the machine's own CA store too.
 rustls-native-certs = "0.8"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1.0.9"
 # Authenticator two-factor (Core User): RFC 6238 over RustCrypto SHA-1, the
 # base32 key, the otpauth label and the QR code drawn server-side as SVG.
 sha1 = "0.11"
 data-encoding = "2.11"
 percent-encoding = "2.3"
 url = "2.5.8"
+# The visitor walkthrough plays a browser: a WebSocket client over the same crate axum serves with.
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+# Received mail (base/mail): MIME parsing with every charset, and one HTML allow-list.
+mail-parser = { version = "0.11.9", features = ["full_encoding"] }
+ammonia = "4.2.4"
+# Fast substring search (base/mail boundary budget); already in the build through askama and axum.
+memchr = "2.8"
+maxminddb = "0.33.0"
+mmdb-writer = "0.1.0"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 bilibi-web = { path = "apps/web" }
 bilibi-database = { path = "apps/base/database" }
@@ -58,19 +94,24 @@ bilibi-extensions = { path = "apps/extensions" }
 
 bilibi-notifications = { path = "apps/base/notifications" }
 bilibi-menu = { path = "apps/base/menu" }
+bilibi-menu-order = { path = "apps/base/menu_order" }
+bilibi-branding = { path = "apps/base/branding" }
 bilibi-principal-directory = { path = "apps/base/principal_directory" }
 bilibi-agent-api = { path = "apps/base/agent_api" }
+bilibi-ai = { path = "apps/base/ai" }
 bilibi-artifacts = { path = "apps/base/artifacts" }
 bilibi-bulk-data = { path = "apps/base/bulk_data" }
 bilibi-audit-views = { path = "apps/base/audit_views" }
 bilibi-authz = { path = "apps/base/authz" }
 bilibi-dashboard = { path = "apps/base/dashboard" }
+bilibi-dashboard-agent = { path = "apps/base/dashboard_agent" }
 bilibi-datetime = { path = "apps/base/datetime" }
 bilibi-events = { path = "apps/base/events" }
 bilibi-design-library = { path = "apps/base/design_library" }
 bilibi-grid = { path = "apps/base/grid" }
 bilibi-integration = { path = "apps/base/integration" }
 bilibi-locale = { path = "apps/base/locale" }
+bilibi-language-detection = { path = "apps/base/language_detection" }
 bilibi-mail = { path = "apps/base/mail" }
 bilibi-media = { path = "apps/base/media" }
 bilibi-party-ids = { path = "apps/base/party_ids" }
@@ -78,13 +119,17 @@ bilibi-perf = { path = "apps/base/perf" }
 bilibi-ports = { path = "apps/base/ports" }
 bilibi-queue = { path = "apps/base/queue" }
 bilibi-reports = { path = "apps/base/reports" }
+bilibi-residents = { path = "apps/base/residents" }
+bilibi-watchers = { path = "apps/base/watchers" }
 bilibi-schedule = { path = "apps/base/schedule" }
 bilibi-search = { path = "apps/base/search" }
 bilibi-session = { path = "apps/base/session" }
 bilibi-settings = { path = "apps/base/settings" }
 bilibi-settings-editor = { path = "apps/base/settings_editor" }
 bilibi-custom-fields = { path = "apps/base/custom_fields" }
+bilibi-labels = { path = "apps/base/labels" }
 bilibi-picklists = { path = "apps/base/picklists" }
+bilibi-templates = { path = "apps/base/templates" }
 bilibi-records = { path = "apps/base/records" }
 bilibi-step-up = { path = "apps/base/step_up" }
 bilibi-software = { path = "apps/base/software" }
@@ -94,13 +139,17 @@ bilibi-tenancy = { path = "apps/base/tenancy" }
 bilibi-tiling = { path = "apps/base/tiling" }
 bilibi-personal-data = { path = "apps/base/personal_data" }
 bilibi-privacy = { path = "apps/base/privacy" }
+bilibi-public = { path = "apps/base/public" }
+bilibi-visitor = { path = "apps/base/visitor" }
 bilibi-workflow = { path = "apps/base/workflow" }
 bilibi-activity = { path = "apps/core/activity" }
 bilibi-address = { path = "apps/core/address" }
+bilibi-consent = { path = "apps/core/consent" }
 bilibi-currency = { path = "apps/core/currency" }
 bilibi-document = { path = "apps/core/document" }
 bilibi-portal = { path = "apps/core/portal" }
 bilibi-product = { path = "apps/core/product" }
+bilibi-team = { path = "apps/core/team" }
 bilibi-affiliation = { path = "apps/core/affiliation" }
 bilibi-agent = { path = "apps/core/agent" }
 bilibi-geonames = { path = "apps/core/geonames" }

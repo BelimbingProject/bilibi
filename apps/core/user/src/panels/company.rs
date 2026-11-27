@@ -77,9 +77,15 @@ impl CompanyUsers {
         let columns = ListColumns::mount(
             "company-users-table",
             vec![
-                BuiltinColumn::new("name", "Name").sortable("name"),
-                BuiltinColumn::new("email", "Email").sortable("email"),
-                BuiltinColumn::new("email_verified", "Email verified").sortable("email_verified"),
+                BuiltinColumn::new("name", "Name")
+                    .grid_field("users.name")
+                    .sortable("name"),
+                BuiltinColumn::new("email", "Email")
+                    .grid_field("users.email")
+                    .sortable("email"),
+                BuiltinColumn::new("email_verified", "Email verified")
+                    .grid_field("users.email_verified_at")
+                    .sortable("email_verified"),
             ],
         )
         .map_err(|_| Error::Internal)?;
@@ -179,7 +185,6 @@ impl CompanyUsers {
         })?;
         let card = render(&Card {
             id: "company-users-card",
-            class: "mt-6",
             inner_class: "p-0",
             body,
             ..Card::default()

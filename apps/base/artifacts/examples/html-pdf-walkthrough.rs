@@ -1,7 +1,9 @@
 //! Manual running-service walkthrough for the A4 HTML PDF engine and the
 //! single-use signed `/pdf/render/{token}` route. Explicit disposable DB only:
 //! it starts the real Axum app on a local port, drives real Chromium, and prints
-//! what happened for inspection. No assertions or test harness.
+//! what happened for inspection. One check exits non-zero: a browser that
+//! starts slowly still prints, because the render timeout counts from its
+//! first answer and its start has its own limit (#707).
 //!
 //! Needs `BILIBI_PDF_DEMO_OUT` (output directory), `BILIBI_PDF_CHROMIUM`
 //! (absolute path of a sandbox-capable Chromium/Chrome), optional
@@ -230,12 +232,14 @@ async fn count(client: &Client) -> Result<i64> {
         .await?;
     Ok(row.get(0))
 }
-async fn get(port: u16, path: &str) -> Result<String> {
+async fn get(port: u16, host_port: u16, path: &str) -> Result<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
     stream
         .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-                .as_bytes(),
+            format!(
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{host_port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
         )
         .await?;
     let mut response = Vec::new();
@@ -278,8 +282,6 @@ async fn main() -> Result<()> {
     )?;
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
-    let app = bilibi_web::App::new(db.clone(), "http://127.0.0.1")?;
-    let store = app.services.get::<Artifacts>("base/artifacts.store")?;
     // Three consecutive free ports; pick a base outside the ephemeral range.
     let base: u16 = std::env::var("BILIBI_PDF_DEMO_PORT")
         .ok()
@@ -287,17 +289,23 @@ async fn main() -> Result<()> {
         .unwrap_or(48210);
     let listener = TcpListener::bind(("127.0.0.1", base)).await?;
     let app_port = listener.local_addr()?.port();
-    let router = bilibi_web::router(app.clone());
-    tokio::spawn(async move { axum::serve(listener, router).await });
     let wire = Arc::new(Mutex::new(Wire::default()));
     let proxy_port = proxy(base + 1, app_port, wire.clone(), db.clone()).await?;
     let (probe_port, hits) = probe(base + 2).await?;
+    // The reverse proxy preserves its browser-facing authority for the exact Host guard.
+    let origin = format!("http://127.0.0.1:{proxy_port}");
+    let app = bilibi_web::App::new(db.clone(), &origin)?;
+    let store = app.services.get::<Artifacts>("base/artifacts.store")?;
+    let router = bilibi_web::staff_router(app.clone());
+    tokio::spawn(async move { axum::serve(listener, router).await });
     println!("app :{app_port}, browser-facing proxy :{proxy_port}, hostile probe :{probe_port}");
 
     let authentication = app
         .services
         .get::<Authentication>("base/tenancy.authentication")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let actor = authentication
         .authenticate(&**client, 1, 1, "walkthrough".into())
         .await?;
@@ -410,17 +418,23 @@ async fn main() -> Result<()> {
     println!("== route behaviour (token path is not printed)");
     println!(
         "replay of the used token: {}",
-        get(app_port, &token_path).await?
+        get(app_port, proxy_port, &token_path).await?
     );
     let mut forged = token_path.clone();
     forged.pop();
     forged.push(if token_path.ends_with('A') { 'B' } else { 'A' });
-    println!("altered signature: {}", get(app_port, &forged).await?);
+    println!(
+        "altered signature: {}",
+        get(app_port, proxy_port, &forged).await?
+    );
     println!(
         "unsigned id only: {}",
-        get(app_port, "/pdf/render/abc").await?
+        get(app_port, proxy_port, "/pdf/render/abc").await?
     );
-    println!("no token: {}", get(app_port, "/pdf/render/").await?);
+    println!(
+        "no token: {}",
+        get(app_port, proxy_port, "/pdf/render/").await?
+    );
     println!(
         "serve_render(garbage): {}",
         matches!(store.serve_render("x.y").await, Served::NotFound)
@@ -547,14 +561,38 @@ async fn main() -> Result<()> {
             .await
             .map(|m| m.id),
     );
+    // A cold start (the browser's files read from a slow disk): 7 s before
+    // the browser runs, longer than the 5 s the render itself may take.
+    let cold = out.join("cold-start.sh");
+    std::fs::write(
+        &cold,
+        format!("#!/bin/sh\nsleep 7\nexec '{chromium}' \"$@\"\n"),
+    )?;
+    std::fs::set_permissions(&cold, std::fs::Permissions::from_mode(0o700))?;
+    configure("pdf.chromium.binary", json!(cold.display().to_string())).await??;
+    configure("pdf.render_timeout_seconds", json!(5)).await??;
+    let started = std::time::Instant::now();
+    let printed = documents
+        .render_inline(&mut client, reference(), &json!({}))
+        .await
+        .map(|m| m.id);
+    let elapsed = started.elapsed().as_secs_f32();
+    show(
+        "browser that takes 7 s to start (5 s render limit)",
+        printed.as_ref(),
+    );
+    println!("returned after {elapsed:.1}s");
+    if printed.is_err() {
+        return Err("a slow browser start used up the render timeout (#707)".into());
+    }
     let slow = out.join("hang.sh");
     std::fs::write(&slow, "#!/bin/sh\nsleep 60\n")?;
     std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o700))?;
     configure("pdf.chromium.binary", json!(slow.display().to_string())).await??;
-    configure("pdf.render_timeout_seconds", json!(2)).await??;
+    configure("pdf.launch_timeout_seconds", json!(2)).await??;
     let started = std::time::Instant::now();
     show(
-        "browser that never answers (2 s limit)",
+        "browser that never answers (2 s start limit)",
         documents
             .render_inline(&mut client, reference(), &json!({}))
             .await
@@ -562,6 +600,7 @@ async fn main() -> Result<()> {
     );
     println!("returned after {:.1}s", started.elapsed().as_secs_f32());
     configure("pdf.chromium.binary", json!(chromium)).await??;
+    configure("pdf.launch_timeout_seconds", json!(60)).await??;
     configure("pdf.render_timeout_seconds", json!(30)).await??;
     println!(
         "probe hits across all refusals: {}",

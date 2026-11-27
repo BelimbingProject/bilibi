@@ -1,12 +1,18 @@
 //! GitHub as a source of setup releases. The server reads one repository the
 //! owner named. It does not give GitHub a way into the server.
 //!
-//! The repository name, the remembered GitHub repository number, the optional
-//! read token and the refresh interval are settings (`lib.rs`). The token is
-//! encrypted. Listings are cached on disk so a live page does not call GitHub
-//! on every refresh. Downloads go through `base/integration` and drop the
-//! token when GitHub redirects to the file host (`redirect.rs`).
-use crate::{review::Review, transport, Software, SoftwareError, SoftwareResult, STEP_UP};
+//! The release-trust record pins the repository name and immutable number;
+//! the refresh interval is a setting (`lib.rs`). The server GitHub App
+//! (`app.rs`) mints a fresh read token for each use, so no person's login or
+//! hand-made token is kept here. Listings are cached on disk so a
+//! live page does not call GitHub on every refresh. Downloads go through
+//! `base/integration` and drop the token when GitHub redirects to the file
+//! host (`redirect.rs`).
+mod app;
+
+use crate::{
+    release_proof, review::Review, transport, Software, SoftwareError, SoftwareResult, STEP_UP,
+};
 use bilibi_authz::authorize_operator;
 use bilibi_database::{MutationTransaction, Result};
 use bilibi_integration::{Call, Failure, Origin, Outgoing, RedirectPolicy, Reply};
@@ -16,13 +22,8 @@ use serde_json::{json, Value};
 use std::{fs, path::Path, sync::Mutex, time::Duration};
 use tokio_postgres::GenericClient;
 
-pub const REPOSITORY: &str = "software.github_repository";
-pub const REPOSITORY_ID: &str = "software.github_repository_id";
-pub const REPOSITORY_BOUND: &str = "software.github_repository_bound";
-pub const TOKEN: &str = "software.github_token";
 pub const REFRESH_MINUTES: &str = "software.github_refresh_minutes";
 pub const DEFAULT_REFRESH_MINUTES: i64 = 15;
-pub const STEP_UP_TOKEN: &str = "base.software.github_token.change";
 
 const API: &str = "https://api.github.com";
 const API_VERSION: &str = "2022-11-28";
@@ -71,28 +72,6 @@ fn github_name(value: &str) -> bool {
         && !value.starts_with('.')
         && !value.ends_with('.')
 }
-pub fn accepts_repository(value: &Value) -> bool {
-    value.is_null()
-        || value
-            .as_str()
-            .is_some_and(|name| parse_repository(name).is_ok())
-}
-pub fn accepts_token(value: &Value) -> bool {
-    value.is_null() || value.as_str().is_some_and(token_ok)
-}
-fn token_ok(token: &str) -> bool {
-    (20..=255).contains(&token.chars().count()) && token.chars().all(|c| c.is_ascii_graphic())
-}
-pub fn accepts_id(value: &Value) -> bool {
-    value.is_null() || value.as_i64().is_some_and(|id| id > 0)
-}
-pub fn accepts_bound(value: &Value) -> bool {
-    value.is_null()
-        || value
-            .as_str()
-            .is_some_and(|name| parse_repository(name).is_ok())
-}
-
 /// The Rust target this process was built for, when it is one the setup
 /// archives are named with.
 pub fn this_target() -> Option<&'static str> {
@@ -113,35 +92,18 @@ pub fn describe_target(target: &str) -> &'static str {
 struct Saved {
     repository: Option<String>,
     repository_id: Option<i64>,
-    bound: Option<String>,
     refresh_minutes: i64,
-    token_set: bool,
+    /// This server's GitHub App client ID, when it has one.
+    app: Option<String>,
 }
 
-pub(crate) struct Verification {
-    pub repository: String,
-    pub repository_id: i64,
-    pub token: Option<String>,
-}
 impl Software {
     async fn github_saved(
         &self,
         client: &(impl GenericClient + Sync),
-        scope: &Scope,
+        scope: Option<&Scope>,
+        policy: Option<&release_proof::Policy>,
     ) -> Result<Saved> {
-        let repository = text_setting(self.settings.get_global(client, REPOSITORY).await?.as_str());
-        let bound = text_setting(
-            self.settings
-                .get_global(client, REPOSITORY_BOUND)
-                .await?
-                .as_str(),
-        );
-        let repository_id = self
-            .settings
-            .get_global(client, REPOSITORY_ID)
-            .await?
-            .as_i64()
-            .filter(|id| *id > 0);
         let refresh_minutes = self
             .settings
             .get_global(client, REFRESH_MINUTES)
@@ -149,46 +111,19 @@ impl Software {
             .as_i64()
             .filter(|minutes| (1..=1440).contains(minutes))
             .unwrap_or(DEFAULT_REFRESH_MINUTES);
-        let token_set = self
-            .settings
-            .resolve_masked(client, scope, Target::Global, &[TOKEN])
-            .await?
-            .get(TOKEN)
-            .is_some_and(|resolved| resolved.source.is_some());
-        Ok(Saved {
-            repository,
-            repository_id,
-            bound,
+        let mut saved = Saved {
+            repository: None,
+            repository_id: None,
             refresh_minutes,
-            token_set,
-        })
-    }
-
-    /// The accepted repository identity used to verify an uploaded release's
-    /// GitHub build provenance. A missing or changed identity is a plain
-    /// refusal, not permission to accept an unsigned upload.
-    pub(crate) async fn github_verification(
-        &self,
-        scope: &Scope,
-    ) -> Result<std::result::Result<Verification, String>> {
-        let client = self.db.get().await?;
-        let saved = self.github_saved(&**client, scope).await?;
-        drop(client);
-        let Some(repository) = saved.repository else {
-            return Ok(Err("Set and accept the application repository on Software › Releases before uploading a release.".into()));
+            app: scope
+                .and_then(|_| app::load(self.paths.as_ref()).ok().flatten())
+                .map(|app| app.client_id),
         };
-        let Some(repository_id) = saved.repository_id else {
-            return Ok(Err("Accept the application repository on Software › Releases before uploading a release.".into()));
-        };
-        if saved.bound.as_deref() != Some(repository.as_str()) {
-            return Ok(Err("The application repository name has changed since it was accepted. Accept it again before uploading a release.".into()));
+        if let Some(policy) = policy {
+            saved.repository = Some(policy.repository.clone());
+            saved.repository_id = Some(policy.repository_id);
         }
-        let token = self.github_token(scope).await?;
-        Ok(Ok(Verification {
-            repository,
-            repository_id,
-            token,
-        }))
+        Ok(saved)
     }
 
     /// The cached GitHub release list, refreshed when it is older than the
@@ -196,26 +131,21 @@ impl Software {
     /// GitHub marks as a pre-release. Drafts are never listed.
     pub(crate) async fn github_listing(
         &self,
-        scope: &Scope,
+        client: &(impl GenericClient + Sync),
+        scope: Option<&Scope>,
         force: bool,
         prerelease: bool,
+        policy: &release_proof::Policy,
     ) -> Result<Value> {
-        let client = self.db.get().await?;
-        let saved = self.github_saved(&**client, scope).await?;
-        drop(client);
-        let Some(repository) = saved.repository.clone() else {
-            return Ok(json!({
-                "available": false,
-                "token_set": saved.token_set,
-                "refresh_minutes": saved.refresh_minutes,
-                "message": "No GitHub repository is set. A server owner sets Software › Application repository on GitHub, like your-company/my-bilibi.",
-            }));
-        };
+        let saved = self.github_saved(client, scope, Some(policy)).await?;
+        let repository = &policy.repository;
+        let nightly = policy.minimum_tag.starts_with("nightly-");
+        let notes_channel = if nightly { "nightly" } else { "stable" };
         let Some(target) = this_target() else {
             return Ok(json!({
                 "available": false,
                 "repository": repository,
-                "token_set": saved.token_set,
+                "app": saved.app,
                 "refresh_minutes": saved.refresh_minutes,
                 "message": "This server is not a Linux x86-64 or ARM 64-bit computer, so it cannot choose a GitHub setup file.",
             }));
@@ -225,67 +155,101 @@ impl Software {
             .as_ref()
             .map(|paths| paths.dir.join("data").join("github-listing.json"));
         if !force {
-            if let Some(cached) = read_cache(cache_path.as_deref(), &repository) {
-                if fresh(&cached, saved.refresh_minutes) || limited(&cached) {
-                    return Ok(present(&cached, &saved, target, prerelease, false));
+            if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
+                if limited(&cached)
+                    || ((cached["latest_notes"].get(notes_channel).is_some()
+                        || cached["attempt_at"].is_string())
+                        && fresh(&cached, saved.refresh_minutes))
+                {
+                    return Ok(present(&cached, &saved, target, prerelease, policy));
                 }
             }
-        } else if let Some(cached) = read_cache(cache_path.as_deref(), &repository) {
+        } else if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
             if limited(&cached) {
-                return Ok(present(&cached, &saved, target, prerelease, false));
+                return Ok(present(&cached, &saved, target, prerelease, policy));
             }
         }
-        let token = self.github_token(scope).await?;
-        let fetched = fetch_listing(
-            &self.integration,
-            scope,
-            &repository,
-            token.as_deref(),
-            target,
-            cache_path.as_deref(),
-        )
-        .await;
+        let token = match scope {
+            Some(scope) => self.github_token(scope, repository).await,
+            None => Ok(None),
+        };
+        let fetched = match token {
+            Ok(token) => {
+                fetch_listing(
+                    &self.integration,
+                    scope.map_or(Origin::System, Origin::User),
+                    repository,
+                    token.as_deref(),
+                    target,
+                    cache_path.as_deref(),
+                    notes_channel,
+                )
+                .await
+            }
+            Err(why) => Err(why),
+        };
         let cached = match fetched {
             Ok(value) => value,
             Err(message) => {
                 // Remember the failed attempt so every page render does not
                 // ask a GitHub that just refused or did not answer. Refresh
                 // still asks again.
-                let mut kept = read_cache(cache_path.as_deref(), &repository).unwrap_or_else(
+                let mut kept = read_cache(cache_path.as_deref(), repository).unwrap_or_else(
                     || json!({"available": false, "repository": repository, "releases": []}),
                 );
                 kept["attempt_at"] = json!(jiff::Timestamp::now().to_string());
                 kept["message"] = json!(message);
                 write_cache(cache_path.as_deref(), &kept);
-                let mut shown = present(&kept, &saved, target, prerelease, true);
-                shown["message"] = json!(message);
-                return Ok(shown);
+                return Ok(present(&kept, &saved, target, prerelease, policy));
             }
         };
-        Ok(present(&cached, &saved, target, prerelease, false))
+        Ok(present(&cached, &saved, target, prerelease, policy))
     }
 
-    pub(crate) async fn github_token(&self, scope: &Scope) -> Result<Option<String>> {
-        let client = self.db.get().await?;
-        let resolved = self
-            .settings
-            .get(&**client, scope, Target::Global, TOKEN)
-            .await?;
-        Ok(resolved.value.as_str().map(str::to_owned))
+    /// A fresh read token for one use of `repository`, minted by this server's
+    /// GitHub App when the repository is private. Public repositories use
+    /// anonymous access. Servers never use a person's login or hand-made token.
+    pub(crate) async fn github_token(
+        &self,
+        scope: &Scope,
+        repository: &str,
+    ) -> std::result::Result<Option<String>, String> {
+        let Some(app) = app::load(self.paths.as_ref())? else {
+            return Ok(None);
+        };
+        match app::mint(&self.integration, scope, &app, repository).await {
+            Ok(token) => Ok(Some(token)),
+            Err(refusal) => Err(refusal.sentence()),
+        }
     }
 
-    /// What saving the GitHub source would do. The token is never copied
-    /// into the review.
+    /// What changing GitHub release-list access would do.
     pub(crate) async fn review_github(
         &self,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         input: &Value,
     ) -> SoftwareResult<Review> {
-        let client = self.db.get().await?;
-        authorize_operator(&**client, scope, crate::MANAGE).await?;
-        let saved = self.github_saved(&**client, scope).await?;
-        drop(client);
-        github_review(self, scope, input, &saved).await
+        authorize_operator(client, scope, crate::MANAGE).await?;
+        self.github_review_with(client, scope, input).await
+    }
+
+    async fn github_review_with(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        let policy = self
+            .paths
+            .as_ref()
+            .map(release_proof::Policy::load)
+            .transpose()
+            .map_err(bilibi_database::Error::refused)?;
+        let saved = self
+            .github_saved(client, Some(scope), policy.as_ref())
+            .await?;
+        github_review(input, &saved)
     }
 
     pub(crate) async fn github_in(
@@ -295,60 +259,27 @@ impl Software {
         input: &Value,
     ) -> SoftwareResult<Value> {
         authorize_operator(tx.sql(), scope, crate::MANAGE).await?;
-        let saved = self.github_saved(tx.sql(), scope).await?;
-        let review = github_review(self, scope, input, &saved).await?;
+        let review = self.github_review_with(tx.sql(), scope, input).await?;
         self.step_up.require(scope, STEP_UP, &review.target).await?;
-        if (input.get("token").and_then(Value::as_str).is_some()
-            || input["clear_token"].as_bool() == Some(true))
-            && !self.settings.encryption_available()
-        {
-            return Err(SoftwareError::field(
-                "token",
-                "This server has no settings key (BILIBI_SETTINGS_KEY), so it cannot keep a GitHub token. Set one in the instance's env file first.",
-            ));
-        }
-        apply_github(tx, &self.settings, scope, input, &review).await?;
+        apply_github(tx, &self.settings, scope, input).await?;
         Ok(
-            json!({"review": review.facts, "github": {"repository": review.facts["repository"], "repository_id": review.facts["repository_id"], "token_set": review.facts["token_set"]}}),
+            json!({"review": review.facts, "github": {"repository": review.facts["repository"], "repository_id": review.facts["repository_id"]}}),
         )
     }
 }
 
-fn text_setting(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
-}
-
-async fn github_review(
-    software: &Software,
-    scope: &Scope,
-    input: &Value,
-    saved: &Saved,
-) -> SoftwareResult<Review> {
-    let repository = match input.get("repository") {
-        Some(Value::String(name)) => {
-            parse_repository(name)
-                .map_err(|message| SoftwareError::field("repository", &message))?;
-            Some(name.trim().to_owned())
-        }
-        Some(Value::Null) | None => saved.repository.clone(),
-        Some(_) => {
-            return Err(SoftwareError::field(
-                "repository",
-                "Enter the repository as owner/name, like your-company/my-bilibi.",
-            ))
-        }
-    };
-    if let Some(token) = input.get("token").and_then(Value::as_str) {
-        if !token_ok(token) {
-            return Err(SoftwareError::field(
-                "token",
-                "The GitHub token must be 20 to 255 characters with no spaces. Create a fine-grained token that can only read this repository.",
-            ));
-        }
+fn github_review(input: &Value, saved: &Saved) -> SoftwareResult<Review> {
+    let object = input.as_object().ok_or_else(|| {
+        SoftwareError::field("github", "Give the GitHub release-list settings to review.")
+    })?;
+    let allowed = ["refresh_minutes"];
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(SoftwareError::field(
+            "github",
+            "GitHub release access accepts only the check interval; servers do not accept GitHub tokens.",
+        ));
     }
+    let repository = &saved.repository;
     let refresh_minutes = match input.get("refresh_minutes") {
         Some(value) => value
             .as_i64()
@@ -361,83 +292,15 @@ async fn github_review(
             })?,
         None => saved.refresh_minutes,
     };
-    let clear_token = input["clear_token"].as_bool() == Some(true);
-    let accept = input["accept"].as_bool() == Some(true);
-    let name_changes = repository.as_deref() != saved.repository.as_deref()
-        && input.get("repository").and_then(Value::as_str).is_some();
-    let mut looked_up: Option<(i64, bool)> = None;
-    if accept || name_changes {
-        let Some(repository) = repository.clone() else {
-            return Err(SoftwareError::field(
-                "repository",
-                "Enter the repository as owner/name before accepting it.",
-            ));
-        };
-        let token = if clear_token {
-            None
-        } else if let Some(token) = input.get("token").and_then(Value::as_str) {
-            Some(token.to_owned())
-        } else {
-            software.github_token(scope).await?
-        };
-        let repo = fetch_repo(&software.integration, scope, &repository, token.as_deref())
-            .await
-            .map_err(|message| SoftwareError::field("repository", &message))?;
-        if let Some(expected) = input.get("repository_id").and_then(Value::as_i64) {
-            if expected != repo.0 {
-                return Err(SoftwareError::field(
-                    "repository_id",
-                    &format!("GitHub now says {repository} is repository {0}, not {expected}. Look at the list again before saving.", repo.0),
-                ));
-            }
-        }
-        looked_up = Some(repo);
-    }
-    let repository_id = looked_up.map(|(id, _)| id).or(saved.repository_id);
-    let token_set = if clear_token {
-        false
-    } else if input.get("token").and_then(Value::as_str).is_some() {
-        true
-    } else {
-        saved.token_set
-    };
     let repository_text = repository.clone().unwrap_or_else(|| "no repository".into());
-    let summary = match &looked_up {
-        Some((id, _)) => format!("Remember GitHub repository {repository_text} as number {id}"),
-        None if clear_token => format!("Clear the GitHub read token for {repository_text}"),
-        None if input.get("token").is_some() => {
-            format!("Save a GitHub read token for {repository_text}")
-        }
-        None => format!("Check GitHub for {repository_text} every {refresh_minutes} minutes"),
-    };
+    let summary = format!("Check GitHub for {repository_text} every {refresh_minutes} minutes");
     let mut notes = Vec::new();
-    if let Some((id, private)) = looked_up {
-        notes.push(format!(
-            "GitHub repository {repository_text} is number {id}{}.",
-            if private { ", and it is private" } else { "" }
-        ));
-        if saved.repository_id.is_some_and(|old| old != id) {
-            notes.push(format!(
-                "That replaces remembered repository number {}.",
-                saved.repository_id.unwrap_or(0)
-            ));
-        }
-    }
-    if clear_token {
-        notes.push("The saved read token will be removed.".into());
-    } else if input.get("token").and_then(Value::as_str).is_some() {
-        notes.push("A new read token will be saved. It is not shown here.".into());
-    }
+    notes.push("Private GitHub access uses a short-lived read token minted by this server's GitHub App; public access is anonymous. No person's login or hand-made token is accepted.".into());
     notes.push(format!(
         "The release list is checked at most every {refresh_minutes} minutes, and when you choose Refresh."
     ));
     let request = json!({
-        "repository": repository,
-        "repository_id": repository_id,
         "refresh_minutes": refresh_minutes,
-        "clear_token": clear_token,
-        "accept": accept || name_changes,
-        "token_set": token_set,
     });
     Ok(Review {
         target: summary.clone(),
@@ -445,11 +308,8 @@ async fn github_review(
         facts: json!({
             "summary": summary,
             "repository": repository,
-            "repository_id": repository_id,
+            "repository_id": saved.repository_id,
             "refresh_minutes": refresh_minutes,
-            "clear_token": clear_token,
-            "token_set": token_set,
-            "accept": accept || name_changes,
             "notes": notes,
             "step_up": [STEP_UP],
         }),
@@ -462,48 +322,10 @@ async fn apply_github(
     settings: &Settings,
     scope: &Scope,
     input: &Value,
-    review: &Review,
 ) -> SoftwareResult<()> {
-    if let Some(repository) = review.facts["repository"].as_str() {
-        if input.get("repository").and_then(Value::as_str).is_some() {
-            settings
-                .put(tx, scope, Target::Global, REPOSITORY, json!(repository))
-                .await?;
-        }
-    }
-    if review.facts["accept"].as_bool() == Some(true) {
-        let id = review.facts["repository_id"].as_i64().ok_or_else(|| {
-            SoftwareError::field("repository", "GitHub did not return a repository number.")
-        })?;
-        let repository = review.facts["repository"].as_str().ok_or_else(|| {
-            SoftwareError::field("repository", "Enter the repository as owner/name.")
-        })?;
-        settings
-            .put(tx, scope, Target::Global, REPOSITORY_ID, json!(id))
-            .await?;
-        settings
-            .put(
-                tx,
-                scope,
-                Target::Global,
-                REPOSITORY_BOUND,
-                json!(repository),
-            )
-            .await?;
-        settings
-            .put(tx, scope, Target::Global, REPOSITORY, json!(repository))
-            .await?;
-    }
     if let Some(minutes) = input.get("refresh_minutes").and_then(Value::as_i64) {
         settings
             .put(tx, scope, Target::Global, REFRESH_MINUTES, json!(minutes))
-            .await?;
-    }
-    if review.facts["clear_token"].as_bool() == Some(true) {
-        settings.delete(tx, scope, Target::Global, TOKEN).await?;
-    } else if let Some(token) = input.get("token").and_then(Value::as_str) {
-        settings
-            .put(tx, scope, Target::Global, TOKEN, json!(token))
             .await?;
     }
     Ok(())
@@ -523,6 +345,10 @@ pub(crate) struct Pin {
     pub bytes: u64,
     pub prerelease: bool,
     pub setup_commit: Option<String>,
+    pub proof_asset_id: Option<i64>,
+    pub proof_name: Option<String>,
+    pub proof_digest: Option<String>,
+    pub proof_bytes: Option<u64>,
 }
 impl Pin {
     pub(crate) fn from_request(source: &Value) -> std::result::Result<Self, String> {
@@ -562,6 +388,10 @@ impl Pin {
             bytes: source["bytes"].as_u64().unwrap_or(0),
             prerelease: source["prerelease"].as_bool().unwrap_or(false),
             setup_commit: source["setup_commit"].as_str().map(str::to_owned),
+            proof_asset_id: source["proof_asset_id"].as_i64(),
+            proof_name: source["proof_name"].as_str().map(str::to_owned),
+            proof_digest: source["proof_digest"].as_str().and_then(normalize_digest),
+            proof_bytes: source["proof_bytes"].as_u64(),
         })
     }
 }
@@ -569,14 +399,14 @@ impl Pin {
 /// Read the setup tag's commit only for a Staging comparison. A missing
 /// answer leaves the comparison unknown and never blocks installation.
 pub(crate) async fn setup_commit(software: &Software, scope: &Scope, pin: &Pin) -> Option<String> {
-    let token = software.github_token(scope).await.ok()?;
+    let token = software.github_token(scope, &pin.repository).await.ok()?;
     let mut url = url::Url::parse(&format!("{API}/repos/{}/commits", pin.repository)).ok()?;
     url.path_segments_mut()
         .ok()?
         .push(&format!("refs/tags/{}", pin.tag));
     let commit = get_json(
         &software.integration,
-        scope,
+        Origin::User(scope),
         url.as_str(),
         token.as_deref(),
         "commits.get",
@@ -594,16 +424,13 @@ pub(crate) async fn recheck(
     software: &Software,
     scope: &Scope,
     pin: &Pin,
+    token: Option<&str>,
 ) -> std::result::Result<(), String> {
-    let token = software
-        .github_token(scope)
-        .await
-        .map_err(|_| "The GitHub token could not be read. Ask again.".to_owned())?;
     let repo = fetch_repo(
         &software.integration,
-        scope,
+        Origin::User(scope),
         &pin.repository,
-        token.as_deref(),
+        token,
     )
     .await
     .map_err(|message| format!("Could not check the GitHub repository: {message}"))?;
@@ -615,9 +442,9 @@ pub(crate) async fn recheck(
     }
     let release = get_json(
         &software.integration,
-        scope,
+        Origin::User(scope),
         &format!("{API}/repos/{}/releases/{}", pin.repository, pin.release_id),
-        token.as_deref(),
+        token,
         "releases.get",
     )
     .await
@@ -655,6 +482,22 @@ pub(crate) async fn recheck(
             pin.name
         ));
     }
+    if let Some(proof_id) = pin.proof_asset_id {
+        let proof = release["assets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|asset| asset["id"].as_i64() == Some(proof_id))
+            .ok_or_else(|| format!("GitHub release {} no longer has the operator proof that was reviewed. Nothing was downloaded.", pin.tag))?;
+        let proof_digest =
+            normalize_digest(proof["digest"].as_str().unwrap_or("")).ok_or_else(|| {
+                "GitHub has no check code for the operator proof now. Nothing was downloaded."
+                    .to_owned()
+            })?;
+        if pin.proof_digest.as_deref() != Some(proof_digest.as_str()) {
+            return Err("The operator proof changed after it was reviewed. Nothing was downloaded. Review the release again.".into());
+        }
+    }
     Ok(())
 }
 
@@ -675,11 +518,19 @@ pub(crate) fn asset_request(repository: &str, asset_id: i64, token: Option<&str>
     outgoing
 }
 
-fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: bool) -> Value {
+fn present(
+    cache: &Value,
+    saved: &Saved,
+    target: &str,
+    prerelease: bool,
+    policy: &release_proof::Policy,
+) -> Value {
+    let nightly = policy.minimum_tag.starts_with("nightly-");
+    let notes_channel = if nightly { "nightly" } else { "stable" };
+    let proof_required = policy.requires_operator_proof();
     let repository = cache["repository"].as_str().unwrap_or("");
     let live_id = cache["repository_id"].as_i64();
     let accepted = saved.repository.as_deref() == Some(repository)
-        && saved.bound.as_deref() == Some(repository)
         && saved.repository_id.is_some()
         && (live_id.is_none() || saved.repository_id == live_id);
     let identity_changed = saved.repository_id.is_some()
@@ -691,23 +542,50 @@ fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: 
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .filter(|row| prerelease || row["prerelease"].as_bool() != Some(true))
+        .filter(|row| {
+            (nightly || prerelease || row["prerelease"].as_bool() != Some(true))
+                && row["tag"]
+                    .as_str()
+                    .is_some_and(|tag| policy.check_tag(tag).is_ok())
+        })
         .collect();
     releases.retain(|row| row["target"].as_str() == Some(target));
     let mut message = cache["message"].as_str().unwrap_or("").to_owned();
+    if proof_required {
+        let before = releases.len();
+        releases.retain(|row| {
+            row["proof_asset_id"].as_i64().is_some() && row["proof_digest"].as_str().is_some()
+        });
+        if before > 0 && releases.is_empty() && message.is_empty() {
+            message = "The setup files have no matching .proof.json assets. Publish each operator proof beside the exact archive.".into();
+        }
+    } else {
+        for row in &mut releases {
+            if let Some(fields) = row.as_object_mut() {
+                for key in [
+                    "proof_asset_id",
+                    "proof_name",
+                    "proof_digest",
+                    "proof_bytes",
+                ] {
+                    fields.remove(key);
+                }
+            }
+        }
+    }
     if identity_changed {
         message = format!(
-            "GitHub now says {repository} is repository {}, not the remembered number {}. Accept the new repository before installing.",
+            "GitHub now says {repository} is repository {}, not the number {} pinned in Release trust. Installation is refused until the installation owner reviews a Release trust change with fresh 2FA.",
             live_id.unwrap_or(0),
             saved.repository_id.unwrap_or(0)
         );
     } else if !accepted && live_id.is_some() {
         message = format!(
-            "GitHub repository {repository} is number {}. Accept it before installing a release.",
+            "GitHub repository {repository} is number {}, which does not match Release trust. Installation is refused.",
             live_id.unwrap_or(0)
         );
     } else if releases.is_empty() && message.is_empty() {
-        message = if prerelease {
+        message = if nightly || prerelease {
             format!(
                 "No setup file for {} is published in {repository}.",
                 describe_target(target)
@@ -720,6 +598,9 @@ fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: 
         };
     }
     json!({
+        "latest": if nightly { &cache["latest_nightly"] } else { &cache["latest"] },
+        "latest_notes": cache["latest_notes"][notes_channel],
+        "complete": cache["complete"],
         "available": cache["available"].as_bool().unwrap_or(false),
         "repository": repository,
         "repository_id": live_id,
@@ -729,11 +610,12 @@ fn present(cache: &Value, saved: &Saved, target: &str, prerelease: bool, stale: 
         "target": target,
         "prerelease": prerelease,
         "fetched_at": cache["fetched_at"],
-        "stale": stale || cache["stale"].as_bool().unwrap_or(false),
-        "token_set": saved.token_set,
+        "stale": cache["latest_notes"].get(notes_channel).is_none() || cache["attempt_at"].is_string() || cache["stale"].as_bool().unwrap_or(false),
+        "app": saved.app,
         "refresh_minutes": saved.refresh_minutes,
         "limited_until": cache["limited_until"],
         "message": if message.is_empty() { Value::Null } else { json!(message) },
+        "proof_required": proof_required,
         "releases": releases,
     })
 }
@@ -766,8 +648,16 @@ fn read_cache(path: Option<&Path>, repository: &str) -> Option<Value> {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
     });
-    let value = from_file.or_else(|| MEMORY.lock().ok().and_then(|guard| guard.clone()))?;
-    (value["repository"].as_str() == Some(repository)).then_some(value)
+    let mut value = from_file.or_else(|| MEMORY.lock().ok().and_then(|guard| guard.clone()))?;
+    if value["repository"].as_str() != Some(repository) {
+        return None;
+    }
+    for row in value["releases"].as_array_mut().into_iter().flatten() {
+        if let Some(fields) = row.as_object_mut() {
+            fields.remove("notes");
+        }
+    }
+    Some(value)
 }
 fn write_cache(path: Option<&Path>, value: &Value) {
     if let Ok(mut guard) = MEMORY.lock() {
@@ -791,22 +681,28 @@ fn write_cache(path: Option<&Path>, value: &Value) {
 
 async fn fetch_listing(
     integration: &bilibi_integration::Integration,
-    scope: &Scope,
+    origin: Origin<'_>,
     repository: &str,
     token: Option<&str>,
     target: &str,
     cache_path: Option<&Path>,
+    notes_channel: &str,
 ) -> std::result::Result<Value, String> {
-    let (id, private) = fetch_repo(integration, scope, repository, token).await?;
+    let (id, private) = fetch_repo(integration, origin, repository, token).await?;
     let previous = read_cache(cache_path, repository);
     let etag = previous
         .as_ref()
+        .filter(|cache| {
+            cache["latest_notes"].get(notes_channel).is_some()
+                && cache["complete"] == true
+                && cache["repository_id"] == id
+        })
         .and_then(|cache| cache["etag"].as_str())
         .map(str::to_owned);
     let url = format!("{API}/repos/{repository}/releases?per_page=30");
     let first = get_raw(
         integration,
-        scope,
+        origin,
         &url,
         token,
         etag.as_deref(),
@@ -835,32 +731,70 @@ async fn fetch_listing(
         ));
     }
     let mut body = json_body(&first.body)?;
-    let mut rated = &first;
-    let mut page_keep = None;
-    if let Some(next) = next_link(&header_text(&first, "link").unwrap_or_default()) {
-        if next.starts_with(API) && rate_headers_remaining(&first) > 10 {
-            if let Ok(page) = get_raw(integration, scope, &next, token, None, "releases.list").await
-            {
-                if (200..300).contains(&page.status) {
-                    if let Ok(mut more) = json_body(&page.body) {
-                        if let (Some(left), Some(right)) =
-                            (body.as_array_mut(), more.as_array_mut())
-                        {
-                            left.append(right);
-                        }
-                    }
-                    page_keep = Some(page);
-                }
-            }
-        }
-    }
-    if let Some(page) = page_keep.as_ref() {
-        rated = page;
-    }
     let releases = body
-        .as_array()
-        .into_iter()
-        .flatten()
+        .as_array_mut()
+        .ok_or_else(|| "GitHub returned an unreadable release list.".to_owned())?;
+    let mut next = next_link(&header_text(&first, "link").unwrap_or_default());
+    let single_page = next.is_none();
+    let mut last = None;
+    let mut pages = 1;
+    let mut page_error = None;
+    // Keep the same rate-limit reserve. A partial listing is useful in Details,
+    // but cannot establish which version to announce.
+    let named_pages = format!("{API}/repos/{repository}/releases?");
+    let numbered_pages = format!("{API}/repositories/{id}/releases?");
+    while let Some(url) = next.as_deref() {
+        if !url
+            .get(..named_pages.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&named_pages))
+            && !url.starts_with(&numbered_pages)
+        {
+            break;
+        }
+        if pages >= 10 || rate_headers_remaining(last.as_ref().unwrap_or(&first)) <= 10 {
+            break;
+        }
+        let page = match get_raw(integration, origin, url, token, None, "releases.list").await {
+            Ok(page) => page,
+            Err(error) => {
+                page_error = Some(error);
+                break;
+            }
+        };
+        if page.status != 200 {
+            page_error = Some(github_status(
+                repository,
+                page.status,
+                token.is_some(),
+                &page,
+            ));
+            last = Some(page);
+            break;
+        }
+        let Ok(Value::Array(mut more)) = json_body(&page.body) else {
+            page_error = Some("GitHub returned an unreadable release list.".to_owned());
+            last = Some(page);
+            break;
+        };
+        releases.append(&mut more);
+        let following = next_link(&header_text(&page, "link").unwrap_or_default());
+        if following == next {
+            break;
+        }
+        next = following;
+        pages += 1;
+        last = Some(page);
+    }
+    let rated = last.as_ref().unwrap_or(&first);
+    let latest = super::update::latest(releases, "setup-v0.0.0");
+    let latest_nightly = super::update::latest(releases, "nightly-0001-01-01");
+    let selected = if notes_channel == "nightly" {
+        latest_nightly
+    } else {
+        latest
+    };
+    let releases = releases
+        .iter()
         .filter(|release| release["draft"].as_bool() != Some(true))
         .filter_map(|release| release_rows(release, target))
         .flatten()
@@ -870,7 +804,14 @@ async fn fetch_listing(
         "repository": repository,
         "repository_id": id,
         "private": private,
-        "etag": header_text(&first, "etag"),
+        "etag": if single_page {header_text(&first, "etag")} else {None},
+        "complete":next.is_none(),
+        "message":page_error,
+        "latest":latest.and_then(|release| release["tag_name"].as_str()),
+        "latest_nightly":latest_nightly.and_then(|release| release["tag_name"].as_str()),
+        "latest_notes":{
+            (notes_channel):selected.and_then(|release| release["body"].as_str()),
+        },
         "fetched_at": jiff::Timestamp::now().to_string(),
         "releases": releases,
     });
@@ -884,15 +825,36 @@ fn release_rows(release: &Value, target: &str) -> Option<Vec<Value>> {
     let release_id = release["id"].as_i64()?;
     let prerelease = release["prerelease"].as_bool().unwrap_or(false);
     let published_at = release["published_at"].as_str().unwrap_or("").to_owned();
-    let rows = release["assets"]
-        .as_array()?
+    let assets = release["assets"].as_array()?;
+    let rows = assets
         .iter()
-        .filter_map(|asset| asset_row(asset, &tag, release_id, prerelease, &published_at, target))
+        .filter_map(|asset| {
+            let name = asset["name"].as_str()?;
+            let proof_name = format!("{name}.proof.json");
+            let proof = assets.iter().find(|candidate| {
+                candidate["name"].as_str() == Some(proof_name.as_str())
+                    && candidate["state"]
+                        .as_str()
+                        .is_none_or(|state| state == "uploaded")
+            });
+            let mut row = asset_row(
+                asset,
+                proof,
+                &tag,
+                release_id,
+                prerelease,
+                &published_at,
+                target,
+            )?;
+            row["version"] = json!(tag.strip_prefix("setup-").unwrap_or(&tag));
+            Some(row)
+        })
         .collect::<Vec<_>>();
     Some(rows)
 }
 fn asset_row(
     asset: &Value,
+    proof: Option<&Value>,
     tag: &str,
     release_id: i64,
     prerelease: bool,
@@ -906,11 +868,13 @@ fn asset_row(
         return None;
     }
     let name = asset["name"].as_str()?.to_owned();
-    let suffix = format!("-{target}.tar.gz");
-    if !name.starts_with("bilibi-setup-") || !name.ends_with(&suffix) {
+    let (asset_tag, asset_target) = release_proof::setup_identity_of(&name)?;
+    if asset_tag != tag || asset_target != target {
         return None;
     }
     let digest = normalize_digest(asset["digest"].as_str().unwrap_or(""))?;
+    let proof_digest =
+        proof.and_then(|proof| normalize_digest(proof["digest"].as_str().unwrap_or("")));
     Some(json!({
         "tag": tag,
         "release_id": release_id,
@@ -921,18 +885,22 @@ fn asset_row(
         "bytes": asset["size"].as_u64().unwrap_or(0),
         "prerelease": prerelease,
         "published_at": published_at,
+        "proof_asset_id": proof.and_then(|proof| proof["id"].as_i64()),
+        "proof_name": proof.and_then(|proof| proof["name"].as_str()),
+        "proof_digest": proof_digest,
+        "proof_bytes": proof.and_then(|proof| proof["size"].as_u64()),
     }))
 }
 
 async fn fetch_repo(
     integration: &bilibi_integration::Integration,
-    scope: &Scope,
+    origin: Origin<'_>,
     repository: &str,
     token: Option<&str>,
 ) -> std::result::Result<(i64, bool), String> {
     let reply = get_raw(
         integration,
-        scope,
+        origin,
         &format!("{API}/repos/{repository}"),
         token,
         None,
@@ -956,12 +924,12 @@ async fn fetch_repo(
 
 async fn get_json(
     integration: &bilibi_integration::Integration,
-    scope: &Scope,
+    origin: Origin<'_>,
     url: &str,
     token: Option<&str>,
     operation: &str,
 ) -> std::result::Result<Value, String> {
-    let reply = get_raw(integration, scope, url, token, None, operation).await?;
+    let reply = get_raw(integration, origin, url, token, None, operation).await?;
     if reply.status != 200 {
         return Err(github_status(
             "GitHub",
@@ -975,7 +943,7 @@ async fn get_json(
 
 async fn get_raw(
     integration: &bilibi_integration::Integration,
-    scope: &Scope,
+    origin: Origin<'_>,
     url: &str,
     token: Option<&str>,
     etag: Option<&str>,
@@ -996,7 +964,7 @@ async fn get_raw(
     }
     integration
         .send(
-            Origin::User(scope),
+            origin,
             &Call {
                 system: SYSTEM.into(),
                 operation: operation.into(),
@@ -1069,7 +1037,11 @@ fn normalize_digest(value: &str) -> Option<String> {
 /// the file. A rate limit looks like a refusal, so it is named as one.
 /// `limits` holds the `retry-after`, `x-ratelimit-remaining` and
 /// `x-ratelimit-reset` header values, when GitHub sent them.
-pub(crate) fn download_refusal(status: u16, limits: [Option<&str>; 3], token: bool) -> String {
+pub(crate) fn download_refusal(
+    status: u16,
+    limits: [Option<&str>; 3],
+    _authenticated: bool,
+) -> String {
     let [retry_after, remaining, reset] = limits;
     if (status == 403 || status == 429) && (retry_after.is_some() || remaining == Some("0")) {
         let until = reset
@@ -1077,37 +1049,36 @@ pub(crate) fn download_refusal(status: u16, limits: [Option<&str>; 3], token: bo
             .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok());
         return match until {
             Some(until) => format!(
-                "GitHub is limiting requests from this server until {until}. Nothing was saved. Ask again after that time{}.",
-                if token { "" } else { ", or save a read token to raise the limit" }
+                "GitHub is limiting requests from this server until {until}. Nothing was saved. Ask again after that time."
             ),
             None => "GitHub is limiting requests from this server. Nothing was saved. Ask again in a few minutes.".into(),
         };
     }
     match status {
-        401 => "GitHub refused the read token. Save a new read-only token, or clear it when the repository is public. Nothing was saved.".into(),
-        403 | 404 => "GitHub would not send the file. Check that the read token can read this repository. Nothing was saved.".into(),
+        401 => "GitHub refused the server App's short-lived token. Check the App installation and key. Nothing was saved.".into(),
+        403 | 404 => "GitHub would not send the file. Check that the server GitHub App is installed on the pinned repository with read access. Nothing was saved.".into(),
         status => format!("GitHub answered with status {status} instead of the file. Nothing was saved."),
     }
 }
-fn github_status(repository: &str, status: u16, token: bool, reply: &Reply) -> String {
+fn github_status(repository: &str, status: u16, _authenticated: bool, reply: &Reply) -> String {
     if status == 304 {
         return format!("{repository} has not changed.");
     }
     if status == 401 {
-        return "GitHub refused the read token. Save a new read-only token, or clear it when the repository is public.".into();
+        return "GitHub refused the server App's short-lived token. Check the App installation and key.".into();
     }
     if status == 403 || status == 429 {
         if header_text(reply, "retry-after").is_some() || rate_headers_remaining(reply) == 0 {
             return "GitHub is limiting requests from this server. The last saved list is shown, when there is one. Try Refresh later.".into();
         }
-        return format!("GitHub refused the request for {repository}. Check the repository name and the read token.");
+        return format!(
+            "GitHub refused the request for {repository}. Check that the server GitHub App is installed on the pinned repository with read access."
+        );
     }
     if status == 404 {
-        return if token {
-            format!("GitHub has no repository {repository} that this token can read. Check the name, or use a token that can read that repository.")
-        } else {
-            format!("GitHub has no public repository {repository}. If it is private, save a read-only token.")
-        };
+        return format!(
+            "GitHub has no repository {repository} that this server's App can read. Check the pinned name and App installation."
+        );
     }
     if (300..400).contains(&status) {
         return "GitHub sent the request to another address. Nothing was read.".into();
@@ -1229,6 +1200,14 @@ pub(crate) fn pin_from_listing(listing: &Value, input: &Value) -> SoftwareResult
             ),
         ));
     }
+    if listing["proof_required"].as_bool() == Some(true)
+        && (row["proof_asset_id"].as_i64().is_none() || row["proof_digest"].as_str().is_none())
+    {
+        return Err(SoftwareError::field(
+            "asset",
+            "That setup file has no matching operator .proof.json asset. Publish the proof beside the archive and refresh the list.",
+        ));
+    }
     Ok(Pin {
         repository: listing["repository"].as_str().unwrap_or("").to_owned(),
         repository_id,
@@ -1241,6 +1220,10 @@ pub(crate) fn pin_from_listing(listing: &Value, input: &Value) -> SoftwareResult
         bytes: row["bytes"].as_u64().unwrap_or(0),
         prerelease: row["prerelease"].as_bool().unwrap_or(false),
         setup_commit: row["setup_commit"].as_str().map(str::to_owned),
+        proof_asset_id: row["proof_asset_id"].as_i64(),
+        proof_name: row["proof_name"].as_str().map(str::to_owned),
+        proof_digest: row["proof_digest"].as_str().and_then(normalize_digest),
+        proof_bytes: row["proof_bytes"].as_u64(),
     })
 }
 

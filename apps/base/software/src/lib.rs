@@ -15,9 +15,12 @@ mod github;
 mod jobs;
 mod promotion;
 mod release_files;
+mod release_proof;
 mod review;
 mod transfer;
 mod transport;
+mod update;
+mod update_notice;
 mod web;
 
 use bilibi_authz::{
@@ -82,6 +85,7 @@ pub const CATALOGUE_URL_KEY: &str = "software.catalogue_url";
 pub const ACTION_INSTALL: &str = "software.install";
 pub const ACTION_UNDO: &str = "software.undo";
 pub const ACTION_CANCEL: &str = "software.cancel";
+pub const ACTION_TRUST: &str = "software.trust";
 /// The action a worker's outcome is settled under (`Software::settle`).
 pub const ACTION_FINISHED: &str = "software.finished";
 /// The action a notification of a settled outcome is sent under.
@@ -91,25 +95,15 @@ const ACTION_NOTIFIED: &str = "software.notified";
 const NOTICE_BODY_CHARS: usize = 900;
 /// How often the server records the outcomes workers wrote.
 const SETTLE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+/// How many minutes the installer of a running job may stay silent, before it
+/// paused the service, until the job ends `interrupted`.
+pub const INSTALLER_SILENCE_MINUTES: &str = "software.installer_silence_minutes";
+const DEFAULT_SILENCE_MINUTES: i64 = 20;
 
 bilibi_step_up::declare!(
     "base/software",
-    bilibi_step_up::Operation::new(
-        STEP_UP,
-        "Change the server's software (install, undo, GitHub releases)"
-    )
-    .always()
-);
-// Saving the GitHub read token in the settings editor. The token can read
-// the application repository, so changing it asks for a fresh code.
-bilibi_step_up::declare!(
-    "base/software",
-    bilibi_step_up::Operation::new(
-        github::STEP_UP_TOKEN,
-        "Change the GitHub read token in the settings"
-    )
-    .always()
-    .guards_setting(github::TOKEN)
+    bilibi_step_up::Operation::new(STEP_UP, "Change the server's software or release trust")
+        .always()
 );
 
 /// The facade: reviews a request without writing, and records it inside the
@@ -225,6 +219,7 @@ impl Software {
         }
         Ok(json!({
             "instance": review::instance_json(&instance),
+            "release_trust": self.paths.as_ref().map(|paths| release_proof::read_facts(paths).1),
             "installed": review::installed_json(&self.composition),
             "installed_asset": self.installed_asset(&**client, scope).await?,
             "plugins": jobs::plugins_json(&**client, tenant).await?,
@@ -306,6 +301,32 @@ impl Software {
         }
         Ok(settled)
     }
+    /// Ends the running jobs whose installer has been silent for
+    /// `software.installer_silence_minutes` before it paused the service, as
+    /// `interrupted`, so one installer that is gone for good cannot hold the
+    /// one-active-job rule for ever. The installer marks its job alive every
+    /// half minute (`apps/installer`); `settle` then records and announces the
+    /// outcome like any other. Returns how many jobs were ended.
+    pub async fn end_silent(&self) -> Result<usize> {
+        let mut client = self.db.get().await?;
+        let client: &mut tokio_postgres::Client = &mut client;
+        let minutes = self
+            .settings
+            .get_global(&*client, INSTALLER_SILENCE_MINUTES)
+            .await?
+            .as_i64()
+            .filter(|minutes| (5..=1440).contains(minutes))
+            .unwrap_or(DEFAULT_SILENCE_MINUTES) as i32;
+        let mut ended = 0;
+        for (tenant, id) in jobs::silent(&*client, minutes).await? {
+            let tx = client.transaction().await?;
+            if jobs::end_silent(&tx, tenant, id, minutes).await? {
+                ended += 1;
+            }
+            tx.commit().await?;
+        }
+        Ok(ended)
+    }
     /// Tells the person who asked how their job ended after the outcome is
     /// recorded, so a notification that
     /// cannot be sent never keeps a job unsettled. Their account is
@@ -363,6 +384,17 @@ impl Software {
         }
         tx.commit().await
     }
+    async fn reconcile_installer_activation(&self) -> Result<()> {
+        let Some(paths) = &self.paths else {
+            return Ok(());
+        };
+        let client = self.db.get().await?;
+        for job in jobs::ready_for_installer(&**client).await? {
+            paths.wake_installer(job).map_err(Error::refused)?;
+        }
+        Ok(())
+    }
+
     /// Runs beside the server for as long as it serves (`bilibi-web run`
     /// starts it like the queue executor): settles outcomes every few
     /// seconds, so a job the installer finished while this program was
@@ -374,6 +406,12 @@ impl Software {
         loop {
             if *stop.borrow() {
                 return Ok(());
+            }
+            if let Err(error) = self.reconcile_installer_activation().await {
+                eprintln!("warning: ready installer jobs could not be signalled: {error:?}");
+            }
+            if let Err(error) = self.end_silent().await {
+                eprintln!("warning: silent software jobs were not ended this round: {error:?}");
             }
             if let Err(error) = self.settle().await {
                 eprintln!("warning: software outcomes were not settled this round: {error:?}");
@@ -415,7 +453,8 @@ impl Software {
         let client = self.db.get().await?;
         authorize_operator(&**client, scope, VIEW).await?;
         let url = self.catalogue_url(&**client).await?;
-        Ok(match self.catalogue.read(scope, &url).await {
+        drop(client);
+        let mut value = match self.catalogue.read(scope, &url).await {
             Ok(catalogue) => {
                 let mut value = discovery::catalogue(&catalogue, &self.composition);
                 value["available"] = json!(true);
@@ -423,14 +462,20 @@ impl Software {
                 value
             }
             Err(message) => json!({"available": false, "url": url, "message": message}),
-        })
+        };
+        value["uncatalogued"] = discovery::uncatalogued(&value, &self.composition);
+        Ok(value)
     }
 
     /// What installing the chosen GitHub release asset or uploaded release would do.
-    pub async fn review_install(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
-        let client = self.db.get().await?;
-        authorize_operator(&**client, scope, MANAGE).await?;
-        self.install_review(&**client, scope, input).await
+    pub(crate) async fn review_install(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        authorize_operator(client, scope, MANAGE).await?;
+        self.install_review(client, scope, input).await
     }
     pub async fn install_in(
         &self,
@@ -455,11 +500,94 @@ impl Software {
         self.queue(tx, scope, new, &review).await
     }
 
+    /// What replacing this installation's release trust would do.
+    pub(crate) async fn review_trust(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        authorize_operator(client, scope, MANAGE).await?;
+        if let Some(job) = jobs::active(client, scope.tenant()).await? {
+            return Err(SoftwareError::field(
+                "job",
+                &format!(
+                    "Job {} is {} on this instance. Wait for it to finish before changing release trust.",
+                    job.id, job.state
+                ),
+            ));
+        }
+        let change = release_proof::review_change(input)
+            .map_err(|(field, message)| SoftwareError::field(&field, &message))?;
+        let paths = self.paths.as_ref().ok_or_else(|| {
+            SoftwareError::field(
+                "trust",
+                "This program is not running from an installed instance.",
+            )
+        })?;
+        let current = release_proof::facts(paths)
+            .map_err(|message| SoftwareError::field("trust", &message))?;
+        let method = if change.facts["kind"] == "operator" {
+            "operator Ed25519 signatures"
+        } else {
+            "GitHub artifact attestations"
+        };
+        let summary = format!(
+            "Trust {method} from {} ({}) starting at {}",
+            change.facts["repository"].as_str().unwrap_or(""),
+            change.facts["repository_id"],
+            change.facts["minimum_tag"].as_str().unwrap_or("")
+        );
+        let target = format!(
+            "release trust: {}",
+            serde_json::to_string(&change.facts).map_err(|_| Error::Internal)?
+        );
+        Ok(Review {
+            target,
+            request: change.request,
+            facts: json!({
+                "summary": summary,
+                "current": current,
+                "new": change.facts,
+                "warnings": ["Only releases matching this one proof method, repository, workflow and tag floor will be accepted. There is no fallback."],
+                "checks": ["The repository name and immutable number are pinned", "The exact workflow identity is pinned", "Operator signatures verify offline with the pinned public key"],
+                "steps": jobs::trust_steps().iter().map(|step| json!({"seq": step.seq, "key": step.key, "label": step.label, "pauses": step.pauses})).collect::<Vec<_>>(),
+                "step_up": [STEP_UP],
+            }),
+            switch: "auto".into(),
+        })
+    }
+
+    pub async fn trust_in(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Value> {
+        let review = self.review_trust(tx.sql(), scope, input).await?;
+        self.step_up
+            .require_code(scope, STEP_UP, &review.target)
+            .await?;
+        let new = jobs::NewJob {
+            kind: "trust",
+            request: review.request.clone(),
+            review: review.facts.clone(),
+            undo_of: None,
+            switch: "auto".into(),
+            steps: jobs::trust_steps(),
+        };
+        self.queue(tx, scope, new, &review).await
+    }
+
     /// What taking back the last finished change would do, and what it costs.
-    pub async fn review_undo(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
-        let client = self.db.get().await?;
-        authorize_operator(&**client, scope, MANAGE).await?;
-        self.undo_review(&**client, scope, input).await
+    pub(crate) async fn review_undo(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        authorize_operator(client, scope, MANAGE).await?;
+        self.undo_review(client, scope, input).await
     }
     pub async fn undo_in(
         &self,
@@ -488,10 +616,14 @@ impl Software {
 
     /// Whether the job waiting or running can still be stopped, and what
     /// stopping it means.
-    pub async fn review_cancel(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
-        let client = self.db.get().await?;
-        authorize_operator(&**client, scope, MANAGE).await?;
-        self.cancel_review(&**client, scope, input).await
+    pub(crate) async fn review_cancel(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        authorize_operator(client, scope, MANAGE).await?;
+        self.cancel_review(client, scope, input).await
     }
     pub async fn cancel_in(
         &self,
@@ -527,10 +659,14 @@ impl Software {
     }
 
     /// What giving a copied install its go-ahead would do.
-    pub async fn review_go(&self, scope: &Scope, input: &Value) -> SoftwareResult<Review> {
-        let client = self.db.get().await?;
-        authorize_operator(&**client, scope, MANAGE).await?;
-        self.go_review(&**client, scope, input).await
+    pub(crate) async fn review_go(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> SoftwareResult<Review> {
+        authorize_operator(client, scope, MANAGE).await?;
+        self.go_review(client, scope, input).await
     }
     /// Turns a parked job's `switch` to `auto` inside the caller's
     /// transaction, after the owner's fresh 2FA check.
@@ -568,9 +704,28 @@ impl Software {
         review: &Review,
     ) -> SoftwareResult<Value> {
         let kind = new.kind;
+        let waits_for_download = new.steps.iter().any(|step| step.key == "download");
+        let paths = self.paths.clone().ok_or_else(|| {
+            SoftwareError::field(
+                "installer",
+                "This program is not running from an installed instance.",
+            )
+        })?;
+        paths
+            .require_installer_activation()
+            .map_err(|message| SoftwareError::field("installer", &message))?;
         let job = jobs::queue(tx, scope.tenant(), scope.user(), new).await?;
+        if !waits_for_download {
+            let job_id = job.id;
+            tx.after_commit(move || {
+                if let Err(message) = paths.wake_installer(job_id) {
+                    eprintln!("software job {job_id}: {message}");
+                }
+            });
+        }
         let title = match kind {
             "install" => format!("Software install queued as job {}", job.id),
+            "trust" => format!("Release trust change queued as job {}", job.id),
             _ => format!("Software undo queued as job {}", job.id),
         };
         self.notifications
@@ -612,11 +767,21 @@ impl Software {
         let instance = Instance::resolve(&self.settings, client).await?;
         let active = jobs::active(client, scope.tenant()).await?;
         let github_install = input.get("asset").is_some();
+        let paths = self.paths.as_ref().ok_or_else(|| {
+            SoftwareError::field(
+                "release",
+                "This program is not running from an installed instance, so it cannot install a release.",
+            )
+        })?;
+        let policy = release_proof::Policy::load(paths)
+            .map_err(|message| SoftwareError::field("release", &message))?;
         let github = if github_install {
             // Ask GitHub now, including pre-releases, so a file replaced
             // after review is refused here. A rate limit still serves the
             // saved list; the download checks the file again.
-            let mut listing = self.github_listing(scope, true, true).await?;
+            let mut listing = self
+                .github_listing(client, Some(scope), true, true, &policy)
+                .await?;
             if input.get("staging").is_some() {
                 let pin = github::pin_from_listing(&listing, input)?;
                 let commit = github::setup_commit(self, scope, &pin).await;
@@ -653,6 +818,15 @@ impl Software {
                 enabled_plugins: &jobs::enabled_plugins(client, scope.tenant()).await?,
             },
         )?;
+        let source = &mut review.request["source"];
+        if github_install {
+            source["workflow"] = json!(policy.workflow);
+            source["fingerprint"] = json!(policy.fingerprint);
+        }
+        policy
+            .check_admission(source)
+            .and_then(|()| release_proof::check_replay(paths, source["tag"].as_str().unwrap_or("")))
+            .map_err(|message| SoftwareError::field("release", &message))?;
         review.facts["current_asset"] = self.installed_asset(client, scope).await?;
         Ok(review)
     }
@@ -719,8 +893,8 @@ impl Software {
         let job = named.or(active).ok_or_else(|| {
             SoftwareError::field("job", "No job is waiting or running on this instance.")
         })?;
-        let past_pause = jobs::past_pause(client, tenant, job.id).await?;
-        review::cancel(&job, past_pause)
+        let cancellation_closed = jobs::cancellation_closed(client, tenant, &job).await?;
+        review::cancel(&job, cancellation_closed)
     }
 }
 
@@ -744,10 +918,10 @@ async fn cancel_state(
 ) -> Result<&'static str> {
     Ok(if !job.active() {
         "not_running"
+    } else if jobs::cancellation_closed(client, tenant, job).await? {
+        "too_late"
     } else if job.cancel_requested_at.is_some() {
         "requested"
-    } else if job.state == "running" && jobs::past_pause(client, tenant, job.id).await? {
-        "too_late"
     } else {
         "available"
     })
@@ -764,7 +938,7 @@ macro_rules! provenance {
 }
 inventory::submit! { Contribution::new(VOCABULARY, "base/software", provenance!(), &VocabularyContribution {
     domains: &[], verbs: &[],
-    capabilities: &[CapabilityDefinition::platform(VIEW), CapabilityDefinition::platform(MANAGE)],
+    capabilities: &[CapabilityDefinition::platform_or_owner(VIEW), CapabilityDefinition::owner(MANAGE)],
     roles: &[],
     system_principals: &[],
 }) }
@@ -776,40 +950,20 @@ inventory::submit! { Contribution::new(DEFINITIONS, CATALOGUE_URL_KEY, provenanc
         help: "The published catalogue.json that lists the Platform and Domain releases and which were tested together. Change it only to read a catalogue you publish yourself (server owner only).",
         capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
 })) }
-inventory::submit! { Contribution::new(DEFINITIONS, github::REPOSITORY, provenance!(), &Setting::Definition(Definition {
-    value_type: ValueType::String, scopes: &[ScopeKind::Global], default: || json!(null), nullable: true, encrypted: false,
-    minimum: None, maximum: None,
-    validator: Some(Validator { accepts: github::accepts_repository, message: "Enter the repository as owner/name, like your-company/my-bilibi." }),
-    editor: Some(Editor { group: "Software", label: "Application repository on GitHub",
-        help: "Your application repository, like your-company/my-bilibi. Software reads its releases from here. Server owner only.",
-        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
-})) }
-inventory::submit! { Contribution::new(DEFINITIONS, github::REPOSITORY_ID, provenance!(), &Setting::Definition(Definition {
-    value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(null), nullable: true, encrypted: false,
-    minimum: Some(1.0), maximum: None,
-    validator: Some(Validator { accepts: github::accepts_id, message: "The GitHub repository number is recorded when you accept the repository." }),
-    editor: None,
-})) }
-inventory::submit! { Contribution::new(DEFINITIONS, github::REPOSITORY_BOUND, provenance!(), &Setting::Definition(Definition {
-    value_type: ValueType::String, scopes: &[ScopeKind::Global], default: || json!(null), nullable: true, encrypted: false,
-    minimum: None, maximum: None,
-    validator: Some(Validator { accepts: github::accepts_bound, message: "The remembered repository must be owner/name." }),
-    editor: None,
-})) }
-inventory::submit! { Contribution::new(DEFINITIONS, github::TOKEN, provenance!(), &Setting::Definition(Definition {
-    value_type: ValueType::String, scopes: &[ScopeKind::Global], default: || json!(null), nullable: true, encrypted: true,
-    minimum: None, maximum: None,
-    validator: Some(Validator { accepts: github::accepts_token, message: "The GitHub token must be 20 to 255 characters with no spaces." }),
-    editor: Some(Editor { group: "Software", label: "GitHub read token for a private setup repository",
-        help: "Leave empty for a public repository. For a private one, use a fine-grained token that can read this repository only. Stored encrypted and never shown back. Changing or clearing it asks for your authenticator code every time (server owner only).",
-        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
-})) }
 inventory::submit! { Contribution::new(DEFINITIONS, github::REFRESH_MINUTES, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(github::DEFAULT_REFRESH_MINUTES), nullable: false, encrypted: false,
     minimum: Some(1.0), maximum: Some(1440.0),
     validator: None,
     editor: Some(Editor { group: "Software", label: "Release check interval (minutes)",
         help: "15 means the release list is refreshed at most every 15 minutes, and again when you choose Refresh. Server owner only.",
+        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
+})) }
+inventory::submit! { Contribution::new(DEFINITIONS, INSTALLER_SILENCE_MINUTES, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(DEFAULT_SILENCE_MINUTES), nullable: false, encrypted: false,
+    minimum: Some(5.0), maximum: Some(1440.0),
+    validator: None,
+    editor: Some(Editor { group: "Software", label: "Installer silence before a job is interrupted (minutes)",
+        help: "20 means a running install or undo whose installer has not answered for 20 minutes, and has not yet stopped the service, is ended as interrupted so you can start again. Server owner only.",
         capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
 })) }
 // The Software page: server owners' view of what runs and the way to change
@@ -832,7 +986,7 @@ bilibi_menu::contribute!(
 // plan for an install, undo or go-ahead, and a plain submit for cancel.
 inventory::submit! { Contribution::new(PAGE_WRITES, web::PAGES, provenance!(), &PageWrites {
     service: web::PAGES,
-    contracts: &[("install", "base.software.install"), ("undo", "base.software.undo"), ("go", "base.software.go"), ("cancel_job", "base.software.cancel"), ("github_source", "base.software.github"), ("github_accept", "base.software.github"), ("clear_github_token", "base.software.github")],
+    contracts: &[("install", "base.software.install"), ("undo", "base.software.undo"), ("go", "base.software.go"), ("cancel_job", "base.software.cancel"), ("github_source", "base.software.github")],
     pending: Pending::None,
 }) }
 // Keep existing bookmarks; the only page is Software with its Releases tab.
@@ -843,8 +997,8 @@ inventory::submit! { Contribution::new(ROUTES, "base/software.releases", provena
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/software", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/step_up", "base/system", "base/notifications", "base/integration", "base/audit", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql"))],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/step_up", "base/system", "base/notifications", "base/schedule", "base/integration", "base/audit", "base/ui", "base/menu", "base/datetime", "base/locale"],
+        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql")), ("base-software-005-paused", include_str!("../migrations/005-paused.sql")), ("base-software-006-installer-heartbeat", include_str!("../migrations/006-installer-heartbeat.sql")), ("base-software-007-release-trust", include_str!("../migrations/007-release-trust.sql")), ("base-software-008-update-notices", include_str!("../migrations/008-update-notices.sql"))],
         // Declaration order is build order: the page service reads this one.
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let software = Arc::new(Software {

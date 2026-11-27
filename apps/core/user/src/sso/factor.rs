@@ -17,7 +17,7 @@ impl Provider for Factor {
             let Some(company) = account.company() else {
                 return Ok(false);
             };
-            Ok(sql.query_opt("SELECT 1 FROM users u JOIN user_desks d ON d.tenant_id=u.tenant_id AND d.person_id=u.person_id AND d.company_id=$3 JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id AND c.deleted_at IS NULL AND c.status <> 'archived' JOIN user_identity_providers p ON p.tenant_id=c.tenant_id AND p.company_id=c.id AND p.enabled WHERE u.tenant_id=$1 AND u.id=$2 LIMIT 1",&[&account.tenant(),&account.user(),&company]).await?.is_some())
+            Ok(sql.query_opt("SELECT 1 FROM users u JOIN user_desks d ON d.tenant_id=u.tenant_id AND d.person_id=u.person_id AND d.company_id=$3 JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id AND c.deleted_at IS NULL JOIN user_identity_providers p ON p.tenant_id=c.tenant_id AND p.company_id=c.id AND p.enabled WHERE u.tenant_id=$1 AND u.id=$2 LIMIT 1",&[&account.tenant(),&account.user(),&company]).await?.is_some())
         })
     }
 
@@ -30,7 +30,7 @@ impl Provider for Factor {
             let Some(company) = account.company() else {
                 return Ok(false);
             };
-            let row=sql.query_opt("SELECT array_agg(DISTINCT p.public_id) FROM user_external_identities i JOIN users u ON u.tenant_id=i.tenant_id AND u.id=i.user_id JOIN user_desks d ON d.tenant_id=u.tenant_id AND d.person_id=u.person_id AND d.company_id=$3 JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id AND c.deleted_at IS NULL AND c.status <> 'archived' JOIN user_identity_providers p ON p.tenant_id=i.tenant_id AND p.id=i.provider_id AND p.company_id=c.id WHERE i.tenant_id=$1 AND i.user_id=$2 AND p.enabled",&[&account.tenant(),&account.user(),&company]).await?.ok_or(Error::Internal)?;
+            let row=sql.query_opt("SELECT array_agg(DISTINCT p.public_id) FROM user_external_identities i JOIN users u ON u.tenant_id=i.tenant_id AND u.id=i.user_id JOIN user_desks d ON d.tenant_id=u.tenant_id AND d.person_id=u.person_id AND d.company_id=$3 JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id AND c.deleted_at IS NULL JOIN user_identity_providers p ON p.tenant_id=i.tenant_id AND p.id=i.provider_id AND p.company_id=c.id WHERE i.tenant_id=$1 AND i.user_id=$2 AND p.enabled",&[&account.tenant(),&account.user(),&company]).await?.ok_or(Error::Internal)?;
             for public in row.get::<_, Option<Vec<String>>>(0).unwrap_or_default() {
                 if self
                     .0
@@ -126,7 +126,7 @@ impl Provider for Factor {
             };
             let (proof_id, provider, version): (i64, i64, i64) =
                 (available.get(0), available.get(1), available.get(2));
-            let enrolled=tx.sql().query_opt("SELECT p.id FROM user_identity_providers p JOIN user_external_identities i ON i.tenant_id=p.tenant_id AND i.provider_id=p.id AND i.user_id=$2 JOIN users u ON u.tenant_id=p.tenant_id AND u.id=i.user_id AND u.deleted_at IS NULL JOIN user_desks d ON d.tenant_id=u.tenant_id AND d.person_id=u.person_id AND d.company_id=p.company_id JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id AND c.deleted_at IS NULL AND c.status <> 'archived' WHERE p.tenant_id=$1 AND p.id=$3 AND p.version=$4 AND p.company_id=$5 AND p.enabled FOR KEY SHARE OF p,i,u,d,c", &[&tenant,&user,&provider,&version,&company]).await?.is_some();
+            let enrolled=tx.sql().query_opt("SELECT p.id FROM user_identity_providers p JOIN user_external_identities i ON i.tenant_id=p.tenant_id AND i.provider_id=p.id AND i.user_id=$2 JOIN users u ON u.tenant_id=p.tenant_id AND u.id=i.user_id AND u.deleted_at IS NULL JOIN user_desks d ON d.tenant_id=u.tenant_id AND d.person_id=u.person_id AND d.company_id=p.company_id JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id AND c.deleted_at IS NULL WHERE p.tenant_id=$1 AND p.id=$3 AND p.version=$4 AND p.company_id=$5 AND p.enabled FOR KEY SHARE OF p,i,u,d,c", &[&tenant,&user,&provider,&version,&company]).await?.is_some();
             if !enrolled {
                 tx.rollback().await?;
                 return Ok(Spent::NotEnrolled);

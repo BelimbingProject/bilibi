@@ -1,5 +1,17 @@
 # System pages
 
+**Use it for:** the instance identity (Dev, Staging, Production) and the System Info, Localization and Menu Inspector pages.
+
+**Not for:** reading `BILIBI_ENV` or the origin to decide which instance this is.
+
+## Installation policy (`src/installation_editor.rs`)
+
+`installation.mode` is the installation owner's choice: `shared` (**Shared service**) admits only reviewed Extensions, while `isolated` (**Isolated installation**) also admits customer code Extensions. It defaults to the safe shared policy. System › Installation policy (`/system/installation`) is an owner-only, step-up-protected page; no capability, Core Administrator role or tenant administrator can see or change it, and every change asks for fresh 2FA through `base.system.installation.mode.change`.
+
+`bilibi-web run` validates the saved policy against its composition at startup. Switching to Shared service refuses while any customer code Extension remains compiled into the composition; the owner first installs a code-free release. A first installation starts with a code-free release, then the owner can select Isolated installation. The mode never changes rules, settings, custom fields, labels or shared views. The protected mutation takes the exclusive `base/system.installation-mode` advisory lock; admission readers take its shared form.
+
+Extension declarations belong to the [composition contract](../module_registry/README.md); build-time admission is documented in [Versions inside the program](../../../docs/versions.md#versions-inside-the-program). The [installer contract](../../installer/README.md) covers admission after approval, policy locking and preservation across restores.
+
 `base/system` owns `/system/info`, `/system/localization` and
 `/system/menu-inspector`. Each requires its contributed platform capability
 **and** the persisted operator identity. It also owns the owner-only
@@ -24,11 +36,14 @@ registry modules with their workspace version, rather than pretending Rust
 has loaded OTP applications. The environment is explicitly the build profile,
 debug means debug assertions, and timezone describes UTC timestamp storage.
 `APP_ORIGIN` follows the Web command's configured origin and default.
+The Health card's Mail line is `Mailer::ready()` (`base/mail`): the
+transport when it can send, or why it cannot, such as a Production
+installation without `MAIL_HOST`.
 
 Unavailable probes stay visible. Disk capacity has no installed portable
 probe. Queue supplies job states but no executor-heartbeat health boundary;
 its health is unavailable rather than inferring an active executor from an
-empty or reachable queue. Perf combines recorder and history-store health and
+empty or reachable queue. The Resident readers line counts readings by state (`bilibi_residents::health_status`), platform-wide and without any reader, key or tenant. Perf combines recorder and history-store health and
 reports disabled collection explicitly. Settings has no value cache; its row
 says that values are read directly from PostgreSQL.
 
@@ -58,23 +73,25 @@ from the repository root for disposable database and browser procedures.
 
 The explicit production seed initializes `instance.role` from `BILIBI_ENV`: `development`, `staging` or `production` (unset means Production). It refuses other values. `install-server.sh` supplies this first value for servers; `./bilibi start` supplies Development for local copies. Seeding again preserves the saved role. Boot never seeds, and changing the environment after install cannot override the setting.
 
-Click the status-bar role to open `/system/instance`. A **Core Administrator in the platform-operator organisation** can change the role, label and colour, with `admin.system.instance.manage` and no impersonation. The page and the `Instances::save` facade recheck these rules; writes recheck inside the audited mutation transaction. Every role change requires a fresh 2FA code through `base.system.instance.role.change`, declared `.always()`, including on Dev. Its `require_code` check refuses a missing submitted code even immediately after enrollment or another browser confirmation. The page warns that changing to or from Production changes warnings and 2FA rules without moving any data. A stale page cannot overwrite a newer role. The shell chooses whether to link the role with the unlogged `Instances::is_core_administrator` read plus its own capability set, so ordinary page renders write no authorization decisions.
+Click the status-bar role to open **Server Instance** (`/system/instance`). A **Core Administrator in the platform-operator organisation** can change the role, label and colour, with `admin.system.instance.manage` and no impersonation. The page and the `Instances::save` facade recheck these rules; writes recheck inside the audited mutation transaction. Every role change requires a fresh 2FA code through `base.system.instance.role.change`, declared `.always()`, including on Dev. Its `require_code` check refuses a missing submitted code even immediately after enrollment or another browser confirmation. A stale page cannot overwrite a newer role. The shell chooses whether to link the role with the unlogged `Instances::is_core_administrator` read plus its own capability set, so ordinary page renders write no authorization decisions.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `instance.role` | Install input | Dev, Staging or Production; only the protected instance page changes it |
 | `instance.label` | Current role word | The name shown to people and agents |
-| `instance.colour` | Blue for Dev, amber for Staging, red for Production | A shared status colour |
+| `instance.colour` | Blue for Dev, amber for Staging | Overrides the shared badges and banners on Dev and Staging |
 
-The label and colour also remain in the generic settings editor behind `admin.system.instance.manage`. Empty label and colour follow the stored role. The role has no generic editor, so delegated operators cannot bypass its Core Administrator and 2FA checks.
+The label and colour also remain in the generic settings editor behind `admin.system.instance.manage`. An unset label and colour follow the stored role. The Server Label field displays the current role when no label is saved; saving stores the displayed label. The role has no generic editor, so delegated operators cannot bypass its Core Administrator and 2FA checks.
 
-The Banner colour field uses the shared `ColourInput`: Blue, Green, Amber and Red each show their name inside that banner colour. “Use role colour (Blue)” (or Green, Amber or Red for the stored role) shows the role's default colour and clears the override when saved. `src/instance.rs` owns the role-to-colour rule.
+The Dev and Staging banner colour field uses the shared `ColourInput`: Blue, Green, Amber and Red each show their name inside that banner colour. “Use role colour (Blue)” (or Amber on Staging) shows the role's default colour and clears the override when saved. The dedicated editor hides the field on Production and preserves the saved override for Dev and Staging. `src/instance.rs` owns the role-to-colour rule.
 
-`Instance::status` always names the role, including when the label differs. Staging keeps an extra top-bar badge. Dev and Staging show a badge on sign-in; Production shows none there. Reviews and confirmations use `Instance::banner` in every role. `Instance::agent_json` identifies plans, commits, MCP and `/.well-known/bilibi`. All use the same resolved identity.
+`Instance::status` always names the role, including when the label differs. Staging keeps an extra top-bar badge. Sign-in names every role with a badge, including Production. Reviews and confirmations use `Instance::banner` in every role. Production uses a neutral badge on all three surfaces; Dev and Staging retain their configured colours and explain that changes do not affect production. `Instance::agent_json` identifies plans, commits, MCP and `/.well-known/bilibi`. All use the same resolved identity.
 
 Base Step-up binds an `Enforcement` policy supplied by `Instances`. It reads the saved role on every check across processes: ordinary operations skip 2FA on Dev; `.always()` operations never skip it. The policy holds no process-local role cache. The server layout is in [`docs/server-install.md`](../../../docs/server-install.md).
 
 `Instance::public_address` says whether an AI app on the internet can reach this Bilibi: false for a Dev copy and for an origin that is `localhost`, a loopback, private, carrier-grade NAT (`100.64.0.0/10`) or link-local IP (an IPv4-mapped IPv6 literal counts as its IPv4 address), a bare host name, or a name under `.localhost`, `.local`, `.internal`, `.lan`, `.home.arpa`, `.test` or `.ts.net`. It is decided from the stored role and `APP_ORIGIN`, never from the browser; the status bar's AI panel uses it to say when only an AI program on this computer can connect.
+
+`Instance::server_name` is the name an AI app saves this Bilibi under, on every door (MCP `serverInfo.name`, the connection prompt, the plugin package, `/.well-known/bilibi`): the host of `APP_ORIGIN` with dots as hyphens and existing hyphens doubled (`try.bilibi.app` is `try-bilibi-app`; `bilibi-app.example.com` is `bilibi--app-example-com`). The address is unique per deployment; a label is not, and two deployments sharing a name would share one saved sign-in. It changes only with the address, which ends a saved sign-in anyway. Two different addresses do not share a name. An HTTPS host name of up to 32 characters maps one to one. Any other address (a port, an IPv6 literal, plain HTTP, or a longer name, since apps name a tool `mcp__<server>__<tool>` within 64 characters) keeps the start of that name and ends in three hyphens and the first 64 bits of the SHA-256 of the whole origin, scheme and port included (`localhost:8443` begins `localhost-8443---`). Three hyphens in a row never come from a host name, so the two kinds cannot meet.
 
 Agent connection identity also includes `APP_ORIGIN` (the canonical public address, with the host's default when unset). `Instance::agent_notice` names the label, role and address; `agent_json` includes `role` and `origin` alongside the existing fields, so discovery and plan/commit results identify the same destination even when an operator gives two environments the same label.
 
@@ -126,4 +143,4 @@ Controls:
   page and 120 characters a cell; a count past the timeout leaves the total
   unknown rather than failing the page.
 
-Without 2FA, the shared `bilibi_ui::StepUp` form disables the role selector and links to setup with a return address. Name and colour changes can still be saved. After setup, the role selector and optional code input are available.
+Without 2FA, the shared `bilibi_ui::StepUp` form disables the role selector and links to setup with a return address. Name changes and any available colour changes can still be saved. After setup, the role selector and optional code input are available.

@@ -8,11 +8,14 @@
 {% import "feedback.html" as f %}
 
 {% macro card(it) %}
-<article id="{{ it.dom_id }}" data-board-card data-card-id="{{ it.id }}" data-version="{{ it.version }}" data-column="{{ it.column }}" data-targets="{{ it.targets }}"{% if it.movable %} data-movable draggable="true"{% endif %} aria-label="{{ it.name }}" class="group relative min-w-0 rounded-md border border-line bg-surface px-2 py-1.5 text-sm text-ink shadow-xs focus-within:ring-2 focus-within:ring-brand-strong/40{% if it.movable %} cursor-grab{% endif %}">
+<article id="{{ it.dom_id }}" data-board-card data-card-id="{{ it.id }}" data-version="{{ it.version }}" data-column="{{ it.column }}" data-targets="{{ it.targets }}"{% if it.movable %} data-movable draggable="true"{% endif %} aria-label="{{ it.name }}" class="group relative min-w-0 rounded-md border {{ it.surface }} px-2 py-1.5 text-sm text-ink shadow-xs focus-within:ring-2 focus-within:ring-brand-strong/40{% if it.movable %} cursor-grab{% endif %}">
 {%- if it.href.is_empty() -%}
 <span class="block break-words font-medium text-ink-strong">{{ it.title }}</span>
 {%- else -%}
 <a href="{{ it.href }}" class="block break-words font-medium text-ink-strong hover:underline focus-visible:outline-none">{{ it.title }}</a>
+{%- endif -%}
+{%- if !it.urgency.is_empty() -%}
+<span class="block text-xs font-medium text-ink-strong">{{ it.urgency }}</span>
 {%- endif -%}
 {%- for fact in it.facts -%}
 <span class="block truncate text-xs text-ink-muted">{{ fact }}</span>

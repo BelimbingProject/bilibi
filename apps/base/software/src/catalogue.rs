@@ -69,6 +69,8 @@ pub struct Release {
     #[serde(default)]
     pub released: Option<String>,
     pub commit: String,
+    #[serde(default)]
+    pub committed_at: Option<String>,
     /// The Platform versions a Domain release needs, `>=0.1.0, <0.2.0`.
     #[serde(default)]
     pub platform: Option<String>,
@@ -166,7 +168,7 @@ impl Catalogue {
                             })
                             .filter_map(|set| set.platform.version.as_deref())
                             .collect();
-                        json!({"version": version, "released": release.released, "commit": release.commit,
+                        json!({"version": version, "released": release.released, "commit": release.commit, "committed_at": release.committed_at,
                                "platform": release.platform, "tested_on": tested_on})
                     })
                     .collect();
@@ -187,7 +189,7 @@ impl Catalogue {
             "platform": {"name": self.platform.name, "repository": self.platform.repository,
                          "versions": self.platform.versions.iter().map(|(v, r)| json!({"version": v, "released": r.released, "commit": r.commit})).collect::<Vec<_>>()},
             "domains": domains,
-            "extensions": self.extensions.iter().map(|(id, ext)| json!({"id": id, "name": ext.name, "description": ext.description, "repository": ext.repository, "modules": ext.modules, "versions": ext.versions.iter().map(|(v, r)| json!({"version":v, "commit":r.commit, "released":r.released, "platform":r.platform})).collect::<Vec<_>>() })).collect::<Vec<_>>(),
+            "extensions": self.extensions.iter().map(|(id, ext)| json!({"id": id, "name": ext.name, "description": ext.description, "repository": ext.repository, "modules": ext.modules, "versions": ext.versions.iter().map(|(v, r)| json!({"version":v, "commit":r.commit, "committed_at":r.committed_at, "released":r.released, "platform":r.platform})).collect::<Vec<_>>() })).collect::<Vec<_>>(),
             "plugins": plugins,
             "tested": self.tested.iter().map(|set| json!({
                 "platform": {"version": set.platform.version, "commit": set.platform.commit},
@@ -197,10 +199,15 @@ impl Catalogue {
     }
 }
 
-/// Fetches the catalogue and keeps it for [`KEEP`].
+/// Fetches the catalogue and keeps its answer, including failures, for [`KEEP`].
 pub struct Reader {
     integration: Arc<Integration>,
-    kept: Mutex<Option<(String, Instant, Arc<Catalogue>)>>,
+    kept: Mutex<Option<Kept>>,
+}
+struct Kept {
+    url: String,
+    at: Instant,
+    answer: std::result::Result<Arc<Catalogue>, String>,
 }
 impl Reader {
     pub fn new(integration: Arc<Integration>) -> Self {
@@ -217,12 +224,24 @@ impl Reader {
         url: &str,
     ) -> std::result::Result<Arc<Catalogue>, String> {
         if let Ok(kept) = self.kept.lock() {
-            if let Some((kept_url, at, catalogue)) = kept.as_ref() {
-                if kept_url == url && at.elapsed() < KEEP {
-                    return Ok(catalogue.clone());
+            if let Some(kept) = kept.as_ref() {
+                if kept.url == url && kept.at.elapsed() < KEEP {
+                    return kept.answer.clone();
                 }
             }
         }
+        let result = self.fetch(scope, url).await;
+        if let Ok(mut kept) = self.kept.lock() {
+            *kept = Some(Kept {
+                url: url.to_owned(),
+                at: Instant::now(),
+                answer: result.clone(),
+            });
+        }
+        result
+    }
+
+    async fn fetch(&self, scope: &Scope, url: &str) -> std::result::Result<Arc<Catalogue>, String> {
         let reply = self
             .integration
             .send(
@@ -246,9 +265,6 @@ impl Reader {
         let catalogue = Catalogue::parse(&reply.body)
             .map(Arc::new)
             .map_err(|_| format!("{url} is not a catalogue in format 1"))?;
-        if let Ok(mut kept) = self.kept.lock() {
-            *kept = Some((url.to_owned(), Instant::now(), catalogue.clone()));
-        }
         Ok(catalogue)
     }
 }

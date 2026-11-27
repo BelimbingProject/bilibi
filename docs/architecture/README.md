@@ -3,7 +3,7 @@
 **Document Type:** Architecture overview
 **Status:** Active
 **Scope:** Layers, modules, composition, data, audit and security of Bilibi. The UI rules are in [`DESIGN.md`](../../DESIGN.md).
-**Last Updated:** 2026-11-05
+**Last Updated:** 2026-11-23
 
 Bilibi is a business application platform written in Rust: a set of small modules that plug into one web host, each owning its own data, pages and rules.
 
@@ -87,7 +87,7 @@ When the program starts, every module hands in a description of itself and the t
 | `Contribution` | same | Typed, validated entries for a consumer: routes, embeds, downloads, seeds, menu, settings, vocabulary, grid tables, ports, agent operations |
 | Boot validation | `Services::install` | Rejects missing, duplicate, upward and cyclic dependencies, duplicate migrations, unknown consumers and wrong payload types |
 | Discovery script | `scripts/discover-modules.py` | Generates the four composition manifests before Cargo resolves. `--check` runs in CI |
-| Mount check | `bilibi.container.toml` | A mounted Domain or Extension declares `id` and `layer`. `bilibi-web` refuses a descriptor that differs from the mounted crates |
+| Mount check | `bilibi.container.toml` | Declares the mounted container; the [composition contract](../../apps/base/module_registry/README.md) defines required declarations and validation |
 
 Two more things keep this safe:
 
@@ -134,20 +134,21 @@ Each Domain and each Extension lives in its own repository, with one or more mod
 
 | Layer | Modules |
 | --- | --- |
-| Base | `agent_api`, `artifacts`, `audit`, `audit_views`, `authz`, `authz_agent`, `custom_fields`, `dashboard`, `database`, `datetime`, `design_library`, `events`, `grid`, `integration`, `locale`, `mail`, `media`, `menu`, `module_registry`, `notifications`, `party_ids`, `perf`, `personal_data`, `picklists`, `ports`, `principal_directory`, `privacy`, `queue`, `records`, `schedule`, `search`, `security`, `session`, `settings`, `settings_editor`, `software`, `step_up`, `system`, `tenancy`, `tiling`, `ui`, `workflow` |
-| Core | `activity`, `address`, `affiliation`, `agent`, `company`, `currency`, `document`, `geonames`, `party`, `person`, `portal`, `product`, `tenant`, `user`, `work_calendar` |
+| Base | See the generated [Base capability map](../../apps/base/CAPABILITIES.md) for modules and their contracts |
+| Core | `activity`, `address`, `affiliation`, `agent`, `company`, `consent`, `currency`, `document`, `geonames`, `party`, `person`, `portal`, `product`, `team`, `tenant`, `user`, `work_calendar` |
 
 - `base/security` is a compatibility facade over Session, Tenancy and Authz.
 - Not ported: a plugin system, a Laravel compatibility layer, adoption of a Belimbing database.
 
 ## The web host
 
-**The host is generic; modules plug into it.** It knows how to serve pages, not what any page is about.
+**The host is generic; modules plug into it.** It knows how to serve pages, not what any page is about. [ADR 34](decisions/34-two-sites-listener-boundary.md) divides them between staff and public routers on separate listeners; the socket is the boundary and each router checks its own configured host.
 
 - **Stack:** Axum on Tokio, Askama templates and a native WebSocket adapter. There is no single-page-app framework and no client-side model.
 - **Pages are contributions.** A module registers a `Route` that names a `PageService`. The host checks access, then the owner renders. *built*
-- **Access kinds:** Public, SignedIn, Capability, AnyOf (one of several capabilities), Operator, OperatorCapability, Owner, StepUp.
+- **Access kinds:** SignedIn, Capability, AnyOf (one of several capabilities), Operator, OperatorCapability, Owner and StepUp pages are installed only on the staff listener. Portal pages join the public listener under their customer scope. Nothing on the staff site is anonymous.
 - **Downloads** are `DOWNLOADS` contributions: GET only, never public.
+- **The public site** belongs to `base/public` (`apps/base/public/README.md`): anonymous `PUBLIC_PAGES` and token `PUBLIC_LINKS` (tracking pixel, click redirect, one-click unsubscribe, calendar feed), each with a required sender budget under the listener's own, and the sealed `PublicScope` their owners receive.
 - **Live pages:** the server renders HTML and the browser patches it by element id. Every intent is queued and acknowledged by request ID. Contract: `docs/live-pages.md`.
 - **Agent edge:** `/api/v1`, `/mcp` and device-code OAuth. Both resolve to the `base/agent_api` registry.
 
@@ -163,7 +164,7 @@ These are the rules every module follows for its data:
 - **Soft delete** is an explicit query policy, decided by each owner.
 - **UTC storage.** Times are stored in UTC; `base/datetime` owns how they are shown: timezone, clock mode and periods.
 - **No unbounded reads.** Page through the rows, or ask PostgreSQL for the total.
-- **Shared services:** private files go through `base/media`, jobs through `base/queue`, and outbound HTTP through `base/integration`.
+- **Shared services:** private files go through `base/media`, jobs through `base/queue`, live connections that stay open through `base/residents`, and outbound HTTP through `base/integration`.
 - **Settings over constants.** A value an operator may change is a setting with an editor. Secrets are encrypted and masked by default. An explicitly authorized, password-confirmed and audited reveal can show one (`apps/base/settings_editor/src/reveal.rs`).
 
 ## Tenants, companies and who you are
@@ -174,7 +175,7 @@ A **tenant** is the outer wall: one customer's data, kept apart from every other
 - **`Scope` is the sealed proof of one unit of work:** tenant, actor and optional impersonator. It has no public constructor and no `Deserialize`, so it can't be faked.
 - Modules take a `Scope`, never a raw tenant or actor ID.
 - **The party model:** a staff account links to a Person within its tenant; explicit desks grant access to the tenant’s workplaces. Every session check re-proves that identity and desk. Customer portal affiliations remain separate business identity.
-- Archiving a company removes it from staff work access; staff can still use their other desks. Customer portal company identity retains its archival checks. There is no restore.
+- Archiving a company makes it read-only: the people with desks there can still read its records, reports and books, and every write into it is refused as archived. It takes no new desk. Customer portal company identity retains its archival checks. There is no restore.
 
 ## How a write is saved and audited
 

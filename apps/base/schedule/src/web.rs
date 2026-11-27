@@ -249,7 +249,7 @@ impl Command {
     }
     fn detail(self, task: &Task) -> String {
         let print = &task.fingerprint[..12];
-        match self {
+        let detail = match self {
             Self::Enable if task.suppressed => format!(
                 "This version ({print}) is approved, but the task stays paused until you resume it. Any later change to the task needs approval again."
             ),
@@ -260,6 +260,15 @@ impl Command {
             Self::Pause => "Runs already queued are cancelled. You can resume the task later.".into(),
             Self::Disable => "Runs already queued are cancelled, and it will not run again until it is reviewed and enabled.".into(),
             Self::ResetTime => format!("The default is {}. Runs already queued at the old time are cancelled. Its enabled and paused state stays the same.", phrase::show(task.expression,task.timezone,task.timezone,Timestamp::now()).words),
+        };
+        if self == Self::Enable && !task.execution_capabilities.is_empty() {
+            format!(
+                "{detail} Runs as “{}”, limited to: {}. Permissions must be granted separately in Authorization.",
+                task.execution_principal,
+                task.execution_capabilities.join(", ")
+            )
+        } else {
+            detail
         }
     }
 }
@@ -1351,8 +1360,7 @@ fn tenant_summary(task: &Task) -> Option<String> {
             line
         }
         TenantFacts::Own(OwnTenant { granted: false, .. }) => {
-            "Not granted here: an administrator must let the scheduler run in this tenant."
-                .to_owned()
+            "Not granted here: an administrator must allow this task to run here.".to_owned()
         }
         TenantFacts::Own(OwnTenant {
             granted: true,
@@ -1516,14 +1524,14 @@ fn task_status_kind(task: &Task) -> BadgeKind {
 }
 // Schedule board facts: a cell's second line is hidden in compact rows,
 // so each scalar it carries is also a column.
-bilibi_ui::record_fields! { mod task_fields {
-    OVERLAP: bilibi_ui::RecordField::new("overlap", "Overlap policy"),
-    MISFIRE: bilibi_ui::RecordField::new("misfire", "Misfire policy"),
-    LAST_RUNTIME: bilibi_ui::RecordField::new("last_runtime", "Last runtime"),
+bilibi_ui::record_fields! { "base/schedule", mod task_fields {
+    OVERLAP: bilibi_ui::RecordField::new("overlap", "Overlap policy", bilibi_ui::RecordFieldType::String),
+    MISFIRE: bilibi_ui::RecordField::new("misfire", "Misfire policy", bilibi_ui::RecordFieldType::String),
+    LAST_RUNTIME: bilibi_ui::RecordField::new("last_runtime", "Last runtime", bilibi_ui::RecordFieldType::String),
 } }
-bilibi_ui::record_fields! { mod run_fields {
-    RUNTIME: bilibi_ui::RecordField::new("runtime", "Runtime"),
-    TRIGGER: bilibi_ui::RecordField::new("trigger", "Trigger"),
+bilibi_ui::record_fields! { "base/schedule", mod run_fields {
+    RUNTIME: bilibi_ui::RecordField::new("runtime", "Runtime", bilibi_ui::RecordFieldType::String),
+    TRIGGER: bilibi_ui::RecordField::new("trigger", "Trigger", bilibi_ui::RecordFieldType::String),
 } }
 
 fn duration(milliseconds: Option<i32>) -> String {

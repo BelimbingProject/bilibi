@@ -189,7 +189,7 @@ pub async fn create(
         .mutate(move |sql| {
             Box::pin(async move {
                 let id: i64 = sql.query_one("INSERT INTO company_departments(tenant_id,company_id,department_type_id,status) VALUES($1,$2,$3,$4) RETURNING id", &[&tenant,&company_id,&department_type_id,&status]).await?.get(0);
-                let row = sql.query_one(&format!("SELECT {COLUMNS} FROM {FROM} WHERE d.id=$1"), &[&id]).await?;
+                let row = sql.query_one(&format!("SELECT {COLUMNS} FROM {FROM} WHERE d.tenant_id=$1 AND d.company_id=$2 AND d.id=$3"), &[&tenant,&company_id,&id]).await?;
                 let created = Department::from_row(&row);
                 let change = Change { kind: "company.department".into(), id, old: serde_json::Value::Null, new: created.to_json() };
                 Ok((created, vec![change]))
@@ -254,11 +254,12 @@ pub async fn update_status(
         return Ok(Outcome::Saved(before));
     }
     let status = status.to_owned();
+    let tenant = scope.tenant();
     let saved = tx
         .mutate(move |sql| {
             Box::pin(async move {
-                sql.execute("UPDATE company_departments SET status=$2,version=version+1,updated_at=now() WHERE id=$1", &[&department_id,&status]).await?;
-                let row = sql.query_one(&format!("SELECT {COLUMNS} FROM {FROM} WHERE d.id=$1"), &[&department_id]).await?;
+                sql.execute("UPDATE company_departments SET status=$4,version=version+1,updated_at=now() WHERE tenant_id=$1 AND company_id=$2 AND id=$3", &[&tenant,&company_id,&department_id,&status]).await?;
+                let row = sql.query_one(&format!("SELECT {COLUMNS} FROM {FROM} WHERE d.tenant_id=$1 AND d.company_id=$2 AND d.id=$3"), &[&tenant,&company_id,&department_id]).await?;
                 let saved = Department::from_row(&row);
                 let change = Change { kind: "company.department".into(), id: department_id, old: before.to_json(), new: saved.to_json() };
                 Ok((saved, vec![change]))
@@ -277,11 +278,12 @@ pub async fn delete(
     authorize_target(tx.sql(), scope, company_id, UPDATE).await?;
     require_writable(tx.sql(), scope, company_id, true).await?;
     let before = lock(tx.sql(), scope, company_id, department_id).await?;
+    let tenant = scope.tenant();
     tx.mutate(move |sql| {
         Box::pin(async move {
             sql.execute(
-                "DELETE FROM company_departments WHERE id=$1",
-                &[&department_id],
+                "DELETE FROM company_departments WHERE tenant_id=$1 AND company_id=$2 AND id=$3",
+                &[&tenant, &company_id, &department_id],
             )
             .await?;
             let change = Change {
@@ -423,11 +425,12 @@ pub async fn update_head(
     if before.head_affiliation_id == head_affiliation_id {
         return Ok(Outcome::Saved(before));
     }
+    let tenant = scope.tenant();
     let saved = tx
         .mutate(move |sql| {
             Box::pin(async move {
-                sql.execute("UPDATE company_departments SET head_affiliation_id=$2,version=version+1,updated_at=now() WHERE id=$1", &[&department_id,&head_affiliation_id]).await?;
-                let row = sql.query_one(&format!("SELECT {COLUMNS} FROM {FROM} WHERE d.id=$1"), &[&department_id]).await?;
+                sql.execute("UPDATE company_departments SET head_affiliation_id=$4,version=version+1,updated_at=now() WHERE tenant_id=$1 AND company_id=$2 AND id=$3", &[&tenant,&company_id,&department_id,&head_affiliation_id]).await?;
+                let row = sql.query_one(&format!("SELECT {COLUMNS} FROM {FROM} WHERE d.tenant_id=$1 AND d.company_id=$2 AND d.id=$3"), &[&tenant,&company_id,&department_id]).await?;
                 let saved = Department::from_row(&row);
                 let change = Change { kind: "company.department".into(), id: department_id, old: before.to_json(), new: saved.to_json() };
                 Ok((saved, vec![change]))

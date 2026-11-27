@@ -26,9 +26,9 @@ use std::collections::HashMap;
 /// The portal home, where a customer lands after signing in.
 pub const HOME: &str = "/portal";
 
-/// The customer's session cookie. `Path=/portal`, so the browser never sends
-/// it to a staff path, where a customer is therefore anonymous.
-pub const COOKIE: &str = "bilibi_portal";
+/// The customer's session cookie. The public listener alone reads it; its
+/// `__Host-` prefix binds it to the public hostname.
+pub const COOKIE: &str = "__Host-bilibi_customer";
 
 /// The portal cookie's token. The staff cookie is never read here.
 pub fn token(headers: &HeaderMap) -> Result<String> {
@@ -48,26 +48,41 @@ pub fn token(headers: &HeaderMap) -> Result<String> {
         .ok_or(Error::Unauthorized)
 }
 
+/// What the portal concluded about a request, as `routes::Admission` does
+/// for staff.
+enum Admission {
+    /// Through, with the customer's proof.
+    Admitted(PortalScope),
+    /// The route asks a step-up this session has not confirmed within the
+    /// window: a page GET goes to the portal's prompt first.
+    StepUp(PortalScope),
+}
+
+pub(crate) async fn session(app: &App, credential: &str) -> Result<PortalScope> {
+    let portal = app.security.guard_portal(credential).await?;
+    // A customer of one tenant is nobody on another tenant's site.
+    if app.public_scope()?.tenant() != portal.scope().tenant() {
+        return Err(Error::Unauthorized);
+    }
+    Ok(portal)
+}
+
 /// The portal session, then the route's portal capability, then its
 /// step-up, as `routes::admit` does for staff. A staff session, a missing
 /// one and a customer of a closed account are all `Unauthorized`; a
 /// non-portal access (a staff embed named from a portal page) is refused.
-/// The portal has no step-up prompt of its own yet, so a step-up still owed
-/// is refused. `target` names the HTTP navigation being admitted, whose
-/// check extends the window; the live socket's recheck only reads it.
+/// `target` names the HTTP navigation being admitted, whose check extends
+/// the window; the live socket's recheck only reads it.
 async fn admit(
     app: &App,
     access: Access,
     credential: Option<&str>,
     target: Option<&str>,
-) -> Result<PortalScope> {
+) -> Result<Admission> {
     let Access::Portal(key) = access.base() else {
         return Err(Error::Forbidden);
     };
-    let portal = app
-        .security
-        .guard_portal(credential.ok_or(Error::Unauthorized)?)
-        .await?;
+    let portal = session(app, credential.ok_or(Error::Unauthorized)?).await?;
     // A portal that is off answers 404 to its own customers too (issue 137,
     // behaviour 1), before any capability is decided.
     if !portal_on(app, &portal).await? {
@@ -86,15 +101,98 @@ async fn admit(
             None => app.step_up.holds(portal.scope(), operation).await?,
         };
         if !holds {
-            return Err(Error::Forbidden);
+            return Ok(Admission::StepUp(portal));
         }
     }
-    Ok(portal)
+    Ok(Admission::Admitted(portal))
+}
+
+/// Draws the portal factor prompt over placeholders in the requested portal
+/// layout without rendering the protected page owner.
+async fn step_up_page(
+    app: &App,
+    requested: &BoundPortalRoute,
+    requested_path: &HashMap<String, String>,
+    portal: &PortalScope,
+    credential: &str,
+    uri: &Uri,
+) -> Result<Response> {
+    let return_to = uri
+        .path_and_query()
+        .map_or(uri.path(), |address| address.as_str());
+    let destination = app.step_up.prompt(portal.scope(), return_to).await?;
+    if !destination.starts_with("/portal/") {
+        return Err(Error::Forbidden);
+    }
+    let (prompt_path, prompt_query) = routes::local_address(&destination)?;
+    let (prompt, prompt_params) = routes::resolve_portal(app, prompt_path)?;
+    match admit(
+        app,
+        prompt.route.access,
+        Some(credential),
+        Some(prompt_path),
+    )
+    .await?
+    {
+        Admission::Admitted(_) => {}
+        Admission::StepUp(_) => return Err(Error::Forbidden),
+    }
+    let page = crate::render_fields(
+        app,
+        Some(portal.scope()),
+        prompt.page.0.render(PageRequest {
+            operation: prompt.route.operation,
+            scope: Some(portal),
+            path: &prompt_params,
+            query: &prompt_query,
+            body: &[],
+            framed: false,
+        }),
+    )
+    .await?;
+    let title = requested
+        .page
+        .0
+        .step_up_title(requested.route.operation, requested_path)
+        .unwrap_or_else(|| "Protected page".to_owned());
+    let gate = Html::render(&bilibi_ui::StepUpGate::rendered_page(
+        destination,
+        return_to,
+        title.clone(),
+        page.html,
+    ))
+    .map_err(|_| Error::Internal)?;
+    let (site, logo) = site_brand(app, portal).await?;
+    let body = layout(
+        app,
+        portal,
+        &site,
+        logo.as_deref(),
+        uri.path(),
+        true,
+        gate.as_str(),
+    )
+    .await?;
+    let html = Html::render(&PortalDocument {
+        title: &title,
+        site: &site,
+        logo: logo.as_deref(),
+        body: &body,
+    })
+    .map_err(|_| Error::Internal)?;
+    let mut response = axum::response::Html(html.as_str().to_owned()).into_response();
+    response.headers_mut().insert(
+        routes::STEP_UP_HEADER,
+        axum::http::HeaderValue::from_static("required"),
+    );
+    *response.status_mut() = StatusCode::OK;
+    Ok(response)
 }
 
 /// The portal's live side (ADR 16): `/portal/live` with the customer's
 /// session, portal routes and panels only, and the portal layout around each
-/// reply. No shell panels and no step-up prompt.
+/// reply. No shell panels; a step-up a page's facade asks for is confirmed on
+/// the portal's own prompt.
 pub struct Portal;
 impl live::Side for Portal {
     type Context = PortalScope;
@@ -108,11 +206,13 @@ impl live::Side for Portal {
         })
     }
     async fn admit(app: &App, access: Access, token: &str) -> Result<live::Gate<PortalScope>> {
-        Ok(live::Gate::Open(Some(
-            admit(app, access, Some(token), None).await?,
-        )))
+        Ok(match admit(app, access, Some(token), None).await? {
+            Admission::Admitted(portal) => live::Gate::Open(Some(portal)),
+            Admission::StepUp(_) => live::Gate::StepUp,
+        })
     }
     async fn activity(app: &App, token: &str) -> Result<PortalScope> {
+        session(app, token).await?;
         let client = app.db.get().await.map_err(Error::from)?;
         PortalScope::seal(
             app.security
@@ -134,8 +234,12 @@ impl live::Side for Portal {
         let (site, logo) = site_brand(app, context).await?;
         layout(app, context, &site, logo.as_deref(), path, true, html).await
     }
-    async fn prompt(_app: &App, _context: &PortalScope, _back: &str) -> Option<String> {
-        None
+    async fn prompt(app: &App, context: &PortalScope, back: &str) -> Option<String> {
+        app.step_up
+            .prompt(context.scope(), back)
+            .await
+            .ok()
+            .filter(|destination| destination.starts_with("/portal/"))
     }
 }
 
@@ -149,10 +253,11 @@ pub async fn upgrade(
 ) -> std::result::Result<Response, HttpError> {
     origin(&app, &headers)?;
     let token = token(&headers)?;
-    let portal = app.security.guard_portal(&token).await?;
+    let portal = session(&app, &token).await?;
     if !portal_on(&app, &portal).await? {
         return Err(Error::NotFound.into());
     }
+    let site = app.public_scope()?;
     let policy = live::Policy::read(&app).await?;
     let Some(slot) = app.live.admit(&token, portal.scope(), &policy) else {
         return Ok((StatusCode::TOO_MANY_REQUESTS, live::TOO_MANY_SOCKETS).into_response());
@@ -162,7 +267,10 @@ pub async fn upgrade(
         .max_message_size(live::FRAME_LIMIT)
         .max_frame_size(live::FRAME_LIMIT)
         .on_upgrade(move |socket| {
-            live::run::<Portal>(app, token, identity, socket, false, slot, policy)
+            // The socket runs in its own task: it keeps the site it opened on.
+            crate::public::PUBLIC_SITE.scope(site, async move {
+                live::run::<Portal>(app, token, identity, socket, false, slot, policy).await
+            })
         }))
 }
 
@@ -197,7 +305,12 @@ pub async fn dispatch(
     .await
     {
         Err(Error::Unauthorized) if get => return Ok(sign_in()),
-        Ok(portal) => portal,
+        Ok(Admission::Admitted(portal)) => portal,
+        Ok(Admission::StepUp(portal)) if get => {
+            let credential = credential.as_deref().ok_or(Error::Unauthorized)?;
+            return Ok(step_up_page(&app, &bound, &path, &portal, credential, &uri).await?);
+        }
+        Ok(Admission::StepUp(_)) => return Err(Error::Forbidden.into()),
         Err(error) => return Err(error.into()),
     };
     if !get
@@ -213,18 +326,27 @@ pub async fn dispatch(
     ) {
         return Err(Error::Forbidden.into());
     }
-    let page = bound
-        .page
-        .0
-        .render(PageRequest {
+    let rendered = crate::render_fields(
+        &app,
+        Some(portal.scope()),
+        bound.page.0.render(PageRequest {
             operation: bound.route.operation,
             scope: Some(&portal),
             path: &path,
             query: &query,
             body: &body,
             framed: false,
-        })
-        .await?;
+        }),
+    )
+    .await;
+    let page = match rendered {
+        // The page's own facade asked for step-up while rendering.
+        Err(Error::StepUpRequired { .. }) if get => {
+            let credential = credential.as_deref().ok_or(Error::Unauthorized)?;
+            return Ok(step_up_page(&app, &bound, &path, &portal, credential, &uri).await?);
+        }
+        page => page?,
+    };
     if let Some(destination) = bound.page.0.redirect(bound.route.operation) {
         return Ok(Redirect::to(destination).into_response());
     }
@@ -375,15 +497,21 @@ pub async fn sign_out(
 ) -> std::result::Result<Response, HttpError> {
     origin(&app, &headers)?;
     if let Ok(credential) = token(&headers) {
-        match app.user.portal_logout(&credential, &form.csrf).await {
-            Ok(()) | Err(Error::Unauthorized) => {}
+        match session(&app, &credential).await {
+            Ok(_) => match app.user.portal_logout(&credential, &form.csrf).await {
+                Ok(()) | Err(Error::Unauthorized) => {}
+                Err(error) => return Err(error.into()),
+            },
+            Err(Error::Unauthorized) => {}
             Err(error) => return Err(error.into()),
         }
     }
     let mut response = sign_in();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("bilibi_portal=; HttpOnly; SameSite=Lax; Path=/portal; Max-Age=0"),
+        HeaderValue::from_static(
+            "__Host-bilibi_customer=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0",
+        ),
     );
     Ok(response)
 }
@@ -409,7 +537,10 @@ pub async fn download(
     .await
     {
         Err(Error::Unauthorized) => return Ok(sign_in()),
-        Ok(portal) => portal,
+        Ok(Admission::Admitted(portal)) => portal,
+        // A file has no page to come back to: the customer confirms on the
+        // page that links to it.
+        Ok(Admission::StepUp(_)) => return Err(Error::Forbidden.into()),
         Err(error) => return Err(error.into()),
     };
     let credential = credential.ok_or(Error::Forbidden)?;

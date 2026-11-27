@@ -8,7 +8,7 @@ use bilibi_agent_api::{
     Registry,
 };
 use bilibi_bulk_data::{BulkData, Pass, Run, SERVICE};
-use bilibi_database::{pool, Db, Error};
+use bilibi_database::{pool, Db};
 use bilibi_queue::{Config, Executor};
 use bilibi_tenancy::{ProofFuture, Scope};
 use serde_json::{json, Value};
@@ -27,14 +27,8 @@ struct Browser<'a> {
 impl PlanAuthority for Browser<'_> {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(Error::Unauthorized)?;
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.check(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })
@@ -71,9 +65,13 @@ impl Person<'_> {
             .map_err(|error| error.to_string())
     }
     async fn read(&self, key: &str, input: Value) -> Result<Value, String> {
-        let client = self.db.get().await.map_err(|error| error.to_string())?;
+        let mut client = self
+            .db
+            .get_detached("the walkthrough's own checking connection")
+            .await
+            .map_err(|error| error.to_string())?;
         self.registry
-            .call(&**client, &self.scope, key, &input)
+            .call(&mut **client, &self.scope, key, &input)
             .await
             .map(|out| out["result"].clone())
             .map_err(|error| error.to_string())
@@ -229,7 +227,9 @@ async fn main() -> Result<(), Failure> {
         .get();
     println!("the manager files under workplace {company}");
     let (mut stop, mut worker) = start(&app, 3)?;
-    let sql = db.get().await?;
+    let sql = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // An unseeded database names no private document folder: keep the
     // uploads under this directory, as a local checkout's seed would.
     let root = std::env::current_dir()?.join("data/artifacts");
@@ -728,6 +728,158 @@ async fn main() -> Result<(), Failure> {
             row.get::<_, String>(0),
             row.get::<_, String>(1)
         );
+    }
+
+    println!("\n== undo removes only untouched records the import created");
+    let undo_run = admin
+        .upload(
+            "core/person.contacts",
+            "undo.csv",
+            &csv(
+                header,
+                [
+                    "U1,Undo One,human,undo.one@import.test,".into(),
+                    "U2,Undo Two,human,undo.two@import.test,".into(),
+                    "U3,Undo Three,human,undo.three@import.test,".into(),
+                ],
+            ),
+        )
+        .await
+        .map_err(|error| format!("undo scenario upload: {error}"))?;
+    let imported = admin
+        .pass("base.bulk_data.import.start", undo_run, &mapping)
+        .await
+        .map_err(|error| format!("undo scenario import: {error}"))?;
+    let changed = sql
+        .query_one(
+            "SELECT id,version FROM persons WHERE tenant_id=1 AND email='undo.two@import.test'",
+            &[],
+        )
+        .await
+        .map_err(|error| format!("undo scenario edit: {error}"))?;
+    admin
+        .write(
+            "core.person.update",
+            json!({
+                "person_id": changed.get::<_, i64>(0),
+                "version": changed.get::<_, i64>(1),
+                "identity": {"name":"Undo Two, edited", "kind":"human", "email":"undo.two@import.test"}
+            }),
+        )
+        .await
+        .map_err(|error| format!("undo scenario edit: {error}"))?;
+    admin
+        .write(
+            "base.bulk_data.import.undo",
+            json!({"run_id":undo_run,"version":imported.version}),
+        )
+        .await
+        .map_err(|error| format!("undo scenario start: {error}"))?;
+    let undone = admin.settle(undo_run).await;
+    println!(
+        "undo: state {}, {} removed, {} edited, {} other errors",
+        undone.state.as_str(),
+        undone.undo.removed,
+        undone.undo.edited,
+        undone.undo.error
+    );
+    let left: Vec<String> = sql
+        .query(
+            "SELECT email FROM persons WHERE tenant_id=1 AND email LIKE 'undo.%@import.test' ORDER BY email",
+            &[],
+        )
+        .await?
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    let listed = admin
+        .read(
+            "base.bulk_data.import.rows",
+            json!({"run_id":undo_run,"pass":"run","undo":"left","page_size":100}),
+        )
+        .await?;
+    println!("records left: {left:?}; listed undo refusals: {listed}");
+    if undone.state != bilibi_bulk_data::RunState::Undone
+        || undone.undo.removed != 2
+        || undone.undo.edited != 1
+        || undone.undo.error != 0
+        || left != ["undo.two@import.test"]
+        || listed.as_array().is_none_or(|rows| rows.len() != 1)
+    {
+        return Err("import undo removed or reported the wrong records".into());
+    }
+
+    let expired = admin
+        .upload(
+            "core/person.contacts",
+            "expired-undo.csv",
+            &csv(
+                header,
+                ["E1,Expired Undo,human,expired.undo@import.test,".into()],
+            ),
+        )
+        .await?;
+    let expired_run = admin
+        .pass("base.bulk_data.import.start", expired, &mapping)
+        .await?;
+    sql.execute(
+        "UPDATE base_bulk_data_runs SET finished_at=clock_timestamp()-interval '8 days' WHERE tenant_id=1 AND id=$1",
+        &[&expired],
+    )
+    .await?;
+    let refused = admin
+        .write(
+            "base.bulk_data.import.undo",
+            json!({"run_id":expired,"version":expired_run.version}),
+        )
+        .await;
+    println!("expired undo: {refused:?}");
+    if refused.is_ok() {
+        return Err("an import was undone after the configured period".into());
+    }
+
+    println!("\n== a check cancelled and started again: the first job records nothing more");
+    // Issue 600: the first check's job is still working through the file
+    // when the check is cancelled and started again with another mapping.
+    // It must stop, not record rows planned with the mapping it began with.
+    let again = admin
+        .upload(
+            "core/person.contacts",
+            "again.csv",
+            &csv(
+                header,
+                (1..=1000).map(|n| format!("G{n},Again Person {n},human,again.{n}@import.test,")),
+            ),
+        )
+        .await?;
+    let version = admin.run(again).await.version;
+    admin
+        .write(
+            "base.bulk_data.import.preview",
+            json!({"run_id": again, "version": version, "mapping": mapping}),
+        )
+        .await?;
+    while admin.run(again).await.progress() < 50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let version = admin.run(again).await.version;
+    admin
+        .write(
+            "base.bulk_data.import.cancel",
+            json!({"run_id": again, "version": version}),
+        )
+        .await?;
+    // Every row of the second mapping fails: its email is the name column.
+    let failing = json!({"fields": [
+        {"field": "name", "column": "Full name"}, {"field": "kind", "column": "Kind"},
+        {"field": "email", "column": "Full name"}
+    ], "duplicates": "skip"});
+    let run = admin
+        .pass("base.bulk_data.import.preview", again, &failing)
+        .await?;
+    counts("checked again with a mapping whose every row fails", &run);
+    if run.preview.error != i64::from(run.row_count) || run.preview.create != 0 {
+        return Err("the cancelled check's job recorded rows into the new check".into());
     }
 
     let _ = stop.send(true);

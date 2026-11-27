@@ -12,7 +12,7 @@ disposable database to see the after-commit fan-out. The anonymous sign-in,
 forgot-password and reset-password
 pages belong to the Web host.
 
-The bell separates **To do** from **Notifications**, with distinct counts. Owners supply actionable rows through [Base Notifications](../../base/notifications/README.md), not a dependency from the shell to Workflow. Each tab has one See all link. Reading or clearing notifications leaves to-dos alone; their owner's normal action completes them.
+The bell separates **To do** from **Notifications**, with a count on each tab and a combined bell count. The badges show 99+ above 99 and mark bounded counts with +. Owners supply actionable rows through [Base Notifications](../../base/notifications/README.md), not a dependency from the shell to Workflow. Nonempty to-do groups name their list and link to it only when more items exist. Reading or clearing notifications leaves to-dos alone; their owner's normal action completes them.
 
 A `user_identities` row owns one login address, password, verification state, reset token, sign-in attempts, pending admissions and second-factor enrollment. A `users` row is the tenant-owned account that acts there. Staff identities are installation-wide and may have one live account per tenant; customer identities stay bound to one tenant and never become memberships. [ADR 21](../../../docs/architecture/decisions/21-one-sign-in-several-tenant-memberships.md) records the complete boundary. Invitation administration, acceptance and switching between tenants are built, including the second-factor and company-sign-in handoff.
 
@@ -24,16 +24,17 @@ Base Records kind `user` names and links staff accounts through the same tenant,
 
 | Method | Purpose |
 |---|---|
-| `login(email, password)` / `logout` | The global sign-in: the address names the platform sign-in, whose last live tenant account is preferred, then its live home or another live membership. The sign-in lock is checked, the password verified, then the account's standing. Refusals are `CredentialError::{Rejected, CompanyArchived, WorkspaceUnavailable}`. A required second factor returns a pending credential, not a session; see [Sign-in admission](#sign-in-admission) |
-| `tenant_choices(client, scope)` / `choose_tenant(token, csrf, tenant, request)` | Lists the holder's live staff memberships and changes an ordinary browser session to one of them. A successful switch rotates the bearer and CSRF secret, clears tenant-local session state, saves the landing tenant and audits entry. Impersonation is refused. A target requiring a sign-in factor returns `TenantEntry::Challenge`, a pending sign-in for the existing second-factor page, and one enforcing company sign-in returns `TenantEntry::Sso`, the connection to start; neither touches the current session. Completing either admits a new session, and `retire_replaced_session(old, new)` then ends the old one of the same identity and closes its pages. A target needing a factor the holder has not enrolled is refused with `TenantChoiceRefusal::EntryPolicy` |
-| `change_password(token, csrf, current, new)` | Signed-in change. Needs the current password; ends the account's other sessions |
-| `request_password_reset(email)` | Always `Ok` for unknown, frozen or throttled accounts. Mail is sent after returning |
-| `reset_password(email, token, new)` | Consumes the one-time token, replaces the password, ends every session; a frozen account's link is as invalid as an unknown one |
+| `login(email, password)` / `login_to_tenant(tenant, email, password)` / `logout` | Portable password admission. The optional target is carried by the Web reauthentication cookie and must be one of the identity's live memberships. The sign-in lock, password, membership standing and target policy are rechecked. A required second factor returns a pending credential with the same portable authority; see [Sign-in admission](#sign-in-admission) |
+| `tenant_choices(client, scope)` / `choose_tenant(token, csrf, tenant, request)` | Lists live memberships. Portable authority switches normally, subject to the target's factor and company-SSO policy. Tenant SSO authority can operate only in its issuing tenant: another target returns `TenantEntry::Reauthenticate { tenant, provider }` or the target's `TenantEntry::Sso`, without touching the old session. Completing target-bound password, SSO or factor admission creates a correctly attributed session; `retire_replaced_session(old, new)` then ends the old session. See [ADR 21](../../../docs/architecture/decisions/21-one-sign-in-several-tenant-memberships.md) |
+| `change_password(token, csrf, current, new)` | Signed-in change. Needs the current password; ends the account's other sessions and the sign-in's sessions in every other tenant (see [A password ends every tenant's sessions](#a-password-ends-every-tenants-sessions)) |
+| `request_password_reset(email)` | Always `Ok` for unknown, frozen or throttled identities. The link belongs to the installation-owned identity and chooses a live membership only for audit context, preferring last used then any live membership. The token's issue is audited (`user.reset_requested`, by the `sign-in` principal, never the token). Mail is sent after returning; a failed delivery withdraws the token (`user.reset_withdrawn`) |
+| `alert_new_device(token, device)` | The new-device sign-in email, sent in the background after the Web host records a staff sign-in that Base Session judged new. Claims the day's email and audits it before sending; a failure is logged and never reaches the sign-in. See [New-device sign-in email](../../base/session/README.md#new-device-sign-in-email) |
+| `reset_password(email, token, new)` | Consumes the one-time token for the same account choice as the request, replaces the password, ends every session of the sign-in in every tenant; a frozen account's link is as invalid as an unknown one |
 | `account(scope, user)` | One account of the tenant with its `AccountLinks`, version and timestamps; `admin.user.view` |
 | `link_person(scope, user, person)` / `unlink(scope, user)` | The account binder's commands; `admin.user.update`. See below |
-| `create_account` / `update_account` / `set_password` / `delete_account` | Account administration (`src/accounts.rs`): `admin.user.create`, `.update`, `.update`, `.delete`. See "Account administration" |
+| `update_account` / `remove_membership` | Tenant membership administration (`src/accounts.rs`): rename with `admin.user.update`, or remove with `admin.user.delete`. Shared credentials are not an administrator operation. See "Account administration" |
 | `invite_member` / `revoke_member_invitation` / `member_invitation` / `accept_member_invitation` / `accept_new_member_invitation` | Prepare or revoke a tenant account, read the safe facts for its emailed page and accept it with an existing or new sign-in. See "Membership invitations" |
-| `update_profile(token, csrf, name, email)` / `landing_pages` / `landing_choice` / `save_landing` / `landing_route` | The signed-in account's own profile and landing page; no capability |
+| `update_profile(token, csrf, name, email)` / `landing_pages` / `landing_choice` / `landing_route` | The signed-in account's own profile and landing page; no capability |
 | `send_email_verification(token, csrf)` / `verify_email(link)` | Signed link to the account's current address; clicking proves mailbox control |
 
 Refusals are `CredentialError` variants a page maps to a field error or flash
@@ -54,9 +55,11 @@ An administrator with `admin.user.invite` can prepare an account for an email ad
 
 `invite_member(scope, input)` always follows the same path whether the email address already has a sign-in or is new. It stores only a SHA-256 token digest, replaces any open invitation to the same address in that tenant, preassigns selected roles through Authz's normal escalation and step-up checks, and emails `/accept/{token}` after the transaction commits. The tenant setting `user.invitation_days` controls expiry from 1 to 60 days and defaults to 7. `/users/invite` is the administrator page; `/users` marks pending invitations and can revoke one through `revoke_member_invitation`.
 
-`member_invitation(token)` returns only the tenant name and whether the bearer must use an existing sign-in. It never returns the invited address. `accept_member_invitation(scope, token)` links the invited account to the signed-in identity only when its email matches. `accept_new_member_invitation(token, password)` creates the sign-in and makes this account its home. Expired, reused, revoked, wrong-email and already-used membership links all return `InvitationError::Link`.
+`member_invitation(token)` returns only the tenant name and whether the bearer must use an existing sign-in. It never returns the invited address. For ordinary invitations, `accept_member_invitation(scope, token)` rechecks and holds the source tenant, staff membership, linked [Person](../person/README.md), portable identity and [browser session](../../base/session/README.md#guard-boundary) in the acceptance transaction. It links the invited membership only if the current sign-in email still matches the invitation. Refusals for impersonation or unavailable source authority record `user.invitation.accept.refused` in the source tenant. `accept_new_member_invitation(token, password)` creates the portable identity with the holder-chosen password. Expired, revoked, already accepted and wrong-email membership links return `InvitationError::Link`.
 
-The Web host serves `/accept/{token}`. An address with a sign-in authenticates first and returns to the one-time link; a new address chooses its password there.
+The acceptance page offers a new link for any expired, still-pending invitation eligible for renewal. Revoked, accepted and unknown links have no resend action. `resend_member_invitation(token)` reissues to the original address. Renewal is audited and throttled. A delivery error restores the previous token and timestamps if the renewal is still pending. If the server restarts after renewal commits and before delivery, an administrator can issue a new invitation.
+
+The Web host serves `/accept/{token}`. For an ordinary invitation, an address with a sign-in authenticates first and returns to the one-time link, while a new address chooses its password there. [Customer tenant owner invitations](#customer-tenant-owner) use the same route and require a new sign-in.
 
 ## Company sign-in
 
@@ -75,7 +78,7 @@ Enable **Sign in** on the tenant's 2FA requirements page to ask for a second fac
 - `pending_sign_in(token)` returns only CSRF and live enrolled method formats. It exposes no `Scope`. `start_sign_in_challenge(token, csrf, method)` explicitly starts or resends delivery. `complete_sign_in(token, csrf, method, code)` consumes that method's proof and returns a fresh admitted session, or `None` for a refused proof. `cancel_sign_in(token, csrf)` ends pending entry.
 - Pending credentials are hashed in `user_sign_ins`, outside `sessions` and agent grants. Normal session, API and live guards cannot authenticate them. Admission locks the pending row and rechecks expiry, standing, password version and the current workplace's company sign-in policy, so parallel submits admit at most once and a password challenge cannot fall into an enforcing workplace. Company sign-in keeps its provider company through the pending factor and admits the session in that workplace. Once pending, sign-in always requires proof even if policy is later turned off.
 - The operator setting **Sign-in challenge lifetime** (`user.sign_in_minutes`) defaults to five minutes, with a range of 1–30. Expiry uses the database clock, never extends on resend, and is recorded once when the expired credential is next presented. Cancelled, expired, revoked and admitted credentials cannot be reused.
-- Password verification, pending entry, challenge starts, admission, cancellation and observed expiry are audited through `MutationBoundary`, without credentials or codes. Providers audit their own checks; Base Step-up also records proof acceptance or refusal for `core.user.sign_in`. Reset, account deletion and session revocation end pending sign-ins through Core User's lifecycle adapter.
+- Password verification, pending entry, challenge starts, admission, cancellation and observed expiry are audited through `MutationBoundary`, without credentials or codes. Providers audit their own checks; Base Step-up also records proof acceptance or refusal for `core.user.sign_in`. Reset, membership removal and session revocation end pending sign-ins through Core User's lifecycle adapter.
 - With no enrolled method, a required sign-in stays pending and explains how to ask an administrator for help. It never admits, enrolls a method or sends a challenge from a GET. Before resetting the last method, keep another administrator signed in to turn off the tenant's sign-in requirement while the holder enrolls again. Reset does not bypass that policy.
 
 Factor Extensions use the [Base provider contract](../../base/step_up/README.md#provider). Sign-in calls the same `start` and `spend` hooks with operation `core.user.sign_in`, a pending-entry ID as target, and channel Web. These hooks must work without a session row. Delivered codes must bind to that complete purpose. Core User does not throttle `start_sign_in_challenge`, and each password sign-in creates a new pending entry. A method's `start` must therefore throttle deliveries per account across all pending entries and step-up targets; `retry_after_seconds` is advice to the page, not enforcement. Providers finish their own proof transaction before Core User begins admission; an admission failure may consume a code but never create a session.
@@ -114,17 +117,17 @@ Web adapters (`apps/web/src/shell.rs`): `POST /preferences` (`{kind,value}`), `G
 
 ## Impersonation (K14; `src/impersonation.rs`)
 
-`UserService::impersonate` and `leave_impersonation` are behind the host's `POST /admin/impersonate/{id}` and `/admin/impersonate/leave` (`apps/web/src/impersonation.rs`). Entering needs `admin.user.impersonate`, a session that is not already impersonating, another account, and a target whose `bilibi_user::standing` is live. A disabled account or retired Person is refused; an archived workplace removes only that desk. Each switch is one transaction through `Sessions::switch`: the session must still hold the identity the request came from, its CSRF secret rotates, and the retained `impersonation.started`/`impersonation.stopped` action (operator as actor, target as subject) commits with it, so a trail that cannot be written refuses the switch. A return that cannot be made ends the session instead of trapping the operator. Every authentication re-proves both accounts, so removing or freezing either ends the borrowed session. The viewed account starts at its remembered or first live desk. Its desks remain the reach boundary. The operator's already authenticated live session satisfies the workplace sign-in check during this authorized impersonation; no target-provider session is required. The start action audits entry into the view, and each later desk change records `user.company.switched` with both identities.
+`UserService::impersonate` and `leave_impersonation` are behind the host's `POST /admin/impersonate/{id}` and `/admin/impersonate/leave` (`apps/web/src/impersonation.rs`). Entering needs `admin.user.impersonate`, a session that is not already impersonating, another account, a target whose `bilibi_user::standing` is live, and a target that holds nothing the operator lacks (`bilibi_authz::holds_everything_of`; otherwise `Refusal::Outranked`), so viewing as an administrator needs an administrator. Every later authorization decision uses the live intersection of permissions for the viewed account and operator in the same company, so granting the viewed account more access or revoking access from the operator cannot widen the open session. The impersonated session creates, changes and deletes no account ("Who may change whose account"). A disabled account or retired Person is refused; an archived workplace stays a read-only desk. Each switch is one transaction through `Sessions::switch`: the session must still hold the identity the request came from, its CSRF secret rotates, and the retained `impersonation.started`/`impersonation.stopped` action (operator as actor, target as subject) commits with it, so a trail that cannot be written refuses the switch. A return that cannot be made ends the session instead of trapping the operator. Every authentication re-proves both accounts, so removing or freezing either ends the borrowed session. The viewed account starts at its remembered or first live desk. Its desks remain the reach boundary. The operator's already authenticated live session satisfies the workplace sign-in check during this authorized impersonation; no target-provider session is required. The start action audits entry into the view, and each later desk change records `user.company.switched` with both identities.
 
 ## Current company
 
 `UserService::choose_company(token, csrf, company, request)` handles the shell's **Switch desk** form. It proves the requested desk, writes the session choice and the account's remembered `last_desk_id`, and records `user.company.switched` through one MutationBoundary transaction. A refused switch records `user.company.switch_refused`. The choice grants no capability.
 
-Every authentication proves the selected desk again. An invalid or absent selection uses the remembered valid desk, then the person's first live desk, or no desk. Impersonation uses the viewed person's desks and parks the operator's selection separately. A queued job retains its captured desk and refuses lost access rather than selecting another one.
+Every authentication proves the selected desk again. An invalid or absent selection uses the remembered valid desk, then the person's first live desk (an unarchived desk before an archived one), or no desk. An archived company's desk may be chosen: its records read and every write into it is refused. Impersonation uses the viewed person's desks and parks the operator's selection separately. A queued job retains its captured desk and refuses lost access rather than selecting another one.
 
 ## Token storage
 
-`password_reset_tokens` has one row per sign-in identity, so it can never grow past the identity count. Only the SHA-256 of the 256-bit random token is stored; the plaintext exists in the emailed link alone. A request is throttled to one per 60 seconds, a link lives one hour, and each request deletes expired rows. Consuming a token deletes its row inside the audited transaction, so a racing second use loses. If delivery fails the row is removed so the person can ask again.
+`password_reset_tokens` has one row per sign-in identity, so it can never grow past the identity count. Only the SHA-256 of the 256-bit random token is stored. The plaintext exists in the emailed link alone. A request is throttled to one per 60 seconds and replaces the previous token. Links live three days by default. Operators with `admin.user.password-reset-lifetime.manage` can set the lifetime for newly issued links with `core.user.password_reset_lifetime.set`. The operation takes `minutes` from 15 to 10,080 and writes the installation setting `user.password_reset_minutes`. Consuming a token deletes its row inside the audited transaction, so a racing second use loses. If delivery fails the row is removed so the person can ask again.
 
 Verification links are stateless: `v1.{tenant}.{user}.{issued}.{hmac}` signed
 with `BILIBI_USER_SIGNING_KEY` (64 hex characters; separate from the Settings
@@ -140,7 +143,7 @@ later slice.
 
 **A staff account belongs to its tenant and optionally names a Person.** Its workplaces are the person's explicit desks, never an account-owned company or employment affiliation. As a narrow owner-approved development-only exception to the project's no-conversion rule, migration `core-user-025-tenant-accounts` turns existing development staff company links into first desks, clears those links and constrains staff rows to tenant/person identity. This preserves local development workplaces; no grants become desks and no other conversion or compatibility path is authorized.
 
-`standing(client, tenant, user)` re-proves the live account and Person on every authentication, returning `Live(AccountIdentity)`, `Unknown` or `Frozen(Identity)`. `AccountVerifier` supplies the same identity to browser sessions and agent authentication. Retiring the Person or disabling the account ends eligibility. Archiving a workplace removes that desk from use; it does not freeze a tenant's staff accounts or their other desks.
+`standing(client, tenant, user)` re-proves the live account and Person on every authentication, returning `Live(AccountIdentity)`, `Unknown` or `Frozen(Identity)`. `AccountVerifier` supplies the same identity to browser sessions and agent authentication. Retiring the Person or disabling the account ends eligibility. Archiving a workplace makes that desk read-only; it does not freeze a tenant's staff accounts or their other desks.
 
 Customer accounts retain their separate portal identity ([ADR 16](../../../docs/architecture/decisions/16-customer-accounts-and-portal.md)). A business customer's affiliation and company are still re-proved through their owners, including archival and effective dates. This identity never supplies staff work access. Staff email remains unique platform-wide; customer email is unique within its tenant.
 
@@ -150,9 +153,20 @@ Customer accounts retain their separate portal identity ([ADR 16](../../../docs/
 
 **Use `UserService::list_company_accounts(scope, company)` and `company_account(scope, company, user)` for staff pickers.** A caller already holding a database transaction uses the static `UserService::list_company_accounts_on(client, scope, company)` and `company_account_on(client, scope, company, user)` variants to preserve that connection. These read live staff accounts whose live Person has an explicit desk at that live, unarchived company. The caller authorizes its own company target; every answer remains within the sealed scope's tenant.
 
+## Staff choice
+
+**Use `UserService::search_staff(scope, capability, text)` (or `search_staff_on(client, scope, capability, text)` on your transaction) to pick any active staff account of the tenant for an assignment control.** `PrincipalDirectory` only names accounts you already hold, `list_users` needs `admin.user.list` and `list_company_accounts` is limited to one company's desks.
+
+- **Register the capability.** Declare which of your own capabilities is the authority to assign staff: `bilibi_user::declare_staff_assignment!("domain/module", StaffAssignment::new("domain.module.thing.assign"));`. Boot refuses a key your module did not declare in its own vocabulary, a key declared twice, and a module that does not list `core/user` in its descriptor dependencies.
+- **`capability` is that registered key.** Core User decides it for the actor, logged, before it reads: not registered, not held or unknown is `Forbidden` (the same answer), so no `admin.user.*` grant is needed and a capability such as `companies.view` can never open the staff list. You still authorize your own target and re-prove the chosen id when you save; a choice is never proof.
+- **Result:** `StaffChoice { id, name }`, at most `STAFF_CHOICE_MAX` (20), in name order. `text` is empty (the first 20) or up to `STAFF_SEARCH_MAX` (255 bytes); it matches a word start in the name, ignoring case, with `%` and `_` literal. Email is not searched or returned.
+- **Who is offered:** staff of the scope's tenant only, with an active sign-in identity, an active account that is not deleted or SCIM-deactivated, and a linked Person that is not retired (the `standing` rule). Customer accounts, other tenants and anyone `standing` would freeze are never offered. A desk is not required, unlike `list_company_accounts`.
+- **Picker:** a Domain shows it with the shared `RecordPicker` combobox, as it does for records; no new component.
+- Proof: `examples/staff-choices-walkthrough.rs` (`BILIBI_STAFF_CHOICES_DEMO=disposable`, migrated disposable `DATABASE_URL`).
+
 `CompanyAccount` carries id, name, email, verification, Person, the requested organisation and timestamps. It contains no credential or employment affiliation. Staff without a desk are not listed. Business affiliations neither add nor remove workplace access.
 
-## Pages (`core/user.pages`)
+## Pages
 
 `/settings/profile`, `/settings/password` (`src/web.rs`, `templates/password.html`), `/settings/two-factor` (below) and `/settings/appearance` are the signed-in account's own settings inside the shell, on the settings layout of `base/ui/templates/settings.html` with the typed `bilibi_ui::SettingsTab` (adapted to the shared horizontal tabs). Open **My settings** in the account panel at the bottom of the sidebar to start at Profile. AI connections uses the same five-tab layout in `core/agent`. The password page is live: the form submits as the `change-password` event carrying its field values, the state keeps the field errors of the last attempt (`can't be blank`, the password policy, `does not match password`, `is incorrect`), and a success or failure is a flash in the page until dismissed. The route needs a session and no capability; the current password proves the holder inside `change_password`.
 
@@ -160,26 +174,25 @@ Customer accounts retain their separate portal identity ([ADR 16](../../../docs/
 the account's own name, email and landing page. The account is the
 session's, never a submitted id; `update_profile` normalizes the email,
 refuses a taken one (`has already been taken`) and leaves a changed address
-unverified, which the saved flash says. An outside membership cannot change the shared email here or by SCIM `userName`; only its home tenant can. The landing page is the user-scope
+unverified, which the saved flash says. A shared-email change requires a portable session; a tenant-SSO session cannot change it, and SCIM `userName` is tenant-local provisioning data. The landing page is the user-scope
 setting `ui.landing_menu_id` (`accounts::LANDING_KEY`, contributed in
 `contributions.rs`): the select offers exactly the menu pages the account can
 open (`landing_pages`, the menu contributions read through the account's
-effective capabilities), `save_landing` refuses any other value, and the
-Web host's sign-in asks `landing_route` for where to go, falling back to the
-workspace when the choice is unset or no longer reachable.
+effective capabilities). Profile saves the choice through the same reviewed set or restore operation as the connector. The Web host asks `landing_route` where to go after sign-in and opens the workspace when the choice is unset or unreachable.
 
 The same page uploads or removes the account's own `ui.profile_image_asset_id`. Media accepts at most 1 MiB of byte-inspected PNG, JPEG or WebP data and serves it through a signed stream link; the sidebar uses the fixed-size picture and returns to the account's initials when it is absent or unreadable.
 
+Agents use `core.user.landing.read` for the reachable menu pages and current choice, then `core.user.landing.set` or `core.user.landing.restore` with its version. Use `core.user.pins.read` for the account's ordered shortcuts, `core.user.pins.set` to set that list and `core.user.pins.restore` to clear the list or remove one pin by ID. The existing shell and profile actions enforce the same owner rules. The account can remove a pin or restore the landing default on Customisations.
+
 ## Account administration (K16; `src/accounts.rs`, `src/account_ui/`)
 
-`/users/new` (`admin.user.create`) creates a tenant account from name, email and a password, plus an optional existing Person and first desk. Without an existing Person it creates one through Core Person. The first desk defaults to the selected workplace. User creation, Person creation and the desk commit together through MutationBoundary. The account stores no staff company or affiliation. An address that already has a sign-in is refused with a pointer to `/users/invite`, without saying whether the sign-in exists.
+`/users/invite` (`admin.user.invite`) is the only customer-administrator door for a new staff membership. The emailed holder accepts the one-time invitation and chooses the initial portable password when a new identity is needed. There is no `/users/new` page and no administrator-entered password.
 
-`/users/{id}` (`admin.user.view`) is the read-first page: the account as facts, each editing in place through the shared inline editors for an actor holding `admin.user.update`. Only the home account accepts administrator changes to the shared email, password or 2FA. An outside membership can change its own name, Person, desks and roles.
+`/users/{id}` (`admin.user.view`) is the read-first membership page. An actor holding `admin.user.update` may edit the tenant-owned name, Person, desks and roles. The shared sign-in email is read-only; password and 2FA controls do not exist.
 
-- Name and email commit through `update_account`, which carries the row's
+- Name commits through `update_account`, which carries the row's
   `version` (migration `008-accounts.sql`): a stale draft is refused rather
-  than applied over another operator's save, and a changed email is
-  unverified again. The refusal is worded on the fact.
+  than applied over another operator's save. The refusal is worded on the fact.
 - Person is an inline choice: `link_person` assigns it and `unlink` removes it. A changed Person ends the account's sessions. The same **Desks** panel used on the person's record appears on the account record.
 - Roles & Permissions panel over Authz: assignments in a shared flexible table, including their company, UTC dates, purpose and current state; a Roles picker with optional company/date bounds, filtered by the escalation guard (a role is
   grantable only by an actor holding everything it grants;
@@ -190,9 +203,21 @@ The same page uploads or removes the account's own `ui.profile_image_asset_id`. 
   writes use `Grants::set_direct`. Both authorize themselves; a change to the acting account's own access confirms
   first through the shared dialog. Each absent control states its reason
   where it would be.
-- Change Password (`set_password`) needs no current password, ends every
-  session of the account and audits a marker, never a hash.
-- Delete (`admin.user.delete`, `delete_account`) confirms through the shared dialog and never deletes the actor's own account. Deleting an outside membership retires only that tenant's account. Deleting the home account also closes the shared sign-in, so every membership stops authenticating. The page returns to `/users`.
+- Remove (`admin.user.delete`, `remove_membership`) confirms through the shared dialog, never removes the actor's own membership and always retires only this tenant's membership. It never deletes or disables the portable identity. The page returns to `/users`.
+
+### Who may change whose account
+
+Shared password, sign-in email and 2FA writes are not customer-administrator operations. Membership removal still applies the existing escalation guard.
+
+| Write | Also needs | Refusal |
+|---|---|---|
+| `remove_membership` | The actor holds everything the account holds | `AccountError::Outranked` |
+| `update_account`, `remove_membership`, `invite_member` | A session that is not impersonating | `AccountError::Impersonating`; an invitation answers `InvitationError::Access(Error::Refused(..))` |
+
+- "Holds everything" is `bilibi_authz::holds_everything_of`: every capability the account holds tenant-wide, in the actor's current company and in each company where it has a company role, and a full-access role only for an actor with one. It is the rule Authz already applies to giving a role (`apps/base/authz/README.md`).
+- A User Editor manages ordinary memberships but cannot delete an administrator's membership or write anyone's shared credentials.
+- Renaming another account needs only `admin.user.update`.
+- Proof: `identity-walkthrough` (`BILIBI_IDENTITY_DEMO=disposable`, on a freshly migrated database) runs the membership and impersonation refusals.
 
 
 The header carries the record-history panel (`audit.record-history`, kind
@@ -203,9 +228,9 @@ inside its `MutationTransaction`, and is audited as kind `user`.
 
 Core User owns the bounded tenant-wide `/users` index, its `list_users` read facade, the `admin.user` menu entry and the `users` Grid table (link `person`, inbound `accounts`). The page and the read both require `admin.user.list`.
 
-The read covers live staff accounts and open invitations in the current tenant. Membership is **Home** when this tenant controls the platform sign-in, **Outside member** when another tenant does, and **Invited** before acceptance. The **Desks** column lists each person's live workplaces. Archiving one workplace does not make the account read-only or prevent work at another desk.
+The read covers live staff memberships and open invitations in the current tenant. Membership is **Active** or **Invited**; no customer tenant is the identity's home. The **Desks** column lists each person's live workplaces, an archived one marked "(archived)". Archiving one workplace does not make the membership read-only or prevent work at another desk.
 
-`Options` bounds every query: `search` is `None` or 1–255 bytes; `role_ids` contains at most 100 unique positive IDs with OR semantics; `membership` is absent or home, outside or invited; `sort` is name, email, desks or created; `page` is 1 through 1,000,000; and `page_size` is 25, 50, 100 or 300. Anything else returns `Error::Invalid`. Search uses a parameterized `ILIKE` contains pattern and treats typed `%` and `_` as literal characters. Every ordering ends with the account ID descending, and an out-of-range page keeps the real total.
+`Options` bounds every query: `search` is `None` or 1–255 bytes; `role_ids` contains at most 100 unique positive IDs with OR semantics; `membership` is absent, active or invited; `sort` is name, email, desks or created; `page` is 1 through 1,000,000; and `page_size` is 25, 50, 100 or 300. Anything else returns `Error::Invalid`. Search uses a parameterized `ILIKE` contains pattern and treats typed `%` and `_` as literal characters. Every ordering ends with the account ID descending, and an out-of-range page keeps the real total.
 
 One facade call runs one PostgreSQL statement. The CTE pipeline filters users, counts them, selects the bounded page and aggregates roles for that page only (`src/administration/query.rs`). The application never receives an unbounded tenant collection. Each row shows system roles and custom roles owned by a company the administrator may see. The Roles filter offers the same set.
 
@@ -213,9 +238,9 @@ The page uses Grid `PageColumns` and keeps its state in the URL with `search`, `
 
 The built-in columns are Name, Email, Desks, Roles and Created. Normal-height rows show initials beside the name, and `admin.user.view` makes the name a record link. The column picker also offers walked columns from the `users` Grid table and scalar facts from the account page.
 
-The toolbar contains search, Membership and the first 100 roles by name. Create (`admin.user.create`) opens `/users/new`; Invite (`admin.user.invite`) opens `/users/invite`; and the pin control pins `nav-admin-user`.
+The toolbar contains search, Membership and the first 100 roles by name. Invite (`admin.user.invite`) opens `/users/invite`; there is no administrator-create action. The pin control pins `nav-admin-user`.
 
-Each row can offer impersonation, invitation revocation or deletion. Impersonation needs `admin.user.impersonate` and posts to `/admin/impersonate/{id}`; the current account is disabled with an explanation. Delete needs `admin.user.delete`, confirms the listed account and calls `delete_account`, which repeats authorization, refuses the current account, retires the row and ends its sessions. An invitation instead offers Revoke under `admin.user.invite`; the page passes its held invitation ID to `revoke_member_invitation`. Someone who may take none of these actions sees no actions column.
+Each row can offer impersonation, invitation revocation or membership removal. Impersonation needs `admin.user.impersonate` and posts to `/admin/impersonate/{id}`; the current account is disabled with an explanation, and an account holding more than the operator is refused with a flash. Remove needs `admin.user.delete`, confirms the listed account and calls `remove_membership`, which repeats authorization, refuses the current account and one holding more than the actor, retires the row and ends its sessions. An invitation instead offers Revoke under `admin.user.invite`; the page passes its held invitation ID to `revoke_member_invitation`. When a page of another module accepts a staff account (Teams' "Add to team"), each account row is draggable and offers it under "Non-local actions" (`Records::add_to`, kind `user`). Someone who may take none of these actions sees no actions column.
 
 ## Account panels (K13; `src/panels/`)
 
@@ -245,76 +270,103 @@ company, Person or tenant target.
 
 The development seed's one-time `user_bootstrap` receipt names the administrator and the operator company. `settle_bootstrap_affiliation` composes the initial agent Person, its business contact affiliation and an explicit desk in one audited transaction. The staff account stores only its Person. The settled receipt is never replayed after a later unlink or retirement. A refused first desk leaves the receipt unsettled.
 
-`create_first_administrator(grants, operator, input)` is the production
-counterpart of the seed's bootstrap (with the
-operator's own name, email and password), behind `bilibi-web create-owner`
-(`apps/web/src/create_owner.rs`, documented for operators in
-`docs/server-install.md`). On one `MutationBoundary` transaction as the
-`create-owner` system principal (`Context::system`, since no account exists
-yet to act as) it locks `users`, proves the given tenant and
-company are the marked platform operator and its primary company, refuses
-with `FirstAdministratorError::AccountsExist` while that tenant holds any
-undeleted account (so it never promotes or replaces one), validates with the
-administrator form's rules, inserts the account, takes the grant-all role
-through Authz's `Grants::grant_first_administrator_in`, and writes the
-receipt (replacing one whose account was deleted, the only way one can
-remain). The transaction's changes are `user`, `authz.principal_role` and
-`user.bootstrap`; it also records the retained `user.bootstrap.completed`
-action with the account, email and role, as the seed does. The host then
-calls `settle_bootstrap_affiliation` for the Person, business affiliation and first desk. `operator_accounts(tenant)` reads the same account count and first email without writing, so the host decides whether an owner exists before it asks any question; where one does, `create-owner` only settles an unfinished bootstrap and names that owner. Use this, not an
-`INSERT INTO users`, for any setup path that needs a first account.
+`create_first_administrator(grants, operator, input, recover)` backs [server owner setup](../../../docs/server-install.md#the-first-account) and [recovery](../../../docs/server-install.md#transfer-or-recover-installation-ownership). Both paths run as the `create-owner` system principal in a `MutationBoundary` transaction, lock `users` and prove the tenant and company are the marked platform operator and its primary company.
+
+Initial setup refuses while the operator tenant has any undeleted account. It inserts the account with a random password, assigns Core Administrator through Authz and writes the receipt. The transaction records `user`, `authz.principal_role` and `user.bootstrap` changes and the retained `user.bootstrap.completed` action. The host then calls `settle_bootstrap_affiliation` for the Person, business affiliation and first desk. On an existing installation, a normal `create-owner` invocation reports the recorded owner's claim state.
+
+Recovery requires an existing receipt. It updates that receipt, expires pending offers from any other sender and records the changes in the same transaction. It grants no role and leaves first-account affiliation setup marked settled.
+
+`claim_owner()` is how the owner takes the account. It reads the receipt's account, never a typed address. While the owner has not chosen a password (`password_version` 1) it checks mail readiness and mails a one-time password-reset link, waiting for delivery (`OwnerClaim::Sent`, or `RecentlySent` inside the one-minute reset throttle; a failed delivery withdraws the token and returns `OwnerClaimError::Delivery`). The password-reset request is audited as `user.reset_requested`. After the password is chosen it only reports `PasswordChosen` or, once any step-up method is enrolled, `Claimed`.
+
+### Ownership transfer (`src/ownership.rs`)
+
+The owner reviews the recipient by name, sign-in address and account number. The account privacy store retains offers as ownership evidence and exports each subject’s participation, dates and recorded status. The exported transfer record omits the other participant’s identity.
+
+For a planned handover, open **Account → My settings → Ownership** (`/settings/ownership`). The current owner selects another active staff account in the platform operator tenant and confirms the offer with a fresh 2FA code. The named recipient receives an inbox notice and has 15 minutes to accept with their own fresh code before the offer expires. Both confirmations require direct browser sessions.
+
+The acceptance review binds to the specific offer shown. Acceptance locks the live `user_bootstrap` receipt, rechecks the offer's participants, status and deadline, and updates the receipt and offer in one `MutationBoundary`. Both changes share that audit boundary, and both accounts keep their roles and ordinary membership data. See [Software access](../../base/software/README.md#access) for the permissions that follow the receipt.
+
+### Customer tenant owner
+
+`provision_tenant_owner` backs [server first-owner setup and reissue](../../../docs/server-install.md#the-first-owner-of-a-customer-tenant). It validates the Person name and origin, checks mail readiness before writing and renders the invitation before committing. Reissue takes the recorded tenant ID and uses the current tenant name in the invitation. The initial tenant, primary company, pending account, invitation, Authz role assignment and bootstrap receipt commit together before delivery. The invitation uses the default of `user.invitation_days` and stores no inviter account.
+
+The `user_tenant_owner_bootstraps` receipt identifies the exact invitation that requires a new portable identity. An attempt to reuse an existing identity returns `InvitationError::DedicatedSignIn`. Acceptance consumes the invitation and settles the membership, Person, affiliation and desk in the same transaction.
 
 ## Two-factor authentication (the step-up provider)
 
 Authenticator-app codes (TOTP, RFC 6238: HMAC-SHA-1, 6 digits, 30 s) for the signed-in account. It is the second factor behind Base Step-up (`apps/base/step_up/README.md`).
 - **Boundary:** this module checks the account holder and nothing else. It never names what step-up protects, and those owners never name it. They declare operations and call `StepUp::require`; tenant policy decides.
-- **Code:** `src/two_factor/` (facade on `UserService`, provider in `provider.rs`), pages in `src/two_factor_ui.rs`, reset doors in `src/two_factor/agent.rs`, migrations `012-two-factor.sql` and `013-drop-two-factor-recovery.sql`.
+- **Code:** `src/two_factor/` (facade on `UserService`, provider in `provider.rs`), pages in `src/two_factor_ui.rs`, server reset in `agent.rs`, request and administrator reset in `recovery.rs`, and request storage in migration `035-two-factor-reset-requests.sql`.
 
 | Method | Purpose |
 |---|---|
-| `two_factor_status(scope)` / `account_two_factor_on(scope, user)` | The holder’s authenticator status / whether any registered method is enrolled for one account in the tenant |
+| `two_factor_status(scope)` | The signed-in holder's authenticator status |
 | `begin_two_factor(scope, password)` | Password again, then a fresh 160-bit secret (OS CSPRNG), sealed and stored pending. Returns the QR code and typed key, once |
 | `confirm_two_factor(scope, code)` | A current code turns it on and opens the session's step-up window |
 | `step_up(scope, code)` | A current code opens the session's step-up window (the confirm page) |
 | `begin_move(scope, code)` / `confirm_move(scope, to, code)` | Move to a new phone: a current code from the old phone is spent and a new secret is made (kept only in the page's state). The new phone's first code replaces the old secret, so the old phone stops working |
 | `reset_two_factor_by_email(email)` | The server command's door (see below): turns off every registered method for one account, audited as the system principal `two-factor-reset` |
+| `core.user.two_factor.reset` | The reviewed administrator operation: applies the tenant and protected-account guards, requires the administrator's fresh 2FA, turns methods off, signs the identity out, emails the person and closes the request |
 | `two_factor::Authenticator` | The registered `core.user.authenticator` provider and shared `SessionProvider`; contract: `apps/base/step_up/README.md` |
 
 Pages (signed in only, live, `Cache-Control: no-store` like every page):
 
-- `/settings/two-factor?method=core.user.authenticator`: set up (password, QR code, setup key, first code), or move to a new phone (a code from the old phone, a new QR code, the new phone's first code). There is no turn-off: Bilibi asks everyone for 2FA. The description is two bullets; the second says to ask an admin to reset 2FA after a lost phone.
+- `/settings/two-factor?method=core.user.authenticator`: set up (password, QR code, setup key, first code), or move to a new phone (a code from the old phone, a new QR code, the new phone's first code). There is no self-service turn-off.
 - `/settings/two-factor/confirm?method=core.user.authenticator&return=<path>`: the authenticator step-up prompt. Success returns to `return`, which must be a local path (`safe_return`).
+- A customer has the same two pages on the portal, mounted by Core Portal: `/portal/account/two-factor` (`PortalTwoFactor`) and `/portal/account/two-factor/confirm` (`PortalConfirm`). The authenticator's `prompt` and `setup` answer these paths for a customer account (`PORTAL_CONFIRM_PATH`, `PORTAL_TWO_FACTOR_PATH`), so Base Step-up sends a customer who owes a check to the portal, never to a staff page. Both keep `return` only when it is a portal address.
 
 Authenticator entry uses the shared six-digit `CodeInput`: one native field, numeric keypad, OTP autocomplete and whole-code paste. This method’s entries take an authenticator code. With multiple registered methods, the settings and confirm routes first show a neutral choice; each method supplies its own setup and prompt destinations.
 
 Security rules:
 
-- **Secret at rest.** `user_two_factor.secret` is the AES-256-GCM envelope of `Settings::seal_owned` (`BILIBI_SETTINGS_KEY`), bound to `core/user.two_factor`, tenant and account (the enrollment row belongs to the sign-in identity). Without the key, setup refuses.
+- **Secret at rest.** `user_two_factor.secret` is the AES-256-GCM envelope of `Settings::seal_owned` (`BILIBI_SETTINGS_KEY`), bound to `core/user.two_factor` and the installation-owned identity id, so the one enrollment opens in every tenant where the person has a membership. Without the key, setup refuses.
 - **QR code.** The `otpauth://totp/<entry name>:<email>?secret=…&issuer=<entry name>&algorithm=SHA1&digits=6&period=30` URI is drawn on the server as one inline SVG path (`qrcode` crate, encoder only). It is sent only over the page's socket. No QR service, image URL or Bilibi URL carries it, and nothing logs it.
 - **Pending until proved.** A secret is unconfirmed until a current code arrives. Leaving setup keeps the pending row; the next setup replaces it.
 - **Verification.** Steps −1, 0 and +1 are each computed and compared in constant time (`subtle`). `last_step` only moves forward, by compare-and-set in the spending transaction, so a code is never accepted twice, even by two racing requests.
-- **No recovery codes.** People lose where they saved them, so there are none (migration `013-drop-two-factor-recovery.sql` drops the table). After a lost phone, another admin resets the account's 2FA, or the server owner runs the command below.
+- **No recovery codes.** People lose where they saved them, so there are none (migration `013-drop-two-factor-recovery.sql` drops the table). After a correct password, the 2FA sign-in step can file one open reset request per identity in 24 hours; it never admits or resets the sign-in.
 - **Throttle.** Applies per sign-in identity to every failed check: password, code, and an agent's code too. The fifth failure within 15 minutes locks every check for 15 minutes (`user_credential_attempts`, kind `step_up`; the shared rule is `src/credential_attempts.rs`). A success resets the count.
 - **Impersonation.** An impersonated session cannot enroll, change or check two-factor.
-- **Audit.** Each write is a `MutationBoundary` transaction: `user.two_factor.enrollment_started`, `.enabled`, `.verified`, `.moved`, `.failed` and `.locked`. A reset is `core.user.two_factor.reset` (an admin; the change names both people) or `user.two_factor.reset` (the server command, system principal `two-factor-reset`). A code spent for an agent records the purpose's operation key and channel (`for`, `channel`). A check refused while locked is the action `user.two_factor.refused`. No code, secret or recovery code is ever in a change, payload or log.
+- **Audit.** Each write is a `MutationBoundary` transaction: enrollment and checks use `user.two_factor.*`; requests use `user.two_factor.reset_requested`; administrator and terminal recovery use `user.two_factor.reset`. Requests record the account, company, time and routing. A code spent for an agent records the purpose's operation key and channel (`for`, `channel`). No code or secret is ever in a change, payload or log.
 
 **Authenticator entry name.** Each server lists itself differently, so several Bilibi servers stay apart in one app: `Bilibi <instance name> (<role>)` with the account's email, or `Bilibi <role>` when the instance still has its role's own name. Both come from Base System's instance identity (`Instance::resolve`); there is no separate setting or input box, and the app lets a person rename the entry.
 
-**Reset 2FA.** There are two ways back after a lost phone:
+**Reset 2FA.** After the password is verified, **Lost your phone? Ask for a reset** files a ticket and keeps the sign-in pending. Ordinary staff with memberships in one tenant notify eligible user administrators by bell and email. Requests for administrator, owner, multi-tenant and customer identities go to the installation owner. The owner also receives requests when a tenant has no eligible administrator. SSO sign-ins recover through their identity provider. A repeat within 24 hours reports the first request time.
 
-- An admin with `core.user.update` opens the person's page and chooses **Reset 2FA** (contract `core.user.two_factor.reset`, `src/two_factor/agent.rs`; the page and every agent door share it). It needs the admin's own fresh authenticator code every time (`.always()`). The audit row names both people, the person is signed out, and gets a notification and a mail (when mail is set up). An admin cannot reset their own 2FA, and an impersonated session cannot reset anyone's.
-- The server owner runs `bilibi-web two-factor-reset --email <address>` (or `scripts/install-server.sh two-factor-reset <instance> --email <address>`) on the server. It is audited as **System · two-factor-reset**, signs the account out and notifies it. See `docs/server-install.md`.
+The existing **Users** grid is the staff worklist: **Reset requested** filters open tickets, a row shows the request time, and eligible rows offer **Reset 2FA**. Capability `admin.user.two-factor-reset` is on User Editor and Tenant Owner. A tenant administrator may reset a staff identity with memberships only in that tenant, except for their own identity, administrators and the installation owner. The installation owner may reset eligible staff and portal accounts in their current tenant. Customer requests appear under **Customer accounts** on the **Customer portal** administration page. Every web or agent reset requires the acting administrator's own fresh 2FA, signs the identity out everywhere, emails the person and closes all open requests for the identity.
+
+If the installation owner cannot sign in, they run `bilibi-web two-factor-reset --email <address>` (or `scripts/install-server.sh two-factor-reset <instance> --email <address>`) on the server. It is audited as **System · two-factor-reset** and remains the last resort. See `docs/server-install.md`.
 
 The person then signs in with their password and sets the app up again.
 
 The step-up window, cap and per-operation policy belong to Base Step-up, not here.
+
+## Session-ended notice (`core/user.session_ended`)
+
+**Core User publishes the durable notice that an account's session ended; Base Session decides when.** Session calls the bound `EndNotice` (`src/session_notice.rs`) inside the ending transaction, so the event, its deliveries and the delivery job commit or roll back with the ending. Which endings record it, and when: [Base Session](../../base/session/README.md#session-ended-notice).
+
+| Part | Value |
+| --- | --- |
+| Name, version | `core/user.session_ended`, 1 |
+| Tenant | The ending transaction's, which is always the session's own |
+| Subject | `account:<user id>`, so one account's notices arrive in order |
+| Key | `session_ended:<random>`, never derived from the session |
+| Payload | `{"account": 12, "reason": "signed_out", "sessions": 1, "still_signed_in": false}` |
+
+- `reason` is `signed_out`, `terminated` or `expired`.
+- `sessions` counts the account's sessions this one ending closed.
+- `still_signed_in` is whether the account held another live session as the ending committed. To know now, call `Sessions::signed_in` with the subscriber's scope.
+- The payload never holds the token, its digest, the session ID or the operator list's row key.
+
+A subscriber's Cargo manifest names `bilibi-user` so the publisher is linked (ADR 25); no code needs to call it. `apps/web/examples/session-ended-walkthrough.rs` proves the notice with the reference subscriber `fixtures/containers/session_listener`.
 
 ## Audit
 
 Credential writes are audited as kind `user_identity` with marker values
 (`"password_hash":"replaced"`), never a hash; the audit layer redacts the field
 name as well. Reset and verification are attributed to the account that proved
-the token.
+the token; issuing and withdrawing a reset token (`user.reset_requested`,
+`user.reset_withdrawn`) to the `sign-in` principal, with `"reset_token":"issued"`
+or `"withdrawn"`, never the token or its digest.
 
 ## Sign-in attempt limits
 
@@ -329,39 +381,58 @@ Two limits, both operator settings (Settings › Session), with these defaults:
 - **One counter:** wrong passwords share `user_credential_attempts` with two-factor (migration `018-credential-attempts.sql`), kind `sign_in`, counted apart from kind `step_up` so guessing at the form never blocks the owner's own 2FA checks. One window/lock rule: `src/credential_attempts.rs`; sign-in side: the password step in `src/identity.rs` (`password_identity`) and the limit in `src/sign_in.rs`, before any second-factor challenge.
 - **A stranger cannot keep it locked:** a wrong password while locked is not counted and never extends the lock.
 - **Hidden from strangers:** a locked account gets the same answer as a wrong password, even with the right one; unknown addresses are not counted per account (the per-sender limit covers them). Over the per-sender limit the form says "Too many sign-in attempts", naming no account.
-- **Visible to the owner and administrators:** failures and locks are audited (`user.sign_in.failed`, `user.sign_in.locked`, actor the system principal `sign-in`); the owner is emailed a reset link when a lock starts; an administrator sees "Locked until" on the account page and can Unlock (`admin.user.update`, `user.sign_in.unlocked`).
-- **Ends:** when the lock expires, after a password reset or an administrator's unlock. A successful sign-in forgets the count and the run of locks.
+- **Visible to the owner:** failures and locks are audited (`user.sign_in.failed`, `user.sign_in.locked`, actor the system principal `sign-in`); the owner is emailed a reset link when the first lock of a run starts (later locks of the same run mail nothing, so a stranger cannot flood the inbox). A customer administrator cannot inspect or clear the shared credential lock.
+- **Same answer time:** a wrong password is counted after the form answers, so a real address answers no slower than an unknown one.
+- **Ends:** when the lock expires or after the holder's password reset. A successful sign-in forgets the count and the run of locks.
 
 ## Personal data
 
-**Erasure closes each linked account as `delete_account` does, then anonymises it and marks it (`anonymised_at`).** Store `core/user.accounts` under [`base/personal_data`](../../base/personal_data/README.md), [ADR 05](../../../docs/architecture/decisions/05-personal-data-registry.md).
+**Erasure closes each linked membership as `remove_membership` does, then anonymises it and marks it (`anonymised_at`).** Store `core/user.accounts` under [`base/personal_data`](../../base/personal_data/README.md), [ADR 05](../../../docs/architecture/decisions/05-personal-data-registry.md).
 
-- Sessions end; step-up factors, reset tokens, sign-in links and notifications go, each unless a hold names it. Ending an account removes all its sign-in links, so a hold on one keeps the whole account.
-- A hold on the sign-in identity keeps it and its account through erasure and closed-account retention. Without a hold, both the account and sign-in identity's email evidence are cleared, subject to the audit legal minimum.
-- Only the home account's erasure or closed-account retention clears the shared sign-in (email, password, status). An outside membership anonymises just its tenant account and links; the sign-in is untouched.
+- The membership's sessions, tenant SSO links and notifications go, each unless a hold names it. A hold on a tenant SSO link keeps the membership because erasure would otherwise break the held link.
+- Every tenant erasure or closed-membership retention anonymises only that tenant's membership and provider links. It never clears the shared identity, email, password, factor, reset token or credential history; the certificate lists the identity as kept because it is shared installation data.
 - The account's SCIM document keeps only its schemas, resource ID and a placeholder `userName`; a first-administrator receipt keeps a placeholder email.
 - Access and portability include every linked account's non-secret SCIM documents, including inactive documents; credentials, sessions, provider secrets and challenges are never exported. The SCIM writer normalizes this document to supported identity attributes, not passwords.
-- Administrative 2FA resets attribute the resetter by `reset_by_user_id` only, never a name/email copy on the target's evidence. System resets retain their fixed principal label.
+- 2FA reset requests are included in access and portability. Tenant administrators have the bounded `admin.user.two-factor-reset` operation described above; installation-owner terminal recovery uses the fixed `two-factor-reset` system principal.
+- Removing the last live membership starts the installation-owned identity's configurable **Unused sign-in retention** clock. Accepting a later invitation cancels it. The server owner runs `identity-retention` to anonymise due identities or `identity-delete --email <address> --confirm <address>` to dispose of one unused identity immediately; neither command can touch an identity with a live membership.
+- Lost-mailbox recovery is `identity-recover --email <old> --new-email <new>` on the server. It treats the new address as operator-verified, revokes pending reset links, signs every membership out and notifies the new mailbox. Customer tenants have no route, capability or agent operation for it.
+- **Audit actions are included in access and portability.** The account store resolves every linked account, including inactive accounts, then reads its actions through Audit: direct use, person-backed agents and impersonation, once per action. Where another account impersonated the subject, the row says an administrator acted and withholds that operator's ID, address, URL, browser and payload. Identifier-only matches and actors from another tenant are excluded. Erasure reports each account’s action evidence as kept (`audit.account_actions`, reason `evidence`); it does not clear it immediately and owes no cleanup, so no resumption is scheduled for it. The existing company action-retention policy clears request and payload values, and the operator’s partition policy removes old evidence. Bookmarks still exempt retained actions. No end date is promised: either policy can be disabled and a bookmark can keep evidence indefinitely.
+- **Sign-in history is kept after erasure, for at most 90 days.** Each sign-in (time, IP address, rough place, user agent) is held by [`base/session`](../../base/session/README.md#sign-in-history-and-privacy) as security evidence of where and when an account was used. Erasure leaves it, lists it on the certificate as kept (`session.sign_in_history`, until the newest record's 90th day) and Session's expiry sweep deletes each record 90 days after the sign-in. Access and portability list it for each account (time, IP address, place, user agent, deletion date). Audit rows of sessions keep their IP address and user agent under Audit's own retention.
 - An erasure of an already anonymised account still records its change, so earlier history is cleared too.
-- Kinds `user` (name, earlier email evidence), `user_identity` (email), `notification` (title, body), `user.scim_user` (`*`: every attribute of the SCIM document, whatever the identity provider sent), `user.external_identity` (subject), `user.bootstrap` (admin email) and `user_two_factor_reset` (name, email, recorded by resets before they named the account by ID only).
+- Kinds `user` (tenant-owned name and status), `user_identity` (shared email, reported as kept), `notification` (title, body), `user.scim_user` (`*`: every attribute of the SCIM document, whatever the identity provider sent), `user.external_identity` (subject), `user.bootstrap` (admin email) and `user_two_factor_reset` (name and email recorded by earlier recovery evidence).
 - The `user.bootstrap.completed` action carries no email: an action payload is never erased.
 - Accounts that only share an email are counted, never touched.
 - Membership invitations are found by their address, with no sign-in needed. Erasure closes an unaccepted one, replaces its address, and closes and anonymises the account prepared for it.
+- **A hold on an invitation or on the account prepared for it keeps both.** Anonymising an account anonymises its accepted invitations, and anonymising an invitation anonymises its prepared account, so a hold on either one (or on the prepared account's person) keeps the pair through erasure and both sweeps below. The certificate lists both as kept, a sweep counts its own record (the account or the invitation) as kept, and the first run after release finishes both.
 - `NotificationBoundary::eligible` answers which recipients are active accounts.
 
 Record classes (`src/retention.rs`, `bilibi_privacy::record_class!`), off until a company turns them on and sets a period:
 
 | Class | Clock starts | Then |
 | --- | --- | --- |
-| `core/user.closed_accounts` | When the account was closed | Anonymise: name and email replaced, sign-in links deleted, `anonymised_at` set; the name and address kept by the account's own accepted invitation are replaced too |
+| `core/user.closed_accounts` | When the membership was closed | Anonymise: tenant-owned name and provider links removed, `anonymised_at` set; the name and address kept by the membership's accepted invitation are replaced too; the shared sign-in identity stays |
 | `core/user.notifications` | When the notification was sent | Purge (no business value) |
 | `core/user.lapsed_invitations` | When an unaccepted invitation expired or was revoked | Anonymise: address replaced, invitation marked closed, the prepared account closed and its name erased |
 
-Each account follows its company's settings, and a notification its recipient's; accounts of no company follow the primary company. Both keep a held record and everything of a held person.
+Each account follows its company's settings, and a notification its recipient's; accounts of no company follow the primary company. Every class keeps a held record and everything of a held person, so a held accepted invitation keeps its closed account and a held prepared account keeps its lapsed invitation.
 
 ## Known gaps
 
 Authorization of the link commands is tenant-scoped (K15).
+
+## A password ends every tenant's sessions
+
+**One portable identity shares its password across memberships, so the holder's password change or mailbox reset ends what that password admitted everywhere.** `sign_in_identity::end_everywhere` runs in both transactions. Customer administrators cannot set it.
+
+| What | This tenant's account | The sign-in's accounts in other tenants |
+|---|---|---|
+| Sessions | Ended and recorded now, except the session that changed it | Marked ended now (they stop signing in at once); the expiry sweep records each tenant's notice |
+| AI connections | Revoked | Revoked, with the same reason (`password_changed` or `password_reset`) |
+| Pending sign-ins | Revoked | Revoked |
+
+- Accounts are the identity's `users` rows that are not deleted; Base Session's `revoke_sign_in` takes them as `(tenant, user)` from Core User and runs every credential revoker for each.
+- The audit row is the acting tenant's: it says how many other accounts were signed out, never which tenants.
+- A refused holder change (wrong current password or a weak password) ends nothing. Customer administrators have no password-change operation.
 
 ## Walkthrough
 
@@ -370,6 +441,8 @@ disposable database after `migrate` (set
 `BILIBI_DISPOSABLE_CREDENTIALS_DEMO=yes`, `BILIBI_MAIL_DIR` and
 `BILIBI_USER_SIGNING_KEY`). It prints every outcome above and reads the dev
 mailbox to follow the links.
+
+`cargo run -p bilibi-user --example memberships-walkthrough` (set `BILIBI_MEMBERSHIPS_DEMO=disposable`, `APP_ORIGIN` and `BILIBI_MAIL_DIR`) proves invitations and [A password ends every tenant's sessions](#a-password-ends-every-tenants-sessions): with sessions and AI connections in tenants 1 and 2, holder change and mailbox reset end both, while refused holder changes end neither.
 
 ## Saved database queries (C9; pages follow in C10)
 
@@ -411,8 +484,9 @@ Run `cargo run -p bilibi-user --example database-queries-walkthrough` against a
 **disposable** migrated database with `DATABASE_URL` and
 `BILIBI_DISPOSABLE_QUERY_DEMO=yes`. This opt-in manual fixture prints CRUD,
 concurrent slug creation, stale refusal, owner/tenant isolation, parameters,
-column preservation, pagination, SQL/DB refusals, timeout, audit rollback and
-private-result exclusion; it is not a unit-test suite. It explicitly makes
+column preservation, pagination, SQL/DB refusals, timeout, audit rollback,
+private-result exclusion and a session advisory lock released when the command
+ends (it fails otherwise); it is not a unit-test suite. It explicitly makes
 fixture tenant 1 the operator, grants fixture capabilities and installs private
 fixture functions/triggers. Never run it against normal data.
 
@@ -422,7 +496,7 @@ The editor keeps SQL, name, description and named parameter values in its mounte
 
 The query editor uses the shared page header for its title, description and Back link. Query name and description use shared form fields; Discard, Save and saved-query actions sit in the form action row. Migration `core-user-014-drop-query-prompt` removes the unused prompt column while preserving saved queries and their SQL.
 
-The [Base Step-up provider contract](../../base/step_up/README.md#provider) owns method registration, challenge starts and lifecycle hooks. Core User registers TOTP beside Extensions. With one method the existing routes retain their original flow. Reset (including the server command) reads enrollment across all methods in the owner's transaction, removes all factor state, revokes challenges, disconnects delegated credentials and signs out the target. Account deletion also calls every method's deletion hook. Password changes, resets and Person reassignment use `Sessions::revoke`; they retain enrollment while ending registered delegated credentials. Every provider and credential-owner change shares the owner's mutation transaction and audit trace. Sign-in admission is described under [Sign-in admission](#sign-in-admission).
+The [Base Step-up provider contract](../../base/step_up/README.md#provider) owns method registration, challenge starts and lifecycle hooks. Core User registers TOTP beside Extensions. With one method the existing routes retain their original flow. Reset (including the server command) reads enrollment across all methods in the owner's transaction, removes all factor state, revokes challenges, disconnects delegated credentials and signs out the target. Membership removal revokes only that tenant's sessions and keeps shared factor enrollment. Password changes, resets and Person reassignment use `Sessions::revoke`; they retain enrollment while ending registered delegated credentials. Every provider and credential-owner change shares the owner's mutation transaction and audit trace. Sign-in admission is described under [Sign-in admission](#sign-in-admission).
 
 Saved notification, pin and database-query icons use the bare names in the [UI icon contract](../../base/ui/README.md#icons). Migration `core-user-019-bare-icon-names` removes the former CSS prefix from existing values and maps the duplicate impersonation name to `impersonate`. Unknown stored names render the shared neutral placeholder and warn once. Migration `core-user-021-database-table-pin-icons` sets the `database` icon on stored database table pins that had none.
 
@@ -430,6 +504,6 @@ Saved notification, pin and database-query icons use the bare names in the [UI i
 
 **A desk lets a staff person choose a workplace; their capabilities decide what they can do there.** Every desk is explicit; there is no own-company exception. `user_desks` stores assignments, with tenant-scoped keys to Person and Company; no grants are converted into desks. Company managers can assign themselves, audited in the same way as any assignment.
 
-`core.user.desk.set` is the one reviewed operation behind **People with a desk here** on company records and **Desks** on person records. Its input is `company_id`, `person_id` and `assigned`. Preview checks company management and a live person with a staff account; commit repeats those checks and locks the company and person before writing a `user.desk` Change. Customer accounts never acquire staff access.
+`core.user.desk.set` is the one reviewed operation behind **People with a desk here** on company records and **Desks** on person records. Its input is `company_id`, `person_id` and `assigned`. Preview checks company management and a live person with a staff account; commit repeats those checks and locks the company and person before writing a `user.desk` Change. An archived company takes no new desk, on this or any other path (a new account's first desk, provider provisioning), and its existing desks can still be removed, so access to it only narrows. Customer accounts never acquire staff access.
 
-Core User binds Company's `WorkAccess` provider at boot. The switcher and every session choice check use the same desk proof. Removing a desk revokes that company's provider-sourced roles and ends the person's sessions in the same transaction; provider-authorized SCIM updates and deactivation remain available without the desk. Archiving a company uses the same owner path to remove every desk there and revoke every provider-sourced role tied to it, while ending only sessions working in that company. Company-record administration still requires its action capability and either the current desk company or the tenant-wide management capability; extra desks do not widen it. See [ADR 19](../../../docs/architecture/decisions/19-company-work-access-and-page-scope.md).
+Core User binds Company's `WorkAccess` provider at boot. The switcher and every session choice check use the same desk proof. Removing a desk revokes that company's provider-sourced roles and ends the person's sessions in the same transaction; provider-authorized SCIM updates and deactivation remain available without the desk. Archiving a company keeps its desks, provider-sourced roles and sessions; the company becomes read-only ([Core Company: Archived companies](../company/README.md#archived-companies)). Company sign-in policy still applies to it. Company-record administration still requires its action capability and either the current desk company or the tenant-wide management capability; extra desks do not widen it. See [ADR 19](../../../docs/architecture/decisions/19-company-work-access-and-page-scope.md).

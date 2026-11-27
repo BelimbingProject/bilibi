@@ -123,7 +123,7 @@ impl ReadHandler for Read {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let bulk = bulk()?;
-            let object = bulk.db.get().await.map_err(Error::from)?;
+            let mut object = bulk.db.get().await.map_err(Error::from)?;
             let client: &tokio_postgres::Client = &object;
             Ok(match self {
                 Self::Types => {
@@ -134,7 +134,7 @@ impl ReadHandler for Read {
                         "fields": info.fields.iter().map(|field| json!({
                             "name": field.name,
                             "label": field.label,
-                            "type": format!("{:?}", field.kind).to_lowercase(),
+                            "type": field.kind.as_str(),
                             "required": field.required,
                             "choices": field.choices,
                             "parent": field.reference.and_then(|r| r.parent),
@@ -142,6 +142,7 @@ impl ReadHandler for Read {
                         })).collect::<Vec<_>>(),
                         "restricted": info.restricted,
                         "matches": info.matches,
+                        "undo": info.undo,
                     })).collect())))
                 }
                 Self::List => {
@@ -179,6 +180,7 @@ impl ReadHandler for Read {
                         .and_then(Pass::parse)
                         .unwrap_or(Pass::Run);
                     let outcome = input["outcome"].as_str().and_then(Outcome::parse);
+                    let undo = input["undo"].as_str();
                     let (rows, total) = bulk
                         .rows(
                             client,
@@ -186,6 +188,7 @@ impl ReadHandler for Read {
                             id(input, "run_id")?,
                             pass,
                             outcome,
+                            undo,
                             (page - 1) * size,
                             size,
                         )
@@ -204,7 +207,9 @@ impl ReadHandler for Read {
                     )))
                 }
                 Self::Export => {
-                    let run = bulk.export(client, scope, id(input, "export_id")?).await?;
+                    let run = bulk
+                        .export(&mut object, scope, id(input, "export_id")?)
+                        .await?;
                     let mut answer = json!(run);
                     answer["label"] = json!(bulk.label(&run.record_type));
                     if run.downloadable {
@@ -212,9 +217,9 @@ impl ReadHandler for Read {
                     }
                     Output::Data(Data::Json(answer))
                 }
-                Self::Exports => {
-                    Output::Data(Data::Json(json!(bulk.exports(client, scope, 50).await?)))
-                }
+                Self::Exports => Output::Data(Data::Json(json!(
+                    bulk.exports(&mut object, scope, 50).await?
+                ))),
                 Self::UpdateFields => {
                     let record_type = input["record_type"].as_str().ok_or(Error::Invalid)?;
                     let fields = bulk.update_fields(client, scope, record_type).await?;
@@ -223,7 +228,7 @@ impl ReadHandler for Read {
                     }
                     Output::Data(Data::Json(json!(fields
                         .iter()
-                        .map(|field| json!({"field": field.name, "label": field.label, "kind": format!("{:?}", field.kind).to_lowercase(), "choices": field.choices}))
+                        .map(|field| json!({"field": field.name, "label": field.label, "kind": field.kind.as_str(), "choices": field.choices}))
                         .collect::<Vec<_>>())))
                 }
                 Self::Update => {
@@ -264,6 +269,7 @@ enum Write {
     Preview,
     Start,
     Cancel,
+    Undo,
     SaveMapping,
     DeleteMapping,
     Export,
@@ -284,6 +290,10 @@ impl Write {
                 mapping: mapping(input)?,
             },
             Self::Cancel => Action::Cancel {
+                run: id(input, "run_id")?,
+                version: id(input, "version")?,
+            },
+            Self::Undo => Action::Undo {
                 run: id(input, "run_id")?,
                 version: id(input, "version")?,
             },
@@ -351,25 +361,42 @@ impl Write {
         })
     }
 }
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let action = self.action(input)?;
+        let bulk = bulk()?;
+        Ok(bulk
+            .review(client, scope, &action)
+            .await
+            .map_err(error)?
+            .into())
+    }
+}
 impl WriteHandler for Write {
     fn owner(&self) -> &'static str {
         "base/bulk_data"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let action = self.action(input)?;
-            let bulk = bulk()?;
-            let client = bulk.db.get().await.map_err(Error::from)?;
-            Ok(bulk
-                .review(&**client, scope, &action)
-                .await
-                .map_err(error)?
-                .into())
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = bulk()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
+                }
+            }
         })
     }
     fn commit<'a>(
@@ -417,7 +444,8 @@ fn rows_schema() -> Value {
     json!({"type": "object", "required": ["run_id"], "properties": {
         "run_id": id_schema(),
         "pass": {"type": "string", "enum": ["preview", "run"]},
-        "outcome": {"type": "string", "enum": ["create", "update", "skip", "error"]},
+        "outcome": {"type": "string", "enum": ["create", "update", "action", "skip", "error"]},
+        "undo": {"type": "string", "enum": ["left", "removed", "edited", "error"], "description": "After undo: records left behind, removed, edited or not removable."},
         "page": {"type": "integer", "minimum": 1, "maximum": 100000},
         "page_size": {"type": "integer", "minimum": 1, "maximum": 100}
     }})
@@ -486,7 +514,7 @@ fn export_output() -> Value {
     json!({"type": "object", "description": "An export: record type, filter, how many ticked records it takes (selected), columns, state (running, completed or failed), the rows it holds, the reason it failed, the download path once completed, and its version. Never the file's data."})
 }
 fn run_output() -> Value {
-    json!({"type": "object", "description": "An import run: file name, record type, columns, rows, state (draft, previewing, previewed, running, completed, cancelled or stopped), progress, mapping, the dry run's and the real run's counts (create, update, skip, error), trace ID and version. Never the file's data."})
+    json!({"type": "object", "description": "An import run: file name, record type, columns, rows, state (draft, previewing, previewed, running, completed, cancelled or stopped), erased (true once a person's erasure removed its file and its rows' source keys and messages), progress, mapping, the dry run's and the real run's counts (create, update, action, skip, error), trace ID and version. Never the file's data."})
 }
 fn list_output() -> Value {
     json!({"type": "array", "description": "Import runs or row results."})
@@ -504,11 +532,12 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/bulk_data.agent", prov
         Operation { key: "base.bulk_data.types", title: "List importable record types", summary: "Record types you may import from CSV, with the fields a column can fill, which fields refer to other records, and what rows are matched on.", keywords: &["import", "csv", "upload", "fields", "columns"], capability: VIEW, input: no_input, output: list_output, handler: Handler::Read(&Read::Types), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.import.list", title: "List your imports", summary: "Your CSV import runs, newest first, with state, progress and counts.", keywords: &["import", "csv", "runs"], capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.import.get", title: "Read an import", summary: "One of your import runs: its columns, mapping, state, counts, version, the saved mappings that fit its file and the imports it may name as parents.", keywords: &["import", "csv", "mapping"], capability: VIEW, input: get_schema, output: run_output, handler: Handler::Read(&Read::Get), channels: Channels::Every, step_up: &[] },
-        Operation { key: "base.bulk_data.import.rows", title: "Read an import's row results", summary: "What each row of a dry run (pass preview) or the real run did or would do: create, update, skip or error with the reason, the record it wrote and its source key.", keywords: &["import", "errors", "results"], capability: VIEW, input: rows_schema, output: list_output, handler: Handler::Read(&Read::Rows), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.bulk_data.import.rows", title: "Read an import's row results", summary: "What each row of a dry run (pass preview) or the real run did or would do: create, update, action, skip or error, with the owner message, record id, safe result links and source key.", keywords: &["import", "errors", "results"], capability: VIEW, input: rows_schema, output: list_output, handler: Handler::Read(&Read::Rows), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.mapping.list", title: "List saved import mappings", summary: "Mappings saved for a record type in your company: which column fills each field, fixed values and the duplicate rule.", keywords: &["import", "mapping", "template"], capability: VIEW, input: mappings_schema, output: list_output, handler: Handler::Read(&Read::Mappings), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.import.preview", title: "Check an import", summary: "Map a run's columns and check every row against the record type's own rules in the background, writing nothing. Replaces an earlier check's results.", keywords: &["import", "dry run", "validate"], capability: CREATE, input: pass_schema, output: run_output, handler: Handler::SafeWrite(&Write::Preview), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.import.start", title: "Run an import", summary: "Map a run's columns and import its rows in the background, each through the record type's own write contract as you.", keywords: &["import", "csv", "load"], capability: CREATE, input: pass_schema, output: run_output, handler: Handler::SafeWrite(&Write::Start), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.import.cancel", title: "Stop an import", summary: "Stop a check or an import that is working. Rows already written stay and are listed.", keywords: &["import", "cancel", "stop"], capability: CREATE, input: cancel_schema, output: run_output, handler: Handler::SafeWrite(&Write::Cancel), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.bulk_data.import.undo", title: "Undo an import", summary: "Within the configured period, remove records this finished import created and nobody changed. Changed or otherwise protected records stay and are listed.", keywords: &["import", "undo", "remove", "rollback"], capability: CREATE, input: cancel_schema, output: run_output, handler: Handler::SafeWrite(&Write::Undo), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.mapping.save", title: "Save an import mapping", summary: "Save a mapping by name for a record type, shared in your company and offered when a file's header has its columns. Saving a name again replaces it.", keywords: &["import", "mapping", "template"], capability: CREATE, input: save_schema, output: list_output, handler: Handler::SafeWrite(&Write::SaveMapping), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.export.get", title: "Read an export", summary: "One of your CSV exports: what it reads, its state, the rows it holds or why it failed, and the download path once ready.", keywords: &["export", "csv", "download"], capability: VIEW, input: export_get_schema, output: export_output, handler: Handler::Read(&Read::Export), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.export.start", title: "Export a list to CSV", summary: "Take a list's filtered records, with the columns it shows, out to a CSV file in the background, read as you: a field restricted for you is blank. Needs the record type's export capability.", keywords: &["export", "csv", "download", "list"], capability: VIEW, input: export_schema, output: export_output, handler: Handler::SafeWrite(&Write::Export), channels: Channels::Every, step_up: &[] },

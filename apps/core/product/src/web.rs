@@ -103,6 +103,7 @@ impl Pages {
             company: None,
             can_manage: false,
             can_price: false,
+            company_archived: false,
             currency_choices: Vec::new(),
             panels: Vec::new(),
             draft: None,
@@ -196,6 +197,7 @@ struct State {
     company: Option<i64>,
     can_manage: bool,
     can_price: bool,
+    company_archived: bool,
     currency_choices: Vec<Choice>,
     panels: Vec<PanelSpec>,
     draft: Option<Draft>,
@@ -233,6 +235,8 @@ impl State {
             };
             columns.from_params(scope, &query).await?;
         }
+        self.columns.refresh_views(scope).await?;
+        self.price_columns.refresh_views(scope).await?;
         let connection = self.pages.db.get().await?;
         let client = &**connection;
         let locale = self
@@ -297,10 +301,21 @@ impl State {
                     }
                     Err(e) => return Err(e),
                 }
-                self.can_price = permitted(
-                    bilibi_company::authorize_work_target(client, scope, company, PRICES_MANAGE)
+                // An archived company's prices read and never change.
+                self.company_archived = matches!(
+                    bilibi_company::require_writable(client, scope, company, false).await,
+                    Err(bilibi_company::WriteError::Archived)
+                );
+                self.can_price = !self.company_archived
+                    && permitted(
+                        bilibi_company::authorize_work_target(
+                            client,
+                            scope,
+                            company,
+                            PRICES_MANAGE,
+                        )
                         .await,
-                )?;
+                    )?;
             }
             self.currency_choices = self
                 .pages
@@ -469,15 +484,27 @@ impl State {
                 self.reload = true;
             }
             "grid" => {
-                let params = params::string_values_checked(v, params::FIELD_LIMIT)
-                    .map_err(Error::refused)?;
+                let query = self.list.to_params();
+                let params = PageColumns::event_values(v)?;
                 let columns = if self.id.is_some() {
                     &mut self.price_columns
                 } else {
                     &mut self.columns
                 };
                 if matches!(
-                    columns.handle(scope, &params).await?,
+                    columns
+                        .handle(
+                            scope,
+                            &params,
+                            bilibi_grid::ViewCaller {
+                                contracts: &self.pages.contracts,
+                                credential,
+                                service: "core/product.pages",
+                                event: "grid",
+                                query,
+                            }
+                        )
+                        .await?,
                     bilibi_grid::Outcome::Patch
                 ) {
                     self.reload = true;
@@ -559,11 +586,11 @@ impl State {
         };
         Ok(())
     }
-    fn create_form(&self, d: &Draft) -> Result<Html> {
+    fn create_form(&self, d: &Draft, words: &bilibi_grid::RecordWords) -> Result<Html> {
         let field = |k: &str, label: &str| {
             Field::in_form("product", k)
                 .id(format!("product-new-{k}"))
-                .label(label)
+                .label(words.field(k, label))
                 .value(d.values.get(k).cloned().unwrap_or_default())
                 .errors(d.errors.get(k).cloned().unwrap_or_default())
         };
@@ -629,7 +656,13 @@ impl State {
             for (p, row) in self.prices.iter().zip(&columns.rows) {
                 rows.push(
                     row.clone()
-                        .slot("effective_on", Html::text(&p.effective_on.to_string()))
+                        .slot(
+                            "effective_on",
+                            Html::text(
+                                &bilibi_datetime::DisplayContext::anonymous()
+                                    .render_date(p.effective_on),
+                            ),
+                        )
                         .slot("currency", Html::text(&p.currency))
                         .slot("amount", Html::text(&p.amount.to_string())),
                 );
@@ -690,9 +723,9 @@ impl State {
             ..Card::default()
         })
     }
-    fn facts(&self, p: &Product) -> Result<Html> {
+    fn facts(&self, p: &Product, words: &bilibi_grid::RecordWords) -> Result<Html> {
         let mut items = vec![Fact {
-            title: "Code",
+            title: words.field("code", "Code"),
             value: Html::text(&p.code),
             ..Fact::default()
         }];
@@ -718,6 +751,7 @@ impl State {
                 choices(&[("Active", "active"), ("Retired", "retired")]),
             ),
         ] {
+            let label = words.field(name, label);
             let mut field =
                 InlineField::new(format!("product-{name}"), name, label, value).version(p.version);
             field.editable = self.can_manage;
@@ -823,7 +857,11 @@ impl State {
             ..Card::default()
         })
     }
-    fn view(&self) -> Result<String> {
+    async fn view(&self, scope: &Scope) -> Result<String> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "products").await?;
+        drop(client);
+
         let mut sections = Vec::new();
         let mut dialog = Html::EMPTY;
         let header = if let Some(p) = &self.product {
@@ -832,7 +870,7 @@ impl State {
                 title: "Products",
                 ..BackLink::default()
             })?);
-            sections.push(self.facts(p)?);
+            sections.push(self.facts(p, &words)?);
             sections.push(render(SectionHeading{title:"Selling prices",description:"Prices for the company selected above, per base unit. Earlier prices stay in the history.",..SectionHeading::default()})?);
             if self.company.is_some() {
                 sections.push(self.table(true)?);
@@ -841,10 +879,15 @@ impl State {
                         "Retired product",
                         "Retired products keep earlier prices and cannot receive new ones.",
                     ))?);
+                } else if self.company_archived {
+                    sections.push(render(EmptyState::missing(
+                        "Archived company",
+                        "This company is archived, so its prices cannot change. Earlier prices stay readable.",
+                    ))?);
                 } else if !self.can_price {
                     sections.push(render(EmptyState::forbidden("add selling prices"))?);
                 } else if self.currency_choices.is_empty() {
-                    sections.push(render(EmptyState::missing("Selling currency", "Ask an administrator to enable a currency on the Currencies page before adding a price."))?);
+                    sections.push(render(EmptyState::missing("Selling currency", "The currency list is not installed. Ask your administrator to install it before adding a price."))?);
                 } else {
                     sections.push(self.price_form()?);
                 }
@@ -880,19 +923,21 @@ impl State {
                             ("Active", "active"),
                             ("Retired", "retired"),
                         ]),
-                    ),
+                    )
+                    .grid_field("products.status"),
                     ToolbarControl::search(
                         "product-category",
                         "category",
                         "Category",
                         &filters["category"],
                         "Category…",
-                    ),
+                    )
+                    .grid_field("products.category"),
                 ],
             ))?);
             sections.push(self.table(false)?);
             if let Some(d) = &self.draft {
-                dialog = self.create_form(d)?;
+                dialog = self.create_form(d, &words)?;
             }
             let actions = if self.can_manage {
                 render(CreateButton {
@@ -968,7 +1013,7 @@ impl LiveState<Scope, Error> for State {
             }
             self.load(r.scope).await?;
             Ok(LiveBody {
-                html: self.view()?,
+                html: self.view(r.scope).await?,
                 query: {
                     let mut q = self.list.to_params();
                     q.extend(if self.id.is_some() {
@@ -1020,3 +1065,48 @@ fn summary(prefix: &str, errors: &BTreeMap<String, Vec<String>>) -> Result<Html>
     }
     render(summary)
 }
+
+fn agent_columns<'a>(
+    _client: &'a tokio_postgres::Client,
+    _scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(async move {
+        PageColumns::mount(views, "products", cols(false)).map_err(|_| Error::Internal)
+    })
+}
+
+bilibi_grid::contribute_page_metadata!(
+    "core/product",
+    "core/product.grid-page",
+    "products",
+    None,
+    crate::VIEW,
+    Some(|| SPEC.clone()),
+    &[],
+    None,
+    agent_columns
+);
+
+fn agent_price_columns<'a>(
+    client: &'a tokio_postgres::Client,
+    scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(async move {
+        let company = scope.current_company().ok_or(Error::Forbidden)?;
+        bilibi_company::authorize_work_target(client, scope, company.get(), crate::VIEW).await?;
+        PageColumns::mount(views, "product-prices", cols(true)).map_err(|_| Error::Internal)
+    })
+}
+bilibi_grid::contribute_page_metadata!(
+    "core/product",
+    "core/product.grid-price-page",
+    "product-prices",
+    None,
+    crate::VIEW,
+    None,
+    &[],
+    None,
+    agent_price_columns
+);

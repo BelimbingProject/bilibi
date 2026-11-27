@@ -8,6 +8,7 @@ mod contributions;
 mod departments;
 mod duplicates;
 mod eligibility;
+mod facts;
 mod field_contributions;
 mod identity_directory;
 mod list_fields;
@@ -18,6 +19,7 @@ mod lifecycle;
 mod organisation;
 mod page_data;
 mod policy;
+mod privacy;
 mod tenant_provisioning;
 pub use tenant_provisioning::TenantCompanyErrors;
 mod primary;
@@ -28,7 +30,7 @@ mod relationship_roles;
 mod relationships;
 mod web;
 mod work_access;
-pub use work_access::{authorize_work_target, bind_work_access, WorkAccess, WorkMutationFuture};
+pub use work_access::{authorize_work_target, bind_work_access, WorkAccess};
 
 pub use contributions::{CAPABILITIES, CREATE, DELETE, LIST, TENANT_WIDE, UPDATE, VIEW};
 pub use duplicates::{
@@ -65,22 +67,20 @@ pub use organisation::{
 };
 pub use primary::{
     assign, is_primary, platform_operator_company, primary_company, provision_platform_operator,
-    provision_platform_operator_in, provision_tenant, AssignmentError, AssignmentStatus,
-    ProvisionOutcome, Provisioned,
+    provision_platform_operator_in, provision_tenant, provision_tenant_in, AssignmentError,
+    AssignmentStatus, ProvisionOutcome, Provisioned,
 };
 pub use reference_types::{
     list_legal_entity_types, DepartmentType, Direction as SortDirection, LegalEntityType, NewType,
     Outcome as TypeOutcome, TypeSort, TypeUpdate,
 };
 pub use relationship_roles::{
-    by_code as relationship_role_by_code,
-    ensure_defaults_if_empty as ensure_default_relationship_roles, RelationshipRole,
-    RoleUpdate as RelationshipRoleUpdate,
+    by_code as relationship_role_by_code, RelationshipRole, RoleUpdate as RelationshipRoleUpdate,
 };
 pub use relationships::{
     assign as assign_relationship, current as current_relationship,
-    Direction as RelationshipDirection, Entry as RelationshipEntry, Relationship,
-    RelationshipUpdate,
+    Direction as RelationshipDirection, Entry as RelationshipEntry, Links as RelationshipLinks,
+    Relationship, RelationshipUpdate, Window as RelationshipWindow,
 };
 
 /// Company-scoped Media image shown by the authenticated shell.
@@ -88,7 +88,6 @@ pub const IDENTITY_IMAGE_KEY: &str = "company.identity_image_asset_id";
 pub const IDENTITY_IMAGE_MAX_BYTES: u64 = 1024 * 1024;
 
 use bilibi_database::{Change, Db, Error, MutationBoundary, Result};
-use bilibi_notifications::NotificationBoundary;
 use bilibi_security::{guard, restrictions, Scope, Sessions};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -373,7 +372,6 @@ pub async fn save(
     db: &Db,
     token: &str,
     edit: &Edit,
-    notifications: &NotificationBoundary,
     mutations: &MutationBoundary,
     sessions: &Sessions,
 ) -> Result<()> {
@@ -384,14 +382,13 @@ pub async fn save(
         .begin(&mut client, scope.mutation_context("company.update"))
         .await?;
     let scope = guard(tx.sql(), token, sessions).await?;
-    save_in(tx, &scope, edit, notifications).await
+    save_in(tx, &scope, edit).await
 }
 
 pub async fn save_as(
     db: &Db,
     scope: &Scope,
     edit: &Edit,
-    notifications: &NotificationBoundary,
     mutations: &MutationBoundary,
 ) -> Result<()> {
     edit.validate()?;
@@ -399,14 +396,13 @@ pub async fn save_as(
     let tx = mutations
         .begin(&mut client, scope.mutation_context("company.update"))
         .await?;
-    save_in(tx, scope, edit, notifications).await
+    save_in(tx, scope, edit).await
 }
 
 async fn save_in(
     mut tx: bilibi_database::MutationTransaction<'_>,
     scope: &Scope,
     edit: &Edit,
-    notifications: &NotificationBoundary,
 ) -> Result<()> {
     let scope = scope.clone();
     organisation::authorize_target(tx.sql(), &scope, edit.id, UPDATE).await?;
@@ -477,9 +473,6 @@ async fn save_in(
         };
         Ok(((), vec![Change { kind: "company".into(), id, old: json!({&field:old}), new: json!({&field:new}) }]))
     })).await?;
-    notifications
-        .record(&mut tx, &scope, "Company updated")
-        .await?;
     tx.commit().await
 }
 
@@ -489,7 +482,6 @@ async fn save_in(
 pub struct CompanyService {
     sessions: Arc<Sessions>,
     db: Db,
-    notifications: Arc<NotificationBoundary>,
     mutations: Arc<MutationBoundary>,
     proofs: Arc<bilibi_tenancy::PartyProofs>,
     directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
@@ -526,18 +518,10 @@ impl CompanyService {
         result
     }
     pub async fn save_as(&self, scope: &Scope, edit: &Edit) -> Result<()> {
-        save_as(&self.db, scope, edit, &self.notifications, &self.mutations).await
+        save_as(&self.db, scope, edit, &self.mutations).await
     }
     pub async fn save(&self, token: &str, edit: &Edit) -> Result<()> {
-        save(
-            &self.db,
-            token,
-            edit,
-            &self.notifications,
-            &self.mutations,
-            &self.sessions,
-        )
-        .await
+        save(&self.db, token, edit, &self.mutations, &self.sessions).await
     }
     /// `create_company/3`: a refused create rolls back and reports its fields.
     pub async fn create_company(&self, scope: &Scope, new: &NewCompany) -> Result<CreateOutcome> {
@@ -826,8 +810,8 @@ async fn finish(tx: bilibi_database::MutationTransaction<'_>, saved: bool) -> Re
 inventory::submit! {
     bilibi_module_registry::Module {
         id:"core/company",layer:bilibi_module_registry::Layer::Core,
-        dependencies:&["base/database","base/security","base/ui","base/notifications","base/party_ids","base/session","base/menu","base/grid","base/search","base/dashboard","base/reports","base/authz","base/tenancy","base/audit","base/agent_api","base/datetime","base/locale","base/principal_directory","base/media","base/artifacts","base/picklists","base/custom_fields","base/settings","base/settings_editor","base/records","core/party","core/geonames","core/person"],
-        migrations:&[MIGRATION, MIGRATION_ORGANISATION, MIGRATION_RELATIONSHIPS, MIGRATION_ROLE_OWNER, MIGRATION_SEARCH, ("core-company-008-match-keys", include_str!("../migrations/008-match-keys.sql")), MIGRATION_SESSION_COMPANY, ("core-company-010-assignment-scope",include_str!("../migrations/010-assignment-scope.sql")), ("core-company-011-custom-fields",include_str!("../migrations/011-custom-fields.sql"))],
+        dependencies:&["base/database","base/security","base/ui","base/party_ids","base/session","base/menu","base/grid","base/search","base/dashboard","base/reports","base/authz","base/tenancy","base/audit","base/agent_api","base/datetime","base/locale","base/principal_directory","base/media","base/artifacts","base/picklists","base/custom_fields","base/settings","base/settings_editor","base/records","base/ports","base/personal_data","base/watchers","core/party","core/geonames","core/person"],
+        migrations:&[MIGRATION, MIGRATION_ORGANISATION, MIGRATION_RELATIONSHIPS, MIGRATION_ROLE_OWNER, MIGRATION_SEARCH, ("core-company-008-match-keys", include_str!("../migrations/008-match-keys.sql")), MIGRATION_SESSION_COMPANY, ("core-company-010-assignment-scope",include_str!("../migrations/010-assignment-scope.sql")), ("core-company-011-custom-fields",include_str!("../migrations/011-custom-fields.sql")), ("core-company-012-personal-data",include_str!("../migrations/012-personal-data.sql")), ("core-company-013-search-trigram",include_str!("../migrations/013-search-trigram.sql")), ("core-company-014-custom-search",include_str!("../migrations/014-custom-search.sql"))],
         services: &[
             bilibi_module_registry::Service { id: SERVICE, factory: |services| {
                 let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
@@ -846,15 +830,15 @@ inventory::submit! {
                 relationship_operations::bind(db.clone(), proofs.clone(), directory.clone())?;
                 Ok(Arc::new(CompanyService {
                     sessions: services.get("base/session.sessions")?, mutations: services.get("base/database.mutations")?,
-                    db, notifications: services.get("base/notifications.sink")?, proofs, directory,
+                    db, proofs, directory,
                     settings, media: services.get(bilibi_media::SERVICE)?,
                 }))
             } },
             bilibi_module_registry::Service { id: "core/company.pages", factory: |services| Ok(Arc::new(bilibi_ui::page::PageService(Arc::new(web::Pages {
-                db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, views: services.get(bilibi_grid::PAGE_VIEWS)?, datetime: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?, picklists: services.get(bilibi_picklists::SERVICE)?, records: services.get(bilibi_records::SERVICE)?, contracts: services.get(bilibi_agent_api::page::SERVICE)?, record_panels: web::record_panels()?,
+                db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, views: services.get(bilibi_grid::PAGE_VIEWS)?, datetime: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?, picklists: services.get(bilibi_picklists::SERVICE)?, records: services.get(bilibi_records::SERVICE)?, contracts: services.get(bilibi_agent_api::page::SERVICE)?, facts: services.get(bilibi_ports::SERVICE)?, record_panels: web::record_panels()?,
             })))) },
             bilibi_module_registry::Service { id: web::relationships::SERVICE, factory: |services| Ok(Arc::new(bilibi_ui::page::PageService(Arc::new(web::relationships::RelationshipPages {
-                db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, persons: services.get(bilibi_person::SERVICE)?,
+                db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, records: services.get(bilibi_records::SERVICE)?,
                 contracts: services.get(bilibi_agent_api::page::SERVICE)?,
             })))) },
         ],
@@ -865,17 +849,13 @@ inventory::submit! {
 /// model (`relationship_roles`, `relationships`). Each write is one audited
 /// mutation transaction; a refusal is an outcome, never an `Error`.
 impl CompanyService {
-    /// The tenant's roles. A tenant whose catalog is empty (one created
-    /// by raw SQL after the migration ran, as the walkthrough fixture does)
-    /// first receives the contributed
-    /// defaults by code; an administered catalog is never touched here.
+    /// The tenant's roles, as administered; a read writes nothing.
     pub async fn relationship_roles(
         &self,
         scope: &Scope,
         include_retired: bool,
     ) -> Result<Vec<relationship_roles::RelationshipRole>> {
         let client = self.db.get().await?;
-        relationship_roles::ensure_defaults_if_empty(&**client, scope.tenant()).await?;
         relationship_roles::list(&**client, scope, include_retired).await
     }
     pub async fn relationship_role(
@@ -948,18 +928,50 @@ impl CompanyService {
         scope: &Scope,
         company: bilibi_party::OrganisationId,
         history: bool,
-    ) -> Result<Vec<relationships::Entry>> {
+        search: &str,
+        window: relationships::Window,
+    ) -> Result<relationships::Links> {
         let client = self.db.get().await?;
-        relationships::list_for_company(&**client, scope, &self.directory, company, history).await
+        relationships::list_for_company(
+            &**client,
+            scope,
+            &self.directory,
+            company,
+            history,
+            search,
+            window,
+        )
+        .await
     }
     pub async fn person_relationships(
         &self,
         scope: &Scope,
         person: bilibi_party::PersonId,
         history: bool,
-    ) -> Result<Vec<relationships::Entry>> {
+        search: &str,
+        window: relationships::Window,
+    ) -> Result<relationships::Links> {
         let client = self.db.get().await?;
-        relationships::list_for_person(&**client, scope, &self.directory, person, history).await
+        relationships::list_for_person(
+            &**client,
+            scope,
+            &self.directory,
+            person,
+            history,
+            search,
+            window,
+        )
+        .await
+    }
+    /// One link on `company`'s page, from its perspective.
+    pub async fn company_relationship(
+        &self,
+        scope: &Scope,
+        company: bilibi_party::OrganisationId,
+        id: bilibi_party::RelationshipId,
+    ) -> Result<relationships::Entry> {
+        let client = self.db.get().await?;
+        relationships::read_for_company(&**client, scope, &self.directory, company, id).await
     }
     pub async fn relationship(
         &self,
@@ -1048,9 +1060,9 @@ impl CompanyService {
 // the facade rather than an operation contract (`base/agent_api` page).
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "core/company.pages", bilibi_module_registry::Provenance { module: "core/company", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
     service: "core/company.pages",
-    contracts: &[("save_contributed_field", "core.company.update"), ("save_custom_field", "core.company.update")],
+    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ("save_contributed_field", "core.company.update"), ("save_custom_field", "core.company.update"), ("pick_custom_reference", "core.company.update"), ("clear_custom_reference", "core.company.update")],
     pending: bilibi_module_registry::contributions::Pending::Events {
-        events: &["save_field", "add_activity", "remove_activity", "apply_lifecycle", "create_company", "confirm_create_anyway"],
-        reason: "Built-in facts, activities, lifecycle and Company create still write through their owner facade.",
+        events: &["save_field", "pick_parent", "remove_parent", "add_activity", "remove_activity", "apply_lifecycle", "create_company", "confirm_create_anyway"],
+        reason: "Built-in facts (the parent picker included), activities, lifecycle and Company create still write through their owner facade.",
     },
 }) }

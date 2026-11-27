@@ -1,5 +1,9 @@
 # Database write and seed contracts
 
+**Use it for:** every business write (`MutationBoundary`, `Change`), its transaction, migrations and seeds.
+
+**Not for:** an inner transaction, hand-written audit rows or notifications sent outside the write.
+
 Business owners obtain `MutationBoundary` from the `base/database.mutations`
 registry service. Start one transaction with trusted `Context`, and pass its
 mutable `MutationTransaction` to every nested owner. Use `mutate` for writes and
@@ -19,6 +23,8 @@ host's part are in `apps/base/agent_api/README.md`). A person's own view state
 (list columns, arrangement, theme, pins) opens `begin_view_state` instead,
 which the check leaves alone; never use it for business data.
 
+`commit_checked` applies a caller’s admission check after action capture and before PostgreSQL commit. A successful commit runs its post-commit callbacks before returning.
+
 The authoritative API is [src/transaction.rs](src/transaction.rs). Audit binds its
 `Capture` implementation once through `MutationBoundary::bind_capture` during
 service installation; a readiness check refuses boot, and `begin` refuses a
@@ -30,6 +36,8 @@ attempted/refused action semantics are owned by `base/audit`
 `audit_mutations` and `bilibi_action_commits` legacy ledgers are frozen; Audit
 carried their rows over once in `006-audit-evidence`. `begin_with` also supports
 explicit deployment adapters.
+
+`adopt_deployment` attaches the bound capture to an open deployment transaction once the caller knows the tenant ID. It requires a system-attributed context and runs the page-write check. Use it when provisioning must allocate the tenant before the caller can supply that context, with the deployment and its captured mutations committing together.
 
 `Context` carries tenant, actor `{kind,id}`, optional impersonator, action and one
 trace ID shared by all nested changes. `agent_connection` records the durable agent grant without replacing the person as actor. Database validates its shape; it does not
@@ -45,6 +53,51 @@ its own bell callback; business owners do not publish manually. A callback must
 not panic or perform durable work: process failure can lose fan-out, and durable
 work belongs in a transactional Queue/outbox. Share the outer boundary rather
 than opening or committing an inner transaction.
+
+# The connection pool
+
+**One pool per process, bounded in size and in waiting time: `pool(url)` builds it from the environment.**
+
+| Limit | Environment | Default | Range |
+| --- | --- | --- | --- |
+| Connections the process may hold | `DATABASE_POOL_SIZE` | 16 | 1 to 1000 |
+| Seconds a caller waits for a free one | `DATABASE_POOL_WAIT_SECONDS` | 5 | 1 to 300 |
+
+- Pages, live sockets, Queue slots, the Scheduler and the Software loops share this pool.
+- A caller that finds it empty for the whole wait gets `Error::Pool` (`Error::is_pool_exhausted`): a page answers 503, a job retries. Nothing waits for ever.
+- These are environment values, not settings, because the pool exists before a setting can be read. A value outside its range refuses the start and names the variable.
+- System Info shows the size in use as Pool Size.
+- `pool_with(url, PoolLimits { size, wait })` is for a private host or a walkthrough that needs its own limits.
+- The timeout turns a lock-up into refusals; it does not make nested asks right. `Db::get` checks them: see the next section.
+
+Proof, on any reachable PostgreSQL database (it runs only `SELECT 1`):
+
+```sh
+cargo run -p bilibi-database --example pool-walkthrough
+```
+
+It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six tracked callers whose nested checkouts are refused immediately while both pool slots remain occupied, and the environment limits with their refusals. It also proves that a second checkout is refused with both call sites and that independent checkouts still work.
+
+## One connection per task
+
+**A task that holds a pooled connection must not ask the pool for another; `Db::get` checks it ([src/pool.rs](src/pool.rs)).**
+
+`bilibi_database::Db` wraps the pool; it is no longer an alias for `deadpool_postgres::Pool`. Checkouts return `bilibi_database::Connection`, which dereferences to the client. `get`, `status`, `timeouts` and `resize` retain their calling forms; replace `deadpool_postgres::Object::take(connection)` with `bilibi_database::Connection::take(connection)`.
+
+Why: once more callers than connections each hold one and ask for a second, every one of them waits out the pool and is refused (#406, #539).
+
+| You need | Use |
+| --- | --- |
+| A connection | `db.get().await?` |
+| To read while you already hold one | Pass the one you hold: `&(impl ProofClient + ?Sized)`, a `&Transaction`, or the `OperationClient` you were given |
+| To call a service that takes its own | Drop your connection first |
+| An independent checkout from either standalone or nested service work | `db.get_independent("why")`, which waits for a first tracked slot and refuses immediately for a second when the pool is full |
+| A single, named connection that must be separate while you hold a pool slot | `db.try_get_detached("why")`, which refuses immediately when the pool is full |
+| A single, named connection that must be separate and can safely wait for admission | `db.get_detached("why")`, with the reason the pool cannot be starved by it |
+| A connection that carries session state (a session lock, a session setting) | `Connection::take(db.get().await?)`: closed when dropped, never returned to the pool, and no longer counted |
+
+- **What counts as a task:** the Tokio task, or the thread for the future a `block_on` drives (a walkthrough's `main`). `tokio::join!` branches are one task. A spawned task starts with none.
+- **A second ask is refused immediately** with a pool error naming both call sites; it never waits for a pool slot.
 
 # Schema ownership
 
@@ -109,7 +162,7 @@ stores SQL text, so put secrets behind service parameters rather than SQL litera
 F2 was demonstrated with external runtime fixture executables and a disposable
 PostgreSQL database, without unit tests. Evidence lives in Firstmate's task data
 folder `data/bilibi-f2/`: legacy upgrade without replay, repeat development seed preserving
-an edit, shared Company/notification trace and bell fan-out, explicit rollback,
+an edit, explicit rollback,
 drop, swallowed capture failure, action-capture failure, cancelled owner/capture,
 deferred commit failure, system/impersonator attribution, failed seed rollback and
 retry, repeat seed skipping, definition drift refusal, SQL/service dependency
@@ -118,3 +171,5 @@ ordering, concurrent seed serialization and exclusion of non-production contribu
 ## Transaction continuations
 
 Use `MutationTransaction::coordinate` when an owner operation must call several existing audited `_in` methods before returning one result. Each nested owner still uses `mutate` or `record`; its changes are captured once. An error or cancelled continuation permanently prevents the outer commit, even if a caller catches the error after an earlier nested write succeeded. Workflow uses this seam to keep the final approval decision and its owner's business effect together.
+
+After a transaction is poisoned or a coordinated continuation fails, explicit rollback has 250 ms to complete. Commit on that transaction also takes the rollback path. If rollback cannot be confirmed, the boundary returns `Error::UnrecoveredTransaction`. The owner of the pooled connection must discard it with `Connection::take`.

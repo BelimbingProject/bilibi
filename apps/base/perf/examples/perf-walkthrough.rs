@@ -1,15 +1,69 @@
-//! Manual walkthrough against an explicitly supplied disposable DB. No test
-//! harness or assertions; it prints what the recorder accepts, drops, stores and
-//! prunes, and how long the observed business work took meanwhile.
-use bilibi_database::{pool, timing, Error, Result};
+//! Walkthrough against an explicitly supplied disposable DB. It shows what
+//! the recorder accepts, drops, stores and prunes, and checks lock recovery.
+use bilibi_database::{pool, pool_with, timing, Db, Error, PoolLimits, Result};
 use bilibi_module_registry::Services;
-use bilibi_perf::{Config, Filter, Finish, Kind, Outcome, Recorder, Sample, Submit, Windows};
+use bilibi_perf::{
+    Config, Filter, Finish, Kind, Outcome, Recorder, Sample, Store, Submit, Windows,
+};
 use bilibi_settings::Settings;
+use bilibi_tenancy::{Authentication, Scope};
+use bilibi_ui::page::{LiveInput, LiveRequest, PageRequest, PageService};
 use std::{
+    collections::HashMap,
+    future::Future,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 use tokio::{sync::watch, time::sleep};
+use tokio_postgres::Transaction;
+
+async fn reader_waiting(lock: &Transaction<'_>) -> Result<bool> {
+    Ok(lock.query_one(
+        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='relation' AND NOT granted \
+         AND mode='AccessShareLock' AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) \
+         AND relation='base_perf_samples'::regclass)",
+        &[],
+    ).await?.get(0))
+}
+
+async fn backend_pid(db: &Db) -> Result<i32> {
+    let client = db.get().await?;
+    Ok(client
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await?
+        .get(0))
+}
+
+async fn blocked_read<T>(
+    lock: &Transaction<'_>,
+    db: &Db,
+    expected_pid: i32,
+    name: &str,
+    read: impl Future<Output = T>,
+) -> Result<T> {
+    tokio::pin!(read);
+    let wait = async {
+        while !reader_waiting(lock).await? {
+            sleep(Duration::from_millis(25)).await;
+        }
+        Ok::<_, Error>(())
+    };
+    tokio::select! {
+        result = wait => result?,
+        _ = &mut read => panic!("{name} finished before reaching the PostgreSQL lock"),
+    }
+    let result = read.await;
+    assert!(
+        !reader_waiting(lock).await?,
+        "{name} left a PostgreSQL reader blocked"
+    );
+    assert_eq!(
+        backend_pid(db).await?,
+        expected_pid,
+        "{name} discarded a connection after PostgreSQL recovered it"
+    );
+    Ok(result)
+}
 
 async fn flush(recorder: &Recorder) {
     for _ in 0..100 {
@@ -53,6 +107,87 @@ async fn work(millis: u64) -> u32 {
     42
 }
 
+async fn partial_page_outcomes(db: &Db, services: &Services) -> Result<()> {
+    db.resize(1);
+    let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
+    let pages = services.get::<PageService<Scope, Error>>("base/perf.pages")?;
+    let client = db.get().await?;
+    let scope = authentication
+        .authenticate(&**client, 1, 6, String::new())
+        .await?;
+    client
+        .batch_execute(
+            "INSERT INTO base_perf_samples(kind,identity,outcome,duration_ms,observed_at)
+             VALUES ('request','/perf-sample','ok',731,now()),
+                    ('request','/perf-history-fault','ok',10,now()-interval '3 hours');
+             INSERT INTO base_perf_samples(kind,identity,outcome,duration_ms,observed_at)
+             SELECT 'request','/perf-regression','ok',duration,now()-age
+             FROM (VALUES (50,interval '90 minutes'),(2300,interval '30 minutes')) AS windows(duration,age),
+                  generate_series(1,6);
+             CREATE TEMP VIEW base_perf_samples AS
+             SELECT id, kind, identity, outcome, duration_ms, db_duration_ms, db_count, response_size_class,
+                    memory_bytes, run_queue, alive_tasks, threads, open_fds, cpu_ms, pool_in_use, pool_waiting,
+                    observed_at + interval '0 seconds' / (identity <> '/perf-history-fault')::int AS observed_at
+             FROM public.base_perf_samples;",
+        )
+        .await?;
+    drop(client);
+
+    let refresh = async |query| {
+        let mut live = pages
+            .0
+            .mount(PageRequest {
+                operation: "index",
+                scope: Some(&scope),
+                path: &HashMap::new(),
+                query: &query,
+                body: &[],
+                framed: false,
+            })
+            .await?
+            .ok_or(Error::Internal)?;
+        live.update(LiveRequest {
+            scope: &scope,
+            credential: "",
+            input: LiveInput::Refresh,
+        })
+        .await
+    };
+    let samples = refresh(HashMap::from([
+        ("tab".into(), "samples".into()),
+        ("identity".into(), "/perf-sample".into()),
+    ]))
+    .await?;
+    assert!(samples.html.contains("history cannot be read"));
+    assert!(
+        samples.html.contains("731 ms"),
+        "All Samples lost the matching row when diagnostics failed"
+    );
+
+    let client = db.get().await?;
+    client
+        .batch_execute(
+            "DROP VIEW pg_temp.base_perf_samples;
+             CREATE TEMP VIEW base_perf_samples AS
+             SELECT kind, identity, observed_at,
+                    duration_ms / (identity <> '/perf-history-fault')::int AS duration_ms
+             FROM public.base_perf_samples;",
+        )
+        .await?;
+    drop(client);
+    let slowdowns = refresh(HashMap::new()).await?;
+    assert!(slowdowns.html.contains("The slowest list is unavailable."));
+    assert!(
+        slowdowns.html.contains("/perf-regression") && slowdowns.html.contains("2300.0 ms"),
+        "Slowdowns lost the known regression when the 24-hour ranking failed"
+    );
+    db.get()
+        .await?
+        .batch_execute("DROP VIEW pg_temp.base_perf_samples")
+        .await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     if std::env::var("BILIBI_DISPOSABLE_PERF_DEMO").as_deref() != Ok("yes") {
@@ -73,7 +208,9 @@ async fn main() -> Result<()> {
     )?;
     services.install(&modules)?;
     let settings = services.get::<Settings>("base/settings.store")?;
-    let client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let config = Config {
         policy_refresh: Duration::from_secs(1),
         ..Config::default()
@@ -269,17 +406,15 @@ async fn main() -> Result<()> {
          SELECT 'request','/steady','ok',40,now()-interval '30 minutes'+n*interval '1 second' FROM generate_series(1,30) n").await?;
     let now = SystemTime::now();
     let ago = |minutes: u64| now - Duration::from_secs(minutes * 60);
-    for row in recorder
-        .regressions(&Windows {
-            baseline_from: ago(180),
-            baseline_to: ago(60),
-            current_from: ago(60),
-            current_to: now + Duration::from_secs(60),
-            min_samples: 20,
-            limit: 10,
-        })
-        .await?
-    {
+    let windows = Windows {
+        baseline_from: ago(180),
+        baseline_to: ago(60),
+        current_from: ago(60),
+        current_to: now + Duration::from_secs(60),
+        min_samples: 20,
+        limit: 10,
+    };
+    for row in recorder.regressions(&windows).await? {
         println!(
             "   {} {}: {:.0} ms mean -> p95 {:.0} ms ({:+.1}%)",
             row.kind.as_str(),
@@ -322,6 +457,67 @@ async fn main() -> Result<()> {
 
     let _ = stop.send(true);
     writer.await.map_err(|_| Error::Internal)??;
+
+    println!("\n== 8. PostgreSQL stops every read while the history lock is held");
+    let read_pool = pool_with(
+        &url,
+        PoolLimits {
+            size: 1,
+            wait: Duration::from_secs(1),
+        },
+    )?;
+    let recorder = Recorder::new(read_pool.clone(), settings, Config::default())?;
+    let pid = backend_pid(&read_pool).await?;
+    let filter = Filter::default();
+    let expected_total = recorder.list_samples(&filter).await?.total;
+    let lock = client.transaction().await?;
+    lock.batch_execute("LOCK TABLE base_perf_samples IN ACCESS EXCLUSIVE MODE")
+        .await?;
+    let diagnostics = blocked_read(
+        &lock,
+        &read_pool,
+        pid,
+        "diagnostics",
+        recorder.diagnostics(),
+    )
+    .await?;
+    assert_eq!(diagnostics.store, Store::Unavailable);
+    assert!(blocked_read(
+        &lock,
+        &read_pool,
+        pid,
+        "sample list",
+        recorder.list_samples(&filter)
+    )
+    .await?
+    .is_err());
+    assert!(blocked_read(
+        &lock,
+        &read_pool,
+        pid,
+        "regressions",
+        recorder.regressions(&windows)
+    )
+    .await?
+    .is_err());
+    assert!(blocked_read(
+        &lock,
+        &read_pool,
+        pid,
+        "slowest",
+        recorder.slowest(ago(180), now, 10)
+    )
+    .await?
+    .is_err());
+    lock.rollback().await?;
+    assert_eq!(recorder.list_samples(&filter).await?.total, expected_total);
+    println!("PASS Performance reads stopped and reused the recovered PostgreSQL connection");
+    drop(client);
+
+    println!("\n== 9. Page refresh keeps successful history beside unavailable sections");
+    partial_page_outcomes(&db, &services).await?;
+    println!("PASS both Performance tabs rendered partial results");
+
     println!("\nRun again with `-- inspect` in another process to read the persisted rows.");
     Ok(())
 }

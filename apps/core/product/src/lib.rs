@@ -56,7 +56,7 @@ route!(
     "record",
     CompanyScope::Company
 );
-inventory::submit! {Contribution::new(PAGE_WRITES,PAGES,provenance!(),&PageWrites{service:PAGES,contracts:&[("create","core.product.create"),("save_field","core.product.update"),("add_price","core.product.price.add")],pending:Pending::None})}
+inventory::submit! {Contribution::new(PAGE_WRITES,PAGES,provenance!(),&PageWrites{service:PAGES,contracts:&[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ("create","core.product.create"),("save_field","core.product.update"),("add_price","core.product.price.add")],pending:Pending::None})}
 bilibi_menu::contribute!(
     "core/product",
     bilibi_menu::MenuItem::page("products", "Products", "/products")

@@ -27,7 +27,7 @@ use std::{
 };
 use tokio_postgres::Client;
 
-const KIND: &str = "base/events.event";
+pub(crate) const KIND: &str = "base/events.event";
 const PAGE: i64 = 1000;
 /// More linked events than this is an export too large to bundle.
 const MAX_EXPORT: usize = 100_000;
@@ -123,11 +123,12 @@ static PAYLOADS: Payloads = Payloads;
 impl Handler for Payloads {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let mut by_person = 0;
             for (name, declaration) in declared()? {
                 let Some(pointer) = declaration.person else {
@@ -245,7 +246,7 @@ impl Handler for Payloads {
             ids.sort_unstable();
             ids.dedup();
             let mut erased = Erased::default();
-            let held = holds.records(grant, KIND, &ids).await?;
+            let held = holds.records(tx.sql(), grant, KIND, &ids).await?;
             let tenant = scope.tenant();
             let declared = declared()?;
             let mut count = 0;

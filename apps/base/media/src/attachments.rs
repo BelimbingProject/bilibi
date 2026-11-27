@@ -11,20 +11,25 @@
 //! `submit_attachments`/`retain_drafts` only change rows and compose into the
 //! owner's own `MutationTransaction`.
 use crate::{
-    audit, storage, upload, Error, Media, NewAsset, Placement, Result, Rules, ScanState, Stored,
-    StreamFile, SubjectAction, Upload,
+    audit, storage, upload, Error, FileStream, Media, NewAsset, Placement, Result, Rules,
+    ScanState, Stored, StreamFile, SubjectAction, Upload,
 };
-use bilibi_database::{Change, Context, MutationTransaction, Principal};
-use bilibi_personal_data::{Disclosure, Erasure, Holds};
+use bilibi_database::{Change, MutationTransaction};
+use bilibi_personal_data::RecordHolds;
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::time::Duration;
 use tokio_postgres::{Client, GenericClient, Row};
 
 /// Never more than this many attachments in one submit or retain.
 const MAX_BIND: usize = 200;
 const CLEANUP_BATCH: i64 = 500;
-const CLEANUP_PRINCIPAL: &str = "media.attachments.cleanup";
+
+mod drafts;
+mod personal_data;
+pub(crate) use drafts::{CleanupJob, DRAFT_HANDLER};
+pub use personal_data::{
+    AttachmentErasure, ErasedAttachment, Removal, ASSET_KIND, ATTACHMENT_KIND,
+};
 
 /// The record a file belongs to, named as the owner registered it
 /// (`orders.order`, the order's id). Callers' ids are requests, never proof.
@@ -55,6 +60,49 @@ impl AttachmentState {
     }
 }
 
+/// Who stored an attachment: an account in person, or a declared system
+/// principal (a module's mailbox import or connector job) sealed into its
+/// scope by `SystemAuthentication::for_system`. Either way the subject owner
+/// decided the upload; a principal's file is scanned and served exactly like
+/// a person's.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Uploader {
+    User(i64),
+    System(String),
+}
+impl Uploader {
+    /// The account, `None` for a system principal.
+    pub fn user(&self) -> Option<i64> {
+        match self {
+            Self::User(id) => Some(*id),
+            Self::System(_) => None,
+        }
+    }
+    /// The principal's name, `None` for an account.
+    pub fn principal(&self) -> Option<&str> {
+        match self {
+            Self::User(_) => None,
+            Self::System(name) => Some(name),
+        }
+    }
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::User(_) => "user",
+            Self::System(_) => "system",
+        }
+    }
+    fn from_row(row: &Row) -> Result<Self> {
+        match (
+            row.get::<_, Option<i64>>("uploaded_by_id"),
+            row.get::<_, Option<String>>("uploaded_by_principal"),
+        ) {
+            (Some(id), None) => Ok(Self::User(id)),
+            (None, Some(name)) => Ok(Self::System(name)),
+            _ => Err(Error::InvalidAsset),
+        }
+    }
+}
+
 /// What an owner may see: no disk, key or asset id. `public_id` is the ULID the
 /// owner stores and later submits or downloads by.
 #[derive(Clone, Debug)]
@@ -63,7 +111,7 @@ pub struct Attachment {
     pub subject_type: String,
     pub subject_id: String,
     pub state: AttachmentState,
-    pub uploaded_by_id: i64,
+    pub uploaded_by: Uploader,
     pub original_filename: Option<String>,
     pub mime_type: Option<String>,
     pub file_size: Option<i64>,
@@ -88,7 +136,43 @@ struct Bound {
     asset_id: i64,
     summary: Attachment,
 }
-const SELECT: &str = "SELECT a.id,a.media_asset_id,a.public_id,a.subject_type,a.subject_id,a.state,a.uploaded_by_id,s.original_filename,s.mime_type,s.file_size,s.scan_state,floor(extract(epoch FROM a.submitted_at))::bigint AS submitted_at,floor(extract(epoch FROM a.retained_at))::bigint AS retained_at,floor(extract(epoch FROM a.created_at))::bigint AS created_at FROM base_media_attachments a JOIN base_media_assets s ON s.id=a.media_asset_id AND s.tenant_id=a.tenant_id";
+const SELECT: &str = "SELECT a.id,a.media_asset_id,a.public_id,a.subject_type,a.subject_id,a.state,a.uploaded_by_id,a.uploaded_by_principal,s.original_filename,s.mime_type,s.file_size,s.scan_state,floor(extract(epoch FROM a.submitted_at))::bigint AS submitted_at,floor(extract(epoch FROM a.retained_at))::bigint AS retained_at,floor(extract(epoch FROM a.created_at))::bigint AS created_at FROM base_media_attachments a JOIN base_media_assets s ON s.id=a.media_asset_id AND s.tenant_id=a.tenant_id";
+/// The audit action of a delivered private attachment.
+const DOWNLOADED: &str = "media.attachment.downloaded";
+/// The audit action of a download its subject's owner refused.
+const DOWNLOAD_REFUSED: &str = "media.attachment.download_refused";
+
+/// A reason code for an owner's refusal: the trail says why without naming
+/// anything the reader was refused.
+fn refusal_reason(error: &Error) -> &'static str {
+    match error {
+        Error::Database(bilibi_database::Error::Forbidden) => "forbidden",
+        Error::Database(bilibi_database::Error::NotFound) | Error::NotFound => "not_found",
+        Error::Database(bilibi_database::Error::Unauthorized) => "unauthorized",
+        _ => "unavailable",
+    }
+}
+
+/// Records a download action on the reader's connection, attributed to the
+/// scope's actor and impersonator.
+async fn audit_download(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    event: &str,
+    payload: Value,
+) -> Result<()> {
+    bilibi_audit::record_action(
+        client,
+        &bilibi_audit::Attribution::from_scope(scope),
+        None,
+        event,
+        payload,
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
 fn bound(row: &Row) -> Result<Bound> {
     Ok(Bound {
         id: row.get("id"),
@@ -98,7 +182,7 @@ fn bound(row: &Row) -> Result<Bound> {
             subject_type: row.get("subject_type"),
             subject_id: row.get("subject_id"),
             state: AttachmentState::parse(row.get("state"))?,
-            uploaded_by_id: row.get("uploaded_by_id"),
+            uploaded_by: Uploader::from_row(row)?,
             original_filename: row.get("original_filename"),
             mime_type: row.get("mime_type"),
             file_size: row.get("file_size"),
@@ -111,35 +195,50 @@ fn bound(row: &Row) -> Result<Bound> {
 }
 /// Audit facts name the binding, never the bytes, key or filename.
 fn facts(summary: &Attachment) -> Value {
-    json!({"public_id":summary.public_id,"subject_type":summary.subject_type,"subject_id":summary.subject_id,"state":summary.state.as_str(),"uploaded_by_id":summary.uploaded_by_id,"submitted_at":summary.submitted_at,"retained_at":summary.retained_at})
+    json!({"public_id":summary.public_id,"subject_type":summary.subject_type,"subject_id":summary.subject_id,"state":summary.state.as_str(),"uploaded_by_id":summary.uploaded_by.user(),"uploaded_by_principal":summary.uploaded_by.principal(),"submitted_at":summary.submitted_at,"retained_at":summary.retained_at})
 }
 /// The only accepted spelling: 26 uppercase Crockford base32 characters.
 fn valid_public_id(id: &str) -> bool {
     ulid::Ulid::from_string(id).is_ok_and(|parsed| parsed.to_string() == id)
 }
 
+/// Whether a record hold names the attachment or its asset.
+async fn held(
+    client: &dyn bilibi_tenancy::ReadClient,
+    holds: &RecordHolds,
+    row: &Bound,
+) -> Result<bool> {
+    Ok(!holds
+        .records(client, ATTACHMENT_KIND, &[row.id])
+        .await?
+        .is_empty()
+        || !holds
+            .records(client, ASSET_KIND, &[row.asset_id])
+            .await?
+            .is_empty())
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Bind {
     Submit,
     Retain,
+    Release,
 }
 
 impl Media {
-    /// Bytes are only ever bound through the caller's own transaction context.
-    /// An impersonated session is refused: the row cannot name the operator.
-    fn acting_user(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<()> {
-        if tx.context().tenant != scope.tenant()
-            || tx.context().actor.kind != "user"
-            || tx.context().actor.id != scope.user().to_string()
-            || tx.context().impersonator.is_some()
-        {
+    /// Bytes are only ever bound through the caller's own transaction context:
+    /// the scope's account in person, or its sealed, declared system principal
+    /// (`Media::acting`). An impersonated session is refused: the row cannot
+    /// name the operator.
+    fn acting_uploader(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<Uploader> {
+        if tx.context().impersonator.is_some() {
             return Err(bilibi_database::Error::Forbidden.into());
         }
-        Ok(())
+        Self::acting(tx, scope)
     }
 
     /// Validate, authorize `Upload`, store the bytes privately and create a
-    /// draft naming the sealed user. `rules` may narrow the operator's size and
+    /// draft naming the sealed user or declared system principal. `rules` may narrow the operator's size and
     /// type limits for this subject, never widen them. The owner is asked again
     /// inside the registering transaction, after the bytes were read.
     pub async fn upload_attachment(
@@ -151,6 +250,8 @@ impl Media {
         rules: Rules,
     ) -> Result<Attachment> {
         let AttachmentSubject { kind, id } = subject;
+        // An undeclared principal stores no bytes at all; registration asks again.
+        let uploader = Self::uploader(&scope.mutation_context("media.attachment.upload"), scope)?;
         self.subjects
             .authorize(&*client, scope, kind, SubjectAction::Upload, id)
             .await?;
@@ -173,6 +274,8 @@ impl Media {
             .ok_or(Error::StorageNotConfigured)?;
         // Refused before any bytes are written; registration decides again.
         self.initial_state(&*client, &disk).await?;
+        self.room_for_draft(client, scope.tenant(), &uploader)
+            .await?;
         let key = format!(
             "tenants/{}/attachments/{}",
             scope.tenant(),
@@ -180,6 +283,7 @@ impl Media {
         );
         let roots = self.disks(&*client).await?;
         storage::write(&roots, &disk, &key, &file.bytes).await?;
+        let mut committing = false;
         let result = async {
             let mut tx = self
                 .boundary
@@ -205,9 +309,8 @@ impl Media {
                     },
                 )
                 .await?;
-            let (tenant, user, subject_type, subject_id, public_id) = (
+            let (tenant, subject_type, subject_id, public_id) = (
                 scope.tenant(),
-                scope.user(),
                 kind.to_owned(),
                 id.to_owned(),
                 ulid::Ulid::generate().to_string(),
@@ -217,8 +320,8 @@ impl Media {
                     Box::pin(async move {
                         let row = sql
                             .query_one(
-                                "INSERT INTO base_media_attachments(public_id,tenant_id,media_asset_id,subject_type,subject_id,state,uploaded_by_type,uploaded_by_id) VALUES($1,$2,$3,$4,$5,'draft','user',$6) RETURNING id",
-                                &[&public_id, &tenant, &asset.id, &subject_type, &subject_id, &user],
+                                "INSERT INTO base_media_attachments(public_id,tenant_id,media_asset_id,subject_type,subject_id,state,uploaded_by_type,uploaded_by_id,uploaded_by_principal) VALUES($1,$2,$3,$4,$5,'draft',$6,$7,$8) RETURNING id",
+                                &[&public_id, &tenant, &asset.id, &subject_type, &subject_id, &uploader.kind(), &uploader.user(), &uploader.principal()],
                             )
                             .await?;
                         let row_id: i64 = row.get("id");
@@ -227,7 +330,7 @@ impl Media {
                             subject_type,
                             subject_id,
                             state: AttachmentState::Draft,
-                            uploaded_by_id: user,
+                            uploaded_by: uploader,
                             original_filename: asset.original_filename,
                             mime_type: asset.mime_type,
                             file_size: asset.file_size,
@@ -246,11 +349,14 @@ impl Media {
                     })
                 })
                 .await?;
+            committing = true;
             tx.commit().await?;
             Ok(summary)
         }
         .await;
-        if result.is_err() {
+        // A failed commit may still have committed: keep the bytes rather
+        // than leave a draft naming a missing file.
+        if result.is_err() && !committing {
             let _ = storage::delete(&roots, &disk, &key).await;
         }
         result
@@ -281,6 +387,19 @@ impl Media {
         self.bind(tx, scope, subject, public_ids, Bind::Retain)
             .await
     }
+    /// Undo `retain_drafts` once the owner no longer needs a draft, so
+    /// abandoned-draft cleanup removes it as usual. Same checks with
+    /// `Retain`; unretained and submitted attachments pass through.
+    pub async fn release_drafts(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        subject: AttachmentSubject<'_>,
+        public_ids: &[&str],
+    ) -> Result<Vec<Attachment>> {
+        self.bind(tx, scope, subject, public_ids, Bind::Release)
+            .await
+    }
     async fn bind(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -289,7 +408,7 @@ impl Media {
         public_ids: &[&str],
         operation: Bind,
     ) -> Result<Vec<Attachment>> {
-        Self::acting_user(tx, scope)?;
+        Self::acting_uploader(tx, scope)?;
         let mut ids = public_ids.to_vec();
         ids.sort_unstable();
         ids.dedup();
@@ -318,7 +437,7 @@ impl Media {
         }
         let action = match operation {
             Bind::Submit => SubjectAction::Submit,
-            Bind::Retain => SubjectAction::Retain,
+            Bind::Retain | Bind::Release => SubjectAction::Retain,
         };
         self.subjects
             .authorize(tx.sql(), scope, subject.kind, action, subject.id)
@@ -337,7 +456,11 @@ impl Media {
             .iter()
             .filter(|row| {
                 row.summary.state == AttachmentState::Draft
-                    && (operation == Bind::Submit || row.summary.retained_at.is_none())
+                    && match operation {
+                        Bind::Submit => true,
+                        Bind::Retain => row.summary.retained_at.is_none(),
+                        Bind::Release => row.summary.retained_at.is_some(),
+                    }
             })
             .collect();
         if changing.is_empty() {
@@ -354,6 +477,7 @@ impl Media {
                 let statement = match operation {
                     Bind::Submit => "UPDATE base_media_attachments SET state='submitted',submitted_at=now(),updated_at=now() WHERE id=ANY($1)",
                     Bind::Retain => "UPDATE base_media_attachments SET retained_at=now(),updated_at=now() WHERE id=ANY($1)",
+                    Bind::Release => "UPDATE base_media_attachments SET retained_at=NULL,updated_at=now() WHERE id=ANY($1)",
                 };
                 sql.execute(statement, &[&row_ids]).await?;
                 let updated = sql
@@ -382,15 +506,91 @@ impl Media {
         .map_err(Into::into)
     }
 
+    /// Metadata and current scan verdict for one private attachment. The
+    /// registered subject owner authorizes `Inspect` on the caller's own
+    /// connection before any metadata is returned; this never opens bytes or
+    /// grants the quarantine manager's tenant-wide view.
+    pub async fn inspect_attachment(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        public_id: &str,
+    ) -> Result<Attachment> {
+        if !valid_public_id(public_id) {
+            return Err(Error::NotFound);
+        }
+        let row = client
+            .query_opt(
+                &format!("{SELECT} WHERE a.tenant_id=$1 AND a.public_id=$2"),
+                &[&scope.tenant(), &public_id],
+            )
+            .await?
+            .ok_or(Error::NotFound)?;
+        let summary = bound(&row)?.summary;
+        self.subjects
+            .authorize(
+                client,
+                scope,
+                &summary.subject_type,
+                SubjectAction::Inspect,
+                &summary.subject_id,
+            )
+            .await?;
+        Ok(summary)
+    }
+
     /// Bytes for one attachment, after the subject's owner allows `Download` for
     /// this scope *now*. A public id from another tenant is `NotFound`. Send the
     /// result with `StreamFile::delivery(true)`: private files always download.
+    /// Each delivery and each refusal by the owner is an audit action
+    /// (`media.attachment.downloaded`, `media.attachment.download_refused`)
+    /// naming the attachment, its subject, the actor and any impersonator,
+    /// never the file name or storage key; bytes are returned only once the
+    /// action is recorded. The whole file is read into memory once a load
+    /// slot is free; the Web host streams with [`Media::open_attachment`].
     pub async fn download_attachment(
         &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
         public_id: &str,
     ) -> Result<StreamFile> {
+        let (asset, trail) = self.downloadable(client, scope, public_id).await?;
+        let bytes = self
+            .load(&self.disks(client).await?, &asset.disk, &asset.key)
+            .await?;
+        audit_download(client, scope, DOWNLOADED, trail).await?;
+        Ok(StreamFile {
+            bytes,
+            filename: asset
+                .asset
+                .original_filename
+                .unwrap_or_else(|| asset.key.rsplit('/').next().unwrap_or("download").into()),
+            mime_type: asset.asset.mime_type,
+        })
+    }
+    /// [`Media::download_attachment`] opened for the Web host to send as it
+    /// reads: the same owner check, scan rule and audit action, holding a
+    /// stream slot (`Busy` when none is free) and no connection once it
+    /// returns.
+    pub async fn open_attachment(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        public_id: &str,
+    ) -> Result<FileStream> {
+        let (asset, trail) = self.downloadable(client, scope, public_id).await?;
+        let file = self.stream(client, &asset).await?;
+        audit_download(client, scope, DOWNLOADED, trail).await?;
+        Ok(file)
+    }
+    /// The one check of both downloads: the tenant's row, the owner's
+    /// `Download` (a refusal is audited), a private asset, then the scan rule.
+    async fn downloadable(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        public_id: &str,
+    ) -> Result<(Stored, Value)> {
         if !valid_public_id(public_id) {
             return Err(Error::NotFound);
         }
@@ -403,7 +603,13 @@ impl Media {
             .ok_or(Error::NotFound)?;
         let row = bound(&row)?;
         let summary = &row.summary;
-        self.subjects
+        let trail = json!({
+            "attachment": summary.public_id,
+            "subject_type": summary.subject_type,
+            "subject_id": summary.subject_id,
+        });
+        if let Err(error) = self
+            .subjects
             .authorize(
                 client,
                 scope,
@@ -411,26 +617,26 @@ impl Media {
                 SubjectAction::Download,
                 &summary.subject_id,
             )
-            .await?;
+            .await
+        {
+            let mut refused = trail;
+            refused["reason"] = json!(refusal_reason(&error));
+            audit_download(client, scope, DOWNLOAD_REFUSED, refused).await?;
+            return Err(error);
+        }
         let asset = self.fetch(client, scope.tenant(), row.asset_id).await?;
         if !asset.private {
             return Err(Error::InvalidAsset);
         }
         // After the owner's answer, so a refused reader learns nothing more.
         self.readable(client, &asset).await?;
-        let bytes = storage::read(&self.disks(client).await?, &asset.disk, &asset.key).await?;
-        Ok(StreamFile {
-            bytes,
-            filename: asset
-                .asset
-                .original_filename
-                .unwrap_or_else(|| asset.key.rsplit('/').next().unwrap_or("download").into()),
-            mime_type: asset.asset.mime_type,
-        })
+        Ok((asset, trail))
     }
 
-    /// Remove a draft its uploader no longer wants. Only the uploader may, only
-    /// while the owner still allows `Discard`, and never submitted evidence.
+    /// Remove a draft its uploader no longer wants. Only the uploader may (the
+    /// same account, or the same system principal), only while the owner still
+    /// allows `Discard`, never submitted evidence, and never a draft a legal
+    /// hold names, on the attachment or on its asset (`Held`).
     pub async fn discard_draft(
         &self,
         client: &mut Client,
@@ -440,10 +646,24 @@ impl Media {
         if !valid_public_id(public_id) {
             return Err(Error::NotFound);
         }
+        let (holds, mut hold_guard) = RecordHolds::acquire(client, scope.tenant()).await?;
+        let client = hold_guard.client();
+        let discarded = self.discard(client, scope, public_id, &holds).await;
+        hold_guard.release().await?;
+        discarded
+    }
+    async fn discard(
+        &self,
+        client: &mut Client,
+        scope: &Scope,
+        public_id: &str,
+        holds: &RecordHolds,
+    ) -> Result<()> {
         let mut tx = self
             .boundary
             .begin(client, scope.mutation_context("media.attachment.discard"))
             .await?;
+        let uploader = Self::acting(&tx, scope)?;
         let row = tx
             .sql()
             .query_opt(
@@ -456,8 +676,11 @@ impl Media {
         if row.summary.state != AttachmentState::Draft {
             return Err(Error::ImmutableAttachment);
         }
-        if row.summary.uploaded_by_id != scope.user() {
+        if row.summary.uploaded_by != uploader {
             return Err(Error::NotUploader);
+        }
+        if held(tx.sql(), holds, &row).await? {
+            return Err(Error::Held);
         }
         self.subjects
             .authorize(
@@ -526,118 +749,6 @@ impl Media {
         }
         Ok(())
     }
-
-    /// Remove one tenant's abandoned drafts: unretained, not submitted, older
-    /// than `older_than`. Trusted callers only (an operator command or a
-    /// worker); there is no user to authorize, so the writes are attributed to
-    /// the system principal `media.attachments.cleanup` in the named tenant.
-    /// Each candidate is locked and rechecked, so a draft submitted, retained or
-    /// discarded meanwhile survives.
-    pub async fn cleanup_drafts(
-        &self,
-        client: &mut Client,
-        tenant: i64,
-        older_than: Duration,
-    ) -> Result<Cleanup> {
-        if older_than.is_zero() {
-            return Err(Error::InvalidRules);
-        }
-        let live = client
-            .query_opt(
-                "SELECT 1 FROM tenants WHERE id=$1 AND deleted_at IS NULL",
-                &[&tenant],
-            )
-            .await?;
-        if live.is_none() {
-            return Err(Error::NotFound);
-        }
-        let age = older_than.as_secs_f64();
-        let mut report = Cleanup::default();
-        loop {
-            let candidates = client
-                .query(
-                    "SELECT public_id FROM base_media_attachments WHERE tenant_id=$1 AND state='draft' AND retained_at IS NULL AND created_at < now()-make_interval(secs => $2) ORDER BY id LIMIT $3",
-                    &[&tenant, &age, &CLEANUP_BATCH],
-                )
-                .await?;
-            if candidates.is_empty() {
-                break;
-            }
-            let before = report.removed;
-            for candidate in &candidates {
-                let public_id: String = candidate.get("public_id");
-                let context = Context {
-                    tenant,
-                    actor: Principal {
-                        kind: "system".into(),
-                        id: CLEANUP_PRINCIPAL.into(),
-                    },
-                    impersonator: None,
-                    actor_role: None,
-                    action: "media.attachment.cleanup".into(),
-                    trace_id: uuid::Uuid::new_v4().to_string(),
-                    agent_self_report: None,
-                    client_identity: None,
-                    agent_connection: None,
-                };
-                let mut tx = self.boundary.begin(client, context).await?;
-                let row = tx
-                    .sql()
-                    .query_opt(
-                        &format!("{SELECT} WHERE a.tenant_id=$1 AND a.public_id=$2 AND a.state='draft' AND a.retained_at IS NULL AND a.created_at < now()-make_interval(secs => $3) FOR UPDATE OF a"),
-                        &[&tenant, &public_id, &age],
-                    )
-                    .await?;
-                let Some(row) = row else {
-                    continue;
-                };
-                let file = self.remove_draft(&mut tx, tenant, &bound(&row)?).await?;
-                tx.commit().await?;
-                report.removed += 1;
-                if self.remove_files(client, &[file]).await.is_err() {
-                    report.file_failures += 1;
-                }
-            }
-            // A pass that removed nothing would only see the same rows again.
-            if report.removed == before {
-                break;
-            }
-        }
-        Ok(report)
-    }
-}
-
-/// The audit record kinds of an attachment row and of its asset.
-pub const ATTACHMENT_KIND: &str = "base/media/attachment";
-pub const ASSET_KIND: &str = "base/media/asset";
-/// Attachments read per page when a request lists a subject's files.
-const DISCLOSE_PAGE: i64 = 500;
-
-/// One attachment an erasure turned into a tombstone. Its row and its removed
-/// asset are both audit records whose evidence the erasure clears.
-#[derive(Clone, Debug)]
-pub struct ErasedAttachment {
-    pub public_id: String,
-    /// The attachment row, kind [`ATTACHMENT_KIND`].
-    pub id: i64,
-    /// The removed asset row, kind [`ASSET_KIND`].
-    pub asset_id: i64,
-}
-/// What `erase_attachments` did.
-#[derive(Clone, Debug, Default)]
-pub struct AttachmentErasure {
-    pub erased: Vec<ErasedAttachment>,
-    /// Attachments a legal hold kept, on the attachment or on its asset:
-    /// (attachment row, hold).
-    pub held: Vec<(i64, i64)>,
-}
-/// What one `remove_erased_bytes` call did.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Removal {
-    /// Files removed by this call; each is one audited change.
-    pub removed: u64,
-    /// Files still waiting: call again (another call may be removing them now).
-    pub more: bool,
 }
 
 impl Media {
@@ -665,229 +776,5 @@ impl Media {
             )
             .await?
             .get(0))
-    }
-
-    /// Every live attachment of `subject` (ADR 05), however many, for an
-    /// approved access request. The grant is the authority: the subject's
-    /// owner is not asked, so a retired record's files are still listed.
-    pub async fn disclosed_attachments(
-        &self,
-        client: &(impl GenericClient + Sync),
-        scope: &Scope,
-        grant: &Disclosure,
-        subject: AttachmentSubject<'_>,
-    ) -> Result<Vec<Attachment>> {
-        grant.check_file_subject(scope, subject.kind, subject.id)?;
-        let (mut all, mut after) = (Vec::new(), 0_i64);
-        loop {
-            let rows = client
-                .query(
-                    &format!("{SELECT} WHERE a.tenant_id=$1 AND a.subject_type=$2 AND a.subject_id=$3 AND a.id>$4 ORDER BY a.id LIMIT $5"),
-                    &[&scope.tenant(), &subject.kind, &subject.id, &after, &DISCLOSE_PAGE],
-                )
-                .await?;
-            let done = (rows.len() as i64) < DISCLOSE_PAGE;
-            for row in &rows {
-                let row = bound(row)?;
-                after = row.id;
-                all.push(row.summary);
-            }
-            if done {
-                return Ok(all);
-            }
-        }
-    }
-
-    /// The bytes of one of `subject`'s live attachments, for an approved
-    /// access request's bundle. Another subject's file is `NotFound`.
-    pub async fn disclosed_attachment(
-        &self,
-        client: &(impl GenericClient + Sync),
-        scope: &Scope,
-        grant: &Disclosure,
-        subject: AttachmentSubject<'_>,
-        public_id: &str,
-    ) -> Result<StreamFile> {
-        grant.check_file_subject(scope, subject.kind, subject.id)?;
-        if !valid_public_id(public_id) {
-            return Err(Error::NotFound);
-        }
-        let row = client
-            .query_opt(
-                &format!("{SELECT} WHERE a.tenant_id=$1 AND a.public_id=$2 AND a.subject_type=$3 AND a.subject_id=$4"),
-                &[&scope.tenant(), &public_id, &subject.kind, &subject.id],
-            )
-            .await?
-            .ok_or(Error::NotFound)?;
-        let row = bound(&row)?;
-        let asset = self.fetch(client, scope.tenant(), row.asset_id).await?;
-        let bytes = storage::read(&self.disks(client).await?, &asset.disk, &asset.key).await?;
-        Ok(StreamFile {
-            bytes,
-            filename: asset
-                .asset
-                .original_filename
-                .unwrap_or_else(|| public_id.to_owned()),
-            mime_type: asset.asset.mime_type,
-        })
-    }
-
-    /// Erasure (ADR 05): turn every live attachment of `subject` that no hold
-    /// names (on the attachment or on its asset) into a tombstone and remove
-    /// its asset row, in the caller's
-    /// erasure transaction. The grant is the authority, so no `SubjectAction`
-    /// is asked; the database admits the change only through
-    /// `base_media_erase_attachment`. The asset's change records its filename
-    /// as `[erased]`; the caller clears the earlier evidence of both records.
-    /// Bytes go afterwards, through [`Media::remove_erased_bytes`]. Repeating
-    /// it finds nothing left to erase.
-    pub async fn erase_attachments(
-        &self,
-        tx: &mut MutationTransaction<'_>,
-        scope: &Scope,
-        grant: &Erasure,
-        subject: AttachmentSubject<'_>,
-        holds: &Holds,
-    ) -> Result<AttachmentErasure> {
-        grant.check_file_subject(scope, subject.kind, subject.id)?;
-        if tx.context().tenant != scope.tenant() {
-            return Err(Error::Database(bilibi_database::Error::Forbidden));
-        }
-        let rows = tx
-            .sql()
-            .query(
-                &format!("{SELECT} WHERE a.tenant_id=$1 AND a.subject_type=$2 AND a.subject_id=$3 ORDER BY a.id FOR UPDATE OF a"),
-                &[&scope.tenant(), &subject.kind, &subject.id],
-            )
-            .await?;
-        let rows = rows.iter().map(bound).collect::<Result<Vec<_>>>()?;
-        let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
-        let assets: Vec<i64> = rows.iter().map(|row| row.asset_id).collect();
-        // A hold on the attachment or on its asset keeps both, and the bytes.
-        let held = holds.records(grant, ATTACHMENT_KIND, &ids).await?;
-        let held_assets = holds.records(grant, ASSET_KIND, &assets).await?;
-        let mut done = AttachmentErasure::default();
-        for row in rows {
-            if let Some(hold) = held.get(&row.id).or_else(|| held_assets.get(&row.asset_id)) {
-                done.held.push((row.id, *hold));
-                continue;
-            }
-            let asset = self.fetch(tx.sql(), scope.tenant(), row.asset_id).await?;
-            let mut old_asset = audit(&asset);
-            if old_asset
-                .get("original_filename")
-                .is_some_and(|name| !name.is_null())
-            {
-                old_asset["original_filename"] = json!(bilibi_personal_data::ERASED);
-            }
-            // A system principal (owed cleanup after a hold) is recorded as no user.
-            let user = scope.principal().is_none().then(|| scope.user());
-            let (tenant, id, asset_id) = (scope.tenant(), row.id, row.asset_id);
-            let changes = vec![
-                Change {
-                    kind: ATTACHMENT_KIND.into(),
-                    id,
-                    old: facts(&row.summary),
-                    new: json!({"public_id": row.summary.public_id, "subject_type": row.summary.subject_type,
-                        "subject_id": row.summary.subject_id, "state": "erased", "uploaded_by_id": row.summary.uploaded_by_id}),
-                },
-                Change {
-                    kind: ASSET_KIND.into(),
-                    id: asset_id,
-                    old: old_asset,
-                    new: json!({}),
-                },
-            ];
-            tx.mutate(move |sql| {
-                Box::pin(async move {
-                    sql.execute(
-                        "SELECT base_media_erase_attachment($1,$2,$3)",
-                        &[&tenant, &id, &user],
-                    )
-                    .await?;
-                    Ok(((), changes))
-                })
-            })
-            .await?;
-            done.erased.push(ErasedAttachment {
-                public_id: row.summary.public_id.clone(),
-                id,
-                asset_id,
-            });
-        }
-        Ok(done)
-    }
-
-    /// Removes the bytes of `subject`'s erased attachments, one file per
-    /// transaction: each file is claimed under its row lock, removed, and
-    /// recorded once, so concurrent calls never remove or record one file
-    /// twice. A file already gone counts as removed. Removes at most one batch;
-    /// `more` says files remain, and a file that will not go is
-    /// `CleanupFailed`, left pending for the next call.
-    pub async fn remove_erased_bytes(
-        &self,
-        client: &mut Client,
-        scope: &Scope,
-        grant: &Erasure,
-        subject: AttachmentSubject<'_>,
-    ) -> Result<Removal> {
-        grant.check_file_subject(scope, subject.kind, subject.id)?;
-        let roots = self.disks(&*client).await?;
-        let mut removal = Removal::default();
-        for _ in 0..CLEANUP_BATCH {
-            let mut tx = self
-                .boundary
-                .begin(
-                    client,
-                    scope.mutation_context("media.attachment.bytes_removed"),
-                )
-                .await?;
-            let Some(row) = tx
-                .sql()
-                .query_opt(
-                    "SELECT id,erased_disk,erased_key FROM base_media_attachments WHERE tenant_id=$1 AND subject_type=$2 AND subject_id=$3 \
-                     AND state='erased' AND bytes_removed_at IS NULL ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED",
-                    &[&scope.tenant(), &subject.kind, &subject.id],
-                )
-                .await?
-            else {
-                tx.rollback().await?;
-                removal.more = client
-                    .query_one(
-                        "SELECT EXISTS (SELECT 1 FROM base_media_attachments WHERE tenant_id=$1 AND subject_type=$2 AND subject_id=$3 \
-                         AND state='erased' AND bytes_removed_at IS NULL)",
-                        &[&scope.tenant(), &subject.kind, &subject.id],
-                    )
-                    .await?
-                    .get(0);
-                return Ok(removal);
-            };
-            let (id, disk, key): (i64, String, String) = (row.get(0), row.get(1), row.get(2));
-            if storage::delete(&roots, &disk, &key).await.is_err() {
-                tx.rollback().await?;
-                return Err(Error::CleanupFailed);
-            }
-            tx.mutate(move |sql| {
-                Box::pin(async move {
-                    sql.execute(
-                        "UPDATE base_media_attachments SET bytes_removed_at=now() WHERE id=$1 AND bytes_removed_at IS NULL",
-                        &[&id],
-                    )
-                    .await?;
-                    let change = Change {
-                        kind: ATTACHMENT_KIND.into(),
-                        id,
-                        old: json!({"bytes": "present"}),
-                        new: json!({"bytes": "removed"}),
-                    };
-                    Ok(((), vec![change]))
-                })
-            })
-            .await?;
-            tx.commit().await?;
-            removal.removed += 1;
-        }
-        removal.more = true;
-        Ok(removal)
     }
 }

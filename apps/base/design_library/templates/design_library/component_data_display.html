@@ -10,7 +10,7 @@
             <div class="space-y-2">
               <p class="text-xs text-ink-muted">Search and filter these example companies, sort by a heading and page below. Changes stay in this preview.</p>
               {{ self.control("design-library-table-search")? }}
-              {% call ui::card(id="component-table", inner_class="p-0") %}{{ self.card_component_table()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_TABLE.anchor, inner_class="p-0") %}{{ self.card_component_table()? }}{% endcall %}
               <div id="component-table-framed">
                 <h3 class="mb-1 text-sm font-semibold text-ink">Company IDs</h3>
                 <p class="mb-2 text-xs text-ink-muted">The plainest table: it brings its own frame, so it stands outside a card.</p>
@@ -23,21 +23,22 @@
                 </div>
                 {{ self.flex("sample-flex-table")? }}
                 <p class="text-xs text-ink-muted">Inside a padless card, which is its only frame, as the companies and users lists have it.</p>
-                {% call ui::card(id="sample-flex-plain-card", inner_class="p-0") %}{{ self.card_sample_flex_plain_card()? }}{% endcall %}
+                {% call ui::card(id=crate::sections::SAMPLE_FLEX_PLAIN_CARD.anchor, inner_class="p-0") %}{{ self.card_sample_flex_plain_card()? }}{% endcall %}
               </div>
             </div>
             <div class="grid gap-3 lg:grid-cols-2">
-              {% call ui::card(id="component-card", title="Card", inner_class="space-y-3 p-3") %}{{ self.card_component_card()? }}{% endcall %}
-              {% call ui::card(id="component-list", title="Record facts", inner_class="space-y-3 px-3") %}{{ self.card_component_list()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_CARD.anchor, title=crate::sections::COMPONENT_CARD.title, inner_class="space-y-3 p-3") %}{{ self.card_component_card()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_LIST.anchor, title=crate::sections::COMPONENT_LIST.title, inner_class="space-y-3 px-3") %}{{ self.card_component_list()? }}{% endcall %}
             </div>
-            {% call ui::card(id="component-stat-strip", title="Statistics", inner_class="space-y-3 p-3") %}{{ self.card_component_stat_strip()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_MARKDOWN.anchor, title=crate::sections::COMPONENT_MARKDOWN.title, inner_class="space-y-3") %}{{ self.markdown()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_STAT_STRIP.anchor, title=crate::sections::COMPONENT_STAT_STRIP.title, inner_class="space-y-3 p-3") %}{{ self.card_component_stat_strip()? }}{% endcall %}
             <div class="grid items-start gap-3 lg:grid-cols-2">
-              {% call ui::card(id="component-datetime", title="Date and time", inner_class="space-y-2 p-3") %}{{ self.card_component_datetime()? }}{% endcall %}
-              {% call ui::card(title="Badges and create button", inner_class="space-y-3 p-3") %}
+              {% call ui::card(id=crate::sections::COMPONENT_DATETIME.anchor, title=crate::sections::COMPONENT_DATETIME.title, inner_class="space-y-2 p-3") %}{{ self.card_component_datetime()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_BADGES_AND_CREATE_BUTTON.anchor, title=crate::sections::COMPONENT_BADGES_AND_CREATE_BUTTON.title, inner_class="space-y-3 p-3") %}
                 <div id="component-badge" class="flex flex-wrap gap-2">
                   {% call ui::badge() %}Archived{% endcall %}{% call ui::badge(kind=bilibi_ui::BadgeKind::Success) %}Active{% endcall %}{% call ui::badge(kind=bilibi_ui::BadgeKind::Warning) %}
                     Pending
-                  {% endcall %}{% call ui::badge(kind=bilibi_ui::BadgeKind::Danger) %}Suspended{% endcall %}{% call ui::badge(dot=false) %}
+                  {% endcall %}{% call ui::badge(kind=bilibi_ui::BadgeKind::Danger) %}Suspended{% endcall %}{% call ui::badge(kind=bilibi_ui::BadgeKind::Warning) %}Past due{% endcall %}{% call ui::badge(dot=false) %}
                     Manager
                   {% endcall %}
                 </div>
@@ -46,7 +47,7 @@
                 </div>
               {% endcall %}
             </div>
-            {% call ui::card(id="component-restricted-fields", title="Restricted fields", inner_class="space-y-3 p-3") %}
+            {% call ui::card(id=crate::sections::COMPONENT_RESTRICTED_FIELDS.anchor, title=crate::sections::COMPONENT_RESTRICTED_FIELDS.title, inner_class="space-y-3 p-3") %}
               <p class="text-xs text-ink-muted">A field the viewer may not see shows a lock, not a blank. The tooltip says they have no access and names no role.</p>
               <div class="grid gap-3 lg:grid-cols-2">
                 <div id="component-restricted" class="space-y-2">

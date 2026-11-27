@@ -93,7 +93,19 @@ impl AddressService {
     /// `ValidAddress`, which every store write takes.
     pub async fn validate(&self, input: &AddressInput) -> WriteResult<ValidAddress> {
         let input = model::normalize(input).map_err(WriteError::Invalid)?;
-        location::check(&self.geonames, &input).await?;
+        if input.country_iso.is_some() {
+            let client = self.db.get().await.map_err(Error::from)?;
+            location::check(&**client, &self.geonames, &input).await?;
+        }
+        Ok(ValidAddress(input))
+    }
+    async fn validate_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        input: &AddressInput,
+    ) -> WriteResult<ValidAddress> {
+        let input = model::normalize(input).map_err(WriteError::Invalid)?;
+        location::check(client, &self.geonames, &input).await?;
         Ok(ValidAddress(input))
     }
     /// The location cascade a form runs as values change (see `location`).
@@ -106,7 +118,11 @@ impl AddressService {
         location::suggest(&self.geonames, incoming, previous, previous_auto).await
     }
     pub async fn options(&self, location: &Location) -> Result<Options> {
-        location::options(&self.geonames, location).await
+        if bilibi_geonames::normalize_iso(&location.country_iso).is_none() {
+            return Ok(Options::default());
+        }
+        let client = self.db.get().await?;
+        location::options(&**client, &self.geonames, location).await
     }
 
     pub async fn read(&self, scope: &Scope, id: AddressId) -> Result<Address> {
@@ -120,11 +136,17 @@ impl AddressService {
         let address = store::read(&**client, &scope, id).await?;
         let owners = store::owners(&**client, &scope, id).await?;
         let country_name = match address.address.country_iso.as_deref() {
-            Some(iso) => self.geonames.get_country(iso).await?.map(|c| c.country),
+            Some(iso) => bilibi_geonames::country_summary(&**client, iso)
+                .await?
+                .map(|c| c.country),
             None => None,
         };
         let admin1_name = match address.address.admin1_code.as_deref() {
-            Some(code) => self.geonames.get_admin1(code).await?.map(|a| a.name),
+            Some(code) => self
+                .geonames
+                .get_admin1_on(&**client, code)
+                .await?
+                .map(|a| a.name),
             None => None,
         };
         Ok(Detail {
@@ -171,7 +193,7 @@ impl AddressService {
     /// Installation-locale facts for `Locales::resolve` (see `bootstrap`).
     pub async fn platform_operator_bootstrap(&self) -> Result<Option<Bootstrap>> {
         let client = self.db.get().await?;
-        bootstrap::platform_operator(&**client, &self.geonames).await
+        bootstrap::platform_operator(&**client).await
     }
 
     pub async fn create(&self, scope: &Scope, input: &AddressInput) -> WriteResult<Address> {
@@ -199,7 +221,7 @@ impl AddressService {
             .begin(&mut client, scope.mutation_context("address.update"))
             .await?;
         let scope = self.fresh(tx.sql(), scope).await?;
-        let result = store::update(&mut tx, &scope, id, update.version, &input).await?;
+        let result = store::update(&mut tx, &scope, id, update.version, &input, false).await?;
         tx.commit().await?;
         Ok(result)
     }
@@ -301,7 +323,7 @@ inventory::submit! {
             // Address owns the operator's address facts, so it supplies Locale's
             // installation bootstrap (K15) without Base naming Core.
             services.get::<bilibi_locale::Locales>("base/locale.locales")?
-                .bind_bootstrap(Arc::new(bootstrap::Source(addresses.clone())))?;
+                .bind_bootstrap(Arc::new(bootstrap::Source))?;
             Ok(addresses)
         }}, bilibi_module_registry::Service { id: web::SERVICE, factory: |services| {
             Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, Error>(Arc::new(web::Pages {

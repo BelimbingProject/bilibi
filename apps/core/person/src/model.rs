@@ -8,8 +8,12 @@ use std::{
 use tokio_postgres::Row;
 
 pub const COLUMNS: &str =
-    "id,code,name,kind,email,phone,system_key,retired_at,erased_at,version,created_at,updated_at";
+    "id,code,name,kind,email,phone,system_key,retired_at,erased_at,version,created_at,updated_at,custom_fields";
 pub const CONTACT_FIELDS: &[&str] = &["email", "phone"];
+/// Tenant-defined custom field values by key (`base/custom_fields`): text, a
+/// decimal string, `YYYY-MM-DD`, a pick-list code, an array of codes (several
+/// choices) or a record's id text (a record field).
+pub type Custom = serde_json::Map<String, serde_json::Value>;
 
 /// What this reader may not see of persons: every restricted field, and of
 /// those, the ones it sees masked with their personal kinds (ADR 05).
@@ -44,6 +48,9 @@ pub struct Person {
     pub version: i64,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
+    /// Custom field values by key, archived fields' included; `custom::listed`
+    /// pairs them with the active fields.
+    pub custom: Custom,
     pub restricted: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub masked: Vec<String>,
@@ -67,6 +74,10 @@ impl Person {
             version: row.get("version"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
+            custom: match row.get::<_, serde_json::Value>("custom_fields") {
+                serde_json::Value::Object(map) => map,
+                _ => return Err(Error::Internal),
+            },
             restricted: Vec::new(),
             masked: Vec::new(),
         })
@@ -117,6 +128,13 @@ pub struct FieldError {
 pub(crate) fn error(field: &'static str, message: &'static str) -> FieldError {
     FieldError { field, message }
 }
+/// A refused custom field value: the field as `cf_<key>`, and why, in Base
+/// Custom Fields' words.
+#[derive(Clone, Debug, Serialize)]
+pub struct CustomFieldError {
+    pub field: String,
+    pub message: String,
+}
 pub fn optional(value: &Option<String>) -> Option<String> {
     value
         .as_deref()
@@ -165,12 +183,16 @@ pub fn validate(input: &PersonInput) -> std::result::Result<PersonInput, Vec<Fie
 }
 
 /// Replaces visible identity fields. A masked contact must be absent/null and
-/// is preserved by the owner; a visible null/omitted contact clears its value.
+/// is preserved by the owner; a visible `None` contact clears its value. The
+/// `core.person.update` contract keeps a contact its input omits instead.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Update {
     pub version: i64,
     pub identity: PersonInput,
+    /// Custom field values to set (a `null` clears); the others are kept.
+    #[serde(default, skip_serializing_if = "Custom::is_empty")]
+    pub custom: Custom,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -179,11 +201,26 @@ pub struct Search {
     pub search: String,
     pub kind: Option<PersonKind>,
     pub include_retired: bool,
+    /// A built-in sort, or `cf_<key>` for an active custom field.
     pub sort: String,
     pub descending: bool,
     pub page: i64,
     pub page_size: i64,
+    /// Conditions on custom field values, all of which must hold.
+    pub custom: Vec<CustomFilter>,
 }
+/// One condition on a custom field value: `contains` (text), `eq` (text,
+/// choice code or yes/no), `has` (several choices holding a code), `gte` or
+/// `lte` (number or date). A record field takes none.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomFilter {
+    pub key: String,
+    pub op: String,
+    pub value: String,
+}
+/// The most custom conditions one search takes.
+pub const CUSTOM_FILTERS_MAX: usize = 50;
 impl Default for Search {
     fn default() -> Self {
         Self {
@@ -194,12 +231,17 @@ impl Default for Search {
             descending: false,
             page: 1,
             page_size: 25,
+            custom: Vec::new(),
         }
     }
 }
 impl Search {
+    /// The shape checks; a custom sort or condition is checked against the
+    /// tenant's active fields when the search runs.
     pub(crate) fn check(&self) -> Result<()> {
-        if !["name", "code", "kind", "state", "created_at"].contains(&self.sort.as_str())
+        if !(["name", "code", "kind", "state", "created_at"].contains(&self.sort.as_str())
+            || self.sort.starts_with("cf_") && self.sort.len() <= 43)
+            || self.custom.len() > CUSTOM_FILTERS_MAX
             || self.search.chars().count() > 255
             || self.search.contains('\0')
             || !(1..=1_000_000).contains(&self.page)
@@ -251,4 +293,7 @@ pub struct CreatePreview {
     #[serde(flatten)]
     pub identity: PersonInput,
     pub code: String,
+    /// The custom field values the person would hold.
+    #[serde(skip_serializing_if = "Custom::is_empty")]
+    pub custom: Custom,
 }

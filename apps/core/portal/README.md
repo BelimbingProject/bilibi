@@ -1,44 +1,67 @@
 # Portal
 
-A tenant's customers sign in to its portal (`/portal/...`), never to the staff application ([ADR 16](../../../docs/architecture/decisions/16-customer-accounts-and-portal.md)). This module owns the portal site, the invitations that admit a customer, the requests people make for an account, the staff controls over the accounts invitations made, and the portal's own home and account pages.
+A tenant's customers sign in to its portal (`/portal/...`), never to the staff application ([ADR 16](../../../docs/architecture/decisions/16-customer-accounts-and-portal.md)). The portal lives on the tenant's public site ([`base/public`](../../base/public/README.md): its title, logo, hostnames and whether it is on). This module owns whether the portal takes requests for an account, the invitations that admit a customer, the requests people make for an account, the staff controls over the accounts invitations made, and the portal's own home and account pages.
 
 ## Contract
 
 | Item | Value |
 | --- | --- |
 | Facade | `PortalService`, service `core/portal.access` |
-| Staff page | `/customer-access` (`admin.customer-access.view`; writes need `admin.customer-access.manage`) |
+| Staff page | **Administration → Customer portal** at `/customer-portal` (`admin.portal.view`; writes need `admin.portal.manage`). The site itself is **Administration → Public site** |
 | Portal pages | `/portal` and `/portal/account` (`portal.account.view`) |
-| Portal role | `portal_customer`, given to every customer an invitation admits |
-| Settings | `customer_portal.invitation_days` (tenant, default 7), `customer_portal.registration_days` (installation, default 3) |
-| Tables | `customer_portal_sites`, `customer_invitations`, `customer_registrations`; customer accounts stay in Core User's `users` |
+| Portal role | `portal_customer`, given to every customer an invitation admits: `portal.account.view` and Core Person's `core.person.portal.manage` (the customer's own contact details, [Person](../person/README.md#the-customers-own-details-on-the-portal)) |
+| Settings | `customer_portal.invitation_days` (tenant, default 7), the installation-wide `customer_portal.registration_*` lifetime and abuse limits, and the company retention classes `core/portal.registration_requests` and `core/portal.invitations` |
+| Events | `core/portal.registration_approved` (see Events) |
+| Tables | `customer_portal_options`, `customer_invitations`, `customer_registrations`, `customer_registration_limits`; the site is `base/public`'s `public_sites`; customer accounts stay in Core User's `users` |
 
-## Portal site
+The [capability rename migration](migrations/009-capability-rename.sql) updates the keys in existing role grants, direct principal grants and named system-principal grants. It preserves both allows and denies.
 
-- One per tenant: an **address** (`acme`, lowercase letters, digits and inner hyphens) and a **title**.
-- The address names the tenant before anyone signs in: customers sign in at `/portal/sign-in/{address}`. It is unique across the installation.
-- The title brands the portal's anonymous cards, its layout and its emails.
-- The **logo** is a PNG, JPEG, GIF or WebP image of at most 1 MiB, chosen in the site form (or `logo_asset_id` / `remove_logo` on `core.portal.site.set`, naming an image already stored in Media). It is stored through `Media::put_public_image` on the attachment disk and shows on the anonymous cards and in the portal layout through a short-lived signed Media link (`Media::tenant_stream_url`, the tenant taken from the site record). A replaced logo's file stays in Media until an operator removes it.
-- Changing the address breaks links already emailed.
-- **Off until staff turn it on** (`enabled`, issue 137 behaviour 1). While off, its anonymous pages answer 404 (`portal_site` returns `None`), its signed-in customers' pages, downloads and live socket answer 404 (the host checks `site_of`), and no invitation is sent or redeemed.
+## The portal and its public site
+
+- The portal is on the tenant's public site, one per tenant ([`base/public`](../../base/public/README.md)). Its **hostname** names the tenant before anyone signs in: customers sign in at `/portal/sign-in` on that hostname, and no portal path carries an address.
+- The site's **title** brands the portal's anonymous cards, its layout and its emails; its **logo** shows on the cards and in the layout through a short-lived signed Media link. Staff set both on **Administration → Public site**.
+- **Off until staff turn the public site on.** While off, its anonymous pages answer 404 (the public listener does not resolve its hostname), its signed-in customers' pages, downloads and live socket answer 404, and no invitation is sent or redeemed.
+- The portal's own option is whether it **takes requests for an account** (`customer_portal_options.registration`, off by default), set on this module's staff page or with `core.portal.options.set`.
+
+The walkthrough opens the staff page, saves and reopens the setup form, and verifies that public sign-in remains reachable on the configured hostname. [Site-boundary walkthrough](../../web/examples/site-boundary-walkthrough.rs)
+
+## Welcome notice
+
+The signed-in home page renders `core.portal.welcome_notice` through [Base Templates](../../base/templates/README.md#word-a-portal-notice). The customer's own company or tenant can choose the language and publish wording through the template operations. The text can name the portal and the customer's sign-in address. Administrators inspect, preview and restore published wording on **Administration → Customisations**.
 
 ## Invitations
 
+- Turn the public site on and give it a hostname before inviting customers. Invitation and registration verification links use its primary hostname (`Public::origin`); a customer password reset link uses the hostname the customer asked from.
 - Staff invite a **Person**, optionally through one of its **affiliations** (a business customer, signing in for that company); without one the customer is a private individual.
 - The invite dialog finds the Person by name on the server (`base/records` search, with the actor's permission to see people), so any number of people can be invited. An agent Person is refused: agents act through Agent Access, never the portal.
 - The address must not already belong to a customer of the tenant. Inviting it again revokes the open invitation first.
-- The email carries a one-time link, `/portal/accept/{address}/{token}`. The token is stored hashed and never read back, not even by agents.
+- The email carries a one-time link, `/portal/accept/{token}`, on the site's primary hostname. The token is stored hashed and never read back, not even by agents.
 - Accepting creates the account through Core User (`create_customer_in`, address verified), gives it `portal_customer` through Authz (`assign_portal_role_in`) and closes the invitation, in one transaction audited as `system · portal`. The host then signs the customer in with the password just chosen, through the ordinary portal sign-in; when that cannot finish (a tenant that requires a second step), the customer signs in on the next page.
 - **Resend** sends a new link to an invitation's Person and address through the same contract as a new invitation, which revokes the old link.
 - A Person that retired, an affiliation that ended or a company that was archived since the invitation makes the link invalid.
 
+### Personal data and retention
+
+- `portal.invitation` declares `name` and `email` as personal. Access and portability export every invitation linked to the request's Person, including accepted, revoked and expired invitations, without token digests. Invitations always have a Person; an equal email never discloses an invitation linked to another Person, and unlinked account requests follow the separate registration policy below.
+- Erasure replaces the copied name and email with `[erased]`, revokes any invitation still awaiting acceptance, and clears those fields from earlier audit evidence through Base Privacy. It preserves IDs, Person and registration links, lifecycle times and accepted accounts. A record or Person legal hold keeps the values until release; Base's owed cleanup then retries them. Repeated erasure is a no-op unless personal values were added again.
+- New invitation audit evidence records links and status without copying the name or email.
+- The shared retention class **Customer invitations** anonymises accepted, revoked and expired invitations after the owning company's configured period, measured from the first acceptance, revocation or expiry. Replacing an already expired invitation does not restart its clock. Invitations without a company follow the primary company's settings. Record and Person holds apply. No period or automatic cleanup is enabled by default; an operator sets the period, enables the class and enables the daily Privacy sweep. Active invitations are never eligible merely because they were created long ago.
+
 ## Requests for an account
 
-- **Off until staff turn it on** (`registration` on the site, issue 137 behaviour 7). While off, or while the portal is off, `/portal/register/{address}` and `/portal/verify/...` answer 404 and the sign-in card has no link to them.
-- Someone gives a name, an email and an optional company name. The answer is the same for known and unknown addresses. A live unverified request or one waiting for staff stays unchanged and sends no new mail, even for concurrent requests from different senders; only an expired unverified request is replaced. The existing token remains valid until `customer_portal.registration_days` expires. The tenant/normalized-recipient unique index arbitrates creation in the owner transaction. Requests are also bounded per sender with password recovery (`user.recovery.per_sender_per_minute`).
-- The emailed link (`/portal/verify/{address}/{token}`, hashed, single use) shows a button; pressing it confirms the address, so a mail scanner that opens links confirms nothing. An unconfirmed request expires after `customer_portal.registration_days`; a confirmed one waits.
+- **Off until staff turn it on** (`registration`, issue 137 behaviour 7). While off, or while the public site is off, `/portal/register` and `/portal/verify/...` answer 404 and the sign-in card has no link to them.
+- Someone gives a name, an email and an optional company name. The answer is the same for known and unknown addresses, including when a limit suppresses the request. A live unverified request or one waiting for staff stays unchanged and sends no new mail, even for concurrent requests from different senders; only an expired unverified request is replaced. The existing token remains valid until `customer_portal.registration_days` expires. The tenant/normalized-recipient unique index arbitrates creation in the owner transaction.
+- Registration has its own installation-wide settings for sender, normalized-recipient and tenant-portal limits over rolling one-minute and one-day windows, plus a cap on pending requests. The counters and admission lock are in PostgreSQL, so every application node shares them; registration consumes none of password recovery's budget. The table keeps only tenant-bound one-way subject fingerprints; each admitted request purges up to 100 inactive counter rows older than two days. Reaching the portal-wide rate or pending cap notifies staff who can manage customer access at most once per day. The public response remains the ordinary success response and no mail or registration row is created.
+- The emailed link (`/portal/verify/{token}`, hashed, single use) shows a button; pressing it confirms the address, so a mail scanner that opens links confirms nothing. An unconfirmed request expires after `customer_portal.registration_days`; a confirmed one waits.
 - Nothing is written to Person or Company. Staff **approve** a confirmed request by choosing the Person (matching or creating it first) and, for a business customer, its affiliation: this sends the ordinary invitation with the request's name and confirmed address, through the same checks. **Reject** closes it; the person is not told and may ask again.
 - Each step is audited: the request and its confirmation as `system · portal`, the decision as the staff member.
+
+### Personal data and retention
+
+- A new unconfirmed request writes only its record ID and status to audit; its unverified name, email and company stay in the registration row rather than append-only evidence.
+- `portal.registration` declares `name`, `email` and `company_name` as personal. A confirmed request that matches an email supplied for a data-subject request is a candidate the operator must confirm. Approval links the request to the chosen Person through its invitation, so it is found without an identifier match. Access and portability export confirmed requests; erasure deletes confirmed or linked requests unless a legal hold names the request or Person, and clears their declared fields from audit evidence.
+- Expired unconfirmed requests are deleted by default, with no operator setting: each new registration on the portal's tenant first deletes up to 100 of them (the same address first), except any a legal hold names. Confirmed requests still waiting for staff are not expired.
+- The shared Privacy retention class **Customer account requests** also purges expired unconfirmed requests and approved or rejected requests after the primary company's configured period. As with every privacy class, an operator must set its period, turn it on and enable the daily privacy sweep before that cleanup runs.
 
 ## Portal access panel
 
@@ -48,8 +71,9 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 
 ## Second sign-in step
 
-- A tenant turns on the step-up operation `core.user.portal_sign_in` (default off, on its 2FA requirements page) to ask customers for an authenticator code after the password. The portal sign-in then sends the customer to `/portal/sign-in/{site}/challenge` (the host's page; the pending sign-in is kept in the `bilibi_portal_sign_in` cookie, `Path=/portal/sign-in`), where they start the challenge and enter the code, or cancel. Core User proves the code and admits the session as for staff (`portal_pending_sign_in`, `portal_start_sign_in_challenge`, `portal_complete_sign_in`).
-- A customer sets up the authenticator app on `/portal/account/two-factor` (linked from My account): the staff page's stages (password, QR code and key, first code, move to a new phone) drawn without the settings shell (`bilibi_user::PortalTwoFactor`). A customer who never set one up cannot finish a sign-in while the tenant asks for it; staff reset the factor as for staff.
+- A tenant turns on the step-up operation `core.user.portal_sign_in` (default off, on its 2FA requirements page) to ask customers for an authenticator code after the password. The portal sign-in then sends the customer to `/portal/sign-in/challenge` (the host's page; the pending sign-in is kept in the public host's `__Host-bilibi_portal_sign_in` cookie), where they start the challenge and enter the code, or cancel. Core User proves the code and admits the session as for staff (`portal_pending_sign_in`, `portal_start_sign_in_challenge`, `portal_complete_sign_in`).
+- **Step-up on a portal page.** A portal route wrapped in `Access::StepUp`, or a portal owner's facade that calls `StepUp::require` with the customer's scope, works as on the staff side: the host sends a customer who owes the check to `/portal/account/two-factor/confirm?return=<address>` (`bilibi_user::PortalConfirm`: "Confirm it is you", a code from the authenticator app), which opens the portal session's step-up window and returns to the page. A customer with no authenticator goes to `/portal/account/two-factor?return=<address>` instead, and setting it up returns the same way. `return` is kept only when it is a portal address: a dot segment or an encoded slash is dropped, since it could resolve outside the portal. Whether an operation asks is the tenant's policy on its Step-up 2FA page; a Domain declares the operation and returns `Error::StepUpRequired` unchanged.
+- A customer sets up the authenticator app on `/portal/account/two-factor` (linked from My account): the staff page's stages (password, QR code and key, first code, move to a new phone) drawn without the settings shell (`bilibi_user::PortalTwoFactor`). A customer who never set one up cannot finish a sign-in while the tenant asks for it; after a lost phone, the customer should contact their portal administrator for help.
 
 ## Delivery of the invitation email
 
@@ -59,15 +83,29 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 
 ## Customer accounts
 
-- The staff page lists the tenant's customer accounts (`bilibi_user::customer_accounts`, the one read of `users` that lists customers; staff reads never do).
+- The staff page lists the tenant's customer accounts (`bilibi_user::customer_accounts`, the canonical read of customer accounts). The installation owner can review and reset eligible customer accounts with an open 2FA reset request from **Customer accounts**.
 - **Revoke access** suspends the account through Core User (`set_customer_active_in`): it cannot sign in, fails its standing, and every session it holds ends at once. **Restore** lets it sign in again; no session comes back.
+
+## Events
+
+`core/portal.registration_approved`, version 1, recorded in the approval's transaction when staff approve a request for an account. It is the one fact other modules get about self-registration: a CRM, say, marks the Person as a contact who came in through the portal. A rejected or expired request records nothing.
+
+| Payload | Meaning |
+| --- | --- |
+| `registration` | The request's id |
+| `person` | The Person staff chose, who is now invited |
+| `organisation` | The company of the chosen affiliation, or `null` for an individual customer |
+| `approved_by` | The user id of the staff member who approved it |
+
+- **Subject and key:** subject `portal.registration:<id>`, key `<id>`; a request is approved once.
+- **No personal values:** the payload carries only ids, never the request's name, email or company name, so it declares no personal fields to Base Privacy and erasure has nothing in it to clear.
 
 ## Agent operations
 
 | Key | Kind | Capability |
 | --- | --- | --- |
-| `core.portal.site.get` | read | view |
-| `core.portal.site.set` | safe write | manage |
+| `core.portal.options.get` | read | view |
+| `core.portal.options.set` | safe write | manage |
 | `core.portal.invitation.list` | read | view |
 | `core.portal.invitation.create` | safe write | manage |
 | `core.portal.invitation.revoke` | safe write | manage |
@@ -82,7 +120,7 @@ The staff page writes through the same contracts.
 
 ## What the host does
 
-The host (`apps/web`) serves the credential pages under `/portal` (`sign-in`, `forgot`, `reset`, `accept`, `register`, `verify`) and asks this facade which site an address names (`portal_site`, `registration_site`), whether an invitation or confirmation link is open (`open_invitation`, `verification_open`), and to redeem an invitation (`accept`), take a request (`register`) or confirm one (`verify`).
+The host (`apps/web`) serves the credential pages under `/portal` (`sign-in`, `forgot`, `reset`, `accept`, `register`, `verify`) on the public site its door resolved by hostname, and asks this facade whether that site's portal is on or takes requests (`portal_site`, `registration_site`, each with the site's `PublicScope`), whether an invitation or confirmation link is open (`open_invitation`, `verification_open`), and to redeem an invitation (`accept`), take a request (`register`) or confirm one (`verify`).
 
 ## Not yet
 

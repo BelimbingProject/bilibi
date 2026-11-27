@@ -10,6 +10,6 @@
             <form id="design-library-pattern-search" data-event="pattern-search" data-change class="mb-0">
               {{ self.control("pattern_search")? }}
             </form>
-            {% call ui::card(inner_class="p-0") %}{{ self.card_surface_56()? }}{% endcall %}
-            {% call ui::card(id="component-filter-toolbar", title="Filter toolbar", inner_class="space-y-3 p-3") %}{{ self.card_component_filter_toolbar()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_INDEX_PATTERN.anchor, inner_class="p-0") %}{{ self.card_surface_56()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_FILTER_TOOLBAR.anchor, title=crate::sections::COMPONENT_FILTER_TOOLBAR.title, inner_class="space-y-3 p-3") %}{{ self.card_component_filter_toolbar()? }}{% endcall %}
           </section>

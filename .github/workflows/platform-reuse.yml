@@ -1,0 +1,32 @@
+# Flags added code that looks like what a Base module already does (an
+# approvals table, an HTTP client crate, local time, a timer loop); fails only
+# when the pull request body does not say, under "## Platform reuse", which Base
+# module it used or why none fits (scripts/platform-reuse.py, rules in
+# scripts/platform-reuse.toml). Its own workflow so editing the body re-runs it
+# without compiling. Domains and Extensions run the same script through
+# docs/domain-ci/platform-reuse.yml.
+name: Platform reuse
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-reuse-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  platform-reuse:
+    name: Platform reuse
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: python3 scripts/platform-reuse.py --base "origin/${{ github.base_ref }}"
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}

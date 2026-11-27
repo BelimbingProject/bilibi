@@ -11,13 +11,15 @@ use crate::{
     requests::{self, RequestKind, RequestView, EXPORT_KIND, STORE_KIND, SUBJECT},
     Privacy, AUDIT_MINIMUM,
 };
-use bilibi_audit::Minimums;
+use bilibi_audit::Minimum;
 use bilibi_database::{Change, Db, Error, MutationTransaction, Result};
 use bilibi_party_ids::PersonId;
 use bilibi_personal_data::{
     Cause, Deferral, Erased, Erasure, HandlerFuture, Holds, Kept, KeptReason, KindAction, Progress,
 };
-use bilibi_queue::{Execution, Handler, HandlerFuture as JobFuture, Outcome};
+use bilibi_queue::{
+    Ended, Ending, EndingFuture, Execution, Handler, HandlerFuture as JobFuture, Outcome, State,
+};
 use bilibi_tenancy::Scope;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -88,6 +90,10 @@ pub(crate) struct Answer {
     pub(crate) deferral: Option<Deferral>,
     #[serde(default)]
     pub(crate) records: u64,
+    /// Records matched only by an email or phone given that the operator did
+    /// not confirm, so the store left them alone (#564).
+    #[serde(default)]
+    pub(crate) unconfirmed: i64,
 }
 impl Answer {
     fn add(&mut self, step: &Erased) {
@@ -208,17 +214,16 @@ async fn failed(
 }
 
 impl Privacy {
-    /// Every company's legal minimum for audit evidence in the tenant
-    /// (`privacy.audit.legal_minimum_days`): evidence of a company stays while
-    /// newer than its own minimum, whatever company filed the request, and
-    /// evidence of no company follows the strictest.
-    pub(crate) async fn evidence_minimums(
+    /// The tenant's legal minimum for audit evidence: the strictest company's
+    /// `privacy.audit.legal_minimum_days`. Audit evidence names no company,
+    /// so every row keeps the longest minimum any company of the tenant set.
+    pub(crate) async fn evidence_minimum(
         &self,
         client: &tokio_postgres::Client,
         scope: &Scope,
-    ) -> Result<Minimums> {
-        let mut entries = Vec::new();
-        for (company, value) in self
+    ) -> Result<Minimum> {
+        let mut strictest = None;
+        for (_, value) in self
             .settings
             .company_values(client, scope, AUDIT_MINIMUM)
             .await?
@@ -230,9 +235,9 @@ impl Privacy {
                 .as_i64()
                 .and_then(|days| i32::try_from(days).ok())
                 .ok_or(Error::Invalid)?;
-            entries.push((company, days));
+            strictest = strictest.max(Some(days));
         }
-        Minimums::new(entries)
+        Minimum::new(strictest)
     }
 }
 
@@ -242,11 +247,11 @@ pub(crate) async fn clear_evidence(
     tx: &MutationTransaction<'_>,
     grant: &Erasure,
     step: &mut Erased,
-    minimums: &Minimums,
+    minimum: &Minimum,
 ) -> Result<()> {
     for record in &step.records {
         let cleared =
-            bilibi_audit::erase_record(tx, grant, &record.kind, record.id, record.person, minimums)
+            bilibi_audit::erase_record(tx, grant, &record.kind, record.id, record.person, minimum)
                 .await?;
         if cleared.kept > 0 {
             step.kept.push(Kept {
@@ -274,7 +279,12 @@ async fn answer(
         return Ok(());
     }
     request.confirmed = requests::confirmed(&**client, scope.tenant(), id).await?;
-    let (key, data) = privacy.stores.get(store).ok_or(Error::Conflict)?;
+    let Some((key, data)) = privacy.stores.get(store) else {
+        // The store's module is no longer mounted (#561): it cannot answer,
+        // and waiting for it would strand the request.
+        drop(client);
+        return unmounted(privacy, execution, scope, id, store).await;
+    };
     let subject = requests::subject_for(&request, key);
     let state = client
         .query_opt(
@@ -284,6 +294,12 @@ async fn answer(
         .await?
         .ok_or(Error::NotFound)?;
     let (state, finished): (String, bool) = (state.get(0), state.get(1));
+    // Counted before the store acts, while every match is still there.
+    let left = if state == "pending" {
+        unconfirmed(&mut client, scope, data.handler, &subject).await?
+    } else {
+        0
+    };
     match request.kind {
         RequestKind::Access | RequestKind::Portability => {
             if state != "pending" {
@@ -316,7 +332,7 @@ async fn answer(
             }
             let records = exported.records;
             let files = serde_json::to_value(&exported.files).map_err(|_| Error::Internal)?;
-            let summary = json!({"files": exported.files.len()});
+            let summary = json!({"files": exported.files.len(), "unconfirmed": left});
             let tenant = scope.tenant();
             let answered = tx
                 .mutate(move |sql| {
@@ -361,12 +377,11 @@ async fn answer(
                 privacy
                     .issuer
                     .erasure(scope.tenant(), Cause::Request(id), Some(request.person));
-            let minimums = privacy.evidence_minimums(&client, scope).await?;
+            let minimum = privacy.evidence_minimum(&client, scope).await?;
             if state == "pending" {
-                let holds = Holds::acquire(scope, &grant).await?;
-                let mut tx = execution
-                    .begin(&mut client, "privacy.request.erase")
-                    .await?;
+                let (holds, mut hold_guard) = Holds::acquire(&mut client, scope, &grant).await?;
+                let client = hold_guard.client();
+                let mut tx = execution.begin(client, "privacy.request.erase").await?;
                 let locked = tx
                     .sql()
                     .query_opt(
@@ -381,8 +396,11 @@ async fn answer(
                         .handler
                         .erase(&mut tx, scope, &subject, &grant, &holds)
                         .await?;
-                    clear_evidence(&tx, &grant, &mut erased, &minimums).await?;
-                    let mut answer = Answer::default();
+                    clear_evidence(&tx, &grant, &mut erased, &minimum).await?;
+                    let mut answer = Answer {
+                        unconfirmed: left,
+                        ..Answer::default()
+                    };
                     answer.add(&erased);
                     record_answer(&mut tx, scope, id, key, &answer, false).await?;
                     tx.commit().await?;
@@ -390,24 +408,24 @@ async fn answer(
                     tx.rollback().await?;
                 }
                 // Released only now: the erasure is committed.
-                holds.release().await?;
+                hold_guard.release().await?;
             } else if finished {
                 return Ok(());
             }
-            let holds = Holds::acquire(scope, &grant).await?;
+            let (holds, mut hold_guard) = Holds::acquire(&mut client, scope, &grant).await?;
+            let guarded = hold_guard.client();
             let progress = Steps {
-                db: privacy.db.clone(),
                 execution,
                 scope,
                 id,
                 key,
                 grant: &grant,
-                minimums: &minimums,
+                minimum: &minimum,
             };
             data.handler
-                .after_erase(&mut client, scope, &subject, &grant, &holds, &progress)
+                .after_erase(guarded, scope, &subject, &grant, &holds, &progress)
                 .await?;
-            holds.release().await?;
+            hold_guard.release().await?;
             let mut tx = execution
                 .begin(&mut client, "privacy.request.erase_finished")
                 .await?;
@@ -417,6 +435,73 @@ async fn answer(
             tx.commit().await
         }
     }
+}
+
+/// How many of the store's records matched only an email or phone given and
+/// were not confirmed as the person's when the request was verified.
+async fn unconfirmed(
+    client: &mut tokio_postgres::Client,
+    scope: &Scope,
+    handler: &dyn bilibi_personal_data::Handler,
+    subject: &bilibi_personal_data::Subject,
+) -> Result<i64> {
+    if subject.identifiers.is_empty() {
+        return Ok(0);
+    }
+    let tx = client.transaction().await?;
+    let located = handler.locate(&tx, scope, subject).await?;
+    tx.commit().await?;
+    let matched: i64 = located.kinds.iter().map(|k| k.by_identifier).sum();
+    Ok((matched - subject.confirmed.len() as i64).max(0))
+}
+
+/// Answers a store whose module is no longer mounted as `unmounted`, in its
+/// own transaction, then finishes the request if it was the last.
+async fn unmounted(
+    privacy: &Privacy,
+    execution: &Execution,
+    scope: &Scope,
+    id: i64,
+    store: &str,
+) -> Result<()> {
+    let mut client = privacy.db.get().await?;
+    let mut tx = execution
+        .begin(&mut client, "privacy.request.store_unmounted")
+        .await?;
+    let tenant = scope.tenant();
+    let Some(row) = tx
+        .sql()
+        .query_opt(
+            "SELECT id FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2 AND store=$3 \
+             AND (state='pending' OR NOT finished) FOR UPDATE",
+            &[&tenant, &id, &store],
+        )
+        .await?
+    else {
+        tx.rollback().await?;
+        return Ok(());
+    };
+    let (row, store): (i64, String) = (row.get(0), store.to_owned());
+    tx.mutate(move |sql| {
+        Box::pin(async move {
+            sql.execute(
+                "UPDATE base_privacy_request_stores SET state='unmounted',finished=true,result=coalesce(result,'{}'::jsonb),\
+                 answered_at=coalesce(answered_at,clock_timestamp()),last_error=NULL WHERE id=$1",
+                &[&row],
+            )
+            .await?;
+            let change = Change {
+                kind: STORE_KIND.into(),
+                id: row,
+                old: json!({}),
+                new: json!({"request": id, "store": store, "state": "unmounted"}),
+            };
+            Ok(((), vec![change]))
+        })
+    })
+    .await?;
+    finish_when_done(privacy, &mut tx, scope, id).await?;
+    tx.commit().await
 }
 
 async fn stored_answer(
@@ -442,23 +527,25 @@ async fn stored_answer(
 /// `after_erase` steps, each saved in its own transaction as soon as the
 /// handler reports it, so a retry still counts what earlier attempts did.
 struct Steps<'a> {
-    db: Db,
     execution: &'a Execution,
     scope: &'a Scope,
     id: i64,
     key: &'static str,
     grant: &'a Erasure,
-    minimums: &'a Minimums,
+    minimum: &'a Minimum,
 }
 impl Progress for Steps<'_> {
-    fn record<'a>(&'a self, mut step: Erased) -> HandlerFuture<'a, ()> {
+    fn record<'a>(
+        &'a self,
+        client: &'a mut tokio_postgres::Client,
+        mut step: Erased,
+    ) -> HandlerFuture<'a, ()> {
         Box::pin(async move {
-            let mut client = self.db.get().await?;
             let mut tx = self
                 .execution
-                .begin(&mut client, "privacy.request.erase_step")
+                .begin(client, "privacy.request.erase_step")
                 .await?;
-            clear_evidence(&tx, self.grant, &mut step, self.minimums).await?;
+            clear_evidence(&tx, self.grant, &mut step, self.minimum).await?;
             let mut answer = stored_answer(&tx, self.scope, self.id, self.key).await?;
             answer.add(&step);
             record_answer(&mut tx, self.scope, self.id, self.key, &answer, false).await?;
@@ -527,12 +614,50 @@ async fn finish_when_done(
         .await?
         .get(0);
     if open == 0 {
-        privacy
+        let job = privacy
             .queue
             .enqueue_for(tx, scope, FINISH_WORKER, json!({"request_id": id}))
             .await?;
+        requests::track_finish_job(tx, scope.tenant(), id, job.id()).await?;
     }
     Ok(())
+}
+
+/// Queue's ending hook for both request workers (`bilibi_queue::ENDINGS`):
+/// a store or finish job that ended without finishing (its approver refused,
+/// out of attempts) moves its running request to `failed`, as the monitor
+/// principal, so the request never waits for ever on a job that is gone.
+pub(crate) struct JobEnded {
+    pub(crate) privacy: Arc<Privacy>,
+}
+impl Ending for JobEnded {
+    fn ended<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        job: &'a Ended,
+    ) -> EndingFuture<'a> {
+        Box::pin(async move {
+            let Some(id) = job.args.get("request_id").and_then(Value::as_i64) else {
+                return Ok(());
+            };
+            let store = match job.worker_id.as_str() {
+                STORE_WORKER => job.args.get("store").and_then(Value::as_str),
+                _ => None,
+            };
+            let state = match job.state {
+                State::Discarded => "discarded",
+                _ => "cancelled",
+            };
+            // `cancelled_actor_refused`, `discarded_store_failed`: how the job
+            // ended and its code, within the request's 64-character code.
+            let mut failure = format!("{state}_{}", job.failure_code.as_deref().unwrap_or("ended"));
+            failure.truncate(64);
+            self.privacy
+                .job_ended_in(tx, scope, id, store, job.job_id, &failure)
+                .await
+        })
+    }
 }
 
 pub(crate) struct FinishJob {
@@ -558,11 +683,28 @@ impl Handler for FinishJob {
                 }
                 Err(error) => {
                     // Shown on the request; the queue retries.
-                    let _ = finish_failed(&self.privacy, execution, scope, id, &error).await;
-                    Outcome::Retry("finish_failed")
+                    let code = finish_code(&error);
+                    let _ = finish_failed(&self.privacy, execution, scope, id, code).await;
+                    Outcome::Retry(code)
                 }
             }
         })
+    }
+}
+
+/// Why a finish attempt failed, as the request's `finish_error` and the
+/// job's failure code: a PDF engine the operator fixes in Settings is named.
+fn finish_code(error: &Error) -> &'static str {
+    match error {
+        Error::Invalid => "export_too_large",
+        Error::Refused(reason) if reason == documents::PDF_ENGINE_UNAVAILABLE => {
+            documents::PDF_ENGINE_UNAVAILABLE
+        }
+        Error::Refused(reason) if reason == documents::PDF_RENDER_TIMED_OUT => {
+            documents::PDF_RENDER_TIMED_OUT
+        }
+        Error::Internal | Error::Database(_) | Error::Pool(_) => "finish_failed",
+        error => code(error),
     }
 }
 
@@ -572,13 +714,8 @@ async fn finish_failed(
     execution: &Execution,
     scope: &Scope,
     id: i64,
-    error: &Error,
+    code: &'static str,
 ) -> Result<()> {
-    let code = match error {
-        Error::Invalid => "export_too_large",
-        Error::Internal | Error::Database(_) | Error::Pool(_) => "finish_failed",
-        error => code(error),
-    };
     let mut client = privacy.db.get().await?;
     let mut tx = execution
         .begin(&mut client, "privacy.request.finish_failed")
@@ -608,40 +745,50 @@ async fn finish_failed(
     tx.commit().await
 }
 
-/// Holds the request's finish guard on its own connection; dropping it
+/// Holds the request's finish guard on the working connection; dropping it
 /// without `release` closes the connection, which ends the guard.
-struct FinishGuard(Option<deadpool_postgres::Object>, i64);
+struct FinishGuard(Option<bilibi_database::Connection>, i32);
 impl FinishGuard {
     async fn take(db: &Db, id: i64) -> Result<Self> {
-        let client = db.get().await?;
-        let taken: bool = client
-            .query_one(
-                "SELECT pg_try_advisory_lock($1,$2::bigint::int)",
-                &[&FINISH_GUARD, &(id % i64::from(i32::MAX))],
-            )
+        let key = (id % i64::from(i32::MAX)) as i32;
+        let mut guard = Self(Some(db.get().await?), key);
+        let taken: bool = guard
+            .client()?
+            .query_one("SELECT pg_try_advisory_lock($1,$2)", &[&FINISH_GUARD, &key])
             .await?
             .get(0);
         if !taken {
+            drop(guard.0.take());
             return Err(Error::Conflict);
         }
-        Ok(Self(Some(client), id))
+        Ok(guard)
     }
+
+    fn client(&mut self) -> Result<&mut tokio_postgres::Client> {
+        self.0
+            .as_mut()
+            .map(|client| &mut ***client)
+            .ok_or(Error::Internal)
+    }
+
     async fn release(mut self) -> Result<()> {
-        if let Some(client) = self.0.take() {
-            client
-                .execute(
-                    "SELECT pg_advisory_unlock($1,$2::bigint::int)",
-                    &[&FINISH_GUARD, &(self.1 % i64::from(i32::MAX))],
-                )
-                .await?;
+        let key = self.1;
+        let released: bool = self
+            .client()?
+            .query_one("SELECT pg_advisory_unlock($1,$2)", &[&FINISH_GUARD, &key])
+            .await?
+            .get(0);
+        if !released {
+            return Err(Error::Internal);
         }
+        drop(self.0.take());
         Ok(())
     }
 }
 impl Drop for FinishGuard {
     fn drop(&mut self) {
         if let Some(client) = self.0.take() {
-            drop(deadpool_postgres::Object::take(client));
+            drop(bilibi_database::Connection::take(client));
         }
     }
 }
@@ -659,13 +806,13 @@ async fn finish(
     scope: &Scope,
     id: i64,
 ) -> Result<Finish> {
-    let guard = match FinishGuard::take(&privacy.db, id).await {
+    let mut guard = match FinishGuard::take(&privacy.db, id).await {
         Ok(guard) => guard,
         Err(Error::Conflict) => return Ok(Finish::Busy),
         Err(error) => return Err(error),
     };
-    let mut client = privacy.db.get().await?;
-    let request = privacy.request(&**client, scope, id).await?;
+    let client = guard.client()?;
+    let request = privacy.request(&*client, scope, id).await?;
     if request.status != "running" {
         guard.release().await?;
         return Ok(Finish::Done);
@@ -674,59 +821,73 @@ async fn finish(
         guard.release().await?;
         return Ok(Finish::Busy);
     }
-    requests::eligible(privacy, &**client, scope, request.company).await?;
+    requests::eligible(privacy, &*client, scope, request.company).await?;
     let access = request.kind != RequestKind::Erasure;
-    if access && !current_export(&**client, scope, &request).await? {
+    if access && !current_export(&*client, scope, &request).await? {
         // An erasure of the person was approved since the stores read: read again.
-        restart_export(privacy, execution, scope, &request).await?;
+        restart_export(privacy, client, execution, scope, &request).await?;
         guard.release().await?;
         return Ok(Finish::Done);
     }
-    if request.kind == RequestKind::Erasure {
-        // The person's earlier exports go before their requests forget them,
-        // and before the certificate is filed, so a failing deletion never
-        // files another retained certificate on each retry; deleting an
-        // already deleted one is a no-op, so a retry is safe.
+    // A hold on the person keeps their earlier exports and what their
+    // requests recorded; the owed cleanup forgets them once it is released.
+    // The guard stays until the completion commits.
+    let mut hold_guard = None;
+    let (client, forget) = if access {
+        (client, false)
+    } else {
         let grant =
             privacy
                 .issuer
                 .erasure(scope.tenant(), Cause::Request(id), Some(request.person));
-        documents::delete_exports(privacy, &mut client, scope, &grant, request.person).await?;
-    }
+        let (holds, guard) = Holds::acquire(client, scope, &grant).await?;
+        let guard = hold_guard.insert(guard);
+        let client = guard.client();
+        let forget = holds.person_hold(&*client, &grant).await?.is_none();
+        if forget {
+            documents::delete_exports(privacy, client, scope, &grant, request.person).await?;
+        }
+        (client, forget)
+    };
+    // An earlier attempt may have stored its document and failed before
+    // filing it (#562): its export goes before another is built, so no copy
+    // of the person's data is left unreferenced; its certificate, retained
+    // and complete, is filed instead of rendering another.
     let artifact = match request.kind {
         RequestKind::Access | RequestKind::Portability => match &request.export_artifact {
             Some(id) => id.clone(),
-            None => Box::pin(documents::export(privacy, &mut client, scope, &request)).await?,
+            None => {
+                documents::delete_unfiled_exports(privacy, client, scope, &request).await?;
+                Box::pin(documents::export(privacy, client, scope, &request)).await?
+            }
         },
         RequestKind::Erasure => match &request.certificate_artifact {
             Some(id) => id.clone(),
             None => {
-                Box::pin(documents::certificate(
-                    privacy,
-                    &mut client,
-                    scope,
-                    &request,
-                ))
-                .await?
+                match documents::unfiled_certificate(privacy, &*client, scope, &request).await? {
+                    Some(id) => id,
+                    None => {
+                        Box::pin(documents::certificate(privacy, client, scope, &request)).await?
+                    }
+                }
             }
         },
     };
-    let mut tx = execution
-        .begin(&mut client, "privacy.request.complete")
-        .await?;
+    let mut tx = execution.begin(client, "privacy.request.complete").await?;
     if access {
         // Publication takes turns with erasure approval: check once more
         // under the guard, and never publish what an erasure has overtaken.
         requests::person_guard(tx.sql(), scope.tenant(), request.person, false).await?;
         if !current_export(tx.sql(), scope, &request).await? {
             tx.rollback().await?;
-            documents::discard_export(privacy, &mut client, scope, &request, &artifact).await?;
-            restart_export(privacy, execution, scope, &request).await?;
+            documents::discard_export(privacy, client, scope, &request, &artifact).await?;
+            restart_export(privacy, client, execution, scope, &request).await?;
+            drop(hold_guard);
             guard.release().await?;
             return Ok(Finish::Done);
         }
     }
-    complete(&mut tx, scope, &request, artifact).await?;
+    complete(&mut tx, scope, &request, artifact, forget).await?;
     privacy
         .engine
         .transition_in(
@@ -739,6 +900,10 @@ async fn finish(
         )
         .await?;
     tx.commit().await?;
+    if let Some(hold_guard) = hold_guard.take() {
+        hold_guard.release().await?;
+    }
+    drop(hold_guard);
     guard.release().await?;
     Ok(Finish::Done)
 }
@@ -746,7 +911,8 @@ async fn finish(
 /// Whether every store of the request has its staged export, each read in
 /// the person's current erasure generation, with no erasure of the person
 /// running. A staged export an erasure dropped counts as stale too: an
-/// export is never published with a store missing.
+/// export is never published with a store missing. A store no longer
+/// mounted stages nothing; the export names it.
 async fn current_export(
     sql: &(impl tokio_postgres::GenericClient + Sync),
     scope: &Scope,
@@ -756,45 +922,31 @@ async fn current_export(
         requests::erasure_generation(sql, scope.tenant(), request.person).await?;
     let row = sql
         .query_one(
-            "SELECT (SELECT count(*) FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2), \
+            "SELECT (SELECT count(*) FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2 AND state<>'unmounted'), \
              (SELECT count(*) FROM base_privacy_request_exports WHERE tenant_id=$1 AND request_id=$2 AND generation=$3), \
              (SELECT count(*) FROM base_privacy_request_exports WHERE tenant_id=$1 AND request_id=$2)",
             &[&scope.tenant(), &request.id, &generation],
         )
         .await?;
     let (stores, current, staged): (i64, i64, i64) = (row.get(0), row.get(1), row.get(2));
-    Ok(!erasing && stores > 0 && current == stores && staged == stores)
+    Ok(!erasing && current == stores && staged == stores)
 }
 
 /// Drops the staged exports and asks every store again, in one transaction.
 async fn restart_export(
     privacy: &Privacy,
+    client: &mut tokio_postgres::Client,
     execution: &Execution,
     scope: &Scope,
     request: &RequestView,
 ) -> Result<()> {
-    let mut client = privacy.db.get().await?;
     let mut tx = execution
-        .begin(&mut client, "privacy.request.export_restarted")
+        .begin(client, "privacy.request.export_restarted")
         .await?;
     let (tenant, id) = (scope.tenant(), request.id);
-    tx.mutate(move |sql| {
+    let stores = tx.mutate(move |sql| {
         Box::pin(async move {
-            let mut changes = Vec::new();
-            for row in sql
-                .query(
-                    "DELETE FROM base_privacy_request_exports WHERE tenant_id=$1 AND request_id=$2 RETURNING id,store",
-                    &[&tenant, &id],
-                )
-                .await?
-            {
-                changes.push(Change {
-                    kind: EXPORT_KIND.into(),
-                    id: row.get(0),
-                    old: json!({"request": id, "store": row.get::<_, String>(1), "staged": true}),
-                    new: json!({}),
-                });
-            }
+            let mut changes = requests::drop_staged(sql, tenant, id).await?;
             // A finish error belongs to the export being restarted.
             if let Some(row) = sql
                 .query_opt(
@@ -811,6 +963,7 @@ async fn restart_export(
                     new: json!({"finish_error": null}),
                 });
             }
+            let mut stores = Vec::new();
             for row in sql
                 .query(
                     "UPDATE base_privacy_request_stores SET state='pending',result=NULL,answered_at=NULL,finished=false \
@@ -819,38 +972,45 @@ async fn restart_export(
                 )
                 .await?
             {
+                let store: String = row.get(1);
                 changes.push(Change {
                     kind: STORE_KIND.into(),
                     id: row.get(0),
                     old: json!({"state": "answered"}),
-                    new: json!({"request": id, "store": row.get::<_, String>(1), "state": "pending", "restarted": "an erasure of the person ran since the store read"}),
+                    new: json!({"request": id, "store": store, "state": "pending", "restarted": "an erasure of the person ran since the store read"}),
                 });
+                stores.push(store);
             }
-            Ok(((), changes))
+            Ok((stores, changes))
         })
     })
     .await?;
-    for (key, _, _) in privacy.stores.iter() {
-        privacy
+    // Every row the request has, mounted or not: each pending row needs its
+    // job, or the request would wait for ever.
+    for store in &stores {
+        let job = privacy
             .queue
             .enqueue_for(
                 &mut tx,
                 scope,
                 STORE_WORKER,
-                json!({"request_id": id, "store": key}),
+                json!({"request_id": id, "store": store}),
             )
             .await?;
+        requests::track_store_job(&mut tx, tenant, id, store, job.id()).await?;
     }
     tx.commit().await
 }
 
 /// Files the artifact on the request and drops its staged exports; for an
-/// erasure, every request about the person forgets its personal text.
+/// erasure, every request about the person forgets its personal text unless
+/// `forget` is false (a hold on the person), which leaves the cleanup owed.
 async fn complete(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
     request: &RequestView,
     artifact: String,
+    forget: bool,
 ) -> Result<()> {
     let (tenant, id, person) = (scope.tenant(), request.id, request.person);
     let before = requests::evidence(request);
@@ -870,12 +1030,7 @@ async fn complete(
                 )
                 .await?;
             }
-            let staged = sql
-                .query(
-                    "DELETE FROM base_privacy_request_exports WHERE tenant_id=$1 AND request_id=$2 RETURNING id,store",
-                    &[&tenant, &id],
-                )
-                .await?;
+            let staged = requests::drop_staged(sql, tenant, id).await?;
             let after = requests::load(sql, tenant, id, false).await?;
             let mut changes = vec![Change {
                 kind: requests::REQUEST_KIND.into(),
@@ -883,17 +1038,12 @@ async fn complete(
                 old: before,
                 new: requests::evidence(&after),
             }];
-            for row in staged {
-                changes.push(Change {
-                    kind: EXPORT_KIND.into(),
-                    id: row.get(0),
-                    old: json!({"request": id, "store": row.get::<_, String>(1), "staged": true}),
-                    new: json!({}),
-                });
-            }
+            changes.extend(staged);
             if erasure {
-                changes.extend(requests::forget_person(sql, tenant, person).await?);
-                changes.extend(forget_exports(sql, tenant, person).await?);
+                if forget {
+                    changes.extend(requests::forget_person(sql, tenant, person).await?);
+                    changes.extend(forget_exports(sql, tenant, person).await?);
+                }
                 // A hold or a retention date kept records, or a store deferred:
                 // the cleanup they owe is persisted and retried by the daily
                 // retention run, from the earliest date one ends (at once
@@ -905,10 +1055,10 @@ async fn complete(
                             "INSERT INTO base_privacy_resumptions(tenant_id,request_id,person_id,not_before) \
                              SELECT $1,$2,$3,CASE WHEN bool_or(o.after IS NULL) THEN NULL ELSE min(o.after) END \
                              FROM (SELECT base_privacy_owed_after(s.result) AS after FROM base_privacy_request_stores s \
-                               WHERE s.tenant_id=$1 AND s.request_id=$2 AND {OWING}) o HAVING count(*) > 0 \
+                               WHERE s.tenant_id=$1 AND s.request_id=$2 AND {OWING}) o HAVING count(*) > 0 OR NOT $4 \
                              ON CONFLICT (request_id) DO NOTHING RETURNING id"
                         ),
-                        &[&tenant, &id, &person.get()],
+                        &[&tenant, &id, &person.get(), &forget],
                     )
                     .await?
                 {
@@ -982,7 +1132,7 @@ impl Privacy {
         &self,
         client: &mut tokio_postgres::Client,
         scope: &Scope,
-        minimums: &Minimums,
+        minimum: &Minimum,
     ) -> Result<()> {
         let open: Vec<(i64, i64)> = client
             .query(
@@ -996,7 +1146,7 @@ impl Privacy {
             .collect();
         let mut failed = false;
         for (resumption, request) in open {
-            let outcome = Box::pin(self.resume(client, scope, request, minimums)).await;
+            let outcome = Box::pin(self.resume(client, scope, request, minimum)).await;
             let (result, owed) = match &outcome {
                 Ok(answer) => (
                     serde_json::to_value(answer).map_err(|_| Error::Internal)?,
@@ -1047,7 +1197,7 @@ impl Privacy {
         client: &mut tokio_postgres::Client,
         scope: &Scope,
         id: i64,
-        minimums: &Minimums,
+        minimum: &Minimum,
     ) -> Result<Answer> {
         let tenant = scope.tenant();
         let mut request = requests::load(&*client, tenant, id, false).await?;
@@ -1075,55 +1225,107 @@ impl Privacy {
                 continue;
             }
             let subject = requests::subject_for(&request, key);
-            let holds = Holds::acquire(scope, &grant).await?;
-            let mut tx = self
-                .boundary
-                .begin(client, scope.mutation_context("privacy.request.resume"))
-                .await?;
-            requests::person_guard(tx.sql(), tenant, request.person, true).await?;
-            let mut erased = data
-                .handler
-                .erase(&mut tx, scope, &subject, &grant, &holds)
-                .await?;
-            clear_evidence(&tx, &grant, &mut erased, minimums).await?;
-            tx.commit().await?;
-            holds.release().await?;
+            let (holds, mut hold_guard) = Holds::acquire(client, scope, &grant).await?;
+            let guarded = hold_guard.client();
+            let erased = async {
+                let mut tx = self
+                    .boundary
+                    .begin(guarded, scope.mutation_context("privacy.request.resume"))
+                    .await?;
+                requests::person_guard(tx.sql(), tenant, request.person, true).await?;
+                let mut erased = data
+                    .handler
+                    .erase(&mut tx, scope, &subject, &grant, &holds)
+                    .await?;
+                clear_evidence(&tx, &grant, &mut erased, minimum).await?;
+                count_erasure(&mut tx, tenant, id).await?;
+                tx.commit().await?;
+                Ok::<_, Error>(erased)
+            }
+            .await;
+            hold_guard.release().await?;
+            let erased = erased?;
             answer.lock().map_err(|_| Error::Internal)?.add(&erased);
-            let holds = Holds::acquire(scope, &grant).await?;
+            let (holds, mut hold_guard) = Holds::acquire(client, scope, &grant).await?;
+            let guarded = hold_guard.client();
             let steps = Resumed {
                 privacy: self,
                 scope,
                 grant: &grant,
-                minimums,
+                minimum,
                 answer: &answer,
             };
-            data.handler
-                .after_erase(client, scope, &subject, &grant, &holds, &steps)
-                .await?;
-            holds.release().await?;
+            let cleaned = data
+                .handler
+                .after_erase(guarded, scope, &subject, &grant, &holds, &steps)
+                .await;
+            hold_guard.release().await?;
+            cleaned?;
         }
         // As at the request's completion: what an access request disclosed
         // or staged while records were kept goes too. The person's exports
         // are deleted and every request about them forgets its personal text
-        // (a staged export is then read again).
-        documents::delete_exports(self, client, scope, &grant, request.person).await?;
-        let mut tx = self
-            .boundary
-            .begin(client, scope.mutation_context("privacy.request.resume"))
-            .await?;
-        requests::person_guard(tx.sql(), tenant, request.person, true).await?;
-        let person = request.person;
-        tx.mutate(move |sql| {
-            Box::pin(async move {
-                let mut changes = requests::forget_person(sql, tenant, person).await?;
-                changes.extend(forget_exports(sql, tenant, person).await?);
-                Ok(((), changes))
+        // (a staged export is then read again), unless a hold on the person
+        // still keeps them: the cleanup then stays owed.
+        let (holds, mut hold_guard) = Holds::acquire(client, scope, &grant).await?;
+        let guarded = hold_guard.client();
+        let cleanup = async {
+            if let Some(hold) = holds.person_hold(&*guarded, &grant).await? {
+                return Ok(Some(hold));
+            }
+            documents::delete_exports(self, guarded, scope, &grant, request.person).await?;
+            let mut tx = self
+                .boundary
+                .begin(guarded, scope.mutation_context("privacy.request.resume"))
+                .await?;
+            requests::person_guard(tx.sql(), tenant, request.person, true).await?;
+            let person = request.person;
+            tx.mutate(move |sql| {
+                Box::pin(async move {
+                    let mut changes = requests::forget_person(sql, tenant, person).await?;
+                    changes.extend(forget_exports(sql, tenant, person).await?);
+                    Ok(((), changes))
+                })
             })
-        })
-        .await?;
-        tx.commit().await?;
-        answer.into_inner().map_err(|_| Error::Internal)
+            .await?;
+            tx.commit().await?;
+            Ok::<_, Error>(None)
+        }
+        .await;
+        hold_guard.release().await?;
+        let mut answer = answer.into_inner().map_err(|_| Error::Internal)?;
+        if let Some(hold) = cleanup? {
+            answer
+                .kept
+                .push(Kept::held(requests::REQUEST_KIND, id, hold));
+        }
+        Ok(answer)
     }
+}
+
+/// Counts one more owed-cleanup erasure of the request's person in that
+/// erasure's own transaction, so the person's erasure generation moves with
+/// it and an access read that spans it is read again.
+async fn count_erasure(tx: &mut MutationTransaction<'_>, tenant: i64, request: i64) -> Result<()> {
+    tx.mutate(move |sql| {
+        Box::pin(async move {
+            let row: i64 = sql
+                .query_one(
+                    "UPDATE base_privacy_resumptions SET erasures=erasures+1 WHERE tenant_id=$1 AND request_id=$2 AND done_at IS NULL RETURNING id",
+                    &[&tenant, &request],
+                )
+                .await?
+                .get(0);
+            let change = Change {
+                kind: RESUMPTION_KIND.into(),
+                id: row,
+                old: json!({}),
+                new: json!({"request": request, "erased": true}),
+            };
+            Ok(((), vec![change]))
+        })
+    })
+    .await
 }
 
 /// `after_erase` steps of an owed cleanup, each committed as reported.
@@ -1131,22 +1333,25 @@ struct Resumed<'a> {
     privacy: &'a Privacy,
     scope: &'a Scope,
     grant: &'a Erasure,
-    minimums: &'a Minimums,
+    minimum: &'a Minimum,
     answer: &'a std::sync::Mutex<Answer>,
 }
 impl Progress for Resumed<'_> {
-    fn record<'a>(&'a self, mut step: Erased) -> HandlerFuture<'a, ()> {
+    fn record<'a>(
+        &'a self,
+        client: &'a mut tokio_postgres::Client,
+        mut step: Erased,
+    ) -> HandlerFuture<'a, ()> {
         Box::pin(async move {
-            let mut client = self.privacy.db.get().await?;
             let tx = self
                 .privacy
                 .boundary
                 .begin(
-                    &mut client,
+                    client,
                     self.scope.mutation_context("privacy.request.resume"),
                 )
                 .await?;
-            clear_evidence(&tx, self.grant, &mut step, self.minimums).await?;
+            clear_evidence(&tx, self.grant, &mut step, self.minimum).await?;
             tx.commit().await?;
             self.answer.lock().map_err(|_| Error::Internal)?.add(&step);
             Ok(())

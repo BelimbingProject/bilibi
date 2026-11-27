@@ -6,6 +6,7 @@
 /.local/
 # Local runtime data is not source.
 /data/
+/.oversight-review.*/
 # Python bytecode caches are generated locally.
 __pycache__/
 # Local Amp portals are not source.

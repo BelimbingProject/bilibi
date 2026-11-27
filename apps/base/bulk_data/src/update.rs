@@ -16,6 +16,7 @@
 //! writes a record twice. Cancelling keeps what was written.
 use crate::export::{maybe_stamp, stamp, Failed};
 use crate::import::{bounded, error_of, refusal, text_id};
+use crate::stats::Written;
 use crate::store::instant;
 use crate::{
     mapping::convert, record::Registered, refused, BulkData, Counts, Field, Outcome, WriteError,
@@ -291,6 +292,10 @@ async fn running(tx: &MutationTransaction<'_>, scope: &Scope, id: i64) -> Result
     Ok((row.get::<_, &str>(0) == "running").then(|| row.get(1)))
 }
 
+/// Why an update whose job ended before it found its records did not start.
+const STRANDED: &str =
+    "The update stopped before it changed anything: its job ended first, for instance when your access changed. Start it again.";
+
 /// What the bulk update was asked to take.
 pub(crate) enum Chosen<'a> {
     /// Ticked records, by id.
@@ -451,6 +456,7 @@ impl BulkData {
             .await?;
         let (registered, _) = self.updatable(record_type)?;
         let company = crate::work_company(scope, "update records in bulk")?.get();
+        self.finish_stranded_updates(tx, scope, company).await?;
         let (tenant, user, kind, field) = (
             scope.tenant(),
             scope.user(),
@@ -492,6 +498,74 @@ impl BulkData {
             })
             .await?;
         Ok(run)
+    }
+
+    /// Ends as failed the company's updates whose job Queue ended before
+    /// they had found their records (their person lost access before it ran,
+    /// or every attempt failed): the filter, ticked ids and left-out ids are
+    /// dropped, as a search may quote a person, and each starter is told.
+    /// Queue calls no owner code for such a job, so this runs when the
+    /// company's next update starts, in its audited transaction; a bounded
+    /// batch. An update stopped after it resolved keeps no filter and stays
+    /// as it is, for its person to stop.
+    pub(crate) async fn finish_stranded_updates(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        company: i64,
+    ) -> Result<()> {
+        let tenant = scope.tenant();
+        let resolving = tx
+            .sql()
+            .query(
+                "SELECT id, job_id FROM base_bulk_data_updates WHERE tenant_id=$1 AND company_id=$2 AND state='resolving' AND job_id IS NOT NULL ORDER BY id LIMIT 100",
+                &[&tenant, &company],
+            )
+            .await?;
+        if resolving.is_empty() {
+            return Ok(());
+        }
+        let jobs: Vec<i64> = resolving.iter().map(|row| row.get(1)).collect();
+        let ended: std::collections::HashSet<i64> = bilibi_queue::states(tx.sql(), tenant, &jobs)
+            .await?
+            .into_iter()
+            .filter(|status| status.state.terminal())
+            .map(|status| status.id)
+            .collect();
+        for row in resolving {
+            let (id, job): (i64, i64) = (row.get(0), row.get(1));
+            if !ended.contains(&job) {
+                continue;
+            }
+            // Locked before the audited write, which must change something:
+            // an update its job ended meanwhile is left as it is.
+            let Some(old) = tx.sql().query_opt(&format!("SELECT {COLUMNS} FROM base_bulk_data_updates WHERE tenant_id=$1 AND id=$2 AND state='resolving' FOR UPDATE"), &[&tenant, &id]).await? else {
+                continue;
+            };
+            let old = UpdateRun::from_row(&old)?.evidence();
+            let ended = tx
+                .mutate(move |sql| {
+                    Box::pin(async move {
+                        let row = sql.query_one(&format!("UPDATE base_bulk_data_updates SET state='failed',error=$3,filter=NULL,ids=NULL,except_ids=NULL,finished_at=clock_timestamp(),version=version+1,updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}, started_by"), &[&tenant, &id, &STRANDED]).await?;
+                        let starter: i64 = row.get("started_by");
+                        let run = UpdateRun::from_row(&row)?;
+                        Ok(((starter, run.record_type.clone()), vec![Change { kind: "base/bulk_data.update".into(), id, old, new: run.evidence() }]))
+                    })
+                })
+                .await?;
+            let (starter, record_type) = ended;
+            let notice = Notice::new(format!(
+                "Bulk update of {} did not start",
+                self.label(&record_type).to_lowercase()
+            ))
+            .body(STRANDED)
+            .kind("bulk_data.update")
+            .url(format!("/updates/{id}"));
+            self.notifications
+                .notify(tx, scope, &[starter], &notice)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Checks that the person's update may be stopped.
@@ -683,16 +757,27 @@ impl BulkData {
         let targets = targets(&*client, &scope, id).await?;
         let started = Instant::now();
         let mut next = usize::try_from(run.progress).map_err(|_| Error::Internal)?;
+        let mut written = Written::default();
         while next < targets.len() && started.elapsed() < SLICE {
             let (record, version) = targets[next].clone();
             let row = next as i32 + 1;
             if !self
                 .write_one(
-                    execution, client, &scope, registered, bulk, &fields, &run, row, &record,
+                    execution,
+                    client,
+                    &scope,
+                    registered,
+                    bulk,
+                    &fields,
+                    &run,
+                    row,
+                    &record,
                     version,
+                    &mut written,
                 )
                 .await?
             {
+                written.analyze(client).await;
                 return Ok(());
             }
             next += 1;
@@ -702,6 +787,7 @@ impl BulkData {
             }
         }
         self.wake(scope.tenant(), scope.user());
+        written.analyze(client).await;
         if next < targets.len() {
             self.continue_update(execution, client, &scope, id).await
         } else {
@@ -714,7 +800,7 @@ impl BulkData {
     async fn resolve(
         &self,
         execution: &Execution,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         scope: &Scope,
         registered: &Registered,
         bulk: &crate::BulkUpdate,
@@ -772,6 +858,7 @@ impl BulkData {
                     &run.except,
                     max,
                     Instant::now(),
+                    None,
                 )
                 .await?
             {
@@ -793,7 +880,6 @@ impl BulkData {
     /// One record: its current values read through the owner, then the
     /// owner's update with the resolved version and the result beside it,
     /// in one transaction. False when the update was cancelled or ended.
-    #[allow(clippy::too_many_arguments)]
     async fn write_one(
         &self,
         execution: &Execution,
@@ -806,6 +892,7 @@ impl BulkData {
         row: i32,
         record: &str,
         version: Option<i64>,
+        written: &mut Written,
     ) -> Result<bool> {
         // What the row will do, read before the write's transaction.
         let planned: std::result::Result<Option<Value>, String> = match version {
@@ -815,7 +902,7 @@ impl BulkData {
                 input.insert(bulk.get_id.into(), crate::typed(record));
                 match self
                     .jobs
-                    .read(&*client, execution, bulk.get, &Value::Object(input))
+                    .read(client, execution, bulk.get, &Value::Object(input))
                     .await
                 {
                     Ok(answer) => {
@@ -917,6 +1004,7 @@ impl BulkData {
             })
         })
         .await?;
+        written.add(tx.sql()).await?;
         tx.commit().await?;
         Ok(true)
     }

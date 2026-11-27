@@ -1,8 +1,10 @@
 //! Deterministic Data Mutations fixture for a disposable, migrated
 //! database; no test harness. It inserts one fixed ledger of 40 mutations for
-//! a tenant (default 1) with explicit event times, so the Data Mutations
-//! screen and a record's History disclosure read the same on every run and
-//! against any other implementation fed the same rows:
+//! a tenant (default 1) with explicit event times, the newest at 09:00 UTC
+//! yesterday so the whole ledger is inside the screen's default period (the
+//! last 30 days), so the Data Mutations screen and a record's History
+//! disclosure read the same on every run and against any other
+//! implementation fed the same rows:
 //!
 //!   BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes DATABASE_URL=... \
 //!     cargo run -p bilibi-audit-views --example mutations-fixture [tenant]
@@ -19,7 +21,7 @@
 //! filter returns and the withholding both readers get through `bilibi_audit`
 //! and `bilibi_authz`. Running it twice doubles the ledger (evidence is
 //! append-only); the grants are idempotent.
-use bilibi_audit::{list_mutations, subject_history, MutationQuery, MutationSort};
+use bilibi_audit::{list_mutations, subject_history, MutationQuery};
 use bilibi_database::{pool, Error, Result};
 use bilibi_module_registry::Services;
 use bilibi_tenancy::Authentication;
@@ -285,18 +287,18 @@ async fn main() -> Result<()> {
         .map_err(|_| Error::Invalid)?;
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
-    let client = db.get().await?;
+    let mut client = db.get().await?;
     let rows = ledger();
     let total = rows.len();
     for (n, r) in rows.into_iter().enumerate() {
-        // Newest last: one row per 11 minutes ending on 2026-10-14T09:00:00Z.
+        // Newest last: one row per 11 minutes ending at 09:00 UTC yesterday.
         let age = i32::try_from((total - n) * 11 * 60).map_err(|_| Error::Invalid)?;
         let (subject_name, subject_identifier) =
             r.subject.map_or((None, None), |(n, i)| (Some(n), Some(i)));
         client
             .execute(
                 "INSERT INTO base_audit_mutations(tenant_id,actor_type,actor_id,actor_role,impersonator_id,system_principal,auditable_type,auditable_id,subject_name,subject_identifier,source,event,old_values,new_values,trace_id,occurred_at) \
-                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'2026-10-14T09:00:00Z'::timestamptz - make_interval(secs => $16))",
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,((date_trunc('day', timezone('UTC', now())) - interval '15 hours') AT TIME ZONE 'UTC') - make_interval(secs => $16))",
                 &[&tenant, &r.actor.0, &r.actor.1, &r.role, &r.impersonator, &r.principal, &r.kind, &r.id, &subject_name, &subject_identifier, &r.source, &r.event, &r.old, &r.new, &r.trace, &f64::from(age)],
             )
             .await?;
@@ -387,16 +389,15 @@ async fn main() -> Result<()> {
             },
         ),
         (
-            "sort actor ascending, page 2",
+            "oldest first, page 2",
             MutationQuery {
-                sort: MutationSort::ActorType,
                 descending: false,
                 page: 2,
                 ..MutationQuery::default()
             },
         ),
     ] {
-        let page = list_mutations(&**client, &scope, &query).await?;
+        let page = list_mutations(&mut client, &scope, &query).await?;
         println!(
             "{label}: {} of {} mutations",
             page.entries.len(),

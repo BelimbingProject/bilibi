@@ -16,7 +16,7 @@ pub use queued::{
     validate_args as validate_render_job, CompletionFuture, PdfMode, PdfRenderHandler, PdfRequest,
     QueuedPdfOwner, Rendered, RequestFuture, RENDER_WORKER,
 };
-pub use retention::{PurgeHold, Retention, RetentionEvent};
+pub use retention::{PurgeHold, Retention, RetentionEvent, RetentionStatus};
 
 use bilibi_database::{Change, Db, MutationBoundary, MutationTransaction};
 use bilibi_module_registry::Service;
@@ -25,7 +25,9 @@ use bilibi_personal_data::{Disclosure, Erasure};
 use bilibi_queue::Queue;
 use bilibi_settings::Settings;
 use bilibi_tenancy::{Authentication, ProofClient, ProofFuture, Scope};
-pub use render::{HtmlFuture, HtmlOwner, Served, RENDER_HEADERS, RENDER_ROUTE};
+pub use render::{
+    HtmlFuture, HtmlOwner, InlineDocument, PdfPaper, Served, RENDER_HEADERS, RENDER_ROUTE,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{any::type_name, future::Future, pin::Pin, sync::Arc};
@@ -141,11 +143,19 @@ pub struct Reference {
     pub kind: String,
 }
 /// Select a concrete adapter in trusted server code, never from request input.
-/// Check live company membership/state and current subject permissions on every
-/// callback. Purge has no reference and requires company maintenance authority.
+/// Check live company state and current subject permissions on every callback.
+/// Desk checks apply unless this owner explicitly authorizes cross-desk reads. Purge has no reference and requires company maintenance authority.
 /// Base binds both this stable owner ID and the concrete Rust adapter type.
 pub trait Owner: Send + Sync + 'static {
     fn owner_id(&self) -> &'static str;
+    /// Whether staff reads also require a desk in the filing company.
+    /// Defaults to true. An owner with explicit per-record read grants may
+    /// return false, but must prove the tenant's company and the current
+    /// record grant in `authorize` (and `authorize_all`) on every read.
+    /// This never exempts a create, delete, retain or purge from its desk check.
+    fn read_requires_desk(&self) -> bool {
+        true
+    }
     fn authorize<'a>(
         &'a self,
         client: &'a dyn ProofClient,
@@ -154,6 +164,26 @@ pub trait Owner: Send + Sync + 'static {
         operation: Operation,
         reference: Option<&'a Reference>,
     ) -> ProofFuture<'a, ()>;
+    /// `authorize` for every one of `references` at once, for a batch read
+    /// (`retention_statuses`): refuse the whole set when any one is refused.
+    /// The default asks `authorize` for each; an owner whose rule is a set
+    /// query overrides it so a batch costs a few statements, not a few per file.
+    fn authorize_all<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        company: OrganisationId,
+        operation: Operation,
+        references: &'a [Reference],
+    ) -> ProofFuture<'a, ()> {
+        Box::pin(async move {
+            for reference in references {
+                self.authorize(client, scope, company, operation, Some(reference))
+                    .await?;
+            }
+            Ok(())
+        })
+    }
     /// Whether `subject`, one of this owner's subjects that is not a person ID
     /// (such as a request about a person), names a document of the erasure
     /// grant's own person, so the erasure may delete it in any company of the
@@ -163,6 +193,18 @@ pub trait Owner: Send + Sync + 'static {
         &'a self,
         _client: &'a dyn ProofClient,
         _grant: &'a Erasure,
+        _subject: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
+    /// Whether `subject`, one of this owner's subjects that is not a person
+    /// ID, names a document of the access grant's own person, so the access
+    /// export may read it (`for_disclosure`) in any company of the tenant.
+    /// The same answer as `erasure_subject`, for an access request.
+    fn disclosure_subject<'a>(
+        &'a self,
+        _client: &'a dyn ProofClient,
+        _grant: &'a Disclosure,
         _subject: &'a str,
     ) -> ProofFuture<'a, bool> {
         Box::pin(async { Ok(false) })
@@ -190,7 +232,7 @@ pub struct Metadata {
     pub content_type: String,
     pub byte_size: i64,
     pub sha256: String,
-    /// Set for an ordinary document; a records-grade one has none.
+    /// Set for an ordinary document; a records-grade or kept one has none.
     pub expires_at: Option<String>,
     pub retain_until: Option<String>,
     pub legal_hold_at: Option<String>,
@@ -298,8 +340,10 @@ impl Artifacts {
         }
     }
     /// A facade for one subject's documents under an approved access request
-    /// (ADR 05): `read` needs no owner permission for that subject's documents,
-    /// so a retired record's or another company's documents are still read.
+    /// (ADR 05): `read` needs no owner permission for that subject's documents
+    /// (the grant's person ID under a declared person-keyed kind, or one the
+    /// owner's `disclosure_subject` says is that person's), so a retired
+    /// record's or another company's documents are still read.
     /// Everything else is asked of the owner as usual.
     pub fn for_disclosure<'a, O: Owner>(
         &'a self,
@@ -315,6 +359,27 @@ impl Artifacts {
             company,
             owner,
             grant: Some(Granted::Disclose(grant, subject)),
+        }
+    }
+    /// A facade for a portal customer's reads (ADR 16). A customer reads a
+    /// file the tenant files under its own company, which is never the
+    /// customer's company, so the company check that keeps a business
+    /// customer to its own company's files is not made; `read` alone is
+    /// allowed, and the owner's `authorize` still decides it with the
+    /// customer's live scope (a share it keeps for that customer). Every other
+    /// operation is refused. The read is audited as the customer.
+    pub fn for_portal<'a, O: Owner>(
+        &'a self,
+        portal: &'a bilibi_tenancy::PortalScope,
+        company: OrganisationId,
+        owner: &'a O,
+    ) -> Owned<'a, O> {
+        Owned {
+            store: self,
+            scope: portal.scope(),
+            company,
+            owner,
+            grant: Some(Granted::Portal),
         }
     }
     /// A facade for one subject's documents under an approved erasure (ADR
@@ -446,6 +511,8 @@ impl Artifacts {
 enum Granted<'a> {
     Disclose(&'a Disclosure, &'a str),
     Erase(&'a Erasure, &'a str),
+    /// A portal customer's read: the owner still decides, see `for_portal`.
+    Portal,
 }
 /// Scoped facade; the concrete adapter cannot be swapped by a client string.
 pub struct Owned<'a, O: Owner> {
@@ -547,12 +614,16 @@ impl<O: Owner> Owned<'_, O> {
             }
         };
         let bytes = protected.as_deref().unwrap_or(bytes);
-        let metadata = match options.retention() {
-            Some(retention) => {
+        let metadata = match (options.retention(), options.expiry()) {
+            (Some(retention), _) => {
                 self.put_retained(client, reference, bytes, PDF, retention.clone())
                     .await?
             }
-            None => self.put(client, reference, bytes, PDF).await?,
+            (None, Some(days)) => {
+                self.put_expiring(client, reference, bytes, PDF, days)
+                    .await?
+            }
+            (None, None) => self.put(client, reference, bytes, PDF).await?,
         };
         let produced_at = self.clock(&*client).await?;
         Ok(PdfArtifact::new(
@@ -599,12 +670,34 @@ pub struct Recovery {
     pub purged: Vec<String>,
     pub failed: Vec<(String, Error)>,
 }
+/// What one authorization covers: one reference (none for `Purge`) or a set.
+enum Target<'r> {
+    One(Option<&'r Reference>),
+    All(&'r [Reference]),
+}
 impl<O: Owner> Owned<'_, O> {
     async fn authorize(
         &self,
         client: &(impl GenericClient + Sync),
         operation: Operation,
         reference: Option<&Reference>,
+    ) -> Result<()> {
+        self.admit(client, operation, Target::One(reference)).await
+    }
+    /// One live-account and desk check for the set, then the owner's set rule.
+    async fn authorize_all(
+        &self,
+        client: &(impl GenericClient + Sync),
+        operation: Operation,
+        references: &[Reference],
+    ) -> Result<()> {
+        self.admit(client, operation, Target::All(references)).await
+    }
+    async fn admit(
+        &self,
+        client: &(impl GenericClient + Sync),
+        operation: Operation,
+        target: Target<'_>,
     ) -> Result<()> {
         if !bounded(self.owner.owner_id(), 255) || type_name::<O>().len() > 1024 {
             return Err(Error::Invalid);
@@ -615,15 +708,29 @@ impl<O: Owner> Owned<'_, O> {
             .reprove(client, self.scope)
             .await?;
         // An approved request is the authority for its subject's documents:
-        // the account must still be live, but the owner is not asked.
-        let granted = match (&self.grant, operation, reference) {
-            (Some(Granted::Disclose(grant, subject)), Operation::Read, Some(reference)) => {
-                grant
-                    .check_file_subject(&live, self.owner.owner_id(), subject)
-                    .is_ok()
-                    && reference.subject == *subject
+        // the account must still be live, but the owner is not asked. It
+        // covers one file; a set is always the owner's to decide.
+        let granted = match (&self.grant, operation, &target) {
+            (
+                Some(Granted::Disclose(grant, subject)),
+                Operation::Read,
+                Target::One(Some(reference)),
+            ) => {
+                reference.subject == *subject
+                    && (grant
+                        .check_file_subject(&live, self.owner.owner_id(), subject)
+                        .is_ok()
+                        || (grant.check(&live).is_ok()
+                            && self
+                                .owner
+                                .disclosure_subject(client, grant, subject)
+                                .await?))
             }
-            (Some(Granted::Erase(grant, subject)), Operation::Delete, Some(reference)) => {
+            (
+                Some(Granted::Erase(grant, subject)),
+                Operation::Delete,
+                Target::One(Some(reference)),
+            ) => {
                 reference.subject == *subject
                     && (grant
                         .check_file_subject(&live, self.owner.owner_id(), subject)
@@ -636,19 +743,30 @@ impl<O: Owner> Owned<'_, O> {
         if granted {
             return Ok(());
         }
+        let portal = matches!(self.grant, Some(Granted::Portal));
+        if portal
+            && (operation != Operation::Read
+                || live.actor().kind() != bilibi_tenancy::AccountKind::Customer)
+        {
+            return Err(bilibi_database::Error::Forbidden.into());
+        }
         if live.actor().person() != self.scope.actor().person()
             || live.actor().organisation() != self.scope.actor().organisation()
             || live.actor().affiliation() != self.scope.actor().affiliation()
         {
             return Err(bilibi_database::Error::Forbidden.into());
         }
-        if live.principal().is_none() && live.actor().kind() == bilibi_tenancy::AccountKind::Staff {
+        if live.principal().is_none()
+            && live.actor().kind() == bilibi_tenancy::AccountKind::Staff
+            && (operation != Operation::Read || self.owner.read_requires_desk())
+        {
             self.store
                 .authentication
                 .require_work_company(client, &live, self.company)
                 .await?;
         }
         if live.actor().kind() == bilibi_tenancy::AccountKind::Customer
+            && !portal
             && live
                 .actor()
                 .organisation()
@@ -656,10 +774,60 @@ impl<O: Owner> Owned<'_, O> {
         {
             return Err(bilibi_database::Error::Forbidden.into());
         }
-        self.owner
-            .authorize(client, &live, self.company, operation, reference)
-            .await?;
+        match target {
+            Target::One(reference) => {
+                self.owner
+                    .authorize(client, &live, self.company, operation, reference)
+                    .await?
+            }
+            Target::All(references) => {
+                self.owner
+                    .authorize_all(client, &live, self.company, operation, references)
+                    .await?
+            }
+        }
         Ok(())
+    }
+    /// Refuses with `Retained` or `LegalHold` when any of this owner's
+    /// documents `ids` is still protected, reading on the caller's own
+    /// connection so the check and the owner's write see one state. On the
+    /// owner's mutation transaction pass `lock`: the rows are held `FOR SHARE`,
+    /// so a hold placed meanwhile waits for the owner's commit. An owner calls
+    /// this after authorizing its own records, before it changes or moves
+    /// anything a protected document belongs to; it names no document and
+    /// reads no bytes. Unknown ids are `NotFound`.
+    pub async fn ensure_unprotected(
+        &self,
+        client: &dyn bilibi_tenancy::ReadClient,
+        ids: &[String],
+        lock: bool,
+    ) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let ids = ids.to_vec();
+        let rows = client
+            .query(
+                &format!("SELECT {COLUMNS} FROM base_artifacts WHERE public_id = ANY($1) AND tenant_id=$2 AND company_id=$3 AND owner_id=$4 AND owner_adapter=$5 ORDER BY id{}", if lock { " FOR SHARE" } else { "" }),
+                &[&ids, &self.scope.tenant(), &self.company.get(), &self.owner.owner_id(), &type_name::<O>()],
+            )
+            .await
+            .map_err(Error::from)?;
+        let mut found = 0;
+        for row in rows {
+            let row = stored(row);
+            found += 1;
+            if !row.deleted {
+                if let Some(refusal) = row.refusal() {
+                    return Err(refusal);
+                }
+            }
+        }
+        if found == ids.len() {
+            Ok(())
+        } else {
+            Err(Error::NotFound)
+        }
     }
     async fn fetch(&self, tx: &MutationTransaction<'_>, id: &str) -> Result<Stored> {
         self.find(tx.sql(), id, " FOR UPDATE").await
@@ -881,12 +1049,62 @@ impl<O: Owner> Owned<'_, O> {
     /// before returning any bytes. Never cache this result for another caller.
     pub async fn read(&self, client: &mut Client, id: &str) -> Result<Document> {
         let tx = self.begin(client, "artifacts.read").await?;
+        self.read_in(tx, id, &(), |_, _| Box::pin(async { Ok(()) }))
+            .await
+    }
+
+    pub async fn read_checked<C: Sync>(
+        &self,
+        client: &mut Client,
+        id: &str,
+        context: &C,
+        check: for<'a> fn(
+            &'a C,
+            &'a tokio_postgres::Transaction<'_>,
+        ) -> bilibi_tenancy::ProofFuture<'a, ()>,
+    ) -> Result<Document> {
+        let mut retries_left = 2;
+        loop {
+            let result = async {
+                let tx = self.begin(client, "artifacts.read").await?;
+                tx.sql()
+                    .batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    .await?;
+                self.read_in(tx, id, context, check).await
+            }
+            .await;
+            let serialization_failure = match &result {
+                Err(Error::Database(error)) => error.is_serialization_failure(),
+                Err(Error::Sql(error)) => {
+                    error.code()
+                        == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+                }
+                _ => false,
+            };
+            if !serialization_failure || retries_left == 0 {
+                return result;
+            }
+            retries_left -= 1;
+        }
+    }
+
+    async fn read_in<C: Sync>(
+        &self,
+        tx: MutationTransaction<'_>,
+        id: &str,
+        context: &C,
+        check: for<'a> fn(
+            &'a C,
+            &'a tokio_postgres::Transaction<'_>,
+        ) -> bilibi_tenancy::ProofFuture<'a, ()>,
+    ) -> Result<Document> {
         let row = self.fetch(&tx, id).await?;
         self.authorize(tx.sql(), Operation::Read, Some(&row.metadata.reference))
             .await?;
         if !row.ready || row.deleted || row.expired {
             return Err(Error::NotFound);
         }
+        check(context, tx.sql()).await?;
         let bytes = storage::io(|| storage::read(&row.root, id, row.metadata.byte_size as usize))?;
         if digest(&bytes) != row.metadata.sha256 {
             return Err(Error::Integrity);
@@ -1030,7 +1248,7 @@ inventory::submit! {
     bilibi_module_registry::Module {
         id:"base/artifacts",layer:bilibi_module_registry::Layer::Base,
         dependencies:&["base/audit","base/authz","base/database","base/queue","base/settings","base/tenancy","base/party_ids","base/personal_data"],
-        migrations:&[("base-artifacts-001",include_str!("../migrations/001-artifacts.sql")),("base-artifacts-002",include_str!("../migrations/002-retention.sql"))],
+        migrations:&[("base-artifacts-001",include_str!("../migrations/001-artifacts.sql")),("base-artifacts-002",include_str!("../migrations/002-retention.sql")),("base-artifacts-003-kept",include_str!("../migrations/003-kept.sql"))],
         services:&[Service {id:"base/artifacts.install-policy",factory:|_| Ok(Arc::new(bilibi_database::seeds::SeedService(Arc::new(install::InstallPolicy))))},Service {id:"base/artifacts.store",factory:|services| Ok(Arc::new(Artifacts {
             boundary:services.get("base/database.mutations")?, settings:services.get("base/settings.store")?, authentication:services.get("base/tenancy.authentication")?,
             queue:services.get("base/queue.store")?, db:services.get::<Db>("base/database.pool")?.as_ref().clone(),

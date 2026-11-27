@@ -4,7 +4,10 @@
 //! `core/user.pages`; Web establishes the session before dispatching.
 use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::{
-    contributions::{Access, Embed, EmbedContext, Method, Route, EMBEDS, ROUTES},
+    contributions::{
+        Access, CredentialPath, Embed, EmbedContext, Method, PageSection, Route, CREDENTIAL_PATHS,
+        EMBEDS, PAGE_SECTIONS, ROUTES,
+    },
     Contribution, Provenance,
 };
 use bilibi_settings::{Definition, ScopeKind, Setting, Validator, DEFINITIONS};
@@ -17,6 +20,7 @@ pub const CREATE: &str = "admin.user.create";
 pub const UPDATE: &str = "admin.user.update";
 pub const DELETE: &str = "admin.user.delete";
 pub const INVITE: &str = "admin.user.invite";
+pub use crate::two_factor::recovery::CAPABILITY as RESET_TWO_FACTOR;
 const READ: &[&str] = &[LIST, VIEW];
 const ALL: &[&str] = &[
     LIST,
@@ -25,6 +29,7 @@ const ALL: &[&str] = &[
     UPDATE,
     DELETE,
     INVITE,
+    RESET_TWO_FACTOR,
     crate::sso::config::MANAGE,
 ];
 const fn role(
@@ -43,8 +48,8 @@ const fn role(
 }
 // The two user-management roles, and the tenant owner's share.
 inventory::submit! { Contribution::new(VOCABULARY, "core/user", Provenance { module: "core/user", source: file!(), line: line!() }, &VocabularyContribution {
-    domains: &[], verbs: &["invite"],
-    capabilities: &[C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(DELETE), C::tenant(INVITE),C::tenant(crate::sso::config::MANAGE)],
+    domains: &[], verbs: &["invite", "two-factor-reset"],
+    capabilities: &[C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(DELETE), C::tenant(INVITE), C::tenant(RESET_TWO_FACTOR), C::platform(crate::reset::MANAGE_LIFETIME), C::tenant(crate::sso::config::MANAGE)],
     roles: &[
         role("user_viewer", "User Viewer", "Read-only access to user management.", READ),
         role("user_editor", "User Editor", "Read-write access to user management.", ALL),
@@ -52,6 +57,10 @@ inventory::submit! { Contribution::new(VOCABULARY, "core/user", Provenance { mod
     ],
     system_principals: &[],
 }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.reset-password", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/reset-password/{token}" }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.accept-invitation", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/accept/{token}" }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.resend-invitation", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/accept/{token}/resend" }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.portal-reset-password", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/portal/reset/{token}" }) }
 
 // The `admin.user` menu entry for the tenant-wide `/users` index.
 bilibi_menu::contribute!(
@@ -71,27 +80,19 @@ static GRID: bilibi_grid::GridContribution = bilibi_grid::GridContribution {
     tables: &[bilibi_grid::TableDecl::new("users", "Users", LIST,
         bilibi_grid::Source::tenant("SELECT u.id,u.name,i.email,i.email_verified_at,u.created_at,u.updated_at,u.person_id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.deleted_at IS NULL AND u.kind='staff'"), "id", &[
             bilibi_grid::Field::new("id", "ID", bilibi_grid::FieldType::Integer),
-            bilibi_grid::Field::new("name", "Name", bilibi_grid::FieldType::String),
-            bilibi_grid::Field::new("email", "Email", bilibi_grid::FieldType::String),
-            bilibi_grid::Field::new("email_verified_at", "Email verified", bilibi_grid::FieldType::DateTime),
-            bilibi_grid::Field::new("created_at", "Created", bilibi_grid::FieldType::DateTime),
-            bilibi_grid::Field::new("updated_at", "Updated", bilibi_grid::FieldType::DateTime),
-            bilibi_grid::Field::new("person_id", "Person", bilibi_grid::FieldType::Integer).hidden(),
-        ]).label_field("name").time_field("created_at").record_types(&["user"])],
+            bilibi_grid::Field::record(crate::record_fields::NAME),
+            bilibi_grid::Field::record(crate::record_fields::EMAIL),
+            bilibi_grid::Field::record(crate::record_fields::EMAIL_VERIFIED_AT),
+            bilibi_grid::Field::record(crate::record_fields::CREATED_AT),
+            bilibi_grid::Field::record(crate::record_fields::UPDATED_AT),
+            bilibi_grid::Field::record(crate::record_fields::PERSON_ID).hidden(),
+        ]).label_field("name").time_field("created_at").record_types(&["user"]).list_address("/users")],
     links: &[
         bilibi_grid::LinkDecl::on("person", "Person", bilibi_grid::LinkKind::One, "users", "person_id", "persons", "id"),
         bilibi_grid::LinkDecl::on("accounts", "Accounts", bilibi_grid::LinkKind::Many, "persons", "id", "users", "person_id"),
     ],
 };
 bilibi_grid::contribute!("core/user", "user.grid", &GRID);
-
-// The account administration pages. The tenant-wide `/users` index lives in
-// `crate::administration`; these are the create form and read-first detail page.
-inventory::submit! {
-    Contribution::new(ROUTES, "core/user.create", Provenance { module: "core/user", source: file!(), line: line!() }, &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
-        method: Method::Get, path: "/users/new", service: "core/user.pages", operation: "create", access: Access::Capability(CREATE), framed: true,
-    })
-}
 
 fn profile_image_accepts(value: &serde_json::Value) -> bool {
     value.is_null()
@@ -133,7 +134,12 @@ inventory::submit! {
 // The signed-in account's own name, email and landing page; the session alone names the account.
 inventory::submit! {
     Contribution::new(ROUTES, "core/user.settings.profile", Provenance { module: "core/user", source: file!(), line: line!() }, &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
-        method: Method::Get, path: "/settings/profile", service: "core/user.pages", operation: "profile", access: Access::SignedIn, framed: true,
+        method: Method::Get, path: "/settings/profile", service: crate::account_ui::PROFILE_SERVICE, operation: "profile", access: Access::SignedIn, framed: true,
+    })
+}
+inventory::submit! {
+    Contribution::new(ROUTES, "core/user.settings.ownership", Provenance { module: "core/user", source: file!(), line: line!() }, &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+        method: Method::Get, path: "/settings/ownership", service: "core/user.pages", operation: "ownership", access: Access::SignedIn, framed: true,
     })
 }
 // `ui.landing_menu_id`: the menu page a sign-in opens, at the
@@ -278,4 +284,52 @@ embed!(
     },
     "person_desks",
     Access::Capability(bilibi_company::VIEW)
+);
+
+macro_rules! settings_section {
+    ($name:ident, $tab:literal, $anchor:literal, $title:literal $(, $keyword:literal)*) => {
+        pub(crate) const $name: PageSection = PageSection {
+            route: concat!("core/user.settings.", $tab),
+            title: $title,
+            anchor: $anchor,
+            keywords: &[$($keyword),*],
+            query: None,
+        };
+        inventory::submit! {
+            Contribution::new(PAGE_SECTIONS, concat!("core/user.", $anchor), Provenance {
+                module: "core/user", source: file!(), line: line!()
+            }, &$name)
+        }
+    };
+}
+
+settings_section!(
+    PROFILE_PICTURE,
+    "profile",
+    "profile-picture",
+    "Profile picture",
+    "avatar",
+    "photo"
+);
+settings_section!(
+    PROFILE_DETAILS,
+    "profile",
+    "profile-details",
+    "Profile details",
+    "name",
+    "email"
+);
+settings_section!(
+    LANGUAGE,
+    "appearance",
+    "appearance-locale",
+    "Language and region",
+    "locale"
+);
+settings_section!(
+    TIME_ZONE,
+    "appearance",
+    "appearance-timezone-mode",
+    "Time zone display",
+    "timezone"
 );

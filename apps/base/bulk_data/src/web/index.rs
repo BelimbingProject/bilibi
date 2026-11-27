@@ -33,7 +33,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
     .expect("import list spec")
 });
 
-fn builtins() -> Vec<BuiltinColumn> {
+fn builtins(actions: bool) -> Vec<BuiltinColumn> {
     let number = |key: &str, label: &str| {
         let mut column = BuiltinColumn::new(key, label);
         column.kind = ColumnType::Integer;
@@ -41,17 +41,23 @@ fn builtins() -> Vec<BuiltinColumn> {
     };
     let mut started = BuiltinColumn::new("started", "Started");
     started.kind = ColumnType::Datetime;
-    vec![
+    let mut columns = vec![
         BuiltinColumn::new("file", "File"),
         BuiltinColumn::new("type", "Records"),
         BuiltinColumn::new("state", "Status"),
         number("rows", "Rows"),
         number("created", "Created"),
         number("updated", "Updated"),
+    ];
+    if actions {
+        columns.push(number("actions", "Actions completed"));
+    }
+    columns.extend([
         number("skipped", "Skipped"),
         number("errors", "Not imported"),
         started,
-    ]
+    ]);
+    columns
 }
 
 fn export_builtins() -> Vec<BuiltinColumn> {
@@ -99,10 +105,12 @@ pub(super) struct Index {
 
 impl Index {
     pub(super) fn new(pages: Pages, query: &HashMap<String, String>, framed: bool) -> Result<Self> {
+        let actions = pages.bulk.any_reports_actions();
         Ok(Self {
             pages,
             state: ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?,
-            columns: ListColumns::mount("imports", builtins()).map_err(|_| Error::Internal)?,
+            columns: ListColumns::mount("imports", builtins(actions))
+                .map_err(|_| Error::Internal)?,
             export_columns: ListColumns::mount("exports", export_builtins())
                 .map_err(|_| Error::Internal)?,
             update_columns: ListColumns::mount("bulk-updates", update_builtins())
@@ -115,7 +123,7 @@ impl Index {
 
     pub(super) async fn render(&mut self, scope: &Scope) -> Result<String> {
         let pages = self.pages.clone();
-        let object = pages.db.get().await?;
+        let mut object = pages.db.get().await?;
         let client: &tokio_postgres::Client = &object;
         let display = pages.display(client, scope).await?;
         let may_create = effective_capabilities(client, scope)
@@ -126,8 +134,8 @@ impl Index {
             .bulk
             .runs(client, scope, self.state.offset() as i64, size)
             .await?;
-        let exports = pages.bulk.exports(client, scope, RECENT).await?;
         let updates = pages.bulk.updates(client, scope, RECENT).await?;
+        let exports = pages.bulk.exports(&mut object, scope, RECENT).await?;
         drop(object);
         if self.rows_changed {
             self.columns.load(&runs, |run: &Run| run.id.to_string());
@@ -183,6 +191,14 @@ impl Index {
                 .slot("rows", Html::text(&run.row_count.to_string()))
                 .slot("created", count(counts.create))
                 .slot("updated", count(counts.update))
+                .slot(
+                    "actions",
+                    if pages.bulk.reports_actions(&run.record_type) || counts.action > 0 {
+                        count(counts.action)
+                    } else {
+                        Html::text("—")
+                    },
+                )
                 .slot("skipped", count(counts.skip))
                 .slot("errors", count(counts.error))
                 .slot("started", when(&display, &started_id, run.created_at)?);
@@ -364,14 +380,20 @@ impl LiveState<Scope, Error> for Index {
                     let get = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
                     match get("type").ok_or(Error::Invalid)? {
                         "page" => self.state.put_page(get("page")),
-                        "grid" => match self.columns.handle(&params::string_values(value)) {
+                        "grid" => match self.columns.handle(
+                            &params::string_values_checked(value, params::FIELD_LIMIT)
+                                .map_err(Error::refused)?,
+                        ) {
                             ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                             ColumnsOutcome::Update | ColumnsOutcome::Noop => {
                                 self.rows_changed = false
                             }
                         },
                         "exports-grid" => {
-                            match self.export_columns.handle(&params::string_values(value)) {
+                            match self.export_columns.handle(
+                                &params::string_values_checked(value, params::FIELD_LIMIT)
+                                    .map_err(Error::refused)?,
+                            ) {
                                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                                 ColumnsOutcome::Update | ColumnsOutcome::Noop => {
                                     self.rows_changed = false
@@ -379,7 +401,10 @@ impl LiveState<Scope, Error> for Index {
                             }
                         }
                         "updates-grid" => {
-                            match self.update_columns.handle(&params::string_values(value)) {
+                            match self.update_columns.handle(
+                                &params::string_values_checked(value, params::FIELD_LIMIT)
+                                    .map_err(Error::refused)?,
+                            ) {
                                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                                 ColumnsOutcome::Update | ColumnsOutcome::Noop => {
                                     self.rows_changed = false

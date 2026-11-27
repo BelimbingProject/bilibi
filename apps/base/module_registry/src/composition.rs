@@ -2,6 +2,30 @@
 //! Bilibi-specific version contract (docs/versions.md).
 use crate::Layer;
 
+/// Who reviewed the code carried by a composed Extension (ADR 28).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionCode {
+    /// Platform or installation-operator reviewed code, admitted everywhere.
+    Reviewed,
+    /// Customer-supplied code, admitted only by an isolated installation.
+    Customer,
+}
+impl ExtensionCode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "reviewed" => Some(Self::Reviewed),
+            "customer" => Some(Self::Customer),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reviewed => "reviewed",
+            Self::Customer => "customer",
+        }
+    }
+}
+
 /// Whether the mounted Domains and Extensions were pinned when this program was built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PinState {
@@ -22,8 +46,14 @@ pub struct Container {
     /// Its module IDs, `finance/ledger`.
     pub modules: Vec<&'static str>,
     pub commit: Option<&'static str>,
+    /// UTC offset timestamp of the commit, when known.
+    pub committed_at: Option<&'static str>,
     /// The release the container is at, `0.1.0`; `None` when unpinned or built from an untagged commit.
     pub version: Option<&'static str>,
+    /// Source branch captured at build time, when known.
+    pub branch: Option<&'static str>,
+    /// Extensions declare reviewed or customer code; Domains have no value.
+    pub extension_code: Option<ExtensionCode>,
 }
 
 /// The whole program's make-up.
@@ -38,6 +68,10 @@ pub struct Composition {
     pub containers: Vec<Container>,
 }
 impl Composition {
+    pub fn validate_installation_mode(&self, mode: &str) -> crate::Result<()> {
+        validate_admission(mode, self.customer_extensions())
+    }
+
     /// `true` when this build is exactly the release `v<version>`.
     pub fn released(&self) -> bool {
         self.tag.is_some()
@@ -46,12 +80,58 @@ impl Composition {
     pub fn short_commit(&self) -> Option<&'static str> {
         self.commit.map(short)
     }
+    /// Customer-code Extensions compiled into this program.
+    pub fn customer_extensions(&self) -> Vec<&'static str> {
+        self.containers
+            .iter()
+            .filter(|container| container.extension_code == Some(ExtensionCode::Customer))
+            .map(|container| container.id)
+            .collect()
+    }
 }
 impl Container {
+    pub fn display_name(&self) -> String {
+        let name = self.id.replace('_', " ");
+        let mut chars = name.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+            .unwrap_or_default()
+    }
+    pub fn build_label(&self) -> String {
+        if let Some(version) = self.version {
+            return format!("v{version}");
+        }
+        let Some(commit) = self.commit else {
+            return "Version unavailable".to_owned();
+        };
+        let short = commit.get(..7).unwrap_or(commit);
+        self.branch
+            .map_or_else(|| short.to_owned(), |branch| format!("{branch} {short}"))
+    }
     pub fn short_commit(&self) -> Option<&'static str> {
         self.commit.map(short)
     }
 }
 fn short(commit: &'static str) -> &'static str {
     commit.get(..12).unwrap_or(commit)
+}
+
+pub(super) fn validate_admission<'a>(
+    mode: &str,
+    customers: impl IntoIterator<Item = &'a str>,
+) -> crate::Result<()> {
+    if !matches!(mode, "shared" | "isolated") {
+        return Err(crate::RegistryError::Graph(
+            "Invalid installation.mode".into(),
+        ));
+    }
+    if mode == "shared" {
+        if let Some(id) = customers.into_iter().next() {
+            return Err(crate::RegistryError::Graph(format!(
+                "Extension {id} requires an isolated installation; use an isolated installation, or prepare a code-free release"
+            )));
+        }
+    }
+    Ok(())
 }

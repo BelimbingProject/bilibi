@@ -4,7 +4,8 @@
 //! subject in recording order, up to this event, one transaction each: lock
 //! the delivery row, run the subscriber, set the receipt, audit, commit. A
 //! refusal stops that subscriber's walk (later events of the subject wait) and
-//! the job retries with the queue's backoff; other subscribers carry on.
+//! the job retries with the queue's backoff; other subscribers carry on. Each
+//! receipt also moves the subscriber's watermark forward (`watermark`).
 use crate::{Event, Events, Subscriber};
 use bilibi_database::{Change, Error, Result};
 use bilibi_queue::{Execution, Handler, HandlerFuture, Identity, Outcome};
@@ -84,7 +85,7 @@ enum Step {
     Done,
     Refused(i64, &'static str),
 }
-const PENDING: &str = "SELECT e.id,e.name,e.version,e.event_key,e.payload,e.recorded_at::text,d.attempts FROM base_events_deliveries d JOIN base_events e ON e.id=d.event_id WHERE d.subscriber=$1 AND d.delivered_at IS NULL AND e.tenant_id=$2 AND e.publisher=$3 AND e.subject=$4 ORDER BY e.id LIMIT 1";
+const PENDING: &str = "SELECT e.id,e.name,e.version,e.event_key,e.payload,e.recorded_at::text,d.attempts,e.cause FROM base_events_deliveries d JOIN base_events e ON e.id=d.event_id WHERE d.subscriber=$1 AND d.delivered_at IS NULL AND e.tenant_id=$2 AND e.publisher=$3 AND e.subject=$4 ORDER BY e.id LIMIT 1";
 
 async fn walk(
     events: &Arc<Events>,
@@ -186,6 +187,7 @@ async fn next(
         recorded_at: row.get(5),
         subject: subject.to_owned(),
         attempt: row.get::<_, i32>(6) + 1,
+        cause: row.get(7),
     };
     let reads = subscriber
         .events
@@ -196,25 +198,33 @@ async fn next(
         return Ok(Step::Refused(id, "unsupported_event_version"));
     }
     let handler = subscriber.handler;
+    let names: Vec<&'static str> = subscriber.events.iter().map(|on| on.event).collect();
     let result = tx
         .mutate(move |sql| {
             Box::pin(async move {
                 let mut changes = handler.handle(sql, &scope, &event).await?;
+                let handoff = handler.handoff(&event, &changes);
                 sql.execute(
                     "UPDATE base_events_deliveries SET attempts=attempts+1,last_error=NULL,delivered_at=clock_timestamp() WHERE event_id=$1 AND subscriber=$2",
                     &[&id, &key],
                 )
                 .await?;
+                // With the receipt: the missed count starts at the watermark.
+                crate::watermark::advance(sql, event.tenant, key, &names).await?;
                 changes.push(Change {
                     kind: "base/events.delivery".into(),
                     id,
                     old: Value::Null,
                     new: json!({"subscriber": key, "event_key": event.key}),
                 });
-                Ok(((), changes))
+                Ok((handoff, changes))
             })
         })
         .await;
+    let result = match result {
+        Ok(Some(handoff)) => hand_off(events, &mut tx, key, handoff).await,
+        other => other.map(|_| ()),
+    };
     match result {
         Ok(()) => {
             tx.commit().await?;
@@ -225,6 +235,32 @@ async fn next(
             Ok(Step::Refused(id, code(&error)))
         }
     }
+}
+/// Enqueues a subscriber's [`Handoff`] in the delivery transaction: its own
+/// module's worker, as a named principal, so the job commits with the receipt.
+async fn hand_off(
+    events: &Events,
+    tx: &mut bilibi_database::MutationTransaction<'_>,
+    subscriber: &str,
+    handoff: crate::Handoff,
+) -> Result<()> {
+    let module = subscriber.rsplit_once('.').map_or("", |(module, _)| module);
+    if events.queue.workers().get(handoff.worker)?.module != module
+        || bilibi_authz::vocabulary()?.principal_module(handoff.principal) != Some(module)
+    {
+        return Err(Error::Forbidden);
+    }
+    let scope = bilibi_authz::SystemScope::rehydrate(
+        tx.sql(),
+        tx.context().tenant,
+        Some(handoff.principal),
+    )
+    .await?;
+    events
+        .queue
+        .enqueue_system_within(tx, &scope, handoff.worker, handoff.args)
+        .await
+        .map(|_| ())
 }
 /// Bounded failure codes; a subscriber's messages and SQL are never stored.
 fn code(error: &Error) -> &'static str {

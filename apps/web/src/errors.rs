@@ -146,13 +146,13 @@ fn bare(response: &Response) -> bool {
 }
 
 /// A referrer that is a credential link loses its token and its query.
-fn redacted_referer(value: &str) -> String {
+fn redacted_referer(app: &App, value: &str) -> String {
     match value.parse::<Uri>() {
-        Ok(uri) if crate::credential_path(uri.path()) => format!(
+        Ok(uri) if crate::credential_path(&app.credential_paths, uri.path()) => format!(
             "{}://{}{}",
             uri.scheme_str().unwrap_or("http"),
             uri.authority().map_or("", |authority| authority.as_str()),
-            crate::redacted(uri.path())
+            crate::redacted(&app.credential_paths, uri.path())
         ),
         _ => value.to_owned(),
     }
@@ -161,7 +161,7 @@ fn redacted_referer(value: &str) -> String {
 fn describe(app: &App, seen: &Seen) -> DebugReport {
     // A credential link's token, and the address its query carries, stay
     // out of the report (`crate::redacted`).
-    let credential = crate::credential_path(seen.uri.path());
+    let credential = crate::credential_path(&app.credential_paths, seen.uri.path());
     let query = axum::extract::Query::<Vec<(String, String)>>::try_from_uri(&seen.uri)
         .map(|query| query.0)
         .unwrap_or_default()
@@ -210,6 +210,11 @@ fn describe(app: &App, seen: &Seen) -> DebugReport {
                 route.push(("Download operation".into(), bound.download.operation.into()));
                 route.push(("Download service".into(), bound.download.service.into()));
                 route.push(("Access".into(), format!("{:?}", bound.download.access)));
+            } else if let Some((kind, operation, service)) =
+                app.public_routes.describe(pattern, seen.method.as_str())
+            {
+                route.push((format!("Public {kind} operation"), operation.into()));
+                route.push((format!("Public {kind} service"), service.into()));
             }
         }
         None => route.push(("Matched route".into(), "none (router fallback)".into())),
@@ -219,7 +224,7 @@ fn describe(app: &App, seen: &Seen) -> DebugReport {
         .filter_map(|name| {
             let value = seen.headers.get(*name)?.to_str().ok()?;
             let value = if *name == "referer" {
-                redacted_referer(value)
+                redacted_referer(app, value)
             } else {
                 value.to_owned()
             };
@@ -228,7 +233,7 @@ fn describe(app: &App, seen: &Seen) -> DebugReport {
         .collect();
     DebugReport {
         method: seen.method.to_string(),
-        path: crate::redacted(seen.uri.path()).into_owned(),
+        path: crate::redacted(&app.credential_paths, seen.uri.path()).into_owned(),
         query,
         params,
         headers,
@@ -253,7 +258,20 @@ pub async fn pages(
     };
     // A panicking handler would drop the connection, which the proxy reports
     // as an outage; run it as its own task so the visitor gets a 500 instead.
-    let response = match tokio::spawn(next.run(request)).await {
+    // The handler runs in a task of its own so a panic becomes an error page;
+    // the public site the door resolved goes with it.
+    let site = crate::public::PUBLIC_SITE.try_with(Clone::clone).ok();
+    let handled = async move {
+        match site {
+            Some(site) => {
+                crate::public::PUBLIC_SITE
+                    .scope(site, next.run(request))
+                    .await
+            }
+            None => next.run(request).await,
+        }
+    };
+    let response = match tokio::spawn(handled).await {
         Ok(response) => response,
         Err(join) => {
             let mut response = Response::new(Body::empty());
@@ -293,7 +311,7 @@ pub async fn pages(
         // A customer never sees the staff application's way back (ADR 16).
         bilibi_ui::portal_error_document(status.as_u16())
     } else {
-        bilibi_ui::error_document(status.as_u16())
+        bilibi_ui::error_document(status.as_u16(), &app.branding.current().await)
     };
     let Ok(document) = document else {
         return response;

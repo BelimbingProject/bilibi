@@ -194,6 +194,9 @@ impl PageContracts {
         let Some(writes) = self.writes.get(service) else {
             return Permit::Contracts(Vec::new());
         };
+        if matches!(writes.pending, Pending::Events { events, .. } if events.contains(&event)) {
+            return Permit::Pending;
+        }
         let contracts: Vec<_> = writes
             .contracts
             .iter()
@@ -205,7 +208,6 @@ impl PageContracts {
         }
         match writes.pending {
             Pending::Every { .. } => Permit::Pending,
-            Pending::Events { events, .. } if events.contains(&event) => Permit::Pending,
             _ => Permit::Contracts(Vec::new()),
         }
     }
@@ -223,7 +225,15 @@ impl PageContracts {
     pub async fn submit(&self, call: &Call<'_>, input: Value) -> Result<Value> {
         let op = self.declared(call, input)?;
         let session = self.session(call);
-        page_write::contract(call.contract, self.plans.submit(call.scope, &session, &op)).await
+        let result =
+            page_write::contract(call.contract, self.plans.submit(call.scope, &session, &op)).await;
+        if matches!(
+            result,
+            Err(crate::Error::Backend(bilibi_database::Error::Conflict))
+        ) {
+            bilibi_ui::inline::InlineRead::mark_stale();
+        }
+        result
     }
 
     /// The review half of a confirmation: the owner's dry-run preview. The

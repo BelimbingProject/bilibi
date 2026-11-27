@@ -4,9 +4,10 @@ mod admin;
 mod oversight;
 mod party_identity;
 pub use admin::{
-    platform_operator, provision_platform_operator, provision_tenant, CreateOutcome, CreatedTenant,
-    NewTenant, TenantErrors, TenantIdentity, TenantPage, TenantStatus, Tenants, CREATE, LIST,
-    NAME_MAX, PRINCIPAL_PAGE_MAX,
+    platform_operator, provision_platform_operator, provision_tenant, tenant_name_lock,
+    CreateOutcome, CreatedTenant, Move, MovePlan, MoveRefusal, NewTenant, Suspension, TenantErrors,
+    TenantIdentity, TenantPage, TenantStatus, Tenants, CREATE, LIST, NAME_MAX, PRINCIPAL_PAGE_MAX,
+    REACTIVATE, REASON_MAX, RENAME, SUSPEND, VIEW,
 };
 use bilibi_database::{Context, Error, Result};
 use bilibi_party_ids::{AffiliationId, OrganisationId, PersonId};
@@ -72,10 +73,6 @@ pub struct AccountIdentity {
     pub affiliation: Option<AffiliationId>,
     /// Staff or a customer of the tenant (`users.kind`, ADR 16).
     pub kind: AccountKind,
-    /// Whether this account is the installation owner: the one account the
-    /// installation's bootstrap receipt names (Core User `user_bootstrap`).
-    /// Owner standing; never a grant, and read afresh on every proof.
-    pub installation_owner: bool,
 }
 pub trait ActorVerifier: Send + Sync {
     fn verify<'a>(
@@ -84,14 +81,48 @@ pub trait ActorVerifier: Send + Sync {
         tenant: i64,
         user: i64,
     ) -> ProofFuture<'a, AccountIdentity>;
-    /// The account's remembered desk, else its first live desk. Accounts belong
-    /// to tenants; no affiliation grants a staff workplace.
+    fn lock_owner<'a>(
+        &'a self,
+        _client: &'a dyn ProofClient,
+        _tenant: i64,
+        _user: i64,
+    ) -> ProofFuture<'a, ()> {
+        Box::pin(async { Err(Error::Forbidden) })
+    }
+    /// The account's remembered desk, else its first live desk, an unarchived
+    /// desk before an archived one. Accounts belong to tenants; no affiliation
+    /// grants a staff workplace.
     fn default_company<'a>(
         &'a self,
         _client: &'a dyn ProofClient,
         _scope: &'a Scope,
     ) -> ProofFuture<'a, Option<OrganisationId>> {
         Box::pin(async { Ok(None) })
+    }
+    /// Which of `accounts` of `tenant` are live staff now, by the standing
+    /// [`ActorVerifier::verify`] applies, in id order. The default asks
+    /// `verify` once per account; Core User answers in one read.
+    fn live_staff<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        tenant: i64,
+        accounts: &'a [i64],
+    ) -> ProofFuture<'a, Vec<i64>> {
+        Box::pin(async move {
+            let mut staff = Vec::new();
+            for &account in accounts {
+                if self
+                    .verify(client, tenant, account)
+                    .await
+                    .is_ok_and(|identity| identity.kind == AccountKind::Staff)
+                {
+                    staff.push(account);
+                }
+            }
+            staff.sort_unstable();
+            staff.dedup();
+            Ok(staff)
+        })
     }
     /// Re-proves the holder of an authenticated session before a sensitive
     /// read (stored-secret reveal). A verifier that cannot check credentials
@@ -106,8 +137,9 @@ pub trait ActorVerifier: Send + Sync {
         Box::pin(async { Ok(false) })
     }
     /// Whether the staff account just sealed into `scope` may work in
-    /// `company` right now: a live, unarchived company of its tenant assigned
-    /// through an explicit desk. Asked on every authentication for the company
+    /// `company` right now: a live company of its tenant assigned through an
+    /// explicit desk. An archived company qualifies: it stays readable, and
+    /// its owners refuse every write into it. Asked on every authentication for the company
     /// the session chose (`Scope::current_company`), so a choice outlives
     /// neither its desk nor the company. A verifier that cannot tell keeps this
     /// default, which never confirms, and the scope uses its default desk.
@@ -304,7 +336,7 @@ impl SelfReport {
     pub const LABEL: &'static str = "Model (as reported)";
     /// The request header the agent edge (`/api/v1`, `/mcp`) reads it from.
     pub const HEADER: &'static str = "x-bilibi-agent-self-report";
-    /// Model-accessible argument on the six generic MCP tools.
+    /// Model-accessible argument on the generic MCP tools.
     pub const MCP_ARGUMENT: &'static str = "agent_self_report";
     /// The MCP `params._meta` key, for clients that cannot set headers.
     pub const MCP_META: &'static str = "bilibi/agent-self-report";
@@ -675,6 +707,24 @@ impl Authentication {
             .verify(client, scope.tenant(), account)
             .await
     }
+    /// Which of `accounts` are live staff of the scope's tenant, in id order:
+    /// the same standing as [`Authentication::account_identity`], for a list
+    /// in one read. Evidence only, like `account_identity`.
+    pub async fn live_staff(
+        &self,
+        client: &dyn ProofClient,
+        scope: &Scope,
+        accounts: &[i64],
+    ) -> Result<Vec<i64>> {
+        if accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.verifier
+            .get()
+            .ok_or(Error::Unauthorized)?
+            .live_staff(client, scope.tenant(), accounts)
+            .await
+    }
     /// Authentication edge only: IDs must come from a durable credential/session.
     /// This method establishes identity; it grants no capabilities.
     pub async fn authenticate(
@@ -775,7 +825,7 @@ impl Authentication {
     }
     async fn authenticate_session_inner(
         &self,
-        client: &(impl GenericClient + Sync),
+        client: &dyn ProofClient,
         tenant: i64,
         user: i64,
         impersonator: Option<i64>,
@@ -871,7 +921,7 @@ impl Authentication {
     /// every decision re-reads.
     pub async fn for_principal(
         &self,
-        client: &(impl GenericClient + Sync),
+        client: &dyn ProofClient,
         tenant: i64,
         principal: &str,
     ) -> Result<Scope> {
@@ -911,11 +961,7 @@ impl Authentication {
     /// Re-proves a scope an edge already sealed, keeping its impersonator,
     /// agent facet and presented step-up code: owners refresh eligibility with this rather than
     /// `authenticate`, which would drop the operator from the audit pair.
-    pub async fn reprove(
-        &self,
-        client: &(impl GenericClient + Sync),
-        scope: &Scope,
-    ) -> Result<Scope> {
+    pub async fn reprove(&self, client: &dyn ProofClient, scope: &Scope) -> Result<Scope> {
         // A principal scope is re-sealed against the live tenant; it carries
         // no agent facet or step-up code to keep.
         if let Some(principal) = scope.principal() {
@@ -1081,17 +1127,14 @@ impl Authorization {
             .await
     }
 }
-async fn require_operator_marker(client: &(impl GenericClient + Sync), tenant: i64) -> Result<()> {
+async fn require_operator_marker(client: &dyn ProofClient, tenant: i64) -> Result<()> {
     client
         .query_opt("SELECT t.id FROM tenants t JOIN platform_operator o ON o.tenant_id=t.id WHERE o.singleton=true AND t.id=$1 AND t.status='active' AND t.deleted_at IS NULL", &[&tenant])
         .await?
         .map(|_| ())
         .ok_or(Error::Forbidden)
 }
-pub async fn prove_operator(
-    client: &(impl GenericClient + Sync),
-    scope: &Scope,
-) -> Result<OperatorProof> {
+pub async fn prove_operator(client: &dyn ProofClient, scope: &Scope) -> Result<OperatorProof> {
     // Operator standing is an account's: a principal decides a platform
     // capability through Authz's own operator gate and never holds a proof
     // that administers tenants or writes global settings. A customer is
@@ -1118,10 +1161,7 @@ impl OwnerProof {
 /// including an agent acting for that person. Impersonation never holds it.
 /// Reproof checks account eligibility and agent revocation on this connection;
 /// no cached flag, role or capability confers ownership.
-pub async fn prove_owner(
-    client: &(impl GenericClient + Sync),
-    scope: &Scope,
-) -> Result<OwnerProof> {
+pub async fn prove_owner(client: &dyn ProofClient, scope: &Scope) -> Result<OwnerProof> {
     // Owner standing belongs to a person; neither an operator behind an
     // impersonated session nor a system principal holds it, and a customer
     // is never the owner (ADR 16).
@@ -1132,20 +1172,19 @@ pub async fn prove_owner(
         return Err(Error::Forbidden);
     }
     require_operator_marker(client, scope.tenant()).await?;
-    let fresh = &scope.authentication.reprove(client, scope).await?;
-    let identity = fresh
+    let verifier = scope
         .authentication
         .verifier
         .get()
-        .ok_or(Error::Unauthorized)?
-        .verify(client, fresh.tenant(), fresh.user())
+        .ok_or(Error::Unauthorized)?;
+    verifier
+        .lock_owner(client, scope.tenant(), scope.user())
         .await?;
-    if !identity.installation_owner {
+    let fresh = scope.authentication.reprove(client, scope).await?;
+    if fresh.actor().kind() != AccountKind::Staff {
         return Err(Error::Forbidden);
     }
-    Ok(OwnerProof {
-        scope: fresh.clone(),
-    })
+    Ok(OwnerProof { scope: fresh })
 }
 
 /// Core providers prove live, eligible targets in this exact actor scope. They
@@ -1179,6 +1218,41 @@ pub struct NamedOrganisation {
     /// Equivalent to `status == "archived"` for summaries from Core Company.
     pub archived: bool,
 }
+/// What a company picker asks the directory for, so it never reads every
+/// company of the tenant: part of a name, legal name or code (case-insensitive,
+/// `%` and `_` taken literally; empty matches every company), optionally only
+/// among `among`, and at most `limit` companies, sorted by the displayed name.
+#[derive(Clone, Copy, Debug)]
+pub struct OrganisationSearch<'a> {
+    pub text: &'a str,
+    pub among: Option<&'a [OrganisationId]>,
+    pub limit: usize,
+}
+impl<'a> OrganisationSearch<'a> {
+    /// The hits a picker shows for typed text.
+    pub const HITS: usize = 20;
+    /// At most `HITS` companies matching `text`.
+    pub fn text(text: &'a str) -> Self {
+        Self {
+            text,
+            among: None,
+            limit: Self::HITS,
+        }
+    }
+    /// At most `limit` instead of `HITS`.
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+    /// Which of `ids` qualify, whatever their names.
+    pub fn among(ids: &'a [OrganisationId]) -> Self {
+        Self {
+            text: "",
+            among: Some(ids),
+            limit: ids.len(),
+        }
+    }
+}
 /// Core Company's naming half of the organisation seam, bound beside `OrganisationProvider` so Base
 /// pickers and binders never query the `companies` table. Every method keeps
 /// to the actor's own tenant; a missing or cross-tenant id is `NotFound` and
@@ -1191,14 +1265,34 @@ pub trait OrganisationDirectory: Send + Sync {
         client: &'a dyn ProofClient,
         scope: &'a Scope,
     ) -> ProofFuture<'a, Vec<NamedOrganisation>>;
-    /// The unarchived companies this actor may target with `capability`:
-    /// none without the capability, the current company, or every company of
-    /// the tenant with Company's tenant-wide management reach.
+    /// The live companies among `ids`, named and sorted like `in_scope`,
+    /// archived ones flagged; a missing or cross-tenant id is left out. For a
+    /// caller that holds company ids (a role's owner) and needs to know which
+    /// are live, without reading every company of the tenant.
+    fn named<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        ids: &'a [OrganisationId],
+    ) -> ProofFuture<'a, Vec<NamedOrganisation>>;
+    /// The unarchived companies this actor may target with `capability` that
+    /// `search` matches: none without the capability, the current company, or
+    /// any company of the tenant with Company's tenant-wide management reach.
     fn selectable<'a>(
         &'a self,
         client: &'a dyn ProofClient,
         scope: &'a Scope,
         capability: &'a str,
+        search: OrganisationSearch<'a>,
+    ) -> ProofFuture<'a, Vec<NamedOrganisation>>;
+    /// The live, unarchived companies of the tenant that `search` matches,
+    /// whatever the actor's reach: for a caller whose write proves the chosen
+    /// company itself (a role's owner company).
+    fn find<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        search: OrganisationSearch<'a>,
     ) -> ProofFuture<'a, Vec<NamedOrganisation>>;
     /// One company as the target of `capability`: `Forbidden` without the
     /// capability or the reach, `NotFound` when missing or in another tenant.
@@ -1227,9 +1321,11 @@ pub trait OrganisationDirectory: Send + Sync {
     ) -> ProofFuture<'a, Option<OrganisationId>> {
         Box::pin(async { Ok(None) })
     }
-    /// The unarchived companies this staff actor may work in: its explicit
-    /// desks. No capability is asked, because the list is work access alone;
-    /// each operation still proves its target with its own capability.
+    /// The companies this staff actor may work in: its explicit desks, an
+    /// archived one flagged (`NamedOrganisation::archived`) because it stays
+    /// readable while every write into it is refused. No capability is asked,
+    /// because the list is work access alone; each operation still proves its
+    /// target with its own capability.
     fn reachable<'a>(
         &'a self,
         client: &'a dyn ProofClient,
@@ -1295,6 +1391,8 @@ inventory::submit! {
             ("005-tenancy-operator", include_str!("../migrations/005-operator.sql")),
             ("009-tenancy-hierarchy", include_str!("../migrations/009-hierarchy.sql")),
             ("base-tenancy-010-oversight", include_str!("../migrations/010-oversight.sql")),
+            ("base-tenancy-011-status", include_str!("../migrations/011-status.sql")),
+            ("base-tenancy-012-name-version", include_str!("../migrations/012-name-version.sql")),
         ],
         services: &[
             bilibi_module_registry::Service { id: "base/tenancy.authentication", factory: |_| Ok(Arc::new(Authentication::default())) },
@@ -1348,14 +1446,45 @@ impl PartyProofs {
             None => Ok(Vec::new()),
         }
     }
+    /// The live companies among `ids` (`OrganisationDirectory::named`); none
+    /// when no Company owner is installed.
+    pub async fn organisations_named(
+        &self,
+        client: &dyn ProofClient,
+        scope: &Scope,
+        ids: &[OrganisationId],
+    ) -> Result<Vec<NamedOrganisation>> {
+        match self.directory.get() {
+            Some(directory) => directory.named(client, scope, ids).await,
+            None => Ok(Vec::new()),
+        }
+    }
     pub async fn selectable_organisations(
         &self,
         client: &dyn ProofClient,
         scope: &Scope,
         capability: &str,
+        search: OrganisationSearch<'_>,
     ) -> Result<Vec<NamedOrganisation>> {
         match self.directory.get() {
-            Some(directory) => directory.selectable(client, scope, capability).await,
+            Some(directory) => {
+                directory
+                    .selectable(client, scope, capability, search)
+                    .await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+    /// The live, unarchived companies `search` matches
+    /// (`OrganisationDirectory::find`); none when no Company owner is installed.
+    pub async fn find_organisations(
+        &self,
+        client: &dyn ProofClient,
+        scope: &Scope,
+        search: OrganisationSearch<'_>,
+    ) -> Result<Vec<NamedOrganisation>> {
+        match self.directory.get() {
+            Some(directory) => directory.find(client, scope, search).await,
             None => Ok(Vec::new()),
         }
     }

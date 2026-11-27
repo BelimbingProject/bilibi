@@ -1,5 +1,9 @@
 # Locale contract
 
+**Use it for:** the supported locales, the `ui.locale` setting, and showing money and numbers.
+
+**Not for:** a second locale list or a number formatter of your own.
+
 `base/locale` owns the supported regional catalogue (`SUPPORTED`, 28 codes such
 as `en-MY`, `de-CH`) and the `ui.locale` Settings contract. It has no table; the
 values and their provenance live in `base_settings` through `base/settings`, so
@@ -20,9 +24,11 @@ those rows directly, and do not keep a second locale list in a template or host.
   explicit platform-operator proof Settings enforces.
 - `Bootstrap` is supplied by Core, which owns companies and addresses (K11):
   explicitly as an argument, or through the `BootstrapSource` Core Address
-  binds once at boot (`Locales::bind_bootstrap`, K15), which `resolve` asks on
-  its own connection only when the caller supplied none and no global locale
-  is stored. Base never queries those tables; only `country_iso` and
+  binds once at boot (`Locales::bind_bootstrap`, K15), which `resolve` asks only
+  when the caller supplied none and no global locale is stored. The source
+  reads on the connection `resolve` was given and takes none of its own: a
+  second pooled connection while the caller holds the first deadlocks the pool
+  once more callers than connections wait. Base never queries those tables; only `country_iso` and
   `languages` drive inference.
 - Unsupported locales are refused (`Invalid`), not silently replaced; `normalize`
   accepts case, `_`/`-` and bare-language variants.
@@ -31,6 +37,7 @@ those rows directly, and do not keep a second locale list in a template or host.
   `ar-SA` digits). It is formatting only: Bilibi copy stays English and the
   catalogue is not a translation claim. `language()` is what a future copy
   adapter would use.
+- `money(amount, places)` shows an amount with exactly `places` decimals, rounded half away from zero, with comma thousands groups (`-1,234.57`). It is the one money display for pages, documents and exports for people; it is not locale-aware yet.
 - The definition leaves `editor` unset. The settings editor (P3) and the System
   localization page (O5) contribute editor metadata and its capability together.
 

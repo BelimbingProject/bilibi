@@ -10,6 +10,7 @@ use crate::{
 use bilibi_authz::authorize_key;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_picklists::{PickLists, Reach};
+use bilibi_records::Records;
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{ReadClient, Scope};
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ pub const KEY_MAX: usize = 40;
 pub const HELP_MAX: usize = 255;
 
 const COLUMNS: &str =
-    "id,record_type,key,label,help,kind,picklist,position,archived_on::text AS archived_on,version";
+    "id,record_type,key,label,help,kind,picklist,target,position,archived_on::text AS archived_on,version,watcher_condition";
 
 /// What a field holds. Fixed when the field is defined.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -36,15 +37,46 @@ pub enum Kind {
     Date,
     /// A code of a standalone tenant pick-list (`Definition::picklist`).
     Choice,
+    /// Yes or no, stored as the stable text true or false.
+    Boolean,
+    LongText,
+    Link,
+    Phone,
+    Email,
+    /// Several codes of one standalone tenant pick-list, kept as a JSON
+    /// array of codes in the order chosen, each at most once.
+    Choices,
+    /// One record of a Base Records kind (`Definition::target`), kept as the
+    /// record's id text; it is named with the reader's own access.
+    Reference,
 }
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Text, Kind::Number, Kind::Date, Kind::Choice];
+    pub const ALL: [Kind; 11] = [
+        Kind::Text,
+        Kind::Number,
+        Kind::Date,
+        Kind::Choice,
+        Kind::Boolean,
+        Kind::LongText,
+        Kind::Link,
+        Kind::Phone,
+        Kind::Email,
+        Kind::Choices,
+        Kind::Reference,
+    ];
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
             Self::Number => "number",
             Self::Date => "date",
             Self::Choice => "choice",
+            Self::Boolean => "boolean",
+            Self::LongText => "long_text",
+            Self::Link => "link",
+            Self::Phone => "phone",
+            Self::Email => "email",
+            Self::Choices => "choices",
+            Self::Reference => "reference",
         }
     }
     pub fn label(self) -> &'static str {
@@ -53,10 +85,29 @@ impl Kind {
             Self::Number => "Number",
             Self::Date => "Date",
             Self::Choice => "Pick-list",
+            Self::Boolean => "Yes/no",
+            Self::LongText => "Long text",
+            Self::Link => "Link",
+            Self::Phone => "Phone",
+            Self::Email => "Email",
+            Self::Choices => "Several choices",
+            Self::Reference => "Record",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+    /// Whether the field names a pick-list its values come from.
+    pub fn takes_picklist(self) -> bool {
+        matches!(self, Self::Choice | Self::Choices)
+    }
+    /// Whether the field may be a Base Watchers condition: one typed value a
+    /// condition compares exactly (#730).
+    pub fn watcher_condition_kind(self) -> bool {
+        matches!(
+            self,
+            Self::Text | Self::Number | Self::Date | Self::Choice | Self::Boolean
+        )
     }
 }
 
@@ -70,11 +121,16 @@ pub struct Definition {
     pub label: String,
     pub help: Option<String>,
     pub kind: Kind,
-    /// For a choice field, the pick-list its values come from.
+    /// For a choice or several-choices field, the pick-list its values come from.
     pub picklist: Option<String>,
+    /// For a record field, the Base Records kind it points at (`company`).
+    pub target: Option<String>,
     pub position: i32,
     pub archived_on: Option<String>,
     pub version: i64,
+    /// Whether the tenant opted it into Base Watchers conditions; a watcher never
+    /// reads a field that is not.
+    pub watcher_condition: bool,
 }
 impl Definition {
     fn from_row(row: &Row) -> Result<Self> {
@@ -86,9 +142,11 @@ impl Definition {
             help: row.get("help"),
             kind: Kind::parse(row.get::<_, &str>("kind")).ok_or(Error::Internal)?,
             picklist: row.get("picklist"),
+            target: row.get("target"),
             position: row.get("position"),
             archived_on: row.get("archived_on"),
             version: row.get("version"),
+            watcher_condition: row.get("watcher_condition"),
         })
     }
     pub fn archived(&self) -> bool {
@@ -127,6 +185,11 @@ pub struct NewField {
     pub help: Option<String>,
     pub kind: String,
     pub picklist: Option<String>,
+    /// For a record field, the kind of record it points at.
+    pub target: Option<String>,
+    /// Offer it to Base Watchers conditions (text, number, date, pick-list and
+    /// yes/no fields only).
+    pub watcher_condition: bool,
 }
 /// Everything but the key and the kind.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -134,6 +197,8 @@ pub struct NewField {
 pub struct FieldUpdate {
     pub label: String,
     pub help: Option<String>,
+    /// Offer it to Base Watchers conditions, or withdraw it; `None` keeps it.
+    pub watcher_condition: Option<bool>,
     pub version: i64,
 }
 
@@ -145,7 +210,11 @@ enum Step {
 
 pub struct CustomFields {
     pub(crate) record_types: BTreeMap<&'static str, &'static RecordType>,
+    /// Where Grid reads each record type's values (`GridSource`), validated
+    /// at boot; an operator restricts a field there as `cf_<key>`.
+    pub(crate) sources: Vec<&'static crate::GridSource>,
     pub(crate) picklists: Arc<PickLists>,
+    pub(crate) records: Arc<Records>,
     pub(crate) settings: Arc<Settings>,
 }
 
@@ -221,8 +290,26 @@ impl CustomFields {
             .collect()
     }
 
+    /// The kinds of record a record field may point at: every mounted Base
+    /// Records kind, by key, with its name for people ("Companies").
+    pub fn reference_kinds(&self) -> Vec<(&'static str, &'static str)> {
+        let mut kinds: Vec<_> = self
+            .records
+            .kinds()
+            .map(|kind| (kind.key, self.records.kind_label(kind.key)))
+            .collect();
+        kinds.sort_by_key(|(key, label)| (*label, *key));
+        kinds
+    }
+
+    /// The Base Records facade a record field's values are checked and named
+    /// through, for owners that show them.
+    pub fn records(&self) -> &Records {
+        &self.records
+    }
+
     /// The most active fields one record type may have, a tenant setting.
-    async fn limit(&self, client: &dyn ReadClient, scope: &Scope) -> Result<i64> {
+    pub(crate) async fn limit(&self, client: &dyn ReadClient, scope: &Scope) -> Result<i64> {
         self.settings
             .get(client, scope, Target::Tenant, MAX_FIELDS)
             .await?
@@ -263,8 +350,28 @@ impl CustomFields {
     /// The fields a record of `record_type` currently offers, for an owner
     /// that has already authorized its own page or write. Needs no
     /// custom-field capability: a person who may open a company may see the
-    /// company's fields.
+    /// company's fields. A field an operator withholds from this reader
+    /// (Field Restrictions, `cf_<key>` on the record type's Grid table) is
+    /// left out, so pages do not show it and writes refuse it.
     pub async fn active(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        record_type: &str,
+    ) -> Result<Vec<Definition>> {
+        let mut fields = self.defined(client, scope, record_type).await?;
+        if let Some(source) = self.sources.iter().find(|s| s.record_type == record_type) {
+            let restricted = bilibi_authz::fields::restricted_read(client, scope).await?;
+            if let Some(withheld) = restricted.get(source.table) {
+                fields.retain(|field| !withheld.contains(bilibi_grid::custom_field_id(&field.key)));
+            }
+        }
+        Ok(fields)
+    }
+
+    /// The tenant's active fields of `record_type` whatever the reader's
+    /// restrictions: for Grid and Authz, which apply restrictions themselves.
+    pub(crate) async fn defined(
         &self,
         client: &dyn ReadClient,
         scope: &Scope,
@@ -278,9 +385,9 @@ impl CustomFields {
                 &[&tenant, &record_type],
             )
             .await?;
-        // A choice field whose pick-list is no longer offered (its module is
-        // not mounted) leaves forms, lists and agents with the list; its
-        // definition and the values stay.
+        // A choice field whose pick-list is no longer offered, or a record
+        // field whose kind is no longer mounted, leaves forms, lists and
+        // agents with its module; its definition and the values stay.
         rows.iter()
             .map(Definition::from_row)
             .filter(|definition| {
@@ -289,6 +396,10 @@ impl CustomFields {
                         .picklist
                         .as_deref()
                         .is_none_or(|list| self.picklists.list(list).is_ok())
+                        && definition
+                            .target
+                            .as_deref()
+                            .is_none_or(|kind| self.records.kind(kind).is_some())
                 })
             })
             .collect()
@@ -310,6 +421,32 @@ impl CustomFields {
             .await?
             .map(|row| Definition::from_row(&row))
             .transpose()
+    }
+
+    /// Read one definition, including an archived key. The caller authorizes
+    /// its operation before reading. A mutation may hold the definition and
+    /// the record type's creation lock while applying a group of changes.
+    pub async fn stored_definition(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        record_type: &str,
+        key: &str,
+        write: bool,
+    ) -> Result<Option<Definition>> {
+        self.record_type(record_type)?;
+        let tenant = scope.tenant();
+        if write {
+            lock(client, tenant, record_type).await?;
+        }
+        self.one(
+            client,
+            tenant,
+            record_type,
+            key,
+            if write { " FOR UPDATE" } else { "" },
+        )
+        .await
     }
 
     /// The definition as it stands, locked `FOR UPDATE` by a write; a stale
@@ -349,6 +486,7 @@ impl CustomFields {
         scope: &Scope,
         input: &NewField,
         write: bool,
+        pending: i64,
     ) -> Result<Checked<NewField>> {
         authorize_key(client, scope, MANAGE).await?;
         let tenant = scope.tenant();
@@ -366,10 +504,7 @@ impl CustomFields {
         let (label, help) = text(&mut errors, &input.label, &input.help);
         let kind = Kind::parse(input.kind.trim());
         if kind.is_none() {
-            errors.push(FieldError::new(
-                "kind",
-                "choose text, number, date or choice",
-            ));
+            errors.push(FieldError::new("kind", "choose a supported field type"));
         }
         let picklist = input
             .picklist
@@ -377,10 +512,10 @@ impl CustomFields {
             .map(str::trim)
             .filter(|key| !key.is_empty());
         match (kind, picklist) {
-            (Some(Kind::Choice), None) => {
+            (Some(kind), None) if kind.takes_picklist() => {
                 errors.push(FieldError::new("picklist", "choose the pick-list to use"))
             }
-            (Some(Kind::Choice), Some(key)) => {
+            (Some(kind), Some(key)) if kind.takes_picklist() => {
                 if !self.choice_lists().iter().any(|(list, _)| *list == key) {
                     errors.push(FieldError::new(
                         "picklist",
@@ -390,9 +525,39 @@ impl CustomFields {
             }
             (Some(_), Some(_)) => errors.push(FieldError::new(
                 "picklist",
-                "only a choice field takes a pick-list",
+                "only a pick-list or several-choices field takes a pick-list",
             )),
             _ => {}
+        }
+        let target = input
+            .target
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty());
+        match (kind, target) {
+            (Some(Kind::Reference), None) => errors.push(FieldError::new(
+                "target",
+                "choose the kind of record it points at",
+            )),
+            (Some(Kind::Reference), Some(key)) => {
+                if self.records.kind(key).is_none() {
+                    errors.push(FieldError::new(
+                        "target",
+                        "is not a kind of record that can be linked",
+                    ));
+                }
+            }
+            (Some(_), Some(_)) => errors.push(FieldError::new(
+                "target",
+                "only a record field points at a kind of record",
+            )),
+            _ => {}
+        }
+        if input.watcher_condition && kind.is_some_and(|kind| !kind.watcher_condition_kind()) {
+            errors.push(FieldError::new(
+                "watcher_condition",
+                "only a text, number, date, pick-list or yes/no field can be a watcher condition",
+            ));
         }
         if write {
             lock(client, tenant, record_type).await?;
@@ -416,10 +581,14 @@ impl CustomFields {
                 .await?
                 .get(0);
             let limit = self.limit(client, scope).await?;
-            if active >= limit {
+            if active + pending >= limit {
                 errors.push(FieldError::new(
                     "key",
-                    format!("this record type already has {limit} active fields, the most this organisation allows; archive one first"),
+                    if pending == 0 {
+                        format!("this record type already has {limit} active fields, the most this organisation allows; archive one first")
+                    } else {
+                        format!("the proposed fields exceed this record type's limit of {limit} active fields")
+                    },
                 ));
             }
         }
@@ -435,6 +604,8 @@ impl CustomFields {
                 .map(|kind| kind.as_str().to_owned())
                 .unwrap_or_default(),
             picklist: picklist.map(str::to_owned),
+            target: target.map(str::to_owned),
+            watcher_condition: input.watcher_condition,
         }))
     }
     /// The field a define would add, without adding it (the agent preview).
@@ -444,7 +615,19 @@ impl CustomFields {
         scope: &Scope,
         input: &NewField,
     ) -> Result<Checked<NewField>> {
-        self.check_define(client, scope, input, false).await
+        self.preview_define_after(client, scope, input, 0).await
+    }
+    /// Preview a definition with the number of earlier, still unsaved
+    /// additions for the same record type included in the capacity check.
+    pub async fn preview_define_after(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        input: &NewField,
+        pending: u32,
+    ) -> Result<Checked<NewField>> {
+        self.check_define(client, scope, input, false, pending.into())
+            .await
     }
     /// Adds a field under `base.custom-fields.manage`, after the record type's
     /// other fields.
@@ -454,7 +637,7 @@ impl CustomFields {
         scope: &Scope,
         input: &NewField,
     ) -> Result<Checked<Definition>> {
-        let field = match self.check_define(tx.sql(), scope, input, true).await? {
+        let field = match self.check_define(tx.sql(), scope, input, true, 0).await? {
             Ok(field) => field,
             Err(errors) => return Ok(Err(errors)),
         };
@@ -464,8 +647,8 @@ impl CustomFields {
                 Box::pin(async move {
                     let row = sql
                         .query_one(
-                            &format!("INSERT INTO base_custom_fields(tenant_id,record_type,key,label,help,kind,picklist,position) VALUES($1,$2,$3,$4,$5,$6,$7,(SELECT coalesce(max(position),0)+10 FROM base_custom_fields WHERE tenant_id=$1 AND record_type=$2)) RETURNING {COLUMNS}"),
-                            &[&tenant, &field.record_type, &field.key, &field.label, &field.help, &field.kind, &field.picklist],
+                            &format!("INSERT INTO base_custom_fields(tenant_id,record_type,key,label,help,kind,picklist,target,position,watcher_condition) VALUES($1,$2,$3,$4,$5,$6,$7,$8,(SELECT coalesce(max(position),0)+10 FROM base_custom_fields WHERE tenant_id=$1 AND record_type=$2),$9) RETURNING {COLUMNS}"),
+                            &[&tenant, &field.record_type, &field.key, &field.label, &field.help, &field.kind, &field.picklist, &field.target, &field.watcher_condition],
                         )
                         .await?;
                     let created = Definition::from_row(&row)?;
@@ -504,6 +687,13 @@ impl CustomFields {
         };
         let mut errors = Vec::new();
         let (label, help) = text(&mut errors, &input.label, &input.help);
+        let watcher_condition = input.watcher_condition.unwrap_or(before.watcher_condition);
+        if watcher_condition && !before.kind.watcher_condition_kind() {
+            errors.push(FieldError::new(
+                "watcher_condition",
+                "only a text, number, date, pick-list or yes/no field can be a watcher condition",
+            ));
+        }
         if !errors.is_empty() {
             return Ok(Err(errors));
         }
@@ -512,6 +702,7 @@ impl CustomFields {
             FieldUpdate {
                 label,
                 help,
+                watcher_condition: Some(watcher_condition),
                 version: input.version,
             },
         )))
@@ -551,8 +742,8 @@ impl CustomFields {
                 Box::pin(async move {
                     let row = sql
                         .query_one(
-                            &format!("UPDATE base_custom_fields SET label=$3,help=$4,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"),
-                            &[&tenant, &before.id, &update.label, &update.help],
+                            &format!("UPDATE base_custom_fields SET label=$3,help=$4,watcher_condition=$5,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"),
+                            &[&tenant, &before.id, &update.label, &update.help, &update.watcher_condition.unwrap_or(false)],
                         )
                         .await?;
                     let saved = Definition::from_row(&row)?;

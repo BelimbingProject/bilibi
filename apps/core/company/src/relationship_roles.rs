@@ -70,38 +70,28 @@ impl RelationshipRole {
 }
 
 /// Reconciles the contributed default roles (`DEFAULT_RELATIONSHIP_ROLES`)
-/// into one tenant by code: a missing code is inserted, an existing one is
-/// left exactly as administered, including its rename or retirement. No
-/// default has a fixed numeric id. Provisioning, the migration (for tenants
-/// that already existed) and the facade's first empty read call this.
-pub async fn ensure_defaults(client: &impl GenericClient, tenant: i64) -> Result<u64> {
-    let mut inserted = 0;
+/// into one tenant by code and returns the roles it inserted: a missing code
+/// is inserted, an existing one is left exactly as administered, including
+/// its rename or retirement. No default has a fixed numeric id. Tenant
+/// provisioning calls this (audited in `provision_new_tenant_in`); the
+/// migration did it for tenants that already existed. A read never does.
+pub async fn ensure_defaults(
+    client: &impl GenericClient,
+    tenant: i64,
+) -> Result<Vec<RelationshipRole>> {
+    let mut inserted = Vec::new();
     for (code, name, inverse_name) in DEFAULT_RELATIONSHIP_ROLES {
-        inserted += client
-            .execute(
-                "INSERT INTO company_relationship_roles(tenant_id,code,name,inverse_name) VALUES($1,$2,$3,$4) ON CONFLICT (tenant_id,code) DO NOTHING",
+        if let Some(row) = client
+            .query_opt(
+                &format!("INSERT INTO company_relationship_roles(tenant_id,code,name,inverse_name) VALUES($1,$2,$3,$4) ON CONFLICT (tenant_id,code) DO NOTHING RETURNING {COLUMNS}"),
                 &[&tenant, code, name, inverse_name],
             )
-            .await?;
+            .await?
+        {
+            inserted.push(RelationshipRole::from_row(&row)?);
+        }
     }
     Ok(inserted)
-}
-
-/// The facade's read-side reconcile: only a tenant with no role at all (one
-/// created by raw SQL after this migration ran, as the walkthrough fixture
-/// does) receives the defaults.
-pub async fn ensure_defaults_if_empty(client: &impl GenericClient, tenant: i64) -> Result<u64> {
-    let any = client
-        .query_opt(
-            "SELECT 1 FROM company_relationship_roles WHERE tenant_id=$1 LIMIT 1",
-            &[&tenant],
-        )
-        .await?
-        .is_some();
-    if any {
-        return Ok(0);
-    }
-    ensure_defaults(client, tenant).await
 }
 
 /// The tenant's catalog under `admin.company.list`, by name; retired roles

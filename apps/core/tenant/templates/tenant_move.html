@@ -1,0 +1,4 @@
+{#- The Suspend and Reactivate confirmation, with the reason form as its body
+    (the shared macro's body slot; the typed ConfirmDialog has none). -#}
+{% import "dialog.html" as dialog %}
+{% call dialog::confirm_dialog(id="tenant-move-dialog", consequence=consequence, detail=detail, confirm=confirm, working=working, confirm_event=confirm_event, cancel_event="cancel_move", body=body) %}{% endcall %}

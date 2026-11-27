@@ -1,0 +1,10 @@
+{%- import "components.html" as ui -%}
+{%- import "forms.html" as form -%}
+{% call ui::card(id="specimen-markdown", title="Markdown", inner_class="space-y-3") %}
+{{ markdown }}
+{% call form::input(field=markdown_source) %}{% endcall %}
+{% endcall %}
+{% call ui::card(id="specimen-markdown-safety", title="Markdown: literal and unsafe input", inner_class="space-y-3") %}
+{{ markdown_unsafe }}
+{{ markdown_plain }}
+{% endcall %}

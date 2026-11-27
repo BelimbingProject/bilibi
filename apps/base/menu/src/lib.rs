@@ -344,6 +344,15 @@ impl Menu {
             .filter(|node| node.item.item.id != PORTAL_ROOT)
             .collect()
     }
+    pub fn visible_staff_tree(&self, capabilities: &BTreeSet<&str>, owner: bool) -> Vec<Node> {
+        self.visible_tree(&|key| {
+            if key == OWNER_STANDING {
+                owner
+            } else {
+                capabilities.contains(key)
+            }
+        })
+    }
     /// The portal layout's menu: the items under [`PORTAL_ROOT`] a customer
     /// may see, as [`Self::visible_tree`] decides them.
     pub fn visible_portal_tree(&self, decide: &dyn Fn(&str) -> bool) -> Vec<Node> {

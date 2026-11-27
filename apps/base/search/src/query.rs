@@ -15,6 +15,15 @@ pub const MAX_WORDS: usize = 8;
 /// The most hits one kind ranks for a results page; its count stops there.
 pub const MAX_KIND_HITS: i64 = 500;
 
+/// Short inputs and phrase or exclusion searches keep their usual matching.
+pub(crate) fn title_words(terms: &Terms) -> Vec<String> {
+    let words = terms.plain.as_deref().map_or_else(Vec::new, words);
+    if words.len() > MAX_WORDS || words.iter().flat_map(|word| word.chars()).take(3).count() < 3 {
+        return Vec::new();
+    }
+    words
+}
+
 /// What a person typed, made safe to search with.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Terms {
@@ -28,16 +37,27 @@ pub struct Terms {
     /// A `LIKE` pattern for the prefix fields when the text is a plain
     /// lookup (no phrase, no exclusion): the whole text, lower-cased.
     pub prefix: Option<String>,
+    /// The text for `plainto_tsquery('simple', …)` when it is a plain lookup:
+    /// PostgreSQL's parser keeps `amazon.com`, `abc-123` or `acme/west` as
+    /// the stored vector does, so the whole name or code typed is found even
+    /// where [`Terms::query`]'s letters-and-digits words miss it. Match
+    /// `vector @@ (to_tsquery('simple', query) || plainto_tsquery('simple', plain))`.
+    pub plain: Option<String>,
+    pub candidates: String,
 }
 
-/// Reads a query. Words are runs of letters and digits, lower-cased, so
-/// `%`, quotes, `&|!:*` and the like never reach the `tsquery` as syntax: a
-/// hostile query matches literally or not at all, and never errors.
+/// Read what a person typed into a safe `tsquery` and plain-lookup text.
+///
+/// Words are runs of letters and digits, lower-cased, so `%`, quotes,
+/// `&|!:*` and the like never reach the `tsquery` as syntax: a hostile query
+/// matches literally or not at all, and never errors.
+/// Shared helper: `let terms = bilibi_search::terms(&query.search);`
 pub fn terms(text: &str) -> Terms {
     let text: String = text.trim().chars().take(MAX_TEXT).collect();
     let text = text.trim_end().to_owned();
     let mut positive = Vec::new();
     let mut negative = Vec::new();
+    let mut candidates = Vec::new();
     let mut plain = true;
     let mut budget = MAX_WORDS;
     let mut rest = text.as_str();
@@ -70,6 +90,9 @@ pub fn terms(text: &str) -> Terms {
             continue;
         }
         budget -= words.len();
+        if !negated {
+            candidates.extend(words.iter().map(|word| format!("'{word}':*")));
+        }
         if negated {
             negative.push(format!("!{}", phrase(&words)));
         } else if quoted {
@@ -85,11 +108,16 @@ pub fn terms(text: &str) -> Terms {
             .collect::<Vec<_>>()
             .join(" & ")
     });
-    let prefix = (plain && query.is_some()).then(|| format!("{}%", like(&text.to_lowercase())));
+    let plain = (plain && query.is_some()).then(|| text.clone());
+    let prefix = plain
+        .as_ref()
+        .map(|text| format!("{}%", like(&text.to_lowercase())));
     Terms {
         text,
         query,
         prefix,
+        plain,
+        candidates: candidates.join(" | "),
     }
 }
 
@@ -176,14 +204,19 @@ fn literal(value: &str) -> String {
 /// selected or matched: a subtitle shows nothing and a prefix field takes no
 /// part, so it cannot answer whether a value exists. A masked field is never
 /// matched either, and its subtitle is shown only in its partial form.
-fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
+fn branch(planned: &Planned<'_>, limit: i64, prefix: bool, trigrams: bool) -> String {
     let Planned {
         kind, table, boost, ..
     } = planned;
     let decl = kind.decl;
     let key = column(table, table.key()).expect("grid keeps the key field");
     let vector = column(table, decl.vector).expect("checked hidden vector field");
-    let query = "to_tsquery('simple', $3::text)";
+    // A plain lookup also matches the text as PostgreSQL parses it ($6).
+    let query = if prefix {
+        "(to_tsquery('simple', $4::text) || plainto_tsquery('simple', $6::text))"
+    } else {
+        "to_tsquery('simple', $4::text)"
+    };
     let (state, inactive) = match decl
         .state
         .and_then(|state| Some((state, column(table, state.field)?)))
@@ -203,6 +236,26 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
         None => ("NULL::text".to_owned(), "false".to_owned()),
     };
     let mut matched = format!("{vector} @@ {query}");
+    let mut ranked = vector.clone();
+    let texts = table.custom_search_values("r");
+    if let Some(custom) = decl
+        .custom
+        .and_then(|custom| column(table, custom))
+        .filter(|_| !texts.is_empty())
+    {
+        let active = format!(
+            "to_tsvector('simple', array_to_string(ARRAY[{}]::text[], ' '))",
+            texts.join(", ")
+        );
+        let candidate = "to_tsquery('simple', $7::text)";
+        ranked = format!("({vector} || setweight({active}, 'D'))");
+        let mut candidates = format!("{vector} @@ {candidate} OR {custom} @@ {candidate}");
+        if prefix {
+            let plain = "replace(plainto_tsquery('simple', $6::text)::text, '&', '|')::tsquery";
+            candidates.push_str(&format!(" OR {vector} @@ {plain} OR {custom} @@ {plain}"));
+        }
+        matched = format!("(({candidates}) AND {ranked} @@ {query})");
+    }
     if prefix {
         for c in decl
             .prefix
@@ -210,63 +263,90 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
             .filter(|id| !planned.masked(id))
             .filter_map(|id| column(table, id))
         {
-            matched.push_str(&format!(" OR lower(({c})::text) LIKE $4::text"));
+            matched.push_str(&format!(" OR lower(({c})::text) LIKE $5::text"));
         }
+    }
+    let title = text_of(table, Some(decl.title));
+    let mut quality = if prefix {
+        format!("CASE WHEN lower({title}) = lower($6::text) THEN 0 ELSE 1 END")
+    } else {
+        "1".to_owned()
+    };
+    let mut rank = format!("ts_rank_cd({ranked}, {query})");
+    if decl.title_trigrams && trigrams {
+        let name = format!("lower({title})");
+        let part = format!("{name} LIKE ('%' || $5::text)");
+        // The indexed phrase comparison picks candidates. Each query word
+        // must still be present or close, so one good word cannot match alone.
+        let close = format!(
+            "(lower($6::text) <% {name} AND NOT EXISTS (SELECT 1 FROM unnest($8::text[]) AS term(word) WHERE strpos({name}, word) = 0 AND NOT (word <% {name})))"
+        );
+        quality = format!(
+            "CASE WHEN {name} = lower($6::text) THEN 0 WHEN {matched} THEN 1 WHEN {part} THEN 2 ELSE 3 END"
+        );
+        rank = format!(
+            "CASE WHEN {matched} THEN {rank} ELSE word_similarity(lower($6::text), {name}) END"
+        );
+        matched = format!("{matched} OR {part} OR {close}");
     }
     let at = time_of(table, table.time_field());
     // A record never updated was last changed when it was made.
     let updated = format!("COALESCE({}, {at})", time_of(table, decl.updated));
     format!(
-        "(SELECT {kind}::text AS kind, ({key})::text AS id, {title} AS title, {sub0} AS sub0, {sub1} AS sub1, {state} AS state, {inactive} AS inactive, (ts_rank_cd({vector}, {query}) * {boost:.4})::float8 AS rank, {at} AS at, {updated} AS updated FROM ({source}) r WHERE {matched} ORDER BY inactive, rank DESC, at DESC NULLS LAST, title, id LIMIT {limit})",
+        "(SELECT {kind}::text AS kind, ({key})::text AS id, {title} AS title, {sub0} AS sub0, {sub1} AS sub1, {state} AS state, {inactive} AS inactive, {quality} AS quality, (({rank}) * {boost:.4})::float8 AS rank, {at} AS at, {updated} AS updated FROM {source} r WHERE {matched} {ORDER} LIMIT {limit})",
         kind = literal(kind.id),
-        title = text_of(table, Some(decl.title)),
         sub0 = text_of(table, decl.subtitle.first().copied()),
         sub1 = text_of(table, decl.subtitle.get(1).copied()),
-        source = table.source().sql,
+        source = table.scoped_source(),
     )
 }
 
-// Binds the reader as each owner's source expects ($1 tenant, $2 user), the
-// tsquery ($3) and the prefix pattern ($4), which every statement references.
-fn hits(planned: &[Planned<'_>], limit: i64, prefix: bool) -> String {
+// Binds the reader as each owner's source expects ($1 tenant, $2 user, $3
+// company), the tsquery ($4), the prefix pattern ($5) and the plain text ($6),
+// which every statement references.
+fn hits(planned: &[Planned<'_>], limit: i64, prefix: bool, trigrams: bool) -> String {
     let branches = planned
         .iter()
-        .map(|kind| branch(kind, limit, prefix))
+        .map(|kind| branch(kind, limit, prefix, trigrams))
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
-    format!("WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS words, $4::text AS prefix), hits AS ({branches})")
+    format!(
+        "WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::bigint AS company, $4::text AS words, $5::text AS prefix, $6::text AS plain, $7::text AS candidates, $8::text[] AS title_words), hits AS ({branches})"
+    )
 }
 
 // Equal ranks read newest first, then by name, as a person scans them.
-const ORDER: &str = "ORDER BY inactive, rank DESC, at DESC NULLS LAST, title, kind, id";
+const ORDER: &str = "ORDER BY quality, inactive, rank DESC, at DESC NULLS LAST, title, kind, id";
 const COLUMNS: &str = "kind, id, title, sub0, sub1, state, inactive, updated";
 
 /// The hits (those `filter` keeps) as every caller lists them: each kind's
 /// together in their ranking, the kinds in the order of their best hit.
 /// Select from `grouped` `ORDER BY lead, pos`.
 fn grouped(filter: &str) -> String {
-    format!("ranked AS (SELECT *, row_number() OVER ({ORDER}) AS pos FROM hits{filter}), grouped AS (SELECT *, min(pos) OVER (PARTITION BY kind) AS lead FROM ranked)")
+    format!(
+        "ranked AS (SELECT *, row_number() OVER ({ORDER}) AS pos FROM hits{filter}), grouped AS (SELECT *, min(pos) OVER (PARTITION BY kind) AS lead FROM ranked)"
+    )
 }
 
 /// The search box: the best `per_kind` hits of each kind, grouped by kind.
-pub fn suggestions(planned: &[Planned<'_>], per_kind: i64, prefix: bool) -> String {
+pub fn suggestions(planned: &[Planned<'_>], per_kind: i64, prefix: bool, trigrams: bool) -> String {
     format!(
         "{}, {} SELECT NULL::jsonb AS counts, {COLUMNS} FROM grouped ORDER BY lead, pos",
-        hits(planned, per_kind, prefix),
+        hits(planned, per_kind, prefix, trigrams),
         grouped("")
     )
 }
 
 /// A results page: how many records each kind matched (up to
-/// [`MAX_KIND_HITS`]) and one page of the hits of the kind `$5` names or of
-/// every kind when it is empty, `$6` rows from `$7`, grouped as the search box
+/// [`MAX_KIND_HITS`]) and one page of the hits of the kind `$9` names or of
+/// every kind when it is empty, `$10` rows from `$11`, grouped as the search box
 /// groups them, so a kind's group continues on the next page. One row carries
 /// the counts even when the page is empty.
-pub fn page(planned: &[Planned<'_>], prefix: bool) -> String {
+pub fn page(planned: &[Planned<'_>], prefix: bool, trigrams: bool) -> String {
     format!(
-        "{}, counted AS (SELECT kind, count(*) AS n FROM hits GROUP BY kind), {} SELECT (SELECT COALESCE(jsonb_object_agg(kind, n), '{{}}'::jsonb) FROM counted) AS counts, {} FROM (SELECT 1) one LEFT JOIN LATERAL (SELECT * FROM grouped ORDER BY lead, pos LIMIT $6::bigint OFFSET $7::bigint) page ON true",
-        hits(planned, MAX_KIND_HITS, prefix),
-        grouped(" WHERE ($5::text = '' OR kind = $5::text)"),
+        "{}, counted AS (SELECT kind, count(*) AS n FROM hits GROUP BY kind), {} SELECT (SELECT COALESCE(jsonb_object_agg(kind, n), '{{}}'::jsonb) FROM counted) AS counts, {} FROM (SELECT 1) one LEFT JOIN LATERAL (SELECT * FROM grouped ORDER BY lead, pos LIMIT $10::bigint OFFSET $11::bigint) page ON true",
+        hits(planned, MAX_KIND_HITS, prefix, trigrams),
+        grouped(" WHERE ($9::text = '' OR kind = $9::text)"),
         COLUMNS
             .split(", ")
             .map(|name| format!("page.{name}"))

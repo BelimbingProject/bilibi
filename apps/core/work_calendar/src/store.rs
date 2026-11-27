@@ -609,7 +609,7 @@ pub(crate) enum Prepared {
 }
 
 fn code(input: &Value, field: &str, errors: &mut Vec<FieldError>) -> String {
-    let code = input[field].as_str().unwrap_or_default().trim().to_owned();
+    let code = bilibi_agent_api::text_field(input, field);
     if !valid_code(&code) {
         errors.push(FieldError::new(
             field,
@@ -842,8 +842,13 @@ impl WorkCalendars {
                 let code = code(input, "code", &mut errors);
                 let name = name(&input["name"], "name", &mut errors);
                 let (country_iso, admin1_code) = place(input, &mut errors);
-                self.check_place(country_iso.as_deref(), admin1_code.as_deref(), &mut errors)
-                    .await?;
+                self.check_place(
+                    client,
+                    country_iso.as_deref(),
+                    admin1_code.as_deref(),
+                    &mut errors,
+                )
+                .await?;
                 let installation = match &input["installation"] {
                     Value::Null => false,
                     Value::Bool(installation) => *installation,
@@ -900,8 +905,13 @@ impl WorkCalendars {
                 let place = match input.get("country_iso") {
                     Some(_) => {
                         let (country, admin1) = place(input, &mut errors);
-                        self.check_place(country.as_deref(), admin1.as_deref(), &mut errors)
-                            .await?;
+                        self.check_place(
+                            client,
+                            country.as_deref(),
+                            admin1.as_deref(),
+                            &mut errors,
+                        )
+                        .await?;
                         Some((country, admin1))
                     }
                     None => None,
@@ -1022,6 +1032,7 @@ impl WorkCalendars {
     }
     async fn check_place(
         &self,
+        client: &(impl GenericClient + Sync),
         country: Option<&str>,
         admin1: Option<&str>,
         errors: &mut Vec<FieldError>,
@@ -1029,14 +1040,17 @@ impl WorkCalendars {
         let Some(country) = country else {
             return Ok(());
         };
-        if self.geonames.get_country(country).await?.is_none() {
+        if bilibi_geonames::country_summary(client, country)
+            .await?
+            .is_none()
+        {
             errors.push(FieldError::new(
                 "country_iso",
                 "is not a known country (import countries first)",
             ));
         }
         if let Some(code) = admin1 {
-            match self.geonames.get_admin1(code).await? {
+            match self.geonames.get_admin1_on(client, code).await? {
                 Some(division) if division.country_iso == country => {}
                 Some(_) => {
                     errors.push(FieldError::new("admin1_code", "belongs to another country"))

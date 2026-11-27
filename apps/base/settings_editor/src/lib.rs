@@ -1,6 +1,7 @@
 //! The generic settings editor at `/system/settings`. A separate module because the page needs Authz, which
 //! itself depends on Settings: storage stays below Authz, the screen above it.
 //! See `README.md` for the contract and the running proof.
+mod agent;
 mod form;
 mod reveal;
 mod web;
@@ -20,9 +21,22 @@ pub const GLOBAL_MANAGE: &str = "base.settings.global.manage";
 pub const COMPANY_MANAGE: &str = "base.settings.company.manage";
 pub const USER_MANAGE: &str = "base.settings.user.manage";
 pub const SUPPORT_OVERRIDE_MANAGE: &str = "base.settings.support-override.manage";
+/// Opens the delegated-setting list operation. The shared read-only
+/// Customisations page uses the same key when its contribution contract lands.
+pub const TENANT_VIEW: &str = "base.settings.tenant.view";
+/// Set or restore settings their owning modules explicitly delegated to tenant
+/// administrators. Individual setting capabilities are rechecked on writes.
+pub const TENANT_MANAGE: &str = "base.settings.tenant.manage";
 /// Shows one stored encrypted value after Base Step-up. Granted by name
 /// only: a `grant_all` role does not confer it.
 pub const SECRET_VIEW: &str = "base.settings.secret.view";
+pub const TENANT_SECRET_CHANGE: &str = "base.settings_editor.tenant.secret.change";
+
+bilibi_step_up::declare!(
+    "base/settings_editor",
+    bilibi_step_up::Operation::new(TENANT_SECRET_CHANGE, "Change a tenant's secret setting")
+        .always()
+);
 
 /// A setting rendered as a PNG/JPEG/WebP upload instead of a text value. The
 /// contribution id is the setting key.
@@ -31,20 +45,51 @@ pub struct ImageSetting {
     pub directory: &'static str,
     pub max_bytes: u64,
 }
+/// A standalone Media upload for a reviewed operation.
+pub const STAGED_IMAGES: &str = "base/settings_editor.staged-images";
+pub struct StagedImage {
+    pub image: ImageSetting,
+    pub noun: &'static str,
+    pub capability: &'static str,
+    pub input: &'static str,
+}
 fn validate_images(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
     for entry in entries {
-        let image = entry.get::<ImageSetting>()?;
-        if image.directory.is_empty() || image.max_bytes == 0 || image.max_bytes > 10 * 1024 * 1024
-        {
-            return Err(RegistryError::Contribution(format!(
-                "invalid image setting {} at {}:{}",
-                entry.id, entry.provenance.source, entry.provenance.line
-            )));
+        if !valid_image(entry.get::<ImageSetting>()?) {
+            return Err(invalid_image(entry));
         }
     }
     Ok(())
 }
+
+fn validate_staged_images(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
+    let mut upload_names = std::collections::BTreeSet::from([web::IMAGE_UPLOAD]);
+    for entry in entries {
+        let stage = entry.get::<StagedImage>()?;
+        if !valid_image(&stage.image)
+            || stage.noun.is_empty()
+            || !bilibi_ui::UploadSpec::valid_name(stage.input)
+            || !upload_names.insert(stage.input)
+        {
+            return Err(invalid_image(entry));
+        }
+    }
+    Ok(())
+}
+
+fn valid_image(image: &ImageSetting) -> bool {
+    !image.directory.is_empty() && (1..=10 * 1024 * 1024).contains(&image.max_bytes)
+}
+
+fn invalid_image(entry: &Entry) -> RegistryError {
+    RegistryError::Contribution(format!(
+        "invalid image setting {} at {}:{}",
+        entry.id, entry.provenance.source, entry.provenance.line
+    ))
+}
+
 inventory::submit! { Consumer::new::<ImageSetting>(IMAGE_SETTINGS, "base/settings_editor", validate_images) }
+inventory::submit! { Consumer::new::<StagedImage>(STAGED_IMAGES, "base/settings_editor", validate_staged_images) }
 
 macro_rules! provenance {
     () => {
@@ -64,6 +109,8 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/settings_editor", prove
         CapabilityDefinition::tenant(COMPANY_MANAGE),
         CapabilityDefinition::tenant(USER_MANAGE),
         CapabilityDefinition::tenant(SUPPORT_OVERRIDE_MANAGE),
+        CapabilityDefinition::tenant(TENANT_VIEW),
+        CapabilityDefinition::tenant(TENANT_MANAGE),
         CapabilityDefinition::tenant(SECRET_VIEW),
     ],
     roles: &[],
@@ -85,9 +132,17 @@ bilibi_menu::contribute!(
 
 inventory::submit! {
     Module { id: "base/settings_editor", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/step_up", "base/ui", "base/menu", "base/media"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/agent_api", "base/settings", "base/step_up", "base/ui", "base/menu", "base/media", "base/labels"],
         migrations: &[],
-        services: &[Service { id: "base/settings_editor.pages", factory: |services| {
+        services: &[Service { id: "base/settings_editor.agent", factory: |services| {
+            if !agent::bind(
+                services.get("base/settings.store")?,
+                services.get(bilibi_step_up::SERVICE)?,
+            ) {
+                return Err(RegistryError::Service("base/settings_editor agent operations were bound twice".into()));
+            }
+            Ok(Arc::new(()))
+        }}, Service { id: "base/settings_editor.pages", factory: |services| {
             let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
             Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, Error>(Arc::new(web::Pages::new(web::Core {
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
@@ -97,6 +152,7 @@ inventory::submit! {
                 step_up: services.get(bilibi_step_up::SERVICE)?,
                 media: services.get(bilibi_media::SERVICE)?,
                 images: catalog.entries::<ImageSetting>(IMAGE_SETTINGS)?.iter().map(|entry| Ok((entry.id, entry.get::<ImageSetting>()?))).collect::<bilibi_module_registry::Result<_>>()?,
+                staged_images: catalog.entries::<StagedImage>(STAGED_IMAGES)?.iter().map(|entry| Ok((entry.id, entry.get::<StagedImage>()?))).collect::<bilibi_module_registry::Result<_>>()?,
             })))))
         } }],
     }

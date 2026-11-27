@@ -3,8 +3,8 @@
 **Document Type:** Architecture Decision Record
 **Status:** Accepted; implemented
 **Agents:** claude-code/opus-5.5-high (author)
-**Scope:** Tasks, calls, notes and their reminders in `apps/core/activity`; customer workflows stay in CX
-**Last Updated:** 2026-11-05
+**Scope:** Tasks, calls, meetings, notes, guests, invitations and reminders in `apps/core/activity`; customer workflows stay in CX
+**Last Updated:** 2026-11-06 (repeating series and the calendar)
 
 ## Context
 
@@ -26,7 +26,7 @@ The CX version had two problems for shared use. Everyone in the filing company c
 | Shared flag | Let readers of the related record see it, by choice |
 | Reminder state | Tell the assignee when it is due |
 
-Core supplies one list, one record page, panels on the company and person pages, a generic panel any record page can place, and one set of operations. Meetings, invitations, recurrence and calendars use the same record later; they are not part of this decision.
+Core supplies one list, one record page, panels on the company and person pages, a generic panel any record page can place, and one set of operations. Meetings, guests' answers and invitations use the same record (see "Meetings and invitations" below), and so do repeating series and the calendar (see "Repeating series and the calendar").
 
 ### Private by default
 
@@ -47,6 +47,20 @@ Core records `core/activity.happened` (`base/events`) when a shared activity has
 | CX | Customer roll-ups, the customer timeline projection, lead conversion (it calls `repoint`), sales cadences, telephony, routing |
 | Other Domains | Their own state machines (approvals, production operations, training obligations). A follow-up may point at them; it does not replace them |
 
+### Meetings and invitations
+
+**Meetings, guests' answers and Send invites are Core too**, added 2026-11-05 when CX's meeting slice was folded in: a purchasing officer meets a supplier as a sales rep meets a customer. Colleagues are told in the bell; people and addresses get an email from a queue worker that runs as the sender.
+
+**Core never asks a Domain directly whether it may email someone.** It declares a registry, `core/activity.invitation_gates`; a Domain that keeps contact rules contributes a gate (CX asks its consent register). Every gate must allow an address before it is emailed. With no gate, Core emails any usable address.
+
+**One reminder per activity, as before.** The sweep that reminds the assignee also puts a call or meeting on its account guests' To do, unless they declined. There is no second reminder table.
+
+### Repeating series and the calendar
+
+**A repeating call, meeting or task is one activity per occurrence, plus the rule it was made by** (`core_activity_series`), added 2026-11-06. Every occurrence keeps its own status, answers and reminder, so the reminder sweep, the bell, the panels and the event need nothing new. Editing or deleting one occurrence is the series' exception; Change series and Delete series reach the later ones or all. "Working days only" asks `core/work_calendar` which dates the filing company works.
+
+**The calendar is the Activities list drawn by base/ui `Calendar`**, with the same filters and the same visibility rule, not a second page. A drag calls `core.activity.update` like any other door.
+
 ## Rejected alternatives
 
 - **Activities in CX:** every other Domain would need CX, or its own activity table.
@@ -55,6 +69,11 @@ Core records `core/activity.happened` (`base/events`) when a shared activity has
 - **A reminder service in Base:** the sweep needs the activity's own rules (due time, assignee, closed state); one owner keeps them together. Base already gives the schedule, queue, bell and mail.
 - **Core calls the timeline through a port:** the projection can wait, so an event is the right seam, and it keeps Core free of any Domain.
 - **Move the CX module unchanged:** it carried timeline subjects and the company-wide rule.
+- **Meetings and invitations in CX on top of Core:** two reminder sweeps and two guest tables for one record.
+- **Core calls `cx/consent` through a port:** a port is named in its provider's namespace, so Core would name CX. A registry Core declares keeps the Domain unnamed.
+- **A series stored as one rule expanded when read:** every reader (reminders, panels, the bell, Reports, the timeline event) would need the expansion, and an exception would need its own table. Up to 200 stored occurrences is small.
+- **A calendar page of its own:** a second page for the same record; the list's display switch keeps one door.
+- **Several reminders per activity with their own offsets:** a second reminder system beside the tenant's lead time; it can come later on the same `reminded_at` model if people need it.
 
 ## Consequences
 

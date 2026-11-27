@@ -4,9 +4,9 @@
 **Status:** Accepted; implemented
 **Agents:** codex/gpt-6 (author)
 **Scope:** Assignment to a company's work, the company switcher, page scope and the company captured by background jobs
-**Last Updated:** 2026-11-01
+**Last Updated:** 2026-11-08
 
-The owner agreed this design on 2026-10-31. The Platform implements it. Official Domains adopt the route, menu and workplace contracts through companion changes.
+The owner agreed this design on 2026-10-31. The Platform implements it. Official Domains adopt the route, menu and workplace contracts through companion changes. Amended 2026-11-08: an archived company stays readable to the people with desks there (see [Archived workplaces stay readable](#archived-workplaces-stay-readable)).
 
 ## Context
 
@@ -40,9 +40,22 @@ Work assignment does not create company-specific roles. Existing capabilities co
 
 The switcher offers the person's explicit desks. `admin.company.tenant-wide.manage` no longer expands that list.
 
-Tenancy accepts a chosen company only while the person may work there and the company remains live and unarchived. The proof runs on every authenticated request. Removing a desk assignment revokes that company's provider-sourced roles and ends the person's sessions in the same transaction. Archiving a company removes every desk there, revokes its provider-sourced roles and ends sessions working there in the same transaction; other desks remain available. The next sign-in selects another valid desk, or no desk. Existing protection against live events acting under a different company remains in force.
+Tenancy accepts a chosen company only while the person has a desk there and the company remains live. The proof runs on every authenticated request. Removing a desk assignment revokes that company's provider-sourced roles and ends the person's sessions in the same transaction. The next sign-in selects another valid desk, or no desk. Existing protection against live events acting under a different company remains in force.
 
 Cross-tenant companies and customer portal accounts remain outside the staff switcher. Impersonation continues to use the viewed person's access and keeps the operator's parked choice separate.
+
+### Archived workplaces stay readable
+
+Amended 2026-11-08. An archived company's records, reports and books must stay available for audit and statutory retention, so archiving changes the company's status and nothing else about who may work there:
+
+- Archiving keeps every desk, the provider-sourced roles and the sessions working there.
+- A desk at an archived company is read access: `authorize_work_target` passes, so reads and exports work as before.
+- Every write into an archived company is refused by its owner's `require_writable` check with a plain "company is archived" refusal (`WriteError::Archived`, a Domain's `CompanyArchived`), never as unauthorized.
+- Access only narrows. An archived company takes no new desk on any path (assignment, a new account, provider provisioning), and an existing desk there can still be removed.
+- The switcher lists an archived desk with an Archived badge. The default desk prefers an unarchived one.
+- Company sign-in policy applies to an archived company as to any other.
+
+The original rule (archiving removed every desk there, revoked its provider-sourced roles and ended sessions working there) made the archived company's records unreadable to everyone but a system principal.
 
 ### Declare what a page covers
 

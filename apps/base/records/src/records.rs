@@ -3,11 +3,12 @@
 //! facade checks a new reference with the owner (`check`), names references
 //! through the owner's Grid source and its own access check (`resolve`),
 //! finds records for a picker (`search`), repoints merged records
-//! (`redirect`) and counts who points at a record (`referrers`). It reads no
+//! (`redirect`), supplies survivor membership for holder reads (`matching`)
+//! and counts who points at a record (`referrers`). It reads no
 //! owner table directly and the owner never learns its holders. No method
 //! holds a pooled connection while Grid takes one, so concurrent callers
 //! cannot fill the pool and wait on each other.
-use crate::declaration::{Access, Holder, RecordKind};
+use crate::declaration::{Access, Holder, PortalStepUp, RecordKind};
 use bilibi_database::{Change, Db, Error, MutationTransaction, Result};
 use bilibi_grid::{
     query::text_search_sql, FieldType, Filter, QueryError, SummarySpec, Test, BOUNDS, MAX_CHOICES,
@@ -125,9 +126,28 @@ pub struct Records {
     pub(crate) kinds: BTreeMap<&'static str, (&'static RecordKind, &'static str)>,
     pub(crate) holders: Vec<&'static Holder>,
     pub(crate) drop_targets: Vec<&'static crate::DropTarget>,
+    pub(crate) portal_step_up: BTreeMap<&'static str, &'static PortalStepUp>,
+    pub(crate) step_up: Arc<bilibi_step_up::StepUp>,
 }
 
 impl Records {
+    /// Portal record rules whose step-up operation this session does not hold.
+    /// Call before taking a pooled connection; checking a browser session may
+    /// read the session store. A holder then asks each returned owner, in one
+    /// batch, which of its referenced records currently need that operation.
+    pub async fn unverified_portal_rules(
+        &self,
+        portal: &bilibi_tenancy::PortalScope,
+    ) -> Result<Vec<&'static PortalStepUp>> {
+        let mut rules = Vec::new();
+        for rule in self.portal_step_up.values() {
+            if !self.step_up.holds(portal.scope(), rule.operation).await? {
+                rules.push(*rule);
+            }
+        }
+        Ok(rules)
+    }
+
     /// The mounted kinds.
     pub fn kinds(&self) -> impl Iterator<Item = &'static RecordKind> + '_ {
         self.kinds.values().map(|(kind, _)| *kind)
@@ -192,11 +212,22 @@ impl Records {
     }
     /// Picker rows for `hits`, each raising `kind:id`.
     pub fn picker_hits(&self, hits: &[Hit]) -> Vec<bilibi_ui::PickerHit> {
+        let multiple_kinds = hits.iter().any(|hit| hit.kind != hits[0].kind);
         hits.iter()
             .map(|hit| bilibi_ui::PickerHit {
                 value: format!("{}:{}", hit.kind, hit.id),
                 label: hit.label.clone(),
-                kind_label: self.kind_label(&hit.kind).to_owned(),
+                instant: None,
+                kind_label: if multiple_kinds {
+                    let noun = self.kind_nouns(&hit.kind).0;
+                    let mut chars = noun.chars();
+                    chars
+                        .next()
+                        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                },
             })
             .collect()
     }
@@ -211,23 +242,26 @@ impl Records {
     /// stored reference, a redirect and a referrer count then name the row
     /// Grid returns, and a malformed id never reaches the owner's source as a
     /// cast error.
-    fn canonical(kind: &RecordKind, id: &str) -> Option<String> {
+    pub(crate) fn canonical(kind: &RecordKind, id: &str) -> Option<String> {
         if !bilibi_ui::workspace::record_id(id) {
             return None;
         }
-        let integer = bilibi_grid::installed()
-            .ok()
-            .and_then(|installed| installed.table(kind.table))
-            .is_some_and(|table| table.key_field().ty == FieldType::Integer);
-        if integer {
+        if Self::integer_key(kind) {
             id.parse::<i64>().ok().map(|id| id.to_string())
         } else {
             Some(id.to_owned())
         }
     }
 
+    fn integer_key(kind: &RecordKind) -> bool {
+        bilibi_grid::installed()
+            .ok()
+            .and_then(|installed| installed.table(kind.table))
+            .is_some_and(|table| table.key_field().ty == FieldType::Integer)
+    }
+
     /// The survivors of merged records, by stored id.
-    async fn redirected(
+    pub(crate) async fn redirected(
         client: &dyn ReadClient,
         tenant: i64,
         kind: &str,
@@ -507,10 +541,11 @@ impl Records {
         };
         let page = tx
             .query(
-                &format!("SELECT k::text FROM ({sql}) AS s(k) ORDER BY k LIMIT $4 OFFSET $5"),
+                &format!("SELECT k::text FROM ({sql}) AS s(k) ORDER BY k LIMIT $5 OFFSET $6"),
                 &[
                     &scope.tenant(),
                     &scope.user(),
+                    &scope.current_company().map(|company| company.get()),
                     &needle,
                     &SEARCH_PAGE,
                     &offset,
@@ -529,7 +564,11 @@ impl Records {
     /// write: anything that pointed at `from` now points at `to`, and `to`
     /// itself is never redirected. Ids are taken in their one spelling.
     /// Merges of one kind in one tenant run one at a time, so overlapping
-    /// merges commit no chain. Holders repoint on read; no holder row is
+    /// merges commit no chain. The merge transaction must read at READ
+    /// COMMITTED (the `MutationBoundary` default); any other isolation is
+    /// refused with `Error::Invalid` before anything is locked or written,
+    /// since an older snapshot would miss a just-committed redirect and
+    /// commit a chain. Holders repoint on read; no holder row is
     /// rewritten. One audited `Change` on `record_redirect` per row.
     pub async fn redirect(
         &self,
@@ -547,6 +586,14 @@ impl Records {
             return Err(Error::Invalid);
         };
         if from == to {
+            return Err(Error::Invalid);
+        }
+        let isolation: String = tx
+            .sql()
+            .query_one("SHOW transaction_isolation", &[])
+            .await?
+            .get(0);
+        if isolation != "read committed" {
             return Err(Error::Invalid);
         }
         let tenant = scope.tenant();
@@ -629,17 +676,16 @@ impl Records {
             .await?
             .remove(&id)
             .unwrap_or(id);
-        let mut ids: Vec<String> = client
+        let ids: Vec<String> = client
             .query(
-                "SELECT from_id FROM base_records_redirects WHERE tenant_id=$1 AND kind=$2 AND to_id=$3",
+                crate::matching::MEMBERSHIP_SQL,
                 &[&scope.tenant(), &kind, &id],
             )
             .await?
             .iter()
-            .map(|row| row.get(0))
+            .map(|row| row.get("record_id"))
             .collect();
         drop(client);
-        ids.push(id);
         let mut counts = Vec::new();
         'holders: for holder in &self.holders {
             let mut count = 0;
@@ -674,5 +720,29 @@ impl Records {
             });
         }
         Ok(counts)
+    }
+}
+
+impl bilibi_grid::SubjectAccess for Records {
+    fn integer_key(&self, kind: &str) -> bool {
+        self.kind(kind).is_some_and(Self::integer_key)
+    }
+
+    fn readable<'a>(
+        &'a self,
+        client: &'a dyn bilibi_tenancy::ProofClient,
+        scope: &'a Scope,
+        kind: &'a str,
+        id: &'a str,
+    ) -> bilibi_tenancy::ProofFuture<'a, bool> {
+        Box::pin(async move {
+            let Some(kind) = self.kind(kind) else {
+                return Ok(false);
+            };
+            let Some(id) = Self::canonical(kind, id) else {
+                return Ok(false);
+            };
+            Ok(kind.owner.authorize(client, scope, &id).await? == Access::Readable)
+        })
     }
 }

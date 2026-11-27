@@ -1,0 +1,36 @@
+[package]
+name = "bilibi-templates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.23.1"
+bilibi-agent-api.workspace = true
+bilibi-artifacts.workspace = true
+bilibi-authz.workspace = true
+bilibi-branding.workspace = true
+bilibi-database.workspace = true
+bilibi-datetime.workspace = true
+bilibi-labels.workspace = true
+bilibi-module-registry.workspace = true
+bilibi-party-ids.workspace = true
+bilibi-queue.workspace = true
+bilibi-schedule.workspace = true
+bilibi-settings.workspace = true
+bilibi-tenancy.workspace = true
+bilibi-ui.workspace = true
+icu_locale.workspace = true
+inventory.workspace = true
+jiff.workspace = true
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio-postgres.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

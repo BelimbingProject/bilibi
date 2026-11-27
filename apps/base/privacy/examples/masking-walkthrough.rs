@@ -65,14 +65,8 @@ impl PlanAuthority for Browser<'_> {
         tx: &'a tokio_postgres::Transaction<'_>,
     ) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(Error::Unauthorized)?;
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.check(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })
@@ -172,7 +166,10 @@ async fn page(
 /// Opens the person 1 update in the audit mutations page, as a reader expands
 /// it, and reports what the diff shows.
 async fn history(app: &bilibi_web::App, scope: &Scope, token: &str) -> Result<()> {
-    let client = app.db.get().await?;
+    let client = app
+        .db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let id: i64 = client
         .query_one(
             "SELECT id FROM base_audit_mutations WHERE auditable_type='person' AND auditable_id='1' AND event='updated' ORDER BY id DESC LIMIT 1",
@@ -258,7 +255,9 @@ async fn main() -> Result<()> {
         .get::<Grants>("base/authz.grants")?
         .reconcile()
         .await?;
-    let client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // The viewer may reveal and read history; staff may read history but not reveal.
     client
         .batch_execute(
@@ -280,7 +279,7 @@ async fn main() -> Result<()> {
     println!("== a contact with history: admin sets Ada's email and phone");
     let ada = registry
         .call(
-            &**client,
+            &mut **client,
             &admin,
             "core.person.get",
             &json!({"person_id": 1}),
@@ -326,7 +325,7 @@ async fn main() -> Result<()> {
             label,
             registry
                 .call(
-                    &**client,
+                    &mut **client,
                     scope,
                     "core.person.get",
                     &json!({"person_id": 1}),
@@ -340,7 +339,7 @@ async fn main() -> Result<()> {
     show(
         "viewer lists contacts",
         registry
-            .call(&**client, &viewer, "core.person.list", &json!({}))
+            .call(&mut **client, &viewer, "core.person.list", &json!({}))
             .await
             .map(|v| contacts(&v)),
     );
@@ -348,7 +347,7 @@ async fn main() -> Result<()> {
         "viewer searches by Ada's email",
         registry
             .call(
-                &**client,
+                &mut **client,
                 &viewer,
                 "core.person.list",
                 &json!({"search": "ada.manager@corp"}),
@@ -360,7 +359,7 @@ async fn main() -> Result<()> {
         "admin searches by Ada's email",
         registry
             .call(
-                &**client,
+                &mut **client,
                 &admin,
                 "core.person.list",
                 &json!({"search": "ada.manager@corp"}),
@@ -484,12 +483,10 @@ async fn main() -> Result<()> {
             .reveal_field(&viewer, "persons", "email", &record, " ")
             .await,
     );
-    show(
-        "viewer, email with a reason",
-        privacy
-            .reveal_field(&viewer, "persons", "email", &record, "Ticket 4411")
-            .await,
-    );
+    let disclosed = privacy
+        .reveal_field(&viewer, "persons", "email", &record, "Ticket 4411")
+        .await?;
+    assert_eq!(disclosed.as_deref(), Some("ada.manager@corp.example"));
     show(
         "viewer, withheld phone",
         privacy
@@ -514,10 +511,37 @@ async fn main() -> Result<()> {
             .reveal_field(&admin, "persons", "email", &record, "Ticket 4411")
             .await,
     );
-    show(
-        "viewer through the agent operation (reviewed write)",
-        write(&app, &viewer_token, "base.privacy.field.reveal", json!({"table": "person_affiliations", "field": "work_email", "record": 1, "reason": "Ticket 4412"}))
-            .await?,
+    let agent_reveal = write(
+        &app,
+        &viewer_token,
+        "base.privacy.field.reveal",
+        json!({"table": "person_affiliations", "field": "work_email", "record": 1, "reason": "Ticket 4412"}),
+    )
+    .await?
+    .unwrap_or_else(|error| panic!("agent reveal failed: {error}"));
+    assert_eq!(
+        agent_reveal
+            .pointer("/results/0/result/result/value")
+            .and_then(Value::as_str),
+        Some("manager@example.test")
+    );
+    let tx = client.transaction().await?;
+    let disclosed = privacy
+        .reveal_field_in(
+            &tx,
+            &viewer,
+            "persons",
+            "email",
+            &record,
+            "Ticket rollback proof",
+        )
+        .await?;
+    assert_eq!(disclosed.as_deref(), Some("ada.manager@corp.example"));
+    tx.rollback().await?;
+    let survived: i64 = client.query_one("SELECT count(*) FROM base_audit_actions WHERE event='privacy.field.revealed' AND payload->>'reason'='Ticket rollback proof'", &[]).await?.get(0);
+    assert_eq!(
+        survived, 1,
+        "the disclosure audit must survive outer rollback"
     );
     for row in client
         .query(
@@ -556,7 +580,10 @@ async fn main() -> Result<()> {
         let (mut ok, mut refused) = (0, std::collections::BTreeMap::<String, i32>::new());
         for call in calls {
             match call.await {
-                Ok(Ok(Some(_))) => ok += 1,
+                Ok(Ok(Some(value))) => {
+                    assert_eq!(value, "ada.manager@corp.example");
+                    ok += 1;
+                }
                 Ok(other) => *refused.entry(format!("{other:?}")).or_default() += 1,
                 Err(error) => *refused.entry(error.to_string()).or_default() += 1,
             }

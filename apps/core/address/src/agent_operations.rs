@@ -1,8 +1,8 @@
 //! Operation adapters for the Address facade and AddressesPanel actions.
 //! Every door shares the owner validation, locking, audit and notifications.
 use crate::{
-    contributions::*, model, store, Address, AddressId, AddressInput, AddressService, AttachmentId,
-    AttachmentInput, AttachmentUpdate, Auto, CalendarDate, EffectiveDates, Location,
+    contributions::*, location, model, store, Address, AddressId, AddressInput, AddressService,
+    AttachmentId, AttachmentInput, AttachmentUpdate, Auto, CalendarDate, EffectiveDates, Location,
     OrganisationId, PartyId, PersonId, Search, WriteError,
 };
 use bilibi_agent_api::{
@@ -77,6 +77,13 @@ fn timestamp(time: std::time::SystemTime) -> Value {
     json!(jiff::Timestamp::try_from(time)
         .expect("database timestamp fits ISO time")
         .to_string())
+}
+/// An update whose input leaves the phone out, or sends null, keeps the
+/// stored phone; only `""` clears it. A plan built while the phone was hidden
+/// leaves it out, and must not clear it if the restriction is lifted before
+/// the plan commits (#603's gap, for addresses).
+fn keeps_phone(input: &Value) -> bool {
+    input["address"].get("phone").is_none_or(Value::is_null)
 }
 fn record(address: &Address) -> Value {
     let mut value = json!(address);
@@ -191,19 +198,19 @@ enum Action {
 impl AddressService {
     async fn operation_preview(
         &self,
+        client: &tokio_postgres::Client,
         scope: &Scope,
         action: Action,
         input: &Value,
         references: Option<&bilibi_agent_api::PlanReferences>,
     ) -> bilibi_agent_api::Result<Value> {
-        let client = self.db.get().await.map_err(Error::from)?;
-        let scope = self.fresh(&**client, scope).await?;
+        let scope = self.fresh(client, scope).await?;
         let mut review = json!({});
         match action {
             Action::Create | Action::Update | Action::CreateAttached(_) => {
                 let address: AddressInput = parse(&input["address"])?;
-                let mut valid = self.validate(&address).await.map_err(invalid)?;
-                store::preview_input(&**client, &scope, &valid)
+                let mut valid = self.validate_on(client, &address).await.map_err(invalid)?;
+                store::preview_input(client, &scope, &valid)
                     .await
                     .map_err(invalid)?;
                 if matches!(action, Action::CreateAttached(_)) {
@@ -213,17 +220,16 @@ impl AddressService {
                 review["address"] = json!(valid.input());
                 let location = Location::of(valid.input());
                 // Reference names are reviewed too, so changed lookup facts require a new plan.
-                review["location"] = json!(self.options(&location).await?);
+                review["location"] =
+                    json!(location::options(client, &self.geonames, &location).await?);
                 if let Some(iso) = &valid.0.country_iso {
-                    review["country"] = json!(self
-                        .geonames
-                        .get_country(iso)
+                    review["country"] = json!(bilibi_geonames::country_summary(client, iso)
                         .await?
                         .map(|c| json!({"iso":c.iso,"name":c.country})));
                 }
                 if let Some(code) = &valid.0.admin1_code {
                     review["region"] =
-                        json!(self.geonames.get_admin1(code).await?.map(
+                        json!(self.geonames.get_admin1_on(client, code).await?.map(
                             |a| json!({"code":a.code,"name":a.name,"country_iso":a.country_iso})
                         ));
                 }
@@ -232,11 +238,11 @@ impl AddressService {
         }
         match action {
             Action::Create => {
-                bilibi_authz::authorize_key(&**client, &scope, CREATE).await?;
+                bilibi_authz::authorize_key(client, &scope, CREATE).await?;
             }
             Action::Update | Action::Delete => {
                 let old = store::preview_address(
-                    &**client,
+                    client,
                     &scope,
                     address_id(input)?,
                     number(input, "version")?,
@@ -245,6 +251,9 @@ impl AddressService {
                 .await
                 .map_err(invalid)?;
                 review["before"] = record(&old);
+                if matches!(action, Action::Update) && keeps_phone(input) {
+                    review["address"]["phone"] = review["before"]["address"]["phone"].clone();
+                }
             }
             Action::Attach(kind)
             | Action::CreateAttached(kind)
@@ -261,14 +270,14 @@ impl AddressService {
                         OwnerKind::Company => bilibi_company::UPDATE,
                         OwnerKind::Person => bilibi_person::UPDATE,
                     };
-                    bilibi_authz::authorize_key(&**client, &scope, capability).await?;
+                    bilibi_authz::authorize_key(client, &scope, capability).await?;
                     review["owner"] = match kind {
                         OwnerKind::Company => input["company_id"].clone(),
                         OwnerKind::Person => input["person_id"].clone(),
                     };
                 } else {
                     review["owner"] =
-                        store::preview_owner(&**client, &scope, party.ok_or(Error::Internal)?)
+                        store::preview_owner(client, &scope, party.ok_or(Error::Internal)?)
                             .await
                             .map_err(invalid)?;
                 }
@@ -295,7 +304,7 @@ impl AddressService {
                     Action::Attach(_) => {
                         review["existing_address"] = record(
                             &store::preview_attach(
-                                &**client,
+                                client,
                                 &scope,
                                 address_id(input)?,
                                 party.ok_or(Error::Internal)?,
@@ -307,7 +316,7 @@ impl AddressService {
                     }
                     Action::UpdateAttachment(_) | Action::Detach(_) => {
                         let old = store::attachment_for(
-                            &**client,
+                            client,
                             &scope,
                             attachment_id(input)?,
                             party.ok_or(Error::Internal)?,
@@ -334,7 +343,7 @@ impl AddressService {
         match action {
             Action::Create | Action::Update | Action::CreateAttached(_) => {
                 let valid = self
-                    .validate(&parse::<AddressInput>(&input["address"])?)
+                    .validate_on(tx.sql(), &parse::<AddressInput>(&input["address"])?)
                     .await
                     .map_err(invalid)?;
                 match action {
@@ -348,6 +357,7 @@ impl AddressService {
                             address_id(input)?,
                             number(input, "version")?,
                             &valid,
+                            keeps_phone(input),
                         )
                         .await
                         .map_err(invalid)?,
@@ -433,7 +443,7 @@ impl WriteHandler for Action {
     }
     fn preview_dependent<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
         references: &'a bilibi_agent_api::PlanReferences,
@@ -446,7 +456,13 @@ impl WriteHandler for Action {
             };
             references.require(&[allowed])?;
             Ok(owner()?
-                .operation_preview(scope, *self, input, Some(references))
+                .operation_preview(
+                    client.sql_client().await?,
+                    scope,
+                    *self,
+                    input,
+                    Some(references),
+                )
                 .await?
                 .into())
         })
@@ -456,13 +472,13 @@ impl WriteHandler for Action {
     }
     fn preview<'a>(
         &'a self,
-        _: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             Ok(owner()?
-                .operation_preview(scope, *self, input, None)
+                .operation_preview(client.sql_client().await?, scope, *self, input, None)
                 .await?
                 .into())
         })
@@ -502,11 +518,14 @@ fn address_schema() -> Value {
         ("parser_version", 255),
         ("parse_confidence", 16),
     ] {
-        properties.insert(key.into(), json!({"type":"string","maxLength":max}));
+        properties.insert(
+            key.into(),
+            crate::web::fields::get(key).input(json!({"maxLength":max})),
+        );
     }
     properties.insert(
         "verification_status".into(),
-        json!({"type":"string","enum":["unverified","suggested","verified"]}),
+        crate::web::fields::VERIFICATION_STATUS.input(json!({})),
     );
     json!({"type":"object","properties":properties})
 }

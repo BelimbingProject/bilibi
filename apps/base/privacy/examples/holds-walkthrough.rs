@@ -113,7 +113,9 @@ async fn main() -> Result<()> {
     services.install(&modules)?;
     let privacy = services.get::<Privacy>(SERVICE)?;
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     if std::env::args().nth(1).as_deref() == Some("report") {
         println!("== separate-process report: holds, events and audit");
         return report(&client).await;
@@ -161,6 +163,21 @@ async fn main() -> Result<()> {
         )
         .await?;
     println!("placed {on_record:?}");
+    let pool_size = db.status().max_size;
+    db.resize(1);
+    let (holds, mut guard) = bilibi_personal_data::RecordHolds::acquire(&mut client, 1).await?;
+    let tx = guard.client().transaction().await?;
+    assert_eq!(
+        holds.records(&tx, "person", &[2]).await?.get(&2),
+        Some(&on_record.id)
+    );
+    tx.commit().await?;
+    let held = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory' AND mode='ShareLock')";
+    assert!(guard.client().query_one(held, &[]).await?.get::<_, bool>(0));
+    guard.release().await?;
+    assert!(!client.query_one(held, &[]).await?.get::<_, bool>(0));
+    db.resize(pool_size);
+    println!("PASS a one-slot pool serves hold reads and keeps the guard through commit");
     show(
         "second hold on the same person",
         privacy
@@ -208,7 +225,7 @@ async fn main() -> Result<()> {
     println!("first: {first}; second: {second}");
 
     // An erasure's or sweep's hold session can be opened only by Privacy,
-    // from its own sealed grant (`Holds::acquire(scope, &grant)`), so this
+    // from its own sealed grant (`Holds::acquire(client, scope, &grant)`), so this
     // walkthrough holds the same shared tenant guard on its own connection
     // to stand in for one; the failures walkthrough runs real erasures and
     // sweeps against holds.

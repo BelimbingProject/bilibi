@@ -52,8 +52,6 @@ pub struct Account {
     pub status: String,
     pub email_verified: bool,
     pub email_verified_at: Option<std::time::SystemTime>,
-    /// Whether this tenant owns the installation-wide sign-in credentials.
-    pub home: bool,
     pub links: AccountLinks,
     pub version: i64,
     pub created_at: std::time::SystemTime,
@@ -89,7 +87,7 @@ pub async fn standing(client: &dyn ProofClient, tenant: i64, user: i64) -> Resul
     }
     let Some(row) = client
         .query_opt(
-            "SELECT u.name,i.email,u.person_id,u.affiliation_id,u.organisation_id,EXISTS(SELECT 1 FROM user_bootstrap b WHERE b.tenant_id=u.tenant_id AND b.user_id=u.id),u.kind FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active' AND NOT EXISTS(SELECT 1 FROM user_scim_users s WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id AND NOT s.active)",
+            "SELECT u.name,i.email,u.person_id,u.affiliation_id,u.organisation_id,u.kind FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active' AND NOT EXISTS(SELECT 1 FROM user_scim_users s WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id AND NOT s.active)",
             &[&tenant, &user],
         )
         .await?
@@ -97,7 +95,7 @@ pub async fn standing(client: &dyn ProofClient, tenant: i64, user: i64) -> Resul
         return Ok(Standing::Unknown);
     };
     let links = AccountLinks::from_row(&row, 2)?;
-    let kind = AccountKind::parse(row.get(6)).ok_or(Error::Internal)?;
+    let kind = AccountKind::parse(row.get(5)).ok_or(Error::Internal)?;
     let organisation = row
         .get::<_, Option<i64>>(4)
         .map(OrganisationId::new)
@@ -143,9 +141,6 @@ pub async fn standing(client: &dyn ProofClient, tenant: i64, user: i64) -> Resul
         organisation: organisation.filter(|_| kind == AccountKind::Customer),
         affiliation: affiliation.filter(|_| kind == AccountKind::Customer),
         kind,
-        // The bootstrap receipt names the installation's owner; Tenancy adds
-        // the operator proof (`bilibi_tenancy::prove_owner`).
-        installation_owner: row.get(5),
     }))
 }
 
@@ -169,8 +164,45 @@ impl ActorVerifier for AccountVerifier {
             }
         })
     }
+    fn lock_owner<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        tenant: i64,
+        user: i64,
+    ) -> ProofFuture<'a, ()> {
+        Box::pin(async move {
+            const RECEIPT: &str =
+                "SELECT id FROM user_bootstrap WHERE id=1 AND tenant_id=$1 AND user_id=$2";
+            let mode = client
+                .query_opt("SHOW transaction_read_only", &[])
+                .await?
+                .ok_or(Error::Internal)?;
+            // Read-only snapshots cannot take row locks. Writable transactions
+            // must still hold the receipt until their owner-authorized work ends.
+            let query = if mode.get::<_, &str>(0) == "on" {
+                RECEIPT.to_owned()
+            } else {
+                format!("{RECEIPT} FOR SHARE")
+            };
+            client
+                .query_opt(&query, &[&tenant, &user])
+                .await?
+                .ok_or(Error::Forbidden)?;
+            Ok(())
+        })
+    }
+    /// One read under the same standing rule as the staff search.
+    fn live_staff<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        tenant: i64,
+        accounts: &'a [i64],
+    ) -> ProofFuture<'a, Vec<i64>> {
+        Box::pin(crate::staff_choices::live_staff(client, tenant, accounts))
+    }
     /// The chosen workplace is proved through Core Company's work-access seam:
-    /// live, unarchived and assigned as an explicit desk on this connection.
+    /// live and assigned as an explicit desk on this connection. An archived
+    /// desk qualifies (read-only); the default desk prefers an unarchived one.
     fn reaches_company<'a>(
         &'a self,
         client: &'a dyn ProofClient,
@@ -200,7 +232,7 @@ impl ActorVerifier for AccountVerifier {
         scope: &'a Scope,
     ) -> ProofFuture<'a, Option<OrganisationId>> {
         Box::pin(async move {
-            let row=client.query_opt("SELECT d.company_id FROM user_desks d JOIN users u ON u.tenant_id=d.tenant_id AND u.person_id=d.person_id AND u.id=$2 JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id WHERE d.tenant_id=$1 AND u.kind='staff' AND u.deleted_at IS NULL AND c.deleted_at IS NULL AND c.status <> 'archived' ORDER BY (d.company_id=u.last_desk_id) DESC NULLS LAST,d.id LIMIT 1", &[&scope.tenant(),&scope.user()]).await?;
+            let row=client.query_opt("SELECT d.company_id FROM user_desks d JOIN users u ON u.tenant_id=d.tenant_id AND u.person_id=d.person_id AND u.id=$2 JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id WHERE d.tenant_id=$1 AND u.kind='staff' AND u.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY c.status='archived',(d.company_id=u.last_desk_id) DESC NULLS LAST,d.id LIMIT 1", &[&scope.tenant(),&scope.user()]).await?;
             row.map(|row| OrganisationId::new(row.get(0)).map_err(|_| Error::Internal))
                 .transpose()
         })
@@ -259,6 +291,7 @@ impl Audience {
 pub(crate) async fn password_identity(
     users: &UserService,
     audience: Audience,
+    target_tenant: Option<i64>,
     email: &str,
     password: &str,
 ) -> std::result::Result<(i64, i64, String), CredentialError> {
@@ -270,8 +303,8 @@ pub(crate) async fn password_identity(
     let tenant = audience.tenant();
     let row = client
         .query_opt(
-            "SELECT u.id,u.tenant_id,i.password_hash,true FROM user_identities i JOIN users u ON u.identity_id=i.id JOIN tenants t ON t.id=u.tenant_id WHERE lower(i.email)=$1 AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' AND i.kind=$2 AND u.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) ORDER BY (u.tenant_id=i.last_tenant_id) DESC,(u.tenant_id=i.home_tenant_id) DESC,u.tenant_id LIMIT 1",
-            &[&email, &audience.kind().as_str(), &tenant],
+            "SELECT u.id,u.tenant_id,i.password_hash,true FROM user_identities i JOIN users u ON u.identity_id=i.id JOIN tenants t ON t.id=u.tenant_id WHERE lower(i.email)=$1 AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' AND i.kind=$2 AND u.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND ($4::bigint IS NULL OR u.tenant_id=$4) ORDER BY (u.tenant_id=i.last_tenant_id) DESC,u.tenant_id LIMIT 1",
+            &[&email, &audience.kind().as_str(), &tenant, &target_tenant],
         )
         .await
         .map_err(Error::from)?;
@@ -290,7 +323,15 @@ pub(crate) async fn password_identity(
     if !matched {
         let limits = users.sign_in_limits(&**client).await?;
         drop(client);
-        users.sign_in_failed(tenant, user, limits).await?;
+        // Counted after the answer: the audited writes (and at the limit
+        // the lock and its notice) would otherwise make a wrong password on
+        // a real address measurably slower than on an unknown one.
+        let mail = users.reset_mail();
+        tokio::spawn(async move {
+            if let Err(error) = mail.sign_in_failed(tenant, user, limits).await {
+                eprintln!("sign-in: a wrong password for user {user} was not counted: {error}");
+            }
+        });
         return Err(CredentialError::Rejected);
     }
     if !workspace {
@@ -300,7 +341,7 @@ pub(crate) async fn password_identity(
         Standing::Live(_) => {}
         Standing::Frozen(Freeze::CompanyArchived) => return Err(CredentialError::CompanyArchived),
         Standing::Frozen(Freeze::Identity) | Standing::Unknown => {
-            return Err(CredentialError::WorkspaceUnavailable)
+            return Err(CredentialError::WorkspaceUnavailable);
         }
     }
     drop(client);
@@ -325,7 +366,7 @@ pub(crate) async fn read_account(
     lock: bool,
 ) -> Result<Option<Account>> {
     let sql = format!(
-        "SELECT u.id,u.name,i.email,u.status,i.email_verified_at,u.person_id,u.version,u.created_at,u.updated_at,i.home_tenant_id=u.tenant_id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.kind='staff' AND u.deleted_at IS NULL{}",
+        "SELECT u.id,u.name,i.email,u.status,i.email_verified_at,u.person_id,u.version,u.created_at,u.updated_at FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.kind='staff' AND u.deleted_at IS NULL{}",
         if lock { " FOR UPDATE" } else { "" }
     );
     client
@@ -340,7 +381,6 @@ pub(crate) async fn read_account(
                 status: row.get(3),
                 email_verified: email_verified_at.is_some(),
                 email_verified_at,
-                home: row.get(9),
                 links: AccountLinks::from_row(&row, 5)?,
                 version: row.get(6),
                 created_at: row.get(7),
@@ -356,11 +396,11 @@ pub(crate) async fn read_account(
 async fn save_links(
     service: &UserService,
     tx: &mut MutationTransaction<'_>,
-    old: &Account,
+    id: i64,
+    before: AccountLinks,
     links: AccountLinks,
 ) -> Result<AccountLinks> {
     let tenant = tx.context().tenant;
-    let (id, before) = (old.id, old.links);
     tx
         .mutate(move |sql| {
             Box::pin(async move {
@@ -424,36 +464,7 @@ impl UserService {
         user: i64,
         person: PersonId,
     ) -> std::result::Result<AccountLinks, LinkError> {
-        let mut client = self.db.get().await.map_err(Error::from)?;
-        let mut tx = self
-            .mutations
-            .begin(&mut client, scope.mutation_context("user.link_person"))
-            .await?;
-        let scope = self.fresh(tx.sql(), scope).await?;
-        bilibi_authz::authorize_key(tx.sql(), &scope, UPDATE).await?;
-
-        // The proof borrows the transaction; take its identity before the
-        // account write borrows it mutably. The database locks stay held.
-        let person = bilibi_person::lock_for_account_binding(&tx, &scope, person)
-            .await
-            .map_err(|error| match error {
-                Error::NotFound => LinkError::NotFound,
-                other => LinkError::Access(other),
-            })?
-            .id();
-        let account = read_account(tx.sql(), &scope, user, true)
-            .await?
-            .ok_or(LinkError::NotFound)?;
-        if account.links.person == Some(person) {
-            tx.rollback().await?;
-            return Ok(account.links);
-        }
-        let links = AccountLinks {
-            person: Some(person),
-        };
-        let links = save_links(self, &mut tx, &account, links).await?;
-        tx.commit().await?;
-        Ok(links)
+        self.set_person_link(scope, user, Some(person), None).await
     }
     /// Initializes a new staff account's person and desk in the creator's transaction.
     pub(crate) async fn initialize_desk_in(
@@ -464,13 +475,20 @@ impl UserService {
         person: PersonId,
         company: OrganisationId,
     ) -> Result<AccountLinks> {
-        let account = read_account(tx.sql(), scope, user, true)
+        let row = tx
+            .sql()
+            .query_opt(
+                "SELECT person_id FROM users WHERE tenant_id=$1 AND id=$2 AND kind='staff'
+                 AND deleted_at IS NULL AND identity_id IS NOT NULL FOR UPDATE",
+                &[&scope.tenant(), &user],
+            )
             .await?
             .ok_or(Error::NotFound)?;
+        let before = AccountLinks::from_row(&row, 0)?;
         let links = AccountLinks {
             person: Some(person),
         };
-        save_links(self, tx, &account, links).await?;
+        save_links(self, tx, user, before, links).await?;
         crate::desks::write_in(tx, scope, company.get(), person.get()).await?;
         Ok(links)
     }
@@ -481,22 +499,49 @@ impl UserService {
         scope: &Scope,
         user: i64,
     ) -> std::result::Result<AccountLinks, LinkError> {
+        self.set_person_link(scope, user, None, None).await
+    }
+
+    pub(crate) async fn set_person_link(
+        &self,
+        scope: &Scope,
+        user: i64,
+        person: Option<PersonId>,
+        expected: Option<Option<PersonId>>,
+    ) -> std::result::Result<AccountLinks, LinkError> {
+        let action = if person.is_some() {
+            "user.link_person"
+        } else {
+            "user.unlink"
+        };
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
-            .begin(&mut client, scope.mutation_context("user.unlink"))
+            .begin(&mut client, scope.mutation_context(action))
             .await?;
         let scope = self.fresh(tx.sql(), scope).await?;
         bilibi_authz::authorize_key(tx.sql(), &scope, UPDATE).await?;
 
+        if let Some(person) = person {
+            bilibi_person::lock_for_account_binding(&tx, &scope, person)
+                .await
+                .map_err(|error| match error {
+                    Error::NotFound => LinkError::NotFound,
+                    other => LinkError::Access(other),
+                })?;
+        }
         let account = read_account(tx.sql(), &scope, user, true)
             .await?
             .ok_or(LinkError::NotFound)?;
-        if account.links == AccountLinks::default() {
+        if expected.is_some_and(|expected| account.links.person != expected) {
+            return Err(Error::Conflict.into());
+        }
+        if account.links.person == person {
             tx.rollback().await?;
             return Ok(account.links);
         }
-        let links = save_links(self, &mut tx, &account, AccountLinks::default()).await?;
+        let links = AccountLinks { person };
+        let links = save_links(self, &mut tx, account.id, account.links, links).await?;
         tx.commit().await?;
         Ok(links)
     }

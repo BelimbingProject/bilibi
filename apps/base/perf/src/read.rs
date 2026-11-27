@@ -5,10 +5,14 @@ use crate::{
     recorder::{Recorder, Stats, SLOW_THRESHOLD_MS},
     sample::{Kind, Outcome, Process, Sample, SizeClass},
 };
-use bilibi_database::{Error, Result};
-use std::time::{Duration, SystemTime};
-use tokio::time::timeout;
-use tokio_postgres::Row;
+use bilibi_database::{Connection, Error, Result};
+use std::{
+    future::Future,
+    pin::Pin,
+    time::{Duration, SystemTime},
+};
+use tokio::time::{timeout_at, Instant};
+use tokio_postgres::{Client, Row};
 
 pub const PAGE_SIZES: [i64; 4] = [25, 50, 100, 300];
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -139,9 +143,70 @@ fn recorded(row: &Row) -> Result<Recorded> {
 const FILTERED: &str = "($1::text IS NULL OR kind=$1) AND ($2::text IS NULL OR identity=$2) AND ($3::text IS NULL OR outcome=$3) AND ($4::timestamptz IS NULL OR observed_at>=$4) AND ($5::timestamptz IS NULL OR observed_at<$5)";
 
 impl Recorder {
+    async fn bounded_read<T>(
+        &self,
+        connection: &mut Option<Connection>,
+        query: impl for<'a> FnOnce(&'a Client) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
+    ) -> Result<T> {
+        let deadline = Instant::now() + READ_TIMEOUT;
+        let client = match connection {
+            Some(client) => client,
+            None => {
+                let client = timeout_at(deadline, self.db.get())
+                    .await
+                    .map_err(|_| Error::Internal)??;
+                connection.insert(client)
+            }
+        };
+        let completed = timeout_at(deadline, async {
+            let tx = client.build_transaction().read_only(true).start().await?;
+            let result = async {
+                let remaining = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis();
+                let statement_ms = remaining
+                    .checked_sub(500)
+                    .filter(|ms| *ms > 0)
+                    .ok_or(Error::Internal)?;
+                let transaction_ms = remaining - 250;
+                tx.batch_execute(&format!(
+                    "SET LOCAL statement_timeout = '{statement_ms}ms'; \
+                     SET LOCAL transaction_timeout = '{transaction_ms}ms'"
+                ))
+                .await?;
+                query(tx.client()).await
+            }
+            .await;
+            if result.is_ok() {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
+            Ok::<_, Error>(result)
+        })
+        .await;
+        let (value, reusable) = match completed {
+            Ok(Ok(value)) => (value, !client.is_closed()),
+            Ok(Err(error)) => (Err(error), false),
+            Err(_) => (Err(Error::Internal), false),
+        };
+        if !reusable {
+            drop(connection.take().map(Connection::take));
+        }
+        value
+    }
+
     /// One bounded page, newest first. A page size outside `PAGE_SIZES`, a page
     /// below one or a malformed identity filter is refused, not clamped.
     pub async fn list_samples(&self, filter: &Filter) -> Result<Page> {
+        self.list_samples_on(&mut None, filter).await
+    }
+
+    pub(crate) async fn list_samples_on(
+        &self,
+        connection: &mut Option<Connection>,
+        filter: &Filter,
+    ) -> Result<Page> {
         if filter.page < 1
             || filter.page > 1_000_000
             || !PAGE_SIZES.contains(&filter.page_size)
@@ -152,8 +217,8 @@ impl Recorder {
         {
             return Err(Error::Invalid);
         }
-        let read = async {
-            let client = self.db.get().await?;
+        let filter = filter.clone();
+        self.bounded_read(connection, move |client| Box::pin(async move {
             let kind = filter.kind.map(Kind::as_str);
             let outcome = filter.outcome.map(Outcome::as_str);
             let identity = filter.identity.as_deref();
@@ -177,16 +242,17 @@ impl Recorder {
                 page: filter.page,
                 page_size: filter.page_size,
             })
-        };
-        timeout(READ_TIMEOUT, read)
-            .await
-            .map_err(|_| Error::Internal)?
+        })).await
     }
 
     /// Store and recorder health. Silence is not health: an empty history with
     /// a running writer reads as available with zero samples, and a missing
     /// writer or store says so.
     pub async fn diagnostics(&self) -> Diagnostics {
+        self.diagnostics_on(&mut None).await
+    }
+
+    pub(crate) async fn diagnostics_on(&self, connection: &mut Option<Connection>) -> Diagnostics {
         let stats = self.stats();
         let recorder = if !stats.running {
             Health::Unavailable
@@ -195,19 +261,20 @@ impl Recorder {
         } else {
             Health::Available
         };
-        let read = async {
-            let client = self.db.get().await?;
-            let row = client
-                .query_one(
-                    "SELECT count(*)::bigint, max(observed_at) FROM base_perf_samples",
-                    &[],
-                )
-                .await?;
-            Ok::<_, Error>((row.get::<_, i64>(0), row.get::<_, Option<SystemTime>>(1)))
-        };
-        let (store, samples, last_observed_at) = match timeout(READ_TIMEOUT, read).await {
-            Ok(Ok((samples, last))) => (Store::Available, Some(samples), last),
-            _ => (Store::Unavailable, None, None),
+        let read = self.bounded_read(connection, |client| {
+            Box::pin(async move {
+                let row = client
+                    .query_one(
+                        "SELECT count(*)::bigint, max(observed_at) FROM base_perf_samples",
+                        &[],
+                    )
+                    .await?;
+                Ok::<_, Error>((row.get::<_, i64>(0), row.get::<_, Option<SystemTime>>(1)))
+            })
+        });
+        let (store, samples, last_observed_at) = match read.await {
+            Ok((samples, last)) => (Store::Available, Some(samples), last),
+            Err(_) => (Store::Unavailable, None, None),
         };
         Diagnostics {
             recorder,
@@ -240,6 +307,14 @@ impl Recorder {
     /// `perf.slow_threshold_ms`, ranked by how much their mean grew against the
     /// baseline window. The windows must be ordered and must not overlap.
     pub async fn regressions(&self, windows: &Windows) -> Result<Vec<Regression>> {
+        self.regressions_on(&mut None, windows).await
+    }
+
+    pub(crate) async fn regressions_on(
+        &self,
+        connection: &mut Option<Connection>,
+        windows: &Windows,
+    ) -> Result<Vec<Regression>> {
         if windows.baseline_from >= windows.baseline_to
             || windows.current_from >= windows.current_to
             || windows.baseline_to > windows.current_from
@@ -248,11 +323,11 @@ impl Recorder {
         {
             return Err(Error::Invalid);
         }
-        let read = async {
-            let client = self.db.get().await?;
-            let threshold = self
-                .settings
-                .get_global(&**client, SLOW_THRESHOLD_MS)
+        let windows = *windows;
+        let settings = self.settings.clone();
+        self.bounded_read(connection, move |client| Box::pin(async move {
+            let threshold = settings
+                .get_global(client, SLOW_THRESHOLD_MS)
                 .await?
                 .as_f64()
                 .ok_or(Error::Invalid)?;
@@ -290,10 +365,7 @@ impl Recorder {
                     })
                 })
                 .collect::<Result<Vec<_>>>()
-        };
-        timeout(READ_TIMEOUT, read)
-            .await
-            .map_err(|_| Error::Internal)?
+        })).await
     }
 
     /// Routes, events and jobs with the highest p95 duration among the samples
@@ -304,11 +376,20 @@ impl Recorder {
         to: SystemTime,
         limit: i64,
     ) -> Result<Vec<Slowest>> {
+        self.slowest_on(&mut None, from, to, limit).await
+    }
+
+    pub(crate) async fn slowest_on(
+        &self,
+        connection: &mut Option<Connection>,
+        from: SystemTime,
+        to: SystemTime,
+        limit: i64,
+    ) -> Result<Vec<Slowest>> {
         if from >= to || !(1..=100).contains(&limit) {
             return Err(Error::Invalid);
         }
-        let read = async {
-            let client = self.db.get().await?;
+        self.bounded_read(connection, move |client| Box::pin(async move {
             let rows = client
                 .query(
                     "SELECT kind, identity, count(*)::bigint AS samples, avg(duration_ms)::float8 AS average, \
@@ -332,9 +413,6 @@ impl Recorder {
                     })
                 })
                 .collect::<Result<Vec<_>>>()
-        };
-        timeout(READ_TIMEOUT, read)
-            .await
-            .map_err(|_| Error::Internal)?
+        })).await
     }
 }

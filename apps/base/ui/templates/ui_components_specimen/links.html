@@ -12,7 +12,7 @@
 {% endcall %}
 </div>
 <div id="specimen-badge" class="flex flex-wrap gap-2 rounded-xl border border-line bg-surface p-4 shadow-xs">
-{% call ui::badge() %}Archived{% endcall %}{% call ui::badge(kind=BadgeKind::Success) %}Active{% endcall %}{% call ui::badge(kind=BadgeKind::Warning) %}Pending{% endcall %}{% call ui::badge(kind=BadgeKind::Danger) %}Suspended{% endcall %}{% call ui::badge(dot=false) %}Manager{% endcall %}
+{% call ui::badge() %}Archived{% endcall %}{% call ui::badge(kind=BadgeKind::Success) %}Active{% endcall %}{% call ui::badge(kind=BadgeKind::Warning) %}Pending{% endcall %}{% call ui::badge(kind=BadgeKind::Danger) %}Suspended{% endcall %}{% call ui::badge(kind=BadgeKind::Warning) %}Past due{% endcall %}{% call ui::badge(kind=BadgeKind::Success) %}set up{% endcall %}{% call ui::badge(dot=false) %}Manager{% endcall %}
 </div>
 <div id="specimen-create-button" class="flex flex-wrap gap-2 rounded-xl border border-line bg-surface p-4 shadow-xs">
 {% call ui::create_button(noun="Company", href="/companies/create") %}{% endcall %}
