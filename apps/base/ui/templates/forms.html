@@ -18,7 +18,7 @@
 
 {#- The label above a control; the star marks a required field. -#}
 {% macro label(id, text, class, required) %}
-<label for="{{ id }}" class="{{ class }}">{{ text }}{% if required %}<span aria-hidden="true">*</span>{% endif %}</label>
+<label for="{{ id }}" class="{{ class }} ui-form-label">{{ text }}{% if required %}<span aria-hidden="true" class="ml-0.5">*</span>{% endif %}</label>
 {% endmacro %}
 
 {#- Helper text inside the field wrapper, below the control. -#}
@@ -47,7 +47,7 @@
 <button type="button" id="{{ control.field.id }}-trigger" data-colour-trigger hidden role="combobox"{% if control.field.attrs.required %} aria-required="true"{% endif %} aria-haspopup="listbox" aria-expanded="false" aria-controls="{{ control.field.id }}-options" aria-labelledby="{{ control.field.id }}-label {{ control.field.id }}-value"{% call aria(invalid=control.field.invalid(), described_by=control.field.described_by()) %}{% endcall %} class="ui-colour-trigger {{ control.field.control_class() }}"{% if control.field.attrs.disabled || control.field.attrs.readonly %} disabled{% endif %}>
 <span id="{{ control.field.id }}-value" data-colour-preview class="ui-colour-chip {{ control.selected().colour.class() }}">{{ control.selected().label }}</span>{% call ui::icon(name="chevron-down", class="ui-colour-chevron size-4 shrink-0 text-ink-muted") %}{% endcall %}
 </button>
-<label id="{{ control.field.id }}-label" for="{{ control.field.id }}" class="{{ bilibi_ui::forms::PINNED_LABEL_CLASS }}">{{ control.field.label_text() }}{% if control.field.attrs.required %}<span aria-hidden="true">*</span>{% endif %}</label>
+<label id="{{ control.field.id }}-label" for="{{ control.field.id }}" class="{{ bilibi_ui::forms::PINNED_LABEL_CLASS }} ui-form-label">{{ control.field.label_text() }}{% if control.field.attrs.required %}<span aria-hidden="true" class="ml-0.5">*</span>{% endif %}</label>
 </div>
 <div id="{{ control.field.id }}-options" hidden role="listbox" tabindex="-1" aria-labelledby="{{ control.field.id }}-label" class="floating-list ui-colour-options z-30 mt-1 max-h-60 min-w-56 overflow-y-auto rounded-xl border border-line bg-surface p-1.5 shadow-lg">
 {% for option in control.options %}<div id="{{ control.field.id }}-option-{{ loop.index0 }}" role="option" tabindex="-1" data-value="{{ option.value }}" aria-selected="{% if option.value == control.field.value %}true{% else %}false{% endif %}" class="ui-colour-option cursor-pointer rounded-md px-2.5 py-1.5 text-base text-ink hover:bg-surface-sunken"><span data-option-label class="ui-colour-chip {{ option.colour.class() }}">{{ option.label }}</span>{% call ui::icon(name="check", class="ui-colour-check ml-auto size-4 shrink-0") %}{% endcall %}</div>{% endfor %}
@@ -104,7 +104,7 @@
 {%- elif field.kind.is_switch() -%}
 <div class="{{ field.wrapper() }}" data-hook="SwitchInput"><label for="{{ field.id }}" class="{{ field.checkbox_label_classes() }}">{{ field.label_text() }}</label><input type="hidden" name="{{ field.name }}" value="{{ field.value }}"{{ field.attrs.companion_html() }} />{% call ui::toggle(on=field.value == "true", label=field.label_text(), id=field.id, disabled=field.attrs.disabled || field.attrs.readonly, described_by=field.described_by(), invalid=field.invalid()) %}{% endcall %}{% call hint(id=field.id, text=field.hint) %}{% endcall %}{% call errors(id=field.id, errors=field.errors) %}{% endcall %}</div>
 {%- elif field.kind.is_checkbox() -%}
-<div class="{{ field.wrapper() }}"><label for="{{ field.id }}" class="{{ field.checkbox_label_classes() }}"><input type="hidden" name="{{ field.name }}" value="false"{{ field.attrs.companion_html() }} /><input type="checkbox" id="{{ field.id }}" name="{{ field.name }}" value="true"{% if field.checked %} checked{% endif %}{% call aria(invalid=field.invalid(), described_by=field.described_by()) %}{% endcall %} class="{{ field.control_class() }}"{{ field.attrs.html() }} />{{ field.label_text() }}{% if field.attrs.required %}<span aria-hidden="true">*</span>{% endif %}</label>{% call hint(id=field.id, text=field.hint) %}{% endcall %}{% call errors(id=field.id, errors=field.errors) %}{% endcall %}</div>
+<div class="{{ field.wrapper() }}"><label for="{{ field.id }}" class="{{ field.checkbox_label_classes() }}"><input type="hidden" name="{{ field.name }}" value="false"{{ field.attrs.companion_html() }} /><input type="checkbox" id="{{ field.id }}" name="{{ field.name }}" value="true"{% if field.checked %} checked{% endif %}{% call aria(invalid=field.invalid(), described_by=field.described_by()) %}{% endcall %} class="{{ field.control_class() }}"{{ field.attrs.html() }} /><span class="whitespace-nowrap">{{ field.label_text() }}{% if field.attrs.required %}<span aria-hidden="true" class="ml-0.5">*</span>{% endif %}</span></label>{% call hint(id=field.id, text=field.hint) %}{% endcall %}{% call errors(id=field.id, errors=field.errors) %}{% endcall %}</div>
 {%- elif field.revealed() -%}
 {#- The input's own type is the only record of masked-or-shown; the SecretReveal
     hook flips it on click and derives the button's name, title and glyph from
@@ -156,7 +156,7 @@
 <div data-live-expanded class="{{ control.trigger_class() }}"{% if control.disabled() %} data-disabled{% endif %}>
 <button id="{{ control.id }}" type="button" class="ui-multi-trigger" aria-expanded="false" aria-controls="{{ control.id }}-options" aria-labelledby="{{ control.id }}-label {{ control.id }}-count"{% if control.required %} aria-required="true"{% endif %}{% if control.disabled() %} disabled{% endif %}{% call aria(invalid=control.invalid(), described_by=control.described_by()) %}{% endcall %}{{ control.attrs.html() }}></button>
 <div class="ui-multi-content">
-<div class="ui-multi-heading{% if control.in_fact %} invisible{% endif %}"><span id="{{ control.id }}-label" class="truncate">{{ control.display_label() }}{% if control.required %}<span aria-hidden="true">*</span>{% endif %}</span><span id="{{ control.id }}-count" data-selected-count class="shrink-0">({{ control.selected_count() }} selected)</span></div>
+<div class="ui-multi-heading{% if control.in_fact %} invisible{% endif %}"><span id="{{ control.id }}-label" class="truncate">{{ control.display_label() }}{% if control.required %}<span aria-hidden="true" class="ml-0.5">*</span>{% endif %}</span><span id="{{ control.id }}-count" data-selected-count class="shrink-0">({{ control.selected_count() }} selected)</span></div>
 <span id="{{ control.id }}-chevron" class="ui-multi-chevron" aria-hidden="true">{% call ui::icon(name="chevron-down", class="size-4 text-ink-muted") %}{% endcall %}</span>
 <div id="{{ control.id }}-chips" class="ui-multi-chips" data-chip-row role="list" aria-labelledby="{{ control.id }}-label">
 {#- Every option has its chip, hidden while unticked, so the hook can follow a tick without a server round trip. -#}
