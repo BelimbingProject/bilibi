@@ -185,7 +185,7 @@ impl Grants {
         tx.commit().await
     }
     /// [`Grants::assign_role`] inside the caller's audited transaction (an agent
-    /// plan's commit), after `require_role_capability_step_up` on the same input.
+    /// plan's commit): the same checks, step-up and write, committed by the caller.
     pub async fn assign_role_in(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -450,7 +450,7 @@ impl Grants {
         tx.commit().await
     }
     /// [`Grants::set_direct`] inside the caller's audited transaction (an agent
-    /// plan's commit), after `require_role_capability_step_up` on the same input.
+    /// plan's commit): the same checks, step-up and write, committed by the caller.
     /// The actor must hold the key at least as far as the allow reaches.
     pub async fn set_direct_in(
         &self,

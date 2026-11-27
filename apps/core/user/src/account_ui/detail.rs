@@ -110,7 +110,6 @@ struct AccessView {
     cap_control: &'static str,
     cap_search: String,
     caps: Html,
-    caps_empty: bool,
     selected_caps: usize,
 }
 struct RoleOption {
@@ -909,10 +908,11 @@ impl Detail {
             ),
             cap_control,
             cap_search: self.access.cap_search.clone(),
-            caps_empty: caps.is_empty(),
             caps: render(&bilibi_ui::PermissionChoices {
                 options: caps,
-                include_visible_keys: false,
+                hidden_selected: Vec::new(),
+                search: self.access.cap_search.clone(),
+                selected_count: self.access.selected_caps.len(),
             })?,
             selected_caps: self.access.selected_caps.len(),
         })?;

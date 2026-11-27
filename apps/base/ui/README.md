@@ -96,7 +96,7 @@ Use `AppFrame` for a self-contained same-origin interactive document inside a Bi
 
 A module publishes a self-contained document under `/assets` by contributing one `PublicAsset` to `PUBLIC_ASSETS`. Paths are unique and must start with `/assets/`; give sensitive documents a narrow response Content Security Policy. The asset must not contain credentials. Use a contributed asset and `AppFrame` instead of adding a host router entry, copying the frame markup or writing a page-specific message bridge.
 
-`PermissionChoices` renders the shared selectable permission list; its owner filters the keys, preserves selections and authorizes each grant.
+`PermissionChoices` renders the shared selectable permission list; it shows the search feedback and selected count. A form that submits its full selection can supply hidden selected keys alongside the visible choices. Its owner authorizes each grant.
 
 ## Searchable multi-select
 
@@ -255,7 +255,7 @@ Below `md` the board shows one column at a time with a column switcher whose lin
 
 ## Record references
 
-`RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven combobox inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md). The picker shares the `Combobox` dropdown and keyboard controls, while typing still posts the search field after a 300 ms debounce. Hits show the record name. `PickerHit::kind_label` is empty when returned matches have one kind, or a singular noun when matches span several kinds. A picker that is a record page's fact (saving a pick or clear at once) uses `in_fact()`: its label is for screen readers and its clear button says Remove. Several pickers on one page share fixed pick and clear events and tell them apart with `key(field)`, sent as `key`.
+`RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven combobox inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md). The picker shares the `Combobox` dropdown and keyboard controls, while typing still posts the search field after a 300 ms debounce. Hits show the record name. `PickerHit::kind_label` is empty when returned matches have one kind, or a singular noun when matches span several kinds. A picker that is a record page's fact (saving a pick or clear at once) uses `in_fact()`: its label is for screen readers and its clear button says Remove. Several pickers on one page share fixed pick and clear events and tell them apart with `key(field)`, sent as `key`. A picker using `form_choice(field)` includes its current `kind:id` in the entire form snapshot and raises a form change on pick or clear.
 
 Set `PickerHit::instant` from the reader’s `DisplayContext::render` when a hit needs a timestamp. It appears on its own line below the name, so a truncated name leaves the timestamp visible. The timestamp follows the reader’s time display, including device-local time.
 

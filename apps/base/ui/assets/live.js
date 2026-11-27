@@ -133,10 +133,12 @@
     // A development rebuild may reload fresh assets only when there is no
     // draft to lose. This also protects forms if an old client hits a new
     // server's hard socket cap instead of receiving a normal refusal.
-    const drafts = [...document.forms].filter((form) => [...form.elements].some(dirty));
+    const drafts = [...document.forms].filter((form) => [...form.elements].some(dirty)
+      || form.hasAttribute('data-preserve-newer-draft'));
     for (const form of drafts) {
       const sent = [...inflight.values()].filter((entry) => entry.ownerForm === form).map((entry) => entry.id);
       preserve(form, Math.max(0, ...sent));
+      if (form.hasAttribute('data-preserve-newer-draft')) newerDrafts.set(form, sequence);
     }
     const hasDraft = drafts.length || [...inflight.values()].some((entry) => entry.form)
       || [...holders].some((holds) => holds());
@@ -773,6 +775,13 @@
   document.addEventListener('click', (event) => {
     // A chart's bar or slice (`Chart::drill`) is an SVG shape, which cannot be
     // a button; it raises its event the same way, with the values it carries.
+    const clear = event.target instanceof Element && event.target.closest('[data-record-picker-form] button[name="record-picker-clear"]');
+    if (clear) {
+      const field = clear.closest('[data-record-picker-form]').querySelector('input[type="hidden"]');
+      field.value = '';
+      field.dispatchEvent(new Event('change', {bubbles: true}));
+      return;
+    }
     const button = event.target instanceof Element && event.target.closest('button[data-event], svg [data-event]');
     if (!button || button.disabled) return;
     const {event: type, field, delta} = button.dataset;

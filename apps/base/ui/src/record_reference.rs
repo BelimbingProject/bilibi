@@ -114,14 +114,14 @@ impl NamedKind<'_> {
 /// still checks it on save; a chosen value is never proof.
 #[derive(Template, Clone, Debug)]
 #[template(
-    source = r#"{%- import "forms.html" as forms -%}<div id="{{ id }}" data-record-picker class="space-y-1{% if !search.hint.is_empty() && !in_fact %} mb-3{% endif %}">
+    source = r#"{%- import "forms.html" as forms -%}<div id="{{ id }}" data-record-picker{% if form_choice %} data-record-picker-form{% endif %} class="space-y-1{% if !search.hint.is_empty() && !in_fact %} mb-3{% endif %}">
 {%- if let Some(pill) = selected -%}
-<div class="flex flex-wrap items-center gap-2"><span class="{% if in_fact %}sr-only{% else %}text-xs text-ink-muted{% endif %}">{{ label }}</span>{{ pill }}{{ self.clear() }}</div>{{ hidden }}{% call forms::errors(id=id, errors=errors) %}{% endcall %}
+<div class="flex flex-wrap items-center gap-2"><span class="{% if in_fact %}sr-only{% else %}text-xs text-ink-muted{% endif %}">{{ label }}</span>{{ pill }}{{ self.clear() }}</div>{% if !form_choice %}{{ hidden }}{% endif %}{% call forms::errors(id=id, errors=errors) %}{% endcall %}
 {%- else -%}
 {%- let combo = self.search_combobox() -%}
 {% call forms::combobox(combo=combo, server_search=true, query=query, pick_event=pick_event, key=key) %}{% endcall %}
 {%- endif -%}
-{% if selected.is_some() %}{% call forms::hint(id=id, text=search.hint) %}{% endcall %}{% endif %}
+{% if form_choice %}{{ hidden }}{% endif %}{% if selected.is_some() %}{% call forms::hint(id=id, text=search.hint) %}{% endcall %}{% endif %}
 </div>"#,
     ext = "html"
 )]
@@ -132,6 +132,7 @@ pub struct RecordPicker {
     selected: Option<Html>,
     search: Combobox,
     hidden: Html,
+    form_choice: bool,
     clear_id: String,
     clear_event: String,
     clear_label: &'static str,
@@ -208,6 +209,7 @@ impl RecordPicker {
             selected,
             search,
             hidden,
+            form_choice: false,
             clear_id: format!("{id}-clear"),
             clear_event: clear_event.into(),
             clear_label: "Change",
@@ -234,11 +236,21 @@ impl RecordPicker {
         self.key = key.into();
         self
     }
+    pub fn form_choice(mut self, field: Field) -> Self {
+        self.hidden = Html::render(&field.kind(InputKind::Hidden)).unwrap_or(Html::EMPTY);
+        self.form_choice = true;
+        self
+    }
     fn clear(&self) -> Html {
         Html::render(&Button {
             id: &self.clear_id,
             button_type: "button",
             event: &self.clear_event,
+            name: if self.form_choice {
+                "record-picker-clear"
+            } else {
+                ""
+            },
             data_key: &self.key,
             body: Html::text(self.clear_label),
             ..Button::default()

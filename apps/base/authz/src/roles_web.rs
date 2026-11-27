@@ -548,7 +548,7 @@ fn render_create(
     errors: &RoleErrors,
     created: bool,
     permission_search: &str,
-    permissions: Vec<bilibi_ui::PermissionChoice>,
+    permissions: bilibi_ui::PermissionChoices,
 ) -> Result<String> {
     let field = |key: &str, label: &str, value: &str, errors: &[String]| {
         Field::in_form("role", key)
@@ -556,6 +556,10 @@ fn render_create(
             .value(value)
             .errors(errors.to_vec())
     };
+    let company_value = picker
+        .chosen
+        .as_ref()
+        .map_or_else(String::new, |(id, _)| format!("{}:{id}", COMPANY.prefix));
     let company = RecordPicker::named(
         COMPANY,
         "role-company-scope",
@@ -568,9 +572,10 @@ fn render_create(
             .chosen
             .as_ref()
             .map(|(id, name)| (*id, name.as_str())),
-        ("pick-company", "change-company"),
+        ("", ""),
         errors.company_id.clone(),
     )
+    .form_choice(Field::in_form("role", "company_id").value(&company_value))
     .hint("Select the company that this role is for.");
     let mut html = render(FlashGroup {
         id: "flash-group",
@@ -610,7 +615,7 @@ fn render_create(
         )?,
         permissions_heading: render(SectionHeading { title: "Permissions", ..SectionHeading::default() })?,
         permission_search: render(Field::in_form("role", "permission_search").label("Search permissions").value(permission_search).attr("data-debounce", "300"))?,
-        permissions: render(bilibi_ui::PermissionChoices { options: permissions, include_visible_keys: true })?,
+        permissions: render(permissions)?,
         save: render(Button {
             variant: ButtonVariant::Primary,
             id: "role-save",
@@ -763,8 +768,6 @@ enum CreateEvent {
         permission_search: String,
         #[serde(rename = "capability_keys[]", default)]
         capabilities: Vec<String>,
-        #[serde(rename = "visible_capability_keys[]", default)]
-        visible_capabilities: Vec<String>,
     },
     RoleChange {
         #[serde(rename = "role[company_id]", default)]
@@ -783,13 +786,7 @@ enum CreateEvent {
         permission_search: String,
         #[serde(rename = "capability_keys[]", default)]
         capabilities: Vec<String>,
-        #[serde(rename = "visible_capability_keys[]", default)]
-        visible_capabilities: Vec<String>,
     },
-    PickCompany {
-        record: String,
-    },
-    ChangeCompany {},
     ClearFlash {
         key: String,
     },
@@ -858,7 +855,22 @@ impl RoleCreate {
             .collect::<Vec<_>>()
             .join("_")
     }
-    async fn permission_choices(&self, scope: &Scope) -> Result<Vec<bilibi_ui::PermissionChoice>> {
+    async fn permission_choices(&self, scope: &Scope) -> Result<bilibi_ui::PermissionChoices> {
+        let options = self.visible_permissions(scope).await?;
+        Ok(bilibi_ui::PermissionChoices {
+            hidden_selected: self
+                .selected_capabilities
+                .iter()
+                .filter(|key| !options.iter().any(|option| &option.key == *key))
+                .cloned()
+                .collect(),
+            options,
+            search: self.permission_search.clone(),
+            selected_count: self.selected_capabilities.len(),
+        })
+    }
+
+    async fn visible_permissions(&self, scope: &Scope) -> Result<Vec<bilibi_ui::PermissionChoice>> {
         let client = self.pages.db.get().await?;
         if !crate::decide(&**client, scope, "admin.authz.role.update")
             .await?
@@ -899,15 +911,6 @@ impl RoleCreate {
             .collect())
     }
 
-    fn select_visible(&mut self, visible: &[String], capabilities: Vec<String>) {
-        self.selected_capabilities
-            .retain(|key| !visible.contains(key));
-        for key in capabilities {
-            if visible.contains(&key) && !self.selected_capabilities.contains(&key) {
-                self.selected_capabilities.push(key);
-            }
-        }
-    }
     /// The tenant's unarchived companies `search` finds: an archived one is
     /// read-only and create would refuse it, so the picker never offers it.
     async fn companies(
@@ -981,17 +984,22 @@ impl LiveState<Scope, Error> for RoleCreate {
                             description,
                             code_edited,
                             permission_search,
-                            capabilities,
-                            visible_capabilities,
+                            mut capabilities,
                         } => {
-                            self.select_visible(&visible_capabilities, capabilities);
+                            capabilities.sort_unstable();
+                            capabilities.dedup();
+                            self.selected_capabilities = capabilities;
                             self.permission_search = permission_search;
                             // A changed code is a deliberate override of the suggestion.
                             if code_edited {
                                 self.editing_code = true;
                             }
+                            let company_id = COMPANY.picked(&company_id);
+                            if company_id != self.role.company_id {
+                                self.errors.company_id.clear();
+                            }
                             self.role = NewRole {
-                                company_id: company_id.trim().parse::<i64>().ok(),
+                                company_id,
                                 name,
                                 code,
                                 description,
@@ -1001,13 +1009,6 @@ impl LiveState<Scope, Error> for RoleCreate {
                             }
                             self.company_query = company_search;
                         }
-                        CreateEvent::PickCompany { record } => {
-                            self.role.company_id =
-                                Some(COMPANY.picked(&record).ok_or(Error::Invalid)?);
-                            self.company_query.clear();
-                            self.errors.company_id.clear();
-                        }
-                        CreateEvent::ChangeCompany {} => self.role.company_id = None,
                         CreateEvent::CreateRole {
                             company_id,
                             company_search,
@@ -1016,14 +1017,15 @@ impl LiveState<Scope, Error> for RoleCreate {
                             description,
                             code_edited,
                             permission_search,
-                            capabilities,
-                            visible_capabilities,
+                            mut capabilities,
                         } => {
-                            self.select_visible(&visible_capabilities, capabilities);
+                            capabilities.sort_unstable();
+                            capabilities.dedup();
+                            self.selected_capabilities = capabilities;
                             self.permission_search = permission_search;
                             self.created = false;
                             self.company_query = company_search;
-                            let company_id = company_id.trim().parse::<i64>().ok();
+                            let company_id = COMPANY.picked(&company_id);
                             if code_edited {
                                 self.editing_code = true;
                             }

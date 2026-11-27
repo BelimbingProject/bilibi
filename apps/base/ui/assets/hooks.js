@@ -487,6 +487,13 @@
 
         if (this.serverSearch) {
           this.setOpen(false)
+          const field = this.el.closest('[data-record-picker-form]')?.querySelector('input[type="hidden"]')
+          if (field) {
+            field.value = option.dataset.value
+            this.input.value = ''
+            field.dispatchEvent(new Event('change', {bubbles: true}))
+            return
+          }
           const payload = {record: option.dataset.value}
           if (this.el.dataset.key) payload.key = this.el.dataset.key
           this.emit(this.el.dataset.pickEvent, payload)
