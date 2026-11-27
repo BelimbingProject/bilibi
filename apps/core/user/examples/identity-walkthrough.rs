@@ -470,14 +470,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         .map_err(|error| format!("Could not create the archived-desk session: {error}"))?;
-    users
-        .choose_company(
+    let independent_login = users
+        .login(
+            "contractor@example.test",
+            bilibi_walkthrough_fixture::PASSWORD,
+        )
+        .await?;
+    let request = RequestInfo::default();
+    let select_archived = || {
+        users.choose_company(
             &archived_desk_login.token,
             &archived_desk_login.csrf,
             Some(2),
-            &RequestInfo::default(),
+            &request,
+        )
+    };
+    let (first, repeat) = tokio::join!(select_archived(), select_archived());
+    if first?.company != Some(2) || repeat?.company != Some(2) {
+        return Err("Overlapping desk selections did not both return desk 2".into());
+    }
+    let independent = app.security.guard(&independent_login.token).await?;
+    if independent.current_company().map(OrganisationId::get) != Some(1) {
+        return Err("Switching desks changed another session's current desk".into());
+    }
+    let selected = users
+        .choose_company(
+            &independent_login.token,
+            &independent_login.csrf,
+            Some(2),
+            &request,
         )
         .await?;
+    let independent = app.security.guard(&independent_login.token).await?;
+    if selected.company != Some(2)
+        || independent.current_company().map(OrganisationId::get) != Some(2)
+    {
+        return Err("Switching with a matching remembered desk did not update the session".into());
+    }
     let audit_before: i64 = sql
         .query_one(
             "SELECT count(*) FROM base_audit_actions WHERE tenant_id=$1",

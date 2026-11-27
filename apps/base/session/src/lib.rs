@@ -756,6 +756,25 @@ impl Sessions {
             .await?;
         moved.map(|_| csrf).ok_or(Error::Conflict)
     }
+    pub async fn lock_company_choice(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+    ) -> Result<Scope> {
+        let fingerprint = scope
+            .browser_session_fingerprint()
+            .ok_or(Error::Unauthorized)?;
+        let row = tx
+            .query_opt(
+                "SELECT id FROM sessions WHERE id=encode($1,'hex') AND tenant_id=$2 AND user_id=$3
+                 AND csrf=$4 AND ended_reason IS NULL FOR NO KEY UPDATE",
+                &[&fingerprint, &scope.tenant(), &scope.user(), &scope.csrf],
+            )
+            .await?
+            .ok_or(Error::Unauthorized)?;
+        let id: String = row.get(0);
+        self.resolve_id(tx, &id, false, AccountKind::Staff).await
+    }
     /// Records the company the signed-in session works in from now on
     /// (`Scope::current_company`), or `None` when no desk is selected. The
     /// caller (Core User) proved the desk and audits the switch on the same

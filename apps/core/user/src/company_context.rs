@@ -15,7 +15,7 @@
 //! choice keeps the scope's current valid desk.
 use crate::UserService;
 use bilibi_audit::{record_action, Attribution, RequestInfo};
-use bilibi_database::Error;
+use bilibi_database::{Change, Error};
 use bilibi_party_ids::OrganisationId;
 use serde_json::json;
 
@@ -53,7 +53,6 @@ impl UserService {
         if scope.csrf != csrf {
             return Err(Error::Forbidden.into());
         }
-        let company = company.or(scope.current_company().map(OrganisationId::get));
         if let Some(id) = company {
             let reached = match OrganisationId::new(id) {
                 Ok(company) => {
@@ -82,10 +81,6 @@ impl UserService {
                 return Err(ChoiceRefusal::Unavailable);
             }
         }
-        let before = scope.current_company().map(OrganisationId::get);
-        if company == before {
-            return Ok(Switched { company });
-        }
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("user.company.switch"))
@@ -102,29 +97,54 @@ impl UserService {
                 .await
                 .map_err(Error::from)?
                 .ok_or(ChoiceRefusal::Unavailable)?;
-            let company = OrganisationId::new(id).map_err(|_| Error::Invalid)?;
-            if !bilibi_tenancy::reaches_work_company(tx.sql(), &scope, company).await? {
-                return Err(ChoiceRefusal::Unavailable);
-            }
         }
-        let to = company;
         let tenant = scope.tenant();
         let user = scope.user();
         // Company -> User -> Session, as account mutations revoke sessions
         // after locking their user. A view's choice is never a saved preference.
-        if scope.impersonator().is_none() {
-            tx.mutate(move|sql|Box::pin(async move {
-                let old:Option<i64>=sql.query_opt("SELECT last_desk_id FROM users WHERE tenant_id=$1 AND id=$2 AND kind='staff' FOR UPDATE",&[&tenant,&user]).await?.ok_or(Error::Unauthorized)?.get(0);
-                sql.execute("UPDATE users SET last_desk_id=$3 WHERE tenant_id=$1 AND id=$2",&[&tenant,&user,&to]).await?;
-                let changes=if old==to {Vec::new()}else{vec![bilibi_database::Change{kind:"user.desk_choice".into(),id:user,old:json!({"company_id":old}),new:json!({"company_id":to})}]};
-                Ok(((),changes))
-            })).await?;
-        }
-        match self
-            .sessions
-            .choose_company(tx.sql(), &scope, company)
+        let remembered: Option<i64> = tx
+            .sql()
+            .query_opt(
+                "SELECT last_desk_id FROM users WHERE tenant_id=$1 AND id=$2 AND kind='staff' FOR UPDATE",
+                &[&tenant, &user],
+            )
             .await
-        {
+            .map_err(Error::from)?
+            .ok_or(Error::Unauthorized)?
+            .get(0);
+        let scope = self.sessions.lock_company_choice(tx.sql(), &scope).await?;
+        let before = scope.current_company().map(OrganisationId::get);
+        let Some(id) = company.filter(|&id| Some(id) != before) else {
+            tx.rollback().await?;
+            return Ok(Switched { company: before });
+        };
+        let to = Some(id);
+        let target = OrganisationId::new(id).map_err(|_| Error::Invalid)?;
+        if !bilibi_tenancy::reaches_work_company(tx.sql(), &scope, target).await? {
+            return Err(ChoiceRefusal::Unavailable);
+        }
+        if scope.impersonator().is_none() && remembered != to {
+            tx.mutate(move |sql| {
+                Box::pin(async move {
+                    sql.execute(
+                        "UPDATE users SET last_desk_id=$3 WHERE tenant_id=$1 AND id=$2",
+                        &[&tenant, &user, &to],
+                    )
+                    .await?;
+                    Ok((
+                        (),
+                        vec![Change {
+                            kind: "user.desk_choice".into(),
+                            id: user,
+                            old: json!({"company_id": remembered}),
+                            new: json!({"company_id": to}),
+                        }],
+                    ))
+                })
+            })
+            .await?;
+        }
+        match self.sessions.choose_company(tx.sql(), &scope, to).await {
             Ok(()) => {}
             Err(Error::Conflict) => return Err(Error::Unauthorized.into()),
             Err(error) => return Err(error.into()),
@@ -147,6 +167,6 @@ impl UserService {
         )
         .await?;
         tx.commit().await?;
-        Ok(Switched { company })
+        Ok(Switched { company: to })
     }
 }
