@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::fs;
 
 /// Keep the newest release in the chosen channel even when its target file is missing.
-pub(super) fn latest(releases: &[Value], minimum: &str) -> Option<String> {
+pub(super) fn latest<'a>(releases: &'a [Value], minimum: &str) -> Option<&'a Value> {
     releases
         .iter()
         .filter(|r| r["draft"] == false)
@@ -15,10 +15,10 @@ pub(super) fn latest(releases: &[Value], minimum: &str) -> Option<String> {
             if minimum.starts_with("setup-") && r["prerelease"] != false {
                 return None;
             }
-            Some((crate::release_proof::policy_order(minimum, tag).ok()?, tag))
+            Some((crate::release_proof::policy_order(minimum, tag).ok()?, r))
         })
         .max_by(|a, b| a.0.cmp(&b.0))
-        .map(|(_, tag)| tag.to_owned())
+        .map(|(_, release)| release)
 }
 
 fn version(tag: &str) -> Option<Version> {
@@ -145,13 +145,14 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
             result["reason"] = json!("no_stable_release");
             return result;
         };
-        let release = listing["releases"]
+        let mut release = listing["releases"]
             .as_array()
             .into_iter()
             .flatten()
             .find(|row| matches_release(row, tag))
             .cloned()
             .unwrap_or_else(|| json!({"tag": tag}));
+        release["notes"] = listing["latest_notes"].clone();
         result["release"] = release;
         let Some(current) = current.filter(|_| {
             setup["repository"]

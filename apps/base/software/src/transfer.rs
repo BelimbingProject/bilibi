@@ -118,6 +118,7 @@ impl Software {
         }
         if let Some(fields) = github.as_object_mut() {
             fields.remove("latest");
+            fields.remove("latest_notes");
             fields.remove("complete");
         }
         Ok(

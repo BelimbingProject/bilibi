@@ -330,7 +330,7 @@ impl ReleaseFiles {
             _ if update["reason"] == "source_not_accepted" => {
                 Html::text("The update source is not trusted. Check release trust on the server.")
             }
-            _ => Html::text("Cannot check GitHub. Check the update source and try Refresh."),
+            _ => Html::text("Update status unavailable. See GitHub releases for details."),
         };
         let mut body = render(Facts {
             id: "software-update-versions",
@@ -412,7 +412,12 @@ impl ReleaseFiles {
                 id: "software-release-terminal",
                 title: "Update from the server terminal",
                 body: {
-                    let mut content = Html::text("This command downloads the newest trusted stable setup release, backs up the database and installs it. If the check fails, it switches back automatically. Use --undo to return to the previous release.");
+                    let explanation = match facts["release_trust"]["minimum_tag"].as_str() {
+                        Some(tag) if tag.starts_with("nightly-") => "This command stops on a nightly server. Use the Releases tab to review and install a nightly file.",
+                        Some(_) => "This command shows an install review for the newest trusted stable setup release when an update is available. After you approve it with fresh 2FA, the installer backs up the database and installs the release. It switches back if the new release fails its check.",
+                        None => "Set up release trust before updating from the terminal.",
+                    };
+                    let mut content = Html::text(explanation);
                     content.push(&render(TerminalCommand {
                         command: &format!("sudo bilibi update {}", paths.name),
                     })?);
@@ -622,30 +627,34 @@ impl ReleaseFiles {
                 .as_str()
                 .unwrap_or("Release trust is not set."),
         };
+        let mut items = vec![
+            Fact {
+                id: "release-source-repository",
+                title: "Repository",
+                value: Html::text(repository),
+            },
+            Fact {
+                id: "release-source-trust",
+                title: "Trust",
+                value: Html::text(trust),
+            },
+        ];
+        if !manages {
+            let unit = if minutes == 1 { "minute" } else { "minutes" };
+            items.push(Fact {
+                id: "release-source-interval",
+                title: "Release list refresh interval",
+                value: Html::text(&format!("{minutes} {unit}")),
+            });
+        }
         let mut body = render(Facts {
             id: "release-source-facts",
-            items: vec![
-                Fact {
-                    id: "release-source-repository",
-                    title: "Repository",
-                    value: Html::text(repository),
-                },
-                Fact {
-                    id: "release-source-interval",
-                    title: "Update checks",
-                    value: Html::text(&format!("Check for updates every {minutes} minutes")),
-                },
-                Fact {
-                    id: "release-source-trust",
-                    title: "Trust",
-                    value: Html::text(trust),
-                },
-            ],
+            items,
         })?;
         if manages {
             let minutes_field = Field::in_form("github", "refresh_minutes")
                 .id("release-files-github-minutes")
-                .label("Check for updates every (minutes)")
+                .label("Release list refresh interval (minutes)")
                 .kind(InputKind::Number)
                 .value(minutes.to_string())
                 .wrapper_class("mb-0 w-full sm:w-72")
@@ -692,21 +701,39 @@ impl ReleaseFiles {
             body: Html::text("Refresh"),
             ..Button::default()
         })?;
-        actions.push(&render(Button {
-            id: "release-files-github-prerelease",
-            button_type: "button",
-            event: "github_prerelease",
-            body: Html::text(if self.github_prerelease {
-                "Show stable releases"
-            } else {
-                "Show pre-releases"
-            }),
-            ..Button::default()
-        })?);
+        if facts["release_trust"]["minimum_tag"]
+            .as_str()
+            .is_some_and(|tag| tag.starts_with("setup-"))
+        {
+            actions.push(&render(Button {
+                id: "release-files-github-prerelease",
+                button_type: "button",
+                event: "github_prerelease",
+                body: Html::text(if self.github_prerelease {
+                    "Show stable releases"
+                } else {
+                    "Show pre-releases"
+                }),
+                ..Button::default()
+            })?);
+        }
+        let has_files = github["releases"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty());
+        let description = if has_files {
+            match (github["stale"] == true, github["message"].as_str()) {
+                (true, Some(message)) => format!("Showing saved release files. {message}"),
+                (true, None) => "Showing saved release files.".into(),
+                (false, Some(message)) => message.to_owned(),
+                (false, None) => "Choose a release to review and install.".into(),
+            }
+        } else {
+            String::new()
+        };
         section(
             "release-files-github",
             "GitHub releases",
-            "Choose a release to review and install.",
+            &description,
             actions,
             false,
             body,

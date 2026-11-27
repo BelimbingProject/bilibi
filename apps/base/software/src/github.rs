@@ -139,6 +139,8 @@ impl Software {
     ) -> Result<Value> {
         let saved = self.github_saved(client, scope, Some(policy)).await?;
         let repository = &policy.repository;
+        let nightly = policy.minimum_tag.starts_with("nightly-");
+        let notes_channel = if nightly { "nightly" } else { "stable" };
         let Some(target) = this_target() else {
             return Ok(json!({
                 "available": false,
@@ -155,16 +157,16 @@ impl Software {
         if !force {
             if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
                 if limited(&cached)
-                    || ((cached.get("latest_nightly").is_some()
+                    || ((cached["latest_notes"].get(notes_channel).is_some()
                         || cached["attempt_at"].is_string())
                         && fresh(&cached, saved.refresh_minutes))
                 {
-                    return Ok(present(&cached, &saved, target, prerelease, false, policy));
+                    return Ok(present(&cached, &saved, target, prerelease, policy));
                 }
             }
         } else if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
             if limited(&cached) {
-                return Ok(present(&cached, &saved, target, prerelease, false, policy));
+                return Ok(present(&cached, &saved, target, prerelease, policy));
             }
         }
         let token = match scope {
@@ -180,6 +182,7 @@ impl Software {
                     token.as_deref(),
                     target,
                     cache_path.as_deref(),
+                    notes_channel,
                 )
                 .await
             }
@@ -192,17 +195,15 @@ impl Software {
                 // ask a GitHub that just refused or did not answer. Refresh
                 // still asks again.
                 let mut kept = read_cache(cache_path.as_deref(), repository).unwrap_or_else(
-                    || json!({"available": false, "repository": repository, "latest_nightly": null, "releases": []}),
+                    || json!({"available": false, "repository": repository, "releases": []}),
                 );
                 kept["attempt_at"] = json!(jiff::Timestamp::now().to_string());
                 kept["message"] = json!(message);
                 write_cache(cache_path.as_deref(), &kept);
-                let mut shown = present(&kept, &saved, target, prerelease, true, policy);
-                shown["message"] = json!(message);
-                return Ok(shown);
+                return Ok(present(&kept, &saved, target, prerelease, policy));
             }
         };
-        Ok(present(&cached, &saved, target, prerelease, false, policy))
+        Ok(present(&cached, &saved, target, prerelease, policy))
     }
 
     /// A fresh read token for one use of `repository`, minted by this server's
@@ -522,10 +523,10 @@ fn present(
     saved: &Saved,
     target: &str,
     prerelease: bool,
-    stale: bool,
     policy: &release_proof::Policy,
 ) -> Value {
     let nightly = policy.minimum_tag.starts_with("nightly-");
+    let notes_channel = if nightly { "nightly" } else { "stable" };
     let proof_required = policy.requires_operator_proof();
     let repository = cache["repository"].as_str().unwrap_or("");
     let live_id = cache["repository_id"].as_i64();
@@ -555,7 +556,7 @@ fn present(
         releases.retain(|row| {
             row["proof_asset_id"].as_i64().is_some() && row["proof_digest"].as_str().is_some()
         });
-        if before > 0 && releases.is_empty() {
+        if before > 0 && releases.is_empty() && message.is_empty() {
             message = "The setup files have no matching .proof.json assets. Publish each operator proof beside the exact archive.".into();
         }
     } else {
@@ -598,6 +599,7 @@ fn present(
     }
     json!({
         "latest": if nightly { &cache["latest_nightly"] } else { &cache["latest"] },
+        "latest_notes": cache["latest_notes"][notes_channel],
         "complete": cache["complete"],
         "available": cache["available"].as_bool().unwrap_or(false),
         "repository": repository,
@@ -608,7 +610,7 @@ fn present(
         "target": target,
         "prerelease": prerelease,
         "fetched_at": cache["fetched_at"],
-        "stale": stale || cache.get("latest_nightly").is_none() || cache["attempt_at"].is_string() || cache["stale"].as_bool().unwrap_or(false),
+        "stale": cache["latest_notes"].get(notes_channel).is_none() || cache["attempt_at"].is_string() || cache["stale"].as_bool().unwrap_or(false),
         "app": saved.app,
         "refresh_minutes": saved.refresh_minutes,
         "limited_until": cache["limited_until"],
@@ -646,8 +648,16 @@ fn read_cache(path: Option<&Path>, repository: &str) -> Option<Value> {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
     });
-    let value = from_file.or_else(|| MEMORY.lock().ok().and_then(|guard| guard.clone()))?;
-    (value["repository"].as_str() == Some(repository)).then_some(value)
+    let mut value = from_file.or_else(|| MEMORY.lock().ok().and_then(|guard| guard.clone()))?;
+    if value["repository"].as_str() != Some(repository) {
+        return None;
+    }
+    for row in value["releases"].as_array_mut().into_iter().flatten() {
+        if let Some(fields) = row.as_object_mut() {
+            fields.remove("notes");
+        }
+    }
+    Some(value)
 }
 fn write_cache(path: Option<&Path>, value: &Value) {
     if let Ok(mut guard) = MEMORY.lock() {
@@ -676,13 +686,14 @@ async fn fetch_listing(
     token: Option<&str>,
     target: &str,
     cache_path: Option<&Path>,
+    notes_channel: &str,
 ) -> std::result::Result<Value, String> {
     let (id, private) = fetch_repo(integration, origin, repository, token).await?;
     let previous = read_cache(cache_path, repository);
     let etag = previous
         .as_ref()
         .filter(|cache| {
-            cache.get("latest_nightly").is_some()
+            cache["latest_notes"].get(notes_channel).is_some()
                 && cache["complete"] == true
                 && cache["repository_id"] == id
         })
@@ -777,10 +788,13 @@ async fn fetch_listing(
     let rated = last.as_ref().unwrap_or(&first);
     let latest = super::update::latest(releases, "setup-v0.0.0");
     let latest_nightly = super::update::latest(releases, "nightly-0001-01-01");
-    let releases = body
-        .as_array()
-        .into_iter()
-        .flatten()
+    let selected = if notes_channel == "nightly" {
+        latest_nightly
+    } else {
+        latest
+    };
+    let releases = releases
+        .iter()
         .filter(|release| release["draft"].as_bool() != Some(true))
         .filter_map(|release| release_rows(release, target))
         .flatten()
@@ -793,8 +807,11 @@ async fn fetch_listing(
         "etag": if single_page {header_text(&first, "etag")} else {None},
         "complete":next.is_none(),
         "message":page_error,
-        "latest":latest,
-        "latest_nightly":latest_nightly,
+        "latest":latest.and_then(|release| release["tag_name"].as_str()),
+        "latest_nightly":latest_nightly.and_then(|release| release["tag_name"].as_str()),
+        "latest_notes":{
+            (notes_channel):selected.and_then(|release| release["body"].as_str()),
+        },
         "fetched_at": jiff::Timestamp::now().to_string(),
         "releases": releases,
     });
@@ -830,7 +847,6 @@ fn release_rows(release: &Value, target: &str) -> Option<Vec<Value>> {
                 target,
             )?;
             row["version"] = json!(tag.strip_prefix("setup-").unwrap_or(&tag));
-            row["notes"] = json!(release["body"].as_str());
             Some(row)
         })
         .collect::<Vec<_>>();
