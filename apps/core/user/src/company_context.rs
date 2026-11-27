@@ -87,26 +87,26 @@ impl UserService {
             .await?;
         if let Some(id) = company {
             // An archived desk may be chosen: its records stay readable and
-            // their owners refuse every write. The lock orders the choice
-            // against a concurrent desk removal.
+            // their owners refuse every write.
             tx.sql()
                 .query_opt(
-                    "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR NO KEY UPDATE",
+                    "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR KEY SHARE",
                     &[&scope.tenant(), &id],
                 )
                 .await
                 .map_err(Error::from)?
                 .ok_or(ChoiceRefusal::Unavailable)?;
         }
+        bilibi_person::hold_account_standing(tx.sql(), &scope).await?;
         let tenant = scope.tenant();
         let user = scope.user();
-        // Company -> User -> Session, as account mutations revoke sessions
-        // after locking their user. A view's choice is never a saved preference.
+        let person = scope.actor().person().map(|person| person.get());
         let remembered: Option<i64> = tx
             .sql()
             .query_opt(
-                "SELECT last_desk_id FROM users WHERE tenant_id=$1 AND id=$2 AND kind='staff' FOR UPDATE",
-                &[&tenant, &user],
+                "SELECT last_desk_id FROM users WHERE tenant_id=$1 AND id=$2 AND kind='staff'
+                 AND person_id IS NOT DISTINCT FROM $3 FOR UPDATE",
+                &[&tenant, &user, &person],
             )
             .await
             .map_err(Error::from)?
