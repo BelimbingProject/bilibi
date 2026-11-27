@@ -120,11 +120,14 @@ fn warn_unknown(name: &str, module: Option<&str>) {
     }
     if warned.insert((name.to_owned(), module.map(str::to_owned))) {
         if let Some(module) = module {
-            eprintln!(
+            bilibi_module_registry::server_log!(Warning,
                 "warning: unknown icon {name:?} contributed by module {module:?}; using missing-icon"
             );
         } else {
-            eprintln!("warning: unknown icon {name:?}; using missing-icon");
+            bilibi_module_registry::server_log!(
+                Warning,
+                "warning: unknown icon {name:?}; using missing-icon"
+            );
         }
     }
 }

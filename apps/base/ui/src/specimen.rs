@@ -318,6 +318,7 @@ impl FormControls {
                 .value("system")
                 .wrapper_class("mb-0"),
             required_roles: MultiSelect::in_form("sample", "required_roles")
+                .searchable()
                 .id("specimen-multi-select-required")
                 .label("Roles")
                 .hint("Everyone needs at least one role.")

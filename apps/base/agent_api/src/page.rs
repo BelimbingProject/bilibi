@@ -236,6 +236,27 @@ impl PageContracts {
         result
     }
 
+    /// Commit a form's repeated inputs as one atomic write of the same contract.
+    pub async fn submit_many(&self, call: &Call<'_>, inputs: Vec<Value>) -> Result<Value> {
+        let operations = inputs
+            .into_iter()
+            .map(|input| self.declared(call, input))
+            .collect::<Result<Vec<_>>>()?;
+        let session = self.session(call);
+        let result = page_write::contract(
+            call.contract,
+            self.plans.commit(call.scope, &session, &operations),
+        )
+        .await;
+        if matches!(
+            result,
+            Err(crate::Error::Backend(bilibi_database::Error::Conflict))
+        ) {
+            bilibi_ui::inline::InlineRead::mark_stale();
+        }
+        result
+    }
+
     /// The review half of a confirmation: the owner's dry-run preview. The
     /// page keeps the input server-side and shows the review.
     pub async fn preview(&self, call: &Call<'_>, input: Value) -> Result<Value> {
@@ -268,9 +289,12 @@ impl PageContracts {
                 .get(call.service)
                 .is_some_and(|writes| writes.contracts.contains(&(call.event, call.contract)));
         if !declared {
-            eprintln!(
+            bilibi_module_registry::server_log!(
+                Error,
                 "error: page {} event {} calls {} without declaring it in its page writes",
-                call.service, call.event, call.contract
+                call.service,
+                call.event,
+                call.contract
             );
             return Err(bilibi_database::Error::Internal.into());
         }

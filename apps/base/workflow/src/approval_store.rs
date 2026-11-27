@@ -1555,7 +1555,7 @@ impl Engine {
             let candidates = match self.approval_maintenance_page(tenant, limit).await {
                 Ok(ids) => ids,
                 Err(Error::Forbidden | Error::Unauthorized | Error::NotFound) => {
-                    eprintln!(
+                    bilibi_module_registry::server_log!(Warning,
                         "workflow approval maintenance unavailable in tenant {tenant}: grant or tenant unavailable"
                     );
                     continue;
@@ -1571,7 +1571,7 @@ impl Engine {
                         | Error::Invalid
                         | Error::Unauthorized
                         | Error::Conflict,
-                    ) => eprintln!(
+                    ) => bilibi_module_registry::server_log!(Warning,
                         "workflow approval maintenance deferred request {id}: permission, owner or routing unavailable"
                     ),
                     Err(e) => return Err(e),

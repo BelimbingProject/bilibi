@@ -222,7 +222,10 @@ impl Handler for InviteJob {
                     Outcome::Cancel("invite_refused")
                 }
                 Err(error) => {
-                    eprintln!("error: activity invitations: {error}");
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "error: activity invitations: {error}"
+                    );
                     Outcome::Retry("invite_failed")
                 }
             }
@@ -318,7 +321,8 @@ impl InviteJob {
             {
                 // The transport's detail may name the address; the job's
                 // failure code is enough for the operator's board.
-                eprintln!(
+                bilibi_module_registry::server_log!(
+                    Error,
                     "error: core/activity could not deliver an invitation (job {})",
                     execution.job_id
                 );
@@ -395,7 +399,8 @@ pub(crate) async fn allowed(
             }
             Err(error @ (Error::Invalid | Error::Forbidden | Error::NotFound)) => {
                 tx.rollback().await?;
-                eprintln!(
+                bilibi_module_registry::server_log!(
+                    Error,
                     "error: an invitation gate did not answer (job {}, guest {guest}): {error}",
                     execution.job_id
                 );

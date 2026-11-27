@@ -269,7 +269,10 @@ impl Software {
                 return Ok(());
             }
             if let Err(error) = self.transfer_once().await {
-                eprintln!("warning: release download round failed: {error:?}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "warning: release download round failed: {error:?}"
+                );
             }
             tokio::select! {
                 _ = stop.changed() => {}
@@ -302,7 +305,11 @@ impl Software {
                     .await?;
                     jobs::fail_queued(&**client, tenant, job.id, &worker, &format!("{message}."))
                         .await?;
-                    eprintln!("software job {}: download failed: {why}", job.id);
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "software job {}: download failed: {why}",
+                        job.id
+                    );
                 }
             }
         }
@@ -581,7 +588,8 @@ impl Software {
             return Ok(false);
         }
         if let Err(error) = self.reconcile_installer_activation().await {
-            eprintln!(
+            bilibi_module_registry::server_log!(
+                Warning,
                 "software job {}: ready installer jobs could not be signalled: {error:?}",
                 job.id
             );

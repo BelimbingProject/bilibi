@@ -40,6 +40,34 @@ pub fn check(schema: &Value) -> Result<(), String> {
     }
     check_node(schema, 0)
 }
+/// `{"true": {"label", "description"}, "false": {...}}` on a boolean: what
+/// each answer means, named for the person choosing it. Presentation only.
+fn check_boolean_labels(kind: &str, labels: &Value) -> Result<(), String> {
+    const SHAPE: &str = "x-bilibi-boolean-labels needs a boolean field and {\"true\":{\"label\",\"description\"},\"false\":{...}} with a label of 1-40 and a description of at most 300 characters";
+    let object = labels
+        .as_object()
+        .filter(|_| kind == "boolean")
+        .ok_or(SHAPE)?;
+    if object.len() != 2 {
+        return Err(SHAPE.into());
+    }
+    for answer in ["true", "false"] {
+        let choice = object.get(answer).and_then(Value::as_object).ok_or(SHAPE)?;
+        let label = choice.get("label").and_then(Value::as_str).ok_or(SHAPE)?;
+        let description = choice
+            .get("description")
+            .and_then(Value::as_str)
+            .ok_or(SHAPE)?;
+        if choice.len() != 2
+            || label.trim().is_empty()
+            || label.chars().count() > 40
+            || description.chars().count() > 300
+        {
+            return Err(SHAPE.into());
+        }
+    }
+    Ok(())
+}
 fn check_node(node: &Value, depth: usize) -> Result<(), String> {
     if depth > MAX_DEPTH {
         return Err("schema is too deeply nested".into());
@@ -104,6 +132,7 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
             "x-bilibi-reference",
             "x-bilibi-picklist",
             "x-bilibi-money",
+            "x-bilibi-boolean-labels",
             "x-bilibi-field",
             "x-bilibi-personal-data",
         ]
@@ -135,6 +164,9 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
         .is_some_and(|value| kind != "string" || value != true)
     {
         return Err("x-bilibi-money requires an exact decimal string field and true".into());
+    }
+    if let Some(labels) = node.get("x-bilibi-boolean-labels") {
+        check_boolean_labels(kind, labels)?;
     }
     for key in ["title", "description"] {
         if node.get(key).is_some_and(|v| !v.is_string()) {

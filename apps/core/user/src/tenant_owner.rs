@@ -10,7 +10,6 @@ use bilibi_company::{NewCompany, ProvisionOutcome};
 use bilibi_database::{Change, Connection, Context, Error, MutationTransaction, Result};
 use bilibi_mail::{Address, Message};
 use bilibi_person::{validate_person, PersonInput, PersonKind};
-use bilibi_settings::Setting;
 use bilibi_tenancy::tenant_name_lock;
 use serde_json::json;
 
@@ -98,19 +97,16 @@ impl UserService {
         }) {
             return Err(FirstTenantOwnerError::Origin);
         }
-        let days = match self
+        let days = self
             .settings
             .definitions()
             .lookup(crate::INVITATION_DAYS_KEY)?
             .setting
-        {
-            Setting::Definition(definition) => (definition.default)()
-                .as_i64()
-                .and_then(|days| i32::try_from(days).ok())
-                .filter(|days| (1..=60).contains(days))
-                .ok_or(Error::Internal)?,
-            Setting::RuntimeClaim => return Err(Error::Internal.into()),
-        };
+            .definition()
+            .and_then(|definition| (definition.default)().as_i64())
+            .and_then(|days| i32::try_from(days).ok())
+            .filter(|days| (1..=60).contains(days))
+            .ok_or(Error::Internal)?;
         let raw_token = token()?;
         let token_hash = digest(&raw_token);
         self.mailer.ready().await?;

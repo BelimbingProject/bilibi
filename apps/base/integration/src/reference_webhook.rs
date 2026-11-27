@@ -45,7 +45,8 @@ impl Reference {
             .filter(|s| !s.is_empty())
             .map(String::into_bytes);
         if secret.is_none() {
-            eprintln!(
+            bilibi_module_registry::server_log!(
+                Warning,
                 "warning: {SECRET_ENV} is unset; /webhooks/{IDENTIFIER} refuses every delivery"
             );
         }

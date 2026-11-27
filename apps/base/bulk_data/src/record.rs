@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 pub const RECORD_TYPES: &str = "base/bulk_data.record_types";
 
-/// A record type people may import, contributed by its owner with
+/// A record type people may import, export or update in bulk, contributed with
 /// `Contribution::new(RECORD_TYPES, "<module>.<name>", …)`; that id is the
 /// type's key in runs and saved mappings, so keep it stable.
 #[derive(Debug)]
@@ -26,7 +26,10 @@ pub struct RecordType {
     pub table: &'static str,
     /// The record's page with `{id}`, for links from row results.
     pub path: Option<&'static str>,
-    pub import: Import,
+    /// ID property in list records, create results and duplicate candidates.
+    pub id: &'static str,
+    /// Import contracts. Use `None` when the type does not support import.
+    pub import: Option<Import>,
     /// Taking a list's records out to CSV; `None` when the type offers none.
     pub export: Option<Export>,
     /// Changing one field on many records; `None` when the type offers none.
@@ -45,7 +48,7 @@ pub struct BulkUpdate {
     pub capability: &'static str,
     /// The owner's list read contract, open to the job door, taking integer
     /// `page` and `page_size` and answering records with their id under
-    /// [`Import::id`] and their `version`.
+    /// [`RecordType::id`] and their `version`.
     pub list: &'static str,
     /// The owner's read of one record by `get_id`, answering it with its
     /// `version`; hidden fields read as `{"restricted": true}`.
@@ -72,7 +75,7 @@ pub struct Export {
     /// The owner's list read contract, open to the job door: it takes the
     /// list's filters with integer `page` (from 1) and `page_size`, and
     /// answers one page of records (an array), each with its id under
-    /// [`Import::id`].
+    /// [`RecordType::id`].
     pub list: &'static str,
 }
 
@@ -83,9 +86,6 @@ pub struct Import {
     pub capability: &'static str,
     /// The owner's write contract creating one record.
     pub create: &'static str,
-    /// Where a record's id is in the create result and in a duplicate
-    /// candidate.
-    pub id: &'static str,
     pub duplicates: Option<Duplicates>,
     pub references: &'static [Reference],
 }
@@ -183,6 +183,15 @@ pub(crate) struct Registered {
     pub limited: BTreeMap<&'static str, bool>,
 }
 
+impl Registered {
+    pub fn import(&self) -> bilibi_database::Result<&Import> {
+        self.definition
+            .import
+            .as_ref()
+            .ok_or(bilibi_database::Error::NotFound)
+    }
+}
+
 fn invalid(entry: &Entry, reason: impl std::fmt::Display) -> RegistryError {
     RegistryError::Contribution(format!(
         "import record type {} at {}:{} {reason}",
@@ -210,16 +219,19 @@ fn shape(entry: &Entry) -> bilibi_module_registry::Result<()> {
         || record
             .path
             .is_some_and(|path| !path.starts_with('/') || path.matches("{id}").count() != 1)
-        || !text(record.import.id, 100)
-        || record.import.references.iter().any(|reference| {
-            reference.parent.is_none() && reference.lookup.is_none()
-                || reference
-                    .lookup
-                    .as_ref()
-                    .is_some_and(|lookup| !text(lookup.noun, 60) || !text(lookup.by, 100))
+        || !text(record.id, 100)
+        || (record.import.is_none() && record.export.is_none() && record.bulk_update.is_none())
+        || record.import.as_ref().is_some_and(|import| {
+            import.references.iter().any(|reference| {
+                reference.parent.is_none() && reference.lookup.is_none()
+                    || reference
+                        .lookup
+                        .as_ref()
+                        .is_some_and(|lookup| !text(lookup.noun, 60) || !text(lookup.by, 100))
+            })
         })
     {
-        return Err(invalid(entry, "is malformed: name it <module>.<name>, give a label, table, id property, a path with one {id}, and a parent or lookup for each reference"));
+        return Err(invalid(entry, "is malformed: name it <module>.<name>, give a label, table, id property, at least one operation, a path with one {id}, and a parent or lookup for each reference"));
     }
     Ok(())
 }
@@ -381,7 +393,9 @@ pub(crate) fn register(
                 ),
             )),
         };
-        capability(record.import.capability, company_scoped)?;
+        if let Some(import) = &record.import {
+            capability(import.capability, company_scoped)?;
+        }
         if let Some(export) = &record.export {
             capability(export.capability, company_scoped)?;
             let list = readable(export.list)?;
@@ -396,83 +410,88 @@ pub(crate) fn register(
                 ));
             }
         }
-        let create = writable(record.import.create)?;
-        own(create, "create contract")?;
-        let create_properties = properties(&create.input).ok_or_else(|| {
-            invalid(
-                entry,
-                "names a create contract whose input has no properties",
-            )
-        })?;
-        let mandatory = required(&create.input);
-        let mut fields: Vec<Field> = create_properties
-            .iter()
-            .filter_map(|(name, schema)| field(name, schema, mandatory.contains(&name.as_str())))
-            .collect();
-        // Required fields first, then by name.
-        fields.sort_by(|a, b| b.required.cmp(&a.required).then(a.name.cmp(&b.name)));
-        if let Some(missing) = mandatory
-            .iter()
-            .find(|name| !fields.iter().any(|field| field.name == **name))
-        {
-            return Err(invalid(
-                entry,
-                format!(
-                    "cannot import: required field {missing} is not a scalar a column can fill"
-                ),
-            ));
-        }
+        let mut fields = Vec::new();
+        let mut update_fields = Vec::new();
         let mut limited = BTreeMap::new();
         let mut take_limit = |operation: &RegisteredOperation| {
             let limit = properties(&operation.input).is_some_and(|p| p.contains_key("limit"));
             limited.insert(operation.definition.key, limit);
         };
-        let mut update_fields = Vec::new();
-        if let Some(duplicates) = &record.import.duplicates {
-            let read = readable(duplicates.read)?;
-            own(read, "duplicates read")?;
-            take_limit(read);
-            let read_properties = properties(&read.input).cloned().unwrap_or_default();
-            if duplicates.fields.is_empty()
-                || duplicates.fields.iter().any(|name| {
-                    !fields.iter().any(|field| field.name == *name)
-                        || !read_properties.contains_key(*name)
+        if let Some(import) = &record.import {
+            let create = writable(import.create)?;
+            own(create, "create contract")?;
+            let create_properties = properties(&create.input).ok_or_else(|| {
+                invalid(
+                    entry,
+                    "names a create contract whose input has no properties",
+                )
+            })?;
+            let mandatory = required(&create.input);
+            fields = create_properties
+                .iter()
+                .filter_map(|(name, schema)| {
+                    field(name, schema, mandatory.contains(&name.as_str()))
                 })
+                .collect();
+            // Required fields first, then by name.
+            fields.sort_by(|a, b| b.required.cmp(&a.required).then(a.name.cmp(&b.name)));
+            if let Some(missing) = mandatory
+                .iter()
+                .find(|name| !fields.iter().any(|field| field.name == **name))
             {
                 return Err(invalid(
                     entry,
-                    "matches on a field the create contract or the duplicates read does not take",
-                ));
-            }
-            let update = writable(duplicates.update)?;
-            own(update, "update contract")?;
-            let update_properties = properties(&update.input).ok_or_else(|| {
-                invalid(
-                    entry,
-                    "names an update contract whose input has no properties",
-                )
-            })?;
-            if update_properties.is_empty() {
-                return Err(invalid(
-                    entry,
-                    "names an update contract whose input has no properties",
-                ));
-            }
-            let Some((_, names)) = update_holder(
-                update,
-                duplicates.update_id,
-                duplicates.update_version,
-                duplicates.update_fields,
-            ) else {
-                return Err(invalid(
-                    entry,
                     format!(
-                        "names an id, version or fields property ({:?}) {} does not take",
-                        duplicates.update_fields, duplicates.update
+                        "cannot import: required field {missing} is not a scalar a column can fill"
                     ),
                 ));
-            };
-            update_fields = names;
+            }
+            if let Some(duplicates) = &import.duplicates {
+                let read = readable(duplicates.read)?;
+                own(read, "duplicates read")?;
+                take_limit(read);
+                let read_properties = properties(&read.input).cloned().unwrap_or_default();
+                if duplicates.fields.is_empty()
+                    || duplicates.fields.iter().any(|name| {
+                        !fields.iter().any(|field| field.name == *name)
+                            || !read_properties.contains_key(*name)
+                    })
+                {
+                    return Err(invalid(
+                    entry,
+                    "matches on a field the create contract or the duplicates read does not take",
+                ));
+                }
+                let update = writable(duplicates.update)?;
+                own(update, "update contract")?;
+                let update_properties = properties(&update.input).ok_or_else(|| {
+                    invalid(
+                        entry,
+                        "names an update contract whose input has no properties",
+                    )
+                })?;
+                if update_properties.is_empty() {
+                    return Err(invalid(
+                        entry,
+                        "names an update contract whose input has no properties",
+                    ));
+                }
+                let Some((_, names)) = update_holder(
+                    update,
+                    duplicates.update_id,
+                    duplicates.update_version,
+                    duplicates.update_fields,
+                ) else {
+                    return Err(invalid(
+                        entry,
+                        format!(
+                            "names an id, version or fields property ({:?}) {} does not take",
+                            duplicates.update_fields, duplicates.update
+                        ),
+                    ));
+                };
+                update_fields = names;
+            }
         }
         let (mut bulk_fields, mut bulk_update_fields) = (Vec::new(), Vec::new());
         if let Some(bulk) = &record.bulk_update {
@@ -547,7 +566,7 @@ pub(crate) fn register(
             }
             bulk_update_fields = names;
         }
-        for reference in record.import.references {
+        for reference in record.import.iter().flat_map(|import| import.references) {
             let Some(field) = fields
                 .iter_mut()
                 .find(|field| field.name == reference.field)
@@ -663,9 +682,17 @@ pub(crate) fn register(
         registered.undo = Some(undo);
     }
     for registered in types.values() {
-        for reference in registered.definition.import.references {
+        for reference in registered
+            .definition
+            .import
+            .iter()
+            .flat_map(|import| import.references)
+        {
             if let Some(parent) = reference.parent {
-                if !types.contains_key(parent) {
+                if !types
+                    .get(parent)
+                    .is_some_and(|parent| parent.definition.import.is_some())
+                {
                     return Err(RegistryError::Contribution(format!(
                         "import record type {} names parent {parent}, which is not an import record type",
                         registered.key

@@ -313,7 +313,10 @@ async fn instance_badge(app: &App) -> std::result::Result<Html, HttpError> {
     match app.instance().await {
         Ok(instance) => Ok(instance.badge().map_err(|_| Error::Internal)?),
         Err(error) => {
-            eprintln!("warning: instance lookup failed: {error:?}");
+            bilibi_module_registry::server_log!(
+                Warning,
+                "warning: instance lookup failed: {error:?}"
+            );
             Ok(Html::default())
         }
     }
@@ -512,7 +515,10 @@ async fn login_workspace(app: &App) -> LoginWorkspace {
         Ok(Some(company)) => LoginWorkspace::Ready(company.display_name),
         Ok(None) => LoginWorkspace::NotProvisioned,
         Err(error) => {
-            eprintln!("warning: platform operator company lookup failed: {error:?}");
+            bilibi_module_registry::server_log!(
+                Warning,
+                "warning: platform operator company lookup failed: {error:?}"
+            );
             match error {
                 Error::Database(_) | Error::Pool(_) => LoginWorkspace::DatabaseUnavailable,
                 _ => LoginWorkspace::InvariantViolation,

@@ -204,7 +204,7 @@ pub fn field_catalog() -> Result<&'static FieldCatalog> {
         })
         .as_ref()
         .map_err(|error| {
-            eprintln!("authz field catalog unavailable: {error}");
+            bilibi_module_registry::server_log!(Error, "authz field catalog unavailable: {error}");
             Error::Internal
         })
 }

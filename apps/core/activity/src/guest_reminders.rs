@@ -80,7 +80,10 @@ impl Handler for GuestReminderJob {
                     Outcome::Cancel("guest_reminder_refused")
                 }
                 Err(error) => {
-                    eprintln!("error: activity guest reminders: {error}");
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "error: activity guest reminders: {error}"
+                    );
                     Outcome::Retry("guest_reminder_failed")
                 }
             }
@@ -113,7 +116,7 @@ impl GuestReminderJob {
         }
         // The sender must be allowed to ask every gate, as for invitations.
         if !crate::invitations::may_ask(&**client, &scope).await? {
-            eprintln!(
+            bilibi_module_registry::server_log!(Error,
                 "error: activity guest reminders: the assignee may not ask an invitation gate (job {})",
                 execution.job_id
             );
@@ -195,7 +198,8 @@ impl GuestReminderJob {
                 .await
                 .is_err()
             {
-                eprintln!(
+                bilibi_module_registry::server_log!(
+                    Error,
                     "error: core/activity could not deliver a guest reminder (job {})",
                     execution.job_id
                 );

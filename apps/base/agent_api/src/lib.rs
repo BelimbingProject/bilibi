@@ -309,6 +309,14 @@ pub trait WriteHandler: Send + Sync {
     fn creates(&self) -> Option<CreatedRecord> {
         None
     }
+    /// The links to an earlier step's new record this write takes, as
+    /// `(input field path, created record kind)` pairs such as
+    /// `("person_id", "person")`. A plan refuses any other link before the
+    /// owner previews it, and a review refuses it when it opens, naming the
+    /// fix. An owner that lists a link implements `preview_dependent`.
+    fn accepts_references(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
     /// Preview unresolved endpoints without creating records or guessing IDs.
     /// The default fails closed; supported owners validate all independent facts.
     fn preview_dependent<'a>(
@@ -1315,7 +1323,7 @@ inventory::submit! { Consumer::new::<App>(APPS,"base/agent_api",Registry::valida
 inventory::submit! { Consumer::new::<job::PrincipalWrite>(job::PRINCIPAL_WRITES,"base/agent_api",|entries| entries.iter().try_for_each(|entry| entry.get::<job::PrincipalWrite>().map(|_| ()))) }
 inventory::submit! { bilibi_module_registry::Module {
     id:"base/agent_api",layer:bilibi_module_registry::Layer::Base,
-    dependencies:&["base/module_registry","base/authz","base/database","base/party_ids","base/settings","base/tenancy","base/step_up","base/session","base/system","base/queue","base/ui","base/notifications"], migrations:&[("agent-api-plans-v1",include_str!("../migrations/001-plans.sql")),("base-agent-api-002-plan-work-company",include_str!("../migrations/002-plan-work-company.sql")),("base-agent-api-003-reviews",include_str!("../migrations/003-reviews.sql")),("base-agent-api-004-drop-plans",include_str!("../migrations/004-drop-plans.sql"))],
+    dependencies:&["base/module_registry","base/authz","base/database","base/party_ids","base/settings","base/tenancy","base/step_up","base/session","base/system","base/queue","base/ui","base/notifications"], migrations:&[("agent-api-plans-v1",include_str!("../migrations/001-plans.sql")),("base-agent-api-002-plan-work-company",include_str!("../migrations/002-plan-work-company.sql")),("base-agent-api-003-reviews",include_str!("../migrations/003-reviews.sql")),("base-agent-api-004-drop-plans",include_str!("../migrations/004-drop-plans.sql")),("base-agent-api-005-replaced-reviews",include_str!("../migrations/005-replaced-reviews.sql"))],
     services:&[bilibi_module_registry::Service {id:"base/agent_api.registry",factory:|services|{
         let catalog = Catalog::discover(&bilibi_module_registry::discover()?)?;
         Ok(Arc::new(Registry::from_catalog(&catalog, services.get("base/settings.store")?)?))

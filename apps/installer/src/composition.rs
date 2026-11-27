@@ -1,8 +1,11 @@
 //! What a release is made of, read from the text its own program prints for
 //! `bilibi-web status` (`bilibi_web::status`), and what differs between two
 //! releases. The installer cannot link the program it installs, so it reads
-//! the text; a line it does not understand is skipped.
+//! the text. Release comparisons skip unrecognized lines. Admission rejects
+//! malformed Extension declarations.
+use regex_lite::Regex;
 use serde_json::{json, Value};
+use std::sync::LazyLock;
 
 /// `{"platform": {"version", "release", "commit"}, "domains": [...],
 /// "extensions": [...]}`, each container `{"id", "version", "commit"}`.
@@ -18,10 +21,10 @@ pub fn parse(status: &str) -> Value {
                 Some(("Extensions", rest)) if rest.trim().is_empty() => 2,
                 _ => 0,
             };
-        } else if let Some(container) = container(line) {
+        } else {
             match section {
-                1 => domains.push(container),
-                2 => extensions.push(container),
+                1 => domains.extend(domain(line)),
+                2 => extensions.extend(extension(line)),
                 _ => {}
             }
         }
@@ -47,17 +50,12 @@ pub fn admit(status: &str, mode: &str) -> Result<Value, String> {
         return Err("The release reports an invalid Extension composition.".into());
     }
     for line in extensions.lines().filter(|line| !line.is_empty()) {
-        let extension = line
-            .starts_with("  ")
-            .then(|| container(line))
-            .flatten()
+        let extension = container_fields(line)
             .ok_or("The release reports an invalid Extension declaration.")?;
-        let id = extension["id"].as_str().unwrap_or("unknown");
-        match extension["code"].as_str() {
-            Some("reviewed") => {}
-            Some("customer") if mode == "isolated" => {}
-            Some("customer") => return Err(format!("Extension {id} requires an isolated installation; use an isolated installation, or prepare a code-free release.")),
-            _ => return Err(format!("Extension {id} must declare reviewed or customer code.")),
+        if mode == "shared" && extension.name("code").map(|code| code.as_str()) != Some("reviewed")
+        {
+            let id = &extension["id"];
+            return Err(format!("Extension {id} requires an isolated installation; use an isolated installation, or prepare a code-free release."));
         }
     }
     Ok(candidate)
@@ -81,9 +79,7 @@ fn platform(line: &str) -> Option<Value> {
     Some(json!({"version": version, "release": release, "commit": commit}))
 }
 
-/// `  connector 0.1.0, commit abc, code: reviewed, modules: a, b`, `  finance untagged,
-/// commit abc, modules: a` or `  finance unpinned, modules: a`.
-fn container(line: &str) -> Option<Value> {
+fn domain(line: &str) -> Option<Value> {
     let (id, rest) = line.split_once(", modules:")?.0.trim().split_once(' ')?;
     let (rest, code) = rest
         .rsplit_once(", code: ")
@@ -96,6 +92,25 @@ fn container(line: &str) -> Option<Value> {
         },
     };
     Some(json!({"id": id, "version": version, "commit": commit, "code": code}))
+}
+
+fn container_fields(line: &str) -> Option<regex_lite::Captures<'_>> {
+    static DECLARATION: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\A  (?P<id>[a-z][a-z0-9]*(?:_[a-z0-9]+)*) (?:unpinned|(?P<version>[^,\x00-\x20\x7F:]+), commit (?P<commit>[A-Za-z0-9]+))(?:, code: (?P<code>reviewed|customer))?, modules: [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*(?:, [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*)*\z")
+            .expect("valid release status grammar")
+    });
+    DECLARATION.captures(line)
+}
+
+fn extension(line: &str) -> Option<Value> {
+    let fields = container_fields(line)?;
+    let version = fields
+        .name("version")
+        .map(|value| value.as_str())
+        .filter(|v| *v != "untagged");
+    let commit = fields.name("commit").map(|value| value.as_str());
+    let code = fields.name("code").map(|value| value.as_str());
+    Some(json!({"id": &fields["id"], "version": version, "commit": commit, "code": code}))
 }
 
 /// What differs from one release to another: a Platform change as

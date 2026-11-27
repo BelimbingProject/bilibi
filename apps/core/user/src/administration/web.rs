@@ -797,7 +797,7 @@ impl Index {
                     .id("users-role-filter")
                     .label("Roles")
                     .placeholder("All roles")
-                    .selection_label(":count role selected|:count roles selected")
+                    .selection_label(":count role|:count roles")
                     .options(
                         roles
                             .iter()
@@ -814,8 +814,8 @@ impl Index {
                 "Reset requested",
                 if self.reset_requested { "open" } else { "" },
                 vec![
-                    bilibi_ui::Choice::new("All requests", ""),
-                    bilibi_ui::Choice::new("Reset requested", "open"),
+                    bilibi_ui::Choice::new("All users", ""),
+                    bilibi_ui::Choice::new("Asked for a 2FA reset", "open"),
                 ],
             ));
         }
