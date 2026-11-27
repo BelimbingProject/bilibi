@@ -416,11 +416,19 @@ impl Tenants {
         Ok(count.unsigned_abs())
     }
     pub async fn fetch(&self, proof: &OperatorProof, id: i64) -> Result<Option<TenantIdentity>> {
+        let client = self.db.get().await?;
+        self.fetch_on(&**client, proof, id).await
+    }
+    pub async fn fetch_on(
+        &self,
+        client: &dyn crate::ProofClient,
+        proof: &OperatorProof,
+        id: i64,
+    ) -> Result<Option<TenantIdentity>> {
         if id <= 0 {
             return Ok(None);
         }
-        let client = self.db.get().await?;
-        prove_operator(&**client, proof.scope()).await?;
+        prove_operator(client, proof.scope()).await?;
         Ok(client
             .query_opt(&format!("{SELECT} AND t.id = $1"), &[&id])
             .await?
@@ -428,14 +436,14 @@ impl Tenants {
             .map(TenantIdentity::from_row))
     }
     /// Validates the draft and parent without a business write.
-    pub async fn preview(
+    pub async fn preview_on(
         &self,
+        client: &dyn crate::ProofClient,
         proof: &OperatorProof,
         new: &NewTenant,
     ) -> Result<std::result::Result<NewTenant, TenantErrors>> {
-        let client = self.db.get().await?;
-        prove_operator(&**client, proof.scope()).await?;
-        validate_on(&**client, new, false).await
+        prove_operator(client, proof.scope()).await?;
+        validate_on(client, new, false).await
     }
     /// Creates only a fresh tenant on the caller's audited transaction. The
     /// capability and live operator identity are rechecked here. Its sealed
@@ -651,25 +659,25 @@ impl Tenants {
     }
     /// Bounded search of the platform tenant directory. IDs returned here
     /// are data, not authority to enter that tenant.
-    pub async fn search(
+    pub async fn search_on(
         &self,
+        client: &dyn crate::ReadClient,
         proof: &OperatorProof,
         search: &str,
         page: i64,
         page_size: i64,
     ) -> Result<(Vec<TenantIdentity>, i64)> {
-        let client = self.db.get().await?;
-        prove_operator(&**client, proof.scope()).await?;
+        prove_operator(client, proof.scope()).await?;
         let page_size = page_size.clamp(1, 100);
         let offset = (page.clamp(1, 1_000_000) - 1) * page_size;
         let rows = client.query(&format!("{SELECT} AND ($1='' OR strpos(lower(t.name),lower($1))>0) ORDER BY t.name,t.id LIMIT $2 OFFSET $3"), &[&search,&page_size,&offset]).await?;
-        let total = client.query_one("SELECT count(*) FROM tenants WHERE deleted_at IS NULL AND ($1='' OR strpos(lower(name),lower($1))>0)", &[&search]).await?.get(0);
+        let total = client.query_opt("SELECT count(*) FROM tenants WHERE deleted_at IS NULL AND ($1='' OR strpos(lower(name),lower($1))>0)", &[&search]).await?.ok_or(bilibi_database::Error::Internal)?.get(0);
         Ok((rows.iter().map(TenantIdentity::from_row).collect(), total))
     }
 }
 
 async fn validate_on(
-    client: &impl GenericClient,
+    client: &dyn crate::ProofClient,
     new: &NewTenant,
     lock: bool,
 ) -> Result<std::result::Result<NewTenant, TenantErrors>> {

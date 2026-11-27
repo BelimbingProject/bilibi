@@ -352,7 +352,7 @@ administrator. No account is shown a guessed company. The widget and section nee
 capability to read; the links show only to a reader holding
 `admin.company.list` / `admin.company.view`.
 
-Workplace liveness (`reachable`) locks the live company `FOR KEY SHARE` before proving the desk assignment on the handed connection. This preserves the company-before-desk order that desk writes use.
+Workplace liveness (`reachable`) checks the live company before the desk assignment on the handed connection. Writable transactions lock both `FOR KEY SHARE` in company-before-desk order; read-only transactions check their snapshot without locks.
 
 ## Runtime inspection
 
