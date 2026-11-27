@@ -29,6 +29,9 @@
   .ui-icon { display: inline-block; vertical-align: middle; }
 }
 
+/* Shared labels keep their required mark beside the text even inside legacy pages. */
+.ui-form-label { display: block; white-space: nowrap; }
+
 /* Forms select and multi_select share the outline chevron. A single
  * select keeps its native keyboard and popup behaviour; only its arrow changes.
  * Its icon ends 11px from the outer edge, matching the multi-select's 2px shift. */

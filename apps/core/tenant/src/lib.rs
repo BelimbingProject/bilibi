@@ -27,7 +27,6 @@ const PAGES: &str = "core/tenant.pages";
 
 /// The composition facade. No caller supplies a tenant or actor to act as.
 pub struct TenantService {
-    db: Db,
     tenants: Arc<Tenants>,
     sessions: Arc<Sessions>,
     companies: Arc<CompanyService>,
@@ -166,25 +165,29 @@ impl TenantService {
         };
         Ok(json!({"tenant":tenant_json(&moved),"sessions_ended":ended}))
     }
-    async fn review(&self, scope: &Scope, input: &Value) -> Result<Value> {
-        let client = self.db.get().await.map_err(Error::from)?;
-        let proof =
-            bilibi_authz::authorize_operator(&**client, scope, bilibi_tenancy::CREATE).await?;
+    async fn review(
+        &self,
+        client: &dyn bilibi_agent_api::OperationClient,
+        scope: &Scope,
+        input: &Value,
+    ) -> Result<Value> {
+        let sql = client.sql_client().await?;
+        let proof = bilibi_authz::authorize_operator(sql, scope, bilibi_tenancy::CREATE).await?;
         let (tenant, names) = draft(input)?;
         let tenant = self
             .tenants
-            .preview(&proof, &tenant)
+            .preview_on(client, &proof, &tenant)
             .await?
             .map_err(tenant_errors)?;
         let companies = self
             .companies
-            .preview_tenant_companies(&**client, scope, &names)
+            .preview_tenant_companies(sql, scope, &names)
             .await?
             .map_err(ContractError::InvalidInput)?;
         let parent = match tenant.parent_id {
             Some(id) => self
                 .tenants
-                .fetch(&proof, id)
+                .fetch_on(client, &proof, id)
                 .await?
                 .map(|tenant| tenant_json(&tenant)),
             None => None,
@@ -243,7 +246,6 @@ inventory::submit! {
         services:&[
             bilibi_module_registry::Service { id:SERVICE, factory:|services| {
                 let facade = Arc::new(TenantService {
-                    db:services.get::<Db>("base/database.pool")?.as_ref().clone(),
                     tenants:services.get("base/tenancy.tenants")?, sessions:services.get("base/session.sessions")?, companies:services.get(bilibi_company::SERVICE)?,
                     step_up:services.get(bilibi_step_up::SERVICE)?,
                     oversight:services.get(bilibi_tenancy::OVERSIGHT)?,

@@ -44,7 +44,7 @@
 {% endmacro %}
 
 {% macro production_badge(identity, id="", title="", editable=false) %}
-{% if editable %}<a{% else %}<span{% endif %}{% if !id.is_empty() %} id="{{ id }}"{% endif %}{% if editable %} href="/system/instance"{% endif %}{% if !title.is_empty() %} title="{% if editable %}Instance settings · {% endif %}{{ title }}"{% endif %} data-instance="production" class="inline-flex min-h-5 items-center rounded-sm border border-line px-1.5 break-words text-xs font-semibold text-ink">Production{% if identity.label != "Production" %} · {{ identity.label }}{% endif %}{% if editable %}</a>{% else %}</span>{% endif %}
+{% if editable %}<a{% else %}<span{% endif %}{% if !id.is_empty() %} id="{{ id }}"{% endif %}{% if editable %} href="/system/instance"{% endif %}{% if !title.is_empty() %} title="{% if editable %}Server Instance · {% endif %}{{ title }}"{% endif %} data-instance="production" class="inline-flex min-h-5 items-center rounded-sm border border-line px-1.5 break-words text-xs font-semibold text-ink">Production{% if identity.label != "Production" %} · {{ identity.label }}{% endif %}{% if editable %}</a>{% else %}</span>{% endif %}
 {% endmacro %}
 
 {#- Which installation this is (src/instance.rs): a small badge for the top
@@ -100,7 +100,7 @@
 {% if status.role == "production" %}
 {% call production_badge(identity=status, id=status.id, title=status.title, editable=status.editable) %}{% endcall %}
 {% else %}
-{% if status.editable %}<a{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} href="/system/instance" title="Instance settings · {{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {{ status.tone.surface_class() }}">{% else %}<span{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} title="{{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {{ status.tone.surface_class() }}">{% endif %}{{ status.role_label }}{% if status.label != status.role_label %} · {{ status.label }}{% endif %}{% if status.editable %}</a>{% else %}</span>{% endif %}
+{% if status.editable %}<a{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} href="/system/instance" title="Server Instance · {{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {{ status.tone.surface_class() }}">{% else %}<span{% if !status.id.is_empty() %} id="{{ status.id }}"{% endif %} title="{{ status.title }}" data-instance="{{ status.role }}" class="inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 font-semibold {{ status.tone.surface_class() }}">{% endif %}{{ status.role_label }}{% if status.label != status.role_label %} · {{ status.label }}{% endif %}{% if status.editable %}</a>{% else %}</span>{% endif %}
 {% endif %}
 {% endmacro %}
 

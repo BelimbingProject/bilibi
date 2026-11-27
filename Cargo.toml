@@ -20,6 +20,7 @@ allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 
 [workspace.dependencies]
+regex-lite = "0.1"
 rquickjs = "0.14"
 seccompiler = "0.5"
 rlimit = "0.11"

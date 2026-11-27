@@ -179,7 +179,7 @@ impl Editor {
             return super::action_gate(
                 &self.pages.instances.step_up,
                 scope,
-                "Instance settings",
+                "Server Instance",
                 "save_instance",
                 self.flash.as_deref(),
             )
@@ -197,7 +197,7 @@ impl Editor {
             Field::named("instance[role]")
                 .id("instance-role")
                 .kind(InputKind::Select)
-                .label("Server role (Core Administrator only)")
+                .label("Server Instance")
                 .value(draft("role").unwrap_or(instance.role.env_value()))
                 .options(vec![
                     Choice::new("Dev", "development"),
@@ -209,14 +209,9 @@ impl Editor {
         role_step.body = role_field;
         role_step.reason = "to change the server role.".into();
         let mut body = render(role_step)?;
-        body.push(&render(bilibi_ui::Alert { kind: StatusKind::Warning, body: Html::text("Production is the live system. Changing to or from Production changes the server's warnings and 2FA rules. It does not copy or remove any data. Every role change needs a fresh 2FA code."), ..Default::default() })?);
         let client = self.pages.db.get().await?;
         for (key, label, hint) in [
-            (
-                INSTANCE_LABEL_KEY,
-                "Instance name",
-                "Leave empty to use the server role.",
-            ),
+            (INSTANCE_LABEL_KEY, "Server Label", "Display server name"),
             (
                 INSTANCE_COLOUR_KEY,
                 "Dev and Staging banner colour",
@@ -236,7 +231,15 @@ impl Editor {
                 .id(key.replace('.', "-"))
                 .label(label)
                 .hint(hint)
-                .value(draft(key).unwrap_or_else(|| value.as_str().unwrap_or("")));
+                .value(draft(key).unwrap_or_else(|| {
+                    value.as_str().unwrap_or_else(|| {
+                        if key == INSTANCE_LABEL_KEY {
+                            self.role.label()
+                        } else {
+                            ""
+                        }
+                    })
+                }));
             if key == INSTANCE_COLOUR_KEY {
                 body.push(&render(super::instance::colour_input(
                     field,
@@ -254,15 +257,14 @@ impl Editor {
                 id: "instance-save",
                 button_type: "submit",
                 variant: ButtonVariant::Primary,
-                body: Html::text("Save instance settings"),
+                body: Html::text("Save"),
                 ..Default::default()
             })?,
             ..Default::default()
         })?;
         let mut content = render(Header {
-            title: Html::text("Instance settings"),
-            subtitle:
-                "Set this server's role and name. Dev and Staging can use a custom banner colour.",
+            title: Html::text("Server Instance"),
+            subtitle: "Set this instance as Dev, Staging, or Production",
             ..Default::default()
         })?;
         content.push(
