@@ -51,6 +51,7 @@
   // Change forms normally follow server values outside the focused field.
   // A transport refusal/disconnect must keep their entire draft until retry.
   const preservedForms = new WeakMap(); // form -> latest refused request ID
+  const newerDrafts = new WeakMap();
   let reconnecting = false;
   let reloadOnReconnect = false;
   let stopped = false; // the server cleared the page: no reconnect
@@ -293,6 +294,7 @@
     const entry = message.request_id == null ? null : inflight.get(message.request_id);
     // Acknowledge before patching: the busy mirror lifts and the control shows
     // whatever the reply renders for it.
+    let draftReleased = false;
     if (entry) {
       inflight.delete(message.request_id);
       settle(entry);
@@ -300,19 +302,26 @@
         if (message.type === 'error') preserve(entry.ownerForm, entry.id);
         // Only a later complete form snapshot releases a refused draft. An
         // older validation reply, upload or button action must not release it.
-        else if ((entry.form || entry.source === entry.ownerForm)
-          && entry.id > (preservedForms.get(entry.ownerForm) || 0)) preservedForms.delete(entry.ownerForm);
+        else if (entry.form || entry.source === entry.ownerForm) {
+          if (entry.id > (preservedForms.get(entry.ownerForm) || 0)) preservedForms.delete(entry.ownerForm);
+          const edit = newerDrafts.get(entry.ownerForm);
+          if (edit && entry.id > edit) {
+            newerDrafts.delete(entry.ownerForm);
+            draftReleased = true;
+          }
+        }
       }
     }
     // A form whose submission the server accepted gives up its draft and shows
     // the stored value; a rejected submission keeps the person's input.
     const options = {
       submitted: entry && entry.form && message.type !== 'error'
-        && !preservedForms.has(entry.form) ? entry.form : null,
+        && !preservedForms.has(entry.form) && !newerDrafts.has(entry.form) ? entry.form : null,
       navigation: !!(entry && entry.navigation),
       anchor: entry?.navigation && entry.intent.type === 'mount' ? location.hash.slice(1) : '',
     };
-    if (message.redirect && entry?.ownerForm && preservedForms.has(entry.ownerForm)) {
+    if (message.redirect && entry?.ownerForm
+      && (preservedForms.has(entry.ownerForm) || newerDrafts.has(entry.ownerForm))) {
       // A previously sent save may redirect after a newer local refusal.
       // Its answer must not navigate away from that newer, unsent draft.
       const refusal = 'An earlier request was answered while this form changed. Your newer draft is kept. Check the stored value before trying again.';
@@ -344,7 +353,7 @@
           released = true;
         }
       }
-      if (released || message.flash || message.html !== lastHTML) {
+      if (released || draftReleased || message.flash || message.html !== lastHTML) {
         patch(document.getElementById('app'), message.html, {...options, flash: message.flash});
         lastHTML = message.html;
       }
@@ -467,7 +476,7 @@
     }
     // A browser-owned subtree and a control awaiting its own reply keep their
     // state; the data-* attributes still follow the server.
-    if (from.hasAttribute('data-live-ignore') || from.hasAttribute('data-live-busy')) {
+    if (from.hasAttribute('data-live-ignore') || from.hasAttribute('data-live-busy') || newerDrafts.has(from)) {
       attributes(from, to, context, (name) => name.startsWith('data-'));
       return from;
     }
@@ -735,7 +744,8 @@
     const values = formValues(form);
     const key = JSON.stringify(values);
     const last = changeSent.get(form);
-    if (last && last.key === key && performance.now() - last.at < 500) return;
+    if (last && last.key === key && performance.now() - last.at < 500
+      && !newerDrafts.has(form)) return;
     changeSent.set(form, {key, at: performance.now()});
     if (type === 'params') enqueue({type: 'params', params: values}, {source: form, loading: true});
     else enqueue({type: 'event', target: ownerTarget(form), payload: {type, ...values}}, {source: form});
@@ -745,6 +755,7 @@
       const control = event.target;
       const form = control.form;
       if (!form || !form.dataset.event || !form.hasAttribute('data-change')) return;
+      if (form.hasAttribute('data-preserve-newer-draft')) newerDrafts.set(form, ++sequence);
       if (kind === 'input' && control.dataset.editedMarker) {
         if (!editedMarkers.has(form)) editedMarkers.set(form, new Set());
         editedMarkers.get(form).add(control.dataset.editedMarker);

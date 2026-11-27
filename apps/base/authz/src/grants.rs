@@ -185,7 +185,7 @@ impl Grants {
         tx.commit().await
     }
     /// [`Grants::assign_role`] inside the caller's audited transaction (an agent
-    /// plan's commit): the same checks, step-up and write, committed by the caller.
+    /// plan's commit), after `require_role_capability_step_up` on the same input.
     pub async fn assign_role_in(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -450,7 +450,7 @@ impl Grants {
         tx.commit().await
     }
     /// [`Grants::set_direct`] inside the caller's audited transaction (an agent
-    /// plan's commit): the same checks, step-up and write, committed by the caller.
+    /// plan's commit), after `require_role_capability_step_up` on the same input.
     /// The actor must hold the key at least as far as the allow reaches.
     pub async fn set_direct_in(
         &self,
@@ -554,7 +554,8 @@ impl Grants {
         key: &str,
         grant: Option<Reach>,
     ) -> Result<()> {
-        self.known(key)?;
+        self.require_role_capability_step_up(actor, role, key, grant)
+            .await?;
         let mut client = self.db.get().await?;
         let mut tx = self
             .boundary
@@ -585,35 +586,18 @@ impl Grants {
             )))
         }
     }
-    /// [`Grants::set_role_capability`] inside the caller's audited transaction (an agent
-    /// plan's commit): the same checks, step-up and write, committed by the caller.
-    /// The actor must hold the key at least as far as the reach given.
-    pub async fn set_role_capability_in(
+    /// Confirm a standalone role grant before acquiring its write connection.
+    pub async fn require_role_capability_step_up(
         &self,
-        tx: &mut MutationTransaction<'_>,
         actor: &Scope,
         role: i64,
         key: &str,
         grant: Option<Reach>,
     ) -> Result<()> {
-        self.known(key)?;
-        if let Some(reach) = grant {
-            self.staff_key(key, false)?;
-            self.reach_supported(key, reach)?;
-        }
-        self.verify_user(tx.sql(), actor, actor.user()).await?;
-        authorize_key(tx.sql(), actor, "admin.authz.role.update").await?;
-        tx.sql()
-            .query_opt(
-                "SELECT id FROM roles WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
-                &[&actor.tenant(), &role],
-            )
-            .await?
-            .ok_or(Error::Invalid)?;
-        if grant.is_some() && !self.vocabulary.capabilities.get(key).is_some_and(|c|c.definition.company_scoped)
-            && tx.sql().query_opt("SELECT role_id FROM principal_roles WHERE tenant_id=$1 AND role_id=$2 AND company_id IS NOT NULL LIMIT 1", &[&actor.tenant(),&role]).await?.is_some() { return Err(Error::Invalid); }
-        if let Some(reach) = grant {
-            Self::verify_role_capability_reach(tx.sql(), actor, key, reach).await?;
+        {
+            let client = self.db.get().await?;
+            self.validate_role_capability(&**client, actor, role, key, grant, false)
+                .await?;
         }
         self.step_up
             .require(
@@ -624,8 +608,59 @@ impl Grants {
                     grant.map_or("remove", Reach::code)
                 ),
             )
+            .await
+    }
+
+    /// [`Grants::set_role_capability`] inside the caller's audited transaction (an agent
+    /// plan's commit), after `require_role_capability_step_up` on the same input.
+    /// The actor must hold the key at least as far as the reach given.
+    pub async fn set_role_capability_in(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        actor: &Scope,
+        role: i64,
+        key: &str,
+        grant: Option<Reach>,
+    ) -> Result<()> {
+        self.validate_role_capability(tx.sql(), actor, role, key, grant, true)
             .await?;
         Self::write_role_capability(tx, actor, role, key, grant).await
+    }
+
+    async fn validate_role_capability(
+        &self,
+        client: &(impl GenericClient + Sync),
+        actor: &Scope,
+        role: i64,
+        key: &str,
+        grant: Option<Reach>,
+        lock_role: bool,
+    ) -> Result<()> {
+        self.known(key)?;
+        if let Some(reach) = grant {
+            self.staff_key(key, false)?;
+            self.reach_supported(key, reach)?;
+        }
+        self.verify_user(client, actor, actor.user()).await?;
+        authorize_key(client, actor, "admin.authz.role.update").await?;
+        let role_query = if lock_role {
+            "SELECT is_system FROM roles WHERE tenant_id=$1 AND id=$2 FOR UPDATE"
+        } else {
+            "SELECT is_system FROM roles WHERE tenant_id=$1 AND id=$2"
+        };
+        let row = client
+            .query_opt(role_query, &[&actor.tenant(), &role])
+            .await?
+            .ok_or(Error::Invalid)?;
+        if row.get::<_, bool>(0) {
+            return Err(Error::Forbidden);
+        }
+        if grant.is_some() && !self.vocabulary.capabilities.get(key).is_some_and(|c|c.definition.company_scoped)
+            && client.query_opt("SELECT role_id FROM principal_roles WHERE tenant_id=$1 AND role_id=$2 AND company_id IS NOT NULL LIMIT 1", &[&actor.tenant(),&role]).await?.is_some() { return Err(Error::Invalid); }
+        if let Some(reach) = grant {
+            Self::verify_role_capability_reach(client, actor, key, reach).await?;
+        }
+        Ok(())
     }
 
     async fn verify_role_capability_reach(
@@ -662,8 +697,6 @@ impl Grants {
         let key = key.to_owned();
         let reach = grant.map(Reach::code);
         tx.mutate(|sql|Box::pin(async move {
-            let row=sql.query_opt("SELECT is_system FROM roles WHERE tenant_id=$1 AND id=$2 FOR UPDATE",&[&tenant,&role]).await?.ok_or(Error::Invalid)?;
-            if row.get::<_,bool>(0) {return Err(Error::Forbidden);}
             let old:Option<String>=sql.query_opt("SELECT reach FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 AND capability=$3",&[&tenant,&role,&key]).await?.map(|row|row.get(0));
             match reach {
                 Some(reach)=>{sql.execute("INSERT INTO role_capabilities(tenant_id,role_id,capability,reach) VALUES($1,$2,$3,$4) ON CONFLICT(tenant_id,role_id,capability) DO UPDATE SET reach=EXCLUDED.reach",&[&tenant,&role,&key,&reach]).await?;},
@@ -690,34 +723,36 @@ impl Grants {
         role: &NewRole,
         capabilities: &[String],
     ) -> Result<CreatedRole> {
-        let mut errors = crate::roles::validate(role);
+        let errors = crate::roles::validate(role);
         if !errors.is_empty() {
             return Ok(CreatedRole::Refused(errors));
+        }
+        let company = role
+            .company_id
+            .and_then(|id| OrganisationId::new(id).ok())
+            .ok_or(Error::Invalid)?;
+        if !capabilities.is_empty() {
+            let errors = {
+                let client = self.db.get().await?;
+                self.validate_role_create(&**client, actor, company, role, capabilities)
+                    .await?
+            };
+            if !errors.is_empty() {
+                return Ok(CreatedRole::Refused(errors));
+            }
+            self.step_up
+                .require(
+                    actor,
+                    step_up::ROLE_CAPABILITY,
+                    &format!("create role:{}", role.code),
+                )
+                .await?;
         }
         let mut client = self.db.get().await?;
         let mut tx = self
             .boundary
             .begin(&mut client, actor.mutation_context("authz.role.create"))
             .await?;
-        self.verify_user(tx.sql(), actor, actor.user()).await?;
-        authorize_key(tx.sql(), actor, crate::roles::CREATE).await?;
-        let company = role
-            .company_id
-            .and_then(|id| OrganisationId::new(id).ok())
-            .ok_or(Error::Invalid)?;
-        match self.parties.organisation(tx.sql(), actor, company).await {
-            Ok(_) => {}
-            Err(Error::NotFound) => errors
-                .company_id
-                .push("is no longer available; choose another company".into()),
-            Err(Error::Forbidden) => errors
-                .company_id
-                .push("is archived and read-only; choose another company".into()),
-            Err(error) => return Err(error),
-        }
-        if !errors.is_empty() {
-            return Ok(CreatedRole::Refused(errors));
-        }
         let tenant = actor.tenant();
         // Serialize creates in the tenant so the uniqueness answer holds until
         // the insert; a refused create writes nothing and is rolled back.
@@ -727,31 +762,11 @@ impl Grants {
                 &[&i32::try_from(tenant).map_err(|_| Error::Invalid)?],
             )
             .await?;
-        let taken = tx.sql().query_one("SELECT EXISTS(SELECT 1 FROM roles WHERE tenant_id=$1 AND name=$2), EXISTS(SELECT 1 FROM roles WHERE tenant_id=$1 AND code=$3)",&[&tenant,&role.name,&role.code]).await?;
-        let mut errors = RoleErrors::default();
-        if taken.get::<_, bool>(0) {
-            errors.name.push("has already been taken".into());
-        }
-        if taken.get::<_, bool>(1) {
-            errors.code.push("has already been taken".into());
-        }
+        let errors = self
+            .validate_role_create(tx.sql(), actor, company, role, capabilities)
+            .await?;
         if !errors.is_empty() {
             return Ok(CreatedRole::Refused(errors));
-        }
-        if !capabilities.is_empty() {
-            authorize_key(tx.sql(), actor, crate::roles::UPDATE).await?;
-            for key in capabilities {
-                self.staff_key(key, false)?;
-                self.reach_supported(key, Reach::All)?;
-                Self::verify_role_capability_reach(tx.sql(), actor, key, Reach::All).await?;
-            }
-            self.step_up
-                .require(
-                    actor,
-                    step_up::ROLE_CAPABILITY,
-                    &format!("create role:{}", role.code),
-                )
-                .await?;
         }
         let role = role.clone();
         let owner = company.get();
@@ -765,6 +780,48 @@ impl Grants {
         tx.commit().await?;
         Ok(CreatedRole::Created(id))
     }
+    async fn validate_role_create(
+        &self,
+        client: &(impl GenericClient + Sync),
+        actor: &Scope,
+        company: OrganisationId,
+        role: &NewRole,
+        capabilities: &[String],
+    ) -> Result<RoleErrors> {
+        self.verify_user(client, actor, actor.user()).await?;
+        authorize_key(client, actor, crate::roles::CREATE).await?;
+        let mut errors = RoleErrors::default();
+        match self.parties.organisation(client, actor, company).await {
+            Ok(_) => {}
+            Err(Error::NotFound) => errors
+                .company_id
+                .push("is no longer available; choose another company".into()),
+            Err(Error::Forbidden) => errors
+                .company_id
+                .push("is archived and read-only; choose another company".into()),
+            Err(error) => return Err(error),
+        }
+        if !errors.is_empty() {
+            return Ok(errors);
+        }
+        let tenant = actor.tenant();
+        let taken = client.query_one("SELECT EXISTS(SELECT 1 FROM roles WHERE tenant_id=$1 AND name=$2), EXISTS(SELECT 1 FROM roles WHERE tenant_id=$1 AND code=$3)",&[&tenant,&role.name,&role.code]).await?;
+        if taken.get::<_, bool>(0) {
+            errors.name.push("has already been taken".into());
+        }
+        if taken.get::<_, bool>(1) {
+            errors.code.push("has already been taken".into());
+        }
+        if errors.is_empty() && !capabilities.is_empty() {
+            authorize_key(client, actor, crate::roles::UPDATE).await?;
+            for key in capabilities {
+                self.staff_key(key, false)?;
+                Self::verify_role_capability_reach(client, actor, key, Reach::All).await?;
+            }
+        }
+        Ok(errors)
+    }
+
     /// Named principals cannot grant themselves access. A live user must hold
     /// the administration capability. Declaration bounds every stored allow.
     pub async fn set_system(

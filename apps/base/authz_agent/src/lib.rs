@@ -17,7 +17,7 @@ mod web;
 use bilibi_agent_api::{
     json::{Data, Output},
     Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
-    ReadHandler, WriteHandler, DEFINITIONS,
+    PrepareFuture, ReadHandler, WriteHandler, DEFINITIONS,
 };
 use bilibi_authz::{
     effective_capabilities_of,
@@ -342,11 +342,41 @@ impl WriteHandler for Write {
             Ok(facts.into())
         })
     }
+    fn prepares(&self) -> bool {
+        matches!(self, Self::RoleCapability)
+    }
+
+    fn prepare<'a>(&'a self, scope: &'a Scope, input: &'a Value) -> PrepareFuture<'a> {
+        Box::pin(async move {
+            let grants = &bound()?.grants;
+            let role = positive(input, "role_id")?;
+            let key = capability(grants, input)?;
+            let reach = input["granted"]
+                .as_bool()
+                .unwrap_or(false)
+                .then_some(reach(input)?);
+            grants
+                .require_role_capability_step_up(scope, role, key, reach)
+                .await?;
+            Ok(Some(Value::Bool(true)))
+        })
+    }
+
     fn commit<'a>(
         &'a self,
         tx: &'a mut MutationTransaction<'_>,
         scope: &'a Scope,
         input: &'a Value,
+    ) -> OperationFuture<'a> {
+        self.commit_prepared(tx, scope, input, None)
+    }
+
+    fn commit_prepared<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+        prepared: Option<&'a Value>,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             // The review again on this transaction: the guard and the facts
@@ -407,6 +437,9 @@ impl WriteHandler for Write {
                     grants.set_direct_in(tx, scope, user, key, rule).await?;
                 }
                 Self::RoleCapability => {
+                    if prepared.and_then(Value::as_bool) != Some(true) {
+                        return Err(bilibi_agent_api::Error::WritesNotEnabled);
+                    }
                     let role = facts["role"]["id"].as_i64().ok_or(Error::Internal)?;
                     let key = facts["capability"].as_str().ok_or(Error::Internal)?;
                     let granted = facts["granted"].as_bool().ok_or(Error::Internal)?;
