@@ -39,15 +39,14 @@ inventory::submit! { Contribution::new(VOCABULARY, "core/affiliation", Provenanc
 // lookup that must find exactly one).
 inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/affiliation.affiliations", Provenance { module: "core/affiliation", source: file!(), line: line!() }, &bilibi_bulk_data::RecordType {
     label: "Affiliations", table: "person_affiliations", path: None,
-    import: bilibi_bulk_data::Import {
-        capability: IMPORT, create: "core.affiliation.create", id: "id",
-        duplicates: None,
+    id: "id", import: Some(bilibi_bulk_data::Import {
+        capability: IMPORT, create: "core.affiliation.create", duplicates: None,
         references: &[bilibi_bulk_data::Reference {
             field: "person_id",
             parent: Some("core/person.contacts"),
             lookup: Some(bilibi_bulk_data::Lookup { read: "core.person.duplicates", by: "email", noun: "contact" }),
         }],
-    },
+    }),
     export: None,
     bulk_update: None,
 }) }

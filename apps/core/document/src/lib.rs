@@ -713,7 +713,8 @@ impl Documents {
                         bilibi_artifacts::Error::Database(Error::Forbidden) => Error::Forbidden,
                         bilibi_artifacts::Error::NotFound => Error::NotFound,
                         other => {
-                            eprintln!(
+                            bilibi_module_registry::server_log!(
+                                Error,
                                 "error: document retention status unavailable: {}",
                                 other.code()
                             );

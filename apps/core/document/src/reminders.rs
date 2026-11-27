@@ -78,7 +78,8 @@ impl Store<'_> {
                 match self.activities.create_task(tx, scope, &input).await {
                     Ok(task) => activity = Some(task.id),
                     Err(error) => {
-                        eprintln!(
+                        bilibi_module_registry::server_log!(
+                            Warning,
                             "warning: the expiry reminder of document {} was not created: {error}",
                             document.id
                         );
@@ -142,7 +143,7 @@ impl Store<'_> {
                 bilibi_activity::WriteError::Stale => WriteError::Stale,
                 bilibi_activity::WriteError::Access(error) => WriteError::Access(error),
                 error => {
-                    eprintln!("error: the expiry reminder of document {document} could not be removed: {error}");
+                    bilibi_module_registry::server_log!(Error,"error: the expiry reminder of document {document} could not be removed: {error}");
                     WriteError::Access(Error::Internal)
                 }
             })

@@ -840,7 +840,7 @@ impl BulkData {
                     Err(error) => {
                         // A content-free code: the folder is missing or unsafe,
                         // or the disk refused the write.
-                        eprintln!(
+                        bilibi_module_registry::server_log!(Error,
                             "error: an export could not be stored as a private document: {}",
                             error.code()
                         );
@@ -1038,7 +1038,7 @@ impl BulkData {
         started: std::time::Instant,
         access: Option<(&Scope, &ExportRun, &str)>,
     ) -> Result<std::result::Result<Listed, Failed>> {
-        let id_property = registered.definition.import.id;
+        let id_property = registered.definition.id;
         // Records unticked after "Select all" are left out before the limit
         // counts, so what is left is what the limit judges.
         let left_out: std::collections::HashSet<&str> =

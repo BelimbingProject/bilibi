@@ -652,9 +652,8 @@ impl Vocabulary {
             }
         }
         for entry in catalog.entries::<bilibi_settings::Setting>(bilibi_settings::DEFINITIONS)? {
-            if let bilibi_settings::Setting::Definition(definition) =
-                entry.get::<bilibi_settings::Setting>()?
-            {
+            let setting = entry.get::<bilibi_settings::Setting>()?;
+            if let Some(definition) = setting.definition() {
                 if let Some(key) = definition
                     .editor
                     .as_ref()
@@ -662,6 +661,9 @@ impl Vocabulary {
                 {
                     check(key)?;
                 }
+            }
+            if let Some(key) = setting.principal_read_capability() {
+                check(key)?;
             }
         }
         Ok(())

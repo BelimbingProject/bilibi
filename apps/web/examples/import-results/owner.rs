@@ -66,7 +66,7 @@ bilibi_grid::contribute!(
 );
 inventory::submit! { Contribution::new(RECORD_TYPES, TYPE, provenance!(), &RecordType {
     label: "Result reference records", table: "reference_import_records", path: Some("/reference/import-records/{id}"),
-    import: Import { capability: CAPABILITY, create: "reference.import_results.create", id: "id", duplicates: None, references: &[] },
+    id: "id", import: Some(Import { capability: CAPABILITY, create: "reference.import_results.create", duplicates: None, references: &[] }),
     export: Some(Export { capability: CAPABILITY, list: "reference.import_results.list" }), bulk_update: None,
 }) }
 

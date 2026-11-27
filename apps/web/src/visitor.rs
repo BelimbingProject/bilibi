@@ -339,7 +339,10 @@ impl From<Error> for Refusal {
             },
             error => {
                 if crate::server_fault(&error) {
-                    eprintln!("error: visitor edge failed: {error:?}");
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "error: visitor edge failed: {error:?}"
+                    );
                 }
                 Self {
                     status: StatusCode::SERVICE_UNAVAILABLE,

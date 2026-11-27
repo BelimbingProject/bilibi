@@ -277,6 +277,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
   - Sidebar: the menu, pinned items and account entry at the bottom.
   - Status bar: the server role and instance label use the role's badge treatment. Staging and Production show the [packaged application version](apps/web/README.md#versions-bilibi-web-status). Dev shows the working version, a marker for uncommitted changes, and the listen address. The version label links to Software for viewers with access to the page, which shows installed Domain and Extension versions. The role comes from `instance.role`, never the build mode. See `docs/versions.md`.
   - In the status bar's centre, the AI tag: the text AI in a bordered box, drawn like the role tag. A faint border means every AI connection is off or none exists; the success colours (green surface, line and text) mean at least one is switched on. The tooltip says which ("One or more AI connections are on" or "AI is off"), so colour is never the only cue. It stays visible at phone width. Clicking it opens a panel upward: when nothing is connected, the prompt to paste into an AI app and the server address, each with a Copy button, a link to enter the code a cloud app or bot shows, plus a note to use an AI program on this computer when the server is a Dev copy or not reachable from the internet; when connected, under the heading Connected AI the connected apps, each with its own on/off pill toggle, its last use as the shared datetime component in the time zone chosen in the top bar and the client it was approved from, a Manage link (the only link to the settings page), and Recent activity, newest first. Each activity line says what the AI operated on ("Read 12 companies", "Saved a change to Company Acme Sdn Bhd", "Prepared a change to 3 invoices for you to review"): the kind of record, how many and, for one record, its name as the reader's own field access and company reach show it, never a masked or out-of-reach name. Asking what the AI can do or how an action works is left to the full activity page, which the heading links to for readers who can open it. The panel follows new requests and connection changes live. Approvals, bot notifications and an in-app assistant are later stages.
+  - Next to the AI tag, [server diagnostics](apps/base/perf/README.md#server-diagnostics) uses the shared status-bar tag and disclosure panel. The tag uses the severity’s semantic colours and names the severity in words.
   - Below `lg` the menu is an off-canvas drawer.
 - Pages never render chrome. The host wraps them (`apps/web/src/shell.rs`).
 - The bell has **To do** and **Notifications** tabs, with separate counts for actionable work and unread notifications. To do starts with approvals waiting for the signed-in person; each row links to its record and See all opens the full approvals page. There is no approvals sidebar entry. Opening the bell or marking notifications read never completes a to-do. Notifications continue to follow new deliveries live.
@@ -309,14 +310,19 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **A drop opens the target's own review**, the dialog its button opens, with the record chosen. Nothing is written until the person confirms, and the confirm runs the target's existing operation: its permission check, rules and history. A drop carries references only (`kind:id`) and the target re-reads every record under the person's own scope.
 - **Rows are draggable only when a page the person may use accepts their kind;** the menu shows the same targets. A target that takes fewer records than are ticked stays in the menu, greyed, saying how many it takes.
 
+- Hide an add control when it cannot add anything; do not explain its absence with an empty state.
+- Use one searchable picker for each record choice, without a separate search field.
+
 ## Writing and tone
+
+- Keep titles and section headings short noun phrases, never sentences. Write each help line as a clear instruction starting with a verb.
 
 - **Scan before reading.** Headings, labels, badges, counts and table structure carry the workflow. Do not explain what a visible label already says.
 - **Put information where it acts.** A page title stays true across tabs. Tab guidance lives in the tab.
 - **Consistency.** Same thing, same look, same place.
 - **Sentence case.** Titles, buttons, labels, options and badges raise only the first word and names: "Set up", "Past due", "Debits equal credits", never "Set Up". The shared badge raises the first letter of a stored lower-case value ("draft" reads "Draft") and nothing else.
 - **Calm.** No urgency, no badge spam, no dark patterns.
-- **Versions.** Show a version and commit date-time, never a commit hash as a version. Put the full hash in a tooltip at most.
+- **Values.** Values say what they are: never show a lone code, number, date or word the reader has to decode; put what it is beside it.
 - **Details.** Every expandable summary names what it contains.
 - **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator", commands to install something are "Installation commands".
 - **Never "your developer".** A label or sentence never sends the reader to another person ("Code for your developer", "Ask your developer to test it first"): the reader may be that person, and the others learn nothing. Say what the thing is and let the reader decide who acts.

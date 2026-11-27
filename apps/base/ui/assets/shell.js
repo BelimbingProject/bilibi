@@ -132,6 +132,10 @@
           this.toggle(button);
           return;
         }
+        if (button.matches("[data-statusbar-close]")) {
+          this.closeAll(true);
+          return;
+        }
         // Opening a notification closes the bell; the
         // transport still sends the intent from its own listener.
         if (button.matches('[data-notifications-panel] [data-event="visit"]')) {

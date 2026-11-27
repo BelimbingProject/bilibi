@@ -274,7 +274,10 @@ pub(crate) async fn request_in(
             tx.after_commit(move || {
                 tokio::spawn(async move {
                     if let Err(error) = mailer.deliver_for(recipient.tenant, &message).await {
-                        eprintln!("mail: 2FA reset request was not delivered: {error}");
+                        bilibi_module_registry::server_log!(
+                            Warning,
+                            "mail: 2FA reset request was not delivered: {error}"
+                        );
                     }
                 });
             });

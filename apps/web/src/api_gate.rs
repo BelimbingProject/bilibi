@@ -200,7 +200,7 @@ fn flush(app: &App, closed: Counts) {
                 Err(error) => Err(error.into()),
             };
             if let Err(error) = written {
-                eprintln!("warning: aggregated agent edge refusals for {endpoint} were not audited: {error}");
+                bilibi_module_registry::server_log!(Warning,"warning: aggregated agent edge refusals for {endpoint} were not audited: {error}");
             }
         }
     });

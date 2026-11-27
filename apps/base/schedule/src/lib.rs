@@ -610,7 +610,10 @@ impl Schedule {
             )
             .await
             {
-                eprintln!("schedule overlap history recording unavailable: key={key} {error}");
+                bilibi_module_registry::server_log!(
+                    Error,
+                    "schedule overlap history recording unavailable: key={key} {error}"
+                );
             }
         }
         Ok(claim)

@@ -508,7 +508,11 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let editors: Vec<&str> = inventory::iter::<Contribution>
         .into_iter()
         .filter(|entry| entry.consumer == DEFINITIONS && entry.provenance.module == "base/ai")
-        .filter(|entry| matches!(entry.get::<Setting>(), Ok(Setting::Definition(d)) if d.editor.is_some()))
+        .filter(|entry| {
+            entry
+                .get::<Setting>()
+                .is_ok_and(|setting| setting.definition().is_some_and(|d| d.editor.is_some()))
+        })
         .map(|entry| entry.id)
         .collect();
     checks.check(

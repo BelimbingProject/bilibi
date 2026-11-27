@@ -120,7 +120,10 @@ impl UserService {
             .await
             .map(|_| ())
             .map_err(|error| {
-                eprintln!("mail: verification for user {user} was not delivered: {error}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "mail: verification for user {user} was not delivered: {error}"
+                );
                 CredentialError::Delivery
             })
     }
