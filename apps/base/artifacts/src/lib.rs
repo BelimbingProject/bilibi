@@ -1076,7 +1076,8 @@ impl<O: Owner> Owned<'_, O> {
             let serialization_failure = match &result {
                 Err(Error::Database(error)) => error.is_serialization_failure(),
                 Err(Error::Sql(error)) => {
-                    error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+                    error.code()
+                        == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
                 }
                 _ => false,
             };

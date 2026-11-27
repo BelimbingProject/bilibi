@@ -240,6 +240,8 @@ reference rows on success. No unit tests or test runner are involved.
 
 ## Reads inside an existing transaction
 
+Use `project_on` to project rows on the transaction you already hold. Use repeatable read to share a snapshot with an earlier authorization check. Grid sets its local query bounds on that transaction.
+
 Use `validate_projection_on`, `validate_page_on` and `validate_summary_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction. Report pages and summaries use repeatable read and allow authorization decision logs.
 
 `OversightQueries::builder_catalog_on` and `probe_on` validate saved oversight questions on the caller's transaction. The probe runs bounded child reads serially and returns whether the question is supported, with no child data in the result. Abort the caller's transaction if savepoint setup or recovery cannot be confirmed.

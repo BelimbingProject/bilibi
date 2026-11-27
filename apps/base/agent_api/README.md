@@ -311,12 +311,15 @@ A job a person started calls a write contract as that person through `base/agent
 | `preview(&mut client, execution, key, input)` | Schema, live capability and the owner's dry run on a transaction borrowed from the supplied connection. Normal owner refusals retain authorization decisions. |
 | `commit(tx, execution, key, input)` | The owner's preview, then its commit on `tx`, which must come from `Execution::begin`: the lease, the caller's identity and the enqueue's trace ID hold. Record your own result in the same `tx`, then commit it |
 | `read(&mut client, execution, key, input)` | A read contract, as `Registry::call` |
+| `read_in(tx, execution, key, input)` | A read contract on the supplied transaction, which can also hold the caller’s authorization checks. Takes ownership of the transaction and uses the registry’s read completion rules |
 
 - The scope is the job's person, re-sealed by Queue and marked `Scope::in_job` (`Channel::Job`). A system principal's job is refused, as system scopes are at the other doors, except where the contract's owner admits that principal by name.
 - **Principal callers.** A contract's owner contributes `PrincipalWrite { principals }` under `job::PRINCIPAL_WRITES`, keyed by its own contract key, to let a named principal's job call it (`principal_writable(key, principal)`). Boot refuses another module's contract, a read, a contract closed to the job door or asking step-up, and an undeclared principal. The commit's transaction must be the job's (`System · <principal>`); the capability is decided live on the principal's own grants. Base Watchers is the first caller ([ADR 31](../../../docs/architecture/decisions/31-tenant-watchers-run-after-commit-as-one-bounded-principal.md)). `validate(key, input)` checks an input against the contract's schema, for a caller that stores one to commit later.
 - No agent approval round-trip occurs during execution. A person reviews a job they start; principal callers arrange their own prior authorization ([Watchers approval](../watchers/README.md#versions-and-approval)). A contract that declares step-up is refused, since no one is present to give a code.
 - Owner refusals come back typed as at the other doors; a database failure comes back as `Backend` so the job retries.
 - `base/bulk_data` (CSV import) is the first person's caller; `base/watchers` the first principal's.
+
+A list owner can implement `ReadHandler::selection_grid_paths` to declare the Grid root table and paths whose access can affect which rows the list returns. Declare dependencies even when a caller might omit those fields from its output. See [Bulk Data export access](../bulk_data/README.md#an-export) for how filtered exports use the declaration.
 
 ## Page writes declaration and check
 

@@ -92,13 +92,9 @@ pub async fn search(
         // Work data follows owner-contributed Grid paths so Person never
         // reads affiliation/company tables or bypasses their masking. Its
         // statement binds $1 tenant, $2 actor, $3 selected company and $4 the term.
-        let work = bilibi_grid::query::text_search_sql(
-            client,
-            scope,
-            "persons",
-            CONTACT_SEARCH_PATHS,
-        )
-        .await?;
+        let work =
+            bilibi_grid::query::text_search_sql(client, scope, "persons", CONTACT_SEARCH_PATHS)
+                .await?;
         let pattern = format!(
             "%{}%",
             needle

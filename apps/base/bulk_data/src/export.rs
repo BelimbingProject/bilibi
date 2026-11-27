@@ -602,9 +602,8 @@ impl BulkData {
         Ok(())
     }
 
-    /// What the person may see, read once for any number of exports: their
-    /// capabilities, Grid's catalog for them and the restricted fields of
-    /// every table that can supply an export's columns.
+    /// Read the person's capabilities, scoped Grid catalog and tenant-wide
+    /// restriction modes once for a set of export eligibility checks.
     async fn seeing(&self, client: &(impl GenericClient + Sync), scope: &Scope) -> Result<Seeing> {
         let held = bilibi_authz::effective_capabilities(client, scope).await?;
         let catalog = bilibi_grid::Catalog::for_scope(client, scope)
@@ -657,8 +656,12 @@ impl BulkData {
             }
         }
         let installed = bilibi_grid::installed().ok()?;
-        let mut tables =
-            access_tables(installed, table, run.columns.iter().map(String::as_str), false)?;
+        let mut tables = access_tables(
+            installed,
+            table,
+            run.columns.iter().map(String::as_str),
+            false,
+        )?;
         let mut selection_reach = BTreeMap::new();
         if run.ids.is_none() {
             let bilibi_agent_api::Handler::Read(handler) = list.handler else {
