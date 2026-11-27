@@ -677,8 +677,8 @@ impl OversightQueries {
                         .await
                     }
                     Err(error) => {
-                        eprintln!(
-                            "{}",
+                        bilibi_module_registry::server_log!(Error,
+                            "Oversight query could not acquire an audit connection" => "{}",
                             json!({
                                 "level": "error",
                                 "event": "tenancy.oversight.query",

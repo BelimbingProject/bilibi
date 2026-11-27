@@ -14,8 +14,8 @@ mod web;
 
 pub use bilibi_database::timing;
 pub use diagnostics::{
-    Diagnostic, Provider as DiagnosticProvider, ReadFuture as DiagnosticReadFuture,
-    Row as DiagnosticRow, PROVIDERS as DIAGNOSTIC_PROVIDERS,
+    Provider as DiagnosticProvider, ReadFuture as DiagnosticReadFuture, Row as DiagnosticRow,
+    PROVIDERS as DIAGNOSTIC_PROVIDERS,
 };
 pub use observe::Finish;
 pub use read::{

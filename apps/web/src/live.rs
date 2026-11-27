@@ -991,7 +991,7 @@ impl<S: Side> Session<S> {
         }
         for slot in crate::shell::embeds(app)? {
             let mounted = self.shell.contains_key(&slot.id);
-            let state = async {
+            let state = crate::shell::read_shell_embed(&slot.id, async {
                 Self::check(app, slot.embed.access, token).await?;
                 if mounted {
                     return Ok(None);
@@ -1013,7 +1013,7 @@ impl<S: Side> Session<S> {
                 .await?
                 .ok_or(Error::Invalid)?;
                 Ok(Some(state))
-            }
+            })
             .await;
             let state = match state {
                 Ok(Some(state)) => state,
@@ -1118,7 +1118,8 @@ impl<S: Side> Session<S> {
         }
         let ids: Vec<String> = self.shell.keys().cloned().collect();
         for id in ids {
-            match self.update(app, token, &id, LiveInput::Refresh).await {
+            let read = self.update(app, token, &id, LiveInput::Refresh);
+            match crate::shell::read_shell_embed(&id, read).await {
                 Ok(fragments) => messages.extend(fragments),
                 Err(_) if id == crate::shell::DIAGNOSTICS_TARGET => {
                     messages.push(fragment(
@@ -1137,9 +1138,10 @@ impl<S: Side> Session<S> {
                 }
                 Err(error) => {
                     if crate::server_fault(&error) {
-                        eprintln!("error: live shell panel {id} failed to refresh: {error:?}");
-                        app.perf
-                            .diagnostic(bilibi_base::perf::Diagnostic::LiveShellRefresh);
+                        bilibi_module_registry::server_log!(
+                            Error,
+                            "error: live shell panel {id} failed to refresh: {error:?}"
+                        );
                     }
                 }
             }
@@ -1341,9 +1343,11 @@ impl<S: Side> Session<S> {
                 Err(Error::Unauthorized) => return Err(Error::Unauthorized),
                 Err(error) => {
                     if crate::server_fault(&error) {
-                        eprintln!("error: live panel {id} on {} failed: {error:?}", self.path);
-                        app.perf
-                            .diagnostic(bilibi_base::perf::Diagnostic::LivePanelUpdate);
+                        bilibi_module_registry::server_log!(
+                            Error,
+                            "error: live panel {id} on {} failed: {error:?}",
+                            self.path
+                        );
                     }
                     self.panels.remove(&id);
                     messages.push(json!({"type":"error", "target":id, "message":error.to_string(), "clear":true}));
@@ -1452,7 +1456,7 @@ impl<S: Side> Session<S> {
         self.uploads = next;
         if let Some(staging) = &staging {
             for registration in &mut registrations {
-                self.stage(app, staging, S::scope(&scope), target, registration)
+                self.stage(staging, S::scope(&scope), target, registration)
                     .await?;
             }
         }
@@ -1467,7 +1471,6 @@ impl<S: Side> Session<S> {
     /// there, or, when every byte is there and hashes as announced, nothing.
     async fn stage(
         &mut self,
-        app: &App,
         staging: &Staging,
         scope: &Scope,
         target: &str,
@@ -1510,9 +1513,10 @@ impl<S: Side> Session<S> {
                 outcome
             }
             Err(error) => {
-                eprintln!("error: an upload could not be staged: {error:?}");
-                app.perf
-                    .diagnostic(bilibi_base::perf::Diagnostic::LiveUpload);
+                bilibi_module_registry::server_log!(
+                    Error,
+                    "error: an upload could not be staged: {error:?}"
+                );
                 None
             }
         };
@@ -2010,9 +2014,8 @@ pub async fn run<S: Side>(
             Ok(messages) => (messages, false),
             Err(error) => {
                 if crate::server_fault(&error) {
-                    app.perf
-                        .diagnostic(bilibi_base::perf::Diagnostic::LiveEvent);
-                    eprintln!(
+                    bilibi_module_registry::server_log!(
+                        Error,
                         "error: live {target} event on {} failed: {error:?}",
                         session.path
                     );

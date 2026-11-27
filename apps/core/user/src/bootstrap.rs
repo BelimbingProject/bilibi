@@ -605,7 +605,10 @@ impl UserService {
     async fn email_recovered_owner(&self, tenant: i64, email: &str) {
         use bilibi_mail::{Address, Message};
         let Ok(address) = Address::new(None, email) else {
-            eprintln!("Former owner notice could not be sent: invalid address.");
+            bilibi_module_registry::server_log!(
+                Warning,
+                "Former owner notice could not be sent: invalid address."
+            );
             return;
         };
         let message = Message::text(
@@ -617,7 +620,10 @@ impl UserService {
             ),
         );
         if self.mailer.deliver_for(tenant, &message).await.is_err() {
-            eprintln!("Former owner notice could not be delivered.");
+            bilibi_module_registry::server_log!(
+                Warning,
+                "Former owner notice could not be delivered."
+            );
         }
     }
 

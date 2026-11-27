@@ -73,7 +73,8 @@ pub(super) fn reset_mail(service: &UserService, account: &Account, slot: &str) -
         .templates
         .platform_wording(crate::wording::TWO_FACTOR_RESET, &[])
         .map_err(|error| {
-            eprintln!(
+            bilibi_module_registry::server_log!(
+                Warning,
                 "mail: 2FA reset notice for user {} was not written: {error}",
                 account.id
             )
@@ -166,7 +167,10 @@ pub(super) fn wake(
     let mailer = service.mailer.clone();
     tokio::spawn(async move {
         if let Err(error) = mailer.deliver_for(tenant, &message).await {
-            eprintln!("mail: 2FA reset notice for user {user} was not delivered: {error}");
+            bilibi_module_registry::server_log!(
+                Warning,
+                "mail: 2FA reset notice for user {user} was not delivered: {error}"
+            );
         }
     });
 }

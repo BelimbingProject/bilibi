@@ -198,7 +198,10 @@ impl UserService {
         match self.restore(token, &scope, impersonator, request).await {
             Ok(()) => Ok(Left::Restored),
             Err(error) => {
-                eprintln!("warning: leaving impersonation failed, ending the session: {error:?}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "warning: leaving impersonation failed, ending the session: {error:?}"
+                );
                 let mut client = self.db.get().await?;
                 let mut tx = self
                     .mutations

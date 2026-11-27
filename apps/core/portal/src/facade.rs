@@ -663,13 +663,19 @@ impl PortalService {
                     .deliver_linked_for(tenant, &message, Some(&link))
                     .await
                 {
-                    eprintln!("mail: customer invitation {id} was not delivered: {error}");
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "mail: customer invitation {id} was not delivered: {error}"
+                    );
                     // The relay refused it: staff are told, and can invite again.
                     if let Err(error) = desk
                         .record(id, None, crate::delivery::Failure::Undelivered)
                         .await
                     {
-                        eprintln!("mail: customer invitation {id} could not be marked: {error}");
+                        bilibi_module_registry::server_log!(
+                            Warning,
+                            "mail: customer invitation {id} could not be marked: {error}"
+                        );
                     }
                 }
             });

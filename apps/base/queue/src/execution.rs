@@ -94,28 +94,6 @@ fn validate_bindings(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
 }
 inventory::submit! { Consumer::new::<HandlerBinding>(HANDLERS,"base/queue",validate_bindings) }
 
-#[derive(Clone, Copy, Debug)]
-pub enum JobFailure {
-    WorkerError {
-        kind: &'static str,
-        message: &'static str,
-    },
-    WorkerWarning {
-        kind: &'static str,
-        message: &'static str,
-    },
-    Preparation,
-    Panic,
-    Timeout,
-    InvalidResult,
-    EndingHook,
-    Loop,
-    Execution,
-    Claim,
-    EndingWrite,
-    EndingRead,
-}
-
 /// What an observer may know about one attempt: stable facts only, never
 /// arguments, actor or tenant.
 #[derive(Clone, Debug)]
@@ -130,8 +108,6 @@ pub struct JobFacts {
 /// timeout, shutdown) the wrapped future is dropped with it.
 pub trait Observer: Send + Sync {
     fn observe<'a>(&'a self, job: JobFacts, work: HandlerFuture<'a>) -> HandlerFuture<'a>;
-    /// Observe a classified failure without altering the work.
-    fn failure(&self, _failure: JobFailure) {}
 }
 pub struct ObserverService(pub Arc<dyn Observer>);
 /// Contributed to `OBSERVERS` by a module that measures jobs (Perf). Its `service`
@@ -257,15 +233,8 @@ pub struct Execution {
     capability: &'static str,
     authentication: Arc<Authentication>,
     boundary: Arc<MutationBoundary>,
-    observers: Arc<[Arc<ObserverService>]>,
 }
 impl Execution {
-    pub fn report_error(&self, kind: &'static str, message: &'static str) {
-        report_failure(&self.observers, JobFailure::WorkerError { kind, message });
-    }
-    pub fn report_warning(&self, kind: &'static str, message: &'static str) {
-        report_failure(&self.observers, JobFailure::WorkerWarning { kind, message });
-    }
     pub fn identity(&self) -> &Identity {
         &self.identity
     }
@@ -428,14 +397,9 @@ pub struct Executor {
     authentication: Arc<Authentication>,
     boundary: Arc<MutationBoundary>,
     handlers: BTreeMap<&'static str, BoundHandler>,
-    observers: Arc<[Arc<ObserverService>]>,
+    observers: Vec<Arc<ObserverService>>,
     endings: BTreeMap<&'static str, BoundEnding>,
     config: Config,
-}
-fn report_failure(observers: &[Arc<ObserverService>], failure: JobFailure) {
-    for observer in observers {
-        observer.0.failure(failure);
-    }
 }
 impl Executor {
     /// Call after Services::install: owners are upstream of Queue and bind their
@@ -480,7 +444,7 @@ impl Executor {
         if queue.workers().iter().any(|w| !handlers.contains_key(w.id)) {
             return Err(Error::Invalid);
         }
-        let observers: Vec<_> = catalog
+        let observers = catalog
             .entries::<ObserverBinding>(OBSERVERS)?
             .iter()
             .map(|entry| services.get(entry.get::<ObserverBinding>()?.service))
@@ -517,7 +481,7 @@ impl Executor {
             authentication: services.get("base/tenancy.authentication")?,
             boundary: services.get("base/database.mutations")?,
             handlers,
-            observers: observers.into(),
+            observers,
             endings,
             config: config.validate()?,
         }))
@@ -545,8 +509,7 @@ impl Executor {
                     let Some(ended) = ended else { break };
                     let id = match &ended { Ok((id, _)) => *id, Err(error) => error.id() };
                     let Some(which) = running.remove(&id) else { continue };
-                    eprintln!("queue {which:?} loop ended; restarting it");
-                    report_failure(&self.observers, JobFailure::Loop);
+                    bilibi_module_registry::server_log!(Error,"queue {which:?} loop ended; restarting it");
                     self.start(&mut slots, &mut running, which, &shutdown, true);
                 }
             }
@@ -594,15 +557,17 @@ impl Executor {
                         // `available_at`), so this never claims it again early.
                         continue;
                     }
-                    eprintln!("queue execution infrastructure unavailable");
-                    report_failure(&self.observers, JobFailure::Execution);
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "queue execution infrastructure unavailable"
+                    );
                 }
                 // Only an empty queue or an error waits a poll interval.
                 Ok(None) => {}
-                Err(_) => {
-                    eprintln!("queue claim infrastructure unavailable");
-                    report_failure(&self.observers, JobFailure::Claim);
-                }
+                Err(_) => bilibi_module_registry::server_log!(
+                    Error,
+                    "queue claim infrastructure unavailable"
+                ),
             }
             tokio::select! {
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
@@ -648,11 +613,15 @@ impl Executor {
                                 Ok(Ok(Ok(false))) => more = false,
                                 _ => {
                                     more = false;
-                                    eprintln!("queue ending hook failed");
-                                    report_failure(&self.observers, JobFailure::EndingHook);
+                                    bilibi_module_registry::server_log!(
+                                        Error,
+                                        "error: queue ending hook failed"
+                                    );
                                     if store::ending_failed(&self.db, id).await.is_err() {
-                                        eprintln!("queue ending infrastructure unavailable");
-                                        report_failure(&self.observers, JobFailure::EndingWrite);
+                                        bilibi_module_registry::server_log!(
+                                            Error,
+                                            "queue could not record an ending failure"
+                                        );
                                     }
                                 }
                             }
@@ -661,10 +630,10 @@ impl Executor {
                             continue;
                         }
                     }
-                    Err(_) => {
-                        eprintln!("queue ending infrastructure unavailable");
-                        report_failure(&self.observers, JobFailure::EndingRead);
-                    }
+                    Err(_) => bilibi_module_registry::server_log!(
+                        Error,
+                        "queue could not read pending endings"
+                    ),
                 }
             }
             tokio::select! {
@@ -794,7 +763,6 @@ impl Executor {
                 capability,
                 authentication: self.authentication.clone(),
                 boundary: self.boundary.clone(),
-                observers: self.observers.clone(),
             },
             bound.service.clone(),
             args,
@@ -815,26 +783,27 @@ impl Executor {
         };
         let mut child = JoinSet::new();
         child.spawn(async move {
-            let mut failure = None;
             let work: HandlerFuture<'_> = Box::pin(async {
                 match executor.prepare(&claim).await {
                     Ok((execution, handler, args)) => handler.0.perform(&execution, args).await,
                     Err(Error::Unauthorized | Error::Forbidden) => Outcome::Cancel("actor_refused"),
                     Err(Error::Invalid | Error::NotFound) => Outcome::Cancel("worker_args_refused"),
-                    Err(_) => {
-                        failure = Some(JobFailure::Preparation);
+                    Err(error) => {
+                        bilibi_module_registry::server_log!(
+                            Error,
+                            "error: queue job preparation failed: {error:?}"
+                        );
                         Outcome::Retry("prepare_unavailable")
                     }
                 }
             });
-            let outcome = executor
+            executor
                 .observers
                 .iter()
                 .fold(work, |work, observer| {
                     observer.0.observe(facts.clone(), work)
                 })
-                .await;
-            (outcome, failure)
+                .await
         });
         let lease = Duration::from_secs(self.config.lease_seconds as u64);
         let beat = lease / 3;
@@ -847,13 +816,13 @@ impl Executor {
         let mut renewed_at = tokio::time::Instant::now();
         let deadline = tokio::time::sleep(self.config.max_runtime);
         tokio::pin!(deadline);
-        let (outcome, failure) = loop {
+        let outcome = loop {
             tokio::select! {
-                result = child.join_next() => break match result {
-                    Some(Ok(result)) => result,
-                    _ => (Outcome::Retry("worker_panicked"), Some(JobFailure::Panic)),
+                result = child.join_next() => break match result {Some(Ok(outcome))=>outcome,_=>Outcome::Retry("worker_panicked")},
+                _ = &mut deadline => {
+                    bilibi_module_registry::server_log!(Error, "error: a queue job exceeded its time limit");
+                    break Outcome::Retry("worker_timed_out")
                 },
-                _ = &mut deadline => break (Outcome::Retry("worker_timed_out"), Some(JobFailure::Timeout)),
                 _ = heartbeat.tick(), if beats.is_empty() => {
                     let (db, token, seconds) = (self.db.clone(), token.clone(), self.config.lease_seconds);
                     let asked = tokio::time::Instant::now();
@@ -873,25 +842,32 @@ impl Executor {
         };
         child.abort_all();
         while child.join_next().await.is_some() {}
-        let retry_state = if attempt >= max {
-            "discarded"
-        } else {
-            "retryable"
-        };
-        let (state, code, failure) = match outcome {
-            Outcome::Completed => ("completed", None, None),
-            Outcome::Cancel(code) if valid_code(code) => ("cancelled", Some(code), None),
-            Outcome::Retry(code) if valid_code(code) => (retry_state, Some(code), failure),
-            _ => (
-                retry_state,
-                Some("invalid_worker_result"),
-                Some(JobFailure::InvalidResult),
+        let (state, code) = match outcome {
+            Outcome::Completed => ("completed", None),
+            Outcome::Cancel(code) if valid_code(code) => ("cancelled", Some(code)),
+            Outcome::Retry(code) if valid_code(code) => (
+                if attempt >= max {
+                    "discarded"
+                } else {
+                    "retryable"
+                },
+                Some(code),
             ),
+            _ => {
+                bilibi_module_registry::server_log!(
+                    Error,
+                    "error: a queue job returned an invalid outcome"
+                );
+                (
+                    if attempt >= max {
+                        "discarded"
+                    } else {
+                        "retryable"
+                    },
+                    Some("invalid_worker_result"),
+                )
+            }
         };
-        if let Some(failure) = failure {
-            eprintln!("queue job attempt failed: {failure:?}");
-            report_failure(&self.observers, failure);
-        }
         store::finish(&self.db, id, &token, state, code).await?;
         Ok(())
     }

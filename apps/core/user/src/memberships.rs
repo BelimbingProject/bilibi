@@ -212,7 +212,7 @@ impl UserService {
         tx.after_commit(move || {
             tokio::spawn(async move {
                 if let Err(error) = mailer.deliver_linked_for(tenant, &message, Some(&link)).await {
-                    eprintln!("mail: user invitation {id} was not delivered: {error}");
+                    bilibi_module_registry::server_log!(Warning,"mail: user invitation {id} was not delivered: {error}");
                     let restore = async {
                         let mut client = db.get().await?;
                         let mut tx = mutations.begin(&mut client, Context::system(tenant, crate::sign_in::PRINCIPAL, "user.invitation.reissue_withdrawn")).await?;
@@ -224,7 +224,7 @@ impl UserService {
                         match restored { Ok(()) => tx.commit().await?, Err(Error::Conflict) => tx.rollback().await?, Err(error) => return Err(error) }
                         Ok::<(), Error>(())
                     }.await;
-                    if let Err(error) = restore { eprintln!("mail: user invitation {id} could not be restored: {error}"); }
+                    if let Err(error) = restore { bilibi_module_registry::server_log!(Warning,"mail: user invitation {id} could not be restored: {error}"); }
                 }
             });
         });
@@ -395,7 +395,10 @@ impl UserService {
                     .deliver_linked_for(tenant, &message, Some(&link))
                     .await
                 {
-                    eprintln!("mail: user invitation {id} was not delivered: {error}");
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "mail: user invitation {id} was not delivered: {error}"
+                    );
                 }
             });
         });

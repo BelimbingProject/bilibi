@@ -230,9 +230,8 @@ inventory::submit! {
 pub use arguments::validate as validate_arguments;
 pub use execution::{
     CapabilityPolicy, Config, Ended, Ending, EndingBinding, EndingFuture, EndingService, Execution,
-    Executor, Handler, HandlerBinding, HandlerFuture, HandlerService, Identity, JobFacts,
-    JobFailure, Observer, ObserverBinding, ObserverService, Outcome, CAPABILITY_POLICIES, ENDINGS,
-    HANDLERS, OBSERVERS,
+    Executor, Handler, HandlerBinding, HandlerFuture, HandlerService, Identity, JobFacts, Observer,
+    ObserverBinding, ObserverService, Outcome, CAPABILITY_POLICIES, ENDINGS, HANDLERS, OBSERVERS,
 };
 pub use store::{cancel_for, health_status, lookup, retry_for, states, JobStatus, State};
 pub const SERVICE: &str = "base/queue.store";

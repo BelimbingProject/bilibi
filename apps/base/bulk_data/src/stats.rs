@@ -50,7 +50,10 @@ impl Written {
         // from the run's input.
         let tables = tables.join(", ");
         if let Err(error) = client.batch_execute(&format!("ANALYZE {tables}")).await {
-            eprintln!("bulk data: could not analyze {tables} after a large batch: {error}");
+            bilibi_module_registry::server_log!(
+                Warning,
+                "bulk data: could not analyze {tables} after a large batch: {error}"
+            );
         }
     }
 }

@@ -301,9 +301,10 @@ async fn record(State(app): State<App>, mut request: Request, next: Next) -> Res
         None => integration.record_incoming_system(&incoming).await,
     };
     if let Err(error) = recorded {
-        eprintln!("warning: API exchange {trace} was not recorded: {error}");
-        app.perf
-            .diagnostic(bilibi_base::perf::Diagnostic::ApiExchange);
+        bilibi_module_registry::server_log!(
+            Warning,
+            "warning: API exchange {trace} was not recorded: {error}"
+        );
     }
     if let Ok(value) = HeaderValue::from_str(&trace) {
         response.headers_mut().insert(TRACE_HEADER, value);
@@ -433,7 +434,7 @@ async fn method_not_allowed() -> Refusal {
     error(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed")
 }
 pub(crate) fn unavailable(error: &Error) -> Refusal {
-    eprintln!("warning: agent edge storage failure: {error}");
+    bilibi_module_registry::server_log!(Warning, "warning: agent edge storage failure: {error}");
     self::error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
 }
 

@@ -109,7 +109,6 @@ pub struct Boundary {
     generation: AtomicU64,
     db: Db,
     settings: Arc<Settings>,
-    perf: Arc<bilibi_base::perf::Recorder>,
 }
 impl Boundary {
     /// Every registration must resolve to its service now, not at first delivery.
@@ -136,7 +135,6 @@ impl Boundary {
             generation: AtomicU64::new(0),
             db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
             settings: services.get("base/settings.store")?,
-            perf: services.get("base/perf.recorder")?,
         })
     }
     /// Whether `path` is a registered webhook's delivery address.
@@ -273,11 +271,10 @@ impl Boundary {
             let payload =
                 json!({"handler": handler, "reason": reason, "result": "refused", "count": count});
             if let Err(error) = self.record(None, payload).await {
-                eprintln!(
+                bilibi_module_registry::server_log!(
+                    Warning,
                     "warning: aggregated webhook refusals for {handler} were not audited: {error}"
                 );
-                self.perf
-                    .diagnostic(bilibi_base::perf::Diagnostic::WebhookRefusalAudit);
             }
         }
     }

@@ -5,11 +5,10 @@ use crate::{
     observe::Finish,
     recorder::Recorder,
     sample::{Kind, Outcome},
-    Diagnostic,
 };
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_queue::{
-    HandlerFuture, JobFacts, JobFailure, Observer, ObserverBinding, Outcome as Returned, OBSERVERS,
+    HandlerFuture, JobFacts, Observer, ObserverBinding, Outcome as Returned, OBSERVERS,
 };
 use std::sync::Arc;
 
@@ -17,9 +16,6 @@ inventory::submit! { Contribution::new(OBSERVERS, "base/perf", Provenance { modu
 
 pub(crate) struct Jobs(pub Arc<Recorder>);
 impl Observer for Jobs {
-    fn failure(&self, failure: JobFailure) {
-        self.0.diagnostic(Diagnostic::Job(failure));
-    }
     fn observe<'a>(&'a self, job: JobFacts, work: HandlerFuture<'a>) -> HandlerFuture<'a> {
         Box::pin(async move {
             let last = job.attempt >= job.max_attempts;

@@ -342,13 +342,13 @@ async fn context<'a>(
             "shell.diagnostics" => &mut diagnostics,
             _ => continue,
         };
-        let result = async {
+        let result = read_shell_embed(&slot.id, async {
             if permits(app, scope, slot.embed.access).await? {
                 render_embed(app, scope, &slot.embed).await.map(Some)
             } else {
                 Ok(None)
             }
-        }
+        })
         .await;
         match result {
             Ok(Some(html)) => *rendered = html,
@@ -483,6 +483,19 @@ pub struct ShellEmbed {
 }
 
 pub(crate) const DIAGNOSTICS_TARGET: &str = "app-diagnostics";
+
+pub(crate) async fn read_shell_embed<T>(
+    id: &str,
+    read: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    if id == DIAGNOSTICS_TARGET {
+        tokio::time::timeout(std::time::Duration::from_secs(2), read)
+            .await
+            .map_err(|_| Error::Internal)?
+    } else {
+        read.await
+    }
+}
 
 pub(crate) fn empty_diagnostics() -> Html {
     Html::render(&bilibi_ui::StatusbarPanel {

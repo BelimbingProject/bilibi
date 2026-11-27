@@ -126,6 +126,12 @@ impl App {
                     && loopback)))
     }
     pub fn new(db: Db, origin: &str) -> Result<Self> {
+        Self::build(db, origin, false)
+    }
+    pub fn new_server(db: Db, origin: &str) -> Result<Self> {
+        Self::build(db, origin, true)
+    }
+    fn build(db: Db, origin: &str, capture_logs: bool) -> Result<Self> {
         let modules = modules()?;
         let mut services = bilibi_module_registry::Services::default();
         services.provide("bootstrap.database", Arc::new(db))?;
@@ -141,6 +147,10 @@ impl App {
             services.get(bilibi_base::step_up::SERVICE)?;
         let settings: Arc<bilibi_base::settings::Settings> = services.get("base/settings.store")?;
         let renderer = services.get("base/ui.renderer")?;
+        let perf = services.get::<bilibi_base::perf::Recorder>("base/perf.recorder")?;
+        if capture_logs {
+            perf.capture_server_logs();
+        }
         for entry in services
             .catalog()?
             .entries::<bilibi_base::menu::MenuItem>(bilibi_base::menu::ITEMS)?
@@ -153,10 +163,11 @@ impl App {
         let menu = bilibi_base::menu::Menu::from_catalog(services.catalog()?)?;
         let display = services.get("base/datetime.display")?;
         let mutations = services.get("base/database.mutations")?;
-        let perf = services.get::<bilibi_base::perf::Recorder>("base/perf.recorder")?;
         for dropped in menu.dropped() {
-            eprintln!("warning: {dropped}");
-            perf.diagnostic(bilibi_base::perf::Diagnostic::MenuEntry);
+            bilibi_module_registry::server_log!(
+                Warning,
+                "warning: a menu entry was dropped: {dropped}"
+            );
         }
         let routes = Arc::new(routes::bind(&services)?);
         let downloads = Arc::new(routes::bind_downloads(&services, &routes)?);
@@ -609,19 +620,12 @@ async fn embedded_asset(
 
 /// Defaults only: a handler that sets its own policy, as signed media streams
 /// do with a sandboxing CSP, keeps it.
-/// A server-side failure is also logged here with its request line: the
-/// page shows only the error's public text.
 async fn response_headers(
     State(app): State<App>,
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    let line = format!(
-        "{} {}",
-        request.method(),
-        redacted(&app.credential_paths, path)
-    );
     // A credential link's page never sends its path on: `strict-origin`
     // names only this origin. Not `no-referrer`, which would make the
     // browser post the page's own form with `Origin: null`, which the
@@ -632,10 +636,6 @@ async fn response_headers(
         "same-origin"
     };
     let mut response = next.run(request).await;
-    if let Some(Failure(cause, diagnostic)) = response.extensions_mut().remove::<Failure>() {
-        eprintln!("error: {line} failed: {cause}");
-        app.perf.diagnostic(diagnostic);
-    }
     let frame_ancestors = match app.site {
         Site::Staff => "'self'",
         Site::Public => "'none'",
@@ -715,9 +715,6 @@ fn credential_path(paths: &CredentialPaths, path: &str) -> bool {
 /// A failed request. API clients read the status and text; `errors::pages`
 /// turns the same response into an error page for browsers.
 struct HttpError(Error, Option<std::sync::Arc<errors::Failure>>);
-/// The cause of a server-side `HttpError`, for `response_headers` to log.
-#[derive(Clone)]
-struct Failure(String, bilibi_base::perf::Diagnostic);
 /// Whether an error is the server's fault (logged), not the request's.
 pub(crate) fn server_fault(error: &Error) -> bool {
     !matches!(
@@ -741,20 +738,30 @@ impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let mut response = (errors::status_of(&self.0), self.0.to_string()).into_response();
         if server_fault(&self.0) {
-            use bilibi_base::perf::Diagnostic;
-            let diagnostic = match &self.0 {
-                Error::Database(_) | Error::Pool(_) => Diagnostic::RequestDatabase,
-                Error::Registry(_) => Diagnostic::RequestRegistry,
-                Error::MigrationDefinition(_) | Error::MigrationOwner { .. } => {
-                    Diagnostic::RequestMigration
+            use bilibi_module_registry::server_log;
+            let error = &self.0;
+            match error {
+                Error::Pool(_) => server_log!(
+                    Error,
+                    "error: HTTP database connection unavailable: {error:?}"
+                ),
+                Error::Database(_) => {
+                    server_log!(Error, "error: HTTP database query failed: {error:?}")
                 }
-                Error::SeedDefinition(_) => Diagnostic::RequestSeed,
-                Error::UnrecoveredTransaction(_) => Diagnostic::RequestTransaction,
-                _ => Diagnostic::RequestInternal,
-            };
-            response
-                .extensions_mut()
-                .insert(Failure(format!("{:?}", self.0), diagnostic));
+                Error::Registry(_) => {
+                    server_log!(Error, "error: HTTP module registry failure: {error:?}")
+                }
+                Error::MigrationDefinition(_) | Error::MigrationOwner { .. } => {
+                    server_log!(Error, "error: HTTP migration definition failure: {error:?}")
+                }
+                Error::SeedDefinition(_) => {
+                    server_log!(Error, "error: HTTP seed definition failure: {error:?}")
+                }
+                Error::UnrecoveredTransaction(_) => {
+                    server_log!(Error, "error: HTTP transaction recovery failed: {error:?}")
+                }
+                _ => server_log!(Error, "error: HTTP request failed: {error:?}"),
+            }
         }
         if let Some(failure) = self.1 {
             response.extensions_mut().insert(failure);

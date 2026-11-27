@@ -1,8 +1,7 @@
-//! Bounded, non-blocking operational diagnostics. Only predefined messages are
-//! accepted: error strings and request data must never reach the store.
+//! Bounded, non-blocking diagnostics from static server log templates.
 use crate::recorder::Recorder;
 use bilibi_database::{Error, Result};
-use bilibi_queue::JobFailure;
+use bilibi_module_registry::{LogEvent, LogLevel};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -14,182 +13,39 @@ use tokio::{
 
 pub const KEEP_DAYS: &str = "diagnostics.keep_days";
 
-#[derive(Clone, Copy)]
-pub enum Diagnostic {
-    RequestDatabase,
-    RequestRegistry,
-    RequestMigration,
-    RequestSeed,
-    RequestTransaction,
-    RequestInternal,
-    LiveShellRefresh,
-    LivePanelUpdate,
-    LiveUpload,
-    LiveEvent,
-    Job(JobFailure),
-    MenuEntry,
-    ApiExchange,
-    AgentRefusalAudit,
-    WebhookRefusalAudit,
-    InstanceLookup,
-    OperatorCompanyLookup,
-    ProxySettingInvalid,
-    ProxySettingRead,
-}
-impl Diagnostic {
-    fn facts(self) -> (&'static str, &'static str, &'static str, &'static str) {
-        match self {
-            Self::RequestDatabase => (
-                "error",
-                "Request",
-                "request_database",
-                "The request could not access the database.",
-            ),
-            Self::RequestRegistry => (
-                "error",
-                "Request",
-                "request_registry",
-                "The request encountered a module registry error.",
-            ),
-            Self::RequestMigration => (
-                "error",
-                "Request",
-                "request_migration",
-                "The request encountered a migration definition error.",
-            ),
-            Self::RequestSeed => (
-                "error",
-                "Request",
-                "request_seed",
-                "The request encountered a seed definition error.",
-            ),
-            Self::RequestTransaction => (
-                "error",
-                "Request",
-                "request_transaction",
-                "The request transaction could not recover.",
-            ),
-            Self::RequestInternal => (
-                "error",
-                "Request",
-                "request_internal",
-                "The request failed with an internal error.",
-            ),
-            Self::LiveShellRefresh => (
-                "error",
-                "Live page",
-                "live_shell_refresh",
-                "A live status panel could not refresh.",
-            ),
-            Self::LivePanelUpdate => (
-                "error",
-                "Live page",
-                "live_panel_update",
-                "A live page panel could not update.",
-            ),
-            Self::LiveUpload => (
-                "error",
-                "Live page",
-                "live_upload",
-                "A live upload could not be staged.",
-            ),
-            Self::LiveEvent => (
-                "error",
-                "Live page",
-                "live_event",
-                "A live page event could not be processed.",
-            ),
-            Self::Job(failure) => {
-                let (kind, message) = match failure {
-                    JobFailure::WorkerError { kind, message } => {
-                        return ("error", "Job", kind, message)
-                    }
-                    JobFailure::WorkerWarning { kind, message } => {
-                        return ("warning", "Job", kind, message)
-                    }
-                    JobFailure::Preparation => {
-                        ("job_preparation", "A background job could not be prepared.")
-                    }
-                    JobFailure::Panic => ("job_panic", "A background job panicked."),
-                    JobFailure::Timeout => {
-                        ("job_timeout", "A background job exceeded its time limit.")
-                    }
-                    JobFailure::InvalidResult => (
-                        "job_invalid_result",
-                        "A background job returned an invalid outcome.",
-                    ),
-                    JobFailure::EndingHook => {
-                        ("job_ending_hook", "A background job ending hook failed.")
-                    }
-                    JobFailure::Loop => ("job_loop", "A queue loop ended unexpectedly."),
-                    JobFailure::Execution => ("job_execution", "Queue execution was unavailable."),
-                    JobFailure::Claim => ("job_claim", "Queue could not claim a job."),
-                    JobFailure::EndingWrite => (
-                        "job_ending_write",
-                        "Queue could not record an ending hook failure.",
-                    ),
-                    JobFailure::EndingRead => (
-                        "job_ending_read",
-                        "Queue could not read pending ending hooks.",
-                    ),
-                };
-                ("error", "Job", kind, message)
+fn normalized(template: &str) -> String {
+    let template = template
+        .strip_prefix("error: ")
+        .or_else(|| template.strip_prefix("warning: "))
+        .unwrap_or(template);
+    let mut text = String::new();
+    let mut closing = None;
+    for ch in template.chars() {
+        if let Some(end) = closing {
+            if ch == end {
+                closing = None;
             }
-            Self::MenuEntry => (
-                "warning",
-                "Server",
-                "menu_entry",
-                "A menu entry was dropped.",
-            ),
-            Self::ApiExchange => (
-                "warning",
-                "Server",
-                "api_exchange",
-                "An API exchange could not be recorded.",
-            ),
-            Self::AgentRefusalAudit => (
-                "warning",
-                "Server",
-                "agent_refusal_audit",
-                "Agent edge refusals could not be audited.",
-            ),
-            Self::WebhookRefusalAudit => (
-                "warning",
-                "Server",
-                "webhook_refusal_audit",
-                "Webhook refusals could not be audited.",
-            ),
-            Self::InstanceLookup => (
-                "warning",
-                "Server",
-                "instance_lookup",
-                "The server instance could not be loaded.",
-            ),
-            Self::OperatorCompanyLookup => (
-                "warning",
-                "Server",
-                "operator_company_lookup",
-                "The platform operator company could not be loaded.",
-            ),
-            Self::ProxySettingInvalid => (
-                "warning",
-                "Server",
-                "proxy_setting_invalid",
-                "The trusted proxy setting is invalid.",
-            ),
-            Self::ProxySettingRead => (
-                "warning",
-                "Server",
-                "proxy_setting_read",
-                "The trusted proxy setting could not be read.",
-            ),
+            continue;
         }
+        match ch {
+            '{' => closing = Some('}'),
+            '"' | '\x27' | '`' => closing = Some(ch),
+            '0'..='9' => {}
+            _ => text.push(ch),
+        }
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.');
+    if text.is_empty() {
+        "A server operation reported a problem.".to_owned()
+    } else {
+        text.to_owned()
     }
 }
 
 pub(crate) struct Ingress {
-    sender: mpsc::Sender<Diagnostic>,
-    receiver: Mutex<Option<mpsc::Receiver<Diagnostic>>>,
+    sender: mpsc::Sender<LogEvent>,
+    receiver: Mutex<Option<mpsc::Receiver<LogEvent>>>,
 }
 impl Ingress {
     pub(crate) fn new() -> Self {
@@ -199,10 +55,7 @@ impl Ingress {
             receiver: Mutex::new(Some(receiver)),
         }
     }
-    pub(crate) fn record(&self, item: Diagnostic) {
-        let _ = self.sender.try_send(item);
-    }
-    pub(crate) fn take(&self) -> Result<mpsc::Receiver<Diagnostic>> {
+    pub(crate) fn take(&self) -> Result<mpsc::Receiver<LogEvent>> {
         self.receiver
             .lock()
             .map_err(|_| Error::Internal)?
@@ -211,14 +64,16 @@ impl Ingress {
     }
 }
 impl Recorder {
-    /// Record a predefined diagnostic without blocking the work being observed.
-    pub fn diagnostic(&self, item: Diagnostic) {
-        self.diagnostics.record(item);
+    pub fn capture_server_logs(&self) {
+        let sender = self.diagnostics.sender.clone();
+        bilibi_module_registry::install_log_sink(move |item| {
+            let _ = sender.try_send(item);
+        });
     }
 
     pub(crate) async fn write_diagnostics(
         self: Arc<Self>,
-        mut receiver: mpsc::Receiver<Diagnostic>,
+        mut receiver: mpsc::Receiver<LogEvent>,
         mut shutdown: watch::Receiver<bool>,
     ) {
         tokio::select! {
@@ -238,8 +93,13 @@ impl Recorder {
         })
         .await;
     }
-    async fn save_diagnostic(&self, item: Diagnostic) -> Result<()> {
-        let (severity, source, kind, message) = item.facts();
+    async fn save_diagnostic(&self, item: LogEvent) -> Result<()> {
+        let severity = match item.level {
+            LogLevel::Warning => "warning",
+            LogLevel::Error => "error",
+        };
+        let source = item.source;
+        let message = normalized(item.template);
         let client = self.db.get().await?;
         let keep = self
             .settings
@@ -254,7 +114,7 @@ impl Recorder {
                 &[&keep],
             )
             .await?;
-        client.execute("INSERT INTO base_perf_diagnostics (severity, source, kind, message, count, first_seen, last_seen) VALUES ($1, $2, $3, $4, 1, now(), now()) ON CONFLICT (severity, source, kind) DO UPDATE SET message = excluded.message, count = base_perf_diagnostics.count + 1, last_seen = excluded.last_seen", &[&severity, &source, &kind, &message]).await?;
+        client.execute("INSERT INTO base_perf_diagnostics (severity, source, kind, message, count, first_seen, last_seen) VALUES ($1, $2, $3, $4, 1, now(), now()) ON CONFLICT (severity, source, kind) DO UPDATE SET message = excluded.message, count = base_perf_diagnostics.count + 1, last_seen = excluded.last_seen", &[&severity, &source, &message, &message]).await?;
         Ok(())
     }
 }

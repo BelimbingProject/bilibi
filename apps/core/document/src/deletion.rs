@@ -115,14 +115,16 @@ impl bilibi_queue::Handler for DeleteJob {
             match self.run(execution, &args).await {
                 Ok(()) => Outcome::Completed,
                 Err(error @ (Error::Forbidden | Error::Unauthorized)) => {
-                    eprintln!("error: document delete refused: {error}");
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "error: document delete refused: {error}"
+                    );
                     Outcome::Cancel("delete_refused")
                 }
                 Err(error) => {
-                    eprintln!("warning: document delete awaits retry: {error}");
-                    execution.report_warning(
-                        "delete_unfinished",
-                        "A document deletion could not finish.",
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "warning: document delete awaits retry: {error}"
                     );
                     Outcome::Retry("delete_unfinished")
                 }
@@ -248,7 +250,7 @@ impl bilibi_queue::Ending for DeleteEnded {
                 .await?
                 .is_some();
             if deleting {
-                eprintln!(
+                bilibi_module_registry::server_log!(Warning,
                     "warning: document {document} delete job {} ended ({}); trying again in an hour",
                     job.job_id,
                     job.failure_code.as_deref().unwrap_or("unknown")

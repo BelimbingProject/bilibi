@@ -778,7 +778,8 @@ impl Store<'_> {
                     Ok(states) => states,
                     Err(bilibi_artifacts::Error::Database(Error::Forbidden)) => continue,
                     Err(error) => {
-                        eprintln!(
+                        bilibi_module_registry::server_log!(
+                            Error,
                             "error: document retention status unavailable: {}",
                             error.code()
                         );

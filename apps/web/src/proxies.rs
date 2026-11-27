@@ -74,15 +74,15 @@ impl Proxies {
                 Ok(Some(list)) => {
                     *self.trusted.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(list);
                 }
-                Ok(None) => {
-                    eprintln!("warning: {TRUSTED_PROXIES_KEY} could not be understood");
-                    app.perf
-                        .diagnostic(bilibi_base::perf::Diagnostic::ProxySettingInvalid);
-                }
+                Ok(None) => bilibi_module_registry::server_log!(
+                    Warning,
+                    "warning: {TRUSTED_PROXIES_KEY} could not be understood"
+                ),
                 Err(error) => {
-                    eprintln!("warning: {TRUSTED_PROXIES_KEY} could not be read: {error}");
-                    app.perf
-                        .diagnostic(bilibi_base::perf::Diagnostic::ProxySettingRead);
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "warning: {TRUSTED_PROXIES_KEY} could not be read: {error}"
+                    );
                 }
             }
         }

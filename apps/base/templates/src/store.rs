@@ -414,7 +414,7 @@ fn render_wording(
     if let Origin::Company { revision, .. } | Origin::Tenant { revision } = resolved.origin {
         let packaged = select(entry, languages, &[], None);
         if let Ok(text) = entry.render_delivery(&packaged.slots, values, omitted) {
-            eprintln!("templates: {} revision {revision} could not be filled in ({problem}); the packaged wording was used", entry.key);
+            bilibi_module_registry::server_log!(Warning,"templates: {} revision {revision} could not be filled in ({problem}); the packaged wording was used", entry.key);
             return Ok(text);
         }
     }

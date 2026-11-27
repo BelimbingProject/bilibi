@@ -195,13 +195,15 @@ impl BulkData {
         {
             Ok(report) => {
                 for (_, error) in &report.failed {
-                    eprintln!(
+                    bilibi_module_registry::server_log!(
+                        Warning,
                         "warning: an expired bulk-data file could not be purged: {}",
                         error.code()
                     );
                 }
             }
-            Err(error) => eprintln!(
+            Err(error) => bilibi_module_registry::server_log!(
+                Warning,
                 "warning: expired bulk-data files could not be purged: {}",
                 error.code()
             ),
@@ -255,7 +257,8 @@ impl bilibi_queue::Handler for Sweep {
             match swept {
                 Ok(report) => {
                     for (_, error) in &report.failed {
-                        eprintln!(
+                        bilibi_module_registry::server_log!(
+                            Warning,
                             "warning: an expired bulk-data file could not be purged: {}",
                             error.code()
                         );
@@ -263,7 +266,8 @@ impl bilibi_queue::Handler for Sweep {
                     bilibi_queue::Outcome::Completed
                 }
                 Err(error) => {
-                    eprintln!(
+                    bilibi_module_registry::server_log!(
+                        Warning,
                         "warning: expired bulk-data files could not be swept: {}",
                         error.code()
                     );

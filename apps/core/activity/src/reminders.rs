@@ -97,10 +97,9 @@ impl Handler for Sweep {
             match self.sweep(execution).await {
                 Ok(()) => Outcome::Completed,
                 Err(error) => {
-                    eprintln!("error: activity reminders: {error}");
-                    execution.report_error(
-                        "activity_reminders_unavailable",
-                        "An activity reminder job failed.",
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "error: activity reminders: {error}"
                     );
                     Outcome::Retry("activity_reminders_unavailable")
                 }
@@ -270,7 +269,8 @@ impl Sweep {
     /// failure is logged and not retried, like the assignee's email.
     async fn queue_guests(&self, tenant: i64, reminder: &Reminded) {
         if let Err(error) = self.try_queue_guests(tenant, reminder).await {
-            eprintln!(
+            bilibi_module_registry::server_log!(
+                Error,
                 "error: activity {} guest reminders could not be queued: {error}",
                 reminder.id
             );
@@ -373,7 +373,8 @@ impl Sweep {
             .await;
         drop(client);
         let Ok(wording) = wording else {
-            eprintln!(
+            bilibi_module_registry::server_log!(
+                Error,
                 "error: activity reminder {} could not be written",
                 reminder.id
             );
@@ -394,7 +395,8 @@ impl Sweep {
             .await
             .is_err()
         {
-            eprintln!(
+            bilibi_module_registry::server_log!(
+                Error,
                 "error: activity reminder {} could not be emailed",
                 reminder.id
             );

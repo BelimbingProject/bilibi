@@ -14,12 +14,12 @@ use bilibi_ui::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
         PageFuture, PageRequest,
     },
-    BuiltinColumn, FlexRow, FlexTable, Header, Html, ListColumns, ListSpec, ListState,
-    StatusbarTag, TableEmpty,
+    BuiltinColumn, FlexRow, FlexTable, Header, Html, ListColumns, StatusbarTag, TableEmpty,
 };
 use std::{collections::HashMap, sync::Arc};
 const PATH: &str = "/system/diagnostics";
-const ROW_LIMIT: u64 = 100;
+const ROW_LIMIT: usize = 100;
+const PROVIDER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
 const SERVICE: &str = "base/perf.diagnostics-pages";
 
 #[derive(Clone)]
@@ -39,10 +39,18 @@ impl Pages {
     async fn rows(&self) -> (Vec<Row>, bool) {
         let mut rows = Vec::new();
         let mut unavailable = false;
-        for provider in self.providers.iter() {
-            match (provider.read)(&self.db, &self.settings).await {
-                Ok(found) => rows.extend(found),
-                Err(_) => unavailable = true,
+        let mut reads = tokio::task::JoinSet::new();
+        for &provider in self.providers.iter() {
+            let db = self.db.clone();
+            let settings = self.settings.clone();
+            reads.spawn(async move {
+                tokio::time::timeout(PROVIDER_TIMEOUT, (provider.read)(&db, &settings)).await
+            });
+        }
+        while let Some(result) = reads.join_next().await {
+            match result {
+                Ok(Ok(Ok(found))) => rows.extend(found),
+                _ => unavailable = true,
             }
         }
         rows.sort_by_key(|r| (r.severity != "error", std::cmp::Reverse(r.last_seen)));
@@ -60,7 +68,6 @@ pub(crate) fn providers(
 }
 fn panel(
     rows: Vec<Row>,
-    limit: usize,
     unavailable: bool,
     display: &bilibi_datetime::DisplayContext,
 ) -> Result<String> {
@@ -104,7 +111,7 @@ fn panel(
     .map_err(|_| Error::Internal)?;
     let visible = unavailable || !rows.is_empty();
     let mut body = availability(unavailable)?;
-    for (index, row) in rows.into_iter().take(limit).enumerate() {
+    for (index, row) in rows.into_iter().take(ROW_LIMIT).enumerate() {
         let at = jiff::Timestamp::try_from(row.last_seen).map_err(|_| Error::Internal)?;
         let rendered = display.render(
             at,
@@ -162,7 +169,6 @@ struct State {
     pages: Pages,
     panel: bool,
     columns: ListColumns,
-    list: ListState,
 }
 impl State {
     fn new(pages: Pages, panel: bool) -> Result<Self> {
@@ -177,22 +183,10 @@ impl State {
             ],
         )
         .map_err(|_| Error::Internal)?;
-        let list = ListState::parse(
-            &HashMap::new(),
-            ListSpec {
-                page_sizes: vec![ROW_LIMIT],
-                default_page_size: ROW_LIMIT,
-                ..ListSpec::default()
-            }
-            .shared()
-            .map_err(|_| Error::Internal)?,
-        )
-        .map_err(|_| Error::Internal)?;
         Ok(Self {
             pages,
             panel,
             columns,
-            list,
         })
     }
     async fn body(&self, scope: &Scope) -> Result<String> {
@@ -211,9 +205,8 @@ impl State {
             .await?;
         drop(client);
         let (rows, unavailable) = self.pages.rows().await;
-        let limit = self.list.page_size as usize;
         if self.panel {
-            return panel(rows, limit, unavailable, &display);
+            return panel(rows, unavailable, &display);
         }
         let mut body = Html::render(&Header {
             title: Html::text("Diagnostics"),
@@ -224,7 +217,7 @@ impl State {
         body.push(&availability(unavailable)?);
         let entries = rows
             .iter()
-            .take(limit)
+            .take(ROW_LIMIT)
             .enumerate()
             .map(|(i, row)| {
                 let at = jiff::Timestamp::try_from(row.last_seen).map_err(|_| Error::Internal)?;
@@ -302,7 +295,6 @@ impl LiveState<Scope, Error> for State {
         Box::pin(async move {
             match req.input {
                 LiveInput::Refresh => (),
-                LiveInput::Params(_) if !self.panel => (),
                 LiveInput::Event(v)
                     if !self.panel
                         && v.get("type").and_then(|v| v.as_str()) == Some("diagnostics_grid") =>
