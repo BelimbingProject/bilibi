@@ -132,21 +132,36 @@ impl Index {
             page_size: self.list.page_size as i64,
         }
     }
-    async fn load(&mut self, scope: &Scope) -> Result<()> {
-        let mut page = self.pages.addresses.search(scope, &self.search()).await?;
+    async fn load(
+        &mut self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<()> {
+        let mut page = self
+            .pages
+            .addresses
+            .search_on(client, scope, &self.search())
+            .await?;
         let last = (page.total as u64).div_ceil(self.list.page_size);
         if self.list.clamp_to_last_page(last, true) {
-            page = self.pages.addresses.search(scope, &self.search()).await?;
+            page = self
+                .pages
+                .addresses
+                .search_on(client, scope, &self.search())
+                .await?;
         }
         // The rows changed: ListColumns forgets an unfinished add box.
         self.columns.load(&page.entries, |a| a.id.to_string());
         self.total = page.total as u64;
         self.names.clear();
         self.entries = page.entries;
-        self.admin1_names().await
+        self.admin1_names(client).await
     }
 
-    async fn admin1_names(&mut self) -> Result<()> {
+    async fn admin1_names(
+        &mut self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+    ) -> Result<()> {
         if !self.columns.visible_ids().contains(&"admin1_code") {
             return Ok(());
         }
@@ -157,7 +172,7 @@ impl Index {
                         .pages
                         .addresses
                         .geonames()
-                        .get_admin1(code)
+                        .get_admin1_on(client, code)
                         .await?
                         .map(|division| division.name)
                         .unwrap_or_else(|| code.clone());
@@ -245,11 +260,15 @@ impl Index {
         }
         Ok(())
     }
-    async fn view(&mut self, scope: &Scope) -> Result<String> {
-        let can_view = self.pages.allowed(scope, VIEW).await?;
-        let can_delete = self.pages.allowed(scope, DELETE).await?;
+    async fn view(
+        &mut self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<String> {
+        let can_view = self.pages.allowed_on(client, scope, VIEW).await?;
+        let can_delete = self.pages.allowed_on(client, scope, DELETE).await?;
         let mut actions = Html::EMPTY;
-        if self.pages.allowed(scope, CREATE).await? {
+        if self.pages.allowed_on(client, scope, CREATE).await? {
             actions = render(CreateButton {
                 noun: "Address",
                 href: "/addresses/create",
@@ -472,7 +491,7 @@ impl LiveState<Scope, Error> for Index {
                         }
                         ColumnsOutcome::Update | ColumnsOutcome::Noop => {
                             requery = false;
-                            self.admin1_names().await?;
+                            self.admin1_names(&**client).await?;
                         }
                     },
                     "page" => self
@@ -483,7 +502,7 @@ impl LiveState<Scope, Error> for Index {
                     // was confirmed is what runs.
                     "request_delete" => {
                         requery = false;
-                        if self.pages.allowed(scope, DELETE).await? {
+                        if self.pages.allowed_on(&**client, scope, DELETE).await? {
                             self.request_delete(
                                 scope,
                                 request.credential,
@@ -510,10 +529,10 @@ impl LiveState<Scope, Error> for Index {
                 },
             }
             if requery {
-                self.load(scope).await?;
+                self.load(&**client, scope).await?;
             }
             Ok(LiveBody {
-                html: self.view(scope).await?,
+                html: self.view(&**client, scope).await?,
                 query: self.list.to_params(),
                 rows: self.entries.len(),
                 ..LiveBody::default()

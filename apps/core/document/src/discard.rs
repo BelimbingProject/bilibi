@@ -81,11 +81,17 @@ impl bilibi_queue::Handler for DiscardJob {
             match self.run(execution, &args).await {
                 Ok(()) => Outcome::Completed,
                 Err(error @ (Error::Forbidden | Error::Unauthorized)) => {
-                    eprintln!("error: unattached document file discard refused: {error}");
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "error: unattached document file discard refused: {error}"
+                    );
                     Outcome::Cancel("discard_refused")
                 }
                 Err(error) => {
-                    eprintln!("warning: unattached document file awaits discard retry: {error}");
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "warning: unattached document file awaits discard retry: {error}"
+                    );
                     Outcome::Retry("discard_unfinished")
                 }
             }

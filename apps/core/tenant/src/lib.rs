@@ -1,6 +1,5 @@
 //! Tenant provisioning and its page, composing Base Tenancy and
 //! `Core.Company.PrimaryCompanyManager` above the operation registry.
-mod detail;
 mod operations;
 mod oversight;
 mod oversight_web;
@@ -65,7 +64,7 @@ fn draft(input: &Value) -> Result<(NewTenant, Vec<String>)> {
     ))
 }
 fn tenant_json(tenant: &bilibi_tenancy::TenantIdentity) -> Value {
-    json!({"id":tenant.id,"parent_id":tenant.parent_id,"name":tenant.name,"status":tenant.status.as_str(),"is_platform_operator":tenant.is_platform_operator,
+    json!({"id":tenant.id,"parent_id":tenant.parent_id,"name":tenant.name,"name_version":tenant.name_version,"status":tenant.status.as_str(),"is_platform_operator":tenant.is_platform_operator,
         "suspension":tenant.suspension.as_ref().map(|suspension| json!({"at":suspension.at,"reason":suspension.reason}))})
 }
 /// The move named by a suspend or reactivate operation key.
@@ -272,9 +271,6 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
     service:PAGES, contracts:&[("save_field",RENAME),("create",CREATE),("confirm_suspend",SUSPEND),("confirm_reactivate",REACTIVATE)], pending:bilibi_module_registry::contributions::Pending::None,
 }) }
 
-inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::ROUTES, "core/tenant.detail", bilibi_module_registry::Provenance { module:"core/tenant", source:file!(), line:line!() }, &bilibi_module_registry::contributions::Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
-    method:bilibi_module_registry::contributions::Method::Get, path:"/tenancy/tenants/{id}", service:PAGES, operation:"detail", access:bilibi_module_registry::contributions::Access::SignedIn, framed:true,
-}) }
 bilibi_menu::contribute!(
     "core/tenant",
     bilibi_menu::MenuItem::container("admin.tenancy", "Tenancy")

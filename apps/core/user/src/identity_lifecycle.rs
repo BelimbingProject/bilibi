@@ -170,7 +170,10 @@ impl UserService {
             sessions.announce(ended);
             tokio::spawn(async move {
                 if let Err(error) = mailer.deliver(&message).await {
-                    eprintln!("mail: identity recovery notice was not delivered: {error}");
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "mail: identity recovery notice was not delivered: {error}"
+                    );
                 }
             });
         });

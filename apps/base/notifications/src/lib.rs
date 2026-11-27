@@ -188,14 +188,17 @@ impl NotificationBoundary {
             let list = match source.read(scope).await {
                 Ok(list) => list,
                 Err(error) => {
-                    eprintln!("To-do source failed: {error}");
+                    bilibi_module_registry::server_log!(Warning, "To-do source failed: {error}");
                     continue;
                 }
             };
             if list.items.iter().any(|item| !local_path(&item.url))
                 || list.see_all.as_deref().is_some_and(|url| !local_path(url))
             {
-                eprintln!("To-do source returned a non-local link");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "To-do source returned a non-local link"
+                );
                 continue;
             }
             lists.push(list);

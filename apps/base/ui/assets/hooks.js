@@ -934,7 +934,15 @@
         if (!(box instanceof HTMLInputElement) || box.type !== "checkbox") return
         const chip = [...this.el.querySelectorAll("[data-selected-chip]")].find(item => item.dataset.selectedChip === box.value)
         if (chip && chip.hidden === box.checked) chip.hidden = !box.checked
-        const ticked = [...this.el.querySelectorAll('input[type="checkbox"]')].filter(item => item.checked).length
+        const selected = [...this.el.querySelectorAll('input[type="checkbox"]')].filter(item => item.checked)
+        const ticked = selected.length
+        const summary = this.el.querySelector("[data-filter-summary]")
+        if (summary) {
+          const templates = this.el.dataset.selectionLabel.split("|")
+          summary.textContent = ticked === 0 ? this.el.dataset.placeholder : ticked === 1
+            ? selected[0].nextElementSibling.textContent
+            : (templates[1] || templates[0]).replace(":count", ticked)
+        }
         const count = this.el.querySelector("[data-selected-count]")
         if (count && count.textContent !== `(${ticked} selected)`) count.textContent = `(${ticked} selected)`
         const placeholder = this.el.querySelector("[data-chip-placeholder]")

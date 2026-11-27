@@ -15,7 +15,10 @@ impl Engine {
             let result = match tasks.join_next().await {
                 Some(Ok(result)) => result,
                 _ => {
-                    eprintln!("workflow maintenance skipped run {id}: owner panicked");
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "workflow maintenance skipped run {id}: owner panicked"
+                    );
                     skipped += 1;
                     continue;
                 }
@@ -29,7 +32,8 @@ impl Engine {
                     | Error::Forbidden
                     | Error::Unauthorized,
                 ) => {
-                    eprintln!(
+                    bilibi_module_registry::server_log!(
+                        Error,
                         "workflow maintenance skipped run {id}: owner or definition unavailable"
                     );
                     skipped += 1;

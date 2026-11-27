@@ -58,7 +58,7 @@ impl From<CatalogError> for Error {
         match error {
             CatalogError::Database(error) => error,
             CatalogError::Misdeclared(why) => {
-                eprintln!("grid: {why}");
+                bilibi_module_registry::server_log!(Warning, "grid: {why}");
                 Error::Internal
             }
         }

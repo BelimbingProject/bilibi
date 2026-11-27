@@ -369,10 +369,16 @@ async fn discard(pages: &Pages, scope: &Scope, stored: StoredFile) {
     {
         Ok(failed) => {
             for (token, error) in failed {
-                eprintln!("warning: document dialog could not discard file {token}: {error:?}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "warning: document dialog could not discard file {token}: {error:?}"
+                );
             }
         }
-        Err(error) => eprintln!("warning: document dialog could not discard a file: {error:?}"),
+        Err(error) => bilibi_module_registry::server_log!(
+            Warning,
+            "warning: document dialog could not discard a file: {error:?}"
+        ),
     }
 }
 

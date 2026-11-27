@@ -333,15 +333,28 @@ async fn context<'a>(
     let mut notifications = Html::default();
     let mut records = Html::default();
     let mut ai = Html::default();
+    let mut diagnostics = Html::default();
     for slot in embeds(app)? {
         let rendered = match slot.embed.slot {
             "shell.notifications" => &mut notifications,
             "shell.search.records" => &mut records,
             "shell.ai" => &mut ai,
+            "shell.diagnostics" => &mut diagnostics,
             _ => continue,
         };
-        if permits(app, scope, slot.embed.access).await? {
-            *rendered = render_embed(app, scope, &slot.embed).await?;
+        let result = read_shell_embed(&slot.id, async {
+            if permits(app, scope, slot.embed.access).await? {
+                render_embed(app, scope, &slot.embed).await.map(Some)
+            } else {
+                Ok(None)
+            }
+        })
+        .await;
+        match result {
+            Ok(Some(html)) => *rendered = html,
+            Ok(None) => {}
+            Err(_) if slot.id == DIAGNOSTICS_TARGET => *rendered = empty_diagnostics(),
+            Err(error) => return Err(error),
         }
     }
     // Display only and unlogged: the editor and its save authorize for real.
@@ -413,6 +426,7 @@ async fn context<'a>(
         navigation: bilibi_ui::navigation(&nodes, true).map_err(|_| Error::Internal)?,
         notifications,
         ai,
+        diagnostics,
         home,
         served_routes: serde_json::to_string(served).map_err(|_| Error::Internal)?,
         pins: serde_json::to_string(&pins).map_err(|_| Error::Internal)?,
@@ -466,6 +480,33 @@ pub struct ShellEmbed {
     pub id: String,
     pub embed_id: &'static str,
     pub embed: Embed,
+}
+
+pub(crate) const DIAGNOSTICS_TARGET: &str = "app-diagnostics";
+
+pub(crate) async fn read_shell_embed<T>(
+    id: &str,
+    read: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    if id == DIAGNOSTICS_TARGET {
+        tokio::time::timeout(std::time::Duration::from_secs(2), read)
+            .await
+            .map_err(|_| Error::Internal)?
+    } else {
+        read.await
+    }
+}
+
+pub(crate) fn empty_diagnostics() -> Html {
+    Html::render(&bilibi_ui::StatusbarPanel {
+        id: DIAGNOSTICS_TARGET,
+        panel_id: "",
+        label: "",
+        visible: false,
+        tag: Html::default(),
+        body: Html::default(),
+    })
+    .unwrap_or_default()
 }
 
 pub fn embeds(app: &App) -> Result<Vec<ShellEmbed>> {
