@@ -293,9 +293,12 @@ fn apply(input: &Value) -> bilibi_agent_api::Result<Apply> {
 fn draft(kind: Kind, input: &Value) -> bilibi_agent_api::Result<Draft> {
     let mut reader = Reader::new(input, "");
     let mut common = reader.common();
-    // A note about a record is for the people who work with that record:
+    // A note about a contact is for the people who work with that contact:
     // shared with its readers unless the creator chooses private.
-    if kind == Kind::Note && !reader.present("shared") && common.related.is_some() {
+    if kind == Kind::Note
+        && !reader.present("shared")
+        && common.related.as_ref().is_some_and(|r| r.kind == "person")
+    {
         common.shared = true;
     }
     let draft = match kind {
@@ -707,17 +710,21 @@ impl Create {
         Ok(json!({"creates": draft_record(owner.records(), &checked)}))
     }
 }
-/// The new records an activity in the same plan may be about.
-const NEW_RELATED: &[(&str, &str)] = &[("related.id", "person"), ("related.id", "company")];
+/// The new record a note in the same plan may be about: a contact.
+const NEW_RELATED: &[(&str, &str)] = &[("related.id", "person")];
 impl WriteHandler for Create {
     fn owner(&self) -> &'static str {
         crate::MODULE
     }
     fn accepts_references(&self) -> &'static [(&'static str, &'static str)] {
-        NEW_RELATED
+        if self.0 == Kind::Note {
+            NEW_RELATED
+        } else {
+            &[]
+        }
     }
-    /// About a person or company an earlier step creates: every other fact
-    /// is checked now; commit checks the new record as any related record.
+    /// A note about a person an earlier step creates: every other fact is
+    /// checked now; commit checks the new record as any related record.
     fn preview_dependent<'a>(
         &'a self,
         client: &'a dyn OperationClient,
@@ -726,7 +733,7 @@ impl WriteHandler for Create {
         references: &'a bilibi_agent_api::PlanReferences,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            references.require(NEW_RELATED)?;
+            references.require(self.accepts_references())?;
             let kind = references.kind("related.id").ok_or(Error::Invalid)?;
             if input["related"]["kind"].as_str() != Some(kind) {
                 return Err(bilibi_agent_api::invalid(
@@ -1188,11 +1195,11 @@ fn reference_schema() -> Value {
     }})
 }
 /// Who reads it besides the people taking part. `note`: a note about a
-/// record is shared by default. The labels name the audience the read rule
+/// contact is shared by default. The labels name the audience the read rule
 /// enforces (README, "Who sees an activity").
 fn shared_schema(note: bool) -> Value {
     let default = if note {
-        "true (the default for a note about a record): people who may view the related record see it too. false: private."
+        "true (the default for a note about a contact, a person): people who may view the related record see it too. false: private, the default for a note about any other record."
     } else {
         "true: people who may view the related record see it too. false (the default): private."
     };

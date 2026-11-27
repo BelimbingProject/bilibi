@@ -342,7 +342,11 @@ function newRow(input={},operation=state.data.operation) {
        operation.input.properties.value['x-bilibi-review-requires-choice']!=='key')) {
     throw new Error('Reopen this review to load the available setting keys.');
   }
-  return {input:clone(editedInput(operation.input,{},input)),edited:new Set(),unresolved:new Map(),jsonDrafts:new Map(),state:'draft',fields:{},preview:null,error:null};
+  const row={input:clone(editedInput(operation.input,{},input)),edited:new Set(),unresolved:new Map(),jsonDrafts:new Map(),state:'draft',fields:{},preview:null,error:null};
+  // What the review opened with for each labelled choice, so a later change stands out.
+  row.opened=new Map();
+  for(const [key,schema] of Object.entries(operation.input.properties||{}))if(schema.type==='boolean'&&schema['x-bilibi-boolean-labels']&&typeof row.input[key]==='boolean')row.opened.set(key,row.input[key]);
+  return row;
 }
 function banner(instance) {
   state.data.instance=clone(instance);
@@ -921,11 +925,7 @@ async function check() {
         row.preview=result.preview;row.error=result.valid?null:result.error;
         row.fields=result.error?.fields||{};
         for(const [path,messages]of Object.entries(row.fields))if(messages.some(m=>/restricted/i.test(m))){row.restricted??=new Set();row.restricted.add(path);}
-        if(result.valid&&!row.opened) {
-          // What the review first showed for each labelled choice, so a later change stands out.
-          row.opened=new Map();
-          for(const [key] of labelledChoices(row)){const value=row.input[key]??findField(previewFor(row),key);if(typeof value==='boolean')row.opened.set(key,value);}
-        }
+        for(const [key] of labelledChoices(row))if(!row.opened.has(key)&&!row.edited.has(pathKey([key]))){const value=findField(previewFor(row),key);if(typeof value==='boolean')row.opened.set(key,value);}
         if(!result.valid)refused++;
       }
       if(plan.valid)plans.push({operations,rows:group});
