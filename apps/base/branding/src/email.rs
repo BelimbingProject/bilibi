@@ -11,7 +11,10 @@ impl BrandSource for Branding {
             match self.mail_brand().await {
                 Ok(brand) => brand,
                 Err(error) => {
-                    eprintln!("warning: mail brand lookup failed: {error:?}");
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "warning: mail brand lookup failed: {error:?}"
+                    );
                     MailBrand::default()
                 }
             }

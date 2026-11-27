@@ -292,7 +292,7 @@ impl Software {
             if recorded {
                 settled += 1;
                 if let Err(error) = self.announce(&mut client, tenant, &job, &worker).await {
-                    eprintln!(
+                    bilibi_module_registry::server_log!(Warning,
                         "warning: software job {} was recorded but its notification was not sent: {error:?}",
                         job.id
                     );
@@ -377,7 +377,8 @@ impl Software {
                     .await?;
             }
             Err(_) => {
-                eprintln!(
+                bilibi_module_registry::server_log!(
+                    Warning,
                     "software: account {user} of tenant {tenant} cannot be notified (not active)"
                 );
             }
@@ -408,13 +409,22 @@ impl Software {
                 return Ok(());
             }
             if let Err(error) = self.reconcile_installer_activation().await {
-                eprintln!("warning: ready installer jobs could not be signalled: {error:?}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "warning: ready installer jobs could not be signalled: {error:?}"
+                );
             }
             if let Err(error) = self.end_silent().await {
-                eprintln!("warning: silent software jobs were not ended this round: {error:?}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "warning: silent software jobs were not ended this round: {error:?}"
+                );
             }
             if let Err(error) = self.settle().await {
-                eprintln!("warning: software outcomes were not settled this round: {error:?}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "warning: software outcomes were not settled this round: {error:?}"
+                );
             }
             tokio::select! {
                 _ = stop.changed() => {}
@@ -719,7 +729,10 @@ impl Software {
             let job_id = job.id;
             tx.after_commit(move || {
                 if let Err(message) = paths.wake_installer(job_id) {
-                    eprintln!("software job {job_id}: {message}");
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "software job {job_id}: {message}"
+                    );
                 }
             });
         }

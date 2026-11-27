@@ -47,12 +47,20 @@ impl Handler for Sweep {
             {
                 Ok(report) => {
                     for (_, error) in report.failed {
-                        eprintln!("warning: expired print preview purge: {}", error.code());
+                        bilibi_module_registry::server_log!(
+                            Warning,
+                            "warning: expired print preview purge: {}",
+                            error.code()
+                        );
                     }
                     Outcome::Completed
                 }
                 Err(error) => {
-                    eprintln!("warning: print preview sweep: {}", error.code());
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "warning: print preview sweep: {}",
+                        error.code()
+                    );
                     Outcome::Retry("files_unavailable")
                 }
             }

@@ -7,8 +7,10 @@ use std::{
 };
 mod composition;
 pub mod contributions;
+mod server_log;
 pub use composition::{Composition, Container, ExtensionCode, PinState};
 pub use contributions::{Catalog, Consumer, Contribution, Entry, Provenance};
+pub use server_log::{capture_log, install_log_sink, LogEvent, LogLevel};
 
 pub type Value = Arc<dyn Any + Send + Sync>;
 pub type Result<T> = std::result::Result<T, RegistryError>;

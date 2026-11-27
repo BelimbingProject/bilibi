@@ -268,9 +268,12 @@ impl PageContracts {
                 .get(call.service)
                 .is_some_and(|writes| writes.contracts.contains(&(call.event, call.contract)));
         if !declared {
-            eprintln!(
+            bilibi_module_registry::server_log!(
+                Error,
                 "error: page {} event {} calls {} without declaring it in its page writes",
-                call.service, call.event, call.contract
+                call.service,
+                call.event,
+                call.contract
             );
             return Err(bilibi_database::Error::Internal.into());
         }

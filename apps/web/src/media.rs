@@ -195,7 +195,7 @@ pub async fn cleanup(
         .cleanup_drafts(&mut client, tenant, Duration::from_secs(hours * 3600))
         .await
         .map_err(|error| {
-            eprintln!("Attachment cleanup failed: {error}");
+            bilibi_module_registry::server_log!(Error, "Attachment cleanup failed: {error}");
             bilibi_database::Error::Invalid
         })?;
     println!(
@@ -211,7 +211,7 @@ pub async fn reconcile(db: &bilibi_database::Db) -> bilibi_database::Result<()> 
     let media = services(db)?.get::<Media>("base/media.store")?;
     let client = db.get().await?;
     let found = media.reconcile(&**client).await.map_err(|error| {
-        eprintln!("Media reconciliation failed: {error}");
+        bilibi_module_registry::server_log!(Error, "Media reconciliation failed: {error}");
         bilibi_database::Error::Invalid
     })?;
     for disk in &found.unreadable_disks {

@@ -218,10 +218,16 @@ impl ResetMail {
             else {
                 return;
             };
-            eprintln!("mail: reset link for user {user} was not delivered: {error}");
+            bilibi_module_registry::server_log!(
+                Warning,
+                "mail: reset link for user {user} was not delivered: {error}"
+            );
             if let Some(hash) = hash {
                 if let Err(error) = mail.withdraw(tenant, user, hash).await {
-                    eprintln!("mail: reset link for user {user} was not withdrawn: {error}");
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "mail: reset link for user {user} was not withdrawn: {error}"
+                    );
                 }
             }
         });

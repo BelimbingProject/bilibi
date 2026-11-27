@@ -246,7 +246,7 @@ impl Labels {
         let mut seeded = Vec::new();
         for source in &self.sources {
             seeded.extend((source.snapshot)().map_err(|error| {
-                eprintln!("label subjects unavailable: {error}");
+                bilibi_module_registry::server_log!(Warning, "label subjects unavailable: {error}");
                 Error::Internal
             })?);
         }

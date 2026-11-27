@@ -48,7 +48,7 @@ pub(crate) fn check(action: &str) -> Result<()> {
                 if CONTRACT.try_with(|key| keys.contains(key)).unwrap_or(false) {
                     return Ok(());
                 }
-                eprintln!(
+                bilibi_module_registry::server_log!(Error,
                     "error: page write without a contract: event {} on {} began {action}; call its operation contract, or list the event as pending",
                     event.name, event.service
                 );

@@ -477,17 +477,24 @@ impl Reports {
         drop(client);
         for tenant in tenants.iter().map(|row| row.get::<_, i64>(0)) {
             if let Err(error) = self.due(tenant).await {
-                eprintln!("reports: scheduled sweep of tenant {tenant} stopped: {error}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "reports: scheduled sweep of tenant {tenant} stopped: {error}"
+                );
                 return JobOutcome::Retry("sweep_failed");
             }
             self.queue_pending(tenant).await;
             if let Err(error) = self.prune(tenant).await {
-                eprintln!(
+                bilibi_module_registry::server_log!(
+                    Warning,
                     "reports: pruning finished deliveries of tenant {tenant} stopped: {error}"
                 );
             }
             if let Err(error) = self.reconcile(tenant).await {
-                eprintln!("reports: delivery reconciliation of tenant {tenant} stopped: {error}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "reports: delivery reconciliation of tenant {tenant} stopped: {error}"
+                );
             }
         }
         JobOutcome::Completed
@@ -725,7 +732,10 @@ impl Reports {
             let (delivery, recipient, company): (i64, i64, i64) =
                 (row.get(0), row.get(1), row.get(2));
             if let Err(error) = self.queue_one(tenant, delivery, recipient, company).await {
-                eprintln!("reports: delivery {delivery} not queued: {error}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "reports: delivery {delivery} not queued: {error}"
+                );
             }
         }
     }

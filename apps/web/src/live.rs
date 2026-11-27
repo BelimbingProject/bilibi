@@ -990,33 +990,41 @@ impl<S: Side> Session<S> {
             return Ok(());
         }
         for slot in crate::shell::embeds(app)? {
-            match Self::check(app, slot.embed.access, token).await {
-                Ok(_) => {}
+            let mounted = self.shell.contains_key(&slot.id);
+            let state = crate::shell::read_shell_embed(&slot.id, async {
+                Self::check(app, slot.embed.access, token).await?;
+                if mounted {
+                    return Ok(None);
+                }
+                let service: Arc<Service<S::Context>> = app.services.get(slot.embed.service)?;
+                let empty = HashMap::new();
+                let state = crate::render_fields(
+                    app,
+                    Some(S::scope(scope)),
+                    service.0.mount(PageRequest {
+                        operation: slot.embed.operation,
+                        scope: Some(scope),
+                        path: &empty,
+                        query: &empty,
+                        body: &[],
+                        framed: false,
+                    }),
+                )
+                .await?
+                .ok_or(Error::Invalid)?;
+                Ok(Some(state))
+            })
+            .await;
+            let state = match state {
+                Ok(Some(state)) => state,
+                Ok(None) => continue,
                 Err(Error::Forbidden) => {
                     self.shell.remove(&slot.id);
                     continue;
                 }
+                Err(_) if slot.id == crate::shell::DIAGNOSTICS_TARGET => continue,
                 Err(error) => return Err(error),
-            }
-            if self.shell.contains_key(&slot.id) {
-                continue;
-            }
-            let service: Arc<Service<S::Context>> = app.services.get(slot.embed.service)?;
-            let empty = HashMap::new();
-            let state = crate::render_fields(
-                app,
-                Some(S::scope(scope)),
-                service.0.mount(PageRequest {
-                    operation: slot.embed.operation,
-                    scope: Some(scope),
-                    path: &empty,
-                    query: &empty,
-                    body: &[],
-                    framed: false,
-                }),
-            )
-            .await?
-            .ok_or(Error::Invalid)?;
+            };
             self.generation += 1;
             let mounted = Mounted::new(
                 state,
@@ -1110,8 +1118,18 @@ impl<S: Side> Session<S> {
         }
         let ids: Vec<String> = self.shell.keys().cloned().collect();
         for id in ids {
-            match self.update(app, token, &id, LiveInput::Refresh).await {
+            let read = self.update(app, token, &id, LiveInput::Refresh);
+            match crate::shell::read_shell_embed(&id, read).await {
                 Ok(fragments) => messages.extend(fragments),
+                Err(_) if id == crate::shell::DIAGNOSTICS_TARGET => {
+                    messages.push(fragment(
+                        &id,
+                        LiveBody {
+                            html: crate::shell::empty_diagnostics().to_string(),
+                            ..LiveBody::default()
+                        },
+                    ));
+                }
                 Err(Error::Unauthorized) => return Err(Error::Unauthorized),
                 // An embed the account lost stops refreshing; the next drawn
                 // shell leaves it out.
@@ -1120,7 +1138,10 @@ impl<S: Side> Session<S> {
                 }
                 Err(error) => {
                     if crate::server_fault(&error) {
-                        eprintln!("error: live shell panel {id} failed to refresh: {error:?}");
+                        bilibi_module_registry::server_log!(
+                            Error,
+                            "error: live shell panel {id} failed to refresh: {error:?}"
+                        );
                     }
                 }
             }
@@ -1322,7 +1343,11 @@ impl<S: Side> Session<S> {
                 Err(Error::Unauthorized) => return Err(Error::Unauthorized),
                 Err(error) => {
                     if crate::server_fault(&error) {
-                        eprintln!("error: live panel {id} on {} failed: {error:?}", self.path);
+                        bilibi_module_registry::server_log!(
+                            Error,
+                            "error: live panel {id} on {} failed: {error:?}",
+                            self.path
+                        );
                     }
                     self.panels.remove(&id);
                     messages.push(json!({"type":"error", "target":id, "message":error.to_string(), "clear":true}));
@@ -1488,7 +1513,10 @@ impl<S: Side> Session<S> {
                 outcome
             }
             Err(error) => {
-                eprintln!("error: an upload could not be staged: {error:?}");
+                bilibi_module_registry::server_log!(
+                    Error,
+                    "error: an upload could not be staged: {error:?}"
+                );
                 None
             }
         };
@@ -1986,7 +2014,8 @@ pub async fn run<S: Side>(
             Ok(messages) => (messages, false),
             Err(error) => {
                 if crate::server_fault(&error) {
-                    eprintln!(
+                    bilibi_module_registry::server_log!(
+                        Error,
                         "error: live {target} event on {} failed: {error:?}",
                         session.path
                     );
