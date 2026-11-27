@@ -891,13 +891,16 @@ impl Detail {
         let mut field = self
             .inline(words, a, key, clock.local(at), editable)
             .input_type("datetime-local");
+        field.comparison_value = bilibi_ui::inline::InlineRead::draft_timezone(&field.id)
+            .and_then(|zone| jiff::tz::TimeZone::get(&zone).ok())
+            .map(|zone| Clock::local_in_zone(at, zone));
         field.timezone = if clock.ready {
             clock.zone.clone()
         } else {
             String::new()
         };
         field.display_html = Some(match at {
-            Some(at) => clock.time(&format!("{}-instant", field.id), at)?,
+            Some(at) => clock.time("", at)?,
             None => Html::text(field.display()),
         });
         if matches!(key, "due_at" | "start_at") {

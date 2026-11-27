@@ -540,6 +540,10 @@ async fn update_state<S: Side>(
         field: get("field")?,
         event: get("type")?,
         original: get("original")?,
+        timezone: payload
+            .get("timezone")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         ..InlineRead::default()
     };
     let mut payload = payload.clone();

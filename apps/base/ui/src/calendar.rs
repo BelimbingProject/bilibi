@@ -504,10 +504,11 @@ pub struct CalendarMove {
 
 impl CalendarMove {
     /// Decodes [`MOVE`] (a drop or resize: `id`, `version`, `date`, `minute`,
-    /// `length`, optional `lane`; all-day items send `days` for `length`) or
-    /// [`MOVE_SUBMIT`] (the dialog's `move[...]` fields) in `zone`. A wall
-    /// clock time in a daylight-saving gap becomes the first valid instant, in
-    /// a fold the earlier. The `Err` is a sentence for the person.
+    /// `length`, `timezone`, optional `lane`; all-day items send `days` for
+    /// `length`) or [`MOVE_SUBMIT`] (the dialog's `move[...]` fields) in
+    /// `zone`. A wall-clock time in a daylight-saving gap becomes the first
+    /// valid instant, or the earlier instant in a fold.
+    /// The `Err` is a sentence for the person.
     pub fn from_event(payload: &serde_json::Value, zone: &str) -> Result<Self, String> {
         let invalid = || "Choose a valid date and time.".to_owned();
         let zone = TimeZone::get(zone).map_err(|_| invalid())?;
@@ -647,10 +648,10 @@ pub struct CalendarSlot {
 }
 
 impl CalendarSlot {
-    /// Decodes [`SLOT`] (`date`, `minute`, `length`, optional `lane`; a day
-    /// cell sends `all_day` instead of the minute and length) in `zone`. A
-    /// wall clock time in a daylight-saving gap becomes the first valid
-    /// instant. The `Err` is a sentence for the person.
+    /// Decodes [`SLOT`] (`date`, `minute`, `length`, `timezone`, optional
+    /// `lane`; a day cell sends `all_day` instead of the minute and length)
+    /// in `zone`. A wall-clock time in a daylight-saving gap becomes the
+    /// first valid instant. The `Err` is a sentence for the person.
     pub fn from_event(payload: &serde_json::Value, zone: &str) -> Result<Self, String> {
         let invalid = || "Choose a valid date and time.".to_owned();
         let zone = TimeZone::get(zone).map_err(|_| invalid())?;
