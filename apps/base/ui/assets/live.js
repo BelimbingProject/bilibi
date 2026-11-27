@@ -143,7 +143,6 @@
     for (const form of drafts) {
       const sent = [...inflight.values()].filter((entry) => entry.ownerForm === form).map((entry) => entry.id);
       preserve(form, Math.max(0, ...sent));
-      if (form.hasAttribute('data-preserve-newer-draft')) newerDrafts.set(form, sequence);
     }
     const hasDraft = stepUpDraft || drafts.length || [...inflight.values()].some((entry) => entry.form)
       || [...holders].some((holds) => holds());
@@ -310,7 +309,9 @@
         // Only a later complete form snapshot releases a refused draft. An
         // older validation reply, upload or button action must not release it.
         else if (entry.form || entry.source === entry.ownerForm) {
-          if (entry.id > (preservedForms.get(entry.ownerForm) || 0)) preservedForms.delete(entry.ownerForm);
+          if (entry.id > (preservedForms.get(entry.ownerForm) || 0)) {
+            draftReleased = preservedForms.delete(entry.ownerForm) && entry.ownerForm.matches(draftSelector);
+          }
           const edit = newerDrafts.get(entry.ownerForm);
           if (edit && entry.id > edit) {
             newerDrafts.delete(entry.ownerForm);
@@ -455,7 +456,7 @@
         const expected = new URL(returnTo);
         if (options.stepUpComplete && slot && slot.id === form.id
           && destination.origin === expected.origin && destination.pathname === expected.pathname) {
-          newerDrafts.set(form, sequence);
+          preserve(form, 0);
           slot.replaceWith(form);
         }
         stepUpDraft = null;
@@ -517,7 +518,7 @@
     }
     // A browser-owned subtree and a control awaiting its own reply keep their
     // state; the data-* attributes still follow the server.
-    if (from.hasAttribute('data-live-ignore') || from.hasAttribute('data-live-busy') || newerDrafts.has(from)) {
+    if (from.hasAttribute('data-live-ignore') || from.hasAttribute('data-live-busy') || protectDraft(from)) {
       attributes(from, to, context, (name) => name.startsWith('data-'));
       return from;
     }
@@ -779,6 +780,10 @@
     const owner = el.parentElement && el.parentElement.closest('[data-target]');
     return owner ? owner.dataset.target : 'page';
   }
+  function protectDraft(form) {
+    return newerDrafts.has(form) || (form.matches(draftSelector) && preservedForms.has(form));
+  }
+
   function sendChange(form) {
     clearTimeout(changeTimers.get(form));
     const type = form.dataset.event;
@@ -786,7 +791,7 @@
     const key = JSON.stringify(values);
     const last = changeSent.get(form);
     if (last && last.key === key && performance.now() - last.at < 500
-      && !newerDrafts.has(form)) return;
+      && !protectDraft(form)) return;
     changeSent.set(form, {key, at: performance.now()});
     if (type === 'params') enqueue({type: 'params', params: values}, {source: form, loading: true});
     else enqueue({type: 'event', target: ownerTarget(form), payload: {type, ...values}}, {source: form});
