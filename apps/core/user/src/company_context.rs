@@ -12,8 +12,9 @@
 //! trail says which company was current from when; a refused switch leaves a
 //! non-retained `user.company.switch_refused` action naming the requested
 //! company. The reach check itself writes no authorization decision. An empty
-//! choice keeps the scope's current valid desk. Choosing the company that is
-//! already current answers as a switch and writes nothing (#958).
+//! choice keeps the scope's current valid desk. Choosing the company the
+//! session (and, outside impersonation, the account) already saved answers as
+//! a switch and writes nothing (#958).
 use crate::UserService;
 use bilibi_audit::{record_action, Attribution, RequestInfo};
 use bilibi_database::Error;
@@ -84,10 +85,22 @@ impl UserService {
             }
         }
         let before = scope.current_company().map(OrganisationId::get);
-        // Choosing the current company again (a double click, a page that
+        // Choosing the saved company again (a double click, a page that
         // re-sends its state) is the switch already made: it answers like one
-        // and writes nothing, neither the session nor an audit action.
-        if company == before {
+        // and writes nothing, neither the session nor an audit action. A
+        // fallback desk the session or account has not saved is still saved.
+        let saved = (**client)
+            .query_opt(
+                "SELECT s.company_id,u.last_desk_id FROM sessions s JOIN users u ON u.tenant_id=s.tenant_id AND u.id=s.user_id WHERE s.tenant_id=$1 AND s.user_id=$2 AND s.csrf=$3 AND s.expires_at>now()",
+                &[&scope.tenant(), &scope.user(), &scope.csrf],
+            )
+            .await
+            .map_err(Error::from)?
+            .is_some_and(|row| {
+                row.get::<_, Option<i64>>(0) == company
+                    && (scope.impersonator().is_some() || row.get::<_, Option<i64>>(1) == company)
+            });
+        if saved {
             return Ok(Switched { company });
         }
         let mut tx = self

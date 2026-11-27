@@ -2,7 +2,8 @@
 //! choosing the company that is already current succeeds with the answer a
 //! real switch gives, writes no audit action and leaves the session as it was,
 //! while a company the account cannot use is still refused. A second session
-//! may also move to the desk the account already remembers. Exits non-zero
+//! may also move to the desk the account already remembers, and picking a
+//! fallback desk that is current but not saved saves it. Exits non-zero
 //! when a check fails. Never point it at a shared database.
 //!
 //! ```sh
@@ -222,6 +223,49 @@ async fn main() -> Result<(), Error> {
         "each refusal records user.company.switch_refused",
         actions(client, user, "user.company.switch_refused").await? == refused + 2,
         "missing refusal actions",
+    );
+
+    // An account that never saved a desk signs in at its fallback desk; a
+    // session that lost its stored choice works there too. Picking that desk
+    // is a real switch that saves it, so the explicit choice is not lost.
+    client
+        .execute(
+            "UPDATE users SET last_desk_id=NULL WHERE tenant_id=1 AND id=$1",
+            &[&user],
+        )
+        .await?;
+    let fresh = users
+        .login("manager@example.test", bilibi_walkthrough_fixture::PASSWORD)
+        .await?;
+    client
+        .execute(
+            "UPDATE sessions SET company_id=NULL WHERE id=$1",
+            &[&bilibi_session::session_id(&fresh.token)],
+        )
+        .await?;
+    let fallback = app
+        .security
+        .guard(&fresh.token)
+        .await?
+        .current_company()
+        .map(|id| id.get())
+        .ok_or("the manager has no fallback desk")?;
+    let switched = actions(client, user, "user.company.switched").await?;
+    let picked = users
+        .choose_company(&fresh.token, &fresh.csrf, Some(fallback), &request)
+        .await;
+    checks.check(
+        "picking the unsaved fallback desk succeeds",
+        matches!(picked, Ok(Switched { company: Some(id) }) if id == fallback),
+        &picked,
+    );
+    let (company, _, _, desk) = state(client, &fresh.token, user).await?;
+    checks.check(
+        "that pick saves the session choice and remembered desk and records the switch",
+        company == Some(fallback)
+            && desk == Some(fallback)
+            && actions(client, user, "user.company.switched").await? == switched + 1,
+        (company, desk),
     );
 
     if checks.failed > 0 {
