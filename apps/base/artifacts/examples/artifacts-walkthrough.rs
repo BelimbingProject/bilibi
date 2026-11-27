@@ -219,6 +219,53 @@ async fn main() -> Result<()> {
             .map(|d| d.bytes.len()),
     );
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    println!("== checked read crossing its expiry");
+    let brief = documents
+        .put_expiring(&mut client, reference(), b"brief export", "text/plain", 1)
+        .await?;
+    // Fixture-only: bring the deadline to three seconds from now.
+    client
+        .execute(
+            "UPDATE base_artifacts SET expires_at=clock_timestamp()+interval '3 seconds' WHERE public_id=$1",
+            &[&brief.id],
+        )
+        .await?;
+    // An owner check that takes `seconds` (eligibility queries under load).
+    fn waits<'a>(seconds: &'a f64, tx: &'a tokio_postgres::Transaction<'_>) -> ProofFuture<'a, ()> {
+        Box::pin(async move {
+            tx.execute("SELECT pg_sleep($1)", &[seconds]).await?;
+            Ok(())
+        })
+    }
+    show(
+        "checked read before the deadline",
+        documents
+            .read_checked(&mut client, &brief.id, &0.0, waits)
+            .await
+            .map(|d| d.bytes.len()),
+    );
+    show(
+        "checked read begun before the deadline, check ends after it",
+        documents
+            .read_checked(&mut client, &brief.id, &4.0, waits)
+            .await
+            .map(|d| d.bytes.len()),
+    );
+    show(
+        "plain read after the deadline",
+        documents
+            .read(&mut client, &brief.id)
+            .await
+            .map(|d| d.bytes.len()),
+    );
+    let reads: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_audit_actions WHERE event='artifacts.read' AND payload->>'artifact_id'=$1",
+            &[&brief.id],
+        )
+        .await?
+        .get(0);
+    println!("artifacts.read audit rows for it: {reads}");
     // Fixture clock ages only new reservations, without modifying the immutable
     // production ledger. This makes recovery immediately observable.
     client.batch_execute("CREATE FUNCTION walkthrough_artifact_age() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.created_at=clock_timestamp()-interval '2 hours'; RETURN NEW; END $$; CREATE TRIGGER walkthrough_artifact_age BEFORE INSERT ON base_artifacts FOR EACH ROW EXECUTE FUNCTION walkthrough_artifact_age();").await?;

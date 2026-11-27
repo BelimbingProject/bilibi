@@ -33,7 +33,7 @@ transaction. Reservations and tombstones must commit before filesystem work.
 No file path, filename or content enters audit payloads. Metadata returned to an
 owner contains no storage path. Reads hold a row lock, recheck permission and
 expiry, validate 0600 regular-file mode, byte count and SHA-256, and commit audit
-evidence before bytes escape. Owners' authenticated download routes must call `read` or `read_checked` every time and return attachments with `Cache-Control: private, no-store` and `X-Content-Type-Options: nosniff`. Use `read_checked` when file eligibility also depends on owner-specific checks. Its callback runs before loading bytes, in the same repeatable-read transaction as Artifacts' own authorization and row checks. A1 adds no public download route or screen.
+evidence before bytes escape. Owners' authenticated download routes must call `read` or `read_checked` every time and return attachments with `Cache-Control: private, no-store` and `X-Content-Type-Options: nosniff`. Use `read_checked` when file eligibility also depends on owner-specific checks. Its callback runs before loading bytes, in the same repeatable-read transaction as Artifacts' own authorization and row checks. Expiry is judged again on the live clock after the callback returns, immediately before bytes load, so a slow callback cannot carry a read past the deadline. A1 adds no public download route or screen.
 
 Keep the eligibility callback read-only. On a serialization failure, Artifacts can repeat the entire checked read, including the callback, in a fresh transaction up to twice.
 
