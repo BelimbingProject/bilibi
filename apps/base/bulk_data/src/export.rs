@@ -653,12 +653,34 @@ impl BulkData {
                 }
             }
         }
-        let tables = access_tables(table, &run.columns)?;
-        let restricted: std::collections::BTreeMap<_, _> = tables
-            .into_iter()
+        let installed = bilibi_grid::installed().ok()?;
+        let tables = access_tables(installed, table, &run.columns)?;
+        let restricted: BTreeMap<_, _> = tables
+            .iter()
+            .copied()
             .map(|table| (table, seeing.restricted.get(table)))
             .collect();
-        let access = json!([seen, masks, restricted, reach]).to_string();
+        let aliases: Vec<_> = installed
+            .restricted_record_field_columns(|table, field| {
+                seeing
+                    .restricted
+                    .get(table)
+                    .is_some_and(|fields| fields.contains_key(field))
+            })
+            .filter(|&(root, record_field, table, field)| {
+                tables.contains(table) && (root, record_field) != (table, field)
+            })
+            .map(|(root, record_field, table, field)| {
+                (
+                    table,
+                    field,
+                    root,
+                    record_field,
+                    seeing.restricted[root][record_field],
+                )
+            })
+            .collect();
+        let access = json!([seen, masks, restricted, aliases, reach]).to_string();
         Some(
             Sha256::digest(access.as_bytes())
                 .iter()
@@ -1144,8 +1166,11 @@ impl BulkData {
 
 /// Grid tables whose fields can contribute to these columns: the root,
 /// resolved linked sources and extra tables declared by each source in use.
-fn access_tables(root: &str, specs: &[String]) -> Option<std::collections::BTreeSet<&'static str>> {
-    let installed = bilibi_grid::installed().ok()?;
+fn access_tables(
+    installed: &bilibi_grid::Installed,
+    root: &str,
+    specs: &[String],
+) -> Option<std::collections::BTreeSet<&'static str>> {
     let root = installed.table(root)?;
     let mut tables = std::collections::BTreeSet::from([root.id()]);
     let mut extra_tables = std::collections::BTreeSet::new();

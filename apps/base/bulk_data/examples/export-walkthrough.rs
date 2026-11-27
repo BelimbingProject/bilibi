@@ -390,6 +390,28 @@ async fn main() -> Result<(), Failure> {
         &[],
     )
     .await?;
+    bulk.export_file(&manager.scope, declared).await?;
+    sql.execute(
+        "INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES(1,1,'persons','work_email','withhold')",
+        &[],
+    )
+    .await?;
+    if manager.export(declared).await?.downloadable
+        || !matches!(
+            bulk.export_file(&manager.scope, declared).await,
+            Err(Error::Forbidden)
+        )
+    {
+        return Err(
+            "the Contacts work email restriction did not invalidate the declared source export"
+                .into(),
+        );
+    }
+    sql.execute(
+        "DELETE FROM field_restrictions WHERE tenant_id=1 AND role_id=1 AND table_id='persons' AND field_id='work_email'",
+        &[],
+    )
+    .await?;
 
     println!("\n== ticked records only");
     let ticked: Vec<String> = sql

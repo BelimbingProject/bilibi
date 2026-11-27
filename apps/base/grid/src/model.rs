@@ -710,6 +710,23 @@ impl Installed {
     pub fn tables(&self) -> impl Iterator<Item = &Table> {
         self.tables.values()
     }
+
+    pub fn restricted_record_field_columns<'a>(
+        &'a self,
+        restricted: impl Fn(&str, &str) -> bool + 'a,
+    ) -> impl Iterator<Item = (&'static str, &'static str, &'static str, &'static str)> + 'a {
+        self.tables()
+            .flat_map(|root| root.record_fields().iter().map(move |field| (root, field)))
+            .filter_map(move |(root, field)| {
+                if !restricted(root.id(), field.id) {
+                    return None;
+                }
+                let column =
+                    crate::column::resolve(field.column?, root, &|id| self.table(id)).ok()?;
+                Some((root.id(), field.id, column.table, column.field?.id))
+            })
+    }
+
     pub fn table(&self, id: &str) -> Option<&Table> {
         self.tables.get(id)
     }
