@@ -174,11 +174,9 @@
         value: current,
         original: current,
         timezone: this.el.dataset.timezone,
-        version: this.el.dataset.version,
       };
       this.original = draft.original;
       this.timezone = draft.timezone;
-      this.version = draft.version;
       this.openedPendingValue = this.pending.has(draft) ? draft.value : undefined;
       const input = this.control();
       if (!input) { this.active = false; return; }
@@ -215,7 +213,7 @@
         this.cancel(returnFocus);
         return;
       }
-      const draft = {value, original: this.original, timezone: this.timezone, version: this.version};
+      const draft = {value, original: this.original, timezone: this.timezone};
       this.draft = draft;
       this.active = false;
       this.pending.add(draft);
@@ -226,7 +224,6 @@
         id: this.el.dataset.id, field: this.el.dataset.field, value,
         fact: this.el.id, original: draft.original,
         ...(draft.timezone ? {timezone: draft.timezone} : {}),
-        ...(draft.version ? {version: draft.version} : {}),
         prepareOriginal: () => draft.original,
         onReply: (reply) => {
           this.pending.delete(draft);
