@@ -1481,6 +1481,8 @@ pub struct MultiSelect {
     pub errors: Vec<String>,
     pub options: Vec<Choice>,
     pub values: Vec<String>,
+    /// Offer a local filter over the supplied options.
+    pub searchable: bool,
     /// Prompt beneath the label when nothing is selected.
     pub placeholder: String,
     /// The `singular|plural` summary template; `:count` is the count.
@@ -1516,6 +1518,7 @@ impl MultiSelect {
             errors: Vec::new(),
             options: Vec::new(),
             values: Vec::new(),
+            searchable: false,
             placeholder: "Select options…".to_owned(),
             selection_label: ":count option selected|:count options selected".to_owned(),
             hint: String::new(),
@@ -1547,6 +1550,12 @@ impl MultiSelect {
 
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
+        self
+    }
+
+    /// Let the reader filter the provided options locally.
+    pub fn searchable(mut self) -> Self {
+        self.searchable = true;
         self
     }
 
@@ -1677,6 +1686,19 @@ impl MultiSelect {
             None => &self.selection_label,
         };
         template.replace(":count", &count.to_string())
+    }
+
+    pub fn filter_summary(&self) -> String {
+        let selected = self.selected_options();
+        match selected.len() {
+            0 => self.placeholder.clone(),
+            1 => selected[0].label.clone(),
+            count => self
+                .selection_label
+                .split_once('|')
+                .map_or(self.selection_label.as_str(), |(_, plural)| plural)
+                .replace(":count", &count.to_string()),
+        }
     }
 
     pub fn show_chips(&self) -> bool {

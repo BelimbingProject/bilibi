@@ -148,7 +148,10 @@ impl Branding {
         match resolved.await {
             Ok(brand) => brand,
             Err(error) => {
-                eprintln!("warning: brand lookup failed: {error:?}");
+                bilibi_module_registry::server_log!(
+                    Warning,
+                    "warning: brand lookup failed: {error:?}"
+                );
                 Brand::default()
             }
         }

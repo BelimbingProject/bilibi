@@ -199,5 +199,100 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .contains(RESTRICTED_FIELD)
     );
     println!("PASS: a field the operator is restricted from stays restricted while impersonating");
+
+    // The readers built on `fields::restricted` and `fields::masked` follow the
+    // same rule: audit history, the masks, and the Contacts read and write.
+    let withheld =
+        bilibi_authz::fields::withheld_by_record_type(&**client, &impersonated, &["company"])
+            .await?;
+    assert!(
+        withheld
+            .get("company")
+            .is_some_and(|fields| fields.contains(RESTRICTED_FIELD)),
+        "audit history withheld while impersonating: {withheld:?}"
+    );
+    println!("PASS: audit history withholds the operator's restricted field while impersonating");
+
+    client
+        .execute(
+            "INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES($1,$2,'persons','email','withhold'),($1,$2,'persons','phone','mask')",
+            &[&impersonated.tenant(), &role],
+        )
+        .await?;
+    let masks = bilibi_authz::fields::masks_for(&**client, &impersonated, "persons").await?;
+    assert_eq!(
+        masks.get("phone"),
+        Some(&"phone"),
+        "persons masks while impersonating: {masks:?}"
+    );
+    println!("PASS: a field the operator sees masked stays masked while impersonating");
+
+    drop(client);
+    for user in [OPERATOR, TARGET] {
+        for capability in [bilibi_person::VIEW, bilibi_person::UPDATE] {
+            grants
+                .set_direct(
+                    &administrator,
+                    user,
+                    capability,
+                    Some(bilibi_authz::grants::Direct::Allow(
+                        bilibi_authz::Reach::All,
+                    )),
+                )
+                .await?;
+        }
+    }
+    let client = db.get().await?;
+    let person = bilibi_person::PersonId::new(1).map_err(|_| "person id")?;
+    let read = bilibi_person::read_person(&**client, &impersonated, person).await?;
+    assert_eq!(read.email, None, "person email read while impersonating");
+    assert!(read.restricted.iter().any(|field| field == "email"));
+    assert!(read.masked.iter().any(|field| field == "phone"));
+    println!("PASS: a contact read while impersonating withholds and masks the operator's restricted fields");
+
+    drop(client);
+    let persons = app
+        .services
+        .get::<bilibi_person::PersonService>(bilibi_person::SERVICE)?;
+    let identity = |email: Option<&str>| bilibi_person::Update {
+        version: read.version,
+        identity: bilibi_person::PersonInput {
+            name: read.name.clone(),
+            kind: read.kind,
+            email: email.map(str::to_owned),
+            phone: None,
+        },
+        custom: bilibi_person::Custom::new(),
+    };
+    let attempt = persons
+        .update(
+            &impersonated,
+            person,
+            &identity(Some("changed@example.test")),
+        )
+        .await;
+    assert!(
+        matches!(
+            attempt,
+            Err(bilibi_person::WriteError::Backend(
+                bilibi_database::Error::Forbidden
+            ))
+        ),
+        "person email update while impersonating: {attempt:?}"
+    );
+    let unchanged = persons
+        .update(&impersonated, person, &identity(None))
+        .await?;
+    assert_eq!(unchanged.email, None);
+    let client = db.get().await?;
+    let stored: Option<String> = client
+        .query_one(
+            "SELECT email FROM persons WHERE tenant_id=$1 AND id=$2",
+            &[&impersonated.tenant(), &person.get()],
+        )
+        .await?
+        .get(0);
+    assert_eq!(stored.as_deref(), Some("ada@example.test"));
+    println!("PASS: a contact update while impersonating refuses the operator's restricted field and keeps its value");
     Ok(())
 }

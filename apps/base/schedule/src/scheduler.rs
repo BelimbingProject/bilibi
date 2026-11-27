@@ -84,12 +84,16 @@ impl Scheduler {
                     self.schedule
                         .beat(Timestamp::now(), self.config.poll_interval);
                     for (key, reason) in &poll.failed {
-                        eprintln!(
+                        bilibi_module_registry::server_log!(
+                            Warning,
                             "schedule occurrence was not enqueued: key={key} reason={reason}"
                         );
                     }
                 }
-                Err(_) => eprintln!("schedule poll infrastructure unavailable"),
+                Err(_) => bilibi_module_registry::server_log!(
+                    Error,
+                    "schedule poll infrastructure unavailable"
+                ),
             }
             tokio::select! {
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
@@ -151,7 +155,8 @@ impl Scheduler {
                         )
                         .await
                         {
-                            eprintln!(
+                            bilibi_module_registry::server_log!(
+                                Error,
                                 "schedule overlap history recording unavailable: key={} {error}",
                                 item.key()
                             );

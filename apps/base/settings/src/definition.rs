@@ -76,6 +76,15 @@ pub struct Definition {
     pub editor: Option<Editor>,
 }
 impl Definition {
+    /// Set the capability checked when a named system principal reads a stored
+    /// encrypted value through Settings.
+    pub const fn principal_read(self, capability: &'static str) -> Setting {
+        Setting::PrincipalReadable {
+            definition: self,
+            capability,
+        }
+    }
+
     pub fn validate(&self, value: &Value) -> std::result::Result<(), &'static str> {
         let typed = if value.is_null() {
             self.nullable
@@ -120,7 +129,37 @@ pub struct Constraint {
 /// encryption. Use a Definition for secrets or user-editable configuration.
 pub enum Setting {
     Definition(Definition),
+    /// Construct through [`Definition::principal_read`].
+    PrincipalReadable {
+        definition: Definition,
+        capability: &'static str,
+    },
     RuntimeClaim,
+}
+impl Setting {
+    /// The declared definition, when this is not a runtime claim.
+    pub fn definition(&self) -> Option<&Definition> {
+        match self {
+            Self::Definition(definition) | Self::PrincipalReadable { definition, .. } => {
+                Some(definition)
+            }
+            Self::RuntimeClaim => None,
+        }
+    }
+
+    /// Capability a named system principal needs to decrypt the value.
+    /// Definitions without an explicit principal capability retain the editor
+    /// capability rule for compatibility.
+    pub fn principal_read_capability(&self) -> Option<&'static str> {
+        match self {
+            Self::PrincipalReadable { capability, .. } => Some(capability),
+            Self::Definition(definition) => definition
+                .editor
+                .as_ref()
+                .and_then(|editor| editor.capability),
+            Self::RuntimeClaim => None,
+        }
+    }
 }
 #[derive(Clone)]
 pub struct OwnedSetting {
@@ -156,8 +195,10 @@ impl Definitions {
                 )));
             };
             let valid = owned.owner == entry.provenance.module
-                && matches!(owned.setting, Setting::Definition(d)
-                    if d.scopes.contains(&ScopeKind::Tenant) && d.editor.is_some());
+                && owned
+                    .setting
+                    .definition()
+                    .is_some_and(|d| d.scopes.contains(&ScopeKind::Tenant) && d.editor.is_some());
             if !valid || !delegated.insert(entry.id) {
                 return Err(RegistryError::Contribution(format!(
                     "tenant setting delegation {} at {}:{} must be unique, owned by the contributing module, tenant-scoped and editable",
@@ -181,14 +222,18 @@ impl Definitions {
             let scopes: Option<BTreeSet<&str>> = constraint
                 .keys
                 .iter()
-                .map(
-                    |key| match self.entries.get(key).map(|owned| owned.setting) {
-                        Some(Setting::Definition(d)) if !d.encrypted && d.scopes.len() == 1 => {
+                .map(|key| {
+                    match self
+                        .entries
+                        .get(key)
+                        .and_then(|owned| owned.setting.definition())
+                    {
+                        Some(d) if !d.encrypted && d.scopes.len() == 1 => {
                             Some(d.scopes[0].as_str())
                         }
                         _ => None,
-                    },
-                )
+                    }
+                })
                 .collect();
             if !(2..=8).contains(&constraint.keys.len())
                 || unique.len() != constraint.keys.len()
@@ -230,7 +275,7 @@ impl Definitions {
                 return Err(fail("invalid or duplicate key"));
             }
             let setting = entry.get::<Setting>()?;
-            if let Setting::Definition(d) = setting {
+            if let Some(d) = setting.definition() {
                 let scopes: BTreeSet<_> = d.scopes.iter().collect();
                 if scopes.is_empty() || scopes.len() != d.scopes.len() {
                     return Err(fail("scopes must be nonempty and unique"));
@@ -256,6 +301,13 @@ impl Definitions {
                 }
                 if d.validator.as_ref().is_some_and(|v| v.message.is_empty()) {
                     return Err(fail("validator must have a message"));
+                }
+                if matches!(setting, Setting::PrincipalReadable { capability, .. }
+                    if !d.encrypted || capability.is_empty())
+                {
+                    return Err(fail(
+                        "principal read capability must be nonempty and belongs only on an encrypted definition",
+                    ));
                 }
                 d.validate(&(d.default)()).map_err(fail)?;
             }

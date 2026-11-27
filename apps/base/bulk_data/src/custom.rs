@@ -64,10 +64,11 @@ pub(crate) fn register(
                     && schema["items"]["properties"]["values"]["items"]["type"] == "string"
             })
         };
-        if !accepts(registered.definition.import.create, binding.create_field)
-            || registered
-                .definition
-                .import
+        let Some(import) = &registered.definition.import else {
+            return Err(invalid(entry));
+        };
+        if !accepts(import.create, binding.create_field)
+            || import
                 .duplicates
                 .as_ref()
                 .is_some_and(|duplicates| !accepts(duplicates.update, binding.update_field))

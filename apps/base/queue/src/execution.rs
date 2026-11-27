@@ -509,7 +509,7 @@ impl Executor {
                     let Some(ended) = ended else { break };
                     let id = match &ended { Ok((id, _)) => *id, Err(error) => error.id() };
                     let Some(which) = running.remove(&id) else { continue };
-                    eprintln!("queue {which:?} loop ended; restarting it");
+                    bilibi_module_registry::server_log!(Error,"queue {which:?} loop ended; restarting it");
                     self.start(&mut slots, &mut running, which, &shutdown, true);
                 }
             }
@@ -557,11 +557,17 @@ impl Executor {
                         // `available_at`), so this never claims it again early.
                         continue;
                     }
-                    eprintln!("queue execution infrastructure unavailable");
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "queue execution infrastructure unavailable"
+                    );
                 }
                 // Only an empty queue or an error waits a poll interval.
                 Ok(None) => {}
-                Err(_) => eprintln!("queue claim infrastructure unavailable"),
+                Err(_) => bilibi_module_registry::server_log!(
+                    Error,
+                    "queue claim infrastructure unavailable"
+                ),
             }
             tokio::select! {
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
@@ -607,8 +613,15 @@ impl Executor {
                                 Ok(Ok(Ok(false))) => more = false,
                                 _ => {
                                     more = false;
+                                    bilibi_module_registry::server_log!(
+                                        Error,
+                                        "error: queue ending hook failed"
+                                    );
                                     if store::ending_failed(&self.db, id).await.is_err() {
-                                        eprintln!("queue ending infrastructure unavailable");
+                                        bilibi_module_registry::server_log!(
+                                            Error,
+                                            "queue could not record an ending failure"
+                                        );
                                     }
                                 }
                             }
@@ -617,7 +630,10 @@ impl Executor {
                             continue;
                         }
                     }
-                    Err(_) => eprintln!("queue ending infrastructure unavailable"),
+                    Err(_) => bilibi_module_registry::server_log!(
+                        Error,
+                        "queue could not read pending endings"
+                    ),
                 }
             }
             tokio::select! {
@@ -772,7 +788,13 @@ impl Executor {
                     Ok((execution, handler, args)) => handler.0.perform(&execution, args).await,
                     Err(Error::Unauthorized | Error::Forbidden) => Outcome::Cancel("actor_refused"),
                     Err(Error::Invalid | Error::NotFound) => Outcome::Cancel("worker_args_refused"),
-                    Err(_) => Outcome::Retry("prepare_unavailable"),
+                    Err(error) => {
+                        bilibi_module_registry::server_log!(
+                            Error,
+                            "error: queue job preparation failed: {error:?}"
+                        );
+                        Outcome::Retry("prepare_unavailable")
+                    }
                 }
             });
             executor
@@ -797,7 +819,10 @@ impl Executor {
         let outcome = loop {
             tokio::select! {
                 result = child.join_next() => break match result {Some(Ok(outcome))=>outcome,_=>Outcome::Retry("worker_panicked")},
-                _ = &mut deadline => break Outcome::Retry("worker_timed_out"),
+                _ = &mut deadline => {
+                    bilibi_module_registry::server_log!(Error, "error: a queue job exceeded its time limit");
+                    break Outcome::Retry("worker_timed_out")
+                },
                 _ = heartbeat.tick(), if beats.is_empty() => {
                     let (db, token, seconds) = (self.db.clone(), token.clone(), self.config.lease_seconds);
                     let asked = tokio::time::Instant::now();
@@ -828,14 +853,20 @@ impl Executor {
                 },
                 Some(code),
             ),
-            _ => (
-                if attempt >= max {
-                    "discarded"
-                } else {
-                    "retryable"
-                },
-                Some("invalid_worker_result"),
-            ),
+            _ => {
+                bilibi_module_registry::server_log!(
+                    Error,
+                    "error: a queue job returned an invalid outcome"
+                );
+                (
+                    if attempt >= max {
+                        "discarded"
+                    } else {
+                        "retryable"
+                    },
+                    Some("invalid_worker_result"),
+                )
+            }
         };
         store::finish(&self.db, id, &token, state, code).await?;
         Ok(())

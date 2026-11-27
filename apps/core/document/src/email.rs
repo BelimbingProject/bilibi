@@ -239,7 +239,7 @@ impl Handler for EmailJob {
                     Outcome::Cancel("email_refused")
                 }
                 Err(error) => {
-                    eprintln!("error: document email: {error}");
+                    bilibi_module_registry::server_log!(Error, "error: document email: {error}");
                     Outcome::Retry("email_failed")
                 }
             }

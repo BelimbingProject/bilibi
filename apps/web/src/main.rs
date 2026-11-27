@@ -228,7 +228,7 @@ async fn serve() -> Result<()> {
                 eprintln!("The public site must use a different hostname and bind address from the staff site");
                 return Err(Error::Invalid);
             }
-            let mut app = bilibi_web::App::new(db, &origin)?;
+            let mut app = bilibi_web::App::new_server(db, &origin)?;
             match app
                 .services
                 .get::<bilibi_base::system::Instances>(bilibi_base::system::SERVICE)?
