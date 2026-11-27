@@ -196,8 +196,25 @@ impl Catalog {
         let installed = crate::installed().map_err(|_| Error::Internal)?;
         // One read for what the reader holds and how far it reaches (#683).
         let grants = bilibi_authz::effective_grants(client, scope).await?;
-        let restricted = bilibi_authz::fields::restricted(client, scope).await?;
-        let masked = bilibi_authz::fields::masked(client, scope).await?;
+        let restricted = bilibi_authz::fields::restriction_modes(client, scope).await?;
+        let fields = bilibi_authz::field_catalog::field_catalog()?;
+        let is_restricted = |table: &str, field: &str| {
+            restricted
+                .get(table)
+                .is_some_and(|fields| fields.contains_key(field))
+        };
+        let mask_kind = |table: &str, field: &str| {
+            let mode = restricted.get(table)?.get(field)?;
+            if *mode == bilibi_authz::restrictions::Mode::Mask.as_str()
+                && scope.principal().is_none()
+            {
+                fields
+                    .field(table, field)
+                    .and_then(|(_, field)| field.personal)
+            } else {
+                None
+            }
+        };
         // A record owner can expose a field stored in a linked Extension table.
         // Apply that record-level restriction to the resolved Grid field too,
         // so the alternate path cannot bypass the Company's field identity
@@ -207,13 +224,9 @@ impl Catalog {
         let mut contributed_masks: BTreeMap<&'static str, BTreeMap<String, &'static str>> =
             BTreeMap::new();
         for (root, record_field, table, field) in
-            installed.restricted_record_field_columns(|table, field| {
-                restricted
-                    .get(table)
-                    .is_some_and(|fields| fields.contains(field))
-            })
+            installed.restricted_record_field_columns(is_restricted)
         {
-            match masked.get(root).and_then(|m| m.get(record_field)) {
+            match mask_kind(root, record_field) {
                 Some(kind) => {
                     contributed_masks
                         .entry(table)
@@ -229,18 +242,22 @@ impl Catalog {
         let mut effective_masks: BTreeMap<&'static str, BTreeMap<String, &'static str>> =
             BTreeMap::new();
         for (id, table) in installed.map() {
-            for field in restricted.get(*id).into_iter().flatten() {
+            for field in restricted
+                .get(*id)
+                .into_iter()
+                .flat_map(|fields| fields.keys())
+            {
                 let Some(field) = table.field(field) else {
                     continue;
                 };
                 if table.is_protected(field.id) {
                     continue;
                 }
-                if let Some(kind) = masked.get(*id).and_then(|fields| fields.get(field.id)) {
+                if let Some(kind) = mask_kind(id, field.id) {
                     effective_masks
                         .entry(*id)
                         .or_default()
-                        .insert(field.id.to_owned(), *kind);
+                        .insert(field.id.to_owned(), kind);
                 } else {
                     effective_hidden.entry(*id).or_default().insert(field.id);
                 }
@@ -316,13 +333,12 @@ impl Catalog {
         // withholds from this reader (custom fields are withheld, never masked).
         if let Some(hook) = crate::custom::hook() {
             for custom in hook.tables(client, scope).await? {
-                let withheld = restricted.get(custom.table).cloned().unwrap_or_default();
-                add_custom(&mut tables, custom, &withheld);
+                let restriction = restricted.get(custom.table);
+                add_custom(&mut tables, custom, restriction);
             }
         }
         for custom in proposed {
-            let withheld = restricted.get(custom.table).cloned().unwrap_or_default();
-            add_custom(&mut tables, custom.clone(), &withheld);
+            add_custom(&mut tables, custom.clone(), restricted.get(custom.table));
         }
         let catalog = Self {
             subject_scope: None,
@@ -662,7 +678,7 @@ impl Catalog {
 fn add_custom(
     tables: &mut BTreeMap<&'static str, Table>,
     custom: crate::custom::CustomTable,
-    withheld: &std::collections::HashSet<String>,
+    restricted: Option<&BTreeMap<String, &str>>,
 ) {
     let Some(json) = tables
         .get(custom.table)
@@ -678,7 +694,7 @@ fn add_custom(
             continue;
         }
         let id = crate::custom::custom_field_id(&column.key);
-        if withheld.contains(id) {
+        if restricted.is_some_and(|fields| fields.contains_key(id)) {
             continue;
         }
         let sql = column.value.replace(
