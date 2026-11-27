@@ -21,8 +21,13 @@ pub(super) fn latest(releases: &[Value], minimum: &str) -> Option<String> {
         .map(|(_, tag)| tag.to_owned())
 }
 
+fn version(tag: &str) -> Option<Version> {
+    let parsed = Version::parse(tag.strip_prefix("setup-v")?)?;
+    (tag == format!("setup-v{parsed}")).then_some(parsed)
+}
+
 impl Software {
-    /// Select the terminal's exact release asset before install review.
+    /// Select the terminal's exact stable release asset before install review.
     pub async fn terminal_update(
         &self,
         scope: &Scope,
@@ -32,6 +37,11 @@ impl Software {
         crate::authorize_operator(&**client, scope, crate::VIEW).await?;
         let paths = self.paths().map_err(Error::refused)?;
         let policy = crate::release_proof::Policy::load(paths).map_err(Error::refused)?;
+        if version(&policy.minimum_tag).is_none() {
+            return Err(Error::refused(
+                "Terminal updates require a stable setup release source.",
+            ));
+        }
         let listing = self
             .github_listing(&**client, Some(scope), true, false, &policy)
             .await?;
@@ -65,7 +75,7 @@ fn select(
     } else {
         let tag = listing["latest"]
             .as_str()
-            .ok_or("There is no published release for this update source.")?;
+            .ok_or("There is no published stable setup release.")?;
         let record = paths
             .current()
             .and_then(|n| fs::read(paths.release(n).join("release.json")).ok())
@@ -73,12 +83,10 @@ fn select(
         let setup = &record.as_ref().unwrap_or(&Value::Null)["setup"];
         let current = setup["tag"]
             .as_str()
-            .and_then(crate::release_proof::tag_order)
+            .and_then(version)
             .filter(|_| setup["repository"].as_str() == Some(repository))
             .ok_or("The running setup version for the pinned repository is unknown. Specify --to X.Y.Z.")?;
-        if crate::release_proof::tag_order(tag)
-            .is_none_or(|(channel, published)| channel != current.0 || published <= current.1)
-        {
+        if version(tag).is_none_or(|published| published <= current) {
             return Err("There is no newer release to install.");
         }
         tag.to_owned()
@@ -87,7 +95,7 @@ fn select(
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|row| row["tag"] == tag);
+        .filter(|row| row["tag"] == tag && row["prerelease"] == false);
     match (rows.next(), rows.next()) {
         (Some(row), None) => Ok(json!({
             "repository_id": listing["repository_id"],
@@ -98,8 +106,10 @@ fn select(
             "digest": row["digest"],
             "switch": "auto",
         })),
-        (None, _) => Err("The requested release has no compatible file."),
-        (_, Some(_)) => Err("The requested release has more than one compatible file."),
+        (None, _) => Err("The requested stable setup has no compatible release file."),
+        (_, Some(_)) => {
+            Err("The requested stable setup has more than one compatible release file.")
+        }
     }
 }
 
@@ -139,7 +149,7 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
             .as_array()
             .into_iter()
             .flatten()
-            .find(|row| row["tag"] == tag)
+            .find(|row| matches_release(row, tag))
             .cloned()
             .unwrap_or_else(|| json!({"tag": tag}));
         result["release"] = release;
@@ -164,7 +174,7 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|r| r["tag"] == tag);
+            .filter(|row| matches_release(row, tag));
         match (rows.next(), rows.next()) {
             (None, _) => "no_matching_file",
             (_, Some(_)) => "ambiguous_files",
@@ -177,4 +187,8 @@ pub(super) fn discover(paths: Option<&Paths>, listing: &Value) -> Value {
     };
     result["reason"] = json!(reason);
     result
+}
+
+fn matches_release(row: &Value, tag: &str) -> bool {
+    row["tag"] == tag && (tag.starts_with("nightly-") || row["prerelease"] == false)
 }

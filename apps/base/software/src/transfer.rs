@@ -86,30 +86,20 @@ impl Software {
             })
             .collect::<Vec<_>>();
         let installed = self.installed_asset(&**client, scope).await?;
-        let (trust, mut github) = match self.paths.as_ref() {
-            Some(paths) => match release_proof::Policy::load(paths) {
-                Ok(policy) => {
-                    let trust = release_proof::facts(paths).map_err(Error::refused)?;
-                    let github = self
-                        .github_listing(&**client, Some(scope), force, prerelease, &policy)
-                        .await?;
-                    (trust, github)
-                }
-                Err(_) => (
-                    Value::Null,
-                    json!({
-                        "available": false,
-                        "message": "Release trust is not set or cannot be read. Set up release trust on the server.",
-                    }),
-                ),
-            },
-            None => (
-                Value::Null,
-                json!({
-                    "available": false,
-                    "message": "This program is not running from an installed instance, so it has no release trust record.",
-                }),
-            ),
+        let (policy, trust) = self
+            .paths
+            .as_ref()
+            .map(release_proof::read_facts)
+            .unwrap_or_default();
+        let mut github = match policy {
+            Some(policy) => {
+                self.github_listing(&**client, Some(scope), force, prerelease, &policy)
+                    .await?
+            }
+            None => json!({
+                "available": false,
+                "message": trust["message"].as_str().unwrap_or("This server has no release folder."),
+            }),
         };
         let repository_id = github["repository_id"].clone();
         if let Some(releases) = github["releases"].as_array_mut() {

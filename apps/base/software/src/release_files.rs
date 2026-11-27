@@ -412,7 +412,7 @@ impl ReleaseFiles {
                 id: "software-release-terminal",
                 title: "Update from the server terminal",
                 body: {
-                    let mut content = Html::text("This command downloads the newest trusted release, backs up the database and installs it. If the check fails, it switches back automatically. Use --undo to return to the previous release.");
+                    let mut content = Html::text("This command downloads the newest trusted stable setup release, backs up the database and installs it. If the check fails, it switches back automatically. Use --undo to return to the previous release.");
                     content.push(&render(TerminalCommand {
                         command: &format!("sudo bilibi update {}", paths.name),
                     })?);
@@ -528,7 +528,9 @@ impl ReleaseFiles {
         section(
             "software-release-trust",
             "Release trust",
-            "Only the installation owner can change release trust.",
+            trust["message"]
+                .as_str()
+                .unwrap_or("Only the installation owner can change release trust."),
             Html::default(),
             false,
             body,
@@ -616,7 +618,9 @@ impl ReleaseFiles {
         let trust = match facts["release_trust"]["kind"].as_str() {
             Some("github") => "Trusts releases with GitHub attestations.",
             Some("operator") => "Trusts releases signed by the operator key.",
-            _ => "Release trust is not set.",
+            _ => facts["release_trust"]["message"]
+                .as_str()
+                .unwrap_or("Release trust is not set."),
         };
         let mut body = render(Facts {
             id: "release-source-facts",

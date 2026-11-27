@@ -1,14 +1,15 @@
 //! The Domains and extensions tab of the Software page: one grid of what this
 //! server runs and what the catalogue offers, installed first, with search
 //! and filters in the address.
-use super::{render, text};
+use super::{render, safe_id, text};
 use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_datetime::{DisplayContext, Format, Precision};
 use bilibi_ui::{
     choices, flex_table::Cell, list_state::FILTERS_FORM, params, Alert, Badge, BadgeKind,
     BuiltinColumn, Card, ColumnsOutcome, Filter, FilterToolbar, FlexRow, FlexTable, Html,
-    ListColumns, ListSpec, ListState, Pagination, StatusKind, TableEmpty, ToolbarControl,
+    IconButton, ListColumns, ListSpec, ListState, Modal, ModalWidth, Pagination, StatusKind,
+    TableEmpty, ToolbarControl,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -39,6 +40,7 @@ struct Entry {
     compatibility: String,
     requested: bool,
     latest_commit: Option<String>,
+    commands: bool,
 }
 
 fn version_label(version: Option<&str>, at: Option<&str>, display: &DisplayContext) -> String {
@@ -114,6 +116,7 @@ fn entries(
                 .into_iter()
                 .flatten()
                 .find(|module| module["id"] == id);
+            let (latest, latest_commit) = latest_label(item, display);
             entries.push(Entry {
                 kind,
                 kind_word,
@@ -126,8 +129,9 @@ fn entries(
                 commit: installed
                     .and_then(|m| m["commit"].as_str())
                     .map(str::to_owned),
-                latest: latest_label(item, display).0,
-                latest_commit: latest_label(item, display).1,
+                latest,
+                latest_commit,
+                commands: has_commands(item),
                 update: item["status"] == "update_available",
                 compatibility: text(&item["compatibility"]).to_owned(),
                 requested: requested.iter().any(|wanted| wanted == id),
@@ -159,6 +163,7 @@ fn entries(
                 compatibility: "Not in the catalogue".into(),
                 requested: false,
                 latest_commit: None,
+                commands: false,
             });
         }
     }
@@ -312,6 +317,7 @@ impl Modules {
         table.add_query = &self.columns.add_query;
         table.caption = "Domains and extensions";
         table.framed = false;
+        table.actions = page.entries.iter().any(|entry| entry.commands);
         if page.counts.total_entries == 0 {
             table.empty = Some(TableEmpty::Content(Html::text(if filtered {
                 "No domains or extensions match these filters."
@@ -368,7 +374,83 @@ fn row(entry: &Entry) -> Result<FlexRow> {
         .cell("description", Cell::text(&entry.description));
     row.dom_id = Some(format!("software-module-{key}"));
     row.label = Some(entry.name.clone());
+    if entry.commands {
+        let module = format!("{}:{}", entry.kind, entry.id);
+        row.actions = render(IconButton {
+            id: &format!("software-commands-{key}"),
+            title: "Installation commands",
+            event: "commands",
+            name: "module",
+            value: &module,
+            ..IconButton::new("command-line", "Installation commands")
+        })?;
+    }
     Ok(row)
+}
+
+/// The `kind:id` a row's commands button sent, checked before it is kept.
+pub(super) fn commands_target(module: &str) -> Option<(String, String)> {
+    let (kind, id) = module.split_once(':')?;
+    (KINDS.iter().any(|(known, _)| *known == kind) && safe_id(id))
+        .then(|| (kind.to_owned(), id.to_owned()))
+}
+
+/// The commands that add one catalogue entry to a Bilibi code folder, with a
+/// copy icon. Empty when the catalogue no longer offers commands for it.
+pub(super) fn commands_dialog(catalogue: &Value, kind: &str, id: &str) -> Result<Html> {
+    let Some(item) = catalogue[kind]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["id"] == id && has_commands(item))
+    else {
+        return Ok(Html::EMPTY);
+    };
+    let commands = item["local_steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if commands.is_empty() {
+        return Ok(Html::EMPTY);
+    }
+    let subject = format!(
+        "{} {}",
+        item["name"].as_str().unwrap_or(id),
+        text(&item["recommended_version"])
+    );
+    let body = render(CommandsBox {
+        commands: &commands,
+    })?;
+    render(Modal {
+        id: "software-commands",
+        title: "Installation commands",
+        cancel_event: "cancel_dialog",
+        width: ModalWidth::Wide,
+        description: subject.trim(),
+        role: "",
+        close_icon: true,
+        flash: None,
+        body,
+    })
+}
+
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}<div data-hook="ClipboardCopy">{% call ui::copy_box(id="software-commands-box", label="Commands", text=commands, copy_label="Copy commands") %}{% endcall %}</div>"#,
+    ext = "html"
+)]
+struct CommandsBox<'a> {
+    commands: &'a str,
+}
+
+fn has_commands(item: &Value) -> bool {
+    item["status"] == "not_installed"
+        && item["local_steps"]
+            .as_array()
+            .is_some_and(|steps| !steps.is_empty())
 }
 
 #[derive(Template)]

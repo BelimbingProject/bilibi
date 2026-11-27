@@ -77,7 +77,7 @@ Install takes an exact GitHub asset or an uploaded bundle from the repository pi
 
 ## Page and ChatGPT card
 
-The **Software** page (`/system/software`) has two tabs named **Domains and extensions** and **Releases**. The first tab is a paginated grid with installed modules first. Search covers name, ID and description. Search and the **Status** and **Kind** filters are kept in the address. **Not installed** includes catalogue entries without a compatible release. **Installed version** and **Latest version** show the version and commit time when known; the full commit is in the tooltip. **Latest version** uses `latest_version` when supplied, otherwise `recommended_version` or **—**. The **Update available** badge follows the catalogue status. Removing a Domain requires installing a release built without it. See [Compatibility](#compatibility) for how these versions are selected.
+The **Software** page (`/system/software`) has two tabs named **Domains and extensions** and **Releases**. The first tab is a paginated grid with installed modules first. Search covers name, ID and description. Search and the **Status** and **Kind** filters are kept in the address. **Not installed** includes catalogue entries without a compatible release. **Installed version** and **Latest version** show the version and commit time when known; the full commit is in the tooltip. **Latest version** uses `latest_version` when supplied, otherwise `recommended_version` or **—**. The **Update available** badge follows the catalogue status. Uninstalled entries with a compatible release and published commands offer **Installation commands**. Removing a Domain requires installing a release built without it. See [Compatibility](#compatibility) for how these versions are selected.
 
 Installed Domains and Extensions missing from the selected catalogue also have a row, with **Not in the catalogue** as their compatibility and the installed release or build label. Extensions also show the recorded code review kind. These rows remain visible when the catalogue cannot be read. Each module appears once, matched by kind and ID.
 
@@ -148,16 +148,16 @@ The initial `scripts/install-server.sh trust` writes the first `/opt/bilibi/<ins
 
 ### Update notices
 
-The automatic check sends the active installation owner one bell notice per newly discovered stable setup tag in the accepted repository. The notice opens Software › Releases. Publisher-written change notes appear as plain text. When the release body contains only App Maker’s standard packaging instructions, the notice reads “No change notes were supplied.”
+The automatic check sends the active installation owner one bell notice per newly discovered tag in the pinned channel in the accepted repository. The notice opens Software › Releases. Publisher-written change notes appear as plain text. When the publisher supplies no release body, the notice reads “No change notes were supplied.”
 
 Bilibi checks the official public repository every 15 minutes without credentials. Opening Releases checks the configured source using the listing cache and the signed-in operator’s access. The receipt and bell notice commit together, so retries cannot announce the same release twice.
 
-The `update` field of `base.software.releases` reports the running setup version and one of the following states.
+The `update` field of `base.software.releases` reports the running release version and one of the following states.
 
 | State | Meaning |
 | --- | --- |
-| `ready` | A complete, fresh listing has a newer stable setup with one matching file. The result includes the publisher’s notes and the exact asset for review. Admission and proof verification occur during installation. |
-| `current` | The running setup version is at least as new as the newest stable setup found. |
+| `ready` | A complete, fresh listing has a newer release in the pinned channel with one matching file. The result includes the publisher’s notes and the exact asset for review. Admission and proof verification occur during installation. |
+| `current` | The running release is at least as new as the newest release found in the pinned channel. |
 | `unavailable` | Source acceptance, the running setup, the listing or a unique compatible file could not be established. The reason identifies the missing check. |
 | `source_checkout` | This program has no installed release folder. |
 

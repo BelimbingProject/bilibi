@@ -139,7 +139,6 @@ impl Software {
     ) -> Result<Value> {
         let saved = self.github_saved(client, scope, Some(policy)).await?;
         let repository = &policy.repository;
-        let proof_required = policy.requires_operator_proof();
         let Some(target) = this_target() else {
             return Ok(json!({
                 "available": false,
@@ -155,29 +154,17 @@ impl Software {
             .map(|paths| paths.dir.join("data").join("github-listing.json"));
         if !force {
             if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
-                if fresh(&cached, saved.refresh_minutes) || limited(&cached) {
-                    return Ok(present(
-                        &cached,
-                        &saved,
-                        target,
-                        prerelease,
-                        false,
-                        proof_required,
-                        &policy.minimum_tag,
-                    ));
+                if limited(&cached)
+                    || ((cached.get("latest_nightly").is_some()
+                        || cached["attempt_at"].is_string())
+                        && fresh(&cached, saved.refresh_minutes))
+                {
+                    return Ok(present(&cached, &saved, target, prerelease, false, policy));
                 }
             }
         } else if let Some(cached) = read_cache(cache_path.as_deref(), repository) {
             if limited(&cached) {
-                return Ok(present(
-                    &cached,
-                    &saved,
-                    target,
-                    prerelease,
-                    false,
-                    proof_required,
-                    &policy.minimum_tag,
-                ));
+                return Ok(present(&cached, &saved, target, prerelease, false, policy));
             }
         }
         let token = match scope {
@@ -210,28 +197,12 @@ impl Software {
                 kept["attempt_at"] = json!(jiff::Timestamp::now().to_string());
                 kept["message"] = json!(message);
                 write_cache(cache_path.as_deref(), &kept);
-                let mut shown = present(
-                    &kept,
-                    &saved,
-                    target,
-                    prerelease,
-                    true,
-                    proof_required,
-                    &policy.minimum_tag,
-                );
+                let mut shown = present(&kept, &saved, target, prerelease, true, policy);
                 shown["message"] = json!(message);
                 return Ok(shown);
             }
         };
-        Ok(present(
-            &cached,
-            &saved,
-            target,
-            prerelease,
-            false,
-            proof_required,
-            &policy.minimum_tag,
-        ))
+        Ok(present(&cached, &saved, target, prerelease, false, policy))
     }
 
     /// A fresh read token for one use of `repository`, minted by this server's
@@ -552,9 +523,10 @@ fn present(
     target: &str,
     prerelease: bool,
     stale: bool,
-    proof_required: bool,
-    minimum_tag: &str,
+    policy: &release_proof::Policy,
 ) -> Value {
+    let nightly = policy.minimum_tag.starts_with("nightly-");
+    let proof_required = policy.requires_operator_proof();
     let repository = cache["repository"].as_str().unwrap_or("");
     let live_id = cache["repository_id"].as_i64();
     let accepted = saved.repository.as_deref() == Some(repository)
@@ -570,12 +542,10 @@ fn present(
         .unwrap_or_default()
         .into_iter()
         .filter(|row| {
-            prerelease
-                || row["prerelease"].as_bool() != Some(true)
-                || (minimum_tag.starts_with("nightly-")
-                    && row["tag"]
-                        .as_str()
-                        .is_some_and(|tag| tag.starts_with("nightly-")))
+            (nightly || prerelease || row["prerelease"].as_bool() != Some(true))
+                && row["tag"]
+                    .as_str()
+                    .is_some_and(|tag| policy.check_tag(tag).is_ok())
         })
         .collect();
     releases.retain(|row| row["target"].as_str() == Some(target));
@@ -614,7 +584,7 @@ fn present(
             live_id.unwrap_or(0)
         );
     } else if releases.is_empty() && message.is_empty() {
-        message = if prerelease {
+        message = if nightly || prerelease {
             format!(
                 "No setup file for {} is published in {repository}.",
                 describe_target(target)
@@ -627,7 +597,7 @@ fn present(
         };
     }
     json!({
-        "latest": if minimum_tag.starts_with("nightly-") { &cache["latest_nightly"] } else { &cache["latest"] },
+        "latest": if nightly { &cache["latest_nightly"] } else { &cache["latest"] },
         "complete": cache["complete"],
         "available": cache["available"].as_bool().unwrap_or(false),
         "repository": repository,
@@ -638,7 +608,7 @@ fn present(
         "target": target,
         "prerelease": prerelease,
         "fetched_at": cache["fetched_at"],
-        "stale": stale || cache["attempt_at"].is_string() || cache["stale"].as_bool().unwrap_or(false),
+        "stale": stale || cache.get("latest_nightly").is_none() || cache["attempt_at"].is_string() || cache["stale"].as_bool().unwrap_or(false),
         "app": saved.app,
         "refresh_minutes": saved.refresh_minutes,
         "limited_until": cache["limited_until"],
@@ -677,8 +647,7 @@ fn read_cache(path: Option<&Path>, repository: &str) -> Option<Value> {
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
     });
     let value = from_file.or_else(|| MEMORY.lock().ok().and_then(|guard| guard.clone()))?;
-    (value["repository"].as_str() == Some(repository) && value.get("latest_nightly").is_some())
-        .then_some(value)
+    (value["repository"].as_str() == Some(repository)).then_some(value)
 }
 fn write_cache(path: Option<&Path>, value: &Value) {
     if let Ok(mut guard) = MEMORY.lock() {
@@ -712,7 +681,11 @@ async fn fetch_listing(
     let previous = read_cache(cache_path, repository);
     let etag = previous
         .as_ref()
-        .filter(|cache| cache["complete"] == true && cache["repository_id"] == id)
+        .filter(|cache| {
+            cache.get("latest_nightly").is_some()
+                && cache["complete"] == true
+                && cache["repository_id"] == id
+        })
         .and_then(|cache| cache["etag"].as_str())
         .map(str::to_owned);
     let url = format!("{API}/repos/{repository}/releases?per_page=30");
@@ -847,7 +820,7 @@ fn release_rows(release: &Value, target: &str) -> Option<Vec<Value>> {
                         .as_str()
                         .is_none_or(|state| state == "uploaded")
             });
-            asset_row(
+            let mut row = asset_row(
                 asset,
                 proof,
                 &tag,
@@ -855,7 +828,10 @@ fn release_rows(release: &Value, target: &str) -> Option<Vec<Value>> {
                 prerelease,
                 &published_at,
                 target,
-            )
+            )?;
+            row["version"] = json!(tag.strip_prefix("setup-").unwrap_or(&tag));
+            row["notes"] = json!(release["body"].as_str());
+            Some(row)
         })
         .collect::<Vec<_>>();
     Some(rows)

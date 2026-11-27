@@ -193,6 +193,7 @@ struct Review {
 enum Dialog {
     Review(Review),
     Cancel { job: i64, running: bool },
+    Commands { kind: String, id: String },
 }
 
 struct View {
@@ -320,11 +321,7 @@ impl View {
                 return Ok(value.clone());
             }
         }
-        let mut value = read(&self.pages.contracts, scope, "base.software.catalogue").await?;
-        self.pages
-            .software
-            .fill_commit_times(scope, &mut value)
-            .await;
+        let value = read(&self.pages.contracts, scope, "base.software.catalogue").await?;
         self.catalogue = Some((std::time::Instant::now(), value.clone()));
         Ok(value)
     }
@@ -345,6 +342,10 @@ impl View {
             return Ok(());
         }
         match kind {
+            "commands" => {
+                self.dialog = modules::commands_target(get("module").unwrap_or_default())
+                    .map(|(kind, id)| Dialog::Commands { kind, id });
+            }
             "request_install" => {
                 self.bundle = values.get("bundle").cloned().unwrap_or_default();
                 if value.get("asset").is_some() {
@@ -764,6 +765,10 @@ impl View {
                     cancel_event: "cancel_dialog",
                 })?
             }
+            Some(Dialog::Commands { kind, id }) => match &self.catalogue {
+                Some((_, catalogue)) => modules::commands_dialog(catalogue, kind, id)?,
+                None => Html::EMPTY,
+            },
             None => Html::EMPTY,
         };
         let mut flash = NO_FLASH;
