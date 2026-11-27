@@ -80,6 +80,11 @@ pub struct Restored {
     pub carried: i64,
     pub problems: Vec<String>,
 }
+pub enum RestoreTarget<'a> {
+    Undo(Option<&'a Path>),
+    Recovery,
+}
+
 /// Replaces the database's contents with a dump: the software history, and
 /// the audit rows of the software changes made after `since` (the instant
 /// the dump was taken), are saved to `history_file` first, the `public` schema is dropped and made
@@ -100,7 +105,7 @@ pub async fn restore(
     dump: &Path,
     since: &str,
     history_file: &Path,
-    target: Option<&Path>,
+    target: RestoreTarget<'_>,
 ) -> Result<Restored, String> {
     let outcome = replace(client, pg, dump, since, history_file, target).await;
     let Err(why) = &outcome else {
@@ -123,7 +128,7 @@ async fn replace(
     dump: &Path,
     since: &str,
     history_file: &Path,
-    target: Option<&Path>,
+    target: RestoreTarget<'_>,
 ) -> Result<Restored, String> {
     if restored(history_file) {
         return Ok(Restored {
@@ -143,14 +148,18 @@ async fn replace(
                     jobs::short(&error)
                 )
             })?;
-            let target = target.ok_or("The restore has no target release composition.")?;
-            saved["target_composition"] = json!(composition::status(target)?);
-            validate_restore(&saved)?;
+            if let RestoreTarget::Undo(target) = target {
+                let target = target.ok_or("The restore has no target release composition.")?;
+                saved["target_composition"] = json!(composition::status(target)?);
+                validate_restore(&saved)?;
+            }
             write_saved(history_file, dump, &saved)?;
             saved
         }
     };
-    validate_restore(&saved)?;
+    if matches!(target, RestoreTarget::Undo(_)) {
+        validate_restore(&saved)?;
+    }
     let kept = match keep_owner(client).await {
         Ok(kept) => kept,
         Err(why) => {

@@ -138,7 +138,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &dump,
         "",
         &root.join("history-undo.json"),
-        Some(&customer),
+        backup::RestoreTarget::Undo(Some(&customer)),
     )
     .await;
     let message = refused
@@ -164,8 +164,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &pg,
         &dump,
         "",
-        &root.join("history-rollback.json"),
-        Some(&reviewed),
+        &root.join("history-switch_back.json"),
+        backup::RestoreTarget::Recovery,
     )
     .await?;
     assert_eq!(jobs::installation_mode(&client).await?, "shared");
@@ -230,7 +230,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &shared_dump,
         "",
         &root.join("history-isolated.json"),
-        Some(&customer),
+        backup::RestoreTarget::Undo(Some(&customer)),
     )
     .await?;
     assert_eq!(jobs::installation_mode(&client).await?, "isolated");
@@ -245,7 +245,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )?;
     backup::clear(&client).await?;
     client.batch_execute("DROP SCHEMA public").await?;
-    backup::restore(&client, &pg, &shared_dump, "", &interrupted, None).await?;
+    backup::restore(
+        &client,
+        &pg,
+        &shared_dump,
+        "",
+        &interrupted,
+        backup::RestoreTarget::Undo(None),
+    )
+    .await?;
     assert_eq!(jobs::installation_mode(&client).await?, "isolated");
     println!("PASS: interrupted restore recreates a missing public schema and preserves the saved policy");
     Ok(())

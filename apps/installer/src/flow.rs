@@ -266,7 +266,7 @@ impl<'a> Run<'a> {
     async fn settle_clean_failure(&mut self) -> Db<()> {
         let mut message = format!("Nothing changed. {}.", self.failure_reason());
         if self.job.paused && self.service.state() != "active" {
-            let started = match self.start_current().await {
+            let started = match self.restart_previous().await? {
                 Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                 Err(why) => Err(why),
             };
@@ -357,7 +357,7 @@ impl<'a> Run<'a> {
             }
             return Ok(false);
         }
-        let back = match self.start_current().await {
+        let back = match self.restart_previous().await? {
             Ok(()) => match self.service.wait_healthy(HEALTH_LIMIT).await {
                 Ok(_) => "The release that was in service is back and answers.".to_owned(),
                 Err(why) => format!(
@@ -542,7 +542,7 @@ impl<'a> Run<'a> {
         if !self.is_done("switch") {
             self.start("switch", &format!("Switching to release {release}"))
                 .await?;
-            if let Err(reason) = self.switch_to(release).await {
+            if let Err(reason) = self.switch_to(release, true).await {
                 self.fail("switch", &reason).await?;
                 return self.switch_back().await;
             }
@@ -964,7 +964,21 @@ impl<'a> Run<'a> {
         self.admit_release(release).await?;
         self.service.start()
     }
-    async fn switch_to(&self, release: u64) -> Result<(), String> {
+    async fn restart_previous(&self) -> Db<Result<(), String>> {
+        let previous = if self.job.kind == "undo" {
+            match self.undone().await? {
+                Ok(undone) => Some(undone.release),
+                Err(why) => return Ok(Err(why)),
+            }
+        } else {
+            self.detail("fetch")["previous"].as_u64()
+        };
+        if previous.is_none() || self.layout.current() != previous {
+            return Ok(Err("The recorded pre-change release is not current.".into()));
+        }
+        Ok(self.service.start())
+    }
+    async fn switch_to(&self, release: u64, admit: bool) -> Result<(), String> {
         if !self.layout.release(release).join("bilibi-web").is_file() {
             return Err(format!(
                 "release {release} is missing from {}",
@@ -972,7 +986,9 @@ impl<'a> Run<'a> {
             ));
         }
         self.service.stop()?;
-        self.admit_release(release).await?;
+        if admit {
+            self.admit_release(release).await?;
+        }
         self.layout
             .point_current(release)
             .map_err(|error| format!("could not point current at release {release}: {error}"))?;
@@ -985,7 +1001,7 @@ impl<'a> Run<'a> {
         if matches!(self.state("switch_back"), "done" | "failed") {
             let mut result = self.detail("switch_back");
             if self.is_done("switch_back") {
-                let answered = match self.start_current().await {
+                let answered = match self.restart_previous().await? {
                     Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                     Err(why) => Err(why),
                 };
@@ -1032,7 +1048,7 @@ impl<'a> Run<'a> {
                 file,
                 back.base["backup_at"].as_str().unwrap_or(""),
                 &self.history_file("switch_back"),
-                Some(&self.layout.release(back.to)),
+                backup::RestoreTarget::Recovery,
             )
             .await
             {
@@ -1051,7 +1067,7 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        let answered = match self.switch_to(back.to).await {
+        let answered = match self.switch_to(back.to, false).await {
             Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
             Err(why) => Err(why),
         };
@@ -1219,7 +1235,7 @@ impl<'a> Run<'a> {
                 &file,
                 &undone.since,
                 &self.history_file("restore"),
-                Some(&self.layout.release(undone.previous)),
+                backup::RestoreTarget::Undo(Some(&self.layout.release(undone.previous))),
             )
             .await
             {
@@ -1236,7 +1252,7 @@ impl<'a> Run<'a> {
         if !self.is_done("switch") {
             self.start("switch", &format!("Switching back to release {previous}"))
                 .await?;
-            if let Err(reason) = self.switch_to(previous).await {
+            if let Err(reason) = self.switch_to(previous, true).await {
                 self.fail("switch", &reason).await?;
                 return self.switch_back().await;
             }
