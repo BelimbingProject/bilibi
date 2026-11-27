@@ -141,6 +141,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 *One field, one box.* The label sits inside the field, so each field is one element and the value is what the eye lands on. *built* (`apps/base/ui/src/forms.rs`, `LabelPlacement`)
 
+- **Required fields:** Keep the star on the label line, immediately after its text with a small gap and the same colour.
 - **Text fields float the label.** Empty, it rests where the value goes. On focus, once filled, or when the browser autofills, it moves up small in muted ink. It never leaves the box.
 - **Selects, textareas, date-like inputs and the combobox pin it small at the top.** They always show something (a prompt, a mask, a selection) that a resting label would cover.
 - **Multi-selects:** one box holds the inset label and `(N selected)` count, with removable selected chips beneath. The default keeps complete chips on one line and shows “…” for overflow; `wrap_chips` expands the box onto multiple lines. The chevron stays beside the label. Empty fields show the label, `(0 selected)` and a selection prompt. For a small fixed set, `MultiSelect` exposes every option. For records, `SearchMultiSelect` sends a debounced query to the owner and shows bounded server results, disabled notes and an optional trailing create action.
