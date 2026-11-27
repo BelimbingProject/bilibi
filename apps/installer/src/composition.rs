@@ -1,7 +1,8 @@
 //! What a release is made of, read from the text its own program prints for
 //! `bilibi-web status` (`bilibi_web::status`), and what differs between two
 //! releases. The installer cannot link the program it installs, so it reads
-//! the text; a line it does not understand is skipped.
+//! the text. Release comparisons skip unrecognized lines. Admission rejects
+//! malformed Extension declarations.
 use regex_lite::Regex;
 use serde_json::{json, Value};
 use std::sync::LazyLock;
