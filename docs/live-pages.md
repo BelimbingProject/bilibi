@@ -168,6 +168,10 @@ A controller whose intent only records where something already is (the
 workspace's frame reports) adds `history: 'replace'`, so a changed canonical
 URL replaces the address instead of pushing an entry.
 
+In a `data-change` form with a separate submit event, mark a search input with `data-change-on-enter` so Enter applies the filter without submitting the form.
+
+A form marked `data-preserve-newer-draft` keeps its rendered controls and local values while an edit awaits a complete form reply or a transport refusal remains unresolved. This also protects an edited draft across a socket remount and restores the form when step-up returns to the same page. The user submits again after step-up. For an inline save, return `data-draft-saved` on the form to clear the recorded edit markers and reset the draft once the save reply can be applied.
+
 ## File uploads
 
 Uploads are `bilibi_ui::upload`

@@ -76,7 +76,9 @@ edge; the sealed scope is identity for one unit of work, not a permanent login.
 Decisions record reason and principal kind using the caller's connection; decisions
 inside an owner transaction follow that transaction's commit/rollback.
 
-The role create page saves its selected permissions with the role in one audited transaction. Each permission uses the same authorization and reach checks as a role grant. Creating a role with permissions requires one role-capability step-up check before the write transaction. The create transaction rechecks authorization and grant bounds.
+On **Create role**, select the **Company** the role is for and enter a **Label**, such as Sales Manager. The **Code** follows the label, for example `sales_manager`, until you edit it. Use lowercase letters, digits and underscores for the code. Both the label and the code must be unique across companies in the tenant. You can add a description and select permissions before saving. Search filters the permission list and keeps your selections.
+
+The role and selected permissions are saved in one audited transaction. Initial permissions are granted with `all` reach and use the same authorization and reach checks as a role grant. Creating a role with permissions requires one role-capability step-up check before the write transaction. The create transaction rechecks authorization and grant bounds.
 
 `base/authz.grants` exposes audited custom-role creation, role assignments, custom-role capability
 changes, direct overrides, and system grants. It checks the administrator and
