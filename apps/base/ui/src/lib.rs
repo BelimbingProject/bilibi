@@ -47,6 +47,8 @@ pub use live_transport::{LIVE_EVENT_LIMIT, LIVE_EVENT_TOO_LARGE};
 pub use mail_frame::MailFrame;
 mod field_labels;
 mod page_search;
+mod permission_choices;
+pub use permission_choices::{PermissionChoice, PermissionChoices};
 pub mod params;
 pub use field_labels::FieldLabels;
 mod record_fields;

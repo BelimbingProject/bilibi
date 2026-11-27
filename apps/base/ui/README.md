@@ -96,6 +96,8 @@ Use `AppFrame` for a self-contained same-origin interactive document inside a Bi
 
 A module publishes a self-contained document under `/assets` by contributing one `PublicAsset` to `PUBLIC_ASSETS`. Paths are unique and must start with `/assets/`; give sensitive documents a narrow response Content Security Policy. The asset must not contain credentials. Use a contributed asset and `AppFrame` instead of adding a host router entry, copying the frame markup or writing a page-specific message bridge.
 
+`PermissionChoices` renders the shared selectable permission list; its owner filters the keys, preserves selections and authorizes each grant.
+
 ## Searchable multi-select
 
 Use `MultiSelect::searchable()` to filter a supplied set of options locally; it preserves checked options while they are hidden. Use `SearchMultiSelect` for a server-searched set of records. Supply selected `SearchMultiOption`s separately from a bounded list of results; the control renders at most 50 hits. An option may carry detail or be disabled with a note and an optional local link shown beside the note. `.create("Create company", "create-company")` adds the trailing action. `.wrap_chips()` shows all selected chips; the default limits the row to one line and offers an overflow button that reveals the remaining chips.

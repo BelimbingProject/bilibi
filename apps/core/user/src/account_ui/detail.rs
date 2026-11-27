@@ -109,7 +109,8 @@ struct AccessView {
     denied: Vec<DomainGroup>,
     cap_control: &'static str,
     cap_search: String,
-    caps: Vec<CapOption>,
+    caps: Html,
+    caps_empty: bool,
     selected_caps: usize,
 }
 struct RoleOption {
@@ -129,11 +130,6 @@ struct CapChip {
     /// The chip's control: its id and accessible label.
     control_id: String,
     control_label: String,
-}
-struct CapOption {
-    key: String,
-    dom_id: String,
-    checked: bool,
 }
 fn dom_id(key: &str) -> String {
     key.replace('.', "-")
@@ -832,10 +828,10 @@ impl Detail {
             "available"
         };
         let cap_needle = self.access.cap_search.trim().to_lowercase();
-        let caps: Vec<CapOption> = available_caps
+        let caps: Vec<bilibi_ui::PermissionChoice> = available_caps
             .iter()
             .filter(|key| cap_needle.is_empty() || key.to_lowercase().contains(&cap_needle))
-            .map(|key| CapOption {
+            .map(|key| bilibi_ui::PermissionChoice {
                 key: (*key).to_owned(),
                 dom_id: dom_id(key),
                 checked: self.access.selected_caps.iter().any(|k| k == key),
@@ -913,7 +909,8 @@ impl Detail {
             ),
             cap_control,
             cap_search: self.access.cap_search.clone(),
-            caps,
+            caps_empty: caps.is_empty(),
+            caps: render(&bilibi_ui::PermissionChoices { options: caps })?,
             selected_caps: self.access.selected_caps.len(),
         })?;
         render(&Card {

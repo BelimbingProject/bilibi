@@ -619,6 +619,14 @@ impl Grants {
             {
                 return Err(Error::Forbidden);
             }
+            if let Some(operator) = actor.impersonator() {
+                if !crate::effective_capabilities_in_company(tx.sql(), actor, operator.user(), None)
+                    .await?
+                    .reaches(key, reach)
+                {
+                    return Err(Error::Forbidden);
+                }
+            }
         }
         self.step_up
             .require(
@@ -652,6 +660,16 @@ impl Grants {
     /// errors rather than a failed write: the company is reproved through
     /// Tenancy on the write's own transaction, never trusted from the form.
     pub async fn create_role(&self, actor: &Scope, role: &NewRole) -> Result<CreatedRole> {
+        self.create_role_with_capabilities(actor, role, &[]).await
+    }
+
+    /// Create a role and its capabilities together, with the ordinary grant checks.
+    pub async fn create_role_with_capabilities(
+        &self,
+        actor: &Scope,
+        role: &NewRole,
+        capabilities: &[String],
+    ) -> Result<CreatedRole> {
         let mut errors = crate::roles::validate(role);
         if !errors.is_empty() {
             return Ok(CreatedRole::Refused(errors));
@@ -706,6 +724,10 @@ impl Grants {
             let id:i64=sql.query_one("INSERT INTO roles(tenant_id,company_id,name,code,description,is_system,grant_all) VALUES($1,$2,$3,$4,$5,false,false) RETURNING id",&[&tenant,&owner,&role.name,&role.code,&role.description]).await?.get(0);
             Ok((id,vec![Change{kind:"authz.role".into(),id,old:json!({}),new:json!({"company_id":owner,"name":role.name,"code":role.code,"description":role.description,"is_system":false,"grant_all":false})}]))
         })).await?;
+        for key in capabilities {
+            self.set_role_capability_in(&mut tx, actor, id, key, Some(Reach::All))
+                .await?;
+        }
         tx.commit().await?;
         Ok(CreatedRole::Created(id))
     }

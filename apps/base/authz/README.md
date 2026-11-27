@@ -76,6 +76,8 @@ edge; the sealed scope is identity for one unit of work, not a permanent login.
 Decisions record reason and principal kind using the caller's connection; decisions
 inside an owner transaction follow that transaction's commit/rollback.
 
+The role create page saves its selected permissions with the role in one audited transaction. Each permission uses the same authorization, reach and step-up checks as a role grant; a refusal rolls back the role.
+
 `base/authz.grants` exposes audited custom-role creation, role assignments, custom-role capability
 changes, direct overrides, and system grants. It checks the administrator and
 live principal through the owner verifier; a role assignment alone also accepts a tenant's identity-less `invited` staff account so Core User can preassign access before membership acceptance. System roles are immutable through

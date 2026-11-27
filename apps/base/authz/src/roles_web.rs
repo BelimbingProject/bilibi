@@ -518,7 +518,7 @@ fn render_role(
 
 #[derive(Template)]
 #[template(
-    source = r#"<form id="role-form" data-event="role-change" data-change data-submit-event="create-role" class="space-y-5"><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ company }}{{ name }}{{ code }}{{ description }}</section><div class="flex items-center justify-end gap-3"><a id="role-cancel" href="/authz/roles" class="text-sm font-medium text-ink-muted hover:text-ink">Cancel</a>{{ save }}</div></form>"#,
+    source = r#"<form id="role-form" data-event="role-change" data-change data-submit-event="create-role" class="space-y-5"><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ company }}{{ name }}{{ code }}{{ description }}</section><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ permissions_heading }}{{ permission_search }}{{ permissions }}</section><div class="flex items-center justify-end gap-3"><a id="role-cancel" href="/authz/roles" class="text-sm font-medium text-ink-muted hover:text-ink">Cancel</a>{{ save }}</div></form>"#,
     ext = "html"
 )]
 struct RoleForm {
@@ -526,6 +526,9 @@ struct RoleForm {
     name: Html,
     code: Html,
     description: Html,
+    permissions_heading: Html,
+    permission_search: Html,
+    permissions: Html,
     save: Html,
 }
 
@@ -544,6 +547,8 @@ fn render_create(
     picker: &CompanyPicker,
     errors: &RoleErrors,
     created: bool,
+    permission_search: &str,
+    permissions: Vec<bilibi_ui::PermissionChoice>,
 ) -> Result<String> {
     let field = |key: &str, label: &str, value: &str, errors: &[String]| {
         Field::in_form("role", key)
@@ -603,6 +608,9 @@ fn render_create(
             .kind(InputKind::Textarea)
             .hint("Describe who should get this role."),
         )?,
+        permissions_heading: render(SectionHeading { title: "Permissions", ..SectionHeading::default() })?,
+        permission_search: render(Field::in_form("role", "permission_search").label("Search permissions").value(permission_search).attr("data-debounce", "300"))?,
+        permissions: render(bilibi_ui::PermissionChoices { options: permissions })?,
         save: render(Button {
             variant: ButtonVariant::Primary,
             id: "role-save",
@@ -627,7 +635,14 @@ fn render_create(
 pub(crate) async fn create_view(pages: &Pages, scope: &Scope) -> Result<String> {
     let form = RoleCreate::mount(pages.clone(), scope).await?;
     let picker = form.picker(scope).await?;
-    render_create(&form.role, &picker, &form.errors, false)
+    render_create(
+        &form.role,
+        &picker,
+        &form.errors,
+        false,
+        &form.permission_search,
+        form.permission_choices(scope).await?,
+    )
 }
 
 /// Filters, sorting and paging stay in the URL for links and Back; column
@@ -744,6 +759,10 @@ enum CreateEvent {
         description: String,
         #[serde(default)]
         code_edited: bool,
+        #[serde(rename = "role[permission_search]", default)]
+        permission_search: String,
+        #[serde(rename = "capability_keys[]", default)]
+        capabilities: Vec<String>,
     },
     RoleChange {
         #[serde(rename = "role[company_id]", default)]
@@ -758,6 +777,10 @@ enum CreateEvent {
         description: String,
         #[serde(default)]
         code_edited: bool,
+        #[serde(rename = "role[permission_search]", default)]
+        permission_search: String,
+        #[serde(rename = "capability_keys[]", default)]
+        capabilities: Vec<String>,
     },
     PickCompany {
         record: String,
@@ -784,6 +807,8 @@ pub(crate) struct RoleCreate {
     pub(crate) errors: RoleErrors,
     pub(crate) created: bool,
     editing_code: bool,
+    permission_search: String,
+    selected_capabilities: Vec<String>,
 }
 /// The owner company picker's state for one view.
 pub(crate) struct CompanyPicker {
@@ -816,6 +841,8 @@ impl RoleCreate {
             errors: RoleErrors::default(),
             created: false,
             editing_code: false,
+            permission_search: String::new(),
+            selected_capabilities: Vec::new(),
         })
     }
     async fn suggested_code(&self, scope: &Scope, name: &str) -> Result<String> {
@@ -849,6 +876,57 @@ impl RoleCreate {
             }
         }
         unreachable!()
+    }
+    async fn permission_choices(&self, scope: &Scope) -> Result<Vec<bilibi_ui::PermissionChoice>> {
+        let client = self.pages.db.get().await?;
+        if !crate::decide(&**client, scope, "admin.authz.role.update")
+            .await?
+            .allowed
+        {
+            return Ok(Vec::new());
+        }
+        let effective =
+            crate::effective_capabilities_in_company(&**client, scope, scope.user(), None).await?;
+        let operator = match scope.impersonator() {
+            Some(operator) => Some(
+                crate::effective_capabilities_in_company(&**client, scope, operator.user(), None)
+                    .await?,
+            ),
+            None => None,
+        };
+        let query = self.permission_search.trim().to_lowercase();
+        Ok(crate::vocabulary()?
+            .capabilities
+            .iter()
+            .filter(|(key, cap)| {
+                cap.definition.audience != crate::Audience::Portal
+                    && cap.definition.audience != crate::Audience::Owner
+                    && effective.reaches(key, Reach::All)
+                    && operator
+                        .as_ref()
+                        .is_none_or(|held| held.reaches(key, Reach::All))
+                    && key.to_lowercase().contains(&query)
+            })
+            .map(|(key, _)| bilibi_ui::PermissionChoice {
+                key: (*key).to_owned(),
+                dom_id: key.replace('.', "-"),
+                checked: self
+                    .selected_capabilities
+                    .iter()
+                    .any(|selected| selected == key),
+            })
+            .collect())
+    }
+
+    fn select_visible(&mut self, capabilities: Vec<String>) {
+        let query = self.permission_search.trim().to_lowercase();
+        self.selected_capabilities
+            .retain(|key| !key.to_lowercase().contains(&query));
+        for key in capabilities {
+            if !self.selected_capabilities.contains(&key) {
+                self.selected_capabilities.push(key);
+            }
+        }
     }
     /// The tenant's unarchived companies `search` finds: an archived one is
     /// read-only and create would refuse it, so the picker never offers it.
@@ -922,7 +1000,11 @@ impl LiveState<Scope, Error> for RoleCreate {
                             code,
                             description,
                             code_edited,
+                            permission_search,
+                            capabilities,
                         } => {
+                            self.select_visible(capabilities);
+                            self.permission_search = permission_search;
                             // A changed code is a deliberate override of the suggestion.
                             if code_edited {
                                 self.editing_code = true;
@@ -956,7 +1038,11 @@ impl LiveState<Scope, Error> for RoleCreate {
                             code,
                             description,
                             code_edited,
+                            permission_search,
+                            capabilities,
                         } => {
+                            self.select_visible(capabilities);
+                            self.permission_search = permission_search;
                             self.created = false;
                             self.company_query = company_search;
                             let company_id = company_id.trim().parse::<i64>().ok();
@@ -988,7 +1074,11 @@ impl LiveState<Scope, Error> for RoleCreate {
                             } else {
                                 self.pages
                                     .grants
-                                    .create_role(request.scope, &self.role)
+                                    .create_role_with_capabilities(
+                                        request.scope,
+                                        &self.role,
+                                        &self.selected_capabilities,
+                                    )
                                     .await?
                             };
                             match outcome {
@@ -1029,7 +1119,14 @@ impl LiveState<Scope, Error> for RoleCreate {
             }
             let picker = self.picker(request.scope).await?;
             Ok(LiveBody {
-                html: render_create(&self.role, &picker, &self.errors, self.created)?,
+                html: render_create(
+                    &self.role,
+                    &picker,
+                    &self.errors,
+                    self.created,
+                    &self.permission_search,
+                    self.permission_choices(request.scope).await?,
+                )?,
                 ..LiveBody::default()
             })
         })
