@@ -1596,15 +1596,24 @@ impl Detail {
         }
         let ids: Vec<i64> = conflicts.iter().map(|c| c.user).collect();
         let names = self.pages.names(scope, &ids).await?;
+        let busy_time = |at: jiff::Timestamp| {
+            let minute = at
+                .round(
+                    jiff::TimestampRound::new()
+                        .smallest(jiff::Unit::Minute)
+                        .mode(jiff::RoundMode::Floor),
+                )
+                .map_err(|_| Error::Internal)?;
+            clock.time("", minute)
+        };
         let mut body = Html::text("This overlaps:");
         for c in conflicts {
             let what = c.title.as_deref().unwrap_or("another call or meeting");
             let who = names.get(&c.user).map_or("", String::as_str);
-            let id = format!("activity-conflict-{}-{}", c.user, c.activity);
             body.push(&Html::text(&format!(" {who} has {what} from ")));
-            body.push(&clock.time(&format!("{id}-start"), c.starts_at)?);
+            body.push(&busy_time(c.starts_at)?);
             body.push(&Html::text(" to "));
-            body.push(&clock.time(&format!("{id}-end"), c.ends_at)?);
+            body.push(&busy_time(c.ends_at)?);
             body.push(&Html::text("."));
         }
         render(Alert {
