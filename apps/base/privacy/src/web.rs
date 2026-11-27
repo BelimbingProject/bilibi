@@ -129,11 +129,18 @@ async fn display(
     let locale = pages.locales.resolve(client, scope, None).await?.locale;
     pages.display.display(client, scope, None, locale).await
 }
-/// An RFC 3339 instant in the reader's display settings, or a dash.
-fn when(display: &DisplayContext, at: Option<&str>) -> String {
-    at.and_then(|at| at.parse::<jiff::Timestamp>().ok())
-        .map(|at| display.render(at, Format::DateTime, Precision::Minute).text)
-        .unwrap_or_else(|| "—".into())
+/// An RFC 3339 instant that follows the reader's display settings.
+fn when(display: &DisplayContext, id: &str, at: Option<&str>) -> Result<Html> {
+    let Some(at) = at.and_then(|at| at.parse::<jiff::Timestamp>().ok()) else {
+        return Ok(Html::text("—"));
+    };
+    let r = display.render(at, Format::DateTime, Precision::Minute);
+    let instant =
+        bilibi_ui::flex_table::Instant::new(&r.iso, &r.text, &r.company, &r.utc, r.mode.as_str());
+    render(bilibi_ui::flex_table::InstantView {
+        id,
+        instant: &instant,
+    })
 }
 fn status_badge(request: &RequestView) -> Result<Html> {
     let kind = match request.status.as_str() {
@@ -480,9 +487,20 @@ impl Requests {
                 .slot("status", status_badge(request)?)
                 .slot(
                     "received",
-                    Html::text(&when(&display, Some(&request.received_at))),
+                    when(
+                        &display,
+                        &format!("privacy-request-{key}-received"),
+                        Some(&request.received_at),
+                    )?,
                 )
-                .slot("due", Html::text(&when(&display, Some(&request.due_at))));
+                .slot(
+                    "due",
+                    when(
+                        &display,
+                        &format!("privacy-request-{key}-due"),
+                        Some(&request.due_at),
+                    )?,
+                );
             row.dom_id = Some(format!("privacy-request-{key}"));
             rows.push(row);
         }
@@ -1273,16 +1291,20 @@ impl RequestPage {
                 Fact {
                     title: "Received",
                     id: "privacy-request-received",
-                    value: Html::text(&format!(
-                        "{} by user {}",
-                        when(&display, Some(&request.received_at)),
-                        request.received_by
-                    )),
+                    value: {
+                        let mut v = when(
+                            &display,
+                            "privacy-request-received-at",
+                            Some(&request.received_at),
+                        )?;
+                        v.push(&Html::text(&format!(" by user {}", request.received_by)));
+                        v
+                    },
                 },
                 Fact {
                     title: "Due",
                     id: "privacy-request-due",
-                    value: Html::text(&when(&display, Some(&request.due_at))),
+                    value: when(&display, "privacy-request-due-at", Some(&request.due_at))?,
                 },
                 Fact {
                     title: "Identity check",
@@ -1311,43 +1333,47 @@ impl RequestPage {
                 Fact {
                     title: "Approved",
                     id: "privacy-request-approved",
-                    value: Html::text(&request.approved_by.map_or_else(
-                        || {
-                            if request.approval_awaiting {
-                                "Waiting for approval".into()
-                            } else {
-                                "Not yet approved".into()
-                            }
-                        },
-                        |by| {
-                            format!(
-                                "{} by user {by}",
-                                when(&display, request.approved_at.as_deref())
-                            )
-                        },
-                    )),
+                    value: if let Some(by) = request.approved_by {
+                        let mut v = when(
+                            &display,
+                            "privacy-request-approved-at",
+                            request.approved_at.as_deref(),
+                        )?;
+                        v.push(&Html::text(&format!(" by user {by}")));
+                        v
+                    } else {
+                        Html::text(if request.approval_awaiting {
+                            "Waiting for approval"
+                        } else {
+                            "Not yet approved"
+                        })
+                    },
                 },
                 Fact {
                     title: "Outcome",
                     id: "privacy-request-outcome",
-                    value: Html::text(&match (
+                    value: match (
                         &request.refused_reason,
                         &request.completed_at,
                         &request.finish_error,
                     ) {
-                        (Some(reason), _, _) => format!("Refused: {reason}"),
-                        _ if request.failure.is_some() => format!(
+                        (Some(reason), _, _) => Html::text(&format!("Refused: {reason}")),
+                        _ if request.failure.is_some() => Html::text(&format!(
                             "Failed: {}. Fix the cause, then run it again.",
                             stopped_because(request.failure.as_deref().unwrap_or_default())
-                        ),
-                        (None, Some(at), _) => format!("Completed {}", when(&display, Some(at))),
-                        (None, None, Some(code)) => format!(
+                        )),
+                        (None, Some(at), _) => {
+                            let mut v = Html::text("Completed ");
+                            v.push(&when(&display, "privacy-request-completed-at", Some(at))?);
+                            v
+                        }
+                        (None, None, Some(code)) => Html::text(&format!(
                             "Finishing failed {} time(s): {}. It is retried.",
                             request.finish_attempts,
                             finish_reason(code)
-                        ),
-                        _ => "Open".into(),
-                    }),
+                        )),
+                        _ => Html::text("Open"),
+                    },
                 },
             ],
         })?;
@@ -1865,10 +1891,20 @@ impl Holds {
             let key = hold.id.to_string();
             let status = match &hold.released_at {
                 None => render(Badge::status(BadgeKind::Warning, "Active"))?,
-                Some(at) => render(Badge::status(
-                    BadgeKind::Neutral,
-                    &format!("Released {}", when(&display, Some(at))),
-                ))?,
+                Some(at) => {
+                    let mut body = Html::text("Released ");
+                    body.push(&when(
+                        &display,
+                        &format!("privacy-hold-{key}-released"),
+                        Some(at),
+                    )?);
+                    render(Badge {
+                        kind: BadgeKind::Neutral,
+                        dot: true,
+                        class: "",
+                        body,
+                    })?
+                }
             };
             let mut row = FlexRow::new(key.clone())
                 .slot(
@@ -1879,14 +1915,15 @@ impl Holds {
                 )
                 .slot("target", Html::text(&target_text(&hold.target)))
                 .slot("reason", Html::text(&hold.reason))
-                .slot(
-                    "placed",
-                    Html::text(&format!(
-                        "{} by user {}",
-                        when(&display, Some(&hold.placed_at)),
-                        hold.placed_by
-                    )),
-                )
+                .slot("placed", {
+                    let mut v = when(
+                        &display,
+                        &format!("privacy-hold-{key}-placed"),
+                        Some(&hold.placed_at),
+                    )?;
+                    v.push(&Html::text(&format!(" by user {}", hold.placed_by)));
+                    v
+                })
                 .slot("status", status);
             row.dom_id = Some(format!("privacy-hold-{key}"));
             if can_manage && hold.released_at.is_none() {
@@ -2191,18 +2228,20 @@ impl Retention {
                 Html::text("Off")
             };
             let sweep = match &class.last_sweep {
-                Some(sweep) => Html::text(&match &sweep.finished_at {
-                    Some(at) => format!(
-                        "{}: {} acted on, {} kept by holds",
-                        when(&display, Some(at)),
-                        sweep.acted,
-                        sweep.kept
-                    ),
-                    None => format!(
-                        "{}: stopped before it finished",
-                        when(&display, Some(&sweep.started_at))
-                    ),
-                }),
+                Some(sweep) => {
+                    let at = sweep.finished_at.as_deref().unwrap_or(&sweep.started_at);
+                    let mut v = when(
+                        &display,
+                        &format!("privacy-sweep-{}-at", class.key),
+                        Some(at),
+                    )?;
+                    v.push(&Html::text(&if sweep.finished_at.is_some() {
+                        format!(": {} acted on, {} kept by holds", sweep.acted, sweep.kept)
+                    } else {
+                        ": stopped before it finished".to_owned()
+                    }));
+                    v
+                }
                 None => Html::text("Not swept yet"),
             };
             let minimum = match (class.legal_minimum_days, class.floor_days) {
@@ -2249,20 +2288,28 @@ impl Retention {
             body: list,
             ..Card::default()
         })?);
-        let evidence_text = match evidence {
-            Some(sweep) => format!(
-                "Audit evidence kept for its legal minimum: last erased {} ({} records).",
-                when(&display, sweep.finished_at.as_deref().or(Some(&sweep.started_at))),
-                sweep.acted
-            ),
-            None => "Audit evidence kept for its legal minimum is erased by the same sweep once the minimum has passed.".to_owned(),
-        };
         body.push(&render(SectionHeading {
             title: "Audit evidence",
             id: "privacy-retention-evidence",
-            description: &evidence_text,
+            description: "Audit evidence is kept for its legal minimum.",
             ..SectionHeading::default()
         })?);
+        if let Some(sweep) = evidence {
+            let mut value = when(
+                &display,
+                "privacy-evidence-erased-at",
+                sweep.finished_at.as_deref().or(Some(&sweep.started_at)),
+            )?;
+            value.push(&Html::text(&format!(" ({} records)", sweep.acted)));
+            body.push(&render(Facts {
+                id: "privacy-evidence-facts",
+                items: vec![Fact {
+                    title: "Last erased",
+                    id: "privacy-evidence-last-erased",
+                    value,
+                }],
+            })?);
+        }
         PageView {
             id: "privacy-retention",
             flash: flash_map(&self.flash),

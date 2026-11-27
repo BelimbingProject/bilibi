@@ -671,7 +671,7 @@ impl View {
                 .map(|m| bilibi_ui::ProofMethod::new(m.id, m.label, m.code_length, m.numeric))
                 .collect::<Vec<_>>();
             return Ok(self
-                .review_dialog(&instance, lost, review, &methods)?
+                .review_dialog(&instance, lost, review, &methods, &display)?
                 .to_string());
         }
         let status = read(&pages.contracts, scope, "base.software.status").await?;
@@ -1374,6 +1374,7 @@ impl View {
         lost: Option<u64>,
         review: &Review,
         methods: &[bilibi_ui::ProofMethod],
+        display: &DisplayContext,
     ) -> Result<Html> {
         let facts = &review.facts;
         let label = instance.label.as_str();
@@ -1459,58 +1460,74 @@ impl View {
                 )
             }
         };
-        let title = if review.kind == Kind::Undo {
-            text(&facts["loss"]).to_owned()
-        } else {
-            title
-        };
-        let mut warnings: Vec<(StatusKind, String)> = facts["warnings"]
+        let mut warnings: Vec<(StatusKind, Html)> = facts["warnings"]
             .as_array()
             .into_iter()
             .flatten()
-            .map(|w| (StatusKind::Warning, text(w).to_owned()))
+            .map(|w| (StatusKind::Warning, Html::text(text(w))))
             .collect();
         if review.kind == Kind::Undo {
-            if let (Some(count), Some(at)) = (lost, facts["backup_at"].as_str()) {
-                let (changes, verb) = if count == 1 {
-                    ("1 change entered", "is")
+            let mut loss = Html::EMPTY;
+            if facts["restores_backup"] == true {
+                if let Some(i) = facts["backup_at"]
+                    .as_str()
+                    .and_then(|at| instant(display, at))
+                {
+                    loss.push(&Html::text("Bilibi restores the backup from "));
+                    loss.push(&render(InstantCell {
+                        id: "software-review-backup-at".into(),
+                        i,
+                    })?);
+                    loss.push(&Html::text("; anything entered since then is lost."));
                 } else {
-                    ("changes entered", "are")
-                };
-                let counted = if count == 1 {
-                    changes.to_owned()
+                    loss.push(&Html::text(text(&facts["loss"])));
+                }
+            } else {
+                loss.push(&Html::text(text(&facts["loss"])));
+            }
+            warnings.insert(0, (StatusKind::Warning, loss));
+            if let (Some(count), Some(i)) = (
+                lost,
+                facts["backup_at"]
+                    .as_str()
+                    .and_then(|at| instant(display, at)),
+            ) {
+                let mut message = Html::text(&format!(
+                    "About {count} {} since ",
+                    if count == 1 {
+                        "change entered"
+                    } else {
+                        "changes entered"
+                    }
+                ));
+                message.push(&render(InstantCell {
+                    id: "software-review-loss-since".into(),
+                    i,
+                })?);
+                message.push(&Html::text(if count == 1 {
+                    " is lost (counted just now)."
                 } else {
-                    format!("{count} {changes}")
-                };
-                warnings.insert(
-                    0,
-                    (
-                        StatusKind::Warning,
-                        format!(
-                            "About {counted} since {} {verb} lost (counted just now).",
-                            crate::review::utc_text(at)
-                        ),
-                    ),
-                );
+                    " are lost (counted just now)."
+                }));
+                warnings.insert(1, (StatusKind::Warning, message));
             }
         }
         if matches!(review.kind, Kind::Install | Kind::Go)
             && instance.role == bilibi_system::Role::Production
         {
-            // The review's own Production warning is the first; it is drawn as an error so it reads as the alert it is.
             if let Some(first) = warnings.first_mut() {
                 first.0 = StatusKind::Error;
             }
         }
         let warnings: Vec<Html> = warnings
-            .iter()
+            .into_iter()
             .enumerate()
-            .map(|(index, (kind, message))| {
+            .map(|(index, (kind, body))| {
                 render(Alert {
-                    kind: *kind,
+                    kind,
                     id: &format!("software-review-warning-{index}"),
                     class: "",
-                    body: Html::text(message),
+                    body,
                 })
             })
             .collect::<Result<_>>()?;

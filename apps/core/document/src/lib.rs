@@ -1410,7 +1410,7 @@ inventory::submit! { Module {
     }}, Service { id: web::SERVICE, factory: |s| {
         Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages::new(s)?))))
     }}, Service { id: web::FILES, factory: |s| {
-        Ok(Arc::new(bilibi_ui::download::DownloadService::<Scope, Error>(Arc::new(web::Files(s.get(SERVICE)?)))))
+        Ok(Arc::new(bilibi_ui::download::DownloadService::<Scope, Error>(Arc::new(web::Files(web::Pages::new(s)?)))))
     }}, Service { id: web::PORTAL, factory: |s| {
         Ok(Arc::new(bilibi_ui::page::PageService::<PortalScope, Error>(Arc::new(web::PortalPages(s.get(SERVICE)?)))))
     }}, Service { id: web::PORTAL_FILES, factory: |s| {

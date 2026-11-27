@@ -25,6 +25,7 @@ pub(crate) struct Pages {
 #[template(path = "approvals.html")]
 struct View<'a> {
     title: &'a str,
+    timezone_request: &'a str,
     record: Option<String>,
     parts: Vec<Html>,
     dialog: Html,
@@ -155,6 +156,8 @@ struct State {
     reason: String,
     flash: Option<(StatusKind, String)>,
     error: String,
+    browser_zone: Option<String>,
+    timezone_request: String,
 }
 impl State {
     fn new(pages: &Pages, req: &PageRequest<'_, Scope>) -> Result<Self> {
@@ -236,6 +239,8 @@ impl State {
             reason: String::new(),
             flash: None,
             error: String::new(),
+            browser_zone: None,
+            timezone_request: uuid::Uuid::new_v4().to_string(),
         })
     }
     fn title(&self) -> &'static str {
@@ -589,8 +594,8 @@ impl State {
                                     )
                                     .collect(),
                             ),
-                            field("starts", "From (UTC)", "").kind(InputKind::DatetimeLocal),
-                            field("ends", "Until (UTC)", "").kind(InputKind::DatetimeLocal),
+                            field("starts", "From", "").kind(InputKind::DatetimeLocal),
+                            field("ends", "Until", "").kind(InputKind::DatetimeLocal),
                         ],
                         button("Review cover", "", "", "")?,
                         false,
@@ -1061,6 +1066,11 @@ impl State {
         };
         View {
             title: self.title(),
+            timezone_request: if self.browser_zone.is_some() {
+                ""
+            } else {
+                &self.timezone_request
+            },
             record: if self.mode == "detail" {
                 self.id.map(|id| id.to_string())
             } else {
@@ -1501,6 +1511,13 @@ impl State {
     async fn event(&mut self, request: &LiveRequest<'_, Scope>, event: &Value) -> Result<()> {
         let kind = value(event, "type");
         let input = fields(event);
+        if kind == "browser_timezone" {
+            self.browser_zone = input
+                .get("timezone")
+                .filter(|zone| bilibi_datetime::valid_timezone(zone))
+                .cloned();
+            return Ok(());
+        }
         if kind.starts_with("approval.") {
             let dialog = self.dialog.clone().ok_or(Error::Conflict)?;
             if kind != format!("approval.{}", dialog.contract) {
@@ -1829,11 +1846,34 @@ impl State {
                     .get("delegate")
                     .and_then(|v| v.parse::<i64>().ok())
                     .ok_or(Error::Invalid)?;
+                let client = self.pages.db.get().await?;
+                let locale = self
+                    .pages
+                    .locales
+                    .resolve(&**client, request.scope, None)
+                    .await?
+                    .locale;
+                let display = self
+                    .pages
+                    .display
+                    .display(&**client, request.scope, None, locale)
+                    .await?;
+                if display.mode == bilibi_datetime::Mode::Local && self.browser_zone.is_none() {
+                    return Err(Error::Invalid);
+                }
+                let clock = display.clock(self.browser_zone.as_deref(), jiff::Timestamp::now());
+                let zone = jiff::tz::TimeZone::get(&clock.timezone).map_err(|_| Error::Invalid)?;
                 let utc = |key: &str| -> Result<String> {
-                    let raw = input.get(key).ok_or(Error::Invalid)?;
-                    match raw.len() {
-                        16 => Ok(format!("{raw}:00Z")),
-                        19 => Ok(format!("{raw}Z")),
+                    let wall = input
+                        .get(key)
+                        .ok_or(Error::Invalid)?
+                        .parse::<jiff::civil::DateTime>()
+                        .map_err(|_| Error::Invalid)?;
+                    match zone.to_ambiguous_timestamp(wall).offset() {
+                        jiff::tz::AmbiguousOffset::Unambiguous { offset } => offset
+                            .to_timestamp(wall)
+                            .map(|at| at.to_string())
+                            .map_err(|_| Error::Invalid),
                         _ => Err(Error::Invalid),
                     }
                 };

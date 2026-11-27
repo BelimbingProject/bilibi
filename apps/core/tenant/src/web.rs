@@ -176,18 +176,32 @@ fn status_kind(status: TenantStatus) -> BadgeKind {
 }
 
 /// The suspension column: since when and why, or a dash while active.
-fn suspension_text(display: &DisplayContext, suspension: Option<&Suspension>) -> String {
+fn suspension_text(
+    display: &DisplayContext,
+    suspension: Option<&Suspension>,
+    id: &str,
+) -> Result<Html> {
     let Some(suspension) = suspension else {
-        return "—".into();
+        return Ok(Html::text("—"));
     };
-    match suspension.at.parse::<jiff::Timestamp>() {
-        Ok(at) => format!(
-            "{}: {}",
-            display.render(at, Format::DateTime, Precision::Minute).text,
-            suspension.reason
-        ),
-        Err(_) => suspension.reason.clone(),
+    let mut value = Html::EMPTY;
+    if let Ok(at) = suspension.at.parse::<jiff::Timestamp>() {
+        let r = display.render(at, Format::DateTime, Precision::Minute);
+        let instant = bilibi_ui::flex_table::Instant::new(
+            &r.iso,
+            &r.text,
+            &r.company,
+            &r.utc,
+            r.mode.as_str(),
+        );
+        value.push(&render(bilibi_ui::flex_table::InstantView {
+            id,
+            instant: &instant,
+        })?);
+        value.push(&Html::text(": "));
     }
+    value.push(&Html::text(&suspension.reason));
+    Ok(value)
 }
 
 /// The Suspend or Reactivate dialog while it is open: whom it is about, the
@@ -544,9 +558,11 @@ impl TenantsPage {
                 )
                 .slot(
                     "suspension",
-                    render(MutedCell {
-                        text: &suspension_text(display, row.suspension.as_ref()),
-                    })?,
+                    suspension_text(
+                        display,
+                        row.suspension.as_ref(),
+                        &format!("tenant-{}-suspended-at", row.id),
+                    )?,
                 );
             match row.status {
                 // The operator's own tenant cannot be suspended: nobody could

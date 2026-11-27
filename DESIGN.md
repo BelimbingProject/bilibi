@@ -322,6 +322,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Consistency.** Same thing, same look, same place.
 - **Sentence case.** Titles, buttons, labels, options and badges raise only the first word and names: "Set up", "Past due", "Debits equal credits", never "Set Up". The shared badge raises the first letter of a stored lower-case value ("draft" reads "Draft") and nothing else.
 - **Calm.** No urgency, no badge spam, no dark patterns.
+- **Date-times.** Show every date-time people read in the time zone selected in the top bar.
 - **Values.** Values say what they are: never show a lone code, number, date or word the reader has to decode; put what it is beside it.
 - **Details.** Every expandable summary names what it contains.
 - **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator", commands to install something are "Installation commands".

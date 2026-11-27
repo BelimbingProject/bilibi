@@ -281,7 +281,12 @@ impl Index {
             }
             calendar::SLOT => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-                if !self.pages.activities.may_create(scope).await? {
+                if !clock.ready {
+                    self.notice = Some((
+                        StatusKind::Error,
+                        "The browser time zone is not available yet. Try again.".into(),
+                    ));
+                } else if !self.pages.activities.may_create(scope).await? {
                     self.notice = Some((
                         StatusKind::Error,
                         "You do not have permission to create activities.".into(),
@@ -312,10 +317,13 @@ impl Index {
                 let form = params::form_values_checked(value, "slot", params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
                 if let Some(mut slot) = self.slot.take() {
-                    slot.read(&form, &self.zone)?;
+                    let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                    slot.read(&form, &clock)?;
+                    if !slot.errors.is_empty() {
+                        self.slot = Some(slot);
+                        return Ok(None);
+                    }
                     if self.pages.activities.may_create(scope).await? {
-                        let clock =
-                            Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                         self.dialog = Some(
                             Dialog::new(slot.kind, None)
                                 .at(slot.start, slot.end, &clock)
@@ -331,7 +339,8 @@ impl Index {
                 let Some(mut slot) = self.slot.take() else {
                     return Ok(None);
                 };
-                slot.read(&form, &self.zone)?;
+                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                slot.read(&form, &clock)?;
                 if !self.pages.activities.may_create(scope).await? {
                     self.notice = Some((
                         StatusKind::Error,
@@ -436,12 +445,16 @@ impl Index {
             }
             calendar::MOVE | calendar::MOVE_SUBMIT => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-                let outcome = match CalendarMove::from_event(value, &clock.zone) {
-                    Ok(change) => {
-                        self.reschedule(scope, credential, name, &clock, &change)
-                            .await?
+                let outcome = if !clock.ready {
+                    Err("The browser time zone is not available yet. Try again.".to_owned())
+                } else {
+                    match CalendarMove::from_event(value, &clock.zone) {
+                        Ok(change) => {
+                            self.reschedule(scope, credential, name, &clock, &change)
+                                .await?
+                        }
+                        Err(sentence) => Err(sentence),
                     }
-                    Err(sentence) => Err(sentence),
                 };
                 match outcome {
                     Ok(message) => {

@@ -8,6 +8,7 @@ use super::{
 use crate::{
     Document, Filter, Marks, Reference, Sort, Source, LIST_CATEGORY, LIST_STATUS, LIST_TYPE,
 };
+use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_records::Resolved;
 use bilibi_tenancy::Scope;
@@ -111,8 +112,19 @@ struct RowState {
     retention_due_at: Option<SystemTime>,
 }
 
+#[derive(Template)]
+#[template(
+    source = r#"<span id="documents-browser-zone" data-hook="BrowserTimeZone" data-timezone-request="{{ request }}" hidden></span>"#,
+    ext = "html"
+)]
+struct ZoneHook<'a> {
+    request: &'a str,
+}
+
 pub(crate) struct Index {
     pages: Pages,
+    browser_zone: Option<String>,
+    timezone_request: String,
     list: ListState,
     columns: ListColumns,
     related: Option<Reference>,
@@ -148,6 +160,8 @@ impl Index {
         let uploads = dialog::uploads(pages.documents.upload_limit(scope).await?);
         let mut index = Self {
             pages,
+            browser_zone: None,
+            timezone_request: uuid::Uuid::new_v4().to_string(),
             list: ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?,
             columns: columns()?,
             related: related_of(query),
@@ -255,6 +269,12 @@ impl Index {
             }
         }
         match name {
+            "browser_timezone" => {
+                self.browser_zone = value["timezone"]
+                    .as_str()
+                    .filter(|v| bilibi_datetime::valid_timezone(v))
+                    .map(str::to_owned);
+            }
             "filters" => {
                 let filters = params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
@@ -461,12 +481,10 @@ impl Index {
             )
             .slot(
                 "retention",
-                Html::text(
-                    &retention_due_at
-                        .and_then(|at| Timestamp::try_from(at).ok())
-                        .map(|at| clock.text(at))
-                        .unwrap_or_default(),
-                ),
+                match retention_due_at.and_then(|at| Timestamp::try_from(at).ok()) {
+                    Some(at) => clock.html(&format!("documents-{id}-retention"), at)?,
+                    None => Html::EMPTY,
+                },
             )
             .slot("revision", Html::text(&d.revision.to_string()))
             .slot("publish_date", Html::text(&clock.date(d.publish_date)));
@@ -558,12 +576,21 @@ impl Index {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let mut actions = render(ActionLink {
-            id: "documents-export",
-            href: &export_href(&self.query()),
-            body: Html::text("Export CSV"),
-            ..ActionLink::default()
-        })?;
+        let mut export_query = self.query();
+        if let Some(zone) = &self.browser_zone {
+            export_query.insert("browser_timezone".into(), zone.clone());
+        }
+        let mut actions =
+            if clock.0.mode == bilibi_datetime::Mode::Local && self.browser_zone.is_none() {
+                Html::EMPTY
+            } else {
+                render(ActionLink {
+                    id: "documents-export",
+                    href: &export_href(&export_query),
+                    body: Html::text("Export CSV"),
+                    ..ActionLink::default()
+                })?
+            };
         if may_manage {
             actions.push(&render(Button {
                 id: "documents-quick",
@@ -763,6 +790,13 @@ impl Index {
             )?);
         }
         body.push(&self.dialogs(&page.entries)?);
+        body.push(&render(ZoneHook {
+            request: if self.browser_zone.is_some() {
+                ""
+            } else {
+                &self.timezone_request
+            },
+        })?);
         let region = render(Region {
             id: "documents-region",
             target: false,
@@ -789,7 +823,14 @@ impl Index {
 
 fn export_href(query: &HashMap<String, String>) -> String {
     let mut pairs: Vec<String> = [
-        "search", "category", "type", "status", "show", "expiry", "related",
+        "search",
+        "category",
+        "type",
+        "status",
+        "show",
+        "expiry",
+        "related",
+        "browser_timezone",
     ]
     .iter()
     .filter_map(|key| {

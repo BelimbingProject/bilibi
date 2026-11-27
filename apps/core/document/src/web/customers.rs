@@ -192,7 +192,7 @@ impl Sharing {
         for (share, resolved) in shares.iter().zip(&named) {
             let mut value =
                 render(resolved.pill(format!("document-customer-{}-record", share.id), framed))?;
-            value.push(&Html::text(&ends(clock, share)));
+            value.push(&ends(clock, share)?);
             value.push(&render(Button {
                 id: &format!("document-customer-{}-remove", share.id),
                 button_type: "button",
@@ -271,10 +271,15 @@ impl Sharing {
 }
 
 /// When a share ends, as the access list says it.
-fn ends(clock: &Clock, share: &CustomerShare) -> String {
-    match share.expires_at {
-        None => " · No end".into(),
-        Some(until) if until <= jiff::Timestamp::now() => format!(" · Ended {}", clock.text(until)),
-        Some(until) => format!(" · Until {}", clock.text(until)),
-    }
+fn ends(clock: &Clock, share: &CustomerShare) -> Result<Html> {
+    let Some(until) = share.expires_at else {
+        return Ok(Html::text(" · No end"));
+    };
+    let mut value = Html::text(if until <= jiff::Timestamp::now() {
+        " · Ended "
+    } else {
+        " · Until "
+    });
+    value.push(&clock.html(&format!("document-customer-{}-until", share.id), until)?);
+    Ok(value)
 }

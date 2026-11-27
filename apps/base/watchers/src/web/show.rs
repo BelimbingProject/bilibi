@@ -384,18 +384,19 @@ impl Show {
             })?);
             html
         };
-        let drafted = format!(
-            "{}{}, {}",
+        let mut drafted = Html::text(&format!(
+            "{}{}, ",
             version.drafted_by,
             if version.drafted_via == "agent" {
                 "'s AI agent"
             } else {
                 ""
-            },
-            display
-                .render(version.drafted_at, Format::DateTime, Precision::Minute)
-                .text
-        );
+            }
+        ));
+        drafted.push(&render(InstantCell {
+            id: &format!("{dom}-drafted-at"),
+            i: instant(display, version.drafted_at),
+        })?);
         let mut items = vec![Fact {
             title: "Watch",
             id: "",
@@ -448,17 +449,18 @@ impl Show {
         items.push(Fact {
             title: "Drafted",
             id: "",
-            value: Html::text(&drafted),
+            value: drafted,
         });
         if let (Some(by), Some(at)) = (&version.approved_by, version.approved_at) {
-            let approved = format!(
-                "{by}, {}",
-                display.render(at, Format::DateTime, Precision::Minute).text
-            );
+            let mut approved = Html::text(&format!("{by}, "));
+            approved.push(&render(InstantCell {
+                id: &format!("{dom}-approved-at"),
+                i: instant(display, at),
+            })?);
             items.push(Fact {
                 title: "Approved",
                 id: "",
-                value: Html::text(&approved),
+                value: approved,
             });
         }
         let mut body = heading;
@@ -613,7 +615,10 @@ impl Show {
             WatcherState::Off => Html::text("Off"),
         };
         let last = match view.summary.last_run {
-            Some(at) => Html::text(&display.render(at, Format::DateTime, Precision::Minute).text),
+            Some(at) => render(InstantCell {
+                id: "watcher-last-run",
+                i: instant(&display, at),
+            })?,
             None => Html::text("Not yet"),
         };
         let mut summary_body = render(SectionHeading {

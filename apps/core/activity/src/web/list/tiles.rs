@@ -50,7 +50,7 @@ impl Slot {
     pub(super) fn read(
         &mut self,
         form: &std::collections::HashMap<String, String>,
-        zone: &super::BrowserZone,
+        clock: &Clock,
     ) -> Result<()> {
         self.errors.clear();
         self.notice.clear();
@@ -60,11 +60,6 @@ impl Slot {
         if let Some(kind) = form.get("kind").and_then(|kind| Kind::parse(kind)) {
             self.kind = kind;
         }
-        // Only the zone is read here, to parse a typed time.
-        let clock = Clock {
-            display: bilibi_datetime::DisplayContext::anonymous(),
-            zone: zone.zone.clone().unwrap_or_else(|| "UTC".to_owned()),
-        };
         let mut time = |key: &str| -> Result<Option<jiff::Timestamp>> {
             match clock.parse(form.get(key).map(String::as_str).unwrap_or_default()) {
                 Ok(at) => Ok(at),
