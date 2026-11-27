@@ -105,7 +105,7 @@ impl UserService {
             .sql()
             .query_opt(
                 "SELECT last_desk_id FROM users WHERE tenant_id=$1 AND id=$2 AND kind='staff'
-                 AND person_id IS NOT DISTINCT FROM $3 FOR UPDATE",
+                 AND person_id IS NOT DISTINCT FROM $3 FOR NO KEY UPDATE",
                 &[&tenant, &user, &person],
             )
             .await
