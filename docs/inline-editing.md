@@ -36,7 +36,7 @@ never ends that state. The displayed value is always the server's
 `data-value`: the hook never paints typed text, so a refused save leaves the
 stored value on screen.
 
-A date-time editor shows the time zone captured when the draft opens and sends it with the commit. Use that zone to interpret the input even if the reader changes the top-bar setting during the edit. When checking for a conflict, compare the original against the current value expressed in the draft’s zone.
+A date-time editor shows the time zone captured when the draft opens and sends it with the commit. Use that zone to interpret the input even if the reader changes the top-bar setting during the edit. For conflict checks, send the exact instant stored when editing began. Compare it with the current stored instant so two occurrences of the same clock time during a daylight-saving change still count as different.
 
 ## Owner responsibilities
 

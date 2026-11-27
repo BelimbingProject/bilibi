@@ -135,11 +135,7 @@ impl Clock {
     }
     /// The value of a `datetime-local` field.
     pub fn local(&self, at: Option<Timestamp>) -> String {
-        Self::local_in_zone(at, self.tz())
-    }
-
-    fn local_in_zone(at: Option<Timestamp>, zone: TimeZone) -> String {
-        at.map(|t| t.to_zoned(zone).strftime("%Y-%m-%dT%H:%M").to_string())
+        at.map(|t| t.to_zoned(self.tz()).strftime("%Y-%m-%dT%H:%M").to_string())
             .unwrap_or_default()
     }
     pub fn parse(&self, value: &str) -> std::result::Result<Option<Timestamp>, ()> {

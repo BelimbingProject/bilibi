@@ -173,9 +173,11 @@
       const draft = this.draft || {
         value: current,
         original: current,
+        comparison: this.el.dataset.comparisonValue ?? current,
         timezone: this.el.dataset.timezone,
       };
       this.original = draft.original;
+      this.comparison = draft.comparison;
       this.timezone = draft.timezone;
       this.openedPendingValue = this.pending.has(draft) ? draft.value : undefined;
       const input = this.control();
@@ -213,7 +215,9 @@
         this.cancel(returnFocus);
         return;
       }
-      const draft = {value, original: this.original, timezone: this.timezone};
+      const draft = {
+        value, original: this.original, comparison: this.comparison, timezone: this.timezone,
+      };
       this.draft = draft;
       this.active = false;
       this.pending.add(draft);
@@ -222,9 +226,9 @@
       if (returnFocus) this.trigger()?.focus();
       this.emit(this.el.dataset.saveEvent, {
         id: this.el.dataset.id, field: this.el.dataset.field, value,
-        fact: this.el.id, original: draft.original,
+        fact: this.el.id, original: draft.comparison,
         ...(draft.timezone ? {timezone: draft.timezone} : {}),
-        prepareOriginal: () => draft.original,
+        prepareOriginal: () => draft.comparison,
         onReply: (reply) => {
           this.pending.delete(draft);
           if (!this.el.isConnected) return;
@@ -232,9 +236,16 @@
             if (this.draft === draft) this.message(reply.message || 'The change was not confirmed. Open the field to retry, or press Escape to discard the draft.');
           } else if (this.el.dataset.status === 'saved') {
             if (this.el.dataset.value === draft.value && this.el.dataset.timezone === draft.timezone) {
-              if (this.active && this.timezone === draft.timezone && this.original === draft.original) this.original = draft.value;
+              const comparison = this.el.dataset.comparisonValue ?? draft.value;
+              if (this.active && this.timezone === draft.timezone && this.comparison === draft.comparison) {
+                this.original = draft.value;
+                this.comparison = comparison;
+              }
               for (const pending of this.pending) {
-                if (pending.timezone === draft.timezone && pending.original === draft.original) pending.original = draft.value;
+                if (pending.timezone === draft.timezone && pending.comparison === draft.comparison) {
+                  pending.original = draft.value;
+                  pending.comparison = comparison;
+                }
               }
             }
             if (this.draft === draft) this.draft = null;

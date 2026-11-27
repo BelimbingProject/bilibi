@@ -891,9 +891,7 @@ impl Detail {
         let mut field = self
             .inline(words, a, key, clock.local(at), editable)
             .input_type("datetime-local");
-        field.comparison_value = bilibi_ui::inline::InlineRead::draft_timezone(&field.id)
-            .and_then(|zone| jiff::tz::TimeZone::get(&zone).ok())
-            .map(|zone| Clock::local_in_zone(at, zone));
+        field.comparison_value = Some(at.map(|at| at.to_string()).unwrap_or_default());
         field.timezone = if clock.ready {
             clock.zone.clone()
         } else {

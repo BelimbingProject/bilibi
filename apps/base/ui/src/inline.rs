@@ -114,7 +114,6 @@ pub struct InlineRead {
     pub field: String,
     pub event: String,
     pub original: String,
-    pub timezone: Option<String>,
     pub version: Option<String>,
     pub conflict: bool,
     pub stale: bool,
@@ -122,19 +121,6 @@ pub struct InlineRead {
 }
 
 impl InlineRead {
-    pub fn draft_timezone(fact: &str) -> Option<String> {
-        INLINE_READ
-            .try_with(|read| {
-                let read = read.borrow();
-                if read.writing || read.fact != fact {
-                    return None;
-                }
-                read.timezone.clone()
-            })
-            .ok()
-            .flatten()
-    }
-
     pub fn mark_stale() -> bool {
         INLINE_READ
             .try_with(|read| {
@@ -163,7 +149,6 @@ pub struct InlineField {
     pub name: String,
     pub label: String,
     pub value: String,
-    /// The current value expressed in the draft's original time zone.
     pub comparison_value: Option<String>,
     /// Optional read text when the editor value has a native input format.
     pub display_value: Option<String>,
