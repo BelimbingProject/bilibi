@@ -198,7 +198,10 @@ impl bilibi_queue::Handler for ScanJob {
                     | bilibi_database::Error::Unauthorized,
                 ) => bilibi_queue::Outcome::Cancel("scan_refused"),
                 Err(error) => {
-                    eprintln!("error: document scan settlement: {error}");
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "error: document scan settlement: {error}"
+                    );
                     bilibi_queue::Outcome::Retry("scan_settlement_failed")
                 }
             }

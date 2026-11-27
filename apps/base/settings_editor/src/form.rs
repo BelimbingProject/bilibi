@@ -11,7 +11,7 @@
 //! mask means "unchanged".
 use bilibi_authz::effective_capabilities;
 use bilibi_database::Result;
-use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Settings, Target, ValueType};
+use bilibi_settings::{Definition, Editor, ScopeKind, Settings, Target, ValueType};
 use bilibi_tenancy::Scope;
 use bilibi_ui::SECRET_MASK;
 use serde_json::Value;
@@ -81,7 +81,7 @@ pub async fn plan(
     let mut visible = Vec::new();
     let mut withheld = BTreeSet::new();
     for owned in settings.definitions().all() {
-        let Setting::Definition(definition) = owned.setting else {
+        let Some(definition) = owned.setting.definition() else {
             continue;
         };
         let Some(editor) = definition.editor.as_ref() else {

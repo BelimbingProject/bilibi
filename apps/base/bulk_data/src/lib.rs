@@ -493,7 +493,8 @@ impl BulkData {
             Err(error) => {
                 // A content-free code: the folder is missing or unsafe, or the
                 // disk refused the write.
-                eprintln!(
+                bilibi_module_registry::server_log!(
+                    Error,
                     "error: an import file could not be stored as a private document: {}",
                     error.code()
                 );

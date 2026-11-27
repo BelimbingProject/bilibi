@@ -241,7 +241,10 @@ impl PortalService {
                     .deliver_linked_for(tenant, &message, Some(&link))
                     .await
                 {
-                    eprintln!("mail: a registration verification was not delivered: {error}");
+                    bilibi_module_registry::server_log!(
+                        Warning,
+                        "mail: a registration verification was not delivered: {error}"
+                    );
                 }
             });
         });

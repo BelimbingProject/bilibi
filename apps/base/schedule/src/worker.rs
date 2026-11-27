@@ -331,7 +331,11 @@ impl Schedule {
         match result {
             Ok(id) => Some(id),
             Err(_) => {
-                eprintln!("schedule recorder start_unavailable: key={}", metadata.key);
+                bilibi_module_registry::server_log!(
+                    Error,
+                    "schedule recorder start_unavailable: key={}",
+                    metadata.key
+                );
                 None
             }
         }
@@ -392,7 +396,11 @@ impl Schedule {
         }
         .await;
         if result.is_err() {
-            eprintln!("schedule recorder finish_unavailable: key={}", metadata.key);
+            bilibi_module_registry::server_log!(
+                Error,
+                "schedule recorder finish_unavailable: key={}",
+                metadata.key
+            );
         }
     }
 }

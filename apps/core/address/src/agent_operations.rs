@@ -441,6 +441,13 @@ impl WriteHandler for Action {
             _ => None,
         }
     }
+    fn accepts_references(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::CreateAttached(OwnerKind::Company) => &[("company_id", "company")],
+            Self::CreateAttached(OwnerKind::Person) => &[("person_id", "person")],
+            _ => &[],
+        }
+    }
     fn preview_dependent<'a>(
         &'a self,
         client: &'a dyn OperationClient,
@@ -449,12 +456,7 @@ impl WriteHandler for Action {
         references: &'a bilibi_agent_api::PlanReferences,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let allowed = match self {
-                Self::CreateAttached(OwnerKind::Company) => ("company_id", "company"),
-                Self::CreateAttached(OwnerKind::Person) => ("person_id", "person"),
-                _ => return Err(Error::Invalid.into()),
-            };
-            references.require(&[allowed])?;
+            references.require(self.accepts_references())?;
             Ok(owner()?
                 .operation_preview(
                     client.sql_client().await?,

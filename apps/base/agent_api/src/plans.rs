@@ -292,6 +292,9 @@ impl Plans {
         if references.is_empty() {
             crate::schema::validate(&registered.input, &op.input).map_err(Error::InvalidInput)?;
         } else {
+            if let Handler::SafeWrite(owner) = registered.definition.handler {
+                crate::plan_references::supported(owner, &op.key, references, "")?;
+            }
             crate::schema::validate_plan(
                 &registered.input,
                 &op.input,
@@ -441,7 +444,7 @@ impl Plans {
             let Handler::SafeWrite(owner) = registered.definition.handler else {
                 return Err(Error::WritesNotEnabled);
             };
-            let input = crate::plan_references::resolve(&op.input, &committed)?;
+            let input = crate::plan_references::resolve(&registered.input, &op.input, &committed)?;
             crate::schema::validate(&registered.input, &input).map_err(Error::InvalidInput)?;
             let result = owner
                 .commit_prepared(&mut tx, &work_scope, &input, prepared[index].as_ref())

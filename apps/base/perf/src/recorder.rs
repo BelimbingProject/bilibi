@@ -109,6 +109,7 @@ pub struct Stats {
 }
 
 pub struct Recorder {
+    pub(crate) diagnostics: crate::diagnostics::Ingress,
     sender: mpsc::Sender<Sample>,
     receiver: Mutex<Option<mpsc::Receiver<Sample>>>,
     policy: Policy,
@@ -125,6 +126,7 @@ impl Recorder {
         let config = config.validate()?;
         let (sender, receiver) = mpsc::channel(config.max_pending);
         Ok(Self {
+            diagnostics: crate::diagnostics::Ingress::new(),
             sender,
             receiver: Mutex::new(Some(receiver)),
             policy: Policy {
@@ -208,9 +210,14 @@ impl Recorder {
             .map_err(|_| Error::Internal)?
             .take()
             .ok_or(Error::Invalid)?;
+        let diagnostics = self.diagnostics.take()?;
         self.running.store(true, Ordering::Relaxed);
         let mut tasks = JoinSet::new();
         tasks.spawn(self.clone().write(receiver, shutdown.clone()));
+        tasks.spawn(
+            self.clone()
+                .write_diagnostics(diagnostics, shutdown.clone()),
+        );
         tasks.spawn(self.clone().housekeeping(shutdown));
         let mut failed = false;
         while let Some(result) = tasks.join_next().await {
@@ -395,6 +402,15 @@ impl Recorder {
                 &[&max_rows],
             )
             .await?;
-        Ok(expired + overflow)
+        let keep_diagnostics = self
+            .settings
+            .get_global(&**client, crate::diagnostics::KEEP_DAYS)
+            .await?;
+        let days = keep_diagnostics
+            .as_i64()
+            .filter(|days| (1..=3650).contains(days))
+            .ok_or(Error::Invalid)?;
+        let diagnostics = client.execute("DELETE FROM base_perf_diagnostics WHERE last_seen < now() - $1::bigint * interval '1 day'", &[&days]).await?;
+        Ok(expired + overflow + diagnostics)
     }
 }

@@ -242,7 +242,7 @@ impl Supervisor {
                     let id = match &ended { Ok((id, _)) => *id, Err(error) => error.id() };
                     let Some(which) = running.remove(&id) else { continue };
                     if *shutdown.borrow() { break; }
-                    eprintln!("resident {which:?} loop ended; restarting it");
+                    bilibi_module_registry::server_log!(Error,"resident {which:?} loop ended; restarting it");
                     let stop = match which { Loop::Claims => &shutdown, Loop::Heartbeats => &quieted };
                     self.start(&mut loops, &mut running, which, stop, true);
                 }
@@ -312,7 +312,10 @@ impl Supervisor {
                         readings.spawn(self.clone().hold(claim, claimed_at, stop.clone()));
                     }
                 }
-                _ => eprintln!("resident claim infrastructure unavailable"),
+                _ => bilibi_module_registry::server_log!(
+                    Error,
+                    "resident claim infrastructure unavailable"
+                ),
             }
             tokio::select! {
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
@@ -362,7 +365,10 @@ impl Supervisor {
             let answer = match answer {
                 Ok(Ok(answer)) => Some(answer),
                 _ => {
-                    eprintln!("resident heartbeat infrastructure unavailable");
+                    bilibi_module_registry::server_log!(
+                        Error,
+                        "resident heartbeat infrastructure unavailable"
+                    );
                     None
                 }
             };
@@ -484,9 +490,11 @@ impl Supervisor {
         };
         let (delay, failures, code) = match finish {
             Finish::Lost => {
-                eprintln!(
+                bilibi_module_registry::server_log!(
+                    Error,
                     "resident reader {} reading {} lost its lease",
-                    claim.reader, claim.id
+                    claim.reader,
+                    claim.id
                 );
                 (Duration::ZERO, claim.failures, None)
             }
@@ -494,9 +502,11 @@ impl Supervisor {
             Finish::Closed => (self.config.restart_delay, kept, None),
             Finish::Failed(code) => {
                 let failures = kept.saturating_add(1);
-                eprintln!(
+                bilibi_module_registry::server_log!(
+                    Error,
                     "resident reader {} reading {} failed: {code}",
-                    claim.reader, claim.id
+                    claim.reader,
+                    claim.id
                 );
                 (self.backoff(failures), failures, Some(code))
             }
@@ -511,9 +521,11 @@ impl Supervisor {
             Ok(Ok(_))
         ) {
             // The lease expires on its own and the next poll takes it over.
-            eprintln!(
+            bilibi_module_registry::server_log!(
+                Error,
                 "resident reader {} reading {} could not hand its lease back",
-                claim.reader, claim.id
+                claim.reader,
+                claim.id
             );
         }
     }

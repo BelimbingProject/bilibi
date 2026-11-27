@@ -12,14 +12,16 @@ class Element {
   constructor(tag) {
     Object.assign(this, {
       tag, children: [], events: {}, dataset: {}, disabled: false,
-      style: { setProperty() {} }, classList: { add() {} },
+      style: { setProperty() {} }, classList: { add() {}, remove() {}, contains: () => false },
     });
   }
   append(...children) { this.children.push(...children); }
+  prepend(...children) { this.children.unshift(...children); }
   replaceChildren(...children) { this.children = children; }
   addEventListener(name, listener) { this.events[name] = listener; }
   setAttribute(name, value) { this[name] = value; }
   focus() {}
+  contains(other) { return this === other || this.children.some(child => child.contains?.(other)); }
   querySelector() { return null; }
   querySelectorAll(tags) {
     return this.children.flatMap(child => [
@@ -42,10 +44,10 @@ for (const mode of ['single', 'linked', 'grid']) {
   const turn = () => new Promise(resolve => setImmediate(resolve));
   const document = {
     body: node('body'), documentElement: node('html'), getElementById: node,
-    createElement: tag => new Element(tag),
+    createElement: tag => new Element(tag), addEventListener() {},
   };
   runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], {
-    window: { addEventListener: (_, listener) => { receive = listener; } },
+    window: { addEventListener: (name, listener) => { if (name === 'message') receive = listener; } },
     document, parent, crypto: webcrypto, Uint8Array, setTimeout, clearTimeout,
     setInterval() {}, ResizeObserver: class { observe() {} }, matchMedia: () => ({ matches: false }),
   });
@@ -62,8 +64,13 @@ for (const mode of ['single', 'linked', 'grid']) {
 
   async function checkPlan(expected) {
     let plan;
-    for (let i = 0; i < 20 && !plan; i++) {
+    // The card checks the current draft by itself shortly after it opens or is edited.
+    for (let i = 0; i < 400 && !plan; i++) {
       await new Promise(resolve => setTimeout(resolve, 5));
+      const status = outgoing.findIndex(message => message.params?.name === 'review_status');
+      if (status >= 0) {
+        send({ id: outgoing.splice(status, 1)[0].id, result: { structuredContent: { status: 'open' } } });
+      }
       plan = outgoing.find(message => message.params?.name === 'plan');
     }
     assert(plan, 'the card must still be able to run a dry run');
@@ -97,9 +104,13 @@ for (const mode of ['single', 'linked', 'grid']) {
     node('add').events.click();
     assert(!controls().some(control => control.id === 'field-' + entries.length + '-value'));
     entries.push({});
+    await checkPlan(entries);
+  } else {
+    // Choosing an unavailable key is not an edit, so nothing is checked or sent.
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    assert(!outgoing.some(message => message.params?.name === 'plan'));
+    assert(!JSON.stringify(outgoing).includes(secret));
   }
-  node('update').events.click();
-  await checkPlan(entries);
   if (mode !== 'linked') {
     const last = entries.length - 1;
     const newKey = controls().find(control => control.id === 'field-' + last + '-key');
@@ -109,7 +120,6 @@ for (const mode of ['single', 'linked', 'grid']) {
     newValue.value = 'new row value';
     newValue.events.input();
     entries[last] = { key: plain, value: newValue.value };
-    node('update').events.click();
     await checkPlan(entries);
   }
 }

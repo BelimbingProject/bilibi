@@ -24,6 +24,7 @@ Not here: pulling in outside calendars (Google, Outlook, iCalendar subscriptions
 | Anyone who may view the related record | Only when the activity is **shared** (`shared = true`, which needs a related record) |
 | Holder of `core.activity.all.view` | Every activity of the tenant (oversight; no contributed role holds it). With reach "my team's" (#683), those assigned to someone in one of the reader's Core teams; "mine" adds nothing |
 
+- **Private is not "only me".** An unshared activity is still read by its creator, assignee and account guests, and by oversight readers. The operation schemas label `shared` (`x-bilibi-boolean-labels`) with exactly this audience, so the agent review card says it: Shared, "people who can view the related record can read it, as well as you, the assignee and invited colleagues"; Private, "not shown to readers of the related record; you, the assignee, invited colleagues and people allowed to oversee activities can still read it". A new note about a contact (a related person) opens as Shared; every other new activity opens as Private; an explicit choice always wins.
 - The same rule answers every read: `get`, the list, panels, the agent operations, `base/records` pills and the bell. A shared activity counts when the related record's owner answers `Readable` for the reader (`RecordOwner::authorize`).
 - The list without a record filter shows the activities you take part in. Shared activities on a record show on that record's panel and on `/activities?related=<kind>:<id>`, after `base/records.check` of the record for you.
 - Reports (Grid table `activities`, capability `core.activity.view`) read only the activities the reader takes part in; the shared rule needs the owner's record check, which a Grid source cannot ask.
@@ -47,7 +48,7 @@ Not here: pulling in outside calendars (Google, Outlook, iCalendar subscriptions
 | `due_at`, `start_at` | Tasks, optional; `start_at` not after `due_at` |
 | `call_outcome`, `description`, `internal_notes` | Plain text; internal notes are never sent to guests |
 | `related_kind`, `related_id` | The `base/records` reference, both or neither |
-| `shared` | Readers of the related record see it too. Default `false` |
+| `shared` | Readers of the related record see it too. Default `false`, except that `core.activity.create_note` about a person (a contact) with no `shared` creates a shared note; private is the explicit `false`. The pages always send the creator's choice |
 | `assignee_user_id` | An active account of the tenant; the creator by default |
 | `reminded_at` | When the sweep last reminded; cleared, with the offsets already reminded at, when `starts_at`, `due_at` or the assignee changes |
 | `reminder_minutes`, `reminder_email` | Its own reminders ([Reminders](#reminders)): up to five offsets in minutes before (0–10,080), `[]` for none, `NULL` for the default; whether each reminder is also emailed, `NULL` for the default |

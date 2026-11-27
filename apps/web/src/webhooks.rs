@@ -271,7 +271,8 @@ impl Boundary {
             let payload =
                 json!({"handler": handler, "reason": reason, "result": "refused", "count": count});
             if let Err(error) = self.record(None, payload).await {
-                eprintln!(
+                bilibi_module_registry::server_log!(
+                    Warning,
                     "warning: aggregated webhook refusals for {handler} were not audited: {error}"
                 );
             }
