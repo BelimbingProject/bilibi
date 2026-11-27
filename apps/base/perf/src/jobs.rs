@@ -16,10 +16,14 @@ inventory::submit! { Contribution::new(OBSERVERS, "base/perf", Provenance { modu
 
 pub(crate) struct Jobs(pub Arc<Recorder>);
 impl Observer for Jobs {
+    fn infrastructure_failure(&self) {
+        self.0.diagnostic(crate::Diagnostic::JobError);
+    }
     fn observe<'a>(&'a self, job: JobFacts, work: HandlerFuture<'a>) -> HandlerFuture<'a> {
         Box::pin(async move {
             let last = job.attempt >= job.max_attempts;
-            self.0
+            let result = self
+                .0
                 .observe(Kind::Job, Some(&job.worker_id), work, |returned| {
                     Finish::outcome(match returned {
                         Returned::Completed => Outcome::Ok,
@@ -28,7 +32,11 @@ impl Observer for Jobs {
                         Returned::Retry(_) => Outcome::Error,
                     })
                 })
-                .await
+                .await;
+            if matches!(result, Returned::Retry(_)) {
+                self.0.diagnostic(crate::Diagnostic::JobError);
+            }
+            result
         })
     }
 }

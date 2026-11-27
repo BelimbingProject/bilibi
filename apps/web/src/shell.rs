@@ -333,11 +333,13 @@ async fn context<'a>(
     let mut notifications = Html::default();
     let mut records = Html::default();
     let mut ai = Html::default();
+    let mut diagnostics = Html::default();
     for slot in embeds(app)? {
         let rendered = match slot.embed.slot {
             "shell.notifications" => &mut notifications,
             "shell.search.records" => &mut records,
             "shell.ai" => &mut ai,
+            "shell.diagnostics" => &mut diagnostics,
             _ => continue,
         };
         if permits(app, scope, slot.embed.access).await? {
@@ -413,6 +415,7 @@ async fn context<'a>(
         navigation: bilibi_ui::navigation(&nodes, true).map_err(|_| Error::Internal)?,
         notifications,
         ai,
+        diagnostics,
         home,
         served_routes: serde_json::to_string(served).map_err(|_| Error::Internal)?,
         pins: serde_json::to_string(&pins).map_err(|_| Error::Internal)?,

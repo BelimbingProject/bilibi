@@ -1121,6 +1121,8 @@ impl<S: Side> Session<S> {
                 Err(error) => {
                     if crate::server_fault(&error) {
                         eprintln!("error: live shell panel {id} failed to refresh: {error:?}");
+                        app.perf
+                            .diagnostic(bilibi_base::perf::Diagnostic::LiveError);
                     }
                 }
             }
@@ -1323,6 +1325,8 @@ impl<S: Side> Session<S> {
                 Err(error) => {
                     if crate::server_fault(&error) {
                         eprintln!("error: live panel {id} on {} failed: {error:?}", self.path);
+                        app.perf
+                            .diagnostic(bilibi_base::perf::Diagnostic::LiveError);
                     }
                     self.panels.remove(&id);
                     messages.push(json!({"type":"error", "target":id, "message":error.to_string(), "clear":true}));
@@ -1431,7 +1435,7 @@ impl<S: Side> Session<S> {
         self.uploads = next;
         if let Some(staging) = &staging {
             for registration in &mut registrations {
-                self.stage(staging, S::scope(&scope), target, registration)
+                self.stage(app, staging, S::scope(&scope), target, registration)
                     .await?;
             }
         }
@@ -1446,6 +1450,7 @@ impl<S: Side> Session<S> {
     /// there, or, when every byte is there and hashes as announced, nothing.
     async fn stage(
         &mut self,
+        app: &App,
         staging: &Staging,
         scope: &Scope,
         target: &str,
@@ -1489,6 +1494,8 @@ impl<S: Side> Session<S> {
             }
             Err(error) => {
                 eprintln!("error: an upload could not be staged: {error:?}");
+                app.perf
+                    .diagnostic(bilibi_base::perf::Diagnostic::LiveError);
                 None
             }
         };
@@ -1986,6 +1993,8 @@ pub async fn run<S: Side>(
             Ok(messages) => (messages, false),
             Err(error) => {
                 if crate::server_fault(&error) {
+                    app.perf
+                        .diagnostic(bilibi_base::perf::Diagnostic::LiveError);
                     eprintln!(
                         "error: live {target} event on {} failed: {error:?}",
                         session.path

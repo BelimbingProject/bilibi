@@ -314,6 +314,8 @@ async fn instance_badge(app: &App) -> std::result::Result<Html, HttpError> {
         Ok(instance) => Ok(instance.badge().map_err(|_| Error::Internal)?),
         Err(error) => {
             eprintln!("warning: instance lookup failed: {error:?}");
+            app.perf
+                .diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
             Ok(Html::default())
         }
     }
@@ -513,6 +515,8 @@ async fn login_workspace(app: &App) -> LoginWorkspace {
         Ok(None) => LoginWorkspace::NotProvisioned,
         Err(error) => {
             eprintln!("warning: platform operator company lookup failed: {error:?}");
+            app.perf
+                .diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
             match error {
                 Error::Database(_) | Error::Pool(_) => LoginWorkspace::DatabaseUnavailable,
                 _ => LoginWorkspace::InvariantViolation,

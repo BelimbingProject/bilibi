@@ -182,6 +182,7 @@ fn flush(app: &App, closed: Counts) {
         return;
     }
     let db = app.db.clone();
+    let perf = app.perf.clone();
     tokio::spawn(async move {
         for ((endpoint, status), count) in closed {
             let payload = json!({"endpoint": endpoint, "status": status, "result": "refused", "count": count});
@@ -201,6 +202,7 @@ fn flush(app: &App, closed: Counts) {
             };
             if let Err(error) = written {
                 eprintln!("warning: aggregated agent edge refusals for {endpoint} were not audited: {error}");
+                perf.diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
             }
         }
     });

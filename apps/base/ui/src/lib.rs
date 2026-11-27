@@ -134,7 +134,7 @@ pub use lists::{
 pub use page_search::{page_search, RecordGroup, RecordHit, SearchPage, SearchRecords};
 pub use settings::{SettingsTab, SETTINGS_LOCATION};
 pub use specimen::ComponentsSpecimen;
-pub use statusbar::StatusbarTag;
+pub use statusbar::{StatusbarPanel, StatusbarTag};
 pub use step_up_gate::StepUpGate;
 pub use upload::{
     ChunkOutcome, ClientEntry, FileInput, Registration, UploadBudget, UploadEntry, UploadError,

@@ -1,6 +1,6 @@
 # Perf history
 
-**Use it for:** the timing history of requests, live events, jobs and processes, and the Performance page.
+**Use it for:** the timing history of requests, live events, jobs and processes, the Performance page, and bounded server diagnostics.
 
 **Not for:** timing logs or a metrics table of your own.
 
@@ -87,3 +87,11 @@ because it truncates `base_perf_samples`:
 BILIBI_DISPOSABLE_PERF_DEMO=yes DATABASE_URL=postgres://... \
   cargo run -p bilibi-perf --example perf-walkthrough
 ```
+
+## Server diagnostics
+
+The status bar shows recent server errors and warnings to platform operators with `admin.system.perf.view` (included in the System Viewer role). Its panel links to the read-only Diagnostics list. The shell refreshes the panel with its normal live refresh; an empty store draws no tag.
+
+Request and live-event failure logging and Queue's job observer submit predefined diagnostic messages through the recorder's bounded, best-effort queue. Messages deliberately contain no error strings, request bodies, credentials or identifiers; stderr remains the place for the original logs. Each severity and source has one row with count, first and last seen, and the latest safe message. The writer and the existing Perf retention job remove expired rows using `diagnostics.keep_days` (default seven). Reads hide expired rows even before pruning. Diagnostics do not depend on the performance sampling settings. A full queue or unavailable database can drop diagnostics rather than delay the work.
+
+Other modules can contribute `DiagnosticProvider` to `DIAGNOSTIC_PROVIDERS` through the module registry. Providers must return bounded, non-sensitive installation-wide facts; the UI rechecks operator access before each read.

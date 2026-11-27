@@ -9,9 +9,8 @@
 use askama::Template;
 
 /// The button in the status bar. `quiet` draws the faint border of an idle
-/// state (no AI app connected); otherwise the tag is in the success colours
-/// (`success-surface`, DESIGN.md) because the state it names is a live
-/// connection.
+/// state (no AI app connected). The `on`, `warning` and `error` states use
+/// their matching semantic colours; other active states are neutral.
 /// `title` is the tooltip and the accessible name, so it names the state in
 /// words ("No AI app connected" or "Claude · last used 5 min ago").
 #[derive(Template, Debug, Default)]
@@ -28,4 +27,20 @@ pub struct StatusbarTag<'a> {
     /// A word for the state, stamped as `data-state` for styling and proof.
     pub state: &'a str,
     pub quiet: bool,
+}
+
+/// A shell-mounted status bar tag and its shared disclosure panel. Keep the
+/// root even when empty so the live shell can show a newly arrived status.
+#[derive(Template, Debug)]
+#[template(
+    source = r#"{% import "feedback.html" as fb %}<div id="{{ id }}" data-target="{{ id }}" class="relative flex shrink-0 items-center">{% if visible %}{{ tag|safe }}{% call fb::statusbar_panel(id=panel_id, label=label) %}<div class="max-h-[70vh] space-y-2 overflow-y-auto p-3">{{ body|safe }}</div>{% endcall %}{% endif %}</div>"#,
+    ext = "html"
+)]
+pub struct StatusbarPanel<'a> {
+    pub id: &'a str,
+    pub panel_id: &'a str,
+    pub label: &'a str,
+    pub visible: bool,
+    pub tag: crate::Html,
+    pub body: crate::Html,
 }

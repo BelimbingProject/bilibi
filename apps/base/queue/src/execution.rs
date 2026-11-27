@@ -108,6 +108,8 @@ pub struct JobFacts {
 /// timeout, shutdown) the wrapped future is dropped with it.
 pub trait Observer: Send + Sync {
     fn observe<'a>(&'a self, job: JobFacts, work: HandlerFuture<'a>) -> HandlerFuture<'a>;
+    /// Observe an executor infrastructure failure without altering the work.
+    fn infrastructure_failure(&self) {}
 }
 pub struct ObserverService(pub Arc<dyn Observer>);
 /// Contributed to `OBSERVERS` by a module that measures jobs (Perf). Its `service`
@@ -402,6 +404,11 @@ pub struct Executor {
     config: Config,
 }
 impl Executor {
+    fn report_infrastructure_failure(&self) {
+        for observer in &self.observers {
+            observer.0.infrastructure_failure();
+        }
+    }
     /// Call after Services::install: owners are upstream of Queue and bind their
     /// handler services during boot. Missing/foreign bindings fail before work.
     pub fn from_services(services: &Services, config: Config) -> Result<Arc<Self>> {
@@ -510,6 +517,7 @@ impl Executor {
                     let id = match &ended { Ok((id, _)) => *id, Err(error) => error.id() };
                     let Some(which) = running.remove(&id) else { continue };
                     eprintln!("queue {which:?} loop ended; restarting it");
+                    self.report_infrastructure_failure();
                     self.start(&mut slots, &mut running, which, &shutdown, true);
                 }
             }
@@ -558,10 +566,14 @@ impl Executor {
                         continue;
                     }
                     eprintln!("queue execution infrastructure unavailable");
+                    self.report_infrastructure_failure();
                 }
                 // Only an empty queue or an error waits a poll interval.
                 Ok(None) => {}
-                Err(_) => eprintln!("queue claim infrastructure unavailable"),
+                Err(_) => {
+                    eprintln!("queue claim infrastructure unavailable");
+                    self.report_infrastructure_failure();
+                }
             }
             tokio::select! {
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
@@ -609,6 +621,7 @@ impl Executor {
                                     more = false;
                                     if store::ending_failed(&self.db, id).await.is_err() {
                                         eprintln!("queue ending infrastructure unavailable");
+                                        self.report_infrastructure_failure();
                                     }
                                 }
                             }
@@ -617,7 +630,10 @@ impl Executor {
                             continue;
                         }
                     }
-                    Err(_) => eprintln!("queue ending infrastructure unavailable"),
+                    Err(_) => {
+                        eprintln!("queue ending infrastructure unavailable");
+                        self.report_infrastructure_failure();
+                    }
                 }
             }
             tokio::select! {

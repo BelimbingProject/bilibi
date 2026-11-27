@@ -302,6 +302,8 @@ async fn record(State(app): State<App>, mut request: Request, next: Next) -> Res
     };
     if let Err(error) = recorded {
         eprintln!("warning: API exchange {trace} was not recorded: {error}");
+        app.perf
+            .diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
     }
     if let Ok(value) = HeaderValue::from_str(&trace) {
         response.headers_mut().insert(TRACE_HEADER, value);

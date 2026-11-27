@@ -1,6 +1,8 @@
 //! Bounded, redacted operational performance history: request, live-event, job
 //! and process samples recorded without ever delaying the work they describe.
 //! See `README.md` for the contract and the running proof.
+mod diagnostics;
+mod diagnostics_web;
 mod jobs;
 mod observe;
 mod read;
@@ -11,6 +13,10 @@ mod sample;
 mod web;
 
 pub use bilibi_database::timing;
+pub use diagnostics::{
+    Diagnostic, Provider as DiagnosticProvider, ReadFuture as DiagnosticReadFuture,
+    Row as DiagnosticRow, PROVIDERS as DIAGNOSTIC_PROVIDERS,
+};
 pub use observe::Finish;
 pub use read::{
     Diagnostics, Filter, Health, Page, Recorded, Regression, Slowest, Store, Windows, PAGE_SIZES,
@@ -65,6 +71,15 @@ inventory::submit! { Contribution::new(DEFINITIONS, ENABLED, provenance!(), &Set
     editor: Some(Editor { group: "Performance", label: "Performance history", help: "Keep a history of how fast pages and jobs run.", capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
 })) }
 setting!(
+    diagnostics::KEEP_DAYS,
+    ValueType::Integer,
+    json!(7),
+    1.0,
+    3650.0,
+    "Diagnostics retention (days)",
+    "Days to keep server diagnostics."
+);
+setting!(
     MINIMUM_DURATION_MS,
     ValueType::Integer,
     json!(100),
@@ -113,8 +128,19 @@ setting!(
 inventory::submit! {
     Module { id: "base/perf", layer: bilibi_module_registry::Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/authz", "base/queue", "base/schedule", "base/settings", "base/dashboard", "base/tenancy", "base/datetime", "base/locale", "base/menu", "base/ui"],
-        migrations: &[("base-perf-001", include_str!("../migrations/001-perf.sql"))],
+        migrations: &[("base-perf-001", include_str!("../migrations/001-perf.sql")), ("base-perf-002-diagnostics", include_str!("../migrations/002-diagnostics.sql"))],
         services: &[
+            Service { id: "base/perf.diagnostics-pages", factory: |services| {
+                let modules = bilibi_module_registry::discover()?;
+                let catalog = bilibi_module_registry::Catalog::discover(&modules)?;
+                Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(diagnostics_web::Pages {
+                    db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
+                    settings: services.get("base/settings.store")?,
+                    display: services.get("base/datetime.display")?,
+                    locales: services.get("base/locale.locales")?,
+                    providers: Arc::new(diagnostics_web::providers(&catalog)?),
+                }))))
+            } },
             Service { id: "base/perf.recorder", factory: |services| {
                 let recorder = Recorder::new(
                     services.get::<Db>("base/database.pool")?.as_ref().clone(),

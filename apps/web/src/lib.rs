@@ -153,9 +153,10 @@ impl App {
         let menu = bilibi_base::menu::Menu::from_catalog(services.catalog()?)?;
         let display = services.get("base/datetime.display")?;
         let mutations = services.get("base/database.mutations")?;
-        let perf = services.get("base/perf.recorder")?;
+        let perf = services.get::<bilibi_base::perf::Recorder>("base/perf.recorder")?;
         for dropped in menu.dropped() {
             eprintln!("warning: {dropped}");
+            perf.diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
         }
         let routes = Arc::new(routes::bind(&services)?);
         let downloads = Arc::new(routes::bind_downloads(&services, &routes)?);
@@ -633,6 +634,11 @@ async fn response_headers(
     let mut response = next.run(request).await;
     if let Some(Failure(cause)) = response.extensions_mut().remove::<Failure>() {
         eprintln!("error: {line} failed: {cause}");
+        app.perf
+            .diagnostic(bilibi_base::perf::Diagnostic::RequestError);
+    } else if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+        app.perf
+            .diagnostic(bilibi_base::perf::Diagnostic::InfrastructureWarning);
     }
     let frame_ancestors = match app.site {
         Site::Staff => "'self'",
