@@ -554,8 +554,7 @@ impl Grants {
         key: &str,
         grant: Option<Reach>,
     ) -> Result<()> {
-        self.require_role_capability_step_up(actor, role, key, grant)
-            .await?;
+        self.known(key)?;
         let mut client = self.db.get().await?;
         let mut tx = self
             .boundary
@@ -586,18 +585,40 @@ impl Grants {
             )))
         }
     }
-    /// Confirm a standalone role grant before acquiring its write connection.
-    pub async fn require_role_capability_step_up(
+    /// [`Grants::set_role_capability`] inside the caller's audited transaction (an agent
+    /// plan's commit): the same checks, step-up and write, committed by the caller.
+    /// The actor must hold the key at least as far as the reach given.
+    pub async fn set_role_capability_in(
         &self,
+        tx: &mut MutationTransaction<'_>,
         actor: &Scope,
         role: i64,
         key: &str,
         grant: Option<Reach>,
     ) -> Result<()> {
-        {
-            let client = self.db.get().await?;
-            self.validate_role_capability(&**client, actor, role, key, grant, false)
-                .await?;
+        self.known(key)?;
+        if let Some(reach) = grant {
+            self.staff_key(key, false)?;
+            self.reach_supported(key, reach)?;
+        }
+        self.verify_user(tx.sql(), actor, actor.user()).await?;
+        authorize_key(tx.sql(), actor, "admin.authz.role.update").await?;
+        tx.sql()
+            .query_opt(
+                "SELECT id FROM roles WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                &[&actor.tenant(), &role],
+            )
+            .await?
+            .ok_or(Error::Invalid)?;
+        if grant.is_some() && !self.vocabulary.capabilities.get(key).is_some_and(|c|c.definition.company_scoped)
+            && tx.sql().query_opt("SELECT role_id FROM principal_roles WHERE tenant_id=$1 AND role_id=$2 AND company_id IS NOT NULL LIMIT 1", &[&actor.tenant(),&role]).await?.is_some() { return Err(Error::Invalid); }
+        if let Some(reach) = grant {
+            if !crate::effective_capabilities_in_company(tx.sql(), actor, actor.user(), None)
+                .await?
+                .reaches(key, reach)
+            {
+                return Err(Error::Forbidden);
+            }
         }
         self.step_up
             .require(
@@ -608,61 +629,22 @@ impl Grants {
                     grant.map_or("remove", Reach::code)
                 ),
             )
-            .await
-    }
-
-    /// [`Grants::set_role_capability`] inside the caller's audited transaction (an agent
-    /// plan's commit), after `require_role_capability_step_up` on the same input.
-    /// The actor must hold the key at least as far as the reach given.
-    pub async fn set_role_capability_in(
-        &self,
-        tx: &mut MutationTransaction<'_>,
-        actor: &Scope,
-        role: i64,
-        key: &str,
-        grant: Option<Reach>,
-    ) -> Result<()> {
-        self.validate_role_capability(tx.sql(), actor, role, key, grant, true)
             .await?;
-        Self::write_role_capability(tx, actor, role, key, grant).await
-    }
-
-    async fn validate_role_capability(
-        &self,
-        client: &(impl GenericClient + Sync),
-        actor: &Scope,
-        role: i64,
-        key: &str,
-        grant: Option<Reach>,
-        lock_role: bool,
-    ) -> Result<()> {
-        self.known(key)?;
-        if let Some(reach) = grant {
-            self.staff_key(key, false)?;
-            self.reach_supported(key, reach)?;
-        }
-        self.verify_user(client, actor, actor.user()).await?;
-        authorize_key(client, actor, "admin.authz.role.update").await?;
-        let role_query = if lock_role {
-            "SELECT is_system FROM roles WHERE tenant_id=$1 AND id=$2 FOR UPDATE"
-        } else {
-            "SELECT is_system FROM roles WHERE tenant_id=$1 AND id=$2"
-        };
-        let row = client
-            .query_opt(role_query, &[&actor.tenant(), &role])
-            .await?
-            .ok_or(Error::Invalid)?;
-        if row.get::<_, bool>(0) {
-            return Err(Error::Forbidden);
-        }
-        if grant.is_some() && !self.vocabulary.capabilities.get(key).is_some_and(|c|c.definition.company_scoped)
-            && client.query_opt("SELECT role_id FROM principal_roles WHERE tenant_id=$1 AND role_id=$2 AND company_id IS NOT NULL LIMIT 1", &[&actor.tenant(),&role]).await?.is_some() { return Err(Error::Invalid); }
-        if let Some(reach) = grant {
-            Self::verify_role_capability_reach(client, actor, key, reach).await?;
-        }
+        let tenant = actor.tenant();
+        let key = key.to_owned();
+        let reach = grant.map(Reach::code);
+        tx.mutate(|sql|Box::pin(async move {
+            let row=sql.query_opt("SELECT is_system FROM roles WHERE tenant_id=$1 AND id=$2 FOR UPDATE",&[&tenant,&role]).await?.ok_or(Error::Invalid)?;
+            if row.get::<_,bool>(0) {return Err(Error::Forbidden);}
+            let old:Option<String>=sql.query_opt("SELECT reach FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 AND capability=$3",&[&tenant,&role,&key]).await?.map(|row|row.get(0));
+            match reach {
+                Some(reach)=>{sql.execute("INSERT INTO role_capabilities(tenant_id,role_id,capability,reach) VALUES($1,$2,$3,$4) ON CONFLICT(tenant_id,role_id,capability) DO UPDATE SET reach=EXCLUDED.reach",&[&tenant,&role,&key,&reach]).await?;},
+                None=>{sql.execute("DELETE FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 AND capability=$3",&[&tenant,&role,&key]).await?;},
+            }
+            Ok(((),vec![Change{kind:"authz.role_capability".into(),id:role,old:json!({"capability":key,"granted":old.is_some(),"reach":old}),new:json!({"capability":key,"granted":reach.is_some(),"reach":reach})}]))
+        })).await?;
         Ok(())
     }
-
     async fn verify_role_capability_reach(
         client: &impl GenericClient,
         actor: &Scope,
@@ -686,26 +668,6 @@ impl Grants {
         Ok(())
     }
 
-    async fn write_role_capability(
-        tx: &mut MutationTransaction<'_>,
-        actor: &Scope,
-        role: i64,
-        key: &str,
-        grant: Option<Reach>,
-    ) -> Result<()> {
-        let tenant = actor.tenant();
-        let key = key.to_owned();
-        let reach = grant.map(Reach::code);
-        tx.mutate(|sql|Box::pin(async move {
-            let old:Option<String>=sql.query_opt("SELECT reach FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 AND capability=$3",&[&tenant,&role,&key]).await?.map(|row|row.get(0));
-            match reach {
-                Some(reach)=>{sql.execute("INSERT INTO role_capabilities(tenant_id,role_id,capability,reach) VALUES($1,$2,$3,$4) ON CONFLICT(tenant_id,role_id,capability) DO UPDATE SET reach=EXCLUDED.reach",&[&tenant,&role,&key,&reach]).await?;},
-                None=>{sql.execute("DELETE FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 AND capability=$3",&[&tenant,&role,&key]).await?;},
-            }
-            Ok(((),vec![Change{kind:"authz.role_capability".into(),id:role,old:json!({"capability":key,"granted":old.is_some(),"reach":old}),new:json!({"capability":key,"granted":reach.is_some(),"reach":reach})}]))
-        })).await?;
-        Ok(())
-    }
     /// Create a custom role (never system, never grant-all) owned by a
     /// company of the actor's tenant. It starts with
     /// no capabilities. A name or code already used in the tenant, and a
@@ -774,8 +736,16 @@ impl Grants {
             let id:i64=sql.query_one("INSERT INTO roles(tenant_id,company_id,name,code,description,is_system,grant_all) VALUES($1,$2,$3,$4,$5,false,false) RETURNING id",&[&tenant,&owner,&role.name,&role.code,&role.description]).await?.get(0);
             Ok((id,vec![Change{kind:"authz.role".into(),id,old:json!({}),new:json!({"company_id":owner,"name":role.name,"code":role.code,"description":role.description,"is_system":false,"grant_all":false})}]))
         })).await?;
-        for key in capabilities {
-            Self::write_role_capability(&mut tx, actor, id, key, Some(Reach::All)).await?;
+        for key in capabilities
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            let key = key.clone();
+            tx.mutate(|sql| Box::pin(async move {
+                let reach = Reach::All.code();
+                sql.execute("INSERT INTO role_capabilities(tenant_id,role_id,capability,reach) VALUES($1,$2,$3,$4)", &[&tenant,&id,&key,&reach]).await?;
+                Ok(((), vec![Change {kind:"authz.role_capability".into(), id, old:json!({"capability":key,"granted":false,"reach":null}), new:json!({"capability":key,"granted":true,"reach":reach})}]))
+            })).await?;
         }
         tx.commit().await?;
         Ok(CreatedRole::Created(id))

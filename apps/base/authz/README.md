@@ -76,7 +76,7 @@ edge; the sealed scope is identity for one unit of work, not a permanent login.
 Decisions record reason and principal kind using the caller's connection; decisions
 inside an owner transaction follow that transaction's commit/rollback.
 
-The role create page saves its selected permissions with the role in one audited transaction. Each permission uses the same authorization and reach checks as a role grant. Creating a role with permissions requires one role-capability step-up check before the write transaction. Standalone role-capability changes check step-up before their write transaction too. Both recheck authorization and grant bounds in the transaction.
+The role create page saves its selected permissions with the role in one audited transaction. Each permission uses the same authorization and reach checks as a role grant. Creating a role with permissions requires one role-capability step-up check before the write transaction. The create transaction rechecks authorization and grant bounds.
 
 `base/authz.grants` exposes audited custom-role creation, role assignments, custom-role capability
 changes, direct overrides, and system grants. It checks the administrator and

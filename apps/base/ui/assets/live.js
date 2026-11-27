@@ -70,6 +70,8 @@
   let shown = address(); // The path and query the page on screen was mounted for.
   const addressIntent = () => ({type: 'mount', path: location.pathname, params: params()});
   const gateSelector = '[data-hook="StepUpGate"]';
+  const draftSelector = 'form[data-preserve-newer-draft]';
+  let stepUpDraft = null;
   const promptIntent = (prompt, returnTo) => ({
     type: 'mount',
     path: prompt.pathname,
@@ -140,7 +142,7 @@
       preserve(form, Math.max(0, ...sent));
       if (form.hasAttribute('data-preserve-newer-draft')) newerDrafts.set(form, sequence);
     }
-    const hasDraft = drafts.length || [...inflight.values()].some((entry) => entry.form)
+    const hasDraft = stepUpDraft || drafts.length || [...inflight.values()].some((entry) => entry.form)
       || [...holders].some((holds) => holds());
     reloadOnReconnect = devReload && !hasDraft;
     for (const entry of inflight.values()) {
@@ -356,7 +358,10 @@
         }
       }
       if (released || draftReleased || message.flash || message.html !== lastHTML) {
-        patch(document.getElementById('app'), message.html, {...options, flash: message.flash});
+        patch(document.getElementById('app'), message.html, {
+          ...options, flash: message.flash, pageUrl: message.url || address(),
+          stepUpComplete: entry?.intent.step_up_complete,
+        });
         lastHTML = message.html;
       }
       panelPath = message.panel_params ? new URL(message.url || location.href, location.href).pathname : null;
@@ -430,6 +435,29 @@
     template.innerHTML = html;
     const next = template.content.firstElementChild;
     if (!next) return;
+    if (options.pageUrl) {
+      const gate = next.querySelector(gateSelector);
+      if (gate) {
+        const returnTo = new URL(gate.dataset.stepUpReturn, location.href);
+        if (stepUpDraft && stepUpDraft.returnTo !== returnTo.href) stepUpDraft = null;
+        const form = root.querySelector(draftSelector);
+        if (form && returnTo.origin === location.origin && returnTo.pathname === location.pathname) {
+          clearTimeout(changeTimers.get(form));
+          stepUpDraft = {form, returnTo: returnTo.href};
+        }
+      } else if (stepUpDraft) {
+        const {form, returnTo} = stepUpDraft;
+        const slot = next.querySelector(draftSelector);
+        const destination = new URL(options.pageUrl, location.href);
+        const expected = new URL(returnTo);
+        if (options.stepUpComplete && slot && slot.id === form.id
+          && destination.origin === expected.origin && destination.pathname === expected.pathname) {
+          newerDrafts.set(form, sequence);
+          slot.replaceWith(form);
+        }
+        stepUpDraft = null;
+      }
+    }
     if (options.flash) next.insertAdjacentHTML('beforeend', options.flash);
     const focus = captureFocus();
     const scroll = captureScroll(root);

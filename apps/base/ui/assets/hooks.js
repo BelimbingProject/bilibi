@@ -494,9 +494,7 @@
             field.dispatchEvent(new Event('change', {bubbles: true}))
             return
           }
-          const payload = {record: option.dataset.value}
-          if (this.el.dataset.key) payload.key = this.el.dataset.key
-          this.emit(this.el.dataset.pickEvent, payload)
+          this.emit(this.el.dataset.pickEvent, {record: option.dataset.value, key: this.el.dataset.key})
           return
         }
         this.selectedValue = option.dataset.value
