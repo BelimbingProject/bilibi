@@ -1145,12 +1145,12 @@ read_installation_mode() {
     [[ $installation_mode == shared || $installation_mode == isolated ]] || fail 'invalid installation.mode'
 }
 admit_release() {
-    local instance=$1 n=$2 dir
+    local instance=$1 n=$2 recorded_running=${3:-} dir
     dir=$(instance_dir "$instance")
     read_installation_mode || return 1
     with_env "$instance" "$dir/releases/$n/bilibi-web" status | python3 -c '
 import sys
-mode = sys.argv[1]
+mode, release, recorded_running = sys.argv[1:]
 status = sys.stdin.read()
 if mode not in {"shared", "isolated"} or not status.startswith("Bilibi "):
     sys.exit("Invalid installation policy or release composition")
@@ -1166,14 +1166,18 @@ for line in extensions.splitlines():
         continue
     declaration, modules, _ = line.partition(", modules:")
     identity, code_marker, code = declaration.rpartition(", code: ")
-    if not line.startswith("  ") or not modules or not code_marker or " " not in identity.strip():
+    if not code_marker:
+        identity = declaration
+    if not line.startswith("  ") or not modules or " " not in identity.strip():
         sys.exit("Invalid or missing Extension code declaration")
+    if not code_marker and release == recorded_running:
+        continue
     name = identity.strip().split(" ", 1)[0]
     if code not in {"reviewed", "customer"}:
         sys.exit(f"Extension {name} must declare reviewed or customer code")
     if code == "customer" and mode == "shared":
         sys.exit(f"Extension {name} requires an isolated installation; use an isolated installation, or prepare a code-free release")
-' "$installation_mode"
+' "$installation_mode" "$n" "$recorded_running"
 }
 listener_ready() {
     local authority=${2#*://}
@@ -1201,17 +1205,16 @@ wait_healthy() {
 # put_in_service <instance> <n> <previous>: stop, point current, start, check;
 # on failure point back at the previous release and start that.
 put_in_service() {
-    local instance=$1 n=$2 previous=$3 dir
-    dir=$(instance_dir "$instance")
-    ensure_current_link "$instance"
-    systemctl stop "$unit_name$instance"
+    local instance=$1 n=$2 previous=$3 recorded_running=${4:-}
     if ! admit_release "$instance" "$n"; then
-        if [[ -n $previous ]]; then
-            # This was the active, already-admitted release when the switch began.
+        if [[ -n $recorded_running && $previous == "$recorded_running" ]] &&
+            admit_release "$instance" "$previous" "$recorded_running"; then
             systemctl start "$unit_name$instance"
         fi
         return 1
     fi
+    ensure_current_link "$instance"
+    systemctl stop "$unit_name$instance"
     point_current "$instance" "$n"
     systemctl start "$unit_name$instance"
     if wait_healthy "$instance"; then
@@ -1221,7 +1224,7 @@ put_in_service() {
     say "$instance: release $n did not answer within 60 s; see: journalctl -u $unit_name$instance" >&2
     if [[ -n $previous ]]; then
         systemctl stop "$unit_name$instance"
-        # Return to the active, already-admitted release without applying newer admission rules.
+        admit_release "$instance" "$previous" "$recorded_running" || return 1
         point_current "$instance" "$previous"
         systemctl start "$unit_name$instance"
         if wait_healthy "$instance"; then
@@ -1294,23 +1297,21 @@ release() {
     say "$instance: release $n copied to $dir/releases/$n"
     (
         lock_installation "$instance"
-        [[ -n $previous ]] && systemctl stop "$unit_name$instance"
-        if ! admit_release "$instance" "$n"; then
-            if [[ -n $previous ]]; then
-                # This was the active, already-admitted release when the update began.
-                systemctl start "$unit_name$instance"
-            fi
-            fail "release $n does not satisfy this instance's installation policy" "use an isolated installation, or prepare a code-free release; a first release must be code-free"
+        local recorded_running=''
+        if [[ -n $previous && $(service_state "$instance") == active ]]; then
+            recorded_running=$previous
         fi
+        admit_release "$instance" "$n" ||
+            fail "release $n does not satisfy this instance's installation policy" "use an isolated installation, or prepare a code-free release; a first release must be code-free"
+        [[ -n $previous ]] && systemctl stop "$unit_name$instance"
         if ! with_env "$instance" "$dir/releases/$n/bilibi-web" migrate ||
             ! with_env "$instance" "$dir/releases/$n/bilibi-web" seed-production; then
-            if [[ -n $previous ]]; then
-                # A refused update must not strand an older admitted release offline.
+            if [[ -n $previous ]] && admit_release "$instance" "$previous" "$recorded_running"; then
                 systemctl start "$unit_name$instance"
             fi
             fail "release $n could not update the database" "see the output above, fix the migration and publish a new setup tag" MIGRATION_FAILED
         fi
-        put_in_service "$instance" "$n" "$previous" ||
+        put_in_service "$instance" "$n" "$previous" "$recorded_running" ||
             fail "release $n did not start" "read journalctl -u $unit_name$instance; any previous release is back in service. Fix the cause and publish a new setup tag" UNHEALTHY
     )
     if [[ -z $previous ]]; then

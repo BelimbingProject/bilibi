@@ -156,4 +156,28 @@ grep -q 'Code: MIGRATION_FAILED' "$root_dir/shell.log"
 [[ $(readlink -f "$FIXTURE_CURRENT") == "$root_dir/shell/dev/releases/1" ]]
 [[ $(curl -fsS "$origin/login") == legacy-release ]]
 
-echo "PASS: both installers recover the answering legacy release."
+systemctl stop bilibi@dev
+legacy_dir=$(readlink -f "$FIXTURE_CURRENT")
+(cd "$legacy_dir" && sha256sum bilibi-web > SHA256SUMS)
+cp "$FIXTURE_EVENTS" "$root_dir/before-switch"
+if bash -s -- "$root_dir" >"$root_dir/switch.log" 2>&1 <<'SHELL'
+    root_dir=$1
+    source scripts/install-server.sh
+    root=$root_dir/shell
+    need_root() { :; }
+    lock_release_policy() { :; }
+    lock_installation() { :; }
+    read_installation_mode() { installation_mode=shared; }
+    runuser() { shift 3; "$@"; }
+    switch dev 1
+SHELL
+then
+    cat "$root_dir/switch.log"
+    exit 1
+fi
+grep -q 'must declare reviewed or customer code' "$root_dir/switch.log"
+cmp "$root_dir/before-switch" "$FIXTURE_EVENTS"
+[[ $(readlink -f "$FIXTURE_CURRENT") == "$legacy_dir" ]]
+[[ $(curl -s -o /dev/null -w '%{http_code}' "$origin/login") == 503 ]]
+
+echo "PASS: both installers recover the answering legacy release, and manual switch refuses it."
