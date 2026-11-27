@@ -306,7 +306,6 @@ Bilibi records the value labelled \"{label}\" on the request log and the audit o
 /// Connection check and OAuth linking, naming this installation's endpoint and client.
 fn setup(package: &str, connection: &Connection, instance: &Instance) -> Skill {
     let server = connection.server_url();
-    let settings = format!("{}/settings/ai-connections", connection.origin());
     Skill {
         name: setup_skill_name(package),
         description: format!("Set up or diagnose the Bilibi {} connection: check the MCP tools, complete OAuth linking through the host, and report what is available.", instance.label),
@@ -314,13 +313,13 @@ fn setup(package: &str, connection: &Connection, instance: &Instance) -> Skill {
             "Read the `{package}` skill's workflow first, including how to report yourself.\n\n\
 This plugin connects to **{label}**.{consequence}\n\n\
 - MCP server: `{server}`, saved as `{package}`.\n\
-- Sign-in: OAuth with PKCE (S256) and automatic client registration, with no client secret and the scope `{scope}`. The person approves it in their browser through the host's connection UI; no Bilibi password or token goes through chat.\n\
-- AI switch: each connection is switched on or off at {settings}. The error `ai_switched_off` means it is off; OAuth approval and the switch are separate choices.\n\
-- Check: call `hello`. A working call proves the connection and the sign-in, so a later refusal of an operation is a permission answer and an empty result is an empty result.\n\n\
+- The plugin configures host OAuth with PKCE (S256), public client registration and the scope `{scope}`.\n\n\
+{guidance}\n\n\
 Report what `hello` returned, or the exact error and whether the host needs a new chat or a reload to list the tools.\n",
             label = instance.label,
             consequence = consequence_suffix(instance),
             scope = connection.scope(),
+            guidance = crate::setup_prompt::connection_guidance(instance),
         ),
     }
 }

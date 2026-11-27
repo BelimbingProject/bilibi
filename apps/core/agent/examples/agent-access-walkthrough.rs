@@ -954,18 +954,27 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("token scope:          {:?}", cloud_tokens.scope);
     println!("bearer at /mcp:       {}", outcome(&at_mcp));
     println!("bearer at /api/v1:    {}", outcome(&at_api));
+    let missing_resource = grants
+        .refresh(CLIENT_ID, &cloud_tokens.refresh_token, None)
+        .await;
     let refreshed = grants
         .refresh(CLIENT_ID, &cloud_tokens.refresh_token, Some(resource))
-        .await;
-    println!("refresh for resource: {}", outcome(&refreshed));
+        .await?;
+    let renewed = grants
+        .authenticate(&refreshed.access_token, Some(resource))
+        .await?;
+    println!("refresh with no resource: {}", outcome(&missing_resource));
+    println!("refresh for resource: same approved connection");
     if !matches!(foreign, Err(OAuthError::InvalidTarget))
         || review.agent_id != bilibi_agent::UNNAMED_APP
         || cloud_tokens.scope.as_deref() != Some("bilibi")
-        || at_mcp.is_err()
         || !matches!(at_api, Err(OAuthError::InvalidToken))
-        || refreshed.is_err()
+        || !matches!(missing_resource, Err(OAuthError::InvalidGrant))
+        || !matches!(at_mcp, Ok(original) if original.connection == renewed.connection)
     {
-        return Err("the device grant did not bind its tokens to the MCP resource".into());
+        return Err(
+            "the device grant did not retain the approved MCP connection across refresh".into(),
+        );
     }
 
     println!("\n== device grant for a registered client ==");
