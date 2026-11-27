@@ -1114,44 +1114,34 @@ impl Detail {
                 ),
             })?,
             RunState::Completed if !availability.available => {
-                let message = availability.deadline.map_or_else(
-                    || "This import created no records that can be undone.".to_owned(),
-                    |deadline| {
-                        format!(
-                            "The undo period ended {}.",
-                            display
-                                .render(
-                                    deadline,
-                                    bilibi_datetime::Format::DateTime,
-                                    bilibi_datetime::Precision::Minute
-                                )
-                                .text
-                        )
-                    },
-                );
+                let mut message = Html::text(if availability.deadline.is_some() {
+                    "The undo period ended "
+                } else {
+                    "This import created no records that can be undone."
+                });
+                if let Some(deadline) = availability.deadline {
+                    message.push(&when(display, "import-undo-ended-at", deadline)?);
+                    message.push(&Html::text("."));
+                }
                 render(Alert {
                     kind: StatusKind::Info,
                     id: "import-undo-expired",
                     class: "",
-                    body: Html::text(&message),
+                    body: message,
                 })?
             }
             RunState::Completed => {
                 let deadline = availability.deadline.ok_or(Error::Internal)?;
+                let mut message = Html::text("Available until ");
+                message.push(&when(display, "import-undo-until", deadline)?);
+                message.push(&Html::text(
+                    ". Only records this import created and nobody changed are removed.",
+                ));
                 render(Alert {
                     kind: StatusKind::Info,
                     id: "import-undo-available",
                     class: "",
-                    body: Html::text(&format!(
-                        "Available until {}. Only records this import created and nobody changed are removed.",
-                        display
-                            .render(
-                                deadline,
-                                bilibi_datetime::Format::DateTime,
-                                bilibi_datetime::Precision::Minute
-                            )
-                            .text
-                    )),
+                    body: message,
                 })?
             }
             _ => Html::EMPTY,

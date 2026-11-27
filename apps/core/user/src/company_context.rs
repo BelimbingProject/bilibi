@@ -5,17 +5,11 @@
 //! so an operator viewing as a user may make it too; the reach it is checked
 //! against is the viewed account's.
 //!
-//! A choice is accepted only for a company where the account has a desk now (Core
-//! Company's `reachable`: live, unarchived, with an explicit desk), and Tenancy proves the same fact again on
-//! every later authentication, so the stored choice never outlives its
-//! reach. The switch commits with a `user.company.switched` action, so the
-//! trail says which company was current from when; a refused switch leaves a
-//! non-retained `user.company.switch_refused` action naming the requested
-//! company. The reach check itself writes no authorization decision. An empty
-//! choice keeps the scope's current valid desk.
+//! See the Core User README's Current company section for the selection
+//! contract. The reach check itself writes no authorization decision.
 use crate::UserService;
 use bilibi_audit::{record_action, Attribution, RequestInfo};
-use bilibi_database::Error;
+use bilibi_database::{Change, Error};
 use bilibi_party_ids::OrganisationId;
 use serde_json::json;
 
@@ -53,7 +47,6 @@ impl UserService {
         if scope.csrf != csrf {
             return Err(Error::Forbidden.into());
         }
-        let company = company.or(scope.current_company().map(OrganisationId::get));
         if let Some(id) = company {
             let reached = match OrganisationId::new(id) {
                 Ok(company) => {
@@ -82,46 +75,70 @@ impl UserService {
                 return Err(ChoiceRefusal::Unavailable);
             }
         }
-        let before = scope.current_company().map(OrganisationId::get);
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("user.company.switch"))
             .await?;
         if let Some(id) = company {
             // An archived desk may be chosen: its records stay readable and
-            // their owners refuse every write. The lock orders the choice
-            // against a concurrent desk removal.
+            // their owners refuse every write.
             tx.sql()
                 .query_opt(
-                    "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR NO KEY UPDATE",
+                    "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR KEY SHARE",
                     &[&scope.tenant(), &id],
                 )
                 .await
                 .map_err(Error::from)?
                 .ok_or(ChoiceRefusal::Unavailable)?;
-            let company = OrganisationId::new(id).map_err(|_| Error::Invalid)?;
-            if !bilibi_tenancy::reaches_work_company(tx.sql(), &scope, company).await? {
-                return Err(ChoiceRefusal::Unavailable);
-            }
         }
-        let to = company;
+        bilibi_person::hold_account_standing(tx.sql(), &scope).await?;
         let tenant = scope.tenant();
         let user = scope.user();
-        // Company -> User -> Session, as account mutations revoke sessions
-        // after locking their user. A view's choice is never a saved preference.
-        if scope.impersonator().is_none() {
-            tx.mutate(move|sql|Box::pin(async move {
-                let old:Option<i64>=sql.query_opt("SELECT last_desk_id FROM users WHERE tenant_id=$1 AND id=$2 AND kind='staff' FOR UPDATE",&[&tenant,&user]).await?.ok_or(Error::Unauthorized)?.get(0);
-                sql.execute("UPDATE users SET last_desk_id=$3 WHERE tenant_id=$1 AND id=$2",&[&tenant,&user,&to]).await?;
-                let changes=if old==to {Vec::new()}else{vec![bilibi_database::Change{kind:"user.desk_choice".into(),id:user,old:json!({"company_id":old}),new:json!({"company_id":to})}]};
-                Ok(((),changes))
-            })).await?;
-        }
-        match self
-            .sessions
-            .choose_company(tx.sql(), &scope, company)
+        let person = scope.actor().person().map(|person| person.get());
+        let remembered: Option<i64> = tx
+            .sql()
+            .query_opt(
+                "SELECT last_desk_id FROM users WHERE tenant_id=$1 AND id=$2 AND kind='staff'
+                 AND person_id IS NOT DISTINCT FROM $3 FOR NO KEY UPDATE",
+                &[&tenant, &user, &person],
+            )
             .await
-        {
+            .map_err(Error::from)?
+            .ok_or(Error::Unauthorized)?
+            .get(0);
+        let scope = self.sessions.lock_company_choice(tx.sql(), &scope).await?;
+        let before = scope.current_company().map(OrganisationId::get);
+        let Some(id) = company.filter(|&id| Some(id) != before) else {
+            tx.rollback().await?;
+            return Ok(Switched { company: before });
+        };
+        let to = Some(id);
+        let target = OrganisationId::new(id).map_err(|_| Error::Invalid)?;
+        if !bilibi_tenancy::reaches_work_company(tx.sql(), &scope, target).await? {
+            return Err(ChoiceRefusal::Unavailable);
+        }
+        if scope.impersonator().is_none() && remembered != to {
+            tx.mutate(move |sql| {
+                Box::pin(async move {
+                    sql.execute(
+                        "UPDATE users SET last_desk_id=$3 WHERE tenant_id=$1 AND id=$2",
+                        &[&tenant, &user, &to],
+                    )
+                    .await?;
+                    Ok((
+                        (),
+                        vec![Change {
+                            kind: "user.desk_choice".into(),
+                            id: user,
+                            old: json!({"company_id": remembered}),
+                            new: json!({"company_id": to}),
+                        }],
+                    ))
+                })
+            })
+            .await?;
+        }
+        match self.sessions.choose_company(tx.sql(), &scope, to).await {
             Ok(()) => {}
             Err(Error::Conflict) => return Err(Error::Unauthorized.into()),
             Err(error) => return Err(error.into()),
@@ -144,6 +161,6 @@ impl UserService {
         )
         .await?;
         tx.commit().await?;
-        Ok(Switched { company })
+        Ok(Switched { company: to })
     }
 }

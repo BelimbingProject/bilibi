@@ -470,14 +470,106 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         .map_err(|error| format!("Could not create the archived-desk session: {error}"))?;
-    users
-        .choose_company(
-            &archived_desk_login.token,
-            &archived_desk_login.csrf,
-            Some(2),
-            &RequestInfo::default(),
+    let independent_login = users
+        .login(
+            "contractor@example.test",
+            bilibi_walkthrough_fixture::PASSWORD,
         )
         .await?;
+    let request = RequestInfo::default();
+    let spawn_selection = || {
+        let users = users.clone();
+        let token = archived_desk_login.token.clone();
+        let csrf = archived_desk_login.csrf.clone();
+        tokio::spawn(async move {
+            users
+                .choose_company(&token, &csrf, Some(2), &RequestInfo::default())
+                .await
+        })
+    };
+    let (first, repeat) = tokio::join!(spawn_selection(), spawn_selection());
+    if first??.company != Some(2) || repeat??.company != Some(2) {
+        return Err("Overlapping desk selections did not both return desk 2".into());
+    }
+    let independent = app.security.guard(&independent_login.token).await?;
+    if independent.current_company().map(OrganisationId::get) != Some(1) {
+        return Err("Switching desks changed another session's current desk".into());
+    }
+    let selected = users
+        .choose_company(
+            &independent_login.token,
+            &independent_login.csrf,
+            Some(2),
+            &request,
+        )
+        .await?;
+    let independent = app.security.guard(&independent_login.token).await?;
+    if selected.company != Some(2)
+        || independent.current_company().map(OrganisationId::get) != Some(2)
+    {
+        return Err("Switching with a matching remembered desk did not update the session".into());
+    }
+    let audit_before: i64 = sql
+        .query_one(
+            "SELECT count(*) FROM base_audit_actions WHERE tenant_id=$1",
+            &[&1_i64],
+        )
+        .await?
+        .get(0);
+    let session_before = sql
+        .query_one(
+            "SELECT company_id, held_company_id FROM sessions WHERE id=$1",
+            &[&bilibi_session::session_id(&archived_desk_login.token)],
+        )
+        .await?;
+    for _ in 0..2 {
+        let selected = users
+            .choose_company(
+                &archived_desk_login.token,
+                &archived_desk_login.csrf,
+                Some(2),
+                &RequestInfo::default(),
+            )
+            .await?;
+        if selected.company != Some(2) {
+            return Err("Reselecting the current desk returned the wrong company".into());
+        }
+    }
+    let session_after = sql
+        .query_one(
+            "SELECT company_id, held_company_id FROM sessions WHERE id=$1",
+            &[&bilibi_session::session_id(&archived_desk_login.token)],
+        )
+        .await?;
+    let audit_after: i64 = sql
+        .query_one(
+            "SELECT count(*) FROM base_audit_actions WHERE tenant_id=$1",
+            &[&1_i64],
+        )
+        .await?
+        .get(0);
+    if session_before.get::<_, Option<i64>>(0) != session_after.get::<_, Option<i64>>(0)
+        || session_before.get::<_, Option<i64>>(1) != session_after.get::<_, Option<i64>>(1)
+        || audit_before != audit_after
+    {
+        return Err("Reselecting the current desk changed the session choice or audit".into());
+    }
+    if !matches!(
+        users
+            .choose_company(
+                &archived_desk_login.token,
+                &archived_desk_login.csrf,
+                Some(100),
+                &RequestInfo::default()
+            )
+            .await,
+        Err(bilibi_user::ChoiceRefusal::Unavailable)
+    ) {
+        return Err("Selecting an unavailable desk was not refused".into());
+    }
+    println!(
+        "Reselecting the current desk twice was a no-op; an unavailable desk was refused: true"
+    );
     let impersonation_login = users
         .login("admin@example.test", bilibi_walkthrough_fixture::PASSWORD)
         .await

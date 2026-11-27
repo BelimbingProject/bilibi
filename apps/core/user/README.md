@@ -121,7 +121,9 @@ Web adapters (`apps/web/src/shell.rs`): `POST /preferences` (`{kind,value}`), `G
 
 ## Current company
 
-`UserService::choose_company(token, csrf, company, request)` handles the shell's **Switch desk** form. It proves the requested desk, writes the session choice and the account's remembered `last_desk_id`, and records `user.company.switched` through one MutationBoundary transaction. A refused switch records `user.company.switch_refused`. The choice grants no capability.
+Selecting the current desk in **Switch desk** succeeds without recording a switch. `UserService::choose_company(token, csrf, company, request)` returns the current desk for a repeat or an empty choice and leaves the desk preference as it was.
+
+When you select a different desk, Core User checks that you can use it, saves it for the session and records `user.company.switched` in one MutationBoundary transaction. For an ordinary session, it also updates the account's remembered `last_desk_id` if needed. Switching desks grants no capability. A request for a desk outside the account's reach records a non-retained `user.company.switch_refused` action naming the requested company.
 
 Every authentication proves the selected desk again. An invalid or absent selection uses the remembered valid desk, then the person's first live desk (an unarchived desk before an archived one), or no desk. An archived company's desk may be chosen: its records read and every write into it is refused. Impersonation uses the viewed person's desks and parks the operator's selection separately. A queued job retains its captured desk and refuses lost access rather than selecting another one.
 
@@ -194,7 +196,7 @@ Agents use `core.user.landing.read` for the reachable menu pages and current cho
   `version` (migration `008-accounts.sql`): a stale draft is refused rather
   than applied over another operator's save. The refusal is worded on the fact.
 - Person is an inline choice: `link_person` assigns it and `unlink` removes it. A changed Person ends the account's sessions. The same **Desks** panel used on the person's record appears on the account record.
-- Roles & Permissions panel over Authz: assignments in a shared flexible table, including their company, UTC dates, purpose and current state; a Roles picker with optional company/date bounds, filtered by the escalation guard (a role is
+- Roles & Permissions panel over Authz: assignments in a shared flexible table, including their company, purpose, current state and [validity dates](../../base/authz/README.md#company-and-engagement-assignments) under **Valid from** and **Valid until**; a Roles picker with optional company/date bounds, filtered by the escalation guard (a role is
   grantable only by an actor holding everything it grants;
   `bilibi_authz::roles::grants_of`), the Effective Permissions disclosure
   (`effective_capabilities_of`, grouped by domain; blue for a direct grant,

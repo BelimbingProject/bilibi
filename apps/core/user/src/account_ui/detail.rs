@@ -258,8 +258,8 @@ impl Detail {
                 vec![
                     BuiltinColumn::new("role", "Role"),
                     BuiltinColumn::new("company", "Company"),
-                    BuiltinColumn::new("from", "Valid from (UTC)"),
-                    BuiltinColumn::new("until", "Valid until (UTC)"),
+                    BuiltinColumn::new("from", "Valid from"),
+                    BuiltinColumn::new("until", "Valid until"),
                     BuiltinColumn::new("purpose", "Purpose"),
                     BuiltinColumn::new("state", "State"),
                 ],
@@ -528,14 +528,14 @@ impl Detail {
         )?;
         body.push(&render(
             &Field::named("assignment_from")
-                .label("Valid from (UTC)")
+                .label("Valid from")
                 .kind(InputKind::Date)
                 .value(&self.access.assignment_from)
                 .hint("Leave empty to make the assignment effective now."),
         )?);
         body.push(&render(
             &Field::named("assignment_until")
-                .label("Valid until (UTC)")
+                .label("Valid until")
                 .kind(InputKind::Date)
                 .value(&self.access.assignment_until)
                 .hint("Leave empty for no end date. Otherwise access ends after this UTC date."),
@@ -557,6 +557,23 @@ impl Detail {
         providers: &[RoleSummary],
         groups: &[bilibi_authz::roles::GroupAssignment],
     ) -> Result<Html> {
+        let locale = self
+            .pages
+            .locales
+            .resolve(client, scope, None)
+            .await?
+            .locale;
+        let display = self
+            .pages
+            .display
+            .display(client, scope, None, locale)
+            .await?;
+        let date = |value: Option<&str>, fallback: &str| {
+            value
+                .and_then(|v| v.parse::<jiff::civil::Date>().ok())
+                .map(|v| display.render_date(v))
+                .unwrap_or_else(|| fallback.to_owned())
+        };
         let mut rows = Vec::new();
         for record in records {
             let key = format!(
@@ -587,23 +604,11 @@ impl Detail {
                 .slot("company", Html::text(&company))
                 .slot(
                     "from",
-                    Html::text(
-                        record
-                            .bounds
-                            .valid_from
-                            .as_deref()
-                            .unwrap_or("No start date"),
-                    ),
+                    Html::text(&date(record.bounds.valid_from.as_deref(), "No start date")),
                 )
                 .slot(
                     "until",
-                    Html::text(
-                        record
-                            .bounds
-                            .valid_until
-                            .as_deref()
-                            .unwrap_or("No end date"),
-                    ),
+                    Html::text(&date(record.bounds.valid_until.as_deref(), "No end date")),
                 )
                 .slot("purpose", Html::text(&record.bounds.purpose))
                 .slot(

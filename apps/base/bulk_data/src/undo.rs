@@ -165,7 +165,7 @@ impl BulkData {
             return Err(crate::WriteError::Stale);
         }
         let registered = self.registered(&run.record_type)?;
-        bilibi_authz::authorize_key(client, scope, registered.definition.import.capability).await?;
+        bilibi_authz::authorize_key(client, scope, registered.import()?.capability).await?;
         let availability = self.undo_availability(client, scope, &run).await?;
         if !availability.supported {
             return Err(crate::refused("run_id", "has no owner removal operation"));
@@ -202,7 +202,7 @@ impl BulkData {
     ) -> Result<()> {
         bilibi_authz::authorize_key(client, scope, CREATE).await?;
         let registered = self.types.get(record_type).ok_or(Error::NotFound)?;
-        bilibi_authz::authorize_key(client, scope, registered.definition.import.capability).await?;
+        bilibi_authz::authorize_key(client, scope, registered.import()?.capability).await?;
         let run = store::load(client, scope, run_id, false).await?;
         if run.erased || run.state != RunState::Undoing || run.record_type != record_type {
             return Err(Error::Forbidden);
@@ -229,8 +229,7 @@ impl BulkData {
     ) -> Result<i32> {
         bilibi_authz::authorize_key(tx.sql(), scope, CREATE).await?;
         let registered = self.types.get(record_type).ok_or(Error::NotFound)?;
-        bilibi_authz::authorize_key(tx.sql(), scope, registered.definition.import.capability)
-            .await?;
+        bilibi_authz::authorize_key(tx.sql(), scope, registered.import()?.capability).await?;
         // Hold the run row until the owner removal commits. Erasure changes
         // this same row before forgetting import metadata, so it cannot race
         // a successful claim and reintroduce a deletion after erasure starts.

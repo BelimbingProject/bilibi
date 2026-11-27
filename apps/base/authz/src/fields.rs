@@ -19,7 +19,10 @@ pub async fn restricted(
             .await?
     } else {
         client
-            .query(USER_RESTRICTIONS, &[&scope.tenant(), &scope.user()])
+            .query(
+                USER_RESTRICTIONS,
+                &[&scope.tenant(), &restricted_users(scope)],
+            )
             .await?
     };
     Ok(restriction_rows(rows))
@@ -37,12 +40,10 @@ pub async fn restriction_modes(
             )
             .await?
     } else {
-        let mut users = vec![scope.user()];
-        users.extend(scope.impersonator().map(|operator| operator.user()));
         client
             .query(
                 "SELECT f.table_id,f.field_id,bool_and(f.mode='mask') FROM field_restrictions f JOIN effective_principal_roles p ON p.tenant_id=f.tenant_id AND p.role_id=f.role_id WHERE f.tenant_id=$1 AND p.user_id=ANY($2) GROUP BY f.table_id,f.field_id",
-                &[&tenant, &users],
+                &[&tenant, &restricted_users(scope)],
             )
             .await?
     };
@@ -73,15 +74,26 @@ pub async fn restricted_read(
             .await?
     } else {
         client
-            .query(USER_RESTRICTIONS, &[&scope.tenant(), &scope.user()])
+            .query(
+                USER_RESTRICTIONS,
+                &[&scope.tenant(), &restricted_users(scope)],
+            )
             .await?
     };
     Ok(restriction_rows(rows))
 }
 
+/// The accounts whose roles' restrictions bind a user scope: the viewed
+/// account and, while impersonating, the operator too, so the session never
+/// reads or writes a field the operator could not.
+fn restricted_users(scope: &Scope) -> Vec<i64> {
+    let mut users = vec![scope.user()];
+    users.extend(scope.impersonator().map(|operator| operator.user()));
+    users
+}
 const SYSTEM_RESTRICTIONS: &str =
     "SELECT DISTINCT table_id,field_id FROM field_restrictions WHERE tenant_id=$1";
-const USER_RESTRICTIONS: &str = "SELECT DISTINCT f.table_id,f.field_id FROM field_restrictions f JOIN effective_principal_roles p ON p.tenant_id=f.tenant_id AND p.role_id=f.role_id WHERE f.tenant_id=$1 AND p.user_id=$2";
+const USER_RESTRICTIONS: &str = "SELECT DISTINCT f.table_id,f.field_id FROM field_restrictions f JOIN effective_principal_roles p ON p.tenant_id=f.tenant_id AND p.role_id=f.role_id WHERE f.tenant_id=$1 AND p.user_id=ANY($2)";
 fn restriction_rows(rows: Vec<tokio_postgres::Row>) -> BTreeMap<String, HashSet<String>> {
     let mut result: BTreeMap<String, HashSet<String>> = BTreeMap::new();
     for row in rows {
@@ -274,7 +286,7 @@ pub async fn masked(
 ) -> Result<BTreeMap<String, BTreeMap<String, &'static str>>> {
     masked_rows(
         client
-            .query(MASKED, &[&scope.tenant(), &scope.user()])
+            .query(MASKED, &[&scope.tenant(), &restricted_users(scope)])
             .await?,
     )
 }
@@ -286,14 +298,14 @@ pub async fn masks_for_read(
 ) -> Result<BTreeMap<String, &'static str>> {
     Ok(masked_rows(
         client
-            .query(MASKED, &[&scope.tenant(), &scope.user()])
+            .query(MASKED, &[&scope.tenant(), &restricted_users(scope)])
             .await?,
     )?
     .remove(table)
     .unwrap_or_default())
 }
 const MASKED: &str = "SELECT f.table_id,f.field_id FROM field_restrictions f JOIN effective_principal_roles p ON p.tenant_id=f.tenant_id AND p.role_id=f.role_id \
-     WHERE f.tenant_id=$1 AND p.user_id=$2 GROUP BY f.table_id,f.field_id HAVING bool_and(f.mode='mask')";
+     WHERE f.tenant_id=$1 AND p.user_id=ANY($2) GROUP BY f.table_id,f.field_id HAVING bool_and(f.mode='mask')";
 fn masked_rows(
     rows: Vec<tokio_postgres::Row>,
 ) -> Result<BTreeMap<String, BTreeMap<String, &'static str>>> {

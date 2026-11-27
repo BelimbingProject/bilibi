@@ -201,11 +201,13 @@ impl Index {
                     .and_then(|user| names.get(&user).cloned())
                     .or_else(|| suppression.lifted_principal.clone())
                     .unwrap_or_default();
-                Html::text(&format!(
-                    "{} by {by}: {}",
-                    super::when(display, at),
+                let mut value =
+                    super::when(display, &format!("consent-suppression-{id}-lifted-at"), at)?;
+                value.push(&Html::text(&format!(
+                    " by {by}: {}",
                     suppression.lift_reason.as_deref().unwrap_or_default()
-                ))
+                )));
+                value
             }
             None => Html::text("—"),
         };

@@ -121,6 +121,8 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 - Dragging, resizing and the Move dialog call `core.activity.update` with the version drawn, so a stale or refused move leaves the item where it was and says why. Only open activities the reader may change can be moved; moving one to another person's column is refused (change Assigned to on its page). Moving a task moves its start by the same amount.
 - The day, week, month and shared views read at most 501 activities for the range and ask for a narrower filter past 500. The year view has no such limit.
 
+The New dialog keeps the time zone shown when you opened it, even if you change the top-bar setting before saving.
+
 ### Status tiles
 
 `/activities?display=board`: the tasks the reader may see as tiles in a column for each status (not started, in progress, pending input, completed, deferred), through base/ui `Board`. Search and "whose" filter it; the kind and open-or-closed filters are hidden, because the tiles are tasks and closed ones have their own columns. A tile shows its subject, an Overdue or Due soon mark, the due time and the assignee. Dragging a tile (or Move…) calls `core.activity.update` with the status and the tile's version, after checking the task is still in the column it was drawn in; a stale or refused move says why and leaves the tile. It reads the first 300 open tasks (by due time) and the latest 100 closed ones, and says when there are more.

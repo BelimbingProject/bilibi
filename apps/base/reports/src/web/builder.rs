@@ -457,7 +457,8 @@ impl Builder {
                 .kind(InputKind::Checkbox).checked(self.oversight)
                 .hint("Adds data from subsidiaries whose admin has turned on sharing with your company, read-only. You still see only what you're permitted to. Contacts, accounts, affiliations, addresses and companies can't be included yet."))?,
             render(
-                field("name", "Name")
+                field("name", "Label")
+                    .hint("Example: Monthly sales")
                     .value(&self.name)
                     .required()
                     .errors(self.errors.get("name").cloned().unwrap_or_default()),
@@ -755,7 +756,7 @@ fn subject(key: &str, offered: &[ColumnInfo]) -> String {
         return format!("The filter on {}", named(spec));
     }
     match key {
-        "name" => "Name".into(),
+        "name" => "Label".into(),
         "description" => "Description".into(),
         "definition.columns" => "Columns".into(),
         "definition.groupings" => "Groupings".into(),

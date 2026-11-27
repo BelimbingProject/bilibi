@@ -155,6 +155,11 @@ fn related(query: &HashMap<String, String>) -> Option<Reference> {
         .then(|| Reference::new(kind, id))
 }
 
+enum CalendarNotice {
+    Error(String),
+    Moved { title: String, at: jiff::Timestamp },
+}
+
 pub(crate) struct Index {
     pages: Pages,
     list: ListState,
@@ -177,10 +182,10 @@ pub(crate) struct Index {
     /// The repeating row whose Delete series dialog is open.
     series_delete: Option<series_delete::Open>,
     /// The calendar item whose Move dialog is open, and its errors.
-    moving: Option<String>,
+    moving: Option<(String, String)>,
     move_errors: Vec<String>,
     /// The last calendar move's outcome, announced on the calendar.
-    notice: Option<(StatusKind, String)>,
+    notice: Option<CalendarNotice>,
     framed: bool,
     zone: BrowserZone,
     dialog: Option<Dialog>,
@@ -281,9 +286,16 @@ impl Index {
             }
             calendar::SLOT => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-                if !self.pages.activities.may_create(scope).await? {
-                    self.notice = Some((
-                        StatusKind::Error,
+                if !clock.ready {
+                    self.notice = Some(CalendarNotice::Error(
+                        "The browser time zone is not available yet. Try again.".into(),
+                    ));
+                } else if value["timezone"].as_str() != Some(clock.zone.as_str()) {
+                    self.notice = Some(CalendarNotice::Error(
+                        "The calendar time zone changed. Choose the slot again.".into(),
+                    ));
+                } else if !self.pages.activities.may_create(scope).await? {
+                    self.notice = Some(CalendarNotice::Error(
                         "You do not have permission to create activities.".into(),
                     ));
                 } else {
@@ -292,6 +304,7 @@ impl Index {
                             let (start, end) = slot_times(&slot, &clock);
                             let assignee = self.slot_assignee(scope, &slot).await?;
                             self.slot = Some(Slot {
+                                clock,
                                 start,
                                 end,
                                 assignee,
@@ -302,39 +315,20 @@ impl Index {
                             });
                             self.notice = None;
                         }
-                        Err(sentence) => self.notice = Some((StatusKind::Error, sentence)),
+                        Err(sentence) => self.notice = Some(CalendarNotice::Error(sentence)),
                     }
                 }
             }
             "cancel_slot" => self.slot = None,
-            "slot_more" => {
-                // More options: the same typed values in the full form.
-                let form = params::form_values_checked(value, "slot", params::FIELD_LIMIT)
-                    .map_err(Error::refused)?;
-                if let Some(mut slot) = self.slot.take() {
-                    slot.read(&form, &self.zone)?;
-                    if self.pages.activities.may_create(scope).await? {
-                        let clock =
-                            Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-                        self.dialog = Some(
-                            Dialog::new(slot.kind, None)
-                                .at(slot.start, slot.end, &clock)
-                                .titled(&slot.title)
-                                .assigned(slot.assignee),
-                        );
-                    }
-                }
-            }
             "slot_save" => {
                 let form = params::form_values_checked(value, "slot", params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
                 let Some(mut slot) = self.slot.take() else {
                     return Ok(None);
                 };
-                slot.read(&form, &self.zone)?;
+                slot.read(&form)?;
                 if !self.pages.activities.may_create(scope).await? {
-                    self.notice = Some((
-                        StatusKind::Error,
+                    self.notice = Some(CalendarNotice::Error(
                         "You do not have permission to create activities.".into(),
                     ));
                     return Ok(None);
@@ -346,25 +340,23 @@ impl Index {
                 // More options is the same submission with its marker: the
                 // typed values open the full form instead of being saved.
                 if form.contains_key("more") {
-                    let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                     self.dialog = Some(
-                        Dialog::new(slot.kind, None)
-                            .at(slot.start, slot.end, &clock)
+                        Dialog::new(slot.kind, None, &slot.clock)
+                            .at(slot.start, slot.end)
                             .titled(&slot.title)
                             .assigned(slot.assignee),
                     );
                     return Ok(None);
                 }
-                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-                let mut dialog = Dialog::new(slot.kind, None)
-                    .at(slot.start, slot.end, &clock)
+                let mut dialog = Dialog::new(slot.kind, None, &slot.clock)
+                    .at(slot.start, slot.end)
                     .titled(&slot.title)
                     .assigned(slot.assignee.clone());
                 let pages = self.pages.shared();
                 // The compact draft already read its fields into the dialog;
                 // the submit reads only what the full form posts.
                 let saved = dialog
-                    .submit(&pages, scope, credential, &clock, &serde_json::json!({}))
+                    .submit(&pages, scope, credential, &serde_json::json!({}))
                     .await?;
                 match saved {
                     Some(id) => {
@@ -426,33 +418,47 @@ impl Index {
             "cancel_delete_series" => self.series_delete = None,
             "delete_series" => self.delete_series(scope, credential, value).await?,
             calendar::MOVE_OPEN => {
-                self.moving = calendar::item_id(value).map(str::to_owned);
+                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 self.move_errors.clear();
                 self.notice = None;
+                self.moving = if clock.ready {
+                    calendar::item_id(value).map(|id| (id.to_owned(), clock.zone))
+                } else {
+                    self.notice = Some(CalendarNotice::Error(
+                        "The browser time zone is not available yet. Try again.".into(),
+                    ));
+                    None
+                };
             }
             calendar::MOVE_CANCEL => {
                 self.moving = None;
                 self.move_errors.clear();
             }
             calendar::MOVE | calendar::MOVE_SUBMIT => {
-                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-                let outcome = match CalendarMove::from_event(value, &clock.zone) {
-                    Ok(change) => {
-                        self.reschedule(scope, credential, name, &clock, &change)
-                            .await?
-                    }
-                    Err(sentence) => Err(sentence),
+                let zone = if name == calendar::MOVE_SUBMIT {
+                    self.moving.as_ref().map(|(_, zone)| zone.clone())
+                } else {
+                    let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                    (clock.ready && value["timezone"].as_str() == Some(clock.zone.as_str()))
+                        .then_some(clock.zone)
+                };
+                let outcome = match zone {
+                    Some(zone) => match CalendarMove::from_event(value, &zone) {
+                        Ok(change) => self.reschedule(scope, credential, name, &change).await?,
+                        Err(sentence) => Err(sentence),
+                    },
+                    None => Err("The calendar time zone changed. Start the move again.".to_owned()),
                 };
                 match outcome {
-                    Ok(message) => {
-                        self.notice = Some((StatusKind::Success, message));
+                    Ok(notice) => {
+                        self.notice = Some(notice);
                         self.moving = None;
                         self.move_errors.clear();
                     }
                     Err(message) if name == calendar::MOVE_SUBMIT => {
                         self.move_errors = vec![message];
                     }
-                    Err(message) => self.notice = Some((StatusKind::Error, message)),
+                    Err(message) => self.notice = Some(CalendarNotice::Error(message)),
                 }
             }
             "clear" => {
@@ -498,7 +504,8 @@ impl Index {
                         None => None,
                     };
                     self.slot = None;
-                    self.dialog = Some(Dialog::new(kind, related));
+                    let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                    self.dialog = Some(Dialog::new(kind, related, &clock));
                 } else {
                     self.flash = Some((
                         StatusKind::Error,
@@ -508,7 +515,6 @@ impl Index {
             }
             "close_modal" => self.dialog = None,
             "save_event" => {
-                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {
                     return Ok(None);
@@ -516,10 +522,7 @@ impl Index {
                 if dialog.submit_event() != name {
                     return Err(Error::Invalid);
                 }
-                if let Some(id) = dialog
-                    .submit(&pages, scope, credential, &clock, value)
-                    .await?
-                {
+                if let Some(id) = dialog.submit(&pages, scope, credential, value).await? {
                     let message = dialog.created_message();
                     self.dialog = None;
                     return Ok(Some(LiveBody {
@@ -647,6 +650,19 @@ impl Index {
         Ok(row)
     }
 
+    fn calendar_notice(&self, clock: &Clock) -> Result<Option<(StatusKind, Html)>> {
+        Ok(match &self.notice {
+            Some(CalendarNotice::Error(message)) => Some((StatusKind::Error, Html::text(message))),
+            Some(CalendarNotice::Moved { title, at }) => {
+                let mut message = Html::text(&format!("“{title}” moved to "));
+                message.push(&clock.time("activities-calendar-moved-at", *at)?);
+                message.push(&Html::text("."));
+                Some((StatusKind::Success, message))
+            }
+            None => None,
+        })
+    }
+
     /// A calendar drop, resize or Move dialog: the new time through the
     /// change contract, with the version the calendar drew. `Err` is the
     /// sentence the page shows; the item stays where the server drew it.
@@ -655,9 +671,8 @@ impl Index {
         scope: &Scope,
         credential: &str,
         event: &str,
-        clock: &Clock,
         change: &CalendarMove,
-    ) -> Result<std::result::Result<String, String>> {
+    ) -> Result<std::result::Result<CalendarNotice, String>> {
         let missing = || Ok(Err("The activity could not be found.".to_owned()));
         let (Ok(id), Ok(version)) = (change.id.parse::<i64>(), change.version.parse::<i64>())
         else {
@@ -708,11 +723,10 @@ impl Index {
             )
             .await
         {
-            Ok(_) => Ok(Ok(format!(
-                "“{}” moved to {}.",
-                activity.title,
-                clock.text(start)
-            ))),
+            Ok(_) => Ok(Ok(CalendarNotice::Moved {
+                title: activity.title,
+                at: start,
+            })),
             Err(error) => Ok(Err(
                 match refusal(
                     error,
@@ -850,16 +864,19 @@ impl Index {
         drawn.day_marks = marks;
         drawn.follows_browser_zone = clock.display.mode == bilibi_datetime::Mode::Local;
         drawn.creatable = may_create;
-        drawn.moving = self.moving.clone();
-        drawn.notice = self.notice.clone().or_else(|| {
+        if let Some((id, zone)) = &self.moving {
+            drawn.moving = Some(id.clone());
+            drawn.move_timezone = Some(zone.clone());
+        }
+        drawn.notice = self.calendar_notice(clock)?.or_else(|| {
             (page.total > page.entries.len() as i64).then(|| {
                 (
                     StatusKind::Warning,
-                    format!(
+                    Html::text(&format!(
                         "Showing the first {} of {} activities in this range. Narrow the view or the filters to see the rest.",
                         page.entries.len(),
                         page.total
-                    ),
+                    )),
                 )
             })
         });
@@ -1069,7 +1086,6 @@ impl Index {
             body.push(&dialog.render(
                 &self.pages,
                 scope,
-                &clock,
                 &words,
                 "activities-new",
                 "close_modal",

@@ -200,8 +200,12 @@ worker cancels it with `actor_refused` until `grant` gives the principal its
 two capabilities (`Grants::set_system`, step-up off for this fixture binary),
 then runs it as `System · queue-specimen`, reads the encrypted company setting
 `queue.specimen.secret` through `Execution::scope()` (printing only that it
-decrypted and its length), and records its effect; `revoke-secret` keeps the
-job running but makes Settings refuse the secret (`secret_refused`).
+decrypted and its length) through the setting's principal read capability, not
+its separate human editor capability, and records its effect; `revoke-secret`
+keeps the job running but makes Settings refuse the secret (`secret_refused`).
+The same successful job reads `queue.specimen.legacy-secret`, whose definition
+has no principal read capability, through its existing editor-capability
+fallback.
 `inspect` prints the audit rows of the effects with their principal.
 
 `enqueue-delayed complete 60` queues the same principal's specimen for one minute later. Run the worker immediately and inspect the job while it waits. It stays `scheduled` with no effect until its `available_at`, then runs once. A cancelled scheduled job remains cancelled after its due instant. An enqueue rolled back by its caller leaves no scheduled job.
@@ -233,7 +237,9 @@ Other enqueue modes: `retry`, `discard`, `cancel`, `panic`, `invalid`,
 (reads the company secret as the actor; `enqueue-system secret` as the
 principal; `BILIBI_SETTINGS_KEY` must be set for `prepare` and `worker`).
 `grant`, `revoke-secret` and `revoke` change the principal's grants as the
-fixture administrator. `cancel JOB_ID` and
+fixture administrator. `prove-human` gives the fixture manager only the
+principal read capability and proves the separate editor capability still
+refuses the human editor and reveal paths. `cancel JOB_ID` and
 `retry JOB_ID` use the production audited owner commands. `QUEUE_DEMO_RUNTIME`
 sets the private attempt timeout (seconds); `QUEUE_DEMO_LEASE` sets its lease
 (three seconds by default). The heartbeat mode takes eight seconds, exceeding

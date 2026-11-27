@@ -9,16 +9,16 @@
     does, so a scrollbar never squares off the rounded corners. owns_flash marks
     a dialog that renders the page's flash itself (the layout copy is hidden by
     app.css while it is open). role is "alertdialog" for a confirmation. -#}
-{% macro modal(id, title, cancel_event, width=bilibi_ui::ModalWidth::Narrow, description="", role="", owns_flash=false, messages=bilibi_ui::NO_FLASH, close_icon=false) %}
-<dialog id="{{ id }}" open data-hook="Modal" data-cancel="{{ cancel_event }}"{% if owns_flash %} data-owns-flash="true"{% endif %} aria-modal="true" aria-labelledby="{{ id }}-title"{% if !description.is_empty() %} aria-describedby="{{ id }}-description"{% endif %} tabindex="-1"{% if !role.is_empty() %} role="{{ role }}"{% endif %} class="{{ width.dialog_class() }}">
+{% macro modal(id, title, cancel_event, width=bilibi_ui::ModalWidth::Narrow, description="", role="", owns_flash=false, messages=bilibi_ui::NO_FLASH, close_icon=false, description_html=bilibi_ui::Html::EMPTY) %}
+<dialog id="{{ id }}" open data-hook="Modal" data-cancel="{{ cancel_event }}"{% if owns_flash %} data-owns-flash="true"{% endif %} aria-modal="true" aria-labelledby="{{ id }}-title"{% if !description.is_empty() || !description_html.is_empty() %} aria-describedby="{{ id }}-description"{% endif %} tabindex="-1"{% if !role.is_empty() %} role="{{ role }}"{% endif %} class="{{ width.dialog_class() }}">
 <div id="{{ id }}-body" class="min-h-0 overflow-y-auto px-panel py-2"><div class="flex items-center justify-between gap-2"><h2 id="{{ id }}-title" class="text-base font-semibold tracking-tight text-ink-strong">{{ title }}</h2>{% if close_icon %}{% call c::icon_button(icon="close", label="Close", id="{}-close"|format(id), event=cancel_event) %}{% endcall %}{% endif %}</div>
 {%- if owns_flash -%}
 {% call f::flash(kind=bilibi_ui::StatusKind::Error, id="{}-flash-error"|format(id), message=messages.error) %}{% endcall %}
 {% call f::flash(kind=bilibi_ui::StatusKind::Info, id="{}-flash-info"|format(id), message=messages.info) %}{% endcall %}
 {%- endif -%}
 {% call f::connection_banners(id=id) %}{% endcall %}
-{%- if !description.is_empty() -%}
-<p id="{{ id }}-description" class="mt-1 mb-3 text-xs text-ink-subtle">{{ description }}</p>
+{%- if !description.is_empty() || !description_html.is_empty() -%}
+<p id="{{ id }}-description" class="mt-1 mb-3 text-xs text-ink-subtle">{% if description_html.is_empty() %}{{ description }}{% else %}{{ description_html|safe }}{% endif %}</p>
 {%- endif -%}
 {{ caller() }}</div></dialog>
 {% endmacro %}

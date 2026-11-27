@@ -39,7 +39,7 @@ use std::{
 pub(crate) fn columns() -> ListColumns {
     let builtins = vec![
         {
-            let mut column = BuiltinColumn::new("name", "Name").sortable("name");
+            let mut column = BuiltinColumn::new("name", "Label").sortable("name");
             column.sort_id = Some("roles-sort-name".into());
             column
         },
@@ -1120,7 +1120,7 @@ impl LiveState<Scope, Error> for RoleCreate {
 
 // Role facts, shared with the roles list columns.
 bilibi_ui::record_fields! { "base/authz", pub(crate) mod fields {
-    NAME: bilibi_ui::RecordField::new("name", "Name", bilibi_ui::RecordFieldType::String),
+    NAME: bilibi_ui::RecordField::new("name", "Label", bilibi_ui::RecordFieldType::String),
     CODE: bilibi_ui::RecordField::new("code", "Code", bilibi_ui::RecordFieldType::String),
     SCOPE: bilibi_ui::RecordField::new("is_system", "Scope", bilibi_ui::RecordFieldType::Boolean),
     COMPANY: bilibi_ui::RecordField::new("company_id", "Owning company", bilibi_ui::RecordFieldType::String),

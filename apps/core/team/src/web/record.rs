@@ -64,9 +64,16 @@ pub(super) async fn read(
     let mut added = BTreeMap::new();
     for m in &members {
         if let Ok(at) = jiff::Timestamp::try_from(m.added_at) {
+            let r = display.render(at, Format::DateTime, Precision::Minute);
             added.insert(
                 m.user_id,
-                display.render(at, Format::DateTime, Precision::Minute).text,
+                bilibi_ui::flex_table::Instant::new(
+                    &r.iso,
+                    &r.text,
+                    &r.company,
+                    &r.utc,
+                    r.mode.as_str(),
+                ),
             );
         }
     }
@@ -165,8 +172,14 @@ fn choice_fact<'a>(
 }
 fn facts(state: &State, record: &Record, words: &bilibi_grid::RecordWords) -> Result<Html> {
     let team = &record.team;
-    let mut name = InlineField::new("team-name", "name", words.field("name", "Name"), &team.name)
-        .version(team.version);
+    let mut name = InlineField::new(
+        "team-name",
+        "name",
+        words.field("name", "Label"),
+        &team.name,
+    )
+    .version(team.version)
+    .hint("Example: Sales team");
     name.editable = record.can_change;
     name.status = state.commits.get("name");
     let mut parents = vec![Choice::new("No parent team", "")];
@@ -190,7 +203,7 @@ fn facts(state: &State, record: &Record, words: &bilibi_grid::RecordWords) -> Re
     };
     let mut items = vec![
         Fact {
-            title: words.field("name", "Name"),
+            title: words.field("name", "Label"),
             value: render(InlineEdit { field: name })?,
             ..Fact::default()
         },
@@ -343,7 +356,13 @@ fn members(state: &State, record: &Record) -> Result<Html> {
         })?;
         let mut row = row.clone().slot("name", name).slot("lead", toggle).slot(
             "added",
-            Html::text(added.get(&m.user_id).map(String::as_str).unwrap_or("—")),
+            match added.get(&m.user_id) {
+                Some(at) => render(bilibi_ui::flex_table::InstantView {
+                    id: &format!("team-member-{}-added", m.user_id),
+                    instant: at,
+                })?,
+                None => Html::text("—"),
+            },
         );
         row.dom_id = Some(format!("team-member-{}", m.user_id));
         row.label = Some(m.name.clone());

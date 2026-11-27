@@ -17,11 +17,11 @@ pub struct StepUpGate {
 
 impl StepUpGate {
     pub fn action(title: &str, heading: &str, body: Html) -> askama::Result<Self> {
-        let body = Html::render(&crate::Card {
-            title: heading,
-            body,
-            ..crate::Card::default()
-        })?;
+        Self::action_with_heading(title, Html::text(heading), body)
+    }
+
+    pub fn action_with_heading(title: &str, heading: Html, body: Html) -> askama::Result<Self> {
+        let body = Html::render(&ActionCard { heading, body })?;
         Ok(Self::new("", "", title, body))
     }
 
@@ -51,4 +51,14 @@ impl StepUpGate {
     ) -> Self {
         Self::new(prompt, return_to, title, Html::raw(body.into()))
     }
+}
+
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::card(title=heading) %}{{ body|safe }}{% endcall %}"#,
+    ext = "html"
+)]
+struct ActionCard {
+    heading: Html,
+    body: Html,
 }

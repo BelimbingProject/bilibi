@@ -1370,7 +1370,7 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
     );
     refused.notice = Some((
         StatusKind::Error,
-        "Prepare quote was changed by someone else. Reload it and try again.".into(),
+        Html::text("Prepare quote was changed by someone else. Reload it and try again."),
     ));
     let mut moving = make(
         "specimen-calendar-move",
