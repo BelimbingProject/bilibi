@@ -30,6 +30,10 @@ pub struct Source {
     /// Other Grid tables whose fields supply projected values. Consumers
     /// that cache results use these table ids to pin their field restrictions.
     pub extra_tables: &'static [&'static str],
+    /// Projected fields whose values derive from fields on `extra_tables`.
+    /// The scoped catalog carries each source field's restriction onto the
+    /// projected field without inspecting SQL.
+    pub derived: &'static [DerivedColumn],
 }
 impl Source {
     pub const fn tenant(sql: &'static str) -> Self {
@@ -38,6 +42,7 @@ impl Source {
             tenant_scoped: true,
             company_scoped: false,
             extra_tables: &[],
+            derived: &[],
         }
     }
     /// Rows of the selected company. `$1`, `$2` and `$3` are the tenant,
@@ -48,6 +53,7 @@ impl Source {
             tenant_scoped: true,
             company_scoped: true,
             extra_tables: &[],
+            derived: &[],
         }
     }
     pub const fn global(sql: &'static str) -> Self {
@@ -56,6 +62,7 @@ impl Source {
             tenant_scoped: false,
             company_scoped: false,
             extra_tables: &[],
+            derived: &[],
         }
     }
     /// Declares the extra table IDs that consumers can use to track field restrictions.
@@ -63,6 +70,32 @@ impl Source {
         Self {
             extra_tables: tables,
             ..self
+        }
+    }
+    /// Declares which of this table's fields derive from fields on tables
+    /// named by [`Source::reads`].
+    pub const fn derives(self, fields: &'static [DerivedColumn]) -> Self {
+        Self {
+            derived: fields,
+            ..self
+        }
+    }
+}
+
+/// One projected Grid field and the declared field that supplies its value.
+/// `column` is the projected table's field id, not a SQL expression or alias.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DerivedColumn {
+    pub column: &'static str,
+    pub table: &'static str,
+    pub field: &'static str,
+}
+impl DerivedColumn {
+    pub const fn new(column: &'static str, table: &'static str, field: &'static str) -> Self {
+        Self {
+            column,
+            table,
+            field,
         }
     }
 }
@@ -589,14 +622,44 @@ impl Installed {
             link_into(&mut tables, link, &provenance)?;
         }
         for table in tables.values() {
-            let edges = table
+            let source = table.source();
+            for extra in source.extra_tables {
+                if !tables.contains_key(extra) {
+                    return Err(invalid(format!(
+                        "grid source {} on table {} names unknown extra source table {extra}",
+                        table.id(),
+                        table.id()
+                    )));
+                }
+            }
+            let mut derived = BTreeSet::new();
+            for column in source.derived {
+                if !derived.insert(column.column)
+                    || table.field(column.column).is_none()
+                    || table.is_protected(column.column)
+                    || !source.extra_tables.contains(&column.table)
+                    || tables
+                        .get(column.table)
+                        .and_then(|source| source.field(column.field))
+                        .is_none()
+                {
+                    return Err(invalid(format!(
+                        "grid source {} has invalid or repeated derived field {} <- {}.{}",
+                        table.id(),
+                        column.column,
+                        column.table,
+                        column.field
+                    )));
+                }
+            }
+            for (id, source) in table
                 .links()
                 .iter()
                 .filter_map(|link| match link.decl.join {
                     Join::Edge(source) => Some((link.id(), source)),
                     Join::On { .. } => None,
-                });
-            for (id, source) in std::iter::once((table.id(), table.source())).chain(edges) {
+                })
+            {
                 for extra in source.extra_tables {
                     if !tables.contains_key(extra) {
                         return Err(invalid(format!(
@@ -604,6 +667,12 @@ impl Installed {
                             table.id()
                         )));
                     }
+                }
+                if !source.derived.is_empty() {
+                    return Err(invalid(format!(
+                        "grid edge source {id} on table {} cannot declare projected fields",
+                        table.id()
+                    )));
                 }
             }
         }

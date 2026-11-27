@@ -225,6 +225,101 @@ impl Catalog {
                 }
             }
         }
+        // Resolve every field restriction before copying the installed tables.
+        // A source can project a value that belongs to another table; carry the
+        // source field's mode through every declared derivation, including a
+        // chain of derived sources. Withholding wins, and incompatible mask
+        // kinds fall back to withholding because no partial form is truthful.
+        let mut effective_hidden: BTreeMap<&'static str, BTreeSet<&'static str>> = BTreeMap::new();
+        let mut effective_masks: BTreeMap<&'static str, BTreeMap<String, &'static str>> =
+            BTreeMap::new();
+        for (id, table) in installed.map() {
+            for field in restricted.get(*id).into_iter().flatten() {
+                let Some(field) = table.field(field) else {
+                    continue;
+                };
+                if table.is_protected(field.id) {
+                    continue;
+                }
+                if let Some(kind) = masked.get(*id).and_then(|fields| fields.get(field.id)) {
+                    effective_masks
+                        .entry(*id)
+                        .or_default()
+                        .insert(field.id.to_owned(), *kind);
+                } else {
+                    effective_hidden.entry(*id).or_default().insert(field.id);
+                }
+            }
+            effective_hidden
+                .entry(*id)
+                .or_default()
+                .extend(contributed_hidden.get(*id).into_iter().flatten().copied());
+            effective_masks.entry(*id).or_default().extend(
+                contributed_masks
+                    .get(*id)
+                    .into_iter()
+                    .flatten()
+                    .map(|(field, kind)| (field.clone(), *kind)),
+            );
+            for hidden in effective_hidden.get(*id).into_iter().flatten() {
+                effective_masks.entry(*id).or_default().remove(*hidden);
+            }
+        }
+        loop {
+            let mut changed = false;
+            for (id, table) in installed.map() {
+                for derived in table.source().derived {
+                    let source_hidden = effective_hidden
+                        .get(derived.table)
+                        .is_some_and(|fields| fields.contains(derived.field));
+                    let source_mask = effective_masks
+                        .get(derived.table)
+                        .and_then(|fields| fields.get(derived.field))
+                        .copied();
+                    if source_hidden {
+                        changed |= effective_hidden
+                            .entry(*id)
+                            .or_default()
+                            .insert(derived.column);
+                        changed |= effective_masks
+                            .entry(*id)
+                            .or_default()
+                            .remove(derived.column)
+                            .is_some();
+                    } else if let Some(kind) = source_mask {
+                        if effective_hidden
+                            .get(*id)
+                            .is_some_and(|fields| fields.contains(derived.column))
+                        {
+                            continue;
+                        }
+                        let target = effective_masks.entry(*id).or_default();
+                        match target.get(derived.column).copied() {
+                            None => {
+                                target.insert(derived.column.to_owned(), kind);
+                                changed = true;
+                            }
+                            Some(current) if current == kind => {}
+                            Some(_) => {
+                                target.remove(derived.column);
+                                changed |= effective_hidden
+                                    .entry(*id)
+                                    .or_default()
+                                    .insert(derived.column);
+                            }
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        if let Some((table, field)) = reveal {
+            if let Some(masks) = effective_masks.get_mut(table) {
+                masks.remove(field);
+            }
+        }
         let mut tables = BTreeMap::new();
         let mut masks = BTreeMap::new();
         for (id, table) in installed.map() {
@@ -234,29 +329,8 @@ impl Catalog {
             let Some(reach) = grants.reach_of(table.capability()) else {
                 continue;
             };
-            let mut own = masked.get(*id).cloned().unwrap_or_default();
-            own.extend(
-                contributed_masks
-                    .get(*id)
-                    .into_iter()
-                    .flatten()
-                    .map(|(field, kind)| (field.clone(), *kind)),
-            );
-            if let Some((_, field)) = reveal.filter(|(table, _)| table == id) {
-                own.remove(field);
-            }
-            // Protected fields are never offered for restriction, so a stale row
-            // naming one is inert here (record pages still mask by name). A
-            // masked field stays, and its values are masked when projected.
-            let mut hidden: BTreeSet<&str> = restricted
-                .get(*id)
-                .into_iter()
-                .flatten()
-                .map(String::as_str)
-                .filter(|field| !table.is_protected(field))
-                .filter(|field| !masked.get(*id).is_some_and(|m| m.contains_key(*field)))
-                .collect();
-            hidden.extend(contributed_hidden.get(*id).into_iter().flatten().copied());
+            let own = effective_masks.get(*id).cloned().unwrap_or_default();
+            let hidden = effective_hidden.get(*id).cloned().unwrap_or_default();
             let table = table.without(&hidden);
             tables.insert(
                 *id,

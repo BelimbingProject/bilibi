@@ -44,8 +44,8 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
   Grid never adds a tenant predicate. It must be one `SELECT`/`WITH` statement
   that references every parameter its scope requires. A request never supplies
   the company parameter. When projected values use fields from another Grid
-  table, declare that table with `.reads(&["table_id"])`. The default is none.
-  The same declaration applies to link edge sources when their joins depend on fields from another Grid table. Discovery refuses unknown extra tables in both table and edge sources. See [Bulk Data export access](../bulk_data/README.md#an-export) for how exports use this declaration.
+  table, declare that table with `.reads(&["table_id"])`, then map every projected field to its source identity with `.derives(&[DerivedColumn::new("projected_field", "table_id", "source_field")])`. The names are Grid field ids, never SQL fragments. The default is none. A restriction on the source field then withholds the projected field or applies the same personal-data mask in every scoped Grid read; withholding wins when several declared inputs protect one projection, and incompatible mask kinds fall back to withholding. Derivations carry through chains of declared sources.
+  `.reads` also applies to link edge sources when their joins depend on fields from another Grid table; edge sources have no projected fields and do not declare `.derives`. Discovery refuses unknown extra tables, source fields, protected projected fields and repeated derivations. See [Bulk Data export access](../bulk_data/README.md#an-export) for how exports use this declaration.
 - `Field`s: `Field::new`/`choice`; `column` names the source key when it differs
   from the id; `hidden` fields exist only for joins; `protected` keeps a field
   out of operator restriction (the key, label, time, hidden and join fields are
@@ -130,6 +130,8 @@ table the actor cannot read is dropped, so such a path is refused exactly like a
 unknown one. Platform capabilities need the operator identity. A system identity
 has no `Scope` and reads nothing. Build the catalog again wherever the page
 refreshes its own capabilities; there is no cache of grants.
+
+A field declared through `Source::derives` takes the effective restriction of the field it names on the table in `Source::reads`. The scoped catalog performs this before any list, record, report, export or agent projection resolves a column, so every door receives the same withheld or masked field.
 
 Company sources enter the catalog only when the sealed scope has a selected company and the actor holds the table's company-scoped capability there. Every projection, count, summary, search and agent read binds that same selected company; URL and operation input cannot choose another one. Tenant sources keep their tenant-wide behavior.
 
