@@ -275,7 +275,7 @@ Set `PickerHit::instant` from the reader’s `DisplayContext::render` when a hit
 
 ## Where to go next
 
-See [`base/system`](../system/README.md) for Banner colour on Instance settings.
+See [`base/system`](../system/README.md) for Banner colour on Server Instance.
 
 ## Softphone
 
