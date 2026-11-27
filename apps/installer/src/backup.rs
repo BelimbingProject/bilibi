@@ -318,16 +318,20 @@ async fn give_up(client: &Client, saved: &Value, history_file: &Path, why: Strin
 /// be recorded. The cut-off cleanup may have left the tables missing or half
 /// refilled, and nothing in the database outlives the failure, so they are
 /// always cleared and made again; a held history ([`give_up`]) was never
-/// cleared after the failure, so only its job tables are made again. It
-/// never runs `pg_restore`.
+/// cleared after the failure, so its job tables are made again only when
+/// they are missing. It never runs `pg_restore`.
 pub async fn rebuild_failed(client: &Client, history_file: &Path) -> Result<(), String> {
+    let held = is_held(history_file);
+    if held && jobs::history_tables_exist(client).await.unwrap_or(false) {
+        return Ok(());
+    }
     let (_, saved) = read_saved(history_file).ok_or_else(|| {
         format!(
             "the saved history {} could not be read",
             history_file.display()
         )
     })?;
-    rebuild(client, &saved, !is_held(history_file)).await
+    rebuild(client, &saved, !held).await
 }
 /// After a restore that failed, gives the database back its job tables and
 /// the history, so the job can record that it failed. `wipe` first clears
