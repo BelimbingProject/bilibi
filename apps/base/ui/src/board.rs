@@ -84,7 +84,7 @@ pub struct BoardCard {
     pub column: String,
     pub title: String,
     /// Up to [`MAX_FACTS`] short lines below the title; more are dropped.
-    pub facts: Vec<String>,
+    pub facts: Vec<Html>,
     pub href: String,
     pub version: String,
     /// The columns this viewer may move it to (for a workflow subject, the
@@ -114,9 +114,13 @@ impl BoardCard {
         self
     }
 
-    pub fn fact(mut self, fact: impl Into<String>) -> Self {
+    pub fn fact(self, fact: impl AsRef<str>) -> Self {
+        self.fact_html(Html::text(fact.as_ref()))
+    }
+
+    pub fn fact_html(mut self, fact: Html) -> Self {
         if self.facts.len() < MAX_FACTS {
-            self.facts.push(fact.into());
+            self.facts.push(fact);
         }
         self
     }
@@ -319,7 +323,7 @@ struct CardView {
     dom_id: String,
     id: String,
     title: String,
-    facts: Vec<String>,
+    facts: Vec<Html>,
     href: String,
     version: String,
     column: String,
@@ -456,9 +460,6 @@ impl View {
             .map(|column| column.label.as_str())
             .unwrap_or_default();
         let mut name = format!("{}, {status}", card.title);
-        for fact in card.facts.iter().take(MAX_FACTS) {
-            name.push_str(&format!(", {fact}"));
-        }
         if let Some(urgency) = card.urgency {
             name.push_str(&format!(", {}", urgency.label().to_lowercase()));
         }
@@ -550,11 +551,8 @@ impl View {
             title: &format!("Move {}", card.title),
             cancel_event: MOVE_CANCEL,
             width: ModalWidth::Compact,
-            description: "",
-            role: "",
-            close_icon: false,
-            flash: None,
             body: form,
+            ..Modal::default()
         })
     }
 }

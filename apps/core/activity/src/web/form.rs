@@ -849,33 +849,26 @@ impl Dialog {
                     ("A note", "note"),
                 ])),
         );
-        match self.kind {
-            Kind::Task => {
-                fields.push(
-                    self.field(words, prefix, "start_at", "Start")
-                        .kind(InputKind::DatetimeLocal)
-                        .hint(&zone),
-                );
-                fields.push(
-                    self.field(words, prefix, "due_at", "Due")
-                        .kind(InputKind::DatetimeLocal),
-                );
-            }
-            Kind::Call | Kind::Meeting => {
-                fields.push(
-                    self.field(words, prefix, "starts_at", "Starts")
-                        .kind(InputKind::DatetimeLocal)
-                        .hint(&zone),
-                );
-                fields.push(
-                    self.field(words, prefix, "ends_at", "Ends")
-                        .kind(InputKind::DatetimeLocal),
-                );
-            }
-            Kind::Note => {}
-        }
+        fields.push(
+            self.field(words, prefix, "starts_at", "Starts")
+                .kind(InputKind::DatetimeLocal)
+                .hint(&zone),
+        );
+        fields.push(
+            self.field(words, prefix, "ends_at", "Ends")
+                .kind(InputKind::DatetimeLocal),
+        );
         let mut details = Vec::new();
         if self.kind == Kind::Task {
+            details.push(
+                self.field(words, prefix, "due_at", "Due")
+                    .kind(InputKind::DatetimeLocal)
+                    .hint(&zone),
+            );
+            details.push(
+                self.field(words, prefix, "start_at", "Start")
+                    .kind(InputKind::DatetimeLocal),
+            );
             details.push(
                 self.field(words, prefix, "priority", "Priority")
                     .kind(InputKind::Select)

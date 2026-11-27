@@ -439,7 +439,7 @@ pub struct Calendar {
     pub focus_hour: Option<u8>,
     pub day_marks: Vec<DayMark>,
     /// The result of the last move, announced politely; a refusal is an error.
-    pub notice: Option<(StatusKind, String)>,
+    pub notice: Option<(StatusKind, Html)>,
     /// The item whose Move dialog is open.
     pub moving: Option<String>,
     /// Errors of the open Move dialog's fields.
@@ -850,7 +850,7 @@ struct View {
     previous: NavLink,
     today: NavLink,
     next: NavLink,
-    notice: Option<(StatusKind, String)>,
+    notice: Option<(StatusKind, Html)>,
     follows_browser_zone: bool,
     too_many: bool,
     columns: Vec<ColumnView>,
@@ -1593,10 +1593,8 @@ impl View {
             cancel_event: MOVE_CANCEL,
             width: ModalWidth::Narrow,
             description: "Times are in the zone the calendar shows.",
-            role: "",
-            close_icon: false,
-            flash: None,
             body: form,
+            ..Modal::default()
         })
     }
 }

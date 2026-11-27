@@ -250,7 +250,9 @@ impl Index {
                 .href(format!("/activities/{}", a.id))
                 .urgency(urgency(a, now, soon));
             if let Some(due) = a.due_at {
-                card = card.fact(format!("Due {}", clock.text(due)));
+                let mut fact = Html::text("Due ");
+                fact.push(&clock.time(&format!("activities-board-{}-due", a.id), due)?);
+                card = card.fact_html(fact);
             }
             card = card.fact(format!(
                 "Assigned to {}",
@@ -292,12 +294,13 @@ impl Index {
     /// interval, saved straight through the kind's own create contract.
     /// More options carries every typed value into the full form instead.
     pub(super) fn slot_dialog(&self, clock: &Clock, slot: &Slot) -> Result<Html> {
-        let start = clock.text(slot.start);
-        let end = clock.text(slot.end);
-        let description = match &slot.assignee {
-            Some((_, name)) => format!("{start} to {end}, assigned to {name}."),
-            None => format!("{start} to {end}."),
-        };
+        let mut description = clock.time("activities-slot-summary-start", slot.start)?;
+        description.push(&Html::text(" to "));
+        description.push(&clock.time("activities-slot-summary-end", slot.end)?);
+        if let Some((_, name)) = &slot.assignee {
+            description.push(&Html::text(&format!(", assigned to {name}")));
+        }
+        description.push(&Html::text("."));
         let mut body = Html::EMPTY;
         if !slot.notice.is_empty() {
             body.push(&render(Alert {
@@ -379,9 +382,9 @@ impl Index {
         render(Modal {
             id: "activities-slot-modal",
             title: "Add at this time",
+            description_html: description,
             cancel_event: "cancel_slot",
             width: ModalWidth::Compact,
-            description: &description,
             body: form,
             ..Modal::default()
         })

@@ -461,7 +461,10 @@ impl CalendarPage {
                 }
             })
             .collect();
-        calendar.notice = self.notice.clone();
+        calendar.notice = self
+            .notice
+            .as_ref()
+            .map(|(kind, message)| (*kind, bilibi_ui::Html::text(message)));
         calendar.moving = self.moving.clone().filter(|_| can_update);
         calendar.move_errors = self.move_errors.clone();
         let mut html = Html::render(&Header {

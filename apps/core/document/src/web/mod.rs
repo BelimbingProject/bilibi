@@ -418,23 +418,9 @@ fn csv_row(cells: &[String]) -> String {
 /// its type is one a browser shows safely (`.../preview`, the same read and
 /// the same authority, not a second path to the bytes), and the list's
 /// metadata as CSV (`/documents/export.csv`), never a file's content.
-pub struct Files(pub Pages);
+pub struct Files(pub Arc<Documents>);
 impl Files {
     async fn export(&self, scope: &Scope, query: &HashMap<String, String>) -> Result<FileBody> {
-        let mut display = self.0.clock(scope).await?.0;
-        if display.mode == bilibi_datetime::Mode::Local
-            && !query
-                .get("browser_timezone")
-                .is_some_and(|zone| bilibi_datetime::valid_timezone(zone))
-        {
-            return Err(Error::Invalid);
-        }
-        let clock = display.clock(
-            query.get("browser_timezone").map(String::as_str),
-            Timestamp::now(),
-        );
-        display.timezone = clock.timezone;
-        display.mode = bilibi_datetime::Mode::Company;
         // `list` returns one bounded page, so the export reads page after
         // page until it holds every match or `EXPORT_ROWS` of them.
         let mut entries: Vec<Document> = Vec::new();
@@ -450,7 +436,7 @@ impl Files {
                 page_size: EXPORT_PAGE,
                 ..filter_of(query)
             };
-            let mut page = self.0.documents.list(scope, &filter).await?;
+            let mut page = self.0.list(scope, &filter).await?;
             total = usize::try_from(page.total).unwrap_or(0);
             if page.entries.is_empty() {
                 break;
@@ -460,12 +446,7 @@ impl Files {
             page.entries.retain(|d| seen.insert(d.id));
             page.entries
                 .truncate(EXPORT_ROWS.saturating_sub(entries.len()));
-            latest.extend(
-                self.0
-                    .documents
-                    .latest_revisions(scope, &page.entries)
-                    .await?,
-            );
+            latest.extend(self.0.latest_revisions(scope, &page.entries).await?);
             due.extend(page.retention_due_at);
             entries.extend(page.entries);
             if entries.len() >= EXPORT_ROWS.min(total) {
@@ -497,17 +478,10 @@ impl Files {
         );
         let text = |v: &Option<String>| v.clone().unwrap_or_default();
         for d in &entries {
-            csv.push_str(&csv_row(&row(
-                d,
-                text,
-                latest.get(&d.id),
-                due.get(&d.id),
-                &display,
-            )));
+            csv.push_str(&csv_row(&row(d, text, latest.get(&d.id), due.get(&d.id))));
         }
         let partial = total > entries.len();
         self.0
-            .documents
             .exported(scope, &filter_of(query), entries.len(), total)
             .await?;
         if partial {
@@ -532,7 +506,6 @@ fn row(
     text: impl Fn(&Option<String>) -> String,
     latest: Option<&crate::Revision>,
     due: Option<&std::time::SystemTime>,
-    display: &DisplayContext,
 ) -> Vec<String> {
     vec![
         d.id.to_string(),
@@ -553,16 +526,12 @@ fn row(
         latest
             .map(|r| r.scan_status.code().to_owned())
             .unwrap_or_default(),
-        display
-            .render(d.last_revision_at, Format::DateTime, Precision::Minute)
-            .text,
+        d.last_revision_at.to_string(),
         due.and_then(|at| jiff::Timestamp::try_from(*at).ok())
-            .map(|at| display.render(at, Format::DateTime, Precision::Minute).text)
+            .map(|at| at.to_string())
             .unwrap_or_default(),
         d.company_id.to_string(),
-        display
-            .render(d.created_at, Format::DateTime, Precision::Minute)
-            .text,
+        d.created_at.to_string(),
     ]
 }
 impl Download<Scope, Error> for Files {
@@ -581,12 +550,7 @@ impl Download<Scope, Error> for Files {
             };
             let id = number("id")?;
             let revision = i32::try_from(number("revision")?).map_err(|_| Error::NotFound)?;
-            match self
-                .0
-                .documents
-                .read_file(request.scope, id, revision)
-                .await
-            {
+            match self.0.read_file(request.scope, id, revision).await {
                 Ok(file) if request.operation == "preview" => {
                     FileBody::preview(file.bytes, &file.content_type, &file.file_name)
                         .ok_or(Error::NotFound)

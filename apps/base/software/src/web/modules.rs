@@ -444,10 +444,9 @@ pub(super) fn commands_dialog(catalogue: &Value, kind: &str, id: &str) -> Result
         cancel_event: "cancel_dialog",
         width: ModalWidth::Wide,
         description: subject.trim(),
-        role: "",
         close_icon: true,
-        flash: None,
         body,
+        ..Modal::default()
     })
 }
 

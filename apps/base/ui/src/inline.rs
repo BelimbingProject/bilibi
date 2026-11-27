@@ -151,6 +151,7 @@ pub struct InlineField {
     pub value: String,
     /// Optional read text when the editor value has a native input format.
     pub display_value: Option<String>,
+    pub display_html: Option<Html>,
     /// Native input type, defaulting to text for facts.
     pub input_type: &'static str,
     pub version: String,
@@ -181,6 +182,7 @@ impl InlineField {
             label: label.into(),
             value: value.into(),
             display_value: None,
+            display_html: None,
             input_type: "text",
             version: String::new(),
             save_event: "save_field".into(),

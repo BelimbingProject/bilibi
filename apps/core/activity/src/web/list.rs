@@ -155,6 +155,11 @@ fn related(query: &HashMap<String, String>) -> Option<Reference> {
         .then(|| Reference::new(kind, id))
 }
 
+enum CalendarNotice {
+    Error(String),
+    Moved { title: String, at: jiff::Timestamp },
+}
+
 pub(crate) struct Index {
     pages: Pages,
     list: ListState,
@@ -180,7 +185,7 @@ pub(crate) struct Index {
     moving: Option<String>,
     move_errors: Vec<String>,
     /// The last calendar move's outcome, announced on the calendar.
-    notice: Option<(StatusKind, String)>,
+    notice: Option<CalendarNotice>,
     framed: bool,
     zone: BrowserZone,
     dialog: Option<Dialog>,
@@ -282,13 +287,11 @@ impl Index {
             calendar::SLOT => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 if !clock.ready {
-                    self.notice = Some((
-                        StatusKind::Error,
+                    self.notice = Some(CalendarNotice::Error(
                         "The browser time zone is not available yet. Try again.".into(),
                     ));
                 } else if !self.pages.activities.may_create(scope).await? {
-                    self.notice = Some((
-                        StatusKind::Error,
+                    self.notice = Some(CalendarNotice::Error(
                         "You do not have permission to create activities.".into(),
                     ));
                 } else {
@@ -307,7 +310,7 @@ impl Index {
                             });
                             self.notice = None;
                         }
-                        Err(sentence) => self.notice = Some((StatusKind::Error, sentence)),
+                        Err(sentence) => self.notice = Some(CalendarNotice::Error(sentence)),
                     }
                 }
             }
@@ -342,8 +345,7 @@ impl Index {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 slot.read(&form, &clock)?;
                 if !self.pages.activities.may_create(scope).await? {
-                    self.notice = Some((
-                        StatusKind::Error,
+                    self.notice = Some(CalendarNotice::Error(
                         "You do not have permission to create activities.".into(),
                     ));
                     return Ok(None);
@@ -449,23 +451,20 @@ impl Index {
                     Err("The browser time zone is not available yet. Try again.".to_owned())
                 } else {
                     match CalendarMove::from_event(value, &clock.zone) {
-                        Ok(change) => {
-                            self.reschedule(scope, credential, name, &clock, &change)
-                                .await?
-                        }
+                        Ok(change) => self.reschedule(scope, credential, name, &change).await?,
                         Err(sentence) => Err(sentence),
                     }
                 };
                 match outcome {
-                    Ok(message) => {
-                        self.notice = Some((StatusKind::Success, message));
+                    Ok(notice) => {
+                        self.notice = Some(notice);
                         self.moving = None;
                         self.move_errors.clear();
                     }
                     Err(message) if name == calendar::MOVE_SUBMIT => {
                         self.move_errors = vec![message];
                     }
-                    Err(message) => self.notice = Some((StatusKind::Error, message)),
+                    Err(message) => self.notice = Some(CalendarNotice::Error(message)),
                 }
             }
             "clear" => {
@@ -660,6 +659,19 @@ impl Index {
         Ok(row)
     }
 
+    fn calendar_notice(&self, clock: &Clock) -> Result<Option<(StatusKind, Html)>> {
+        Ok(match &self.notice {
+            Some(CalendarNotice::Error(message)) => Some((StatusKind::Error, Html::text(message))),
+            Some(CalendarNotice::Moved { title, at }) => {
+                let mut message = Html::text(&format!("“{title}” moved to "));
+                message.push(&clock.time("activities-calendar-moved-at", *at)?);
+                message.push(&Html::text("."));
+                Some((StatusKind::Success, message))
+            }
+            None => None,
+        })
+    }
+
     /// A calendar drop, resize or Move dialog: the new time through the
     /// change contract, with the version the calendar drew. `Err` is the
     /// sentence the page shows; the item stays where the server drew it.
@@ -668,9 +680,8 @@ impl Index {
         scope: &Scope,
         credential: &str,
         event: &str,
-        clock: &Clock,
         change: &CalendarMove,
-    ) -> Result<std::result::Result<String, String>> {
+    ) -> Result<std::result::Result<CalendarNotice, String>> {
         let missing = || Ok(Err("The activity could not be found.".to_owned()));
         let (Ok(id), Ok(version)) = (change.id.parse::<i64>(), change.version.parse::<i64>())
         else {
@@ -721,11 +732,10 @@ impl Index {
             )
             .await
         {
-            Ok(_) => Ok(Ok(format!(
-                "“{}” moved to {}.",
-                activity.title,
-                clock.text(start)
-            ))),
+            Ok(_) => Ok(Ok(CalendarNotice::Moved {
+                title: activity.title,
+                at: start,
+            })),
             Err(error) => Ok(Err(
                 match refusal(
                     error,
@@ -864,15 +874,15 @@ impl Index {
         drawn.follows_browser_zone = clock.display.mode == bilibi_datetime::Mode::Local;
         drawn.creatable = may_create;
         drawn.moving = self.moving.clone();
-        drawn.notice = self.notice.clone().or_else(|| {
+        drawn.notice = self.calendar_notice(clock)?.or_else(|| {
             (page.total > page.entries.len() as i64).then(|| {
                 (
                     StatusKind::Warning,
-                    format!(
+                    Html::text(&format!(
                         "Showing the first {} of {} activities in this range. Narrow the view or the filters to see the rest.",
                         page.entries.len(),
                         page.total
-                    ),
+                    )),
                 )
             })
         });

@@ -134,17 +134,6 @@ impl Clock {
             i: self.instant(at),
         })
     }
-    /// An instant as text for an inline time fact, in the Platform's format
-    /// and in the zone its editor reads and enters times in.
-    pub fn text(&self, at: Timestamp) -> String {
-        DisplayContext {
-            mode: Mode::Company,
-            timezone: self.zone.clone(),
-            ..self.display.clone()
-        }
-        .render(at, Format::DateTime, Precision::Minute)
-        .text
-    }
     /// The value of a `datetime-local` field.
     pub fn local(&self, at: Option<Timestamp>) -> String {
         at.map(|t| t.to_zoned(self.tz()).strftime("%Y-%m-%dT%H:%M").to_string())

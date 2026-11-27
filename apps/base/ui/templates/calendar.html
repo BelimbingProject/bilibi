@@ -80,7 +80,7 @@
 <div id="{{ id }}-status" role="status" aria-live="polite">
 {%- match notice -%}
 {%- when Some with ((kind, message)) -%}
-{% call f::alert(kind=kind, id="{}-notice"|format(id), class="") %}{{ message }}{% endcall %}
+{% call f::alert(kind=kind, id="{}-notice"|format(id), class="") %}{{ message|safe }}{% endcall %}
 {%- when None -%}
 {%- endmatch -%}
 </div>

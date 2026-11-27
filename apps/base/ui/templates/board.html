@@ -8,7 +8,7 @@
 {% import "feedback.html" as f %}
 
 {% macro card(it) %}
-<article id="{{ it.dom_id }}" data-board-card data-card-id="{{ it.id }}" data-version="{{ it.version }}" data-column="{{ it.column }}" data-targets="{{ it.targets }}"{% if it.movable %} data-movable draggable="true"{% endif %} aria-label="{{ it.name }}" class="group relative min-w-0 rounded-md border {{ it.surface }} px-2 py-1.5 text-sm text-ink shadow-xs focus-within:ring-2 focus-within:ring-brand-strong/40{% if it.movable %} cursor-grab{% endif %}">
+<article id="{{ it.dom_id }}" data-board-card data-card-id="{{ it.id }}" data-version="{{ it.version }}" data-column="{{ it.column }}" data-targets="{{ it.targets }}"{% if it.movable %} data-movable draggable="true"{% endif %} aria-label="{{ it.name }}"{% if !it.facts.is_empty() %} aria-describedby="{{ it.dom_id }}-facts"{% endif %} class="group relative min-w-0 rounded-md border {{ it.surface }} px-2 py-1.5 text-sm text-ink shadow-xs focus-within:ring-2 focus-within:ring-brand-strong/40{% if it.movable %} cursor-grab{% endif %}">
 {%- if it.href.is_empty() -%}
 <span class="block break-words font-medium text-ink-strong">{{ it.title }}</span>
 {%- else -%}
@@ -17,9 +17,13 @@
 {%- if !it.urgency.is_empty() -%}
 <span class="block text-xs font-medium text-ink-strong">{{ it.urgency }}</span>
 {%- endif -%}
+{%- if !it.facts.is_empty() -%}
+<div id="{{ it.dom_id }}-facts">
 {%- for fact in it.facts -%}
-<span class="block truncate text-xs text-ink-muted">{{ fact }}</span>
+<span class="block truncate text-xs text-ink-muted">{{ fact|safe }}</span>
 {%- endfor -%}
+</div>
+{%- endif -%}
 {%- if it.movable -%}
 <div class="mt-1 md:sr-only md:focus-within:not-sr-only">
 {% call c::button(button_type="button", event="board_move_open", name="id", value=it.id, aria_label="Move {}"|format(it.title)) %}Move…{% endcall %}

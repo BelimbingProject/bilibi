@@ -532,6 +532,17 @@ impl State {
         self.columns.load(&self.items, |i| i.request.id.to_string());
         Ok(())
     }
+    fn cover_timezone(&self, display: &bilibi_datetime::DisplayContext) -> Option<String> {
+        if display.mode == bilibi_datetime::Mode::Local && self.browser_zone.is_none() {
+            return None;
+        }
+        Some(
+            display
+                .clock(self.browser_zone.as_deref(), jiff::Timestamp::now())
+                .timezone,
+        )
+    }
+
     async fn body(&self, scope: &Scope) -> Result<String> {
         let navigation = render(Tabs {
             id: "approval-tabs",
@@ -563,6 +574,20 @@ impl State {
         match self.mode {
             "rules" => parts.extend(self.policy_parts()?),
             "cover" => {
+                let client = self.pages.db.get().await?;
+                let locale = self
+                    .pages
+                    .locales
+                    .resolve(&**client, scope, None)
+                    .await?
+                    .locale;
+                let display = self
+                    .pages
+                    .display
+                    .display(&**client, scope, None, locale)
+                    .await?;
+                let zone = self.cover_timezone(&display);
+                let zone = zone.as_deref().unwrap_or("Waiting for browser time zone");
                 if self.cases.is_empty() {
                     parts.push(Html::text("No approval types are available to cover."));
                 } else {
@@ -594,14 +619,15 @@ impl State {
                                     )
                                     .collect(),
                             ),
-                            field("starts", "From", "").kind(InputKind::DatetimeLocal),
-                            field("ends", "Until", "").kind(InputKind::DatetimeLocal),
+                            field("starts", &format!("From ({zone})"), "")
+                                .kind(InputKind::DatetimeLocal),
+                            field("ends", &format!("Until ({zone})"), "")
+                                .kind(InputKind::DatetimeLocal),
                         ],
                         button("Review cover", "", "", "")?,
                         false,
                     )?);
                 }
-                let client = self.pages.db.get().await?;
                 let principals = self
                     .cover
                     .iter()
@@ -625,17 +651,6 @@ impl State {
                     )
                     .await
                     .map_err(|_| Error::Internal)?;
-                let locale = self
-                    .pages
-                    .locales
-                    .resolve(&**client, scope, None)
-                    .await?
-                    .locale;
-                let display = self
-                    .pages
-                    .display
-                    .display(&**client, scope, None, locale)
-                    .await?;
                 drop(client);
                 let mut rows = Vec::new();
                 for cover in &self.cover {
@@ -1858,11 +1873,8 @@ impl State {
                     .display
                     .display(&**client, request.scope, None, locale)
                     .await?;
-                if display.mode == bilibi_datetime::Mode::Local && self.browser_zone.is_none() {
-                    return Err(Error::Invalid);
-                }
-                let clock = display.clock(self.browser_zone.as_deref(), jiff::Timestamp::now());
-                let zone = jiff::tz::TimeZone::get(&clock.timezone).map_err(|_| Error::Invalid)?;
+                let zone = self.cover_timezone(&display).ok_or(Error::Invalid)?;
+                let zone = jiff::tz::TimeZone::get(&zone).map_err(|_| Error::Invalid)?;
                 let utc = |key: &str| -> Result<String> {
                     let wall = input
                         .get(key)

@@ -892,9 +892,10 @@ impl Detail {
         let mut field = self
             .inline(words, a, key, clock.local(at), editable)
             .input_type("datetime-local");
-        if let Some(at) = at {
-            field = field.display_value(clock.text(at));
-        }
+        field.display_html = Some(match at {
+            Some(at) => clock.time(&format!("{}-instant", field.id), at)?,
+            None => Html::text(field.display()),
+        });
         if matches!(key, "due_at" | "start_at") {
             field = field.allow_empty();
         }
@@ -1406,10 +1407,9 @@ impl Detail {
                 } else {
                     "email pending"
                 };
-                who.push(&Html::text(&format!(
-                    " Invited {} · {sent}",
-                    clock.text(at)
-                )));
+                who.push(&Html::text(" Invited "));
+                who.push(&clock.time(&format!("activity-guest-{}-invited", guest.id), at)?);
+                who.push(&Html::text(&format!(" · {sent}")));
             }
             if editable && guest.role != "assignee" {
                 who.push(&Html::text(" "));
@@ -1589,23 +1589,22 @@ impl Detail {
         }
         let ids: Vec<i64> = conflicts.iter().map(|c| c.user).collect();
         let names = self.pages.names(scope, &ids).await?;
-        let lines: Vec<String> = conflicts
-            .iter()
-            .map(|c| {
-                let what = c.title.as_deref().unwrap_or("another call or meeting");
-                format!(
-                    "{} has {what} from {} to {}.",
-                    names.get(&c.user).cloned().unwrap_or_default(),
-                    clock.text(c.starts_at),
-                    clock.text(c.ends_at)
-                )
-            })
-            .collect();
+        let mut body = Html::text("This overlaps:");
+        for c in conflicts {
+            let what = c.title.as_deref().unwrap_or("another call or meeting");
+            let who = names.get(&c.user).map_or("", String::as_str);
+            let id = format!("activity-conflict-{}-{}", c.user, c.activity);
+            body.push(&Html::text(&format!(" {who} has {what} from ")));
+            body.push(&clock.time(&format!("{id}-start"), c.starts_at)?);
+            body.push(&Html::text(" to "));
+            body.push(&clock.time(&format!("{id}-end"), c.ends_at)?);
+            body.push(&Html::text("."));
+        }
         render(Alert {
             kind: StatusKind::Warning,
             id: "activity-conflicts",
             class: "mt-6",
-            body: Html::text(&format!("This overlaps: {}", lines.join(" "))),
+            body,
         })
     }
 

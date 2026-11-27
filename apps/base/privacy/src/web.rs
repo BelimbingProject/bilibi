@@ -2291,7 +2291,11 @@ impl Retention {
         body.push(&render(SectionHeading {
             title: "Audit evidence",
             id: "privacy-retention-evidence",
-            description: "Audit evidence is kept for its legal minimum.",
+            description: if evidence.is_some() {
+                "Audit evidence is kept for its legal minimum."
+            } else {
+                "Audit evidence kept for its legal minimum is erased by the same sweep once the minimum has passed."
+            },
             ..SectionHeading::default()
         })?);
         if let Some(sweep) = evidence {
