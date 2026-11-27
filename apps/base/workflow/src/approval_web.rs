@@ -25,7 +25,7 @@ pub(crate) struct Pages {
 #[template(path = "approvals.html")]
 struct View<'a> {
     title: &'a str,
-    timezone_request: &'a str,
+    timezone_request: Option<&'a str>,
     record: Option<String>,
     parts: Vec<Html>,
     dialog: Html,
@@ -157,6 +157,7 @@ struct State {
     flash: Option<(StatusKind, String)>,
     error: String,
     browser_zone: Option<String>,
+    cover_zone: Option<String>,
     timezone_request: String,
 }
 impl State {
@@ -240,6 +241,7 @@ impl State {
             flash: None,
             error: String::new(),
             browser_zone: None,
+            cover_zone: None,
             timezone_request: uuid::Uuid::new_v4().to_string(),
         })
     }
@@ -543,7 +545,7 @@ impl State {
         )
     }
 
-    async fn body(&self, scope: &Scope) -> Result<String> {
+    async fn body(&mut self, scope: &Scope) -> Result<String> {
         let navigation = render(Tabs {
             id: "approval-tabs",
             label: "Approval pages",
@@ -586,11 +588,12 @@ impl State {
                     .display
                     .display(&**client, scope, None, locale)
                     .await?;
-                let zone = self.cover_timezone(&display);
-                let zone = zone.as_deref().unwrap_or("Waiting for browser time zone");
+                if self.cover_zone.is_none() {
+                    self.cover_zone = self.cover_timezone(&display);
+                }
                 if self.cases.is_empty() {
                     parts.push(Html::text("No approval types are available to cover."));
-                } else {
+                } else if let Some(zone) = &self.cover_zone {
                     parts.push(form(
                         "cover-form",
                         "cover_review",
@@ -627,6 +630,8 @@ impl State {
                         button("Review cover", "", "", "")?,
                         false,
                     )?);
+                } else {
+                    parts.push(Html::text("Waiting for browser time zone."));
                 }
                 let principals = self
                     .cover
@@ -1081,11 +1086,8 @@ impl State {
         };
         View {
             title: self.title(),
-            timezone_request: if self.browser_zone.is_some() {
-                ""
-            } else {
-                &self.timezone_request
-            },
+            timezone_request: (self.mode == "cover" && !self.cases.is_empty())
+                .then_some(self.timezone_request.as_str()),
             record: if self.mode == "detail" {
                 self.id.map(|id| id.to_string())
             } else {
@@ -1526,7 +1528,7 @@ impl State {
     async fn event(&mut self, request: &LiveRequest<'_, Scope>, event: &Value) -> Result<()> {
         let kind = value(event, "type");
         let input = fields(event);
-        if kind == "browser_timezone" {
+        if kind == "browser_timezone" && self.mode == "cover" && !self.cases.is_empty() {
             self.browser_zone = input
                 .get("timezone")
                 .filter(|zone| bilibi_datetime::valid_timezone(zone))
@@ -1861,20 +1863,8 @@ impl State {
                     .get("delegate")
                     .and_then(|v| v.parse::<i64>().ok())
                     .ok_or(Error::Invalid)?;
-                let client = self.pages.db.get().await?;
-                let locale = self
-                    .pages
-                    .locales
-                    .resolve(&**client, request.scope, None)
-                    .await?
-                    .locale;
-                let display = self
-                    .pages
-                    .display
-                    .display(&**client, request.scope, None, locale)
-                    .await?;
-                let zone = self.cover_timezone(&display).ok_or(Error::Invalid)?;
-                let zone = jiff::tz::TimeZone::get(&zone).map_err(|_| Error::Invalid)?;
+                let zone = self.cover_zone.as_deref().ok_or(Error::Invalid)?;
+                let zone = jiff::tz::TimeZone::get(zone).map_err(|_| Error::Invalid)?;
                 let utc = |key: &str| -> Result<String> {
                     let wall = input
                         .get(key)

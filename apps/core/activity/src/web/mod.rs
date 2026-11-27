@@ -98,8 +98,7 @@ impl Pages {
 }
 
 /// The reader's clock: how instants are shown, and the zone a date-time
-/// field is read in. Until the browser reports its zone, a reader in the
-/// browser-local mode sees a provisional UTC reading and cannot save a typed time.
+/// field is read in.
 #[derive(Clone)]
 pub(crate) struct Clock {
     pub display: DisplayContext,
@@ -139,21 +138,21 @@ impl Clock {
         at.map(|t| t.to_zoned(self.tz()).strftime("%Y-%m-%dT%H:%M").to_string())
             .unwrap_or_default()
     }
-    /// A `datetime-local` value read in the reader's zone; `Ok(None)` when
-    /// blank.
     pub fn parse(&self, value: &str) -> std::result::Result<Option<Timestamp>, ()> {
+        Self::parse_in_zone(&self.zone, value)
+    }
+
+    fn parse_in_zone(zone: &str, value: &str) -> std::result::Result<Option<Timestamp>, ()> {
         let value = value.trim();
-        if !self.ready && !value.is_empty() {
-            return Err(());
-        }
         if value.is_empty() {
             return Ok(None);
         }
+        let zone = TimeZone::get(zone).map_err(|_| ())?;
         let civil = civil::DateTime::strptime("%Y-%m-%dT%H:%M", value)
             .or_else(|_| civil::DateTime::strptime("%Y-%m-%dT%H:%M:%S", value))
             .map_err(|_| ())?;
         civil
-            .to_zoned(self.tz())
+            .to_zoned(zone)
             .map(|z| Some(z.timestamp()))
             .map_err(|_| ())
     }

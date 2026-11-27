@@ -182,7 +182,7 @@ pub(crate) struct Index {
     /// The repeating row whose Delete series dialog is open.
     series_delete: Option<series_delete::Open>,
     /// The calendar item whose Move dialog is open, and its errors.
-    moving: Option<String>,
+    moving: Option<(String, String)>,
     move_errors: Vec<String>,
     /// The last calendar move's outcome, announced on the calendar.
     notice: Option<CalendarNotice>,
@@ -290,6 +290,10 @@ impl Index {
                     self.notice = Some(CalendarNotice::Error(
                         "The browser time zone is not available yet. Try again.".into(),
                     ));
+                } else if value["timezone"].as_str() != Some(clock.zone.as_str()) {
+                    self.notice = Some(CalendarNotice::Error(
+                        "The calendar time zone changed. Choose the slot again.".into(),
+                    ));
                 } else if !self.pages.activities.may_create(scope).await? {
                     self.notice = Some(CalendarNotice::Error(
                         "You do not have permission to create activities.".into(),
@@ -300,6 +304,7 @@ impl Index {
                             let (start, end) = slot_times(&slot, &clock);
                             let assignee = self.slot_assignee(scope, &slot).await?;
                             self.slot = Some(Slot {
+                                clock,
                                 start,
                                 end,
                                 assignee,
@@ -315,35 +320,13 @@ impl Index {
                 }
             }
             "cancel_slot" => self.slot = None,
-            "slot_more" => {
-                // More options: the same typed values in the full form.
-                let form = params::form_values_checked(value, "slot", params::FIELD_LIMIT)
-                    .map_err(Error::refused)?;
-                if let Some(mut slot) = self.slot.take() {
-                    let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-                    slot.read(&form, &clock)?;
-                    if !slot.errors.is_empty() {
-                        self.slot = Some(slot);
-                        return Ok(None);
-                    }
-                    if self.pages.activities.may_create(scope).await? {
-                        self.dialog = Some(
-                            Dialog::new(slot.kind, None)
-                                .at(slot.start, slot.end, &clock)
-                                .titled(&slot.title)
-                                .assigned(slot.assignee),
-                        );
-                    }
-                }
-            }
             "slot_save" => {
                 let form = params::form_values_checked(value, "slot", params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
                 let Some(mut slot) = self.slot.take() else {
                     return Ok(None);
                 };
-                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-                slot.read(&form, &clock)?;
+                slot.read(&form)?;
                 if !self.pages.activities.may_create(scope).await? {
                     self.notice = Some(CalendarNotice::Error(
                         "You do not have permission to create activities.".into(),
@@ -357,25 +340,23 @@ impl Index {
                 // More options is the same submission with its marker: the
                 // typed values open the full form instead of being saved.
                 if form.contains_key("more") {
-                    let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                     self.dialog = Some(
-                        Dialog::new(slot.kind, None)
-                            .at(slot.start, slot.end, &clock)
+                        Dialog::new(slot.kind, None, &slot.clock)
+                            .at(slot.start, slot.end)
                             .titled(&slot.title)
                             .assigned(slot.assignee),
                     );
                     return Ok(None);
                 }
-                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-                let mut dialog = Dialog::new(slot.kind, None)
-                    .at(slot.start, slot.end, &clock)
+                let mut dialog = Dialog::new(slot.kind, None, &slot.clock)
+                    .at(slot.start, slot.end)
                     .titled(&slot.title)
                     .assigned(slot.assignee.clone());
                 let pages = self.pages.shared();
                 // The compact draft already read its fields into the dialog;
                 // the submit reads only what the full form posts.
                 let saved = dialog
-                    .submit(&pages, scope, credential, &clock, &serde_json::json!({}))
+                    .submit(&pages, scope, credential, &serde_json::json!({}))
                     .await?;
                 match saved {
                     Some(id) => {
@@ -437,23 +418,36 @@ impl Index {
             "cancel_delete_series" => self.series_delete = None,
             "delete_series" => self.delete_series(scope, credential, value).await?,
             calendar::MOVE_OPEN => {
-                self.moving = calendar::item_id(value).map(str::to_owned);
+                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 self.move_errors.clear();
                 self.notice = None;
+                self.moving = if clock.ready {
+                    calendar::item_id(value).map(|id| (id.to_owned(), clock.zone))
+                } else {
+                    self.notice = Some(CalendarNotice::Error(
+                        "The browser time zone is not available yet. Try again.".into(),
+                    ));
+                    None
+                };
             }
             calendar::MOVE_CANCEL => {
                 self.moving = None;
                 self.move_errors.clear();
             }
             calendar::MOVE | calendar::MOVE_SUBMIT => {
-                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-                let outcome = if !clock.ready {
-                    Err("The browser time zone is not available yet. Try again.".to_owned())
+                let zone = if name == calendar::MOVE_SUBMIT {
+                    self.moving.as_ref().map(|(_, zone)| zone.clone())
                 } else {
-                    match CalendarMove::from_event(value, &clock.zone) {
+                    let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                    (clock.ready && value["timezone"].as_str() == Some(clock.zone.as_str()))
+                        .then_some(clock.zone)
+                };
+                let outcome = match zone {
+                    Some(zone) => match CalendarMove::from_event(value, &zone) {
                         Ok(change) => self.reschedule(scope, credential, name, &change).await?,
                         Err(sentence) => Err(sentence),
-                    }
+                    },
+                    None => Err("The calendar time zone changed. Start the move again.".to_owned()),
                 };
                 match outcome {
                     Ok(notice) => {
@@ -510,7 +504,8 @@ impl Index {
                         None => None,
                     };
                     self.slot = None;
-                    self.dialog = Some(Dialog::new(kind, related));
+                    let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                    self.dialog = Some(Dialog::new(kind, related, &clock));
                 } else {
                     self.flash = Some((
                         StatusKind::Error,
@@ -520,7 +515,6 @@ impl Index {
             }
             "close_modal" => self.dialog = None,
             "save_event" => {
-                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {
                     return Ok(None);
@@ -528,10 +522,7 @@ impl Index {
                 if dialog.submit_event() != name {
                     return Err(Error::Invalid);
                 }
-                if let Some(id) = dialog
-                    .submit(&pages, scope, credential, &clock, value)
-                    .await?
-                {
+                if let Some(id) = dialog.submit(&pages, scope, credential, value).await? {
                     let message = dialog.created_message();
                     self.dialog = None;
                     return Ok(Some(LiveBody {
@@ -873,7 +864,10 @@ impl Index {
         drawn.day_marks = marks;
         drawn.follows_browser_zone = clock.display.mode == bilibi_datetime::Mode::Local;
         drawn.creatable = may_create;
-        drawn.moving = self.moving.clone();
+        if let Some((id, zone)) = &self.moving {
+            drawn.moving = Some(id.clone());
+            drawn.move_timezone = Some(zone.clone());
+        }
         drawn.notice = self.calendar_notice(clock)?.or_else(|| {
             (page.total > page.entries.len() as i64).then(|| {
                 (
@@ -1092,7 +1086,6 @@ impl Index {
             body.push(&dialog.render(
                 &self.pages,
                 scope,
-                &clock,
                 &words,
                 "activities-new",
                 "close_modal",

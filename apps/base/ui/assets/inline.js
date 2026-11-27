@@ -159,8 +159,15 @@
       if (this.el.dataset.editable !== 'true' || this.active) return;
       this.active = true;
       const current = this.el.dataset.value;
-      const draft = this.draft || {value: current, original: current};
+      const draft = this.draft || {
+        value: current,
+        original: current,
+        timezone: this.el.dataset.timezone,
+        version: this.el.dataset.version,
+      };
       this.original = draft.original;
+      this.timezone = draft.timezone;
+      this.version = draft.version;
       this.openedPendingValue = this.pending.has(draft) ? draft.value : undefined;
       const input = this.control();
       if (!input) { this.active = false; return; }
@@ -197,7 +204,7 @@
         this.cancel(returnFocus);
         return;
       }
-      const draft = {value, original: this.original};
+      const draft = {value, original: this.original, timezone: this.timezone, version: this.version};
       this.draft = draft;
       this.active = false;
       this.pending.add(draft);
@@ -207,6 +214,8 @@
       this.emit(this.el.dataset.saveEvent, {
         id: this.el.dataset.id, field: this.el.dataset.field, value,
         fact: this.el.id, original: draft.original,
+        ...(draft.timezone ? {timezone: draft.timezone} : {}),
+        ...(draft.version ? {version: draft.version} : {}),
         prepareOriginal: () => draft.original,
         onReply: (reply) => {
           this.pending.delete(draft);
@@ -214,10 +223,10 @@
           if (reply.type === 'error') {
             if (this.draft === draft) this.message(reply.message || 'The change was not confirmed. Open the field to retry, or press Escape to discard the draft.');
           } else if (this.el.dataset.status === 'saved') {
-            if (this.el.dataset.value === draft.value) {
-              if (this.active && this.original === draft.original) this.original = draft.value;
+            if (this.el.dataset.value === draft.value && this.el.dataset.timezone === draft.timezone) {
+              if (this.active && this.timezone === draft.timezone && this.original === draft.original) this.original = draft.value;
               for (const pending of this.pending) {
-                if (pending.original === draft.original) pending.original = draft.value;
+                if (pending.timezone === draft.timezone && pending.original === draft.original) pending.original = draft.value;
               }
             }
             if (this.draft === draft) this.draft = null;

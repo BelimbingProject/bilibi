@@ -87,6 +87,7 @@
       this.report = (item, place, length) => {
         const allDay = item.hasAttribute("data-all-day")
         const payload = {
+          timezone: this.el.dataset.timezone,
           id: item.dataset.itemId,
           version: item.dataset.version,
           date: place.date,
@@ -113,13 +114,13 @@
         const grab = column
           ? Math.round(((event.clientY - item.getBoundingClientRect().top) / column.getBoundingClientRect().height * DAY_MINUTES) / snap) * snap
           : 0
-        this.drag = {item, grab: Math.max(0, grab)}
+        this.drag = {item, timezone: this.el.dataset.timezone, grab: Math.max(0, grab)}
         event.dataTransfer.effectAllowed = "move"
         event.dataTransfer.setData("text/plain", item.dataset.itemId)
         item.classList.add("opacity-40")
       }
       this.onDragOver = event => {
-        if (!this.drag) return
+        if (!this.drag || this.drag.timezone !== this.el.dataset.timezone) return
         const target = event.target instanceof Element ? event.target.closest(TARGET) : null
         if (!target || !this.el.contains(target)) return this.clearGhost()
         event.preventDefault()
@@ -138,7 +139,7 @@
         }
       }
       this.onDrop = event => {
-        if (!this.drag) return
+        if (!this.drag || this.drag.timezone !== this.el.dataset.timezone) return
         const target = event.target instanceof Element ? event.target.closest(TARGET) : null
         if (!target || !this.el.contains(target)) return
         event.preventDefault()
@@ -165,12 +166,12 @@
         if (!item || !column || column.dataset.date !== item.dataset.startDate) return
         event.preventDefault()
         try { handle.setPointerCapture(event.pointerId) } catch { /* a synthetic or ended pointer */ }
-        this.resize = {item, column, handle, pointer: event.pointerId, length: number(item.dataset.length)}
+        this.resize = {item, column, handle, timezone: this.el.dataset.timezone, pointer: event.pointerId, length: number(item.dataset.length)}
       }
       // Create: press on a free part of a time column and drag down.
       this.creatable = () => this.el.hasAttribute("data-creatable")
       this.emitSlot = (column, minute, length) => {
-        this.emit("calendar_slot", {date: column.dataset.date, lane: column.dataset.lane || "", minute, length: Math.max(1, Math.min(length, DAY_MINUTES - minute))})
+        this.emit("calendar_slot", {timezone: this.el.dataset.timezone, date: column.dataset.date, lane: column.dataset.lane || "", minute, length: Math.max(1, Math.min(length, DAY_MINUTES - minute))})
       }
       this.onSlotDown = event => {
         if (!this.creatable() || event.button !== 0 || coarse() || this.resize) return
@@ -180,7 +181,7 @@
         event.preventDefault()
         try { column.setPointerCapture(event.pointerId) } catch { /* a synthetic or ended pointer */ }
         const from = this.minuteAt(column, event.clientY)
-        this.slot = {column, pointer: event.pointerId, from, length: this.snap(), moved: false}
+        this.slot = {column, timezone: this.el.dataset.timezone, pointer: event.pointerId, from, length: this.snap(), moved: false}
         this.showGhost(column, from, DEFAULT_SLOT)
       }
       this.onSlotMove = event => {
@@ -197,7 +198,7 @@
         this.slot = null
         try { slot.column.releasePointerCapture(slot.pointer) } catch { /* already released */ }
         this.clearGhost()
-        if (apply) this.emitSlot(slot.column, slot.from, slot.moved ? slot.length : DEFAULT_SLOT)
+        if (apply && slot.timezone === this.el.dataset.timezone) this.emitSlot(slot.column, slot.from, slot.moved ? slot.length : DEFAULT_SLOT)
       }
       // A tap on touch, and a click on an empty day cell with any pointer.
       this.onClick = event => {
@@ -211,7 +212,7 @@
         }
         const cell = target.closest("[data-cal-cell]")
         if (cell && !column) {
-          this.emit("calendar_slot", {date: cell.dataset.date, lane: cell.dataset.lane || "", all_day: "true"})
+          this.emit("calendar_slot", {timezone: this.el.dataset.timezone, date: cell.dataset.date, lane: cell.dataset.lane || "", all_day: "true"})
         }
       }
 
@@ -231,7 +232,7 @@
         this.resize = null
         try { state.handle.releasePointerCapture(state.pointer) } catch { /* already released */ }
         this.clearGhost()
-        if (apply && state.length !== number(state.item.dataset.length)) {
+        if (apply && state.timezone === this.el.dataset.timezone && state.length !== number(state.item.dataset.length)) {
           this.report(state.item, {date: state.item.dataset.startDate, minute: number(state.item.dataset.startMinute), lane: state.item.dataset.lane || ""}, state.length)
         }
       }
@@ -277,7 +278,7 @@
         if (!cell || event.altKey || event.ctrlKey || event.metaKey) return
         if ((event.key === "Enter" || event.key === " ") && cell.matches("[data-cal-cell]") && this.creatable()) {
           event.preventDefault()
-          this.emit("calendar_slot", {date: cell.dataset.date, lane: "", all_day: "true"})
+          this.emit("calendar_slot", {timezone: this.el.dataset.timezone, date: cell.dataset.date, lane: "", all_day: "true"})
           return
         }
         const cells = [...this.el.querySelectorAll("[role=gridcell]")]

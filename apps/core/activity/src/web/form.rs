@@ -32,6 +32,7 @@ struct FormView<'a> {
 
 /// A new activity being written in the dialog.
 pub(crate) struct Dialog {
+    clock: Clock,
     pub kind: Kind,
     values: BTreeMap<String, String>,
     related: Option<Resolved>,
@@ -98,7 +99,7 @@ fn label_of(field: &str) -> &'static str {
 }
 
 impl Dialog {
-    pub fn new(kind: Kind, related: Option<Resolved>) -> Self {
+    pub fn new(kind: Kind, related: Option<Resolved>, clock: &Clock) -> Self {
         let mut values = BTreeMap::new();
         values.insert("priority".into(), "medium".into());
         values.insert("status".into(), "held".into());
@@ -110,6 +111,7 @@ impl Dialog {
         values.insert("repeat_end".into(), "count".into());
         values.insert("repeat_count".into(), "10".into());
         Self {
+            clock: clock.clone(),
             kind,
             values,
             related,
@@ -133,16 +135,17 @@ impl Dialog {
     /// The dialog for a slot chosen on the calendar: a call or meeting
     /// starts and ends there (a call in the future is planned, not held), a
     /// task falls due at its start.
-    pub fn at(mut self, start: jiff::Timestamp, end: jiff::Timestamp, clock: &Clock) -> Self {
+    pub fn at(mut self, start: jiff::Timestamp, end: jiff::Timestamp) -> Self {
         match self.kind {
             Kind::Task => {
                 self.values
-                    .insert("due_at".into(), clock.local(Some(start)));
+                    .insert("due_at".into(), self.clock.local(Some(start)));
             }
             Kind::Call | Kind::Meeting => {
                 self.values
-                    .insert("starts_at".into(), clock.local(Some(start)));
-                self.values.insert("ends_at".into(), clock.local(Some(end)));
+                    .insert("starts_at".into(), self.clock.local(Some(start)));
+                self.values
+                    .insert("ends_at".into(), self.clock.local(Some(end)));
                 if self.kind == Kind::Call && start > jiff::Timestamp::now() {
                     self.values.insert("status".into(), "planned".into());
                 }
@@ -201,7 +204,7 @@ impl Dialog {
                 .next(),
             None => None,
         };
-        let mut dialog = Self::new(draft.kind, related);
+        let mut dialog = Self::new(draft.kind, related, clock);
         let mut put = |key: &str, value: String| {
             dialog.values.insert(key.into(), value);
         };
@@ -501,9 +504,9 @@ impl Dialog {
     }
 
     /// The contract input, or the fields the dialog refuses before asking.
-    fn input(&mut self, clock: &Clock) -> Option<Value> {
+    fn input(&mut self) -> Option<Value> {
         let mut errors: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let mut time = |key: &str| match clock.parse(self.value(key)) {
+        let mut time = |key: &str| match self.clock.parse(self.value(key)) {
             Ok(time) => time.map(|t| t.to_string()),
             Err(()) => {
                 errors
@@ -582,7 +585,7 @@ impl Dialog {
         if self.repeats() {
             let mut repeat = json!({
                 "frequency": self.value("repeat"),
-                "timezone": clock.zone,
+                "timezone": self.clock.zone,
                 "working_days_only": self.value("repeat_working") == "true",
             });
             match self.value("repeat_every").trim().parse::<i64>() {
@@ -644,14 +647,13 @@ impl Dialog {
         pages: &Pages,
         scope: &Scope,
         credential: &str,
-        clock: &Clock,
         value: &Value,
     ) -> Result<Option<i64>> {
         self.read(pages, scope, value).await?;
         self.submitted = true;
         self.errors.clear();
         self.notice.clear();
-        let Some(input) = self.input(clock) else {
+        let Some(input) = self.input() else {
             return Ok(None);
         };
         let event = self.submit_event();
@@ -821,7 +823,6 @@ impl Dialog {
         &self,
         pages: &Pages,
         scope: &Scope,
-        clock: &Clock,
         words: &bilibi_grid::RecordWords,
         prefix: &str,
         cancel_event: &str,
@@ -834,7 +835,7 @@ impl Dialog {
             .field(words, prefix, "title", "Subject")
             .required()
             .attr("maxlength", "160")];
-        let zone = clock.hint();
+        let zone = self.clock.hint();
         // One field order for every event, whatever it is: what it is, when
         // it is, and the rest behind Details. The kind only decides which
         // contract saves it and which fields it can fill.

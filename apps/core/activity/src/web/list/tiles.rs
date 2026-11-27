@@ -30,6 +30,7 @@ const SLOT_HOUR: i64 = 9;
 /// lane of the shared view it was chosen on (their account and name), when
 /// that is not the reader's own.
 pub(super) struct Slot {
+    pub(super) clock: Clock,
     pub start: jiff::Timestamp,
     pub end: jiff::Timestamp,
     pub assignee: Option<(i64, String)>,
@@ -47,11 +48,7 @@ pub(super) struct Slot {
 impl Slot {
     /// Reads the compact draft's fields: its title, kind, all-day box and its
     /// start and end (a date in a zone, or the date the all-day box keeps).
-    pub(super) fn read(
-        &mut self,
-        form: &std::collections::HashMap<String, String>,
-        clock: &Clock,
-    ) -> Result<()> {
+    pub(super) fn read(&mut self, form: &std::collections::HashMap<String, String>) -> Result<()> {
         self.errors.clear();
         self.notice.clear();
         if let Some(title) = form.get("title") {
@@ -61,7 +58,10 @@ impl Slot {
             self.kind = kind;
         }
         let mut time = |key: &str| -> Result<Option<jiff::Timestamp>> {
-            match clock.parse(form.get(key).map(String::as_str).unwrap_or_default()) {
+            match self
+                .clock
+                .parse(form.get(key).map(String::as_str).unwrap_or_default())
+            {
                 Ok(at) => Ok(at),
                 Err(()) => {
                     self.errors
@@ -337,15 +337,15 @@ impl Index {
                 .id("activities-slot-start")
                 .label("Starts")
                 .kind(InputKind::DatetimeLocal)
-                .value(clock.local(Some(slot.start)))
-                .hint(clock.hint()),
+                .value(slot.clock.local(Some(slot.start)))
+                .hint(slot.clock.hint()),
         )?);
         body.push(&render(
             Field::in_form("slot", "end")
                 .id("activities-slot-end")
                 .label("Ends")
                 .kind(InputKind::DatetimeLocal)
-                .value(clock.local(Some(slot.end)))
+                .value(slot.clock.local(Some(slot.end)))
                 .errors(slot.errors.get("end").cloned().unwrap_or_default()),
         )?);
         let mut actions = render(Button {

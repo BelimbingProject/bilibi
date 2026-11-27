@@ -48,7 +48,7 @@
 </li>
 {% endmacro %}
 
-<section id="{{ id }}" data-hook="Calendar" data-view="{{ view }}" data-snap="{{ snap }}"{% if creatable %} data-creatable{% endif %} aria-label="Calendar, {{ title }}" class="space-y-2">
+<section id="{{ id }}" data-hook="Calendar" data-timezone="{{ timezone }}" data-view="{{ view }}" data-snap="{{ snap }}"{% if creatable %} data-creatable{% endif %} aria-label="Calendar, {{ title }}" class="space-y-2">
 <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
 <div class="flex items-center gap-1">
 <a id="{{ id }}-previous" href="{{ previous.href }}" data-patch aria-label="{{ previous.label }}" title="{{ previous.label }}" class="ui-icon-button grid size-7 place-items-center rounded-md text-ink-muted hover:bg-surface-sunken hover:text-ink">{% call c::icon(name="chevron-left", class="size-4") %}{% endcall %}</a>

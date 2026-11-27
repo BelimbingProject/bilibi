@@ -442,6 +442,7 @@ pub struct Calendar {
     pub notice: Option<(StatusKind, Html)>,
     /// The item whose Move dialog is open.
     pub moving: Option<String>,
+    pub move_timezone: Option<String>,
     /// Errors of the open Move dialog's fields.
     pub move_errors: Vec<String>,
     /// The zone follows the viewer's browser (display mode `local`): the
@@ -477,6 +478,7 @@ impl Calendar {
             day_marks: Vec::new(),
             notice: None,
             moving: None,
+            move_timezone: None,
             move_errors: Vec::new(),
             follows_browser_zone: false,
             creatable: false,
@@ -841,6 +843,7 @@ struct ViewLink {
 struct View {
     id: String,
     view: &'static str,
+    timezone: String,
     title: String,
     zone_note: String,
     focus_hour: Option<u8>,
@@ -1357,7 +1360,13 @@ impl View {
                 .items
                 .iter()
                 .find(|item| &item.id == id && item.movable)
-                .map(|item| Self::dialog(calendar, item, &zone))
+                .map(|item| {
+                    Self::dialog(
+                        calendar,
+                        item,
+                        calendar.move_timezone.as_deref().unwrap_or(&zone_name),
+                    )
+                })
                 .transpose()?,
             None => None,
         };
@@ -1369,6 +1378,7 @@ impl View {
         Ok(Self {
             id: calendar.id.clone(),
             view: state.view.name(),
+            timezone: zone_name.clone(),
             title,
             focus_hour: calendar.focus_hour.map(|hour| hour.min(23)),
             range_key: format!("{}-{first}-{last}-{zone_name}", state.view.name()),
@@ -1476,8 +1486,9 @@ impl View {
     }
 
     /// The Move dialog: the item's start and end in the display zone.
-    fn dialog(calendar: &Calendar, item: &CalendarItem, zone: &TimeZone) -> askama::Result<Html> {
-        let civil = Civil::of(item, zone);
+    fn dialog(calendar: &Calendar, item: &CalendarItem, timezone: &str) -> askama::Result<Html> {
+        let (zone, name) = tz(timezone);
+        let civil = Civil::of(item, &zone);
         let field = |key: &str, label: &str, kind: InputKind, value: String| {
             Field::in_form(MOVE_FORM, key)
                 .id(format!("{}-move-{key}", calendar.id))
@@ -1592,7 +1603,7 @@ impl View {
             title: &format!("Move {}", item.title),
             cancel_event: MOVE_CANCEL,
             width: ModalWidth::Narrow,
-            description: "Times are in the zone the calendar shows.",
+            description: &format!("Times are in {name}."),
             body: form,
             ..Modal::default()
         })

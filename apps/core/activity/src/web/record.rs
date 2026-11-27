@@ -35,6 +35,7 @@ const LIMIT: usize = 10_000;
 /// The Change series dialog: which occurrences, the values to give them,
 /// and what the last save refused.
 struct SeriesForm {
+    clock: Clock,
     values: HashMap<String, String>,
     errors: Vec<String>,
 }
@@ -56,6 +57,7 @@ impl SeriesForm {
             ),
         ]);
         Self {
+            clock: clock.clone(),
             values,
             errors: Vec::new(),
         }
@@ -64,7 +66,7 @@ impl SeriesForm {
         self.values.get(key).map_or("", String::as_str)
     }
     /// The patch: only the values that differ from this occurrence's.
-    fn patch(&self, a: &Activity, clock: &Clock) -> std::result::Result<Value, Vec<String>> {
+    fn patch(&self, a: &Activity) -> std::result::Result<Value, Vec<String>> {
         let mut patch = json!({});
         let mut errors = Vec::new();
         let title = self.value("title").trim();
@@ -82,7 +84,7 @@ impl SeriesForm {
                 "ends_at" => a.ends_at,
                 _ => a.due_at,
             };
-            match clock.parse(self.value(key)) {
+            match self.clock.parse(self.value(key)) {
                 Ok(at) if at != stored => {
                     patch[*key] = json!(at.map(|t| t.to_string()).unwrap_or_default())
                 }
@@ -195,8 +197,7 @@ impl Detail {
             dialog.values.insert(key, value);
         }
         let a = self.pages.activities.get(scope, self.id).await?;
-        let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-        let patch = match dialog.patch(&a, &clock) {
+        let patch = match dialog.patch(&a) {
             Ok(patch) => patch,
             Err(errors) => {
                 dialog.errors = errors;
@@ -357,10 +358,12 @@ impl Detail {
             .as_str()
             .and_then(|v| v.parse::<i64>().ok())
             .ok_or(Error::Invalid)?;
-        let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
         let mut patch = json!({});
         match field {
-            "starts_at" | "ends_at" | "due_at" | "start_at" => match clock.parse(submitted) {
+            "starts_at" | "ends_at" | "due_at" | "start_at" => match Clock::parse_in_zone(
+                value["timezone"].as_str().unwrap_or_default(),
+                submitted,
+            ) {
                 Ok(time) => patch[field] = json!(time.map(|t| t.to_string()).unwrap_or_default()),
                 Err(()) => {
                     self.statuses.put(
@@ -785,7 +788,6 @@ impl Detail {
             }
             "close_modal" => self.dialog = None,
             "save_event" => {
-                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {
                     return Ok(None);
@@ -793,10 +795,7 @@ impl Detail {
                 if dialog.submit_event() != name {
                     return Err(Error::Invalid);
                 }
-                if let Some(id) = dialog
-                    .submit(&pages, scope, credential, &clock, value)
-                    .await?
-                {
+                if let Some(id) = dialog.submit(&pages, scope, credential, value).await? {
                     let message = dialog.created_message();
                     self.dialog = None;
                     return Ok(Some(LiveBody {
@@ -892,6 +891,11 @@ impl Detail {
         let mut field = self
             .inline(words, a, key, clock.local(at), editable)
             .input_type("datetime-local");
+        field.timezone = if clock.ready {
+            clock.zone.clone()
+        } else {
+            String::new()
+        };
         field.display_html = Some(match at {
             Some(at) => clock.time(&format!("{}-instant", field.id), at)?,
             None => Html::text(field.display()),
@@ -1847,7 +1851,6 @@ impl Detail {
             body.push(&dialog.render(
                 &self.pages,
                 scope,
-                &clock,
                 &words,
                 "activity-new",
                 "close_modal",
@@ -1938,10 +1941,18 @@ fn series_dialog(a: &Activity, form: &SeriesForm) -> Result<Html> {
     ];
     match a.kind {
         Kind::Call | Kind::Meeting => {
-            fields.push(field("starts_at", "Starts").kind(InputKind::DatetimeLocal));
+            fields.push(
+                field("starts_at", "Starts")
+                    .kind(InputKind::DatetimeLocal)
+                    .hint(form.clock.hint()),
+            );
             fields.push(field("ends_at", "Ends").kind(InputKind::DatetimeLocal));
         }
-        Kind::Task => fields.push(field("due_at", "Due").kind(InputKind::DatetimeLocal)),
+        Kind::Task => fields.push(
+            field("due_at", "Due")
+                .kind(InputKind::DatetimeLocal)
+                .hint(form.clock.hint()),
+        ),
         Kind::Note => {}
     }
     if a.kind == Kind::Meeting {
