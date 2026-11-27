@@ -53,10 +53,10 @@ pub fn admit(status: &str, mode: &str) -> Result<Value, String> {
             .flatten()
             .ok_or("The release reports an invalid Extension declaration.")?;
         let id = extension["id"].as_str().unwrap_or("unknown");
-        match extension["code"].as_str() {
-            None | Some("reviewed") => {}
-            Some("customer") if mode == "isolated" => {}
-            Some("customer") => return Err(format!("Extension {id} requires an isolated installation; use an isolated installation, or prepare a code-free release.")),
+        match extension["code"].as_str().unwrap_or("customer") {
+            "reviewed" => {}
+            "customer" if mode == "isolated" => {}
+            "customer" => return Err(format!("Extension {id} requires an isolated installation; use an isolated installation, or prepare a code-free release.")),
             _ => return Err(format!("Extension {id} must declare reviewed or customer code.")),
         }
     }
@@ -88,8 +88,11 @@ fn container(line: &str) -> Option<Value> {
     let (rest, code) = rest
         .rsplit_once(", code:")
         .map_or((rest, None), |(rest, code)| {
-            (rest, Some(code.strip_prefix(' ').unwrap_or(code)))
+            (rest, Some(code.strip_prefix(' ').unwrap_or("")))
         });
+    if rest.contains(", code:") {
+        return None;
+    }
     let (version, commit) = match rest {
         "unpinned" => (None, None),
         _ => match rest.split_once(", commit ") {

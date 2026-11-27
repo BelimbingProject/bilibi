@@ -1167,10 +1167,10 @@ for line in extensions.splitlines():
     declaration, modules, _ = line.partition(", modules:")
     identity, code_marker, code = declaration.rpartition(", code:")
     if not code_marker:
-        identity, code = declaration, "reviewed"
+        identity, code = declaration, "customer"
     else:
-        code = code.removeprefix(" ")
-    if not line.startswith("  ") or not modules or " " not in identity.strip():
+        code = code[1:] if code.startswith(" ") else ""
+    if not line.startswith("  ") or not modules or " " not in identity.strip() or ", code:" in identity:
         sys.exit("Invalid Extension declaration")
     name = identity.strip().split(" ", 1)[0]
     if code not in {"reviewed", "customer"}:
