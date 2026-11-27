@@ -61,13 +61,24 @@ impl Mode {
 
 /// Whether the name is a convertible IANA identifier (links included) in the
 /// bundled database. Bounded and character-checked before any lookup.
+/// Files that a system zoneinfo directory ships beside the zones are refused.
 pub fn valid_timezone(name: &str) -> bool {
     !name.is_empty()
+        && !is_tzdata_artifact(name)
         && name.len() <= 64
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'+'))
         && TimeZone::get(name).is_ok()
+}
+
+/// Names a system zoneinfo directory holds that are not time zones: the local
+/// zone copy, the POSIX rules file, the test zone and the `posix/` and `right/`
+/// mirrors. An explicit list, so a real identifier is never dropped by a pattern.
+fn is_tzdata_artifact(name: &str) -> bool {
+    matches!(name, "localtime" | "posixrules" | "Factory")
+        || name.starts_with("posix/")
+        || name.starts_with("right/")
 }
 
 /// Every selectable IANA identifier, links included: a company that stored an
@@ -76,6 +87,7 @@ pub fn timezones() -> Vec<String> {
     let mut names: Vec<String> = jiff::tz::db()
         .available()
         .map(|name| name.as_str().to_owned())
+        .filter(|name| !is_tzdata_artifact(name))
         .collect();
     names.sort();
     names
