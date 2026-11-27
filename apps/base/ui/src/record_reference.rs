@@ -114,13 +114,14 @@ impl NamedKind<'_> {
 /// still checks it on save; a chosen value is never proof.
 #[derive(Template, Clone, Debug)]
 #[template(
-    source = r#"{%- import "forms.html" as forms -%}<div id="{{ id }}" data-record-picker class="space-y-1">
+    source = r#"{%- import "forms.html" as forms -%}<div id="{{ id }}" data-record-picker class="space-y-1{% if !search.hint.is_empty() && !in_fact %} mb-3{% endif %}">
 {%- if let Some(pill) = selected -%}
 <div class="flex flex-wrap items-center gap-2"><span class="{% if in_fact %}sr-only{% else %}text-xs text-ink-muted{% endif %}">{{ label }}</span>{{ pill }}{{ self.clear() }}</div>{{ hidden }}{% call forms::errors(id=id, errors=errors) %}{% endcall %}
 {%- else -%}
 {%- let combo = self.search_combobox() -%}
 {% call forms::combobox(combo=combo, server_search=true, query=query, pick_event=pick_event, key=key) %}{% endcall %}
 {%- endif -%}
+{% if selected.is_some() %}{% call forms::hint(id=id, text=search.hint) %}{% endcall %}{% endif %}
 </div>"#,
     ext = "html"
 )]
@@ -144,6 +145,11 @@ pub struct RecordPicker {
     errors: Vec<String>,
 }
 impl RecordPicker {
+    /// Explain what the chosen record is for, both before and after selection.
+    pub fn hint(mut self, hint: impl Into<String>) -> Self {
+        self.search = self.search.hint(hint);
+        self
+    }
     pub fn search_name(mut self, name: impl Into<String>) -> Self {
         self.search.name = name.into();
         self

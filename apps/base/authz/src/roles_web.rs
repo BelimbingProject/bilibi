@@ -556,7 +556,7 @@ fn render_create(
         "role-company-scope",
         "role",
         "company_id",
-        "Company Scope",
+        "Company",
         &picker.query,
         &picker.hits,
         picker
@@ -565,7 +565,8 @@ fn render_create(
             .map(|(id, name)| (*id, name.as_str())),
         ("pick-company", "change-company"),
         errors.company_id.clone(),
-    );
+    )
+    .hint("Select the company that this role is for.");
     let mut html = render(FlashGroup {
         id: "flash-group",
         flash: FlashMap {
@@ -574,7 +575,7 @@ fn render_create(
         },
     })?;
     html.push(&render(Header {
-        title: Html::text("Create Role"),
+        title: Html::text("Create role"),
         subtitle: "Create a role for one of your companies.",
         actions: render(BackLink {
             href: "/authz/roles",
@@ -586,12 +587,12 @@ fn render_create(
     })?);
     html.push(&render(RoleForm {
         company: render(company)?,
-        name: render(field("name", "Name", &role.name, &errors.name))?,
-        code: render(
-            field("code", "Code", &role.code, &errors.code)
-                .placeholder("billing_manager")
-                .hint("Lowercase letters, digits and underscores; must be unique."),
+        name: render(
+            field("name", "Label", &role.name, &errors.name).hint("Example: Sales Manager").attr("data-debounce", "300"),
         )?,
+        code: render(field("code", "Code", &role.code, &errors.code).attr("data-debounce", "300").attr("data-edited-marker", "code_edited").hint(
+            "Lowercase letters, digits and underscores; must be unique; example: sales_manager",
+        ))?,
         description: render(
             field(
                 "description",
@@ -599,14 +600,15 @@ fn render_create(
                 &role.description,
                 &errors.description,
             )
-            .kind(InputKind::Textarea),
+            .kind(InputKind::Textarea)
+            .hint("Describe who should get this role."),
         )?,
         save: render(Button {
             variant: ButtonVariant::Primary,
             id: "role-save",
             button_type: "submit",
             working: "Creating...",
-            body: Html::text("Create Role"),
+            body: Html::text("Create role"),
             ..Button::default()
         })?,
     })?);
@@ -740,6 +742,8 @@ enum CreateEvent {
         code: String,
         #[serde(rename = "role[description]", default)]
         description: String,
+        #[serde(default)]
+        code_edited: bool,
     },
     RoleChange {
         #[serde(rename = "role[company_id]", default)]
@@ -752,9 +756,13 @@ enum CreateEvent {
         code: String,
         #[serde(rename = "role[description]", default)]
         description: String,
+        #[serde(default)]
+        code_edited: bool,
     },
     PickCompany {
         record: String,
+        #[serde(default)]
+        key: String,
     },
     ChangeCompany {},
     ClearFlash {
@@ -775,6 +783,7 @@ pub(crate) struct RoleCreate {
     pub(crate) company_query: String,
     pub(crate) errors: RoleErrors,
     pub(crate) created: bool,
+    editing_code: bool,
 }
 /// The owner company picker's state for one view.
 pub(crate) struct CompanyPicker {
@@ -806,7 +815,40 @@ impl RoleCreate {
             company_query: String::new(),
             errors: RoleErrors::default(),
             created: false,
+            editing_code: false,
         })
+    }
+    async fn suggested_code(&self, scope: &Scope, name: &str) -> Result<String> {
+        let base = name
+            .chars()
+            .flat_map(char::to_lowercase)
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect::<String>();
+        let base = base
+            .split('_')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("_");
+        if base.is_empty() {
+            return Ok(base);
+        }
+        let base = &base[..base.len().min(240)];
+        let client = self.pages.db.get().await?;
+        let rows = client.query("SELECT code FROM roles WHERE tenant_id=$1 AND (code=$2 OR left(code, length($3))=$3)", &[&scope.tenant(), &base, &format!("{base}_")]).await?;
+        let used: std::collections::HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.get::<_, Option<String>>(0))
+            .collect();
+        if !used.contains(base) {
+            return Ok(base.to_owned());
+        }
+        for suffix in 2u64.. {
+            let code = format!("{base}_{suffix}");
+            if !used.contains(&code) {
+                return Ok(code);
+            }
+        }
+        unreachable!()
     }
     /// The tenant's unarchived companies `search` finds: an archived one is
     /// read-only and create would refuse it, so the picker never offers it.
@@ -879,17 +921,28 @@ impl LiveState<Scope, Error> for RoleCreate {
                             name,
                             code,
                             description,
+                            code_edited,
                         } => {
-                            // Each change keeps what was typed: the form follows the server.
+                            // A changed code is a deliberate override of the suggestion.
+                            if code_edited {
+                                self.editing_code = true;
+                            }
                             self.role = NewRole {
                                 company_id: company_id.trim().parse::<i64>().ok(),
                                 name,
                                 code,
                                 description,
                             };
+                            if !self.editing_code {
+                                self.role.code =
+                                    self.suggested_code(request.scope, &self.role.name).await?;
+                            }
                             self.company_query = company_search;
                         }
-                        CreateEvent::PickCompany { record } => {
+                        CreateEvent::PickCompany { record, key } => {
+                            if !key.is_empty() {
+                                return Err(Error::Invalid);
+                            }
                             self.role.company_id =
                                 Some(COMPANY.picked(&record).ok_or(Error::Invalid)?);
                             self.company_query.clear();
@@ -902,16 +955,24 @@ impl LiveState<Scope, Error> for RoleCreate {
                             name,
                             code,
                             description,
+                            code_edited,
                         } => {
                             self.created = false;
                             self.company_query = company_search;
                             let company_id = company_id.trim().parse::<i64>().ok();
+                            if code_edited {
+                                self.editing_code = true;
+                            }
                             self.role = NewRole {
                                 company_id,
                                 name: name.trim().to_owned(),
                                 code: code.trim().to_owned(),
                                 description: description.trim().to_owned(),
                             };
+                            if !self.editing_code {
+                                self.role.code =
+                                    self.suggested_code(request.scope, &self.role.name).await?;
+                            }
                             // The source's `validate_inclusion`: a value the
                             // picker never offered is a field error.
                             let offered = match company_id {
