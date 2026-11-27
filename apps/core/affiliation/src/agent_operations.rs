@@ -320,6 +320,13 @@ impl WriteHandler for Write {
             _ => None,
         }
     }
+    fn accepts_references(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Create => &[("organisation_id", "company"), ("person_id", "person")],
+            Self::Contact => &[("organisation_id", "company")],
+            _ => &[],
+        }
+    }
     fn preview_dependent<'a>(
         &'a self,
         client: &'a dyn OperationClient,

@@ -292,7 +292,12 @@ fn apply(input: &Value) -> bilibi_agent_api::Result<Apply> {
 
 fn draft(kind: Kind, input: &Value) -> bilibi_agent_api::Result<Draft> {
     let mut reader = Reader::new(input, "");
-    let common = reader.common();
+    let mut common = reader.common();
+    // A note about a record is for the people who work with that record:
+    // shared with its readers unless the creator chooses private.
+    if kind == Kind::Note && !reader.present("shared") && common.related.is_some() {
+        common.shared = true;
+    }
     let draft = match kind {
         Kind::Task => {
             let due_at = reader.time("due_at").flatten();
@@ -662,10 +667,89 @@ impl ReadHandler for Get {
     }
 }
 
+/// Where the created activity opens, for the caller's receipt.
+fn activity_path(id: i64) -> Option<String> {
+    owner()
+        .ok()?
+        .records()
+        .kind(crate::RECORD)?
+        .path_of(&id.to_string())
+}
 struct Create(Kind);
+impl Create {
+    /// The owner's review of `draft`, read from `input`, without writing.
+    async fn checked(
+        &self,
+        client: &dyn OperationClient,
+        scope: &Scope,
+        input: &Value,
+        draft: &Draft,
+    ) -> bilibi_agent_api::Result<Value> {
+        let owner = owner()?;
+        if let Some(repeat) = repeat(input)? {
+            let (checked, occurrences) = owner
+                .preview_create_series(client, scope, draft, &repeat)
+                .await
+                .map_err(|e| invalid(e, ""))?;
+            let times: Vec<Value> = occurrences
+                .iter()
+                .map(|o| iso(o.starts_at.or(o.due_at)))
+                .collect();
+            return Ok(json!({
+                "creates": draft_record(owner.records(), &checked),
+                "repeats": {"rule": repeat.describe(None), "occurrences": times.len(), "at": times},
+            }));
+        }
+        let checked = owner
+            .preview_create(client, scope, draft)
+            .await
+            .map_err(|e| invalid(e, ""))?;
+        Ok(json!({"creates": draft_record(owner.records(), &checked)}))
+    }
+}
+/// The new records an activity in the same plan may be about.
+const NEW_RELATED: &[(&str, &str)] = &[("related.id", "person"), ("related.id", "company")];
 impl WriteHandler for Create {
     fn owner(&self) -> &'static str {
         crate::MODULE
+    }
+    fn creates(&self) -> Option<bilibi_agent_api::CreatedRecord> {
+        Some(bilibi_agent_api::CreatedRecord {
+            kind: crate::RECORD,
+            id_pointer: "/id",
+        })
+    }
+    fn accepts_references(&self) -> &'static [(&'static str, &'static str)] {
+        NEW_RELATED
+    }
+    /// About a person or company an earlier step creates: every other fact
+    /// is checked now; commit checks the new record as any related record.
+    fn preview_dependent<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+        references: &'a bilibi_agent_api::PlanReferences,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            references.require(NEW_RELATED)?;
+            let kind = references.kind("related.id").ok_or(Error::Invalid)?;
+            if input["related"]["kind"].as_str() != Some(kind) {
+                return Err(bilibi_agent_api::invalid(
+                    "related.kind",
+                    format!("must be {kind}: related.id is the new {kind} an earlier step creates"),
+                ));
+            }
+            let mut draft = draft(self.0, input)?;
+            let shared = draft.shared;
+            // Sharing needs a related record, which does not exist yet.
+            draft.related = None;
+            draft.shared = false;
+            let mut review = self.checked(client, scope, input, &draft).await?;
+            review["creates"]["related"] = json!({"kind": kind, "id": input["related"]["id"]});
+            review["creates"]["shared"] = json!(shared);
+            Ok(review.into())
+        })
     }
     fn preview<'a>(
         &'a self,
@@ -675,27 +759,7 @@ impl WriteHandler for Create {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let draft = draft(self.0, input)?;
-            let owner = owner()?;
-            if let Some(repeat) = repeat(input)? {
-                let (checked, occurrences) = owner
-                    .preview_create_series(client, scope, &draft, &repeat)
-                    .await
-                    .map_err(|e| invalid(e, ""))?;
-                let times: Vec<Value> = occurrences
-                    .iter()
-                    .map(|o| iso(o.starts_at.or(o.due_at)))
-                    .collect();
-                return Ok(json!({
-                    "creates": draft_record(owner.records(), &checked),
-                    "repeats": {"rule": repeat.describe(None), "occurrences": times.len(), "at": times},
-                })
-                .into());
-            }
-            let checked = owner
-                .preview_create(client, scope, &draft)
-                .await
-                .map_err(|e| invalid(e, ""))?;
-            Ok(json!({"creates": draft_record(owner.records(), &checked)}).into())
+            Ok(self.checked(client, scope, input, &draft).await?.into())
         })
     }
     fn commit<'a>(
@@ -713,6 +777,7 @@ impl WriteHandler for Create {
                     .map_err(|e| invalid(e, ""))?;
                 let first = created.first().ok_or(Error::Internal)?;
                 let mut value = record(first, None);
+                value["path"] = json!(activity_path(first.id));
                 value["occurrences"] = json!(created
                     .iter()
                     .map(|a| json!({"id": a.id, "at": iso(a.starts_at.or(a.due_at)), "version": a.version}))
@@ -723,7 +788,9 @@ impl WriteHandler for Create {
                 .create(tx, scope, &draft)
                 .await
                 .map_err(|e| invalid(e, ""))?;
-            Ok(record(&activity, None).into())
+            let mut value = record(&activity, None);
+            value["path"] = json!(activity_path(activity.id));
+            Ok(value.into())
         })
     }
 }
@@ -1126,8 +1193,20 @@ fn reference_schema() -> Value {
         "id":{"type":"string","maxLength":64}
     }})
 }
-fn shared_schema() -> Value {
-    json!({"type":"boolean","description":"true: people who may view the related record see it too. false (the default): only you, the assignee and account guests."})
+/// Who reads it besides the people taking part. `note`: a note about a
+/// record is shared by default. The labels name the audience the read rule
+/// enforces (README, "Who sees an activity").
+fn shared_schema(note: bool) -> Value {
+    let default = if note {
+        "true (the default for a note about a record): people who may view the related record see it too. false: private."
+    } else {
+        "true: people who may view the related record see it too. false (the default): private."
+    };
+    json!({"type":"boolean","title":"Visibility","description":format!("{default} Private still lets you, the assignee, account guests and oversight readers (core.activity.all.view) see it. Sharing needs a related record."),
+    "x-bilibi-boolean-labels":{
+        "true":{"label":"Shared","description":"People who can view the related record can read it, as well as you, the assignee and invited colleagues."},
+        "false":{"label":"Private","description":"Not shown to readers of the related record. You, the assignee, invited colleagues and people allowed to oversee activities can still read it."}
+    }})
 }
 fn guest_schema() -> Value {
     json!({"type":"object","description":"Exactly one of user_id (a colleague's account), person_id (a Core person) or email. Set related on the email address of the record the activity is about (a lead).","properties":{
@@ -1147,7 +1226,7 @@ fn common_properties() -> serde_json::Map<String, Value> {
         json!({"type":"string","maxLength":160,"description":"The subject, 1–160 characters."}),
     );
     properties.insert("related".into(), reference_schema());
-    properties.insert("shared".into(), shared_schema());
+    properties.insert("shared".into(), shared_schema(false));
     properties.insert(
         "assignee_user_id".into(),
         json!({"type":"integer","minimum":1,"description":"An active account; you when omitted."}),
@@ -1268,7 +1347,9 @@ fn respond_schema() -> Value {
     }})
 }
 fn note_schema() -> Value {
-    json!({"type":"object","required":["title"],"properties":common_properties()})
+    let mut properties = common_properties();
+    properties.insert("shared".into(), shared_schema(true));
+    json!({"type":"object","required":["title"],"properties":properties})
 }
 fn update_schema() -> Value {
     let statuses: Vec<&str> = Status::ALL.iter().map(|s| s.code()).collect();
@@ -1291,7 +1372,7 @@ fn update_schema() -> Value {
             "description":{"type":"string","maxLength":10000},
             "internal_notes":{"type":"string","maxLength":10000},
             "related":{"type":"object","properties":{"kind":{"type":"string","maxLength":100},"id":{"type":"string","maxLength":64}}},
-            "shared":shared_schema(),
+            "shared":shared_schema(false),
             "assignee_user_id":{"type":"integer","minimum":1},
             "reminder_minutes":reminder_minutes_schema(),
             "reminder_minutes_default":{"type":"boolean","description":"true: forget this activity's own reminders and follow your default, then the organisation's. Not with reminder_minutes."},
@@ -1349,7 +1430,7 @@ fn list_output() -> Value {
     json!({"type":"object","description":"activities (each as core.activity.get without guests), total, page and page_size."})
 }
 fn review_output() -> Value {
-    json!({"type":"object","description":"The review shows what will be stored; the commit returns the activity."})
+    json!({"type":"object","description":"The review shows what will be stored; the commit returns the activity (a create adds path, where it opens)."})
 }
 
 static LIST: List = List;

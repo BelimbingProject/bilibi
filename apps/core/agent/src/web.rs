@@ -211,6 +211,10 @@ impl BrowserReviewPage {
                     "Review cancelled",
                     "This review ended when its AI connection or browser session ended. Start a new review from the AI app if the changes are still needed.",
                 ),
+                "replaced" => (
+                    "Review replaced",
+                    "A newer review replaced this one, so nothing here can be approved. Open the newer review from the AI app or the bell's To do list.",
+                ),
                 "uncertain" => (
                     "Review outcome needs checking",
                     "The result could not be confirmed. Check the affected records before starting another review.",
@@ -223,7 +227,7 @@ impl BrowserReviewPage {
         let header = Html::render(&bilibi_ui::Header {
             title: Html::text("Review entries"),
             subtitle: if open {
-                "Edit the proposed values, check the complete review, then approve or cancel."
+                "Edit the proposed values; each change is checked automatically. Approve saves exactly what was checked, or cancel."
             } else {
                 "This review is no longer waiting for a decision."
             },

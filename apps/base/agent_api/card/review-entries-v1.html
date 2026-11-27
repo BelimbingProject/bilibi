@@ -39,6 +39,25 @@ button,input,select,textarea { font:inherit; color:inherit; border:1px solid var
 button { padding:2px 8px; min-height:24px; cursor:pointer; font-weight:600; white-space:nowrap; }
 button:disabled { opacity:.5; cursor:default; }
 button.primary { background:var(--action); color:var(--action-ink); border-color:var(--action); }
+/* A blocked Approve stays focusable and tappable so it can say why; it must not look actionable. */
+button.primary[aria-disabled=true] { background:var(--surface-sunken); color:var(--ink-faint); border-color:var(--line-strong); opacity:.75; cursor:not-allowed; }
+#approve-reason { flex:1 1 220px; min-width:0; font-size:12px; }
+#approve-reason[data-tone=ready] { color:var(--success-ink); } #approve-reason[data-tone=blocked] { color:var(--color-text-secondary,var(--ink-muted)); }
+#approve-reason[data-tone=problem] { color:var(--danger-ink); }
+#reviews.stale>*:not(.stale-note) { opacity:.55; }
+.stale-note { color:var(--warning-ink); font-weight:600; }
+.changed { background:var(--warning-surface); color:var(--warning-ink); border-radius:4px; padding:1px 4px; font-weight:600; }
+.choice { display:grid; gap:6px; }
+.choice-option { display:flex; gap:8px; align-items:flex-start; padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; cursor:pointer; }
+.choice-option:has(input:checked) { border-color:var(--action); background:var(--brand-surface); color:var(--brand-ink); }
+.choice-option input { width:16px; height:16px; margin-top:2px; flex:none; accent-color:var(--action); }
+#replaced { padding:12px; border-left:5px solid var(--warning); background:var(--warning-surface); color:var(--warning-ink); font-weight:600; }
+.receipt { display:grid; gap:6px; } .receipt ul { margin:0; padding-left:18px; display:grid; gap:4px; }
+.badge { display:inline-block; border-radius:4px; padding:0 6px; margin-right:6px; font-size:11px; font-weight:700; }
+.badge[data-tone=success] { background:var(--success-surface); color:var(--success-ink); border:1px solid var(--success-line); }
+.badge[data-tone=warning] { background:var(--warning-surface); color:var(--warning-ink); border:1px solid var(--warning-line); }
+.badge[data-tone=danger] { background:var(--danger-surface); color:var(--danger-ink); border:1px solid var(--danger-line); }
+.badge[data-tone=info] { background:var(--info-surface); color:var(--info-ink); border:1px solid var(--info-line); }
 button.danger { color:var(--danger); }
 :focus-visible { outline:2px solid var(--brand-strong); outline-offset:2px; }
 input,select,textarea { width:100%; min-width:0; padding:6px 8px; font-size:14px; line-height:20px; }
@@ -97,16 +116,17 @@ progress { width:100%; height:6px; accent-color:var(--action); }
 fieldset { border:1px solid var(--line); border-radius:6px; padding:8px; min-width:0; }
 legend { font-size:11px; color:var(--ink-muted); }
 @media(max-width:500px) { main { padding:8px; } dl>div { grid-template-columns:1fr; gap:2px; } .preview { padding:8px; } }
-@media(pointer:coarse) { input,select { min-height:40px; } }
+@media(pointer:coarse) { input,select { min-height:40px; } button { min-height:40px; } }
 </style></head><body>
 <header id="banner" role="status"><div class="identity"><span class="role" id="role">Bilibi</span><span id="instance">Connecting…</span></div><p id="origin"></p><p id="notice"></p></header>
-<main><div class="row"><div class="grow"><h1 id="title">Review entries</h1><p class="muted" id="subtitle">Edit the draft, then update the review before approving.</p></div><button id="fullscreen" hidden>Expand grid</button></div>
+<div id="replaced" role="alert" hidden></div>
+<main><div class="row"><div class="grow"><h1 id="title">Review entries</h1><p class="muted" id="subtitle">Edit any value; each change is checked automatically. Approve saves exactly what was checked.</p></div><button id="fullscreen" hidden>Expand grid</button></div>
 <div id="status" class="status" role="status" aria-live="polite">Connecting to Bilibi…</div>
 <div id="editor" class="card"></div>
 <div class="row" id="row-actions"><button id="add">+ Add entry</button><span class="muted" id="paste-hint">Paste spreadsheet cells into a field. Empty pasted cells are omitted. Tab moves between cells; Alt + arrows moves across rows and columns.</span></div>
 <section id="reviews" class="card preview" aria-label="Review of changes" hidden></section>
 <div id="stepup" class="card preview" hidden></div>
-<div id="actions" class="row"><button id="update">Update review</button><button id="stop" hidden>Stop</button><button id="approve" class="primary" disabled>Approve</button><button id="cancel" class="danger">Cancel</button><span id="progress-label" class="muted" aria-live="polite"></span></div>
+<div id="actions" class="row"><button id="approve" class="primary" aria-disabled="true" aria-describedby="approve-reason">Approve</button><span id="approve-reason" aria-live="polite" data-tone="blocked">Connecting to Bilibi…</span><button id="update" hidden>Check again</button><button id="stop" hidden>Stop</button><button id="cancel" class="danger">Cancel</button><span id="progress-label" class="muted" aria-live="polite"></span></div>
 <progress id="progress" hidden max="1" value="0" aria-label="Batch progress"></progress>
 </main><script>
 (() => {
@@ -128,7 +148,11 @@ function shownFields(schema,value={},row,path=[]) {
     if(!path.length&&!choiceAvailable(schema,value,key))return false;
     const childPath=[...path,key],error=row.fields[childPath.join('.')];
     if(error?.length)return true;
+    // A link to a record an earlier step creates is always shown, even in an internal field.
+    if(value?.[key]?.$ref)return true;
     if(internalFields.has(key))return false;
+    // A labelled choice (such as Private or Shared) is always shown, so its effect is explicit.
+    if(!path.length&&schema.properties[key]['x-bilibi-boolean-labels'])return true;
     return schema.required?.includes(key)||key==='code'||hasValue(value?.[key])||edited(row,childPath);
   });
 }
@@ -148,7 +172,7 @@ function stepTitle(row) {
   const companyName=company&&referenceName(row.input[company[0]]);
   const personName=row.input.name||(person&&referenceName(row.input[person[0]]));
   if(companyName&&personName&&properties.organisation_id)return 'Add '+personName+' to '+companyName+(row.input.title?' as '+row.input.title:'');
-  const target=Object.values(row.input).map(referenceName).find(Boolean);
+  const target=Object.values(row.input).flatMap(value=>value&&typeof value==='object'&&!value.$ref?[value,...Object.values(value)]:[value]).map(referenceName).find(Boolean);
   return (row.operation?.title||state.data.operation.title)+(target?' for '+target:'');
 }
 const restricted = value => value && typeof value === 'object' && value.restricted === true;
@@ -163,7 +187,9 @@ function el(tag, attributes={}, children=[]) {
   }
   node.append(...children.filter(Boolean)); return node;
 }
-const state={ data:null, rows:[], fields:[], plans:[], busy:false, planning:false, stopRequested:false, cancelled:false, uncertain:false, finished:false, revision:0, next:0, nextToolAt:0, choices:new Map(), stepup:false, renderedRows:RENDER_STEP, renderedReviews:RENDER_STEP };
+// Edits are checked automatically after a short pause; Approve is the one deliberate save.
+const CHECK_DELAY=700, STATUS_EVERY=15000;
+const state={ data:null, rows:[], fields:[], plans:[], busy:false, saving:false, planning:false, stopRequested:false, cancelled:false, uncertain:false, finished:false, replaced:false, revision:0, plansRevision:-1, checkTimer:0, recheck:false, checkProblem:null, checkFailed:null, checkStopped:false, statusAt:0, next:0, nextToolAt:0, choices:new Map(), stepup:false, renderedRows:RENDER_STEP, renderedReviews:RENDER_STEP };
 const pending=new Map();
 const prefix=Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,'0')).join('');
 let sequence=0, hostOrigin=null, host={};
@@ -236,22 +262,62 @@ window.addEventListener('message',event=>{
 });
 new ResizeObserver(()=>notify('ui/notifications/size-changed',{height:Math.ceil(document.documentElement.getBoundingClientRect().height)})).observe(document.body);
 function busy(value) {state.busy=value;buttons();}
+const terminal=()=>state.cancelled||state.uncertain||state.finished||state.replaced;
+const entryWord=()=>state.data?.linked?'Step':'Entry';
+// Why Approve cannot save now, and what to do next; ready only for the exact checked revision.
+function approveState() {
+  if(!state.data)return {ready:false,reason:'Connecting to Bilibi…'};
+  if(state.replaced)return {ready:false,reason:'Replaced by a newer review. Approve the newer review instead.'};
+  if(state.cancelled)return {ready:false,reason:'This review was cancelled. Ask your assistant for a new review.'};
+  if(state.uncertain)return {ready:false,reason:'The last save was not confirmed. Ask your assistant to check the records before trying again.'};
+  if(state.finished)return {ready:false,reason:'This review is finished.'};
+  if(state.saving)return {ready:false,reason:'Saving on '+state.data.instance.label+'…'};
+  if(state.busy)return {ready:false,reason:'Loading choices…'};
+  if(state.stepup)return {ready:false,reason:'Enter your current 2FA code above, then confirm.'};
+  const included=state.rows.filter(row=>row.state==='draft');
+  if(!included.length)return {ready:false,reason:state.rows.some(row=>row.state==='done')?'Everything included here is saved.':'Include at least one entry to approve.'};
+  if(state.checkProblem)return {ready:false,problem:true,reason:state.checkProblem};
+  if(state.checkTimer||state.planning)return {ready:false,reason:'Checking your latest edits…'};
+  if(state.checkFailed)return {ready:false,problem:true,reason:'The check could not finish: '+state.checkFailed+' Press Check again.'};
+  if(state.checkStopped)return {ready:false,reason:'Checking stopped. Press Check again to continue.'};
+  const refused=state.rows.map((row,index)=>({row,index})).filter(({row})=>row.state==='draft'&&row.error);
+  if(refused.length) {
+    const {row,index}=refused[0],first=Object.entries(row.fields||{})[0];
+    const what=first?label(first[0].split('.').at(-1))+': '+[].concat(first[1]).join(' '):errorText(row.error);
+    return {ready:false,problem:true,reason:entryWord()+' '+(index+1)+' needs a change: '+what+(/[.!?]$/.test(what)?'':'.')+(refused.length>1?' ('+refused.length+' '+(state.data.linked?'steps':'entries')+' need changes.)':'')+' Fix the marked field.'};
+  }
+  if(!state.plans.length||state.plansRevision!==state.revision)return {ready:false,reason:'Checking your latest edits…'};
+  const count=state.plans.reduce((n,p)=>n+p.rows.length,0);
+  return {ready:true,reason:'Ready: saves '+count+' '+(count===1?'entry':'entries')+' on '+state.data.instance.label+(state.data.linked||state.plans.length===1?' in one step.':' in '+state.plans.length+' batches.')};
+}
 function buttons() {
-  const terminal=state.cancelled||state.uncertain||state.finished;
-  $('update').disabled=state.busy||terminal||!state.data||!state.rows.some(row=>row.state==='draft');
-  $('approve').disabled=state.busy||terminal||!state.plans.length||state.stepup;
-  $('cancel').disabled=state.busy||terminal||!state.data||!state.rows.some(row=>row.state==='draft'||row.state==='excluded');
-  $('add').disabled=state.busy||terminal||!state.data||state.rows.some(row=>row.state==='done')||state.rows.length>=state.data.review_max_entries;
-  $('stop').hidden=!state.planning;$('stop').disabled=!state.planning||state.stopRequested;
-  for(const control of $('editor').querySelectorAll('input,select,textarea,button')) control.disabled=state.busy||terminal||control.dataset.locked==='true';
-  $('approve').textContent='Approve'+(state.plans.length?' '+state.plans.reduce((n,p)=>n+p.rows.length,0)+' on '+state.data.instance.label:'');
+  const done=terminal(),approval=approveState(),approve=$('approve'),reason=$('approve-reason');
+  approve.setAttribute('aria-disabled',String(!approval.ready));approve.disabled=false;
+  const tone=approval.ready?'ready':approval.problem?'problem':'blocked';
+  if(reason.textContent!==approval.reason)reason.textContent=approval.reason;
+  if(reason.dataset.tone!==tone)reason.dataset.tone=tone;
+  $('update').hidden=done||state.planning||!(state.checkStopped||state.checkFailed);$('update').disabled=state.busy;
+  $('cancel').disabled=state.busy||done||!state.data||!state.rows.some(row=>row.state==='draft'||row.state==='excluded');
+  $('add').disabled=state.busy||done||!state.data||state.rows.some(row=>row.state==='done')||state.rows.length>=state.data.review_max_entries;
+  $('stop').hidden=!state.planning||state.rows.filter(row=>row.state==='draft').length<=(state.data?.plan_max_operations||Infinity);$('stop').disabled=!state.planning||state.stopRequested;
+  for(const control of $('editor').querySelectorAll('input,select,textarea,button')) control.disabled=state.busy||done||control.dataset.locked==='true';
+  const text='Approve'+(approval.ready?' '+state.plans.reduce((n,p)=>n+p.rows.length,0)+' on '+state.data.instance.label:'');
+  if(approve.textContent!==text)approve.textContent=text;
 }
 setInterval(buttons,1000);
+function scheduleCheck(delay=CHECK_DELAY) {
+  clearTimeout(state.checkTimer);state.checkTimer=0;
+  if(!state.data||terminal())return buttons();
+  state.checkTimer=setTimeout(()=>{state.checkTimer=0;check();},delay);buttons();
+}
+// Any edit: the checked plan no longer matches the draft, so it can never be approved.
 function invalidate() {
-  state.revision++;discardPlans();state.next=0;state.stepup=false;$('stepup').hidden=true;$('stepup').replaceChildren();
-  for(const row of state.rows)if(row.state==='draft'){row.preview=null;row.error=null;row.fields={};}
-  state.renderedReviews=RENDER_STEP;$('reviews').hidden=true;$('progress').hidden=true;$('progress').value=0;$('progress-label').textContent='';
-  status('Draft changed. Update the review before approving.');buttons();
+  state.revision++;discardPlans();state.next=0;state.stepup=false;state.checkProblem=null;state.checkFailed=null;state.checkStopped=false;$('stepup').hidden=true;$('stepup').replaceChildren();
+  for(const row of state.rows)row.saveError=null;
+  $('progress').hidden=true;$('progress').value=0;$('progress-label').textContent='';
+  if(!$('reviews').hidden&&!$('reviews').classList.contains('stale')){$('reviews').classList.add('stale');$('reviews').prepend(el('p',{class:'stale-note',text:'Out of date: checking your latest edits…'}));}
+  if($('status').textContent!=='Checking your latest edits…')status('Checking your latest edits…');
+  scheduleCheck();
 }
 function schemaFor(row) {return row.operation?.input||state.data.operation.input;}
 function choiceAvailable(schema,input,field) {
@@ -307,7 +373,7 @@ async function opened(answer) {
     if(schema.items)await choices(schema.items);
   }
   try {for(const row of state.rows)await choices(schemaFor(row));} finally {busy(false);renderEditor();}
-  await update();
+  await check();
 }
 function setValue(object,path,value) {
   let target=object;
@@ -374,6 +440,17 @@ function clearedFields(row) {
   }
   collect(schemaFor(row),row.input,[]);return names;
 }
+// The value the owner's latest check reports for a field the draft leaves to its default.
+function findField(value,key,depth=0) {
+  if(!value||typeof value!=='object'||depth>3)return undefined;
+  if(Object.hasOwn(value,key)&&typeof value[key]!=='object')return value[key];
+  for(const [name,child] of Object.entries(value))if(name!=='before'&&child&&typeof child==='object'){const found=findField(child,key,depth+1);if(found!==undefined)return found;}
+  return undefined;
+}
+function effectiveChoice(row,path) {return path.length===1?findField(previewFor(row),path[0]):undefined;}
+function labelledChoices(row) {
+  return Object.entries(schemaFor(row).properties||{}).filter(([,schema])=>schema.type==='boolean'&&schema['x-bilibi-boolean-labels']);
+}
 function control(row,schema,path,required=false,position={}) {
   const key=path.join('.');
   const root=schemaFor(row);
@@ -386,6 +463,7 @@ function control(row,schema,path,required=false,position={}) {
   const box=el('div',{class:'field'});
   const locked=restricted(value)||row.state==='done'||row.state==='excluded'||row.restricted?.has(key);
   const errors=el('span',{class:'error',id:id+'-error',text:(row.fields[key]||[]).join(' ')});
+  row.placed?.add(key);
   function change(value) {
     if(path.length===1) {
       try{row.input=editedInput(root,row.input,{[key]:value});}
@@ -434,6 +512,19 @@ function control(row,schema,path,required=false,position={}) {
       item.append(el('button',{type:'button',text:'Remove item','data-locked':locked,onclick:()=>{items.splice(i,1);change(items);renderEditor();}}));list.append(item);
     }
     box.append(list,el('button',{type:'button',text:'+ Add item','data-locked':locked,onclick:()=>{change([...items,schema.items.type==='object'?{}:schema.items.type==='boolean'?false:'']);renderEditor();}}));return box;
+  }
+  if(schema.type==='boolean'&&schema['x-bilibi-boolean-labels']) {
+    // Both answers are spelled out with who can read the record; omitted means the owner's default.
+    const labels=schema['x-bilibi-boolean-labels'],current=value!==undefined?value:effectiveChoice(row,path);
+    const group=el('fieldset',{class:'choice','aria-describedby':id+'-error','aria-invalid':String(!!row.fields[key]?.length)},[el('legend',{text:name+(required?' *':'')})]);
+    for(const answer of [true,false]) {
+      const choice=labels[String(answer)],radio=el('input',{type:'radio',name:id,id:id+'-'+answer,'data-locked':String(!!locked)});
+      radio.checked=current===answer;radio.disabled=locked;
+      radio.addEventListener('change',()=>{if(radio.checked)change(answer);});
+      group.append(el('label',{for:radio.id,class:'choice-option'},[radio,el('span',{},[el('strong',{text:choice.label}),el('span',{class:'muted',text:' — '+choice.description})])]));
+    }
+    if(value===undefined)group.append(el('p',{class:'muted',text:current!==undefined?'This is the default here. Choose the other answer to change it.':row.error?'The default shows once this step passes the check, or choose an answer now.':'Checking the default…'}));
+    box.classList.add('field-group');box.replaceChildren(group,errors);return box;
   }
   let input;
   const picklist=schema['x-bilibi-picklist'];
@@ -516,8 +607,27 @@ function referencePicker(box,input,row,schema,path,change) {
     },250);
   });box.append(search,hits);
 }
+// Errors whose field has no control on screen still belong beside their entry.
+function unplacedErrors(row) {
+  if(!row.error)return null;
+  const rest=Object.entries(row.fields||{}).filter(([field])=>!row.placed?.has(field));
+  if(row.error.code==='invalid_input'&&!rest.length)return el('p',{class:'error',text:'Fix the marked field'+(Object.keys(row.fields||{}).length>1?'s':'')+' below.'});
+  return el('p',{class:'error',text:errorText({...row.error,fields:rest.length?Object.fromEntries(rest):undefined})});
+}
 function renderEditor() {
-  if(!state.data)return;applyHost({});
+  if(!state.data)return;
+  // Rebuilding the editor must not take the cursor away from someone typing.
+  const active=document.activeElement,activeId=$('editor').contains(active)?active.id:null;
+  let selection=null;try{if(activeId&&active.selectionStart!=null)selection=[active.selectionStart,active.selectionEnd];}catch(_){}
+  renderEditorNow();
+  if(activeId) {
+    const next=document.getElementById(activeId);
+    if(next&&next!==document.activeElement&&!next.disabled){next.focus({preventScroll:true});try{if(selection)next.setSelectionRange(...selection);}catch(_){}}
+  }
+}
+function renderEditorNow() {
+  applyHost({});
+  for(const row of state.rows)row.placed=new Set();
   if(!state.rows.length){$('editor').replaceChildren(el('p',{class:'preview muted',text:'Add an entry to begin.'}));buttons();return;}
   const grid=state.rows.length>1;
   if(state.data.linked) {
@@ -527,13 +637,15 @@ function renderEditor() {
         el('h2',{class:'step-heading',text:(index+1)+'. '+stepTitle(row)})]);
       const form=el('div',{class:'form'});
       shownFields(schemaFor(row),row.input,row).forEach(([key,schema],col)=>form.append(control(row,schema,[key],schemaFor(row).required?.includes(key),{row:index,col})));
+      const problem=unplacedErrors(row);if(problem)section.append(el('div',{class:'step-heading'},[problem]));
       section.append(form);list.append(section);
     });
     $('editor').replaceChildren(list);
   } else if(!grid) {
     const form=el('div',{class:'form'}),row=state.rows[0];
     shownFields(schemaFor(row),row.input,row).forEach(([key,schema],col)=>form.append(control(row,schema,[key],state.data.operation.input.required?.includes(key),{row:0,col})));
-    $('editor').replaceChildren(form);
+    const problem=unplacedErrors(row);
+    $('editor').replaceChildren(...[problem&&el('div',{class:'step-heading'},[problem]),form].filter(Boolean));
   } else {
     state.fields=fields(state.data.operation.input).filter(([key,schema])=>schema['x-bilibi-review-requires-choice']||state.rows.some(row=>shownFields(schemaFor(row),row.input,row).some(([shown])=>shown===key)));
     const table=el('table',{'aria-label':'Draft entries'});
@@ -547,7 +659,7 @@ function renderEditor() {
       const first=el('td',{},[el('div',{class:'row'},[checkbox,el('span',{text:String(index+1)}),el('button',{type:'button',text:'×','aria-label':'Remove entry '+(index+1),title:'Remove entry','data-locked':row.state==='done'||row.state==='uncertain',onclick:()=>{state.rows.splice(index,1);invalidate();renderEditor();focusCell(Math.min(index,state.rows.length-1),0);}})]),el('span',{class:'state',text:row.state==='draft'?(row.error?'Refused':row.preview?'Ready':'Draft'):label(row.state)})]);
       const tr=el('tr',{'data-state':row.state},[first]);
       state.fields.forEach(([key,schema],col)=>tr.append(el('td',{},[control(row,schema,[key],state.data.operation.input.required?.includes(key),{row:index,col})])));
-      tr.append(el('td',{},[el('span',{class:row.error?'error':'muted',text:row.error?errorText(row.error):row.state==='done'?'Saved':row.preview?'See changes below':'Update review'})]));body.append(tr);
+      tr.append(el('td',{},[el('span',{class:row.error?'error':'muted',text:row.error?errorText(row.error):row.state==='done'?'Saved':row.preview?'See changes below':'Checking…'})]));body.append(tr);
     });table.append(body);
     const parts=[el('div',{class:'grid-scroll'},[table])];
     if(shown<state.rows.length)parts.push(el('div',{class:'row more'},[el('span',{class:'muted',text:'Showing '+shown+' of '+state.rows.length+' entries.'}),el('button',{type:'button',text:'Show '+Math.min(RENDER_STEP,state.rows.length-shown)+' more',onclick:()=>{state.renderedRows=Math.min(state.rows.length,shown+RENDER_STEP);renderEditor();}})]));
@@ -611,7 +723,7 @@ function paste(event,startRow,startCol) {
         const path=pathKey([key]);
         if(value===undefined){delete row.input[key];row.edited.delete(path);}else row.edited.add(path);
       }
-    });invalidate();renderEditor();focusCell(startRow,startCol);status('Pasted '+matrix.length+' '+(matrix.length===1?'entry':'entries')+'. Update the review to check them.');
+    });invalidate();renderEditor();focusCell(startRow,startCol);status('Pasted '+matrix.length+' '+(matrix.length===1?'entry':'entries')+'. Checking them…');
   }catch(error){status(error.message,'danger');}
 }
 function errorText(error) {
@@ -648,12 +760,18 @@ function valueText(value) {
   const name=referenceName(value);if(name)return name;
   if(Array.isArray(value))return value.map(valueText).join(', ');
   if(typeof value==='boolean')return value?'Yes':'No';
+  const linked=typeof value==='object'&&Object.values(value).find(item=>item?.$ref);
+  if(linked)return referenceName(linked)+' (new in step '+/^([1-9][0-9]*)\./.exec(linked.$ref)?.[1]+')';
   if(typeof value==='object')return Object.entries(value).filter(([key,item])=>!previewInternals.has(key)&&hasValue(item)).map(([key,item])=>(key==='name'||key==='label'?'':label(key)+': ')+valueText(item)).join(', ');
   return String(value);
 }
+function choiceText(schema,answer) {
+  const choice=schema['x-bilibi-boolean-labels'][String(answer)];
+  return choice.label+' — '+choice.description;
+}
 function facts(value,row) {
   const updating=/\.(update|edit|replace|end)$/.test(row.key||state.data.key);
-  const lines=el('div');
+  const lines=el('div'),choices=new Map(labelledChoices(row));
   function line(name,to,from,changed=false) {
     lines.append(el('p',{class:'value-line',text:name+': '+(changed?valueText(from)+' → ':'')+valueText(to)}));
   }
@@ -680,9 +798,16 @@ function facts(value,row) {
           }
         }catch(_){}
       }
+      if(choices.has(key)&&typeof item==='boolean') {
+        // Shown in words, and marked when it differs from what this review opened with or approved.
+        const schema=choices.get(key),line=el('p',{class:'value-line',text:[...path,schema.title||label(key)].join(' · ')+': '+(row.state==='done'?'saved as ':'')+choiceText(schema,item)});
+        const compare=row.state==='done'?row.approved?.get(key):row.opened?.get(key);
+        if(compare!==undefined&&compare!==item)line.append(' ',el('span',{class:'changed',text:row.state==='done'?'Approved as '+schema['x-bilibi-boolean-labels'][String(compare)].label:'Changed from '+schema['x-bilibi-boolean-labels'][String(compare)].label}));
+        lines.append(line);continue;
+      }
       const name=[...path,label(key)];
       const old=before?.[key];
-      if(item&&typeof item==='object'&&!Array.isArray(item)&&!restricted(item)&&!item.$ref)walk(item,name,old||before);
+      if(item&&typeof item==='object'&&!Array.isArray(item)&&!restricted(item)&&!item.$ref&&!Object.values(item).some(child=>child?.$ref))walk(item,name,old||before);
       else if(!before||JSON.stringify(old)!==JSON.stringify(item))line(name.join(' · '),item,old,!!before);
     }
   }
@@ -697,8 +822,36 @@ function duplicateWarning(preview) {
   const matches=candidates.map(candidate=>candidate.name||candidate.label||candidate.company?.name).filter(Boolean);
   return el('p',{class:'clear-note',text:'Possible duplicate'+(matches.length?': '+matches.join(', '):' found. Check the existing record before approving.')});
 }
+const recordLink=(path,text)=>{
+  try {
+    const url=new URL(path,state.data.instance.origin);
+    if(url.origin!==new URL(state.data.instance.origin).origin||!['http:','https:'].includes(url.protocol))return null;
+    return el('a',{href:url.href,text,onclick:event=>{event.preventDefault();request('ui/open-link',{url:url.href}).catch(()=>status('The host could not open the record.','warning'));}});
+  }catch(_){return null;}
+};
+// What happened to every entry: saved (with links), not saved, not confirmed or still waiting.
+function receipt() {
+  if(!state.rows.some(row=>['done','uncertain','cancelled'].includes(row.state))&&!state.rows.some(row=>row.saveError))return null;
+  const items=state.rows.map((row,index)=>{
+    const title=(index+1)+'. '+(state.data.linked?stepTitle(row):row.operation?.title||state.data.operation.title);
+    const [tone,word]=row.state==='done'?['success','Saved']:row.state==='uncertain'?['warning','Not confirmed']:row.saveError?['danger','Not saved']:row.state==='excluded'?['info','Not included']:row.state==='cancelled'?['info','Not saved (cancelled)']:['info','Pending'];
+    const parts=[el('span',{class:'badge','data-tone':tone,text:word}),title];
+    if(row.state==='done') {
+      const result=unwrap(row.result)||{},name=result.name||result.title||result.label||result.record?.name||result.person?.name||result.code;
+      if(name&&!title.includes(name))parts.push(': '+name);
+      const path=result.url||result.path,link=typeof path==='string'&&recordLink(path,'Open record ↗');
+      if(link)parts.push(' · ',link);
+    } else if(row.saveError)parts.push(' — '+errorText(row.saveError));
+    else if(row.state==='uncertain')parts.push(' — check the records before trying again.');
+    return el('li',{},parts);
+  });
+  const saved=state.rows.filter(row=>row.state==='done').length;
+  return el('div',{class:'receipt'},[el('h2',{text:'Receipt'}),el('p',{text:saved+' of '+state.rows.length+' '+(state.rows.length===1?'entry':'entries')+' saved on '+state.data.instance.label+'.'}),el('ul',{},items)]);
+}
 function renderReviews() {
-  $('reviews').hidden=false;$('reviews').replaceChildren(el('h2',{text:'Changes'}));
+  $('reviews').hidden=false;$('reviews').classList.remove('stale');
+  const summary=receipt();
+  $('reviews').replaceChildren(...[summary,el('h2',{text:'Changes'})].filter(Boolean));
   const rows=state.rows.map((row,index)=>({row,index})).filter(({row})=>row.preview||row.error||row.result);
   rows.slice(0,state.renderedReviews).forEach(({row,index})=>{
     const detail=el('article',{},[el('h2',{text:(index+1)+'. '+(state.data.linked?stepTitle(row):row.operation?.title||state.data.operation.title)+(row.state==='done'?' · Saved':'')})]);
@@ -712,22 +865,33 @@ function renderReviews() {
   });
   if(state.renderedReviews<rows.length)$('reviews').append(el('div',{class:'row more'},[el('span',{class:'muted',text:'Showing '+state.renderedReviews+' of '+rows.length+' changes.'}),el('button',{type:'button',text:'Show '+Math.min(RENDER_STEP,rows.length-state.renderedReviews)+' more',onclick:()=>{state.renderedReviews=Math.min(rows.length,state.renderedReviews+RENDER_STEP);renderReviews();}})]));
 }
-async function update() {
-  if(state.busy||state.cancelled||state.uncertain)return;
-  if(state.rows.some(row=>row.state==='draft'&&row.jsonDrafts.size)){status('Enter a valid JSON object before updating the review.','warning');return;}
+// The dry-run check of the exact current draft. A newer edit makes the result stale: it is
+// dropped unseen and the latest draft is checked instead, so only the latest edits can be approved.
+async function check() {
+  clearTimeout(state.checkTimer);state.checkTimer=0;
+  if(!state.data||state.busy||terminal())return buttons();
+  if(state.planning){state.recheck=true;return;}
+  state.checkProblem=null;
+  const jsonRows=state.rows.map((row,index)=>({row,index})).filter(({row})=>row.state==='draft'&&row.jsonDrafts.size);
+  if(jsonRows.length){state.checkProblem=entryWord()+' '+(jsonRows[0].index+1)+': enter a valid JSON object in the marked field.';status(state.checkProblem,'warning');return buttons();}
   const unresolved=state.rows.map((row,index)=>({row,index})).filter(({row})=>row.state==='draft'&&row.unresolved.size);
-  if(unresolved.length){status((unresolved.length===1?'Entry ':'Entries ')+unresolved.map(({index})=>index+1).join(', ')+(unresolved.length===1?' has':' have')+' a reference search that must be selected or cleared.','warning');renderEditor();return;}
-  invalidate();const revision=state.revision;
+  if(unresolved.length){state.checkProblem=entryWord()+' '+unresolved.map(({index})=>index+1).join(', ')+': choose a search result or clear the search.';status(state.checkProblem,'warning');return buttons();}
+  const revision=state.revision;
   const rows=state.rows.filter(row=>row.state==='draft'),limit=state.data.plan_max_operations;
-  const plans=[];let refused=0,checked=0,stopped=false;
-  state.planning=true;state.stopRequested=false;$('progress').hidden=false;$('progress').max=rows.length;$('progress').value=0;
-  busy(true);status('Checking entries on '+state.data.instance.label+'…');
+  if(!rows.length)return buttons();
+  const plans=[];let refused=0,checked=0,stopped=false,stale=false;
+  state.planning=true;state.stopRequested=false;state.checkFailed=null;state.checkStopped=false;
+  if(rows.length>limit){$('progress').hidden=false;$('progress').max=rows.length;$('progress').value=0;}
+  if($('status').textContent!=='Checking your latest edits…')status('Checking your latest edits…');
+  buttons();
   try {
     planning: for(let offset=0;offset<rows.length;offset+=limit) {
       const group=rows.slice(offset,offset+limit),operations=group.map(row=>({key:row.key||state.data.key,input:plannedInput(row)}));
       let answer;
       for(;;) {
+        if(revision!==state.revision){stale=true;break planning;}
         if(!await waitUntilRequest(state.nextToolAt,checked,rows.length)){stopped=true;break planning;}
+        if(revision!==state.revision){stale=true;break planning;}
         reserveRequest();
         try {answer=await tool('plan',{operations});}
         catch(error) {
@@ -743,7 +907,8 @@ async function update() {
         }
         break;
       }
-      if(revision!==state.revision||state.cancelled)return;
+      if(state.cancelled)return;
+      if(revision!==state.revision){stale=true;break;}
       if(state.stopRequested){stopped=true;break;}
       if(answer.failed)throw new Error(errorText(answer.body));
       const plan=answer.body;
@@ -754,21 +919,40 @@ async function update() {
         row.preview=result.preview;row.error=result.valid?null:result.error;
         row.fields=result.error?.fields||{};
         for(const [path,messages]of Object.entries(row.fields))if(messages.some(m=>/restricted/i.test(m))){row.restricted??=new Set();row.restricted.add(path);}
+        if(result.valid&&!row.opened) {
+          // What the review first showed for each labelled choice, so a later change stands out.
+          row.opened=new Map();
+          for(const [key] of labelledChoices(row)){const value=row.input[key]??findField(previewFor(row),key);if(typeof value==='boolean')row.opened.set(key,value);}
+        }
         if(!result.valid)refused++;
       }
       if(plan.valid)plans.push({operations,rows:group});
-      checked=Math.min(offset+limit,rows.length);$('progress').value=checked;$('progress-label').textContent='Checked '+checked+' / '+rows.length;
+      checked=Math.min(offset+limit,rows.length);$('progress').value=checked;$('progress-label').textContent=rows.length>limit?'Checked '+checked+' / '+rows.length:'';
     }
+    if(stale)return;
     if(stopped) {
+      state.checkStopped=true;
       for(const row of rows){row.preview=null;row.error=null;row.fields={};}
       $('reviews').hidden=true;
-      status('Stopped after checking '+checked+' of '+rows.length+' entries. Update the review to start checking again.','warning');return;
+      status('Stopped after checking '+checked+' of '+rows.length+' entries. Press Check again, or edit an entry, to check again.','warning');return;
     }
-    if(!refused)state.plans=plans;
-    else context('Review entries were refused on '+state.data.instance.label+(state.data.linked?'. Correct the linked steps before planning again.':'. Correct or exclude them before planning again.'),{rows:contextRows(state.rows)});
-    status(refused?refused+' '+(refused===1?'entry was':'entries were')+(state.data.linked?' refused. Correct the linked steps, then update the complete review.':' refused. Correct or untick them, then update the review.'):rows.length+' '+(rows.length===1?'entry is':'entries are')+' ready on '+state.data.instance.label+'. Review every change below.',refused?'warning':'info');
-  }catch(error){discardPlans();status(error.message+' Update the review to try again.','danger');}
-  finally{if(state.plans!==plans)discardPlans(plans);state.planning=false;state.stopRequested=false;busy(false);renderEditor();if(!stopped)renderReviews();}
+    if(!refused){state.plans=plans;state.plansRevision=revision;}
+    else {
+      // Tell the model once per distinct refusal, not on every automatic check.
+      const refusal=JSON.stringify(contextRows(state.rows));
+      if(refusal!==state.lastRefusal){state.lastRefusal=refusal;context('Review entries were refused on '+state.data.instance.label+(state.data.linked?'. Correct the linked steps before planning again.':'. Correct or exclude them before planning again.'),{rows:contextRows(state.rows)});}
+    }
+    status(refused?refused+' '+(refused===1?(state.data.linked?'step needs':'entry needs'):(state.data.linked?'steps need':'entries need'))+' a change. Fix the marked fields'+(state.data.linked?'':' or untick the entry')+'; the review checks again as you edit.':rows.length+' '+(rows.length===1?'entry is':'entries are')+' ready on '+state.data.instance.label+'. Review every change below, then approve.',refused?'warning':'info');
+  }catch(error){
+    if(revision!==state.revision){stale=true;return;}
+    discardPlans();state.checkFailed=error.message;status('The check could not finish: '+error.message+' Your edits are kept. Press Check again.','danger');
+  }
+  finally{
+    if(state.plans!==plans)discardPlans(plans);
+    state.planning=false;state.stopRequested=false;
+    if(stale||state.recheck){state.recheck=false;if(!state.checkTimer)scheduleCheck(0);else buttons();}
+    else if(!state.cancelled){buttons();renderEditor();if(!stopped)renderReviews();}
+  }
 }
 function collectMethods(value,found=new Map()) {
   if(value&&typeof value==='object') {
@@ -792,12 +976,46 @@ function showStepup(body) {
   }});
   $('stepup').append(...[method,code,confirm].filter(Boolean));code.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();confirm.click();}});code.focus();buttons();
 }
+// A newer review replaces this one: nothing here may be saved, and it must look finished.
+function markReplaced(outcome) {
+  if(state.replaced)return;
+  state.replaced=true;clearTimeout(state.checkTimer);state.checkTimer=0;state.revision++;scrubRows(state.rows);discardPlans();
+  $('stepup').hidden=true;$('stepup').replaceChildren();
+  $('replaced').hidden=false;$('replaced').textContent='Replaced: a newer review took the place of this one. Nothing here can be approved or saved; use the newer review.';
+  status('This review was replaced by a newer one. Nothing here will be saved.','warning');
+  context('Review on '+state.data.instance.label+' was replaced by review '+(outcome?.replaced_by||'a newer one')+'.',{summary:reviewSummary()});
+  renderEditor();if(!$('reviews').hidden)renderReviews();
+}
+// Whether this review is still the one waiting for a decision. A failed status read does not block.
+async function stillCurrent() {
+  if(!state.data?.review_id||terminal())return !terminal();
+  state.statusAt=Date.now();
+  try {
+    const answer=await tool('review_status',{review_id:state.data.review_id});
+    const current=answer.body?.status;
+    if(answer.failed||!current)return true;
+    if(current==='replaced'){markReplaced(answer.body.outcome);return false;}
+    if(!['open','refused'].includes(current)){state.finished=true;status('This review already ended ('+current.replace(/_/g,' ')+'). Nothing more will be saved here.','warning');renderEditor();return false;}
+  }catch(_){}
+  return true;
+}
+function explainBlocked() {
+  const approval=approveState();
+  status(approval.reason,approval.problem?'warning':'info');
+  const invalid=$('editor').querySelector('[aria-invalid=true]');
+  if(invalid){(invalid.matches('fieldset')?invalid.querySelector('input'):invalid)?.focus();}
+}
 async function approve(stepUpCode) {
-  if(state.busy||state.cancelled||state.uncertain||!state.plans.length)return;
+  if(!approveState().ready)return explainBlocked();
   const pending=state.plans.slice(state.next),total=pending.reduce((n,p)=>n+p.rows.length,0),positions=new Map(state.rows.map((row,index)=>[row,index+1]));let savedThisRun=0;
   const finalOperations=outcomeOperations(state.rows.filter(row=>row.state==='draft'));
-  busy(true);$('progress').hidden=false;$('progress').max=total;$('progress').value=0;
+  state.saving=true;busy(true);$('progress').hidden=false;$('progress').max=total;$('progress').value=0;
+  for(const batch of pending)for(const row of batch.rows) {
+    row.saveError=null;row.approved=new Map();
+    for(const [key] of labelledChoices(row)){const value=row.input[key]??findField(previewFor(row),key);if(typeof value==='boolean')row.approved.set(key,value);}
+  }
   try {
+    if(!await stillCurrent())return;
     for(;state.next<state.plans.length;state.next++) {
       const batch=state.plans[state.next];
       status('Saving batch '+(state.next+1)+' / '+state.plans.length+' on '+state.data.instance.label+'…');
@@ -816,10 +1034,15 @@ async function approve(stepUpCode) {
       }finally{delete args.step_up_code;}
       if(answer.failed) {
         if(answer.body.error==='step_up_required') {showStepup(answer.body);status('Your current 2FA code is needed to continue.','warning');return;}
-        for(const result of answer.body.results||[])if(result.valid===false){const row=batch.rows[result.index];if(row)row.error=result.error;}
-        scrubRows(state.rows);discardPlans();status('Stopped: '+errorText(answer.body)+'. Update the remaining review before approving again.','danger');
+        let marked=false;
+        for(const result of answer.body.results||[])if(result.valid===false){const row=batch.rows[result.index];if(row){row.error=result.error;row.saveError=result.error;row.fields=result.error?.fields||{};marked=true;}}
+        if(!marked)for(const row of batch.rows)row.saveError=answer.body;
+        scrubRows(state.rows);discardPlans();
+        status('Not saved: '+errorText(answer.body)+'. Nothing in this '+(state.plans.length>1?'batch':'review')+' was saved'+(state.next>0?'; earlier batches stay saved':'')+'. Your edits are kept: fix the marked fields and approve again.','danger');
         context('Review stopped on '+state.data.instance.label+'. Earlier saved batches remain saved.',{rows:contextRows(batch.rows,positions),summary:reviewSummary()});
-        await outcome('refused',{final_operations:finalOperations,reason:errorText(answer.body),refusal:answer.body});return;
+        await outcome('refused',{final_operations:finalOperations,reason:errorText(answer.body),refusal:answer.body});
+        // Check the unchanged draft again, so Approve says exactly what is still needed.
+        state.revision++;scheduleCheck(0);return;
       }
       if(answer.body.instance)banner(answer.body.instance);
       for(const [index,row]of batch.rows.entries()) {row.state='done';row.result=unwrap(answer.body.results?.[index]?.result)||answer.body.results?.[index];row.preview=null;}
@@ -829,20 +1052,26 @@ async function approve(stepUpCode) {
       context('Saved '+batch.rows.length+' entries on '+state.data.instance.label+'. Batch '+(state.next+1)+' of '+state.plans.length+'.',{rows:contextRows(batch.rows,positions)});
       renderEditor();renderReviews();
     }
-    discardPlans();const saved=state.rows.filter(row=>row.state==='done').length;status(saved+' '+(saved===1?'entry':'entries')+' saved on '+state.data.instance.label+'.','success');
+    discardPlans();const saved=state.rows.filter(row=>row.state==='done').length;
+    status(saved+' '+(saved===1?'entry':'entries')+' saved on '+state.data.instance.label+'. The receipt below links to each saved record.','success');
     context('Review complete on '+state.data.instance.label+'.',{summary:reviewSummary()});
     await outcome('saved',{final_operations:finalOperations,results:state.rows.map(row=>row.result)});
-  }finally{busy(false);renderEditor();renderReviews();}
+  }finally{state.saving=false;busy(false);renderEditor();renderReviews();}
 }
 async function cancel() {
   if(state.busy)return;
+  clearTimeout(state.checkTimer);state.checkTimer=0;
   state.cancelled=true;state.revision++;scrubRows(state.rows);discardPlans();$('stepup').hidden=true;$('stepup').replaceChildren();
   for(const row of state.rows)if(row.state==='draft')row.state='cancelled';
   status('Review cancelled. '+state.rows.filter(r=>r.state==='done').length+' entries were already saved.');
   context('Review cancelled on '+(state.data?.instance.label||'Bilibi')+'. No further entries will be committed.',{summary:reviewSummary()});renderEditor();
   await outcome('cancelled',{reason:'The person cancelled the review.'});
 }
-$('update').addEventListener('click',update);$('approve').addEventListener('click',()=>approve());$('cancel').addEventListener('click',cancel);
+$('update').addEventListener('click',()=>check());$('approve').addEventListener('click',()=>approve());$('cancel').addEventListener('click',cancel);
+// Another review may have replaced this one while the person was away.
+const recheckCurrent=()=>{if(state.data&&!terminal()&&!state.busy&&Date.now()-state.statusAt>STATUS_EVERY)stillCurrent();};
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')recheckCurrent();});
+window.addEventListener('focus',recheckCurrent);
 $('stop').addEventListener('click',()=>{if(!state.planning||state.stopRequested)return;state.stopRequested=true;status('Stopping after the current group…','warning');buttons();});
 $('add').addEventListener('click',()=>{
   if(state.rows.length>=state.data.review_max_entries)return status('A review can hold up to '+state.data.review_max_entries.toLocaleString()+' entries. Split this into smaller reviews.','warning');

@@ -441,6 +441,13 @@ impl WriteHandler for Action {
             _ => None,
         }
     }
+    fn accepts_references(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::CreateAttached(OwnerKind::Company) => &[("company_id", "company")],
+            Self::CreateAttached(OwnerKind::Person) => &[("person_id", "person")],
+            _ => &[],
+        }
+    }
     fn preview_dependent<'a>(
         &'a self,
         client: &'a dyn OperationClient,
