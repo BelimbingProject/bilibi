@@ -436,14 +436,6 @@ impl Tenants {
             .map(TenantIdentity::from_row))
     }
     /// Validates the draft and parent without a business write.
-    pub async fn preview(
-        &self,
-        proof: &OperatorProof,
-        new: &NewTenant,
-    ) -> Result<std::result::Result<NewTenant, TenantErrors>> {
-        let client = self.db.get().await?;
-        self.preview_on(&**client, proof, new).await
-    }
     pub async fn preview_on(
         &self,
         client: &dyn crate::ProofClient,
@@ -667,17 +659,6 @@ impl Tenants {
     }
     /// Bounded search of the platform tenant directory. IDs returned here
     /// are data, not authority to enter that tenant.
-    pub async fn search(
-        &self,
-        proof: &OperatorProof,
-        search: &str,
-        page: i64,
-        page_size: i64,
-    ) -> Result<(Vec<TenantIdentity>, i64)> {
-        let client = self.db.get().await?;
-        self.search_on(&**client, proof, search, page, page_size)
-            .await
-    }
     pub async fn search_on(
         &self,
         client: &dyn crate::ReadClient,
