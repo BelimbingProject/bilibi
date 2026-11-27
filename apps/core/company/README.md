@@ -66,7 +66,7 @@ company reach. The generic field editor never accepts `status`.
 | `Directory::reachable` (`OrganisationDirectory`) | Company | The same desk access, listed: what the top bar's switcher offers, an archived company flagged `archived`. No capability is asked, because the list is the reach alone |
 | `sessions.company_id` and `Sessions::choose_company` | Base Session | The stored choice; `NULL` lets Tenancy select the remembered or first valid desk. See [Base Session](../../base/session/README.md#current-company) |
 | `ActorVerifier::reaches_company` | Core User, through `reachable` | Proves the stored choice on every authentication; a choice the account no longer reaches is dropped from the scope and the session edge forgets it |
-| `UserService::choose_company` | Core User | The switch: proves the reach, writes the row and records `user.company.switched` in one transaction (a refused one records `user.company.switch_refused`) ([Core User README](../user/README.md#current-company)) |
+| `UserService::choose_company` | Core User | [Desk selection contract](../user/README.md#current-company) |
 | `POST /session/company` | Web | The top bar's form ([Web README](../../web/README.md)) |
 | `core.company.reachable` | Company | The same list for an agent, under `admin.company.view`; reviewed writes capture one proved workplace for the whole plan |
 

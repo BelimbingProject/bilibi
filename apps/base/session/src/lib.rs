@@ -756,6 +756,8 @@ impl Sessions {
             .await?;
         moved.map(|_| csrf).ok_or(Error::Conflict)
     }
+    /// Resolves the effective desk after locking the session so overlapping
+    /// submissions compare against the choice committed by the previous switch.
     pub async fn lock_company_choice(
         &self,
         tx: &tokio_postgres::Transaction<'_>,

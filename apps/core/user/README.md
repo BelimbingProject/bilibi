@@ -121,7 +121,9 @@ Web adapters (`apps/web/src/shell.rs`): `POST /preferences` (`{kind,value}`), `G
 
 ## Current company
 
-`UserService::choose_company(token, csrf, company, request)` handles the shell's **Switch desk** form. It proves the requested desk, writes the session choice and the account's remembered `last_desk_id`, and records `user.company.switched` through one MutationBoundary transaction. A refused switch records `user.company.switch_refused`. The choice grants no capability.
+Selecting the current desk in **Switch desk** succeeds without recording a switch. `UserService::choose_company(token, csrf, company, request)` returns the current desk for a repeat or an empty choice and leaves the desk preference as it was.
+
+When you select a different desk, Core User checks that you can use it, saves it for the session and records `user.company.switched` in one MutationBoundary transaction. For an ordinary session, it also updates the account's remembered `last_desk_id` if needed. Switching desks grants no capability. A request for a desk outside the account's reach records a non-retained `user.company.switch_refused` action naming the requested company.
 
 Every authentication proves the selected desk again. An invalid or absent selection uses the remembered valid desk, then the person's first live desk (an unarchived desk before an archived one), or no desk. An archived company's desk may be chosen: its records read and every write into it is refused. Impersonation uses the viewed person's desks and parks the operator's selection separately. A queued job retains its captured desk and refuses lost access rather than selecting another one.
 

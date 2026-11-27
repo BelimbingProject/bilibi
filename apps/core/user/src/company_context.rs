@@ -5,14 +5,8 @@
 //! so an operator viewing as a user may make it too; the reach it is checked
 //! against is the viewed account's.
 //!
-//! A choice is accepted only for a company where the account has a desk now (Core
-//! Company's `reachable`: live, unarchived, with an explicit desk), and Tenancy proves the same fact again on
-//! every later authentication, so the stored choice never outlives its
-//! reach. The switch commits with a `user.company.switched` action, so the
-//! trail says which company was current from when; a refused switch leaves a
-//! non-retained `user.company.switch_refused` action naming the requested
-//! company. The reach check itself writes no authorization decision. An empty
-//! choice keeps the scope's current valid desk.
+//! See the Core User README's Current company section for the selection
+//! contract. The reach check itself writes no authorization decision.
 use crate::UserService;
 use bilibi_audit::{record_action, Attribution, RequestInfo};
 use bilibi_database::{Change, Error};
