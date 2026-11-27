@@ -274,8 +274,8 @@ impl Installer {
         let mut finished = false;
         for (id, history, dump) in backup::unfinished_restores(&self.layout.backups()) {
             let key = match history.file_name().and_then(|name| name.to_str()) {
-                Some("history-restore.json") => "restore",
-                Some("history-switch_back.json") => "switch_back",
+                Some("history-restore.json" | "history-restore.held") => "restore",
+                Some("history-switch_back.json" | "history-switch_back.held") => "switch_back",
                 _ => continue,
             };
             let recorded = jobs::restore_job(client, id).await?;
@@ -304,7 +304,8 @@ impl Installer {
                     Err(error) => return Err(error),
                 }
             }
-            // The restore already failed and a restart cut off its cleanup:
+            // The restore already failed and a restart cut off its cleanup,
+            // or its failure could not be noted and its history was held:
             // record that failure, and never run the restore again.
             if let Some(why) = backup::noted_failure(&history) {
                 println!(

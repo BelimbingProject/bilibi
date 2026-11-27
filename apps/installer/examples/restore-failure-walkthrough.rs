@@ -11,6 +11,13 @@
 //!    The next start records that failure once, with the same manual
 //!    recovery dump, and never runs `pg_restore` again; a third start finds
 //!    nothing to do.
+//! 3. The failure note cannot be written (its partial file's path is taken
+//!    by a folder). The installer clears nothing more, holds the saved
+//!    history, and records the failure with the dump to restore by hand.
+//! 4. The same, but the installer is killed after it held the history and
+//!    before the failed step is recorded. The next start records the failure
+//!    and never runs `pg_restore` again, and what the failed restore left is
+//!    still not cleared.
 //!
 //! Set `DATABASE_URL` to an empty disposable database and
 //! `RESTORE_FAILURE_ROOT` to a private scratch directory.
@@ -37,16 +44,23 @@ const UNDO_JOB: i64 = 2;
 /// A release composition the Shared installation policy admits.
 const TARGET: &str = "Bilibi 0.1.0\nDomains: none mounted\nExtensions: none mounted\n";
 
-/// `pg_restore` that records each call and fails. With `HOLD` set it first
-/// opens a transaction that creates a table in `public` and stays open, so
-/// the installer's cleanup waits to drop that schema: the window in which
-/// the failure is noted and not yet recorded.
+/// `pg_restore` that records each call and fails. With `NO_NOTE` set it
+/// leaves a table behind, as a restore that failed part way would, and makes
+/// a folder at `NO_NOTE`, the failure note's partial file, so the note cannot
+/// be written. With `HOLD` set it then opens a transaction that creates the
+/// table `HOLD` in `public` and stays open, so the installer waits for it
+/// (dropping that schema, or making that job table again): the window in
+/// which the failure is decided and not yet recorded.
 const PG_RESTORE: &str = r#"#!/bin/sh
 echo "pg_restore $*" >> "$WALK/pg_restore.calls"
+if [ -n "$NO_NOTE" ]; then
+  psql --no-psqlrc --quiet -c 'CREATE TABLE public.restore_failure_partial ()' >/dev/null 2>&1
+  mkdir -p "$NO_NOTE"
+fi
 if [ -n "$HOLD" ]; then
   PGAPPNAME=restore-failure-hold psql --no-psqlrc --quiet >/dev/null 2>&1 <<SQL &
 BEGIN;
-CREATE TABLE public.restore_failure_hold ();
+CREATE TABLE public.$HOLD ();
 \! touch "$WALK/held"
 SELECT pg_sleep(300);
 SQL
@@ -89,83 +103,91 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // 1. A failure the installer records without a restart.
     walk.prepare(&client).await?;
-    let output = walk.installer(false)?.wait_with_output()?;
+    let output = walk.installer(&[])?.wait_with_output()?;
     let log = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{log}");
     assert_eq!(walk.restore_calls(), 1, "{log}");
-    walk.assert_failed_once(&client).await?;
+    walk.assert_failed_once(&client, PG_RESTORE_FAILED).await?;
     println!("PASS: a failed restore is recorded once, names the safety backup to restore by hand, and leaves no failure note");
 
     // 2. The installer exits during the cleanup after the failure.
     walk.prepare(&client).await?;
-    let mut child = walk.installer(true)?;
-    let blocked = walk.wait_for_cleanup(&client, &mut child).await;
-    let _ = child.kill();
-    child.wait()?;
-    let blocked = match blocked {
-        Ok(pid) => pid,
-        Err(why) => {
-            client
-                .execute(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-                     WHERE datname = current_database() AND application_name = 'restore-failure-hold'",
-                    &[],
-                )
-                .await?;
-            return Err(why);
-        }
-    };
-    client
-        .execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-             WHERE pid = $1 OR (datname = current_database() AND application_name = 'restore-failure-hold')",
-            &[&blocked],
-        )
+    walk.cut_off(&client, &[("HOLD", "restore_failure_hold")], "DROP SCHEMA%")
         .await?;
-    wait_until("the stopped sessions to end", || async {
-        Ok(client
-            .query_one(
-                "SELECT count(*) = 0 FROM pg_stat_activity WHERE pid = $1
-                 OR (datname = current_database() AND application_name = 'restore-failure-hold')",
-                &[&blocked],
-            )
-            .await?
-            .get::<_, bool>(0))
-    })
-    .await?;
     assert_eq!(walk.restore_calls(), 1);
     assert!(walk.history().is_file());
     let noted = walk.note().is_file();
     assert!(
-        client
-            .query_one("SELECT to_regclass('base_software_jobs') IS NULL", &[])
-            .await?
-            .get::<_, bool>(0),
+        !table_exists(&client, "base_software_jobs").await?,
         "the installer was stopped before the job tables were made again"
     );
     println!("PASS: the installer exited during the cleanup after the failure, with the job tables gone and the restore step not recorded");
 
-    let output = walk.installer(false)?.wait_with_output()?;
-    let log = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{log}");
-    assert_eq!(
-        walk.restore_calls(),
-        1,
-        "the restart ran pg_restore again: {log}"
-    );
     assert!(noted, "the failure was not noted before the cleanup");
-    assert_eq!(log.matches("recording the failure").count(), 1, "{log}");
-    assert!(!log.contains("finishing it from"), "{log}");
-    let finished = walk.assert_failed_once(&client).await?;
+    walk.restart_records_failure().await?;
+    let finished = walk.assert_failed_once(&client, PG_RESTORE_FAILED).await?;
     println!("PASS: the restart recorded the failure once with the manual recovery dump and ran no restore");
 
-    let output = walk.installer(false)?.wait_with_output()?;
+    let output = walk.installer(&[])?.wait_with_output()?;
     let log = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{log}");
     assert_eq!(walk.restore_calls(), 1, "{log}");
-    assert_eq!(walk.assert_failed_once(&client).await?, finished);
+    assert_eq!(
+        walk.assert_failed_once(&client, PG_RESTORE_FAILED).await?,
+        finished
+    );
     println!("PASS: a later start finds nothing to do and leaves the recorded outcome as it is");
+
+    // 3. The failure note cannot be written.
+    let no_note = walk.note().with_extension("failure.partial");
+    let no_note = no_note.to_str().ok_or("the instance path is not UTF-8")?;
+    walk.prepare(&client).await?;
+    let output = walk
+        .installer(&[("NO_NOTE", no_note)])?
+        .wait_with_output()?;
+    let log = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{log}");
+    assert_eq!(walk.restore_calls(), 1, "{log}");
+    walk.assert_failed_once(&client, "Nothing more was cleared.")
+        .await?;
+    walk.assert_failed_once(&client, PG_RESTORE_FAILED).await?;
+    assert!(table_exists(&client, "restore_failure_partial").await?);
+    println!("PASS: when the failure cannot be noted, nothing more is cleared and the failure is recorded with the dump to restore by hand");
+
+    // 4. The failure note cannot be written, and the installer exits before
+    //    the failed step is recorded.
+    walk.prepare(&client).await?;
+    walk.cut_off(
+        &client,
+        &[("NO_NOTE", no_note), ("HOLD", "base_settings")],
+        "CREATE TABLE IF NOT EXISTS base_settings%",
+    )
+    .await?;
+    assert_eq!(walk.restore_calls(), 1);
+    assert!(
+        !walk.history().exists() && walk.held().is_file() && !walk.note().exists(),
+        "the saved history was not held, or a note was written"
+    );
+    assert!(table_exists(&client, "restore_failure_partial").await?);
+    assert!(!table_exists(&client, "base_software_jobs").await?);
+    println!("PASS: the installer exited after holding the saved history, with no failure note, nothing more cleared and the restore step not recorded");
+
+    walk.restart_records_failure().await?;
+    walk.assert_failed_once(&client, "its failure could not be noted")
+        .await?;
+    assert!(table_exists(&client, "restore_failure_partial").await?);
+    println!("PASS: the restart recorded the held failure with the manual recovery dump, ran no restore and cleared nothing");
     Ok(())
+}
+
+/// What the stand-in `pg_restore`'s failure reads as in the job's message.
+const PG_RESTORE_FAILED: &str = "pg_restore exited with";
+
+async fn table_exists(client: &Client, table: &str) -> Result<bool, Box<dyn Error>> {
+    Ok(client
+        .query_one("SELECT to_regclass($1) IS NOT NULL", &[&table])
+        .await?
+        .get(0))
 }
 
 struct Walk {
@@ -210,6 +232,9 @@ impl Walk {
     }
     fn note(&self) -> PathBuf {
         self.safety.with_file_name("history-restore.failure")
+    }
+    fn held(&self) -> PathBuf {
+        self.safety.with_file_name("history-restore.held")
     }
     fn restore_calls(&self) -> usize {
         std::fs::read_to_string(self.root.join("pg_restore.calls"))
@@ -292,8 +317,9 @@ impl Walk {
         )?;
         Ok(())
     }
-    /// Starts the installer for the instance, as systemd would.
-    fn installer(&self, hold: bool) -> Result<Child, Box<dyn Error>> {
+    /// Starts the installer for the instance, as systemd would, with `env`
+    /// for the stand-in `pg_restore`.
+    fn installer(&self, env: &[(&str, &str)]) -> Result<Child, Box<dyn Error>> {
         let path = format!(
             "{}:{}",
             self.root.join("bin").display(),
@@ -307,47 +333,69 @@ impl Walk {
             .env("PATH", path)
             .env("WALK", &self.root)
             .env_remove("HOLD")
+            .env_remove("NO_NOTE")
+            .envs(env.iter().copied())
             .stdout(Stdio::piped());
-        if hold {
-            command.env("HOLD", "1");
-        }
         Ok(command.spawn()?)
     }
-    /// Waits until the cleanup after the failure is held dropping `public`
-    /// (the clear before `pg_restore` ran before the hold existed); returns
-    /// that session's process ID.
-    async fn wait_for_cleanup(
+    /// Starts the installer with `env`, waits until it is held running
+    /// `waiting` after the failure, kills it there, and ends the held
+    /// sessions.
+    async fn cut_off(
         &self,
         client: &Client,
-        child: &mut Child,
-    ) -> Result<i32, Box<dyn Error>> {
-        let started = Instant::now();
-        loop {
-            if let Some(status) = child.try_wait()? {
-                return Err(format!("the installer ended before its cleanup: {status}").into());
-            }
-            let waiting = client
-                .query_opt(
-                    "SELECT pid FROM pg_stat_activity
-                     WHERE datname = current_database() AND wait_event_type = 'Lock'
-                       AND query LIKE 'DROP SCHEMA%'",
-                    &[],
+        env: &[(&str, &str)],
+        waiting: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut child = self.installer(env)?;
+        let held = wait_for_held(client, &mut child, waiting).await;
+        let _ = child.kill();
+        child.wait()?;
+        let blocked = *held.as_ref().unwrap_or(&0);
+        client
+            .execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+                 WHERE pid = $1 OR (datname = current_database() AND application_name = 'restore-failure-hold')",
+                &[&blocked],
+            )
+            .await?;
+        wait_until("the stopped sessions to end", || async {
+            Ok(client
+                .query_one(
+                    "SELECT count(*) = 0 FROM pg_stat_activity WHERE pid = $1
+                     OR (datname = current_database() AND application_name = 'restore-failure-hold')",
+                    &[&blocked],
                 )
-                .await?;
-            if let Some(row) = waiting {
-                return Ok(row.get(0));
-            }
-            if started.elapsed() > Duration::from_secs(60) {
-                return Err("the installer's cleanup was not seen within 60 seconds".into());
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+                .await?
+                .get::<_, bool>(0))
+        })
+        .await?;
+        held.map(|_| ())
+    }
+    /// Starts the installer after a cut-off failure: it records the failure
+    /// once and never runs `pg_restore` again.
+    async fn restart_records_failure(&self) -> Result<(), Box<dyn Error>> {
+        let output = self.installer(&[])?.wait_with_output()?;
+        let log = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{log}");
+        assert_eq!(
+            self.restore_calls(),
+            1,
+            "the restart ran pg_restore again: {log}"
+        );
+        assert_eq!(log.matches("recording the failure").count(), 1, "{log}");
+        assert!(!log.contains("finishing it from"), "{log}");
+        Ok(())
     }
     /// The Undo ended `failed` exactly once: its restore step failed, its
     /// message names the backup it tried and the safety backup to restore by
     /// hand, and the history file and failure note are gone. Returns when
     /// the job finished.
-    async fn assert_failed_once(&self, client: &Client) -> Result<String, Box<dyn Error>> {
+    async fn assert_failed_once(
+        &self,
+        client: &Client,
+        reason: &str,
+    ) -> Result<String, Box<dyn Error>> {
         let row = client
             .query_one(
                 "SELECT state, result, finished_at::text,
@@ -371,13 +419,46 @@ impl Walk {
             )) && message.contains(&format!(
                 "The restore step failed for {}",
                 self.original.display()
-            )) && message.contains("pg_restore exited with")
+            )) && message.contains(reason)
                 && message.contains("The service remains stopped."),
             "{message}"
         );
         assert_eq!(result["restored"], json!(false));
-        assert!(!self.history().exists() && !self.note().exists());
+        assert!(!self.history().exists() && !self.note().exists() && !self.held().exists());
         Ok(finished)
+    }
+}
+
+/// Waits until the installer is held by a lock running a statement like
+/// `waiting`; returns that session's process ID.
+async fn wait_for_held(
+    client: &Client,
+    child: &mut Child,
+    waiting: &str,
+) -> Result<i32, Box<dyn Error>> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(format!("the installer ended before it was held: {status}").into());
+        }
+        let held = client
+            .query_opt(
+                "SELECT pid FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND query LIKE $1",
+                &[&waiting],
+            )
+            .await?;
+        if let Some(row) = held {
+            return Ok(row.get(0));
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            return Err(format!(
+                "the installer was not seen waiting on {waiting} within 60 seconds"
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
