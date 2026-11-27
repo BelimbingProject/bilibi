@@ -518,10 +518,11 @@ fn render_role(
 
 #[derive(Template)]
 #[template(
-    source = r#"<form id="role-form" data-preserve-newer-draft data-event="role-change" data-change data-submit-event="create-role" class="space-y-5"><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ company }}{{ name }}{{ code }}{{ description }}</section><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ permissions_heading }}{{ permission_search }}{{ permissions }}</section><div class="flex items-center justify-end gap-3"><a id="role-cancel" href="/authz/roles" class="text-sm font-medium text-ink-muted hover:text-ink">Cancel</a>{{ save }}</div></form>"#,
+    source = r#"<form id="role-form" data-preserve-newer-draft{% if created %} data-draft-saved{% endif %} data-event="role-change" data-change data-submit-event="create-role" class="space-y-5"><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ company }}{{ name }}{{ code }}{{ description }}</section><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ permissions_heading }}{{ permission_search }}{{ permissions }}</section><div class="flex items-center justify-end gap-3"><a id="role-cancel" href="/authz/roles" class="text-sm font-medium text-ink-muted hover:text-ink">Cancel</a>{{ save }}</div></form>"#,
     ext = "html"
 )]
 struct RoleForm {
+    created: bool,
     company: Html,
     name: Html,
     code: Html,
@@ -596,6 +597,7 @@ fn render_create(
         ..Header::default()
     })?);
     html.push(&render(RoleForm {
+        created,
         company: render(company)?,
         name: render(
             field("name", "Label", &role.name, &errors.name).hint("Example: Sales Manager").attr("data-debounce", "300"),

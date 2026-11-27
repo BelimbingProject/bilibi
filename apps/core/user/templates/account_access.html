@@ -27,7 +27,7 @@
 {% if cap_control == "available" %}<div id="add-capabilities-section" class="mt-4 pt-4 border-t border-line"><div class="text-[11px] uppercase tracking-wider font-semibold text-ink-subtle mb-2">Add Capabilities</div>
 <form id="capability-search-form" data-event="search_capabilities" data-change class="mb-2"><label for="capability-search-input" class="sr-only">Search capabilities</label><input type="search" id="capability-search-input" name="value" data-debounce="300" autocomplete="off" placeholder="Search capabilities..." value="{{ cap_search }}" class="w-full rounded-md border border-high-contrast-line bg-surface px-3 py-1.5 text-xs text-ink placeholder:text-ink-faint focus:border-brand-strong focus:outline-none" /></form>
 <form id="add-capabilities-form" data-event="select_capabilities" data-change data-submit-event="add_selected_capabilities">{{ caps }}
-{% if selected_caps > 0 %}<div class="mt-2">{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="confirm-add-capabilities-btn", button_type="submit") %}Add{% endcall %}</div>{% endif %}</form></div>
+{% if selected_caps > 0 %}<div class="mt-2">{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="confirm-add-capabilities-btn", button_type="submit") %}Add ({{ selected_caps }}){% endcall %}</div>{% endif %}</form></div>
 {% endif %}
 </div>{% endif %}
 </div>

@@ -52,6 +52,7 @@
   // A transport refusal/disconnect must keep their entire draft until retry.
   const preservedForms = new WeakMap(); // form -> latest refused request ID
   const newerDrafts = new WeakMap();
+  const editedDrafts = new WeakSet();
   let reconnecting = false;
   let reloadOnReconnect = false;
   let stopped = false; // the server cleared the page: no reconnect
@@ -135,8 +136,10 @@
     // A development rebuild may reload fresh assets only when there is no
     // draft to lose. This also protects forms if an old client hits a new
     // server's hard socket cap instead of receiving a normal refusal.
+    const pending = new Set([...inflight.values(), ...queued].map((entry) => entry.ownerForm));
     const drafts = [...document.forms].filter((form) => [...form.elements].some(dirty)
-      || form.hasAttribute('data-preserve-newer-draft'));
+      || (form.matches(draftSelector)
+        && (editedDrafts.has(form) || pending.has(form))));
     for (const form of drafts) {
       const sent = [...inflight.values()].filter((entry) => entry.ownerForm === form).map((entry) => entry.id);
       preserve(form, Math.max(0, ...sent));
@@ -474,8 +477,16 @@
     }
     morph(root, next, context);
     if (context.submitted && context.submitted.isConnected) {
-      editedMarkers.delete(context.submitted);
-      context.submitted.reset();
+      const form = context.submitted;
+      if (!form.matches(draftSelector) || form.hasAttribute('data-draft-saved')) {
+        editedMarkers.delete(form);
+      }
+      if (form.hasAttribute('data-draft-saved')) {
+        editedDrafts.delete(form);
+        clearTimeout(changeTimers.get(form));
+        changeSent.delete(form);
+      }
+      form.reset();
     }
     const anchor = options.anchor && document.getElementById(options.anchor);
     restoreScroll(scroll, options.navigation, anchor && root.contains(anchor) ? anchor : null);
@@ -785,7 +796,10 @@
       const control = event.target;
       const form = control.form;
       if (!form || !form.dataset.event || !form.hasAttribute('data-change')) return;
-      if (form.hasAttribute('data-preserve-newer-draft')) newerDrafts.set(form, ++sequence);
+      if (form.matches(draftSelector)) {
+        editedDrafts.add(form);
+        newerDrafts.set(form, ++sequence);
+      }
       if (kind === 'input' && control.dataset.editedMarker) {
         if (!editedMarkers.has(form)) editedMarkers.set(form, new Set());
         editedMarkers.get(form).add(control.dataset.editedMarker);

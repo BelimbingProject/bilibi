@@ -912,7 +912,7 @@ impl Detail {
                 options: caps,
                 hidden_selected: Vec::new(),
                 search: self.access.cap_search.clone(),
-                selected_count: self.access.selected_caps.len(),
+                selected_count: 0,
             })?,
             selected_caps: self.access.selected_caps.len(),
         })?;
