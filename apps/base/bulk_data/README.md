@@ -30,12 +30,12 @@ inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/per
 | --- | --- |
 | `label`, `path` | What the records are called; their page with `{id}`, for links from row results |
 | `table` | The registered Grid table: its tenant/company scope governs this record type, and a field restricted there for the person is not offered |
-| `id` | The record ID property in create results and list records |
+| `id` | The record ID property in create results, duplicate candidates and list records |
 | `import` | Optional; `None` excludes the type from imports and saved mappings |
 | `import.capability` | The owner's import capability (verb `import`, from its own vocabulary), with the same tenant/company scope as the Grid table; checked for every row |
 | `import.create` | The owner's write contract creating one record |
 | `import.duplicates` | Optional. The owner's read answering candidates for the match `fields`, and its update contract with the id, version and fields properties. A field the file leaves out keeps the record's value |
-| `import.references` | Create fields holding another record's id: a `parent` record type whose earlier import names it by source key, and/or a `lookup` read that must find exactly one record |
+| `import.references` | Create fields that hold another record's ID. A `parent` must support import because the reference uses a source key from an earlier import. A `lookup` read must find exactly one record. A reference can use either or both. |
 | `export` | Optional; `None` keeps the type out of export. The owner's export capability (verb `export`), scoped like the Grid table, and its list read contract, which takes integer `page` and `page_size` and returns the records with their `id` |
 | `bulk_update` | Optional for tenant-wide Grid tables. The owner's tenant-wide capability (verb `bulk-update`), its paged list read (records with `id` and `version`), its read of one record by `get_id`, its update contract with the id, version and fields properties, and the `fields` people may set: scalar properties of the update's fields (choices, dates, flags, numbers, or an owner's id) |
 
@@ -103,7 +103,7 @@ This seam supports [CX lead import 117](https://github.com/cx2027/bilibi-dom-cx/
 | `cancelled` | Stopped during the import; rows already written stay. A cancelled check returns to `draft` |
 | `stopped` (read only) | The job ended without finishing (its person lost access, or every attempt failed); cancel and start again |
 
-- **Upload** (`/imports/new`): the record type and a file. Refused in words: not UTF-8 (a byte-order mark is fine), not CSV, no header, a blank or repeated column, a row wider than the header, larger than `bulk_data.import_max_bytes`, more rows than `bulk_data.import_max_rows`.
+- **Upload** (`/imports/new`). The picker shows only record types you can import. Choose a type and select a file. Refused in words: not UTF-8 (a byte-order mark is fine), not CSV, no header, a blank or repeated column, a row wider than the header, larger than `bulk_data.import_max_bytes`, more rows than `bulk_data.import_max_rows`.
 - **Mapping**: for each field, a column or a fixed value. A reference field's column is looked up, or names a row of a completed parent import (one of the person's own, in the same company) by its source key. `source_key` names the column a later child import uses. `duplicates`: `skip` (default), `update` or `create`.
 - **Check file** (dry run) and **Import** run in the background as the person, through `bilibi_agent_api::job`. Each real row is one transaction: the owner's preview and commit, with the row's result beside it; a refusal is recorded in words and the run goes on. A row locks its run with a single-row read (`store::lock`) and never counts the run's recorded rows, so an import's cost grows with its rows, not with their square; the counts are read for the pages and once when the run ends. Every row the run writes shares its trace ID.
 - **Slices**: an attempt works for two minutes, then queues the rest from the next unrecorded row. A retried attempt never writes a row twice.

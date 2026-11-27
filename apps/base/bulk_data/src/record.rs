@@ -28,7 +28,7 @@ pub struct RecordType {
     pub path: Option<&'static str>,
     /// ID property in list records, create results and duplicate candidates.
     pub id: &'static str,
-    /// Import contracts, or `None` for a read-only type.
+    /// Import contracts. Use `None` when the type does not support import.
     pub import: Option<Import>,
     /// Taking a list's records out to CSV; `None` when the type offers none.
     pub export: Option<Export>,

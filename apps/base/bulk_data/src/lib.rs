@@ -356,12 +356,8 @@ impl BulkData {
         let held = bilibi_authz::effective_capabilities(client, scope).await?;
         let mut types = Vec::new();
         for registered in self.types.values() {
-            if registered
-                .definition
-                .import
-                .as_ref()
-                .is_some_and(|import| held.contains(import.capability))
-            {
+            let import = registered.definition.import.as_ref();
+            if import.is_some_and(|import| held.contains(import.capability)) {
                 types.push(self.info(client, scope, registered).await?);
             }
         }
