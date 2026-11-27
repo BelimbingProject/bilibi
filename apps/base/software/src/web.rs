@@ -1460,28 +1460,30 @@ impl View {
                 )
             }
         };
+        let restores_backup = facts["restores_backup"] == true;
+        let title = if review.kind == Kind::Undo && !restores_backup {
+            text(&facts["loss"]).to_owned()
+        } else {
+            title
+        };
         let mut warnings: Vec<(StatusKind, Html)> = facts["warnings"]
             .as_array()
             .into_iter()
             .flatten()
             .map(|w| (StatusKind::Warning, Html::text(text(w))))
             .collect();
-        if review.kind == Kind::Undo {
+        if review.kind == Kind::Undo && restores_backup {
             let mut loss = Html::EMPTY;
-            if facts["restores_backup"] == true {
-                if let Some(i) = facts["backup_at"]
-                    .as_str()
-                    .and_then(|at| instant(display, at))
-                {
-                    loss.push(&Html::text("Bilibi restores the backup from "));
-                    loss.push(&render(InstantCell {
-                        id: "software-review-backup-at".into(),
-                        i,
-                    })?);
-                    loss.push(&Html::text("; anything entered since then is lost."));
-                } else {
-                    loss.push(&Html::text(text(&facts["loss"])));
-                }
+            if let Some(i) = facts["backup_at"]
+                .as_str()
+                .and_then(|at| instant(display, at))
+            {
+                loss.push(&Html::text("Bilibi restores the backup from "));
+                loss.push(&render(InstantCell {
+                    id: "software-review-backup-at".into(),
+                    i,
+                })?);
+                loss.push(&Html::text("; anything entered since then is lost."));
             } else {
                 loss.push(&Html::text(text(&facts["loss"])));
             }
@@ -1538,7 +1540,7 @@ impl View {
             .map(|s| text(&s["label"]).to_owned())
             .collect();
         let mut what_happens = text(&facts["what_happens"]).to_owned();
-        if review.kind == Kind::Undo && facts["restores_backup"] == true {
+        if review.kind == Kind::Undo && restores_backup {
             if let Some(file) = facts["backup"].as_str() {
                 what_happens.push_str(&format!(" Undo restores this file on the server: {file}"));
             }

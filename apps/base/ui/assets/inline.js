@@ -131,6 +131,17 @@
         else trigger.removeAttribute('aria-describedby');
       }
       this.editor()?.classList.toggle('hidden', !this.active);
+      const timezoneHint = this.el.querySelector('[data-role="edit-timezone"]');
+      if (timezoneHint) {
+        const timezone = this.active ? this.timezone : undefined;
+        const text = timezone ? `Time zone: ${timezone}` : '';
+        if (timezoneHint.textContent !== text) timezoneHint.textContent = text;
+        timezoneHint.hidden = !timezone;
+        const dateInput = this.editor()?.querySelector('[data-role="input"]');
+        const description = [timezone && timezoneHint.id, describedBy].filter(Boolean).join(' ');
+        if (description) dateInput?.setAttribute('aria-describedby', description);
+        else dateInput?.removeAttribute('aria-describedby');
+      }
       const input = this.control();
       if (input) {
         input.setAttribute('aria-invalid', String(['error', 'conflict'].includes(this.el.dataset.status)));
