@@ -342,7 +342,7 @@ struct Workspace {
     shared_columns: ListColumns,
 }
 
-const SHARED_COLUMNS: &[(&str, &str)] = &[("label", "Name"), ("audience", "Audience")];
+const SHARED_COLUMNS: &[(&str, &str)] = &[("label", "Label"), ("audience", "Audience")];
 
 pub(crate) fn columns(id: &str, builtins: &[(&str, &str)]) -> Result<ListColumns> {
     ListColumns::mount(
@@ -897,7 +897,8 @@ impl Workspace {
         };
         let pin_field = if self.pin_open {
             let mut field = Field::in_form("layout", "label")
-                .label("Layout name")
+                .label("Label")
+                .hint("Example: Sales workspace")
                 .value(self.pin_label.clone());
             if let Some(error) = &self.pin_error {
                 field = field.error(error.clone());

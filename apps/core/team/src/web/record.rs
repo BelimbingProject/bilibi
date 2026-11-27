@@ -165,8 +165,14 @@ fn choice_fact<'a>(
 }
 fn facts(state: &State, record: &Record, words: &bilibi_grid::RecordWords) -> Result<Html> {
     let team = &record.team;
-    let mut name = InlineField::new("team-name", "name", words.field("name", "Name"), &team.name)
-        .version(team.version);
+    let mut name = InlineField::new(
+        "team-name",
+        "name",
+        words.field("name", "Label"),
+        &team.name,
+    )
+    .version(team.version)
+    .hint("Example: Sales team");
     name.editable = record.can_change;
     name.status = state.commits.get("name");
     let mut parents = vec![Choice::new("No parent team", "")];
@@ -190,7 +196,7 @@ fn facts(state: &State, record: &Record, words: &bilibi_grid::RecordWords) -> Re
     };
     let mut items = vec![
         Fact {
-            title: words.field("name", "Name"),
+            title: words.field("name", "Label"),
             value: render(InlineEdit { field: name })?,
             ..Fact::default()
         },

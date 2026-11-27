@@ -132,7 +132,7 @@ fn label(field: &str) -> String {
     let key = form_key(field);
     let named = match key.as_str() {
         "code" => "Code",
-        "name" => "Name",
+        "name" => "Label",
         "timezone" => "Zone",
         "substitute" => "Holiday substitution",
         "effective_from" => "Applies from",

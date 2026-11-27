@@ -80,7 +80,7 @@ pub(super) static DEPARTMENT_TYPES: Spec = Spec {
     new_title: "New Department Type",
     edit_title: "Edit Department Type",
     code_placeholder: "e.g. ENG, HR, FIN",
-    name_placeholder: "e.g. Engineering",
+    name_placeholder: "Example: Engineering",
     not_found: "Department type not found.",
     created: "Department type created.",
     updated: "Department type updated.",
@@ -112,7 +112,7 @@ pub(super) static LEGAL_ENTITY_TYPES: Spec = Spec {
     new_title: "New Legal Entity Type",
     edit_title: "Edit Legal Entity Type",
     code_placeholder: "e.g. LLC, CORP, PT",
-    name_placeholder: "e.g. Limited Liability Company",
+    name_placeholder: "Example: Limited Liability Company",
     not_found: "Legal entity type not found.",
     created: "Legal entity type created.",
     updated: "Legal entity type updated.",
@@ -226,7 +226,7 @@ pub(super) struct ReferenceTypes {
 fn builtins(spec: &Spec) -> Vec<BuiltinColumn> {
     let mut columns = vec![
         BuiltinColumn::new("code", "Code"),
-        BuiltinColumn::new("name", "Name"),
+        BuiltinColumn::new("name", "Label"),
     ];
     if spec.category() {
         columns.push(BuiltinColumn::new("category", "Category"));
@@ -612,8 +612,8 @@ impl ReferenceTypes {
             code = code.value(loaded.clone()).disabled();
         }
         let name = field("name")
-            .label("Name")
-            .placeholder(spec.name_placeholder)
+            .label("Label")
+            .hint(spec.name_placeholder)
             .required();
         let category = spec.category().then(|| {
             field("category")

@@ -24,7 +24,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
 
-const COLUMNS: &[(&str, &str)] = &[("label", "Name"), ("audience", "Audience")];
+const COLUMNS: &[(&str, &str)] = &[("label", "Label"), ("audience", "Audience")];
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -231,7 +231,8 @@ impl SharedPage {
             }
         }
         let label = Field::in_form("layout", "label")
-            .label("Name")
+            .label("Label")
+            .hint("Example: Sales workspace")
             .value(self.label.clone())
             .required();
         let roles = MultiSelect::in_form("layout", "roles")

@@ -59,7 +59,7 @@ static GRID: GridContribution = GridContribution {
         "id",
         &[
             Field::new("id", "ID", FieldType::Integer).protected(),
-            Field::new("name", "Name", FieldType::String).protected(),
+            Field::new("name", "Label", FieldType::String).protected(),
             Field::new("kind", "Kind", FieldType::String).protected(),
             Field::new("parent_id", "Parent team ID", FieldType::Integer).protected(),
             Field::new("company_id", "Company ID", FieldType::Integer).protected(),

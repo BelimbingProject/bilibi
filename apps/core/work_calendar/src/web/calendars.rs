@@ -28,7 +28,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
 fn columns() -> Vec<BuiltinColumn> {
     vec![
         BuiltinColumn::new("code", "Code").grid_field("work_calendars.code"),
-        BuiltinColumn::new("name", "Name").grid_field("work_calendars.name"),
+        BuiltinColumn::new("name", "Label").grid_field("work_calendars.name"),
         BuiltinColumn::new("status", "Status").grid_field("work_calendars.status"),
         BuiltinColumn::new("timezone", "Zone").grid_field("work_calendars.timezone"),
         BuiltinColumn::new("holiday_sets", "Holiday sets")
@@ -221,7 +221,12 @@ impl Calendars {
                         .attr("maxlength", "64")
                         .required(),
                 )?,
-                render(field("name", "Name").attr("maxlength", "120").required())?,
+                render(
+                    field("name", "Label")
+                        .hint("Example: Office hours")
+                        .attr("maxlength", "120")
+                        .required(),
+                )?,
             ],
             vec![
                 render(

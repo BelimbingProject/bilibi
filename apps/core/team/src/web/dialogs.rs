@@ -82,7 +82,10 @@ pub(super) fn create(
     );
     let mut body = summary("team-new", &d.errors)?;
     body.push(&render(
-        field("name", "Name").required().attr("maxlength", "200"),
+        field("name", "Label")
+            .hint("Example: Sales team")
+            .required()
+            .attr("maxlength", "200"),
     )?);
     body.push(&render(
         field("kind", "Kind")

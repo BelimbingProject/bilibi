@@ -27,7 +27,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
 fn columns() -> Vec<BuiltinColumn> {
     vec![
         BuiltinColumn::new("code", "Code"),
-        BuiltinColumn::new("name", "Name"),
+        BuiltinColumn::new("name", "Label"),
         BuiltinColumn::new("country", "Country"),
         BuiltinColumn::new("division", "Division"),
         BuiltinColumn::new("scope", "Applies to"),
@@ -288,7 +288,12 @@ impl Sets {
                         .attr("maxlength", "64")
                         .required(),
                 )?,
-                render(field("name", "Name").attr("maxlength", "120").required())?,
+                render(
+                    field("name", "Label")
+                        .hint("Example: Malaysia holidays")
+                        .attr("maxlength", "120")
+                        .required(),
+                )?,
             ],
             place,
         ];

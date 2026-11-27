@@ -346,7 +346,13 @@ impl State {
                     }))
                     .collect();
                 let mut fields = vec![
-                    self.field("label", "Connection name", &c.label)?,
+                    render(
+                        &Field::named("label")
+                            .label("Label")
+                            .hint("Example: Company sign-in")
+                            .value(&c.label)
+                            .errors(self.errors.get("label").cloned().into_iter().collect()),
+                    )?,
                     check("enabled", "Enable company sign-in", c.enabled)?,
                     self.field("method", "Sign-in method", &c.method)?,
                     self.field(

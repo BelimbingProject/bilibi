@@ -47,7 +47,7 @@ fn builtins() -> Vec<BuiltinColumn> {
     let mut updated = BuiltinColumn::new("updated", "Updated");
     updated.kind = ColumnType::Datetime;
     vec![
-        BuiltinColumn::new("name", "Name"),
+        BuiltinColumn::new("name", "Label"),
         BuiltinColumn::new("record_type", "Records"),
         BuiltinColumn::new("kind", "Kind"),
         BuiltinColumn::new("sharing", "Shared"),
@@ -509,7 +509,7 @@ fn label_for(key: &str) -> &'static str {
     match key {
         "record_type" => "Records",
         "kind" => "Kind",
-        _ => "Name",
+        _ => "Label",
     }
 }
 
@@ -546,7 +546,8 @@ fn new_dialog(draft: &NewDraft, types: &HashMap<String, String>) -> Result<Html>
     }
     let fields = [
         Field::in_form("report", "name")
-            .label("Name")
+            .label("Label")
+            .hint("Example: Open orders by month")
             .value(&draft.name)
             .required()
             .errors(errors("name"))
