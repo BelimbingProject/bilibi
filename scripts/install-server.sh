@@ -1531,6 +1531,10 @@ PYJSON
     return "$result"
 }
 
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+    return
+fi
+
 if [[ ${1:-} == --json ]]; then
     shift
     json_command "$@"

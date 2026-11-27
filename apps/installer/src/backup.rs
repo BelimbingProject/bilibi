@@ -105,9 +105,19 @@ pub async fn restore(
     dump: &Path,
     since: &str,
     history_file: &Path,
+    current_release: Option<u64>,
     target: RestoreTarget<'_>,
 ) -> Result<Restored, String> {
-    let outcome = replace(client, pg, dump, since, history_file, target).await;
+    let outcome = replace(
+        client,
+        pg,
+        dump,
+        since,
+        history_file,
+        current_release,
+        target,
+    )
+    .await;
     let Err(why) = &outcome else {
         return outcome;
     };
@@ -128,6 +138,7 @@ async fn replace(
     dump: &Path,
     since: &str,
     history_file: &Path,
+    current_release: Option<u64>,
     target: RestoreTarget<'_>,
 ) -> Result<Restored, String> {
     if restored(history_file) {
@@ -148,6 +159,7 @@ async fn replace(
                     jobs::short(&error)
                 )
             })?;
+            saved["current_release"] = json!(current_release);
             if let RestoreTarget::Undo(target) = target {
                 let target = target.ok_or("The restore has no target release composition.")?;
                 saved["target_composition"] = json!(composition::status(target)?);
@@ -496,7 +508,7 @@ fn restore_with_owner(pg: &PgEnv, dump: &Path, owner: &Value) -> Result<(), Stri
 /// The restores a restart cut off, found by their saved history: the job,
 /// the file and the dump being restored, newest job first. A file marked
 /// restored is not among them.
-pub fn unfinished_restores(backups: &Path) -> Vec<(i64, PathBuf, PathBuf)> {
+pub fn unfinished_restores(backups: &Path) -> Vec<(i64, PathBuf, PathBuf, Option<u64>)> {
     let mut found = Vec::new();
     for dir in fs::read_dir(backups).into_iter().flatten().flatten() {
         let Some(id) = dir
@@ -513,12 +525,12 @@ pub fn unfinished_restores(backups: &Path) -> Vec<(i64, PathBuf, PathBuf)> {
                     .file_name()
                     .to_str()
                     .is_some_and(|name| name.starts_with("history-"));
-            if let (true, Some((dump, _))) = (is_saved, read_saved(&path)) {
-                found.push((id, path, dump));
+            if let (true, Some((dump, saved))) = (is_saved, read_saved(&path)) {
+                found.push((id, path, dump, saved["current_release"].as_u64()));
             }
         }
     }
-    found.sort_by_key(|(id, _, _)| std::cmp::Reverse(*id));
+    found.sort_by_key(|(id, _, _, _)| std::cmp::Reverse(*id));
     found
 }
 /// A JSON value as one SQL literal (a quoted string: PostgreSQL reads it as

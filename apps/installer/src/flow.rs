@@ -29,6 +29,7 @@ const MIGRATE_LIMIT_SECONDS: &str = "1800";
 /// How many releases besides the current and previous one are kept.
 const KEEP_RELEASES: usize = 3;
 const KEEP_BACKUPS: usize = 3;
+const RELEASE_MOVED: &str = "Current no longer belongs to this release job. Recovery stopped.";
 
 type Db<T> = Result<T, tokio_postgres::Error>;
 
@@ -318,6 +319,10 @@ impl<'a> Run<'a> {
     pub async fn resume(&mut self) -> Db<bool> {
         let paused = self.job.paused;
         if paused {
+            if !self.owns_current().await? {
+                self.interrupted(RELEASE_MOVED).await?;
+                return Ok(true);
+            }
             jobs::lock_installation(&*self.client).await?;
             // From the first moment: nothing may be entered while the
             // database is being decided on.
@@ -964,17 +969,41 @@ impl<'a> Run<'a> {
         self.admit_release(release).await?;
         self.service.start()
     }
-    async fn restart_previous(&self) -> Db<Result<(), String>> {
-        let previous = if self.job.kind == "undo" {
-            match self.undone().await? {
-                Ok(undone) => Some(undone.release),
-                Err(why) => return Ok(Err(why)),
-            }
-        } else {
-            self.detail("fetch")["previous"].as_u64()
+    async fn release_transition(&self) -> Db<Option<(u64, u64)>> {
+        if self.job.kind == "undo" {
+            return Ok(self
+                .undone()
+                .await?
+                .ok()
+                .map(|undo| (undo.release, undo.previous)));
+        }
+        let fetched = self.detail("fetch");
+        Ok(fetched["previous"]
+            .as_u64()
+            .zip(fetched["release"].as_u64()))
+    }
+    async fn owns_current(&self) -> Db<bool> {
+        let Some((previous, candidate)) = self.release_transition().await? else {
+            return Ok(false);
         };
+        let current = self.layout.current();
+        Ok(match self.state("switch_back") {
+            "done" => current == Some(previous),
+            "running" => current == Some(previous) || current == Some(candidate),
+            _ => match self.state("switch") {
+                "done" => current == Some(candidate),
+                "running" | "failed" => current == Some(previous) || current == Some(candidate),
+                _ => current == Some(previous),
+            },
+        })
+    }
+    async fn restart_previous(&self) -> Db<Result<(), String>> {
+        let previous = self
+            .release_transition()
+            .await?
+            .map(|(previous, _)| previous);
         if previous.is_none() || self.layout.current() != previous {
-            return Ok(Err("The recorded pre-change release is not current.".into()));
+            return Ok(Err(RELEASE_MOVED.into()));
         }
         Ok(self.service.start())
     }
@@ -998,6 +1027,9 @@ impl<'a> Run<'a> {
     /// with the backup restored first when the database was changed. It is a
     /// step of the job like the others, so a restart in it ends the same way.
     async fn switch_back(&mut self) -> Db<()> {
+        if !self.owns_current().await? {
+            return self.interrupted(RELEASE_MOVED).await;
+        }
         if matches!(self.state("switch_back"), "done" | "failed") {
             let mut result = self.detail("switch_back");
             if self.is_done("switch_back") {
@@ -1048,6 +1080,7 @@ impl<'a> Run<'a> {
                 file,
                 back.base["backup_at"].as_str().unwrap_or(""),
                 &self.history_file("switch_back"),
+                self.layout.current(),
                 backup::RestoreTarget::Recovery,
             )
             .await
@@ -1235,6 +1268,7 @@ impl<'a> Run<'a> {
                 &file,
                 &undone.since,
                 &self.history_file("restore"),
+                self.layout.current(),
                 backup::RestoreTarget::Undo(Some(&self.layout.release(undone.previous))),
             )
             .await

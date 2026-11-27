@@ -138,6 +138,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &dump,
         "",
         &root.join("history-undo.json"),
+        Some(1),
         backup::RestoreTarget::Undo(Some(&customer)),
     )
     .await;
@@ -165,6 +166,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &dump,
         "",
         &root.join("history-switch_back.json"),
+        Some(1),
         backup::RestoreTarget::Recovery,
     )
     .await?;
@@ -230,6 +232,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &shared_dump,
         "",
         &root.join("history-isolated.json"),
+        Some(1),
         backup::RestoreTarget::Undo(Some(&customer)),
     )
     .await?;
@@ -251,6 +254,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &shared_dump,
         "",
         &interrupted,
+        Some(1),
         backup::RestoreTarget::Undo(None),
     )
     .await?;

@@ -272,7 +272,9 @@ impl Installer {
         client: &mut Client,
     ) -> Result<bool, tokio_postgres::Error> {
         let mut finished = false;
-        for (id, history, dump) in backup::unfinished_restores(&self.layout.backups()) {
+        for (id, history, dump, current_release) in
+            backup::unfinished_restores(&self.layout.backups())
+        {
             let key = match history.file_name().and_then(|name| name.to_str()) {
                 Some("history-restore.json") => "restore",
                 Some("history-switch_back.json") => "switch_back",
@@ -284,6 +286,23 @@ impl Installer {
                 .is_some_and(|(_, state)| !matches!(state.as_str(), "queued" | "running"))
             {
                 let _ = std::fs::remove_file(&history);
+                continue;
+            }
+            if current_release.is_none() || current_release != self.layout.current() {
+                let message = "The saved restore does not own current. Recovery stopped.";
+                eprintln!("bilibi-installer: job {id}: {message}");
+                if let Some((job, _)) = recorded {
+                    jobs::finish_with_plugins(
+                        client,
+                        &job,
+                        "interrupted",
+                        &serde_json::json!({"message": message}),
+                        None,
+                    )
+                    .await?;
+                }
+                backup::set_aside(&history);
+                finished = true;
                 continue;
             }
             jobs::lock_installation(client).await?;
@@ -313,7 +332,17 @@ impl Installer {
             } else {
                 backup::RestoreTarget::Undo(None)
             };
-            if let Err(why) = backup::restore(client, &self.pg, &dump, "", &history, target).await {
+            if let Err(why) = backup::restore(
+                client,
+                &self.pg,
+                &dump,
+                "",
+                &history,
+                current_release,
+                target,
+            )
+            .await
+            {
                 if let Some((job, _)) = jobs::restore_job(client, id).await? {
                     let mut run =
                         flow::Run::new(client, &self.layout, &self.service, &self.pg, job, true)
