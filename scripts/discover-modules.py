@@ -466,6 +466,7 @@ def pin(root, modules, files):
         folder = mounted[name]
         branch = subprocess.run(["git", "-C", str(folder), "symbolic-ref", "--quiet", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
         manifest += f'\n[containers."{name}"]\nhead = "{head}"\n'
+        manifest += f'committed_at = "{git(folder, "show", "-s", "--format=%cI", head).strip()}"\n'
         if branch and re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
             manifest += f'branch = "{branch}"\n'
         if versions[name]:

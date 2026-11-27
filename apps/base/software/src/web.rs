@@ -192,15 +192,8 @@ struct Review {
 }
 enum Dialog {
     Review(Review),
-    Cancel {
-        job: i64,
-        running: bool,
-    },
-    /// The installation commands of one catalogue entry.
-    Commands {
-        kind: String,
-        id: String,
-    },
+    Cancel { job: i64, running: bool },
+    Commands { kind: String, id: String },
 }
 
 struct View {
@@ -710,7 +703,8 @@ impl View {
             details.push(&self.history_card(&display, &status)?);
             self.releases.body(scope, active, job, details).await?
         } else {
-            self.modules.body(&status, &catalogue, &self.propose)?
+            self.modules
+                .body(&status, &catalogue, &self.propose, &display)?
         };
         self.page(&instance, content)
     }
@@ -821,7 +815,14 @@ impl View {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|item| format!("{} {}", text(&item["name"]), text(&item["build_label"])))
+                .map(|item| match item["version"].as_str() {
+                    Some(version) => format!(
+                        "{} v{}",
+                        text(&item["name"]),
+                        version.trim_start_matches('v')
+                    ),
+                    None => text(&item["name"]).to_owned(),
+                })
                 .collect();
             if components.is_empty() {
                 "None".to_owned()

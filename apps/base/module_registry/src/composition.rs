@@ -46,6 +46,8 @@ pub struct Container {
     /// Its module IDs, `finance/ledger`.
     pub modules: Vec<&'static str>,
     pub commit: Option<&'static str>,
+    /// UTC offset timestamp of the commit, when known.
+    pub committed_at: Option<&'static str>,
     /// The release the container is at, `0.1.0`; `None` when unpinned or built from an untagged commit.
     pub version: Option<&'static str>,
     /// Source branch captured at build time, when known.

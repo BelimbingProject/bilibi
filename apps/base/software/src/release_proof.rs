@@ -446,7 +446,20 @@ pub fn check_replay(paths: &Paths, tag: &str) -> Result<(), String> {
 }
 
 pub fn facts(paths: &Paths) -> Result<Value, String> {
-    let policy = Policy::load(paths)?;
+    facts_with_policy(paths, &Policy::load(paths)?)
+}
+
+pub(super) fn read_facts(paths: &Paths) -> (Option<Policy>, Value) {
+    match Policy::load(paths).and_then(|policy| {
+        let facts = facts_with_policy(paths, &policy)?;
+        Ok((Some(policy), facts))
+    }) {
+        Ok(read) => read,
+        Err(message) => (None, json!({"message": message})),
+    }
+}
+
+fn facts_with_policy(paths: &Paths, policy: &Policy) -> Result<Value, String> {
     let channel = tag_order(&policy.minimum_tag).map(|(channel, _)| channel);
     let highest = load_replay(paths)?.and_then(|replay| {
         let channel = channel?;
