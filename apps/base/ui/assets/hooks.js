@@ -1019,11 +1019,19 @@
         if (!option || option.getAttribute("aria-disabled") === "true") return
         if (option.hasAttribute("data-create")) this.emit(this.el.dataset.createEvent, {query: this.input.value.trim()})
         else this.emit(this.el.dataset.pickEvent, {value: option.dataset.value})
+        // A pick closes the list: left open it floats over what follows (a
+        // dialog's Create button), and a click meant for that lands on an
+        // option and takes the pick back. The reply's patch moves the
+        // focused box and the transport focuses it again, so that focus must
+        // not reopen it; typing, an arrow key or a click on the field does.
+        this.open = false
+        this.picked = true
         this.active = -1
         this.input.focus()
         this.paint()
       }
       this.onInput = () => {
+        this.picked = false
         this.open = true
         this.active = -1
         this.paint()
@@ -1031,10 +1039,11 @@
         const query = this.input.value
         this.timer = setTimeout(() => this.emit(this.el.dataset.searchEvent, {query}), 300)
       }
-      this.onFocus = () => { this.open = true; this.paint() }
+      this.onFocus = () => { if (this.picked) return; this.open = true; this.paint() }
       this.onKey = event => {
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault()
+          this.picked = false
           this.open = true
           this.popup.hidden = false
           const options = this.options()
@@ -1068,10 +1077,14 @@
       }
       this.onPointer = event => {
         if (event.target.closest('[role="option"]')) event.preventDefault()
-        else if (!event.target.closest('input, button, a') && event.target.closest('.ui-multi-field')) this.input.focus()
+        else if (event.target.closest('.ui-multi-field') && !event.target.closest('button, a')) {
+          this.picked = false
+          if (event.target !== this.input) this.input.focus()
+          if (!this.open) { this.open = true; this.paint() }
+        }
       }
       this.onFocusOut = () => requestAnimationFrame(() => {
-        if (!this.el.contains(document.activeElement)) { this.open = false; this.active = -1; this.paint() }
+        if (!this.el.contains(document.activeElement)) { this.open = false; this.picked = false; this.active = -1; this.paint() }
       })
       this.onChange = event => event.stopPropagation()
       this.input.addEventListener("input", this.onInput)
