@@ -95,7 +95,7 @@ fn domain(line: &str) -> Option<Value> {
 
 fn container_fields(line: &str) -> Option<regex_lite::Captures<'_>> {
     static DECLARATION: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\A  (?P<id>[a-z][a-z0-9]*(?:_[a-z0-9]+)*) (?:unpinned|(?P<version>[^,\r\n]+), commit (?P<commit>[A-Za-z0-9]+))(?:, code: (?P<code>reviewed|customer))?, modules: [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*(?:, [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*)*\z")
+        Regex::new(r"\A  (?P<id>[a-z][a-z0-9]*(?:_[a-z0-9]+)*) (?:unpinned|(?P<version>[^,\x00-\x20\x7F:]+), commit (?P<commit>[A-Za-z0-9]+))(?:, code: (?P<code>reviewed|customer))?, modules: [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*(?:, [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*)*\z")
             .expect("valid release status grammar")
     });
     DECLARATION.captures(line)
