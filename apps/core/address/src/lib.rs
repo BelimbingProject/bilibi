@@ -136,8 +136,17 @@ impl AddressService {
     }
     pub async fn search(&self, scope: &Scope, query: &Search) -> Result<Page> {
         let client = self.db.get().await?;
-        let scope = self.fresh(&**client, scope).await?;
-        store::search(&**client, &scope, query).await
+        self.search_on(&**client, scope, query).await
+    }
+    /// `search` on the caller's held connection or transaction.
+    pub async fn search_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        query: &Search,
+    ) -> Result<Page> {
+        let scope = self.fresh(client, scope).await?;
+        store::search(client, &scope, query).await
     }
     pub async fn attached(&self, scope: &Scope, owner: PartyId) -> Result<Vec<AttachedAddress>> {
         let client = self.db.get().await?;
