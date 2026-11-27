@@ -575,7 +575,7 @@ async fn main() -> Result<()> {
         .as_i64()
         .ok_or("export start returned no ID")?;
     for _ in 0..120 {
-        if bulk.export(&**client, &admin, saved_export).await?.state != ExportState::Running {
+        if bulk.export(&mut client, &admin, saved_export).await?.state != ExportState::Running {
             break;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1477,7 +1477,7 @@ async fn main() -> Result<()> {
         .as_i64()
         .ok_or("fresh export returned no ID")?;
     for _ in 0..120 {
-        if bulk.export(&**client, &admin, fresh_export).await?.state != ExportState::Running {
+        if bulk.export(&mut client, &admin, fresh_export).await?.state != ExportState::Running {
             break;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;

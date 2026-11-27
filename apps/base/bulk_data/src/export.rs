@@ -605,11 +605,7 @@ impl BulkData {
     /// What the person may see, read once for any number of exports: their
     /// capabilities, Grid's catalog for them and the restricted fields of
     /// every table that can supply an export's columns.
-    async fn seeing(
-        &self,
-        client: &(impl GenericClient + Sync),
-        scope: &Scope,
-    ) -> Result<Seeing> {
+    async fn seeing(&self, client: &(impl GenericClient + Sync), scope: &Scope) -> Result<Seeing> {
         let held = bilibi_authz::effective_capabilities(client, scope).await?;
         let catalog = bilibi_grid::Catalog::for_scope(client, scope)
             .await
@@ -682,19 +678,24 @@ impl BulkData {
         let document = self
             .artifacts
             .for_owner(scope, company, &FILES)
-            .read_checked(client, artifact, &(self, scope, id, artifact), |context, tx| {
-                Box::pin(async move {
-                    let &(bulk, scope, id, artifact) = context;
-                    let run = bulk.export_in(tx, scope, id).await?;
-                    if run.expired || run.artifact.as_deref() != Some(artifact) {
-                        return Err(Error::NotFound);
-                    }
-                    if !run.downloadable {
-                        return Err(Error::Forbidden);
-                    }
-                    Ok(())
-                })
-            })
+            .read_checked(
+                client,
+                artifact,
+                &(self, scope, id, artifact),
+                |context, tx| {
+                    Box::pin(async move {
+                        let &(bulk, scope, id, artifact) = context;
+                        let run = bulk.export_in(tx, scope, id).await?;
+                        if run.expired || run.artifact.as_deref() != Some(artifact) {
+                            return Err(Error::NotFound);
+                        }
+                        if !run.downloadable {
+                            return Err(Error::Forbidden);
+                        }
+                        Ok(())
+                    })
+                },
+            )
             .await
             .map_err(crate::artifact)?;
         let stem: String = self
@@ -1158,7 +1159,14 @@ fn access_tables(root: &str, specs: &[String]) -> Option<std::collections::BTree
         }
     }
     for table in &tables {
-        extra_tables.extend(installed.table(table)?.source().extra_tables.iter().copied());
+        extra_tables.extend(
+            installed
+                .table(table)?
+                .source()
+                .extra_tables
+                .iter()
+                .copied(),
+        );
     }
     tables.extend(extra_tables);
     Some(tables)

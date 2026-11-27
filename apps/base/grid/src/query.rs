@@ -269,6 +269,8 @@ pub async fn reveal_on(
     .await
 }
 
+/// Projects rows on the caller's transaction. Use repeatable read when an
+/// authorization check and the projection must share a snapshot.
 pub async fn project_on<S: AsRef<str>>(
     tx: &tokio_postgres::Transaction<'_>,
     scope: &Scope,

@@ -45,7 +45,7 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
   that references every parameter its scope requires. A request never supplies
   the company parameter. When projected values use fields from another Grid
   table, declare that table with `.reads(&["table_id"])`. The default is none.
-  Discovery refuses unknown extra tables. See [Bulk Data export access](../bulk_data/README.md#an-export) for how exports use this declaration.
+  The same declaration applies to link edge sources when their joins depend on fields from another Grid table. Discovery refuses unknown extra tables in both table and edge sources. See [Bulk Data export access](../bulk_data/README.md#an-export) for how exports use this declaration.
 - `Field`s: `Field::new`/`choice`; `column` names the source key when it differs
   from the id; `hidden` fields exist only for joins; `protected` keeps a field
   out of operator restriction (the key, label, time, hidden and join fields are

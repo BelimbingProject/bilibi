@@ -1058,7 +1058,10 @@ impl<O: Owner> Owned<'_, O> {
         client: &mut Client,
         id: &str,
         context: &C,
-        check: for<'a> fn(&'a C, &'a tokio_postgres::Transaction<'_>) -> bilibi_tenancy::ProofFuture<'a, ()>,
+        check: for<'a> fn(
+            &'a C,
+            &'a tokio_postgres::Transaction<'_>,
+        ) -> bilibi_tenancy::ProofFuture<'a, ()>,
     ) -> Result<Document> {
         let tx = self.begin(client, "artifacts.read").await?;
         tx.sql()
@@ -1072,7 +1075,10 @@ impl<O: Owner> Owned<'_, O> {
         tx: MutationTransaction<'_>,
         id: &str,
         context: &C,
-        check: for<'a> fn(&'a C, &'a tokio_postgres::Transaction<'_>) -> bilibi_tenancy::ProofFuture<'a, ()>,
+        check: for<'a> fn(
+            &'a C,
+            &'a tokio_postgres::Transaction<'_>,
+        ) -> bilibi_tenancy::ProofFuture<'a, ()>,
     ) -> Result<Document> {
         let row = self.fetch(&tx, id).await?;
         self.authorize(tx.sql(), Operation::Read, Some(&row.metadata.reference))

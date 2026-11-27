@@ -589,10 +589,13 @@ impl Installed {
             link_into(&mut tables, link, &provenance)?;
         }
         for table in tables.values() {
-            let edges = table.links().iter().filter_map(|link| match link.decl.join {
-                Join::Edge(source) => Some((link.id(), source)),
-                Join::On { .. } => None,
-            });
+            let edges = table
+                .links()
+                .iter()
+                .filter_map(|link| match link.decl.join {
+                    Join::Edge(source) => Some((link.id(), source)),
+                    Join::On { .. } => None,
+                });
             for (id, source) in std::iter::once((table.id(), table.source())).chain(edges) {
                 for extra in source.extra_tables {
                     if !tables.contains_key(extra) {

@@ -152,8 +152,8 @@ fn require(ok: bool, label: &str) -> Result<(), Failure> {
 
 async fn settle_export(db: &Db, bulk: &BulkData, scope: &Scope, id: i64) -> Result<(), Failure> {
     for _ in 0..600 {
-        let client = db.get().await?;
-        let export = bulk.export(&**client, scope, id).await?;
+        let mut client = db.get().await?;
+        let export = bulk.export(&mut client, scope, id).await?;
         if export.state != ExportState::Running {
             return require(
                 export.state == ExportState::Completed,

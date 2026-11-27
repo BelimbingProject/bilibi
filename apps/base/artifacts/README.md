@@ -33,9 +33,7 @@ transaction. Reservations and tombstones must commit before filesystem work.
 No file path, filename or content enters audit payloads. Metadata returned to an
 owner contains no storage path. Reads hold a row lock, recheck permission and
 expiry, validate 0600 regular-file mode, byte count and SHA-256, and commit audit
-evidence before bytes escape. Owners' authenticated download routes must call
-`read` every time and return attachments with `Cache-Control: private, no-store`
-and `X-Content-Type-Options: nosniff`. A1 adds no public download route or screen.
+evidence before bytes escape. Owners' authenticated download routes must call `read` or `read_checked` every time and return attachments with `Cache-Control: private, no-store` and `X-Content-Type-Options: nosniff`. Use `read_checked` when file eligibility also depends on owner-specific checks. Its callback runs before loading bytes, in the same repeatable-read transaction as Artifacts' own authorization and row checks. A1 adds no public download route or screen.
 
 Operator Settings owns these installation values, gated by
 `admin.system.artifacts.manage` and explicit platform operator identity:

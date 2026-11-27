@@ -368,7 +368,9 @@ async fn main() -> Result<(), Failure> {
             Err(Error::Forbidden)
         )
     {
-        return Err("changing work email from mask to withhold did not invalidate the export".into());
+        return Err(
+            "changing work email from mask to withhold did not invalidate the export".into(),
+        );
     }
     let replacement = manager
         .exports(
