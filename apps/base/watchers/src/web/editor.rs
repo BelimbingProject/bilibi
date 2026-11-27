@@ -293,7 +293,7 @@ fn place(path: &str) -> String {
         (Some("do"), Some(n), None) => format!("Action {n}"),
         (Some("examples"), Some(n), Some(part)) => format!("Example {n}, {part}"),
         (Some("examples"), Some(n), None) => format!("Example {n}"),
-        (Some("name"), ..) => "Name".into(),
+        (Some("name"), ..) => "Label".into(),
         (Some("watch"), ..) => "Watch".into(),
         (Some("match"), ..) => "Match".into(),
         (Some("explanation"), ..) => "Asked for".into(),
@@ -842,7 +842,8 @@ impl Editor {
         let mut body = render(
             Field::named("h[name]")
                 .id("watcher-draft-name")
-                .label("Name")
+                .label("Label")
+                .hint("Example: Route urgent cases")
                 .value(&self.name)
                 .attr("maxlength", &NAME_MAX.to_string())
                 .required(),

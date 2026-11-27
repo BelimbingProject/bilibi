@@ -488,8 +488,8 @@ fn get<'a>(value: &'a Value, key: &str) -> &'a str {
 fn errors_for(errors: &[FieldError], field: &str) -> Vec<String> {
     let label = match field {
         "code" => "Code",
-        "name" => "Name",
-        "inverse_name" => "Inverse name",
+        "name" => "Label",
+        "inverse_name" => "Inverse label",
         "target" => "Related party",
         "role_id" => "Relationship role",
         "effective_from" => "Effective from",
@@ -608,8 +608,8 @@ fn role_columns() -> Result<ListColumns> {
         "relationship-types",
         vec![
             BuiltinColumn::new("code", "Code"),
-            BuiltinColumn::new("name", "Name"),
-            BuiltinColumn::new("inverse_name", "Inverse Name"),
+            BuiltinColumn::new("name", "Label"),
+            BuiltinColumn::new("inverse_name", "Inverse label"),
             BuiltinColumn::new("status", "Status"),
         ],
     )
@@ -805,13 +805,13 @@ impl RolesPage {
         for (key, label, placeholder, hint) in [
             (
                 "name",
-                "Name",
+                "Label",
                 "e.g. Vendor",
                 "What the related party is to this company.",
             ),
             (
                 "inverse_name",
-                "Inverse Name",
+                "Inverse label",
                 "e.g. Customer",
                 "What this company is to the related party.",
             ),

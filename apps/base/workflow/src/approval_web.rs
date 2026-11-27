@@ -1309,7 +1309,10 @@ impl State {
             .collect::<Vec<_>>();
         let mut controls = Vec::new();
         for (i, stage) in policy.stages.iter().enumerate() {
-            controls.push(field(&format!("s{i}_label"), "Step name", &stage.label));
+            controls.push(
+                field(&format!("s{i}_label"), "Label", &stage.label)
+                    .hint("Example: Manager approval"),
+            );
             controls.push(select(
                 &format!("s{i}_mode"),
                 "Approvals needed",
@@ -1336,11 +1339,10 @@ impl State {
             }
             for (s, stage) in rule.stages.iter().enumerate() {
                 let prefix = format!("r{r}_s{s}");
-                controls.push(field(
-                    &format!("{prefix}_label"),
-                    "Extra step name",
-                    &stage.label,
-                ));
+                controls.push(
+                    field(&format!("{prefix}_label"), "Label", &stage.label)
+                        .hint("Example: Finance approval"),
+                );
                 controls.push(select(
                     &format!("{prefix}_mode"),
                     "Approvals needed",
@@ -1904,7 +1906,7 @@ fn seat_fields(
         ApprovalSelector::Relationship { key } => format!("relationship:{key}"),
     };
     vec![
-        field(&format!("{prefix}_label"), "Approver name", &seat.label),
+        field(&format!("{prefix}_label"), "Label", &seat.label).hint("Example: Finance manager"),
         select(
             &format!("{prefix}_capability"),
             "Approval permission",

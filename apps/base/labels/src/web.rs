@@ -88,8 +88,8 @@ fn columns() -> Vec<BuiltinColumn> {
     vec![
         BuiltinColumn::new("kind", "Kind"),
         BuiltinColumn::new("item", "Found under"),
-        BuiltinColumn::new("default", "Module's word"),
-        BuiltinColumn::new("label", "Your label"),
+        BuiltinColumn::new("default", "System label"),
+        BuiltinColumn::new("label", "Custom label"),
     ]
 }
 
@@ -262,7 +262,7 @@ impl Index {
         let mut inline = InlineField::new(
             dom,
             "label",
-            "Label",
+            "Custom label",
             stored.map_or("", |stored| stored.label.as_str()),
         )
         .version(stored.map_or_else(
@@ -313,7 +313,7 @@ impl Index {
         }
         let header = render(Header {
             title: Html::text("Labels"),
-            subtitle: "Show your own words for menu items, record types and fields. Links and permissions keep working under their old names.",
+            subtitle: "Customise labels for menu items, record types and fields.",
             ..Header::default()
         })?;
         let form = self.state.filters_form();
@@ -375,7 +375,7 @@ impl Index {
                     event: "restore",
                     name: "key",
                     value: &format!("{key}@{}:{}", own.id, own.version),
-                    ..IconButton::new("unarchive", "Restore the module's word")
+                    ..IconButton::new("unarchive", "Restore the system label")
                 })?;
             }
             row.dom_id = Some(format!(

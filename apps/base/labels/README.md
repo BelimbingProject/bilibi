@@ -24,7 +24,7 @@ For column and record-field rendering, follow [Grid's label integration](../grid
 
 | Who | How |
 | --- | --- |
-| A person | Administration › Labels (`/admin/labels`), editing the **Your label** column in place; clearing it restores the module's word. Needs `base.labels.manage`; `base.labels.view` reads. |
+| A person | Administration › Labels (`/admin/labels`), editing the **Custom label** column in place; clearing it restores the system label. Needs `base.labels.manage`; `base.labels.view` reads. |
 | An agent | `base.labels.list`, `base.labels.set` and `base.labels.clear` (`kind` is `menu`, `record` or `field`), the same contracts the page calls. Writes are reviewed first. Each listed word also carries `page` (the address a menu item opens) and `record_kinds` (the Grid table and record types a record or field belongs to). |
 
 A label is 1 to 60 characters of plain text; Askama escapes it wherever it is shown. A subject that no module declares is refused, and every change is audited as kind `label`.

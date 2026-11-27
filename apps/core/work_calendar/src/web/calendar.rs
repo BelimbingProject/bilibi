@@ -36,13 +36,13 @@ fn rule_columns() -> Vec<BuiltinColumn> {
 fn set_columns() -> Vec<BuiltinColumn> {
     vec![
         BuiltinColumn::new("code", "Code"),
-        BuiltinColumn::new("name", "Name"),
+        BuiltinColumn::new("name", "Label"),
     ]
 }
 fn exception_columns() -> Vec<BuiltinColumn> {
     vec![
         BuiltinColumn::new("dates", "Dates"),
-        BuiltinColumn::new("name", "Name"),
+        BuiltinColumn::new("name", "Label"),
         BuiltinColumn::new("type", "Type"),
         BuiltinColumn::new("hours", "Hours"),
     ]
@@ -623,10 +623,11 @@ impl Record {
         let mut name = InlineField::new(
             "work-calendar-name",
             "name",
-            words.field("name", "Edit name"),
+            words.field("name", "Edit label"),
             &calendar.name,
         )
         .version(calendar.version)
+        .hint("Example: Office hours")
         .status(self.statuses.get("name"));
         name.id_value = calendar.code.clone();
         name.save_event = "save_calendar".into();
@@ -674,7 +675,7 @@ impl Record {
                     value: Html::text(&calendar.code),
                 },
                 Fact {
-                    title: words.field("name", "Name"),
+                    title: words.field("name", "Label"),
                     id: "work-calendar-name-fact",
                     value: render(InlineEdit { field: name })?,
                 },
@@ -1029,8 +1030,8 @@ impl Record {
         };
         let rows = vec![
             vec![render(
-                field("name", "Name")
-                    .hint("Why: Year-end shutdown, Special working Saturday, Half day.")
+                field("name", "Label")
+                    .hint("Example: Year-end shutdown")
                     .attr("maxlength", "120")
                     .required(),
             )?],
