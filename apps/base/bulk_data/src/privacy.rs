@@ -47,8 +47,8 @@ impl BulkData {
                 && registered
                     .definition
                     .import
-                    .references
                     .iter()
+                    .flat_map(|import| import.references)
                     .any(|reference| reference.parent == Some(record_type))
             {
                 types.push(registered.key.to_owned());

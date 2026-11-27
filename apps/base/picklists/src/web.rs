@@ -317,7 +317,7 @@ impl Index {
                 "search",
                 "Search lists",
                 &form["search"],
-                "Search by name...",
+                "Search by label...",
             )],
         ))?;
         let compact = self.columns.mode() == RowMode::Compact;

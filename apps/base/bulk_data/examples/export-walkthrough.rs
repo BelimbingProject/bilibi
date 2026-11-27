@@ -60,13 +60,8 @@ inventory::submit! {
             label: "Contacts with work email",
             table: JOINED_TABLE,
             path: None,
-            import: bilibi_bulk_data::Import {
-                capability: "admin.person.import",
-                create: "core.person.create",
-                id: "id",
-                duplicates: None,
-                references: &[],
-            },
+            id: "id",
+            import: None,
             export: Some(bilibi_bulk_data::Export {
                 capability: "admin.person.export",
                 list: "core.person.list",
@@ -290,6 +285,22 @@ async fn main() -> Result<(), Failure> {
            SELECT 1,id,1,'alice@work.exp.test' FROM persons WHERE tenant_id=1 AND name='Exp Alice';",
     )
     .await?;
+    let offered = manager.read("base.bulk_data.types", json!({})).await?;
+    if offered
+        .as_array()
+        .ok_or("types are not an array")?
+        .iter()
+        .any(|item| item["key"] == JOINED_CONTACTS)
+    {
+        return Err("export-only type was offered for import".into());
+    }
+    if bulk.upload(&manager.scope, JOINED_CONTACTS, "records.csv", b"name\nAlice\n").await.is_ok()
+        || bulk.mappings(&**sql, &manager.scope, JOINED_CONTACTS, None).await.is_ok()
+        || manager.write("base.bulk_data.mapping.save", json!({"record_type": JOINED_CONTACTS, "name": "No import", "mapping": {"fields": []}})).await.is_ok()
+    {
+        return Err("export-only type accepted an import or mapping".into());
+    }
+    println!("export-only type is absent from import choices and rejects imports and mappings");
     let (stop, worker) = start(&app)?;
 
     println!("== the filtered rows and the shown columns");

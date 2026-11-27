@@ -94,7 +94,7 @@ pub(super) struct Departments {
 pub(super) fn builtins() -> Vec<BuiltinColumn> {
     vec![
         BuiltinColumn::new("code", "Code").grid_field("departments.type_code"),
-        BuiltinColumn::new("name", "Department Name").grid_field("departments.type_name"),
+        BuiltinColumn::new("name", "Label").grid_field("departments.type_name"),
         BuiltinColumn::new("category", "Category"),
         BuiltinColumn::new("head", "Head"),
         BuiltinColumn::new("status", "Status").grid_field("departments.status"),

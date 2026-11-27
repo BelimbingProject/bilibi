@@ -321,8 +321,43 @@ impl Records {
     /// record is then put to the owner's own access check, the one `check`
     /// asks on save. A row the reader cannot see, a record the owner refuses,
     /// a removed record, an unknown or unmounted kind and a malformed id all
-    /// come back unnamed, never as an error.
+    /// come back unnamed, never as an error. It takes one pooled connection
+    /// for one `REPEATABLE READ` transaction; a caller that already holds one
+    /// uses [`Records::resolve_on`].
     pub async fn resolve(&self, scope: &Scope, references: &[Reference]) -> Result<Vec<Resolved>> {
+        let mut client = self.db.get().await?;
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await?;
+        let resolved = self.resolve_on(&tx, scope, references).await?;
+        tx.commit().await?;
+        Ok(resolved)
+    }
+
+    /// [`Records::resolve`] on the caller's transaction, for a page or read
+    /// that already holds its pooled connection: it takes no connection and
+    /// starts, commits or rolls back nothing. The transaction must be
+    /// `REPEATABLE READ` or `SERIALIZABLE` (`Error::Invalid` otherwise), so
+    /// each Grid projection reads the reader's grants and the rows in one
+    /// snapshot, and must allow writes: owners record their access decisions
+    /// on it. Each projection runs in a savepoint that is rolled back, so
+    /// Grid's statement limits do not outlive it and a failed projection
+    /// leaves the transaction usable.
+    pub async fn resolve_on(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+        references: &[Reference],
+    ) -> Result<Vec<Resolved>> {
+        let isolation: String = tx
+            .query_one("SHOW transaction_isolation", &[])
+            .await?
+            .get(0);
+        if !matches!(isolation.as_str(), "repeatable read" | "serializable") {
+            return Err(Error::Invalid);
+        }
         let mut by_kind: BTreeMap<&str, Vec<&Reference>> = BTreeMap::new();
         for reference in references {
             by_kind
@@ -349,13 +384,7 @@ impl Records {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            // A connection for this read only: Grid's projection takes its
-            // own, and holding one across it lets concurrent resolves take
-            // the whole pool and wait on each other.
-            let moved = {
-                let client = self.db.get().await?;
-                Self::redirected(&**client, scope.tenant(), key, &wanted).await?
-            };
+            let moved = Self::redirected(tx, scope.tenant(), key, &wanted).await?;
             let mut projected = BTreeSet::new();
             for (reference, id) in ids {
                 let target = moved.get(&id).cloned().unwrap_or(id);
@@ -372,9 +401,7 @@ impl Records {
             let projected: Vec<Value> = projected.into_iter().map(Value::String).collect();
             for chunk in projected.chunks(MAX_PER_KIND) {
                 let projection =
-                    match bilibi_grid::project(&self.db, scope, kind.table, chunk, &[label_field])
-                        .await
-                    {
+                    match Self::project(tx, scope, kind.table, chunk, label_field).await? {
                         Ok(projection) => projection,
                         // The reader may not read the table or its label.
                         Err(QueryError::ForbiddenRoot | QueryError::Column(_, _)) => continue,
@@ -391,18 +418,16 @@ impl Records {
                 }
             }
             // Grid names what the reader may list; the owner decides what
-            // they may view, as on save. One connection, after Grid's.
+            // they may view, as on save, outside the savepoint so the
+            // decisions it records stay with the caller's transaction.
             let named: Vec<String> = names
                 .keys()
                 .filter(|(named_kind, _)| *named_kind == key)
                 .map(|(_, id)| id.clone())
                 .collect();
-            if !named.is_empty() {
-                let client = self.db.get().await?;
-                for id in named {
-                    if kind.owner.authorize(&**client, scope, &id).await? != Access::Readable {
-                        names.remove(&(key, id));
-                    }
+            for id in named {
+                if kind.owner.authorize(tx, scope, &id).await? != Access::Readable {
+                    names.remove(&(key, id));
                 }
             }
         }
@@ -425,6 +450,26 @@ impl Records {
                 }
             })
             .collect())
+    }
+
+    /// One Grid projection of `ids`' labels on the caller's transaction, in a
+    /// savepoint that is always rolled back: Grid's `SET LOCAL` limits end
+    /// with it, and a failed statement does not abort the transaction. The
+    /// outer `Result` is the savepoint's own failure.
+    async fn project(
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+        table: &str,
+        ids: &[Value],
+        label_field: &str,
+    ) -> Result<std::result::Result<bilibi_grid::Projection, QueryError>> {
+        tx.batch_execute("SAVEPOINT records_resolve").await?;
+        let projection = bilibi_grid::project_on(tx, scope, table, ids, &[label_field]).await;
+        tx.batch_execute(
+            "ROLLBACK TO SAVEPOINT records_resolve; RELEASE SAVEPOINT records_resolve",
+        )
+        .await?;
+        Ok(projection)
     }
 
     /// Records whose name contains `text`, for a picker: each allowed kind's

@@ -321,6 +321,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Put information where it acts.** A page title stays true across tabs. Tab guidance lives in the tab.
 - **Consistency.** Same thing, same look, same place.
 - **Sentence case.** Titles, buttons, labels, options and badges raise only the first word and names: "Set up", "Past due", "Debits equal credits", never "Set Up". The shared badge raises the first letter of a stored lower-case value ("draft" reads "Draft") and nothing else.
+- **Labels and names.** Use “Label” for display text someone chooses for a defined thing, with an example such as “Example: Sales Manager”. Keep “Name” for people, companies, tenants, products and files.
 - **Calm.** No urgency, no badge spam, no dark patterns.
 - **Values.** Values say what they are: never show a lone code, number, date or word the reader has to decode; put what it is beside it.
 - **Details.** Every expandable summary names what it contains.

@@ -113,7 +113,7 @@ static GRID: GridContribution = GridContribution {
             (SELECT string_agg(s.code, ', ' ORDER BY s.code) FROM core_work_calendar_includes i JOIN core_work_calendar_holiday_sets s ON s.tenant_id=i.set_tenant_id AND s.id=i.holiday_set_id WHERE i.tenant_id=c.tenant_id AND i.calendar_id=c.id) AS holiday_sets \
             FROM core_work_calendars c WHERE c.tenant_id=$1")), "code", &[
             Field::new("code", "Code", FieldType::String).protected(),
-            Field::new("name", "Name", FieldType::String).protected(),
+            Field::new("name", "Label", FieldType::String).protected(),
             Field::choice("status", "Status", &["active", "retired"]).protected(),
             Field::choice("substitute", "Holiday substitution", &["none", "rest", "rest_and_off"]).protected(),
             Field::new("timezone", "Zone", FieldType::String).protected(),

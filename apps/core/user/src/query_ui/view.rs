@@ -327,7 +327,8 @@ pub(super) fn detail(state: &detail::Detail, editor: bool) -> Result<String> {
     let mut fields = fragment(
         &Field::named("name")
             .id("query-name-input")
-            .label("Query name")
+            .label("Label")
+            .hint("Example: Active customers")
             .value(&state.draft.name)
             .attr("data-debounce", "150"),
     )?;

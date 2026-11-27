@@ -13,7 +13,7 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_templates:
         bilibi_templates::Slot::text("intro", "Text before the download link"),
     ],
     variables: &[
-        bilibi_templates::Variable::text("report_name", "Report name", "Monthly sales", &["subject", "intro"]),
+        bilibi_templates::Variable::text("report_name", "Report label", "Monthly sales", &["subject", "intro"]),
     ],
     base_language: "en",
     defaults: &[

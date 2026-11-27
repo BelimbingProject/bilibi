@@ -139,7 +139,7 @@ fn builtin(id: &str, label: &str, kind: ColumnType, sort: Option<(&str, &str)>) 
 fn task_builtins() -> Vec<BuiltinColumn> {
     let sortable = |id, label, kind| builtin(id, label, kind, Some((id, "schedule-tasks")));
     vec![
-        sortable("name", "Name", ColumnType::String),
+        sortable("name", "Label", ColumnType::String),
         builtin("source", "Source", ColumnType::String, None),
         builtin("cron", "Schedule", ColumnType::String, None),
         sortable("next_due", "Next run", ColumnType::Datetime),
@@ -152,7 +152,7 @@ fn run_builtins() -> Vec<BuiltinColumn> {
     let sortable = |id, label, kind| builtin(id, label, kind, Some((id, "schedule-runs")));
     vec![
         sortable("started_at", "Started", ColumnType::Datetime),
-        sortable("name", "Name", ColumnType::String),
+        sortable("name", "Label", ColumnType::String),
         sortable("source", "Source", ColumnType::String),
         sortable("status", "Status", ColumnType::String),
         builtin("tenant", "Tenant", ColumnType::String, None),
@@ -845,10 +845,10 @@ impl Board {
         let search = Field::in_form("task", "search")
             .id("schedule-task-search")
             .kind(InputKind::Search)
-            .label("Search task name")
+            .label("Search task label")
             .label_class("sr-only")
             .wrapper_class("mb-0")
-            .placeholder("Search task name…")
+            .placeholder("Search task label…")
             .attr("maxlength", "255")
             .attr("data-debounce", "300")
             .autocomplete("off")
@@ -1149,9 +1149,9 @@ impl Board {
         let mut controls = vec![ToolbarControl::search(
             "schedule-run-search",
             "search",
-            "Search run name",
+            "Search run label",
             &form["search"],
-            "Search run name…",
+            "Search run label…",
         )];
         if operator {
             controls.push(ToolbarControl::search(

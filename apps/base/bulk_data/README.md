@@ -12,11 +12,11 @@ Declare a dependency on `base/bulk_data` and contribute one `RecordType` per typ
 ```rust
 inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/person.contacts", provenance!(), &RecordType {
     label: "Contacts", table: "persons", path: Some("/contacts/{id}"),
-    import: Import {
-        capability: IMPORT, create: "core.person.create", id: "id",
+    id: "id", import: Some(Import {
+        capability: IMPORT, create: "core.person.create",
         duplicates: Some(Duplicates { read: "core.person.duplicates", fields: &["email", "phone"], update: "core.person.update", update_id: "person_id", update_version: "version", update_fields: "identity" }),
         references: &[],
-    },
+    }),
     export: Some(Export { capability: EXPORT, list: "core.person.list" }),
     bulk_update: Some(BulkUpdate {
         capability: BULK_UPDATE, list: "core.person.list", get: "core.person.get", get_id: "person_id",
@@ -30,18 +30,24 @@ inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/per
 | --- | --- |
 | `label`, `path` | What the records are called; their page with `{id}`, for links from row results |
 | `table` | The registered Grid table: its tenant/company scope governs this record type, and a field restricted there for the person is not offered |
+| `id` | The record ID property in create results, duplicate candidates and list records |
+| `import` | Use `Some(Import { … })` to support imports and saved mappings. For a read-only source that offers CSV export, set `import: None` and configure `export`. |
 | `import.capability` | The owner's import capability (verb `import`, from its own vocabulary), with the same tenant/company scope as the Grid table; checked for every row |
-| `import.create`, `import.id` | The owner's write contract creating one record, and where the record's id is in its result |
+| `import.create` | The owner's write contract creating one record |
 | `import.duplicates` | Optional. The owner's read answering candidates for the match `fields`, and its update contract with the id, version and fields properties. A field the file leaves out keeps the record's value |
-| `import.references` | Create fields holding another record's id: a `parent` record type whose earlier import names it by source key, and/or a `lookup` read that must find exactly one record |
-| `export` | Optional; `None` keeps the type out of export. The owner's export capability (verb `export`), scoped like the Grid table, and its list read contract, which takes integer `page` and `page_size` and returns the records with their `import.id` |
-| `bulk_update` | Optional for tenant-wide Grid tables. The owner's tenant-wide capability (verb `bulk-update`), its paged list read (records with `import.id` and `version`), its read of one record by `get_id`, its update contract with the id, version and fields properties, and the `fields` people may set: scalar properties of the update's fields (choices, dates, flags, numbers, or an owner's id) |
+| `import.references` | Create fields that hold another record's ID. A `parent` must support import because the reference uses a source key from an earlier import. A `lookup` read must find exactly one record. A reference can use either or both. |
+| `export` | Optional; `None` keeps the type out of export. The owner's export capability (verb `export`), scoped like the Grid table, and its list read contract, which takes integer `page` and `page_size` and returns the records with their `id` |
+| `bulk_update` | Optional for tenant-wide Grid tables. The owner's tenant-wide capability (verb `bulk-update`), its paged list read (records with `id` and `version`), its read of one record by `get_id`, its update contract with the id, version and fields properties, and the `fields` people may set: scalar properties of the update's fields (choices, dates, flags, numbers, or an owner's id) |
 
 - **Mappable fields are data:** the create contract's top-level string, number, integer and boolean properties, with its `enum` as choices and `required` as required; opted-in [tenant-defined fields](#tenant-defined-fields-in-csv-import) are added from the current tenant's definitions.
-- **Boot refuses** an unknown Grid table, a bulk update on a company-scoped Grid table, an import or export capability whose tenant/company scope differs from its table, an unknown or foreign contract, a write a job cannot call (step-up declared, or `Channel::Job` left out), a list read a job cannot call or that does not page, an undeclared or foreign capability, a match field, reference, lookup property or parent that does not exist, and a bulk field that is not a scalar of the update's fields.
+- **Boot refuses** a type with none of import, export or bulk update, an unknown Grid table, a bulk update on a company-scoped Grid table, an import or export capability whose tenant/company scope differs from its table, an unknown or foreign contract, a write a job cannot call (step-up declared, or `Channel::Job` left out), a list read a job cannot call or that does not page, an undeclared or foreign capability, a match field, reference, lookup property or parent that does not exist, and a bulk field that is not a scalar of the update's fields.
 - A lookup read must match exactly (Core Person's duplicates read matches email exactly); a scoring read such as Core Company's duplicates is not a lookup. Several matches are always a row error.
 
 Adopters: Core Person (`core/person.contacts`, matched on email or phone; exported from the Contacts list with `admin.person.export`; kind set in bulk with `admin.person.bulk-update`) and Core Affiliation (`core/affiliation.affiliations`, the contact by source key of a contacts import or by email; the organisation as a column of ids or one fixed value).
+
+## Upgrade notes for agents
+
+Move each `Import.id` to `RecordType.id` and wrap each supported import declaration in `Some(...)`. See [the `import` field](#opting-a-record-type-in) for export-only types.
 
 ## Tenant-defined fields in CSV import
 
@@ -49,7 +55,7 @@ Adopters: Core Person (`core/person.contacts`, matched on email or phone; export
 
 - Each row goes through the owner's existing preview and commit: type, text limits, active choice checks, permissions, version fences and audit all apply there. An invalid custom value refuses the row.
 - A duplicate update sends only mapped custom keys. Unmapped keys, including archived values, stay in the owner's JSON column. Saved mappings retain stable field names and are rechecked before reuse; an archived or unavailable key is refused rather than silently dropped. On the mapping page, choose **Not imported** for an unavailable field to remove its mapping, or restore the field or access before checking or importing.
-- Owners opt in with a `CustomImport` contribution to `CUSTOM_IMPORTS`, under their existing import type id. Name the owning `base/custom_fields` record type and the create and update operations' top-level custom-patch array properties (`create_field`, `update_field`). Those arrays hold `{key, value, values}` pairs: `value` text (or null) for every kind but several choices, `values` an array of codes for several choices. Boot verifies both contributions belong to the same module and the contracts accept that shape; `cf_` is reserved on opted-in types. Existing `RecordType` declarations need no change.
+- Owners opt in with a `CustomImport` contribution to `CUSTOM_IMPORTS`, using the key of a record type that supports import. Name the owning `base/custom_fields` record type and the create and update operations' top-level custom-patch array properties (`create_field`, `update_field`). Those arrays hold `{key, value, values}` pairs: `value` text (or null) for every kind but several choices, `values` an array of codes for several choices. Boot verifies both contributions belong to the same module and the contracts accept that shape; `cf_` is reserved on opted-in types.
 - Import field discovery is fresh and tenant-scoped. The importer sees only its tenant's active definitions. The owner's normal transactional validation remains the final authority if definitions or choices change while a job runs.
 
 ## Letting people undo an import
@@ -97,7 +103,7 @@ This seam supports [CX lead import 117](https://github.com/cx2027/bilibi-dom-cx/
 | `cancelled` | Stopped during the import; rows already written stay. A cancelled check returns to `draft` |
 | `stopped` (read only) | The job ended without finishing (its person lost access, or every attempt failed); cancel and start again |
 
-- **Upload** (`/imports/new`): the record type and a file. Refused in words: not UTF-8 (a byte-order mark is fine), not CSV, no header, a blank or repeated column, a row wider than the header, larger than `bulk_data.import_max_bytes`, more rows than `bulk_data.import_max_rows`.
+- **Upload** (`/imports/new`). The picker shows only record types you can import. Choose a type and select a file. Refused in words: not UTF-8 (a byte-order mark is fine), not CSV, no header, a blank or repeated column, a row wider than the header, larger than `bulk_data.import_max_bytes`, more rows than `bulk_data.import_max_rows`.
 - **Mapping**: for each field, a column or a fixed value. A reference field's column is looked up, or names a row of a completed parent import (one of the person's own, in the same company) by its source key. `source_key` names the column a later child import uses. `duplicates`: `skip` (default), `update` or `create`.
 - **Check file** (dry run) and **Import** run in the background as the person, through `bilibi_agent_api::job`. Each real row is one transaction: the owner's preview and commit, with the row's result beside it; a refusal is recorded in words and the run goes on. A row locks its run with a single-row read (`store::lock`) and never counts the run's recorded rows, so an import's cost grows with its rows, not with their square; the counts are read for the pages and once when the run ends. Every row the run writes shares its trace ID.
 - **Slices**: an attempt works for two minutes, then queues the rest from the next unrecorded row. A retried attempt never writes a row twice.

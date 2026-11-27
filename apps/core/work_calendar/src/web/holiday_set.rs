@@ -23,7 +23,7 @@ const SHARED_READONLY: &str = "The platform operator keeps this installation-wid
 fn holiday_columns() -> Vec<BuiltinColumn> {
     vec![
         BuiltinColumn::new("date", "Date"),
-        BuiltinColumn::new("name", "Name"),
+        BuiltinColumn::new("name", "Label"),
     ]
 }
 /// The years the page offers.
@@ -486,10 +486,11 @@ impl Record {
                     value: Html::text(&set.code),
                 },
                 Fact {
-                    title: "Name",
+                    title: "Label",
                     id: "holiday-set-name-fact",
                     value: render(InlineEdit {
-                        field: inline("holiday-set-name", "name", "Edit name", &set.name),
+                        field: inline("holiday-set-name", "name", "Edit label", &set.name)
+                            .hint("Example: Malaysia holidays"),
                     })?,
                 },
                 Fact {
@@ -757,7 +758,7 @@ impl Record {
                 id: "holiday-set-copy-form",
                 event: "copy_holiday_set",
                 rows: vec![
-                    vec![render(field("code", "Code").attr("maxlength", "64").required())?, render(field("name", "Name").attr("maxlength", "120").required())?],
+                    vec![render(field("code", "Code").attr("maxlength", "64").required())?, render(field("name", "Label").hint("Example: Malaysia holidays").attr("maxlength", "120").required())?],
                     vec![render(field("from", "From").kind(InputKind::Date))?, render(field("to", "To").kind(InputKind::Date).hint("Optional dates. Copy at most 400 holidays; narrow the dates for a larger set."))?],
                 ],
                 actions: dialog_actions("Copy set", "Copying…", "close_copy")?,

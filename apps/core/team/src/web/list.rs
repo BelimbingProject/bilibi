@@ -7,7 +7,7 @@ use bilibi_ui::*;
 
 pub(super) fn columns() -> Vec<BuiltinColumn> {
     [
-        ("name", "Name"),
+        ("name", "Label"),
         ("kind", "Kind"),
         ("leads", "Leads"),
         ("members", "Members"),
@@ -108,7 +108,7 @@ pub(super) fn view(state: &State) -> Result<(Html, Vec<Html>, PageVariant)> {
                 "search",
                 "Search teams",
                 &filters["search"],
-                "Search by name…",
+                "Search by label…",
             ),
             ToolbarControl::select("team-kind", "kind", "Kind", &filters["kind"], kinds)
                 .grid_field("teams.kind"),

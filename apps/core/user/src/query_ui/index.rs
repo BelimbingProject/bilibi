@@ -48,7 +48,7 @@ impl Index {
             columns: ListColumns::mount(
                 "database-queries-table",
                 [
-                    ("name", "Name"),
+                    ("name", "Label"),
                     ("description", "Description"),
                     ("created_at", "Created"),
                     ("updated_at", "Updated"),
