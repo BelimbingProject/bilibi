@@ -225,11 +225,6 @@ impl Catalog {
                 }
             }
         }
-        // Resolve every field restriction before copying the installed tables.
-        // A source can project a value that belongs to another table; carry the
-        // source field's mode through every declared derivation, including a
-        // chain of derived sources. Withholding wins, and incompatible mask
-        // kinds fall back to withholding because no partial form is truthful.
         let mut effective_hidden: BTreeMap<&'static str, BTreeSet<&'static str>> = BTreeMap::new();
         let mut effective_masks: BTreeMap<&'static str, BTreeMap<String, &'static str>> =
             BTreeMap::new();
@@ -261,9 +256,6 @@ impl Catalog {
                     .flatten()
                     .map(|(field, kind)| (field.clone(), *kind)),
             );
-            for hidden in effective_hidden.get(*id).into_iter().flatten() {
-                effective_masks.entry(*id).or_default().remove(*hidden);
-            }
         }
         loop {
             let mut changed = false;
@@ -272,52 +264,19 @@ impl Catalog {
                     let source_hidden = effective_hidden
                         .get(derived.table)
                         .is_some_and(|fields| fields.contains(derived.field));
-                    let source_mask = effective_masks
+                    let source_masked = effective_masks
                         .get(derived.table)
-                        .and_then(|fields| fields.get(derived.field))
-                        .copied();
-                    if source_hidden {
+                        .is_some_and(|fields| fields.contains_key(derived.field));
+                    if source_hidden || source_masked {
                         changed |= effective_hidden
                             .entry(*id)
                             .or_default()
                             .insert(derived.column);
-                        changed |= effective_masks
-                            .entry(*id)
-                            .or_default()
-                            .remove(derived.column)
-                            .is_some();
-                    } else if let Some(kind) = source_mask {
-                        if effective_hidden
-                            .get(*id)
-                            .is_some_and(|fields| fields.contains(derived.column))
-                        {
-                            continue;
-                        }
-                        let target = effective_masks.entry(*id).or_default();
-                        match target.get(derived.column).copied() {
-                            None => {
-                                target.insert(derived.column.to_owned(), kind);
-                                changed = true;
-                            }
-                            Some(current) if current == kind => {}
-                            Some(_) => {
-                                target.remove(derived.column);
-                                changed |= effective_hidden
-                                    .entry(*id)
-                                    .or_default()
-                                    .insert(derived.column);
-                            }
-                        }
                     }
                 }
             }
             if !changed {
                 break;
-            }
-        }
-        if let Some((table, field)) = reveal {
-            if let Some(masks) = effective_masks.get_mut(table) {
-                masks.remove(field);
             }
         }
         let mut tables = BTreeMap::new();
@@ -329,8 +288,12 @@ impl Catalog {
             let Some(reach) = grants.reach_of(table.capability()) else {
                 continue;
             };
-            let own = effective_masks.get(*id).cloned().unwrap_or_default();
-            let hidden = effective_hidden.get(*id).cloned().unwrap_or_default();
+            let mut own = effective_masks.remove(*id).unwrap_or_default();
+            let hidden = effective_hidden.remove(*id).unwrap_or_default();
+            own.retain(|field, _| !hidden.contains(field.as_str()));
+            if let Some((_, field)) = reveal.filter(|(table, _)| table == id) {
+                own.remove(field);
+            }
             let table = table.without(&hidden);
             tables.insert(
                 *id,

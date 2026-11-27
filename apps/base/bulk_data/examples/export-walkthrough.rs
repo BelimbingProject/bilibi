@@ -21,11 +21,12 @@ bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 const JOINED_CONTACTS: &str = "core/person.walkthrough_joined_contacts";
+const JOINED_TABLE: &str = "walkthrough_joined_contacts";
 
 static JOINED_GRID: GridContribution = GridContribution {
     record_fields: &[],
     tables: &[TableDecl::new(
-        "walkthrough_joined_contacts",
+        JOINED_TABLE,
         "Contacts with work email",
         "admin.person.list",
         Source::tenant(
@@ -57,7 +58,7 @@ inventory::submit! {
         Provenance { module: "core/person", source: file!(), line: line!() },
         &bilibi_bulk_data::RecordType {
             label: "Contacts with work email",
-            table: "walkthrough_joined_contacts",
+            table: JOINED_TABLE,
             path: None,
             import: bilibi_bulk_data::Import {
                 capability: "admin.person.import",
@@ -352,22 +353,6 @@ async fn main() -> Result<(), Failure> {
         &[],
     )
     .await?;
-    let projected = bilibi_grid::project(
-        &db,
-        &manager.scope,
-        "walkthrough_joined_contacts",
-        &[json!(alice.clone())],
-        &["work_email"],
-    )
-    .await?;
-    if projected
-        .rows
-        .first()
-        .and_then(|row| row.cells.get("work_email"))
-        != Some(&json!("a•••@work.exp.test"))
-    {
-        return Err("the list projection did not mask the derived work email".into());
-    }
     for id in [linked, declared] {
         let run = manager.export(id).await?;
         let file = bulk.export_file(&manager.scope, id).await;
@@ -379,28 +364,57 @@ async fn main() -> Result<(), Failure> {
         println!("work email restriction invalidated export {id}");
     }
     let masked = manager
-        .write("base.bulk_data.export.start", declared_input.clone())
-        .await?["id"]
-        .as_i64()
-        .ok_or("declared source export under mask was not started")?;
-    manager.settle(masked).await;
-    let (_, bytes) = bulk.export_file(&manager.scope, masked).await?;
-    let csv = std::str::from_utf8(&bytes)?;
-    if csv.contains("alice@work.exp.test") || !csv.contains("a•••@work.exp.test") {
-        return Err("the fresh declared source export did not mask the derived work email".into());
-    }
-    sql.execute(
-        "UPDATE field_restrictions SET mode='withhold' WHERE tenant_id=1 AND role_id=1 AND table_id='person_affiliations' AND field_id='work_email'",
-        &[],
-    )
-    .await?;
-    let catalog = bilibi_grid::Catalog::for_scope(&**sql, &manager.scope).await?;
-    if catalog
-        .table("walkthrough_joined_contacts")
-        .and_then(|table| table.field("work_email"))
-        .is_some()
-    {
-        return Err("the list catalog retained the withheld derived work email".into());
+        .exports(
+            "name and masked linked work email",
+            json!({"search": "Exp Alice"}),
+            &["name", "work.work_email:list"],
+        )
+        .await
+        .ok_or("linked export under mask was not started")?;
+    bulk.export_file(&manager.scope, masked).await?;
+    for mode in ["mask", "withhold"] {
+        sql.execute(
+            "UPDATE field_restrictions SET mode=$1 WHERE tenant_id=1 AND role_id=1 AND table_id='person_affiliations' AND field_id='work_email'",
+            &[&mode],
+        )
+        .await?;
+        let projection = bilibi_grid::project(
+            &db,
+            &manager.scope,
+            JOINED_TABLE,
+            &[json!(alice.clone())],
+            &["work_email"],
+        )
+        .await;
+        if !matches!(
+            projection,
+            Err(bilibi_grid::QueryError::Column(
+                _,
+                bilibi_grid::column::ColumnError::UnknownSegment { .. }
+            ))
+        ) {
+            return Err(format!(
+                "the projection did not withhold the derived work email under {mode}"
+            )
+            .into());
+        }
+        let withheld = manager
+            .write("base.bulk_data.export.start", declared_input.clone())
+            .await?["id"]
+            .as_i64()
+            .ok_or("restricted declared source export was not started")?;
+        let run = manager.settle(withheld).await;
+        if run.state != ExportState::Failed
+            || run
+                .error
+                .as_deref()
+                .is_none_or(|error| !error.contains("None of the shown columns can be read"))
+        {
+            return Err(format!(
+                "the fresh declared source export did not withhold the work email under {mode}"
+            )
+            .into());
+        }
     }
     if manager.export(masked).await?.downloadable
         || !matches!(
@@ -411,20 +425,6 @@ async fn main() -> Result<(), Failure> {
         return Err(
             "changing work email from mask to withhold did not invalidate the export".into(),
         );
-    }
-    let withheld = manager
-        .write("base.bulk_data.export.start", declared_input.clone())
-        .await?["id"]
-        .as_i64()
-        .ok_or("declared source export under withhold was not started")?;
-    let run = manager.settle(withheld).await;
-    if run.state != ExportState::Failed
-        || run
-            .error
-            .as_deref()
-            .is_none_or(|error| !error.contains("None of the shown columns can be read"))
-    {
-        return Err("the fresh declared source export did not withhold the work email".into());
     }
     let replacement = manager
         .exports(

@@ -634,7 +634,7 @@ impl Installed {
             }
             let mut derived = BTreeSet::new();
             for column in source.derived {
-                if !derived.insert(column.column)
+                if !derived.insert(*column)
                     || table.field(column.column).is_none()
                     || table.is_protected(column.column)
                     || !source.extra_tables.contains(&column.table)
@@ -649,6 +649,14 @@ impl Installed {
                         column.column,
                         column.table,
                         column.field
+                    )));
+                }
+            }
+            for extra in source.extra_tables {
+                if !source.derived.iter().any(|column| column.table == *extra) {
+                    return Err(invalid(format!(
+                        "grid source {} has no derived field for extra source table {extra}",
+                        table.id()
                     )));
                 }
             }
