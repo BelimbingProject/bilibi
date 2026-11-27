@@ -53,10 +53,11 @@ pub fn admit(status: &str, mode: &str) -> Result<Value, String> {
             .flatten()
             .ok_or("The release reports an invalid Extension declaration.")?;
         let id = extension["id"].as_str().unwrap_or("unknown");
-        match extension["code"].as_str().unwrap_or("customer") {
-            "reviewed" => {}
-            "customer" if mode == "isolated" => {}
-            "customer" => return Err(format!("Extension {id} requires an isolated installation; use an isolated installation, or prepare a code-free release.")),
+        let code = &extension["code"];
+        match if code.is_null() { Some("customer") } else { code.as_str() } {
+            Some("reviewed") => {}
+            Some("customer") if mode == "isolated" => {}
+            Some("customer") => return Err(format!("Extension {id} requires an isolated installation; use an isolated installation, or prepare a code-free release.")),
             _ => return Err(format!("Extension {id} must declare reviewed or customer code.")),
         }
     }
@@ -84,22 +85,35 @@ fn platform(line: &str) -> Option<Value> {
 /// `  connector 0.1.0, commit abc, code: reviewed, modules: a, b`, `  finance untagged,
 /// commit abc, modules: a` or `  finance unpinned, modules: a`.
 fn container(line: &str) -> Option<Value> {
-    let (id, rest) = line.split_once(", modules:")?.0.trim().split_once(' ')?;
+    let (id, rest) = line
+        .split_once(", modules:")?
+        .0
+        .trim_start()
+        .split_once(' ')?;
     let (rest, code) = rest
         .rsplit_once(", code:")
         .map_or((rest, None), |(rest, code)| {
             (rest, Some(code.strip_prefix(' ').unwrap_or("")))
         });
-    if rest.contains(", code:") {
-        return None;
-    }
+    let token = |value: &str| {
+        !value.is_empty()
+            && !value.contains(|character: char| {
+                character.is_whitespace() || matches!(character, ',' | ':')
+            })
+    };
     let (version, commit) = match rest {
         "unpinned" => (None, None),
-        _ => match rest.split_once(", commit ") {
-            Some((version, commit)) => (Some(version).filter(|v| *v != "untagged"), Some(commit)),
-            None => (None, None),
-        },
+        _ => {
+            let (version, commit) = rest.split_once(", commit ")?;
+            if !token(version) || !token(commit) {
+                return None;
+            }
+            (Some(version).filter(|v| *v != "untagged"), Some(commit))
+        }
     };
+    if !token(id) {
+        return None;
+    }
     Some(json!({"id": id, "version": version, "commit": commit, "code": code}))
 }
 

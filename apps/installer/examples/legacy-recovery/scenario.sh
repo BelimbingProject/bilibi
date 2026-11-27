@@ -181,27 +181,35 @@ esac
 STUB
 chmod +x "$root_dir/shared"
 for instance in "$root_dir"/{worker,shell}/dev; do
-    mkdir "$instance/releases/4" "$instance/releases/5"
+    mkdir "$instance/releases/4" "$instance/releases/5" "$instance/releases/6"
     cp "$root_dir/shared" "$instance/releases/4/bilibi-web"
     sed 's/ unpinned, modules:/ unpinned, code:reviewed, modules:/' "$root_dir/legacy" > "$instance/releases/5/bilibi-web"
-    chmod +x "$instance/releases/5/bilibi-web"
+    sed 's/ unpinned, modules:/ unpinned, code : reviewed, modules:/' "$root_dir/legacy" > "$instance/releases/6/bilibi-web"
+    chmod +x "$instance/releases/"{5,6}/bilibi-web
     ln -sfn 4 "$instance/releases/current"
 done
 : > "$FIXTURE_EVENTS"
-sql -c "UPDATE base_settings SET value='\"shared\"' WHERE key='installation.mode'" >/dev/null
-systemctl start bilibi@dev
-for target in 1 3 5; do
+admission_case() {
+    mode=shared
     refusal='requires an isolated installation'
-    if [[ $target == 5 ]]; then refusal='must declare reviewed or customer code'; fi
+    case $1 in
+        5) mode=isolated; refusal='must declare reviewed or customer code';;
+        6) mode=isolated; refusal='invalid Extension declaration';;
+    esac
+}
+systemctl start bilibi@dev
+for target in 1 3 5 6; do
+    admission_case "$target"
     (cd "$root_dir/shell/dev/releases/$target" && sha256sum bilibi-web > SHA256SUMS)
-    if bash -s -- "$root_dir" "$target" >"$root_dir/switch.log" 2>&1 <<'SHELL'
+    if bash -s -- "$root_dir" "$target" "$mode" >"$root_dir/switch.log" 2>&1 <<'SHELL'
     root_dir=$1
     source scripts/install-server.sh
     root=$root_dir/shell
     need_root() { :; }
     lock_release_policy() { :; }
     lock_installation() { :; }
-    read_installation_mode() { installation_mode=shared; }
+    shell_mode=$3
+    read_installation_mode() { installation_mode=$shell_mode; }
     runuser() { shift 3; "$@"; }
     switch dev "$2"
 SHELL
@@ -209,7 +217,7 @@ SHELL
         cat "$root_dir/switch.log"
         exit 1
     fi
-    grep -Fq "$refusal" "$root_dir/switch.log"
+    grep -Fiq "$refusal" "$root_dir/switch.log"
     [[ -z $(grep -Fx "$root_dir/shell/dev/releases/$target" "$FIXTURE_EVENTS" || true) ]]
     [[ $(readlink -f "$FIXTURE_CURRENT") == "$root_dir/shell/dev/releases/4" ]]
     [[ $(curl -fsS "$origin/login") == shared-release ]]
@@ -217,9 +225,9 @@ done
 
 export FIXTURE_CURRENT=$root_dir/worker/dev/current
 systemctl start bilibi@dev
-for target in 1 3 5; do
-    refusal='requires an isolated installation'
-    if [[ $target == 5 ]]; then refusal='must declare reviewed or customer code'; fi
+for target in 1 3 5 6; do
+    admission_case "$target"
+    sql -c "UPDATE base_settings SET value='\"$mode\"' WHERE key='installation.mode'" >/dev/null
     job=$(sql -c "INSERT INTO base_software_jobs (tenant_id,kind,request,review,requested_by)
         VALUES (1,'install','{}','{}',1) RETURNING id" -q)
     sql >/dev/null <<SQL
@@ -229,7 +237,7 @@ INSERT INTO base_software_steps (tenant_id,job_id,seq,key,label,state,detail) VA
   (1,$job,3,'migrate','Migrate','pending',NULL);
 SQL
     timeout 30 "$installer" --worker "$root_dir/worker/dev"
-    [[ $(sql -c "SELECT state FROM base_software_jobs WHERE id=$job AND result->>'message' LIKE '%$refusal%'") == failed ]]
+    [[ $(sql -c "SELECT state FROM base_software_jobs WHERE id=$job AND result->>'message' ILIKE '%$refusal%'") == failed ]]
     [[ -z $(grep -Fx "$root_dir/worker/dev/releases/$target" "$FIXTURE_EVENTS" || true) ]]
     [[ $(readlink -f "$FIXTURE_CURRENT") == "$root_dir/worker/dev/releases/4" ]]
     [[ $(curl -fsS "$origin/login") == shared-release ]]

@@ -1149,6 +1149,7 @@ admit_release() {
     dir=$(instance_dir "$instance")
     read_installation_mode || return 1
     with_env "$instance" "$dir/releases/$n/bilibi-web" status | python3 -c '
+import re
 import sys
 mode = sys.argv[1]
 status = sys.stdin.read()
@@ -1170,7 +1171,9 @@ for line in extensions.splitlines():
         identity, code = declaration, "customer"
     else:
         code = code[1:] if code.startswith(" ") else ""
-    if not line.startswith("  ") or not modules or " " not in identity.strip() or ", code:" in identity:
+    if not line.startswith("  ") or not modules or not re.fullmatch(
+        r"[^\s,:]+ (?:unpinned|[^\s,:]+, commit [^\s,:]+)", identity.lstrip()
+    ):
         sys.exit("Invalid Extension declaration")
     name = identity.strip().split(" ", 1)[0]
     if code not in {"reviewed", "customer"}:
