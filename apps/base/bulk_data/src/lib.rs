@@ -337,8 +337,7 @@ impl BulkData {
             fields,
             restricted: restricted.into_iter().map(|field| field.name).collect(),
             matches: registered
-                .definition
-                .import
+                .import()?
                 .duplicates
                 .as_ref()
                 .map(|duplicates| duplicates.fields.to_vec())
@@ -357,7 +356,12 @@ impl BulkData {
         let held = bilibi_authz::effective_capabilities(client, scope).await?;
         let mut types = Vec::new();
         for registered in self.types.values() {
-            if held.contains(registered.definition.import.capability) {
+            if registered
+                .definition
+                .import
+                .as_ref()
+                .is_some_and(|import| held.contains(import.capability))
+            {
                 types.push(self.info(client, scope, registered).await?);
             }
         }
@@ -372,7 +376,7 @@ impl BulkData {
         key: &str,
     ) -> Result<TypeInfo> {
         let registered = self.types.get(key).ok_or(Error::NotFound)?;
-        bilibi_authz::authorize_key(client, scope, registered.definition.import.capability).await?;
+        bilibi_authz::authorize_key(client, scope, registered.import()?.capability).await?;
         self.info(client, scope, registered).await
     }
 
@@ -392,8 +396,7 @@ impl BulkData {
         let mut object = self.db.get().await?;
         let client: &mut tokio_postgres::Client = &mut object;
         bilibi_authz::authorize_key(&*client, scope, CREATE).await?;
-        bilibi_authz::authorize_key(&*client, scope, registered.definition.import.capability)
-            .await?;
+        bilibi_authz::authorize_key(&*client, scope, registered.import()?.capability).await?;
         let company = match work_company(scope, "import") {
             Ok(company) => company,
             Err(WriteError::Invalid(fields)) => {
@@ -597,7 +600,7 @@ impl BulkData {
     ) -> Result<Vec<SavedMapping>> {
         let registered = self.types.get(record_type).ok_or(Error::NotFound)?;
         bilibi_authz::authorize_key(client, scope, VIEW).await?;
-        bilibi_authz::authorize_key(client, scope, registered.definition.import.capability).await?;
+        bilibi_authz::authorize_key(client, scope, registered.import()?.capability).await?;
         let Some(company) = scope.current_company() else {
             return Ok(Vec::new());
         };
@@ -616,11 +619,12 @@ impl BulkData {
         record_type: &str,
     ) -> Result<BTreeMap<&'static str, Vec<Run>>> {
         let registered = self.types.get(record_type).ok_or(Error::NotFound)?;
+        let import = registered.import()?;
         let mut parents = BTreeMap::new();
         let Some(company) = scope.current_company() else {
             return Ok(parents);
         };
-        for reference in registered.definition.import.references {
+        for reference in import.references {
             if let Some(parent) = reference.parent {
                 parents.insert(
                     reference.field,
@@ -1051,7 +1055,7 @@ impl BulkData {
             return Err(refused("run_id", "has no stored file; upload it again"));
         }
         let registered = self.registered(&run.record_type)?;
-        bilibi_authz::authorize_key(client, scope, registered.definition.import.capability).await?;
+        bilibi_authz::authorize_key(client, scope, registered.import()?.capability).await?;
         let (offered, restricted) = self.offered(client, scope, registered).await?;
         let restricted: Vec<&Field> = restricted.iter().collect();
         let mut errors = mapping
@@ -1059,7 +1063,7 @@ impl BulkData {
                 &offered,
                 &restricted,
                 Some(&run.header),
-                registered.definition.import.duplicates.is_some(),
+                registered.import()?.duplicates.is_some(),
             )
             .err()
             .unwrap_or_default();
@@ -1109,7 +1113,7 @@ impl BulkData {
         mapping: &Mapping,
     ) -> std::result::Result<(String, Option<SavedMapping>), WriteError> {
         let registered = self.registered(record_type)?;
-        bilibi_authz::authorize_key(client, scope, registered.definition.import.capability).await?;
+        bilibi_authz::authorize_key(client, scope, registered.import()?.capability).await?;
         let company = work_company(scope, "import")?.get();
         let name = name.trim().to_owned();
         if name.is_empty() || name.chars().count() > 120 || name.chars().any(char::is_control) {
@@ -1122,7 +1126,7 @@ impl BulkData {
                 &offered,
                 &restricted,
                 None,
-                registered.definition.import.duplicates.is_some(),
+                registered.import()?.duplicates.is_some(),
             )
             .map_err(WriteError::Invalid)?;
         if mapping
@@ -1167,7 +1171,7 @@ impl BulkData {
             .transpose()?
             .ok_or(WriteError::NotFound)?;
         let registered = self.registered(&saved.record_type)?;
-        bilibi_authz::authorize_key(client, scope, registered.definition.import.capability).await?;
+        bilibi_authz::authorize_key(client, scope, registered.import()?.capability).await?;
         if saved.version != version {
             return Err(WriteError::Stale);
         }

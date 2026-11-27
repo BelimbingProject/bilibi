@@ -226,7 +226,7 @@ impl Work<'_> {
         if !problems.is_empty() {
             return Ok(Planned::Refused(problems.join("; ")));
         }
-        let import = &self.registered.definition.import;
+        let import = self.registered.import()?;
         let custom = self
             .registered
             .custom
@@ -282,7 +282,7 @@ impl Work<'_> {
             }
         };
         let candidates = answer["result"].as_array().cloned().unwrap_or_default();
-        let id_key = import.id;
+        let id_key = self.registered.definition.id;
         match candidates.as_slice() {
             [] => Ok(create(input)),
             [candidate] => {
@@ -725,7 +725,7 @@ impl Work<'_> {
                 .map(Some)
                 .ok_or(Error::Internal)
         };
-        if contract == self.registered.definition.import.create {
+        if contract == self.registered.import()?.create {
             if let Some(results) = self.registered.results {
                 let result = (results.interpret)(&answer["result"])?;
                 result.validate()?;
@@ -748,7 +748,7 @@ impl Work<'_> {
             if preview {
                 None
             } else {
-                text_id(&answer["result"][self.registered.definition.import.id])
+                text_id(&answer["result"][self.registered.definition.id])
             },
             created_version(outcome)?,
             None,
@@ -829,7 +829,7 @@ impl Work<'_> {
         let permitted = match bilibi_authz::authorize_key(
             tx.sql(),
             &self.scope,
-            self.registered.definition.import.capability,
+            self.registered.import()?.capability,
         )
         .await
         {

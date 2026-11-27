@@ -96,11 +96,10 @@ bilibi_search::contribute!("core/person", "person.search", &SEARCH);
 // contacts change kind together through the person update contract.
 inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/person.contacts", Provenance { module: "core/person", source: file!(), line: line!() }, &bilibi_bulk_data::RecordType {
     label: "Contacts", table: "persons", path: Some("/contacts/{id}"),
-    import: bilibi_bulk_data::Import {
-        capability: IMPORT, create: "core.person.create", id: "id",
-        duplicates: Some(bilibi_bulk_data::Duplicates { read: "core.person.duplicates", fields: &["email", "phone"], update: "core.person.update", update_id: "person_id", update_version: "version", update_fields: "identity" }),
+    id: "id", import: Some(bilibi_bulk_data::Import {
+        capability: IMPORT, create: "core.person.create", duplicates: Some(bilibi_bulk_data::Duplicates { read: "core.person.duplicates", fields: &["email", "phone"], update: "core.person.update", update_id: "person_id", update_version: "version", update_fields: "identity" }),
         references: &[],
-    },
+    }),
     export: Some(bilibi_bulk_data::Export { capability: EXPORT, list: "core.person.list" }),
     bulk_update: Some(bilibi_bulk_data::BulkUpdate {
         capability: BULK_UPDATE, list: "core.person.list", get: "core.person.get", get_id: "person_id",

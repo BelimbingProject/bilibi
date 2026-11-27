@@ -12,11 +12,11 @@ Declare a dependency on `base/bulk_data` and contribute one `RecordType` per typ
 ```rust
 inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/person.contacts", provenance!(), &RecordType {
     label: "Contacts", table: "persons", path: Some("/contacts/{id}"),
-    import: Import {
-        capability: IMPORT, create: "core.person.create", id: "id",
+    id: "id", import: Some(Import {
+        capability: IMPORT, create: "core.person.create",
         duplicates: Some(Duplicates { read: "core.person.duplicates", fields: &["email", "phone"], update: "core.person.update", update_id: "person_id", update_version: "version", update_fields: "identity" }),
         references: &[],
-    },
+    }),
     export: Some(Export { capability: EXPORT, list: "core.person.list" }),
     bulk_update: Some(BulkUpdate {
         capability: BULK_UPDATE, list: "core.person.list", get: "core.person.get", get_id: "person_id",
@@ -30,18 +30,24 @@ inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/per
 | --- | --- |
 | `label`, `path` | What the records are called; their page with `{id}`, for links from row results |
 | `table` | The registered Grid table: its tenant/company scope governs this record type, and a field restricted there for the person is not offered |
+| `id` | The record ID property in create results and list records |
+| `import` | Optional; `None` excludes the type from imports and saved mappings |
 | `import.capability` | The owner's import capability (verb `import`, from its own vocabulary), with the same tenant/company scope as the Grid table; checked for every row |
-| `import.create`, `import.id` | The owner's write contract creating one record, and where the record's id is in its result |
+| `import.create` | The owner's write contract creating one record |
 | `import.duplicates` | Optional. The owner's read answering candidates for the match `fields`, and its update contract with the id, version and fields properties. A field the file leaves out keeps the record's value |
 | `import.references` | Create fields holding another record's id: a `parent` record type whose earlier import names it by source key, and/or a `lookup` read that must find exactly one record |
-| `export` | Optional; `None` keeps the type out of export. The owner's export capability (verb `export`), scoped like the Grid table, and its list read contract, which takes integer `page` and `page_size` and returns the records with their `import.id` |
-| `bulk_update` | Optional for tenant-wide Grid tables. The owner's tenant-wide capability (verb `bulk-update`), its paged list read (records with `import.id` and `version`), its read of one record by `get_id`, its update contract with the id, version and fields properties, and the `fields` people may set: scalar properties of the update's fields (choices, dates, flags, numbers, or an owner's id) |
+| `export` | Optional; `None` keeps the type out of export. The owner's export capability (verb `export`), scoped like the Grid table, and its list read contract, which takes integer `page` and `page_size` and returns the records with their `id` |
+| `bulk_update` | Optional for tenant-wide Grid tables. The owner's tenant-wide capability (verb `bulk-update`), its paged list read (records with `id` and `version`), its read of one record by `get_id`, its update contract with the id, version and fields properties, and the `fields` people may set: scalar properties of the update's fields (choices, dates, flags, numbers, or an owner's id) |
 
 - **Mappable fields are data:** the create contract's top-level string, number, integer and boolean properties, with its `enum` as choices and `required` as required; opted-in [tenant-defined fields](#tenant-defined-fields-in-csv-import) are added from the current tenant's definitions.
-- **Boot refuses** an unknown Grid table, a bulk update on a company-scoped Grid table, an import or export capability whose tenant/company scope differs from its table, an unknown or foreign contract, a write a job cannot call (step-up declared, or `Channel::Job` left out), a list read a job cannot call or that does not page, an undeclared or foreign capability, a match field, reference, lookup property or parent that does not exist, and a bulk field that is not a scalar of the update's fields.
+- **Boot refuses** a type with none of import, export or bulk update, an unknown Grid table, a bulk update on a company-scoped Grid table, an import or export capability whose tenant/company scope differs from its table, an unknown or foreign contract, a write a job cannot call (step-up declared, or `Channel::Job` left out), a list read a job cannot call or that does not page, an undeclared or foreign capability, a match field, reference, lookup property or parent that does not exist, and a bulk field that is not a scalar of the update's fields.
 - A lookup read must match exactly (Core Person's duplicates read matches email exactly); a scoring read such as Core Company's duplicates is not a lookup. Several matches are always a row error.
 
 Adopters: Core Person (`core/person.contacts`, matched on email or phone; exported from the Contacts list with `admin.person.export`; kind set in bulk with `admin.person.bulk-update`) and Core Affiliation (`core/affiliation.affiliations`, the contact by source key of a contacts import or by email; the organisation as a column of ids or one fixed value).
+
+## Upgrade notes for agents
+
+Move each `Import.id` to `RecordType.id` and wrap each import declaration in `Some(...)`. Use `import: None` for types that cannot be imported; keep at least one of import, export or bulk update.
 
 ## Tenant-defined fields in CSV import
 
