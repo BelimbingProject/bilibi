@@ -325,6 +325,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Calm.** No urgency, no badge spam, no dark patterns.
 - **Values.** Values say what they are: never show a lone code, number, date or word the reader has to decode; put what it is beside it.
 - **Details.** Every expandable summary names what it contains.
+- **People act.** Describe actions as things people do, not things companies or other objects do.
 - **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator", commands to install something are "Installation commands".
 - **Never "your developer".** A label or sentence never sends the reader to another person ("Code for your developer", "Ask your developer to test it first"): the reader may be that person, and the others learn nothing. Say what the thing is and let the reader decide who acts.
 - **Facts, not advice.** State what is true in one short line ("Works with Bilibi 0.2.1") and stop. No paragraph of cautions, and no instruction for a step the control already makes plain ("Run these in your local code folder, then test it in the browser").

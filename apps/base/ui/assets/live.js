@@ -51,6 +51,8 @@
   // Change forms normally follow server values outside the focused field.
   // A transport refusal/disconnect must keep their entire draft until retry.
   const preservedForms = new WeakMap(); // form -> latest refused request ID
+  const newerDrafts = new WeakMap();
+  const editedDrafts = new WeakSet();
   let reconnecting = false;
   let reloadOnReconnect = false;
   let stopped = false; // the server cleared the page: no reconnect
@@ -69,6 +71,8 @@
   let shown = address(); // The path and query the page on screen was mounted for.
   const addressIntent = () => ({type: 'mount', path: location.pathname, params: params()});
   const gateSelector = '[data-hook="StepUpGate"]';
+  const draftSelector = 'form[data-preserve-newer-draft]';
+  let stepUpDraft = null;
   const promptIntent = (prompt, returnTo) => ({
     type: 'mount',
     path: prompt.pathname,
@@ -132,12 +136,15 @@
     // A development rebuild may reload fresh assets only when there is no
     // draft to lose. This also protects forms if an old client hits a new
     // server's hard socket cap instead of receiving a normal refusal.
-    const drafts = [...document.forms].filter((form) => [...form.elements].some(dirty));
+    const pending = new Set([...inflight.values(), ...queued].map((entry) => entry.ownerForm));
+    const drafts = [...document.forms].filter((form) => [...form.elements].some(dirty)
+      || (form.matches(draftSelector)
+        && (editedDrafts.has(form) || pending.has(form))));
     for (const form of drafts) {
       const sent = [...inflight.values()].filter((entry) => entry.ownerForm === form).map((entry) => entry.id);
       preserve(form, Math.max(0, ...sent));
     }
-    const hasDraft = drafts.length || [...inflight.values()].some((entry) => entry.form)
+    const hasDraft = stepUpDraft || drafts.length || [...inflight.values()].some((entry) => entry.form)
       || [...holders].some((holds) => holds());
     reloadOnReconnect = devReload && !hasDraft;
     for (const entry of inflight.values()) {
@@ -293,6 +300,7 @@
     const entry = message.request_id == null ? null : inflight.get(message.request_id);
     // Acknowledge before patching: the busy mirror lifts and the control shows
     // whatever the reply renders for it.
+    let draftReleased = false;
     if (entry) {
       inflight.delete(message.request_id);
       settle(entry);
@@ -300,19 +308,28 @@
         if (message.type === 'error') preserve(entry.ownerForm, entry.id);
         // Only a later complete form snapshot releases a refused draft. An
         // older validation reply, upload or button action must not release it.
-        else if ((entry.form || entry.source === entry.ownerForm)
-          && entry.id > (preservedForms.get(entry.ownerForm) || 0)) preservedForms.delete(entry.ownerForm);
+        else if (entry.form || entry.source === entry.ownerForm) {
+          if (entry.id > (preservedForms.get(entry.ownerForm) || 0)) {
+            draftReleased = preservedForms.delete(entry.ownerForm) && entry.ownerForm.matches(draftSelector);
+          }
+          const edit = newerDrafts.get(entry.ownerForm);
+          if (edit && entry.id > edit) {
+            newerDrafts.delete(entry.ownerForm);
+            draftReleased = true;
+          }
+        }
       }
     }
     // A form whose submission the server accepted gives up its draft and shows
     // the stored value; a rejected submission keeps the person's input.
     const options = {
       submitted: entry && entry.form && message.type !== 'error'
-        && !preservedForms.has(entry.form) ? entry.form : null,
+        && !preservedForms.has(entry.form) && !newerDrafts.has(entry.form) ? entry.form : null,
       navigation: !!(entry && entry.navigation),
       anchor: entry?.navigation && entry.intent.type === 'mount' ? location.hash.slice(1) : '',
     };
-    if (message.redirect && entry?.ownerForm && preservedForms.has(entry.ownerForm)) {
+    if (message.redirect && entry?.ownerForm
+      && (preservedForms.has(entry.ownerForm) || newerDrafts.has(entry.ownerForm))) {
       // A previously sent save may redirect after a newer local refusal.
       // Its answer must not navigate away from that newer, unsent draft.
       const refusal = 'An earlier request was answered while this form changed. Your newer draft is kept. Check the stored value before trying again.';
@@ -344,8 +361,11 @@
           released = true;
         }
       }
-      if (released || message.flash || message.html !== lastHTML) {
-        patch(document.getElementById('app'), message.html, {...options, flash: message.flash});
+      if (released || draftReleased || message.flash || message.html !== lastHTML) {
+        patch(document.getElementById('app'), message.html, {
+          ...options, flash: message.flash, pageUrl: message.url || address(),
+          stepUpComplete: entry?.intent.step_up_complete,
+        });
         lastHTML = message.html;
       }
       panelPath = message.panel_params ? new URL(message.url || location.href, location.href).pathname : null;
@@ -419,6 +439,29 @@
     template.innerHTML = html;
     const next = template.content.firstElementChild;
     if (!next) return;
+    if (options.pageUrl) {
+      const gate = next.querySelector(gateSelector);
+      if (gate) {
+        const returnTo = new URL(gate.dataset.stepUpReturn, location.href);
+        if (stepUpDraft && stepUpDraft.returnTo !== returnTo.href) stepUpDraft = null;
+        const form = root.querySelector(draftSelector);
+        if (form && returnTo.origin === location.origin && returnTo.pathname === location.pathname) {
+          clearTimeout(changeTimers.get(form));
+          stepUpDraft = {form, returnTo: returnTo.href};
+        }
+      } else if (stepUpDraft) {
+        const {form, returnTo} = stepUpDraft;
+        const slot = next.querySelector(draftSelector);
+        const destination = new URL(options.pageUrl, location.href);
+        const expected = new URL(returnTo);
+        if (options.stepUpComplete && slot && slot.id === form.id
+          && destination.origin === expected.origin && destination.pathname === expected.pathname) {
+          preserve(form, 0);
+          slot.replaceWith(form);
+        }
+        stepUpDraft = null;
+      }
+    }
     if (options.flash) next.insertAdjacentHTML('beforeend', options.flash);
     const focus = captureFocus();
     const scroll = captureScroll(root);
@@ -434,7 +477,16 @@
       if (id) context.lookup.set(id, el);
     }
     morph(root, next, context);
-    if (context.submitted && context.submitted.isConnected) context.submitted.reset();
+    if (context.submitted && context.submitted.isConnected) {
+      const form = context.submitted;
+      if (form.hasAttribute('data-draft-saved')) {
+        editedMarkers.delete(form);
+        editedDrafts.delete(form);
+        clearTimeout(changeTimers.get(form));
+        changeSent.delete(form);
+      }
+      form.reset();
+    }
     const anchor = options.anchor && document.getElementById(options.anchor);
     restoreScroll(scroll, options.navigation, anchor && root.contains(anchor) ? anchor : null);
     restoreFocus(focus);
@@ -464,7 +516,7 @@
     }
     // A browser-owned subtree and a control awaiting its own reply keep their
     // state; the data-* attributes still follow the server.
-    if (from.hasAttribute('data-live-ignore') || from.hasAttribute('data-live-busy')) {
+    if (from.hasAttribute('data-live-ignore') || from.hasAttribute('data-live-busy') || protectDraft(from)) {
       attributes(from, to, context, (name) => name.startsWith('data-'));
       return from;
     }
@@ -726,22 +778,39 @@
     const owner = el.parentElement && el.parentElement.closest('[data-target]');
     return owner ? owner.dataset.target : 'page';
   }
+  function protectDraft(form) {
+    return newerDrafts.has(form) || (form.matches(draftSelector) && preservedForms.has(form));
+  }
+
   function sendChange(form) {
     clearTimeout(changeTimers.get(form));
     const type = form.dataset.event;
     const values = formValues(form);
     const key = JSON.stringify(values);
     const last = changeSent.get(form);
-    if (last && last.key === key && performance.now() - last.at < 500) return;
+    if (last && last.key === key && performance.now() - last.at < 500
+      && !protectDraft(form)) return;
     changeSent.set(form, {key, at: performance.now()});
     if (type === 'params') enqueue({type: 'params', params: values}, {source: form, loading: true});
     else enqueue({type: 'event', target: ownerTarget(form), payload: {type, ...values}}, {source: form});
   }
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.defaultPrevented || event.isComposing) return;
+    const control = event.target;
+    const form = control.form;
+    if (!control.hasAttribute('data-change-on-enter') || !form?.matches('[data-event][data-change]')) return;
+    event.preventDefault();
+    sendChange(form);
+  });
   for (const kind of ['input', 'change']) {
     document.addEventListener(kind, (event) => {
       const control = event.target;
       const form = control.form;
       if (!form || !form.dataset.event || !form.hasAttribute('data-change')) return;
+      if (form.matches(draftSelector)) {
+        editedDrafts.add(form);
+        newerDrafts.set(form, ++sequence);
+      }
       if (kind === 'input' && control.dataset.editedMarker) {
         if (!editedMarkers.has(form)) editedMarkers.set(form, new Set());
         editedMarkers.get(form).add(control.dataset.editedMarker);
@@ -759,6 +828,13 @@
   document.addEventListener('click', (event) => {
     // A chart's bar or slice (`Chart::drill`) is an SVG shape, which cannot be
     // a button; it raises its event the same way, with the values it carries.
+    const clear = event.target instanceof Element && event.target.closest('[data-record-picker-form] button[name="record-picker-clear"]');
+    if (clear) {
+      const field = clear.closest('[data-record-picker-form]').querySelector('input[type="hidden"]');
+      field.value = '';
+      field.dispatchEvent(new Event('change', {bubbles: true}));
+      return;
+    }
     const button = event.target instanceof Element && event.target.closest('button[data-event], svg [data-event]');
     if (!button || button.disabled) return;
     const {event: type, field, delta} = button.dataset;

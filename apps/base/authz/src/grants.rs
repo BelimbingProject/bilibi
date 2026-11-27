@@ -645,6 +645,29 @@ impl Grants {
         })).await?;
         Ok(())
     }
+    async fn verify_role_capability_reach(
+        client: &impl GenericClient,
+        actor: &Scope,
+        key: &str,
+        reach: Reach,
+    ) -> Result<()> {
+        if !crate::effective_capabilities_in_company(client, actor, actor.user(), None)
+            .await?
+            .reaches(key, reach)
+        {
+            return Err(Error::Forbidden);
+        }
+        if let Some(operator) = actor.impersonator() {
+            if !crate::effective_capabilities_in_company(client, actor, operator.user(), None)
+                .await?
+                .reaches(key, reach)
+            {
+                return Err(Error::Forbidden);
+            }
+        }
+        Ok(())
+    }
+
     /// Create a custom role (never system, never grant-all) owned by a
     /// company of the actor's tenant. It starts with
     /// no capabilities. A name or code already used in the tenant, and a
@@ -652,22 +675,93 @@ impl Grants {
     /// errors rather than a failed write: the company is reproved through
     /// Tenancy on the write's own transaction, never trusted from the form.
     pub async fn create_role(&self, actor: &Scope, role: &NewRole) -> Result<CreatedRole> {
-        let mut errors = crate::roles::validate(role);
+        self.create_role_with_capabilities(actor, role, &[]).await
+    }
+
+    /// Create a role and its capabilities together, with the ordinary grant checks.
+    pub async fn create_role_with_capabilities(
+        &self,
+        actor: &Scope,
+        role: &NewRole,
+        capabilities: &[String],
+    ) -> Result<CreatedRole> {
+        let errors = crate::roles::validate(role);
         if !errors.is_empty() {
             return Ok(CreatedRole::Refused(errors));
+        }
+        let company = role
+            .company_id
+            .and_then(|id| OrganisationId::new(id).ok())
+            .ok_or(Error::Invalid)?;
+        if !capabilities.is_empty() {
+            let errors = {
+                let client = self.db.get().await?;
+                self.validate_role_create(&**client, actor, company, role, capabilities)
+                    .await?
+            };
+            if !errors.is_empty() {
+                return Ok(CreatedRole::Refused(errors));
+            }
+            self.step_up
+                .require(
+                    actor,
+                    step_up::ROLE_CAPABILITY,
+                    &format!("create role:{}", role.code),
+                )
+                .await?;
         }
         let mut client = self.db.get().await?;
         let mut tx = self
             .boundary
             .begin(&mut client, actor.mutation_context("authz.role.create"))
             .await?;
-        self.verify_user(tx.sql(), actor, actor.user()).await?;
-        authorize_key(tx.sql(), actor, crate::roles::CREATE).await?;
-        let company = role
-            .company_id
-            .and_then(|id| OrganisationId::new(id).ok())
-            .ok_or(Error::Invalid)?;
-        match self.parties.organisation(tx.sql(), actor, company).await {
+        let tenant = actor.tenant();
+        // Serialize creates in the tenant so the uniqueness answer holds until
+        // the insert; a refused create writes nothing and is rolled back.
+        tx.sql()
+            .execute(
+                "SELECT pg_advisory_xact_lock(841318,$1::integer)",
+                &[&i32::try_from(tenant).map_err(|_| Error::Invalid)?],
+            )
+            .await?;
+        let errors = self
+            .validate_role_create(tx.sql(), actor, company, role, capabilities)
+            .await?;
+        if !errors.is_empty() {
+            return Ok(CreatedRole::Refused(errors));
+        }
+        let role = role.clone();
+        let owner = company.get();
+        let id = tx.mutate(|sql|Box::pin(async move {
+            let id:i64=sql.query_one("INSERT INTO roles(tenant_id,company_id,name,code,description,is_system,grant_all) VALUES($1,$2,$3,$4,$5,false,false) RETURNING id",&[&tenant,&owner,&role.name,&role.code,&role.description]).await?.get(0);
+            Ok((id,vec![Change{kind:"authz.role".into(),id,old:json!({}),new:json!({"company_id":owner,"name":role.name,"code":role.code,"description":role.description,"is_system":false,"grant_all":false})}]))
+        })).await?;
+        for key in capabilities
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            let key = key.clone();
+            tx.mutate(|sql| Box::pin(async move {
+                let reach = Reach::All.code();
+                sql.execute("INSERT INTO role_capabilities(tenant_id,role_id,capability,reach) VALUES($1,$2,$3,$4)", &[&tenant,&id,&key,&reach]).await?;
+                Ok(((), vec![Change {kind:"authz.role_capability".into(), id, old:json!({"capability":key,"granted":false,"reach":null}), new:json!({"capability":key,"granted":true,"reach":reach})}]))
+            })).await?;
+        }
+        tx.commit().await?;
+        Ok(CreatedRole::Created(id))
+    }
+    async fn validate_role_create(
+        &self,
+        client: &(impl GenericClient + Sync),
+        actor: &Scope,
+        company: OrganisationId,
+        role: &NewRole,
+        capabilities: &[String],
+    ) -> Result<RoleErrors> {
+        self.verify_user(client, actor, actor.user()).await?;
+        authorize_key(client, actor, crate::roles::CREATE).await?;
+        let mut errors = RoleErrors::default();
+        match self.parties.organisation(client, actor, company).await {
             Ok(_) => {}
             Err(Error::NotFound) => errors
                 .company_id
@@ -678,37 +772,26 @@ impl Grants {
             Err(error) => return Err(error),
         }
         if !errors.is_empty() {
-            return Ok(CreatedRole::Refused(errors));
+            return Ok(errors);
         }
         let tenant = actor.tenant();
-        // Serialize creates in the tenant so the uniqueness answer holds until
-        // the insert; a refused create writes nothing and is rolled back.
-        tx.sql()
-            .execute(
-                "SELECT pg_advisory_xact_lock(841318,$1::integer)",
-                &[&i32::try_from(tenant).map_err(|_| Error::Invalid)?],
-            )
-            .await?;
-        let taken = tx.sql().query_one("SELECT EXISTS(SELECT 1 FROM roles WHERE tenant_id=$1 AND name=$2), EXISTS(SELECT 1 FROM roles WHERE tenant_id=$1 AND code=$3)",&[&tenant,&role.name,&role.code]).await?;
-        let mut errors = RoleErrors::default();
+        let taken = client.query_one("SELECT EXISTS(SELECT 1 FROM roles WHERE tenant_id=$1 AND name=$2), EXISTS(SELECT 1 FROM roles WHERE tenant_id=$1 AND code=$3)",&[&tenant,&role.name,&role.code]).await?;
         if taken.get::<_, bool>(0) {
             errors.name.push("has already been taken".into());
         }
         if taken.get::<_, bool>(1) {
             errors.code.push("has already been taken".into());
         }
-        if !errors.is_empty() {
-            return Ok(CreatedRole::Refused(errors));
+        if errors.is_empty() && !capabilities.is_empty() {
+            authorize_key(client, actor, crate::roles::UPDATE).await?;
+            for key in capabilities {
+                self.staff_key(key, false)?;
+                Self::verify_role_capability_reach(client, actor, key, Reach::All).await?;
+            }
         }
-        let role = role.clone();
-        let owner = company.get();
-        let id = tx.mutate(|sql|Box::pin(async move {
-            let id:i64=sql.query_one("INSERT INTO roles(tenant_id,company_id,name,code,description,is_system,grant_all) VALUES($1,$2,$3,$4,$5,false,false) RETURNING id",&[&tenant,&owner,&role.name,&role.code,&role.description]).await?.get(0);
-            Ok((id,vec![Change{kind:"authz.role".into(),id,old:json!({}),new:json!({"company_id":owner,"name":role.name,"code":role.code,"description":role.description,"is_system":false,"grant_all":false})}]))
-        })).await?;
-        tx.commit().await?;
-        Ok(CreatedRole::Created(id))
+        Ok(errors)
     }
+
     /// Named principals cannot grant themselves access. A live user must hold
     /// the administration capability. Declaration bounds every stored allow.
     pub async fn set_system(

@@ -518,14 +518,18 @@ fn render_role(
 
 #[derive(Template)]
 #[template(
-    source = r#"<form id="role-form" data-event="role-change" data-change data-submit-event="create-role" class="space-y-5"><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ company }}{{ name }}{{ code }}{{ description }}</section><div class="flex items-center justify-end gap-3"><a id="role-cancel" href="/authz/roles" class="text-sm font-medium text-ink-muted hover:text-ink">Cancel</a>{{ save }}</div></form>"#,
+    source = r#"<form id="role-form" data-preserve-newer-draft{% if created %} data-draft-saved{% endif %} data-event="role-change" data-change data-submit-event="create-role" class="space-y-5"><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ company }}{{ name }}{{ code }}{{ description }}</section><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ permissions_heading }}{{ permission_search }}{{ permissions }}</section><div class="flex items-center justify-end gap-3"><a id="role-cancel" href="/authz/roles" class="text-sm font-medium text-ink-muted hover:text-ink">Cancel</a>{{ save }}</div></form>"#,
     ext = "html"
 )]
 struct RoleForm {
+    created: bool,
     company: Html,
     name: Html,
     code: Html,
     description: Html,
+    permissions_heading: Html,
+    permission_search: Html,
+    permissions: Html,
     save: Html,
 }
 
@@ -544,6 +548,8 @@ fn render_create(
     picker: &CompanyPicker,
     errors: &RoleErrors,
     created: bool,
+    permission_search: &str,
+    permissions: bilibi_ui::PermissionChoices,
 ) -> Result<String> {
     let field = |key: &str, label: &str, value: &str, errors: &[String]| {
         Field::in_form("role", key)
@@ -551,21 +557,27 @@ fn render_create(
             .value(value)
             .errors(errors.to_vec())
     };
+    let company_value = picker
+        .chosen
+        .as_ref()
+        .map_or_else(String::new, |(id, _)| format!("{}:{id}", COMPANY.prefix));
     let company = RecordPicker::named(
         COMPANY,
         "role-company-scope",
         "role",
         "company_id",
-        "Company Scope",
+        "Company",
         &picker.query,
         &picker.hits,
         picker
             .chosen
             .as_ref()
             .map(|(id, name)| (*id, name.as_str())),
-        ("pick-company", "change-company"),
+        ("", ""),
         errors.company_id.clone(),
-    );
+    )
+    .form_choice(Field::in_form("role", "company_id").value(&company_value))
+    .hint("Select the company that this role is for.");
     let mut html = render(FlashGroup {
         id: "flash-group",
         flash: FlashMap {
@@ -574,7 +586,7 @@ fn render_create(
         },
     })?;
     html.push(&render(Header {
-        title: Html::text("Create Role"),
+        title: Html::text("Create role"),
         subtitle: "Create a role for one of your companies.",
         actions: render(BackLink {
             href: "/authz/roles",
@@ -585,13 +597,14 @@ fn render_create(
         ..Header::default()
     })?);
     html.push(&render(RoleForm {
+        created,
         company: render(company)?,
-        name: render(field("name", "Name", &role.name, &errors.name))?,
-        code: render(
-            field("code", "Code", &role.code, &errors.code)
-                .placeholder("billing_manager")
-                .hint("Lowercase letters, digits and underscores; must be unique."),
+        name: render(
+            field("name", "Label", &role.name, &errors.name).hint("Example: Sales Manager").attr("data-debounce", "300"),
         )?,
+        code: render(field("code", "Code", &role.code, &errors.code).attr("data-debounce", "300").attr("data-edited-marker", "code_edited").hint(
+            "Lowercase letters, digits and underscores; must be unique; example: sales_manager",
+        ))?,
         description: render(
             field(
                 "description",
@@ -599,14 +612,18 @@ fn render_create(
                 &role.description,
                 &errors.description,
             )
-            .kind(InputKind::Textarea),
+            .kind(InputKind::Textarea)
+            .hint("Describe who should get this role."),
         )?,
+        permissions_heading: render(SectionHeading { title: "Permissions", ..SectionHeading::default() })?,
+        permission_search: render(Field::in_form("role", "permission_search").label("Search permissions").value(permission_search).attr("data-debounce", "300").attr("data-change-on-enter", "true"))?,
+        permissions: render(permissions)?,
         save: render(Button {
             variant: ButtonVariant::Primary,
             id: "role-save",
             button_type: "submit",
             working: "Creating...",
-            body: Html::text("Create Role"),
+            body: Html::text("Create role"),
             ..Button::default()
         })?,
     })?);
@@ -625,7 +642,14 @@ fn render_create(
 pub(crate) async fn create_view(pages: &Pages, scope: &Scope) -> Result<String> {
     let form = RoleCreate::mount(pages.clone(), scope).await?;
     let picker = form.picker(scope).await?;
-    render_create(&form.role, &picker, &form.errors, false)
+    render_create(
+        &form.role,
+        &picker,
+        &form.errors,
+        false,
+        &form.permission_search,
+        form.permission_choices(scope).await?,
+    )
 }
 
 /// Filters, sorting and paging stay in the URL for links and Back; column
@@ -740,6 +764,12 @@ enum CreateEvent {
         code: String,
         #[serde(rename = "role[description]", default)]
         description: String,
+        #[serde(default)]
+        code_edited: bool,
+        #[serde(rename = "role[permission_search]", default)]
+        permission_search: String,
+        #[serde(rename = "capability_keys[]", default)]
+        capabilities: Vec<String>,
     },
     RoleChange {
         #[serde(rename = "role[company_id]", default)]
@@ -752,11 +782,13 @@ enum CreateEvent {
         code: String,
         #[serde(rename = "role[description]", default)]
         description: String,
+        #[serde(default)]
+        code_edited: bool,
+        #[serde(rename = "role[permission_search]", default)]
+        permission_search: String,
+        #[serde(rename = "capability_keys[]", default)]
+        capabilities: Vec<String>,
     },
-    PickCompany {
-        record: String,
-    },
-    ChangeCompany {},
     ClearFlash {
         key: String,
     },
@@ -775,6 +807,9 @@ pub(crate) struct RoleCreate {
     pub(crate) company_query: String,
     pub(crate) errors: RoleErrors,
     pub(crate) created: bool,
+    editing_code: bool,
+    permission_search: String,
+    selected_capabilities: Vec<String>,
 }
 /// The owner company picker's state for one view.
 pub(crate) struct CompanyPicker {
@@ -806,8 +841,78 @@ impl RoleCreate {
             company_query: String::new(),
             errors: RoleErrors::default(),
             created: false,
+            editing_code: false,
+            permission_search: String::new(),
+            selected_capabilities: Vec::new(),
         })
     }
+    fn suggested_code(name: &str) -> String {
+        let code = name
+            .chars()
+            .flat_map(char::to_lowercase)
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect::<String>();
+        code.split('_')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("_")
+    }
+    async fn permission_choices(&self, scope: &Scope) -> Result<bilibi_ui::PermissionChoices> {
+        let options = self.visible_permissions(scope).await?;
+        Ok(bilibi_ui::PermissionChoices {
+            hidden_selected: self
+                .selected_capabilities
+                .iter()
+                .filter(|key| !options.iter().any(|option| &option.key == *key))
+                .cloned()
+                .collect(),
+            options,
+            search: self.permission_search.clone(),
+            selected_count: self.selected_capabilities.len(),
+        })
+    }
+
+    async fn visible_permissions(&self, scope: &Scope) -> Result<Vec<bilibi_ui::PermissionChoice>> {
+        let client = self.pages.db.get().await?;
+        if !crate::decide(&**client, scope, "admin.authz.role.update")
+            .await?
+            .allowed
+        {
+            return Ok(Vec::new());
+        }
+        let effective =
+            crate::effective_capabilities_in_company(&**client, scope, scope.user(), None).await?;
+        let operator = match scope.impersonator() {
+            Some(operator) => Some(
+                crate::effective_capabilities_in_company(&**client, scope, operator.user(), None)
+                    .await?,
+            ),
+            None => None,
+        };
+        let query = self.permission_search.trim().to_lowercase();
+        Ok(crate::vocabulary()?
+            .capabilities
+            .iter()
+            .filter(|(key, cap)| {
+                cap.definition.audience != crate::Audience::Portal
+                    && cap.definition.audience != crate::Audience::Owner
+                    && effective.reaches(key, Reach::All)
+                    && operator
+                        .as_ref()
+                        .is_none_or(|held| held.reaches(key, Reach::All))
+                    && key.to_lowercase().contains(&query)
+            })
+            .map(|(key, _)| bilibi_ui::PermissionChoice {
+                key: (*key).to_owned(),
+                dom_id: key.replace('.', "-"),
+                checked: self
+                    .selected_capabilities
+                    .iter()
+                    .any(|selected| selected == key),
+            })
+            .collect())
+    }
+
     /// The tenant's unarchived companies `search` finds: an archived one is
     /// read-only and create would refuse it, so the picker never offers it.
     async fn companies(
@@ -879,39 +984,62 @@ impl LiveState<Scope, Error> for RoleCreate {
                             name,
                             code,
                             description,
+                            code_edited,
+                            permission_search,
+                            mut capabilities,
                         } => {
-                            // Each change keeps what was typed: the form follows the server.
+                            capabilities.sort_unstable();
+                            capabilities.dedup();
+                            self.selected_capabilities = capabilities;
+                            self.permission_search = permission_search;
+                            // A changed code is a deliberate override of the suggestion.
+                            if code_edited {
+                                self.editing_code = true;
+                            }
+                            let company_id = COMPANY.picked(&company_id);
+                            if company_id != self.role.company_id {
+                                self.errors.company_id.clear();
+                            }
                             self.role = NewRole {
-                                company_id: company_id.trim().parse::<i64>().ok(),
+                                company_id,
                                 name,
                                 code,
                                 description,
                             };
+                            if !self.editing_code {
+                                self.role.code = Self::suggested_code(&self.role.name);
+                            }
                             self.company_query = company_search;
                         }
-                        CreateEvent::PickCompany { record } => {
-                            self.role.company_id =
-                                Some(COMPANY.picked(&record).ok_or(Error::Invalid)?);
-                            self.company_query.clear();
-                            self.errors.company_id.clear();
-                        }
-                        CreateEvent::ChangeCompany {} => self.role.company_id = None,
                         CreateEvent::CreateRole {
                             company_id,
                             company_search,
                             name,
                             code,
                             description,
+                            code_edited,
+                            permission_search,
+                            mut capabilities,
                         } => {
+                            capabilities.sort_unstable();
+                            capabilities.dedup();
+                            self.selected_capabilities = capabilities;
+                            self.permission_search = permission_search;
                             self.created = false;
                             self.company_query = company_search;
-                            let company_id = company_id.trim().parse::<i64>().ok();
+                            let company_id = COMPANY.picked(&company_id);
+                            if code_edited {
+                                self.editing_code = true;
+                            }
                             self.role = NewRole {
                                 company_id,
                                 name: name.trim().to_owned(),
                                 code: code.trim().to_owned(),
                                 description: description.trim().to_owned(),
                             };
+                            if !self.editing_code {
+                                self.role.code = Self::suggested_code(&self.role.name);
+                            }
                             // The source's `validate_inclusion`: a value the
                             // picker never offered is a field error.
                             let offered = match company_id {
@@ -927,7 +1055,11 @@ impl LiveState<Scope, Error> for RoleCreate {
                             } else {
                                 self.pages
                                     .grants
-                                    .create_role(request.scope, &self.role)
+                                    .create_role_with_capabilities(
+                                        request.scope,
+                                        &self.role,
+                                        &self.selected_capabilities,
+                                    )
                                     .await?
                             };
                             match outcome {
@@ -953,6 +1085,10 @@ impl LiveState<Scope, Error> for RoleCreate {
                                         }
                                     }
                                     self.role = NewRole::default();
+                                    self.company_query.clear();
+                                    self.editing_code = false;
+                                    self.permission_search.clear();
+                                    self.selected_capabilities.clear();
                                     self.errors = RoleErrors::default();
                                     self.created = true;
                                 }
@@ -968,7 +1104,14 @@ impl LiveState<Scope, Error> for RoleCreate {
             }
             let picker = self.picker(request.scope).await?;
             Ok(LiveBody {
-                html: render_create(&self.role, &picker, &self.errors, self.created)?,
+                html: render_create(
+                    &self.role,
+                    &picker,
+                    &self.errors,
+                    self.created,
+                    &self.permission_search,
+                    self.permission_choices(request.scope).await?,
+                )?,
                 ..LiveBody::default()
             })
         })

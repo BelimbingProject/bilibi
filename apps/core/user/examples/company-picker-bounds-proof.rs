@@ -141,13 +141,6 @@ async fn main() -> Result<(), Error> {
         listed(&html) <= BOUND,
         listed(&html),
     );
-    let _ = send(
-        &mut state,
-        &admin,
-        token,
-        Some(json!({"type": "change-company"})),
-    )
-    .await;
     let html = send(&mut state, &admin, token, Some(json!({"type": "role-change", "role[company_id_search]": last, "role[name]": "Bound owner", "role[code]": "bound_owner", "role[description]": ""}))).await;
     checks.check(
         "typing finds the last company",
@@ -158,10 +151,12 @@ async fn main() -> Result<(), Error> {
         &mut state,
         &admin,
         token,
-        Some(json!({"type": "pick-company", "record": record})),
+        Some(
+            json!({"type": "role-change", "role[company_id]": record, "role[name]": "Bound owner"}),
+        ),
     )
     .await;
-    let _ = send(&mut state, &admin, token, Some(json!({"type": "create-role", "role[company_id]": last_id.to_string(), "role[name]": "Bound owner", "role[code]": "bound_owner", "role[description]": ""}))).await;
+    let _ = send(&mut state, &admin, token, Some(json!({"type": "create-role", "role[company_id]": record, "role[name]": "Bound owner", "role[code]": "bound_owner", "role[description]": ""}))).await;
     let owner: Option<i64> = client
         .query_opt(
             "SELECT company_id FROM roles WHERE tenant_id=$1 AND code='bound_owner'",
