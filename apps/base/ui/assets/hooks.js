@@ -941,6 +941,19 @@
         if (placeholder && placeholder.hidden !== ticked > 0) placeholder.hidden = ticked > 0
         this.scheduleChips()
       }
+      this.filterOptions = event => {
+        if (!event.target.matches("[data-multi-search]")) return
+        const query = event.target.value.trim().toLocaleLowerCase()
+        const options = [...this.el.querySelectorAll("[data-multi-option]")]
+        let visible = 0
+        for (const option of options) {
+          option.hidden = !option.textContent.toLocaleLowerCase().includes(query)
+          if (!option.hidden) visible++
+        }
+        const empty = this.el.querySelector("[data-multi-no-matches]")
+        if (empty) empty.hidden = visible !== 0
+      }
+      this.el.addEventListener("input", this.filterOptions)
       this.el.addEventListener("change", this.followTick)
       this.el.addEventListener("click", this.removeChip)
       this.chipResize = new ResizeObserver(this.scheduleChips)
@@ -954,6 +967,7 @@
       cancelAnimationFrame(this.chipFrame)
       this.el.removeEventListener("click", this.removeChip)
       this.el.removeEventListener("change", this.followTick)
+      this.el.removeEventListener("input", this.filterOptions)
     },
   }
 

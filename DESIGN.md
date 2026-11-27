@@ -308,14 +308,19 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **A drop opens the target's own review**, the dialog its button opens, with the record chosen. Nothing is written until the person confirms, and the confirm runs the target's existing operation: its permission check, rules and history. A drop carries references only (`kind:id`) and the target re-reads every record under the person's own scope.
 - **Rows are draggable only when a page the person may use accepts their kind;** the menu shows the same targets. A target that takes fewer records than are ticked stays in the menu, greyed, saying how many it takes.
 
+- Hide an add control when it cannot add anything; do not explain its absence with an empty state.
+- Use one searchable picker for each record choice, without a separate search field.
+
 ## Writing and tone
+
+- Keep titles and section headings short noun phrases, never sentences. Write each help line as a clear instruction starting with a verb.
 
 - **Scan before reading.** Headings, labels, badges, counts and table structure carry the workflow. Do not explain what a visible label already says.
 - **Put information where it acts.** A page title stays true across tabs. Tab guidance lives in the tab.
 - **Consistency.** Same thing, same look, same place.
 - **Sentence case.** Titles, buttons, labels, options and badges raise only the first word and names: "Set up", "Past due", "Debits equal credits", never "Set Up". The shared badge raises the first letter of a stored lower-case value ("draft" reads "Draft") and nothing else.
 - **Calm.** No urgency, no badge spam, no dark patterns.
-- **Versions.** Show a version and commit date-time, never a commit hash as a version. Put the full hash in a tooltip at most.
+- **Values.** Values say what they are: never show a lone code, number, date or word the reader has to decode; put what it is beside it.
 - **Details.** Every expandable summary names what it contains.
 - **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator", commands to install something are "Installation commands".
 - **Never "your developer".** A label or sentence never sends the reader to another person ("Code for your developer", "Ask your developer to test it first"): the reader may be that person, and the others learn nothing. Say what the thing is and let the reader decide who acts.

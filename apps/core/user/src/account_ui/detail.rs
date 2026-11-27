@@ -24,9 +24,9 @@ use bilibi_ui::{
     lists::RecordLink,
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, PanelSpec},
     ActionLink, BackLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, Choice,
-    CommitStates, CommitStatus, ConfirmDialog, EmptyState, Fact, Facts, Field, FlashGroup, FlexRow,
-    FlexTable, Header, IconButton, InlineChoice, InlineEdit, InlineField, InputKind, ListColumns,
-    PageVariant, SectionHeading, TableEmpty,
+    CommitStates, CommitStatus, ConfirmDialog, Fact, Facts, Field, FilterToolbar, FlashGroup,
+    FlexRow, FlexTable, Header, IconButton, InlineChoice, InlineEdit, InlineField, InputKind,
+    ListColumns, PageVariant, SectionHeading, TableEmpty, ToolbarControl,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -97,17 +97,17 @@ struct AccessView {
     assignment_fields: Html,
     can_edit_capabilities: bool,
     control: &'static str,
-    unavailable: Html,
     show_assign: bool,
     role_search: String,
     roles: Vec<RoleOption>,
     selected_roles: usize,
     show_effective: bool,
     effective_count: usize,
+    permission_search: String,
+    permission_filter: Html,
     effective: Vec<DomainGroup>,
     denied: Vec<DomainGroup>,
     cap_control: &'static str,
-    cap_unavailable: Html,
     cap_search: String,
     caps: Vec<CapOption>,
     selected_caps: usize,
@@ -211,6 +211,7 @@ struct AccessUi {
     assignment_until: String,
     assignment_purpose: String,
     show_effective: bool,
+    permission_search: String,
     cap_search: String,
     selected_caps: Vec<String>,
 }
@@ -584,7 +585,7 @@ impl Detail {
                     .await?
                     .map(|c| c.name)
                     .unwrap_or_else(|| format!("Company {id}")),
-                None => "Every assigned workplace".into(),
+                None => "All workspaces".into(),
             };
             let mut row = FlexRow::new(&key)
                 .slot("role", Html::text(&record.role.name))
@@ -632,7 +633,7 @@ impl Detail {
             rows.push(
                 FlexRow::new(format!("provider-{}", role.id))
                     .slot("role", Html::text(&role.name))
-                    .slot("company", Html::text("Every assigned workplace"))
+                    .slot("company", Html::text("All workspaces"))
                     .slot("state", Html::text("Managed by sign-in provider")),
             );
         }
@@ -660,7 +661,7 @@ impl Detail {
                     .await?
                     .map(|c| c.name)
                     .unwrap_or_else(|| format!("Company {id}")),
-                None => "Every assigned workplace".into(),
+                None => "All workspaces".into(),
             };
             let state = if held.company_id.is_none_or(|id| reach.contains(&id)) {
                 format!("Via {} {}", held.source, held.label)
@@ -756,74 +757,6 @@ impl Detail {
         } else {
             "available"
         };
-        let grant_all_subject = {
-            let names: Vec<&str> = assignments
-                .iter()
-                .filter(|r| r.effective && r.role.grant_all)
-                .map(|r| r.role.name.as_str())
-                .chain(
-                    providers
-                        .iter()
-                        .filter(|r| r.grant_all)
-                        .map(|r| r.name.as_str()),
-                )
-                .collect();
-            if names.is_empty() {
-                "An assigned role".to_owned()
-            } else {
-                names.join(" and ")
-            }
-        };
-        let can_create_roles =
-            bilibi_authz::holds_proof(&**client, scope, "admin.authz.role.create").await?;
-        let can_list_roles =
-            bilibi_authz::holds_proof(&**client, scope, "admin.authz.role.list").await?;
-        let unavailable = match control {
-            "forbidden" => render(&EmptyState::forbidden("assign roles to this user"))?,
-            "grant_all" => render(&EmptyState::missing(
-                "A role would add nothing",
-                format!("{grant_all_subject} already gives this user every permission."),
-            ))?,
-            "no_roles" => {
-                let mut state = EmptyState::missing(
-                    "No roles exist yet",
-                    if can_create_roles {
-                        "Create one on the Roles page, then assign it here."
-                    } else {
-                        "Ask someone who can create roles to add one."
-                    },
-                );
-                if can_create_roles {
-                    state = state.action(render(&bilibi_ui::ActionLink {
-                        id: "assign-roles-create-link",
-                        icon: "create",
-                        title: "Create a role",
-                        href: "/authz/roles/create",
-                        body: Html::text("Create a role"),
-                        ..bilibi_ui::ActionLink::default()
-                    })?);
-                } else if can_list_roles {
-                    state = state.action(render(&bilibi_ui::ActionLink {
-                        id: "assign-roles-index-link",
-                        icon: "manage",
-                        title: "Open the Roles page",
-                        href: "/authz/roles",
-                        body: Html::text("Roles"),
-                        ..bilibi_ui::ActionLink::default()
-                    })?);
-                }
-                render(&state)?
-            }
-            "all_assigned" => render(&EmptyState::missing(
-                "No roles left to assign",
-                "This user already has every role.",
-            ))?,
-            "none_grantable" => render(&EmptyState::missing(
-                "No roles your account can assign",
-                "You can only assign roles whose permissions you have yourself.",
-            ))?,
-            _ => Html::EMPTY,
-        };
         let needle = self.access.role_search.trim().to_lowercase();
         let roles: Vec<RoleOption> = available
             .iter()
@@ -898,18 +831,6 @@ impl Detail {
         } else {
             "available"
         };
-        let cap_unavailable = match cap_control {
-            "forbidden" => render(&EmptyState::forbidden("add capabilities to this user"))?,
-            "all_in_effect" => render(&EmptyState::missing(
-                "No capabilities left to add",
-                "This user already has, or is denied, every capability.",
-            ))?,
-            "none_grantable" => render(&EmptyState::missing(
-                "No capabilities your account can add",
-                "You can only add capabilities you have yourself.",
-            ))?,
-            _ => Html::EMPTY,
-        };
         let cap_needle = self.access.cap_search.trim().to_lowercase();
         let caps: Vec<CapOption> = available_caps
             .iter()
@@ -924,8 +845,6 @@ impl Detail {
             id: "user-roles-heading",
             title: "Roles & Permissions",
             count: Some(assignments.len() + providers.len() + groups.len()),
-            description:
-                "Roles set what this user can do; effective permissions show the combined result.",
             ..SectionHeading::default()
         })?;
         let body = render(&AccessView {
@@ -947,17 +866,52 @@ impl Detail {
             },
             can_edit_capabilities: loaded.can_edit(),
             control,
-            unavailable,
             show_assign: self.access.show_assign,
             role_search: self.access.role_search.clone(),
             roles,
             selected_roles: self.access.selected_roles.len(),
             show_effective: self.access.show_effective,
             effective_count: effective_keys.len(),
-            effective: group(&effective_keys, &target.direct_allowed, "permissions"),
-            denied: group(&denied_keys, &target.direct_denied, "denied"),
+            permission_search: self.access.permission_search.clone(),
+            permission_filter: {
+                let mut toolbar = FilterToolbar::new(
+                    "permission-filter",
+                    vec![ToolbarControl::search(
+                        "permission-search-input",
+                        "search",
+                        "Search permissions",
+                        &self.access.permission_search,
+                        "Search permissions",
+                    )],
+                );
+                toolbar.event = "search_permissions";
+                render(&toolbar)?
+            },
+            effective: group(
+                &effective_keys
+                    .iter()
+                    .filter(|k| {
+                        k.to_lowercase()
+                            .contains(&self.access.permission_search.trim().to_lowercase())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                &target.direct_allowed,
+                "permissions",
+            ),
+            denied: group(
+                &denied_keys
+                    .iter()
+                    .filter(|k| {
+                        k.to_lowercase()
+                            .contains(&self.access.permission_search.trim().to_lowercase())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                &target.direct_denied,
+                "denied",
+            ),
             cap_control,
-            cap_unavailable,
             cap_search: self.access.cap_search.clone(),
             caps,
             selected_caps: self.access.selected_caps.len(),
@@ -1613,6 +1567,15 @@ impl Detail {
             }
             "toggle_effective_permissions" => {
                 self.access.show_effective = !self.access.show_effective
+            }
+            "search_permissions" => {
+                let fields = bilibi_ui::params::form_values_checked(
+                    value,
+                    "filters",
+                    bilibi_ui::params::FIELD_LIMIT,
+                )
+                .map_err(Error::refused)?;
+                self.access.permission_search = fields.get("search").cloned().unwrap_or_default();
             }
             "search_capabilities" => self.access.cap_search = text(value, "value"),
             "select_capabilities" => self.access.selected_caps = list(value, "capability_keys[]"),
