@@ -896,6 +896,7 @@ impl BulkData {
                     &run.except,
                     max,
                     started,
+                    Some((scope, run, &access)),
                 )
                 .await?
             {
@@ -1009,6 +1010,7 @@ impl BulkData {
         leave_out: &[String],
         max: i64,
         started: std::time::Instant,
+        access: Option<(&Scope, &ExportRun, &str)>,
     ) -> Result<std::result::Result<Listed, Failed>> {
         let id_property = registered.definition.import.id;
         // Records unticked after "Select all" are left out before the limit
@@ -1028,7 +1030,23 @@ impl BulkData {
                 let mut input = filter.clone();
                 input["page"] = json!(page);
                 input["page_size"] = json!(PAGE);
-                let listed = match self.jobs.read(client, execution, list, &input).await {
+                let listed = if let Some((scope, run, expected)) = access {
+                    let tx = client
+                        .build_transaction()
+                        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+                        .start()
+                        .await?;
+                    let current = self.seeing(&tx, scope).await?;
+                    if self.access(&current, run).as_deref() != Some(expected) {
+                        return Ok(Err(Failed(
+                            "Your access changed while the list was being exported. Export the list again.".into(),
+                        )));
+                    }
+                    self.jobs.read_in(tx, execution, list, &input).await
+                } else {
+                    self.jobs.read(client, execution, list, &input).await
+                };
+                let listed = match listed {
                     Ok(listed) => listed,
                     Err(bilibi_agent_api::Error::Backend(error))
                         if !matches!(

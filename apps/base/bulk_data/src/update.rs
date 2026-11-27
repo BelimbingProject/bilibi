@@ -858,6 +858,7 @@ impl BulkData {
                     &run.except,
                     max,
                     Instant::now(),
+                    None,
                 )
                 .await?
             {
