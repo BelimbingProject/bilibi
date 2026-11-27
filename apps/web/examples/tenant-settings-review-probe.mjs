@@ -42,10 +42,10 @@ for (const mode of ['single', 'linked', 'grid']) {
   const turn = () => new Promise(resolve => setImmediate(resolve));
   const document = {
     body: node('body'), documentElement: node('html'), getElementById: node,
-    createElement: tag => new Element(tag),
+    createElement: tag => new Element(tag), addEventListener() {},
   };
   runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], {
-    window: { addEventListener: (_, listener) => { receive = listener; } },
+    window: { addEventListener: (name, listener) => { if (name === 'message') receive = listener; } },
     document, parent, crypto: webcrypto, Uint8Array, setTimeout, clearTimeout,
     setInterval() {}, ResizeObserver: class { observe() {} }, matchMedia: () => ({ matches: false }),
   });
