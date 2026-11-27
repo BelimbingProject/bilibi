@@ -479,10 +479,8 @@
     morph(root, next, context);
     if (context.submitted && context.submitted.isConnected) {
       const form = context.submitted;
-      if (!form.matches(draftSelector) || form.hasAttribute('data-draft-saved')) {
-        editedMarkers.delete(form);
-      }
       if (form.hasAttribute('data-draft-saved')) {
+        editedMarkers.delete(form);
         editedDrafts.delete(form);
         clearTimeout(changeTimers.get(form));
         changeSent.delete(form);
@@ -796,6 +794,14 @@
     if (type === 'params') enqueue({type: 'params', params: values}, {source: form, loading: true});
     else enqueue({type: 'event', target: ownerTarget(form), payload: {type, ...values}}, {source: form});
   }
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.defaultPrevented || event.isComposing) return;
+    const control = event.target;
+    const form = control.form;
+    if (!control.hasAttribute('data-change-on-enter') || !form?.matches('[data-event][data-change]')) return;
+    event.preventDefault();
+    sendChange(form);
+  });
   for (const kind of ['input', 'change']) {
     document.addEventListener(kind, (event) => {
       const control = event.target;

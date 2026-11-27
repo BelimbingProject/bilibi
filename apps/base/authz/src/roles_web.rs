@@ -616,7 +616,7 @@ fn render_create(
             .hint("Describe who should get this role."),
         )?,
         permissions_heading: render(SectionHeading { title: "Permissions", ..SectionHeading::default() })?,
-        permission_search: render(Field::in_form("role", "permission_search").label("Search permissions").value(permission_search).attr("data-debounce", "300"))?,
+        permission_search: render(Field::in_form("role", "permission_search").label("Search permissions").value(permission_search).attr("data-debounce", "300").attr("data-change-on-enter", "true"))?,
         permissions: render(permissions)?,
         save: render(Button {
             variant: ButtonVariant::Primary,
