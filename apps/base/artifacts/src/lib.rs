@@ -1048,8 +1048,7 @@ impl<O: Owner> Owned<'_, O> {
     /// Lock, reauthorize, verify byte count/digest, and commit read evidence
     /// before returning any bytes. Never cache this result for another caller.
     pub async fn read(&self, client: &mut Client, id: &str) -> Result<Document> {
-        let tx = self.begin(client, "artifacts.read").await?;
-        self.read_in(tx, id, &(), |_, _| Box::pin(async { Ok(()) }))
+        self.read_in(client, false, id, &(), |_, _| Box::pin(async { Ok(()) }))
             .await
     }
 
@@ -1065,14 +1064,7 @@ impl<O: Owner> Owned<'_, O> {
     ) -> Result<Document> {
         let mut retries_left = 2;
         loop {
-            let result = async {
-                let tx = self.begin(client, "artifacts.read").await?;
-                tx.sql()
-                    .batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                    .await?;
-                self.read_in(tx, id, context, check).await
-            }
-            .await;
+            let result = self.read_in(client, true, id, context, check).await;
             let serialization_failure = match &result {
                 Err(Error::Database(error)) => error.is_serialization_failure(),
                 Err(Error::Sql(error)) => {
@@ -1088,9 +1080,11 @@ impl<O: Owner> Owned<'_, O> {
         }
     }
 
+    /// `repeatable` reads in one repeatable-read snapshot, for `read_checked`.
     async fn read_in<C: Sync>(
         &self,
-        tx: MutationTransaction<'_>,
+        client: &mut Client,
+        repeatable: bool,
         id: &str,
         context: &C,
         check: for<'a> fn(
@@ -1098,9 +1092,28 @@ impl<O: Owner> Owned<'_, O> {
             &'a tokio_postgres::Transaction<'_>,
         ) -> bilibi_tenancy::ProofFuture<'a, ()>,
     ) -> Result<Document> {
+        let tx = self.begin(client, "artifacts.read").await?;
+        if repeatable {
+            tx.sql()
+                .batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                .await?;
+        }
         let row = self.fetch(&tx, id).await?;
-        self.authorize(tx.sql(), Operation::Read, Some(&row.metadata.reference))
-            .await?;
+        let refused = self
+            .authorize(tx.sql(), Operation::Read, Some(&row.metadata.reference))
+            .await;
+        if let Err(error) = refused {
+            if matches!(error, Error::Database(bilibi_database::Error::Forbidden)) {
+                // The denial rolls back with the read, which must not commit
+                // as a read: decide again outside it, so the decision log
+                // keeps the refusal. The read stays refused either way.
+                drop(tx);
+                let _ = self
+                    .authorize(&*client, Operation::Read, Some(&row.metadata.reference))
+                    .await;
+            }
+            return Err(error);
+        }
         if !row.ready || row.deleted || row.expired {
             return Err(Error::NotFound);
         }
