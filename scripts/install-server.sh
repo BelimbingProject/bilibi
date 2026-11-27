@@ -1207,7 +1207,7 @@ put_in_service() {
     systemctl stop "$unit_name$instance"
     if ! admit_release "$instance" "$n"; then
         if [[ -n $previous ]]; then
-            admit_release "$instance" "$previous" || return 1
+            # This was the active, already-admitted release when the switch began.
             systemctl start "$unit_name$instance"
         fi
         return 1
@@ -1221,7 +1221,7 @@ put_in_service() {
     say "$instance: release $n did not answer within 60 s; see: journalctl -u $unit_name$instance" >&2
     if [[ -n $previous ]]; then
         systemctl stop "$unit_name$instance"
-        admit_release "$instance" "$previous" || return 1
+        # Return to the active, already-admitted release without applying newer admission rules.
         point_current "$instance" "$previous"
         systemctl start "$unit_name$instance"
         if wait_healthy "$instance"; then
@@ -1297,7 +1297,7 @@ release() {
         [[ -n $previous ]] && systemctl stop "$unit_name$instance"
         if ! admit_release "$instance" "$n"; then
             if [[ -n $previous ]]; then
-                admit_release "$instance" "$previous" || exit 1
+                # This was the active, already-admitted release when the update began.
                 systemctl start "$unit_name$instance"
             fi
             fail "release $n does not satisfy this instance's installation policy" "use an isolated installation, or prepare a code-free release; a first release must be code-free"
@@ -1305,7 +1305,7 @@ release() {
         if ! with_env "$instance" "$dir/releases/$n/bilibi-web" migrate ||
             ! with_env "$instance" "$dir/releases/$n/bilibi-web" seed-production; then
             if [[ -n $previous ]]; then
-                admit_release "$instance" "$previous" || exit 1
+                # A refused update must not strand an older admitted release offline.
                 systemctl start "$unit_name$instance"
             fi
             fail "release $n could not update the database" "see the output above, fix the migration and publish a new setup tag" MIGRATION_FAILED
