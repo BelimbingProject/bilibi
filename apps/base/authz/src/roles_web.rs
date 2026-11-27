@@ -610,7 +610,7 @@ fn render_create(
         )?,
         permissions_heading: render(SectionHeading { title: "Permissions", ..SectionHeading::default() })?,
         permission_search: render(Field::in_form("role", "permission_search").label("Search permissions").value(permission_search).attr("data-debounce", "300"))?,
-        permissions: render(bilibi_ui::PermissionChoices { options: permissions })?,
+        permissions: render(bilibi_ui::PermissionChoices { options: permissions, include_visible_keys: true })?,
         save: render(Button {
             variant: ButtonVariant::Primary,
             id: "role-save",
@@ -763,6 +763,8 @@ enum CreateEvent {
         permission_search: String,
         #[serde(rename = "capability_keys[]", default)]
         capabilities: Vec<String>,
+        #[serde(rename = "visible_capability_keys[]", default)]
+        visible_capabilities: Vec<String>,
     },
     RoleChange {
         #[serde(rename = "role[company_id]", default)]
@@ -781,11 +783,11 @@ enum CreateEvent {
         permission_search: String,
         #[serde(rename = "capability_keys[]", default)]
         capabilities: Vec<String>,
+        #[serde(rename = "visible_capability_keys[]", default)]
+        visible_capabilities: Vec<String>,
     },
     PickCompany {
         record: String,
-        #[serde(default)]
-        key: String,
     },
     ChangeCompany {},
     ClearFlash {
@@ -845,37 +847,16 @@ impl RoleCreate {
             selected_capabilities: Vec::new(),
         })
     }
-    async fn suggested_code(&self, scope: &Scope, name: &str) -> Result<String> {
-        let base = name
+    fn suggested_code(name: &str) -> String {
+        let code = name
             .chars()
             .flat_map(char::to_lowercase)
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect::<String>();
-        let base = base
-            .split('_')
+        code.split('_')
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
-            .join("_");
-        if base.is_empty() {
-            return Ok(base);
-        }
-        let base = &base[..base.len().min(240)];
-        let client = self.pages.db.get().await?;
-        let rows = client.query("SELECT code FROM roles WHERE tenant_id=$1 AND (code=$2 OR left(code, length($3))=$3)", &[&scope.tenant(), &base, &format!("{base}_")]).await?;
-        let used: std::collections::HashSet<String> = rows
-            .into_iter()
-            .filter_map(|row| row.get::<_, Option<String>>(0))
-            .collect();
-        if !used.contains(base) {
-            return Ok(base.to_owned());
-        }
-        for suffix in 2u64.. {
-            let code = format!("{base}_{suffix}");
-            if !used.contains(&code) {
-                return Ok(code);
-            }
-        }
-        unreachable!()
+            .join("_")
     }
     async fn permission_choices(&self, scope: &Scope) -> Result<Vec<bilibi_ui::PermissionChoice>> {
         let client = self.pages.db.get().await?;
@@ -918,12 +899,11 @@ impl RoleCreate {
             .collect())
     }
 
-    fn select_visible(&mut self, capabilities: Vec<String>) {
-        let query = self.permission_search.trim().to_lowercase();
+    fn select_visible(&mut self, visible: &[String], capabilities: Vec<String>) {
         self.selected_capabilities
-            .retain(|key| !key.to_lowercase().contains(&query));
+            .retain(|key| !visible.contains(key));
         for key in capabilities {
-            if !self.selected_capabilities.contains(&key) {
+            if visible.contains(&key) && !self.selected_capabilities.contains(&key) {
                 self.selected_capabilities.push(key);
             }
         }
@@ -1002,8 +982,9 @@ impl LiveState<Scope, Error> for RoleCreate {
                             code_edited,
                             permission_search,
                             capabilities,
+                            visible_capabilities,
                         } => {
-                            self.select_visible(capabilities);
+                            self.select_visible(&visible_capabilities, capabilities);
                             self.permission_search = permission_search;
                             // A changed code is a deliberate override of the suggestion.
                             if code_edited {
@@ -1016,15 +997,11 @@ impl LiveState<Scope, Error> for RoleCreate {
                                 description,
                             };
                             if !self.editing_code {
-                                self.role.code =
-                                    self.suggested_code(request.scope, &self.role.name).await?;
+                                self.role.code = Self::suggested_code(&self.role.name);
                             }
                             self.company_query = company_search;
                         }
-                        CreateEvent::PickCompany { record, key } => {
-                            if !key.is_empty() {
-                                return Err(Error::Invalid);
-                            }
+                        CreateEvent::PickCompany { record } => {
                             self.role.company_id =
                                 Some(COMPANY.picked(&record).ok_or(Error::Invalid)?);
                             self.company_query.clear();
@@ -1040,8 +1017,9 @@ impl LiveState<Scope, Error> for RoleCreate {
                             code_edited,
                             permission_search,
                             capabilities,
+                            visible_capabilities,
                         } => {
-                            self.select_visible(capabilities);
+                            self.select_visible(&visible_capabilities, capabilities);
                             self.permission_search = permission_search;
                             self.created = false;
                             self.company_query = company_search;
@@ -1056,8 +1034,7 @@ impl LiveState<Scope, Error> for RoleCreate {
                                 description: description.trim().to_owned(),
                             };
                             if !self.editing_code {
-                                self.role.code =
-                                    self.suggested_code(request.scope, &self.role.name).await?;
+                                self.role.code = Self::suggested_code(&self.role.name);
                             }
                             // The source's `validate_inclusion`: a value the
                             // picker never offered is a field error.
@@ -1104,6 +1081,10 @@ impl LiveState<Scope, Error> for RoleCreate {
                                         }
                                     }
                                     self.role = NewRole::default();
+                                    self.company_query.clear();
+                                    self.editing_code = false;
+                                    self.permission_search.clear();
+                                    self.selected_capabilities.clear();
                                     self.errors = RoleErrors::default();
                                     self.created = true;
                                 }

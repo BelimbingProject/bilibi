@@ -12,4 +12,5 @@ pub struct PermissionChoice {
 #[template(path = "permission_choices.html")]
 pub struct PermissionChoices {
     pub options: Vec<PermissionChoice>,
+    pub include_visible_keys: bool,
 }

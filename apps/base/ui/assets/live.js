@@ -434,7 +434,10 @@
       if (id) context.lookup.set(id, el);
     }
     morph(root, next, context);
-    if (context.submitted && context.submitted.isConnected) context.submitted.reset();
+    if (context.submitted && context.submitted.isConnected) {
+      editedMarkers.delete(context.submitted);
+      context.submitted.reset();
+    }
     const anchor = options.anchor && document.getElementById(options.anchor);
     restoreScroll(scroll, options.navigation, anchor && root.contains(anchor) ? anchor : null);
     restoreFocus(focus);

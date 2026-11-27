@@ -910,7 +910,10 @@ impl Detail {
             cap_control,
             cap_search: self.access.cap_search.clone(),
             caps_empty: caps.is_empty(),
-            caps: render(&bilibi_ui::PermissionChoices { options: caps })?,
+            caps: render(&bilibi_ui::PermissionChoices {
+                options: caps,
+                include_visible_keys: false,
+            })?,
             selected_caps: self.access.selected_caps.len(),
         })?;
         render(&Card {

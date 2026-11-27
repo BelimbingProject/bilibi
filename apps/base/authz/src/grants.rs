@@ -613,20 +613,7 @@ impl Grants {
         if grant.is_some() && !self.vocabulary.capabilities.get(key).is_some_and(|c|c.definition.company_scoped)
             && tx.sql().query_opt("SELECT role_id FROM principal_roles WHERE tenant_id=$1 AND role_id=$2 AND company_id IS NOT NULL LIMIT 1", &[&actor.tenant(),&role]).await?.is_some() { return Err(Error::Invalid); }
         if let Some(reach) = grant {
-            if !crate::effective_capabilities_in_company(tx.sql(), actor, actor.user(), None)
-                .await?
-                .reaches(key, reach)
-            {
-                return Err(Error::Forbidden);
-            }
-            if let Some(operator) = actor.impersonator() {
-                if !crate::effective_capabilities_in_company(tx.sql(), actor, operator.user(), None)
-                    .await?
-                    .reaches(key, reach)
-                {
-                    return Err(Error::Forbidden);
-                }
-            }
+            Self::verify_role_capability_reach(tx.sql(), actor, key, reach).await?;
         }
         self.step_up
             .require(
@@ -638,6 +625,39 @@ impl Grants {
                 ),
             )
             .await?;
+        Self::write_role_capability(tx, actor, role, key, grant).await
+    }
+
+    async fn verify_role_capability_reach(
+        client: &impl GenericClient,
+        actor: &Scope,
+        key: &str,
+        reach: Reach,
+    ) -> Result<()> {
+        if !crate::effective_capabilities_in_company(client, actor, actor.user(), None)
+            .await?
+            .reaches(key, reach)
+        {
+            return Err(Error::Forbidden);
+        }
+        if let Some(operator) = actor.impersonator() {
+            if !crate::effective_capabilities_in_company(client, actor, operator.user(), None)
+                .await?
+                .reaches(key, reach)
+            {
+                return Err(Error::Forbidden);
+            }
+        }
+        Ok(())
+    }
+
+    async fn write_role_capability(
+        tx: &mut MutationTransaction<'_>,
+        actor: &Scope,
+        role: i64,
+        key: &str,
+        grant: Option<Reach>,
+    ) -> Result<()> {
         let tenant = actor.tenant();
         let key = key.to_owned();
         let reach = grant.map(Reach::code);
@@ -718,6 +738,21 @@ impl Grants {
         if !errors.is_empty() {
             return Ok(CreatedRole::Refused(errors));
         }
+        if !capabilities.is_empty() {
+            authorize_key(tx.sql(), actor, crate::roles::UPDATE).await?;
+            for key in capabilities {
+                self.staff_key(key, false)?;
+                self.reach_supported(key, Reach::All)?;
+                Self::verify_role_capability_reach(tx.sql(), actor, key, Reach::All).await?;
+            }
+            self.step_up
+                .require(
+                    actor,
+                    step_up::ROLE_CAPABILITY,
+                    &format!("create role:{}", role.code),
+                )
+                .await?;
+        }
         let role = role.clone();
         let owner = company.get();
         let id = tx.mutate(|sql|Box::pin(async move {
@@ -725,8 +760,7 @@ impl Grants {
             Ok((id,vec![Change{kind:"authz.role".into(),id,old:json!({}),new:json!({"company_id":owner,"name":role.name,"code":role.code,"description":role.description,"is_system":false,"grant_all":false})}]))
         })).await?;
         for key in capabilities {
-            self.set_role_capability_in(&mut tx, actor, id, key, Some(Reach::All))
-                .await?;
+            Self::write_role_capability(&mut tx, actor, id, key, Some(Reach::All)).await?;
         }
         tx.commit().await?;
         Ok(CreatedRole::Created(id))

@@ -487,7 +487,9 @@
 
         if (this.serverSearch) {
           this.setOpen(false)
-          this.emit(this.el.dataset.pickEvent, {record: option.dataset.value, key: this.el.dataset.key})
+          const payload = {record: option.dataset.value}
+          if (this.el.dataset.key) payload.key = this.el.dataset.key
+          this.emit(this.el.dataset.pickEvent, payload)
           return
         }
         this.selectedValue = option.dataset.value
