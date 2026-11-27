@@ -198,7 +198,7 @@ The role comes from **`instance.role` in the settings table**. The explicit inst
 
 Builds run in a development workspace, which may live on a Dev server, or in your application repository’s GitHub Actions. The role identifies the instance; it never enables a build job in Bilibi.
 
-Click the role in the status bar to open **Instance settings** (`/system/instance`). A Core Administrator in the platform-operator organisation can change the role, name and colour. Every role change needs a fresh 2FA code, even on Dev, and is audited. The page warns before moving to or from Production: this changes warnings and 2FA rules without moving any data. Other accounts cannot change the role.
+Click the role in the status bar to open **Server Instance** (`/system/instance`). A Core Administrator in the platform-operator organisation can change the role, name and colour. Every role change needs a fresh 2FA code, even on Dev, and is audited. Changing the role changes warnings and 2FA rules without moving any data. Other accounts cannot change the role.
 
 The name and colour also remain available in the generic operator settings. Empty name and colour follow the current role:
 
@@ -215,13 +215,13 @@ In code, `bilibi_base::system::Instance::resolve` returns the role, label and co
 
 **Dev and Production on two machines** use the same verified release archive from GitHub, either downloaded directly or saved and uploaded again. Each instance keeps its own local release numbers, database and backup. No instance serves release files to another.
 
-**Install from GitHub**: Software › Releases lists the application repository pinned in Release trust. A private repository is read with the server's [GitHub App](#private-application-repositories). That asks for your 2FA code. Then review one setup file for this server. The server downloads that file, checks it, backs up, switches and can switch back or Undo, the same way as an upload. Uploading a saved copy of that published asset still works when you do not want GitHub to supply the bytes.
+**Install from GitHub**: Software › Releases lists the application repository pinned in Release trust. A private repository is read with the server's [GitHub App](#private-application-repositories). That asks for your 2FA code. Then review a file for this server in its pinned release channel. The server downloads that file, checks it, backs up, switches and can switch back or Undo, the same way as an upload. Uploading a saved copy of that published asset still works when you do not want GitHub to supply the bytes.
 
 Staging is optional. When used, install and check the exact GitHub asset there first, then review a separate Production install of that asset with fresh 2FA. See [Staging and Production](../apps/base/software/README.md#staging-and-production) for the agent report and identity checks.
 
 ## Putting a release into service
 
-**After the first release, the owner does this from the Software page or the root-only server command**, and the on-demand installer service does the work: copy and check, pause, back up, update the database, switch, check, and switch back by itself when the check fails. The page also offers Undo. From an interactive server terminal, `sudo bilibi update <instance> [--to X.Y.Z]` lists compatible releases from the pinned repository, shows the same review, asks for the installation owner's fresh 2FA code, queues the same operation and follows every step. By default it selects the newest published stable setup if it is newer than the running setup from that repository. Use `--to X.Y.Z` to select the stable setup tagged `setup-vX.Y.Z`. Either selection requires a fresh, complete release listing and exactly one compatible asset for the selected tag. For Undo, `sudo bilibi update <instance> --undo` reviews and follows Undo. There is no flag to skip 2FA, proof verification or backup. What each step does, and what Undo loses, is in [`apps/installer/README.md`](../apps/installer/README.md).
+**After the first release, the owner does this from the Software page or the root-only server command**, and the on-demand installer service does the work: copy and check, pause, back up, update the database, switch, check, and switch back by itself when the check fails. The page also offers Undo. For an instance with a pinned stable setup source, run `sudo bilibi update <instance> [--to X.Y.Z]` from an interactive server terminal. The command lists compatible releases from the pinned repository, shows the same review, asks for the installation owner's fresh 2FA code, queues the same operation and follows every step. By default it selects the newest published stable setup if it is newer than the running setup from that repository. Use `--to X.Y.Z` to select the stable setup tagged `setup-vX.Y.Z`. Either selection requires a fresh, complete release listing and exactly one compatible asset for the selected tag. For Undo, `sudo bilibi update <instance> --undo` reviews and follows Undo. There is no flag to skip 2FA, proof verification or backup. What each step does, and what Undo loses, is in [`apps/installer/README.md`](../apps/installer/README.md).
 
 The installer records the admitted tag and digest before copying a numbered release. A failure after that write consumes the tag. Fix the cause and publish a new setup tag.
 
@@ -530,7 +530,7 @@ Keys in `env` (the service's environment; `README.md` explains each):
 
 | Key | Set to |
 | --- | --- |
-| `BILIBI_ENV` | Initial role for the install seed: `development`, `staging` or `production`; later changes use Instance settings |
+| `BILIBI_ENV` | Initial role for the install seed: `development`, `staging` or `production`; later changes use Server Instance |
 | `APP_ORIGIN` | `https://<staff-site>`, the exact staff address |
 | `BIND_ADDR` | `127.0.0.1:<port>`, the staff listener where Caddy forwards |
 | `PUBLIC_ORIGIN` | `https://<public-site>`, present only when `--public-site` enables public routes. It gives the public listener's scheme and port; each request's hostname names the workspace's site |

@@ -112,6 +112,8 @@ The file has five required parts and an optional extension list:
 | `plugins` | per plug-in ID: name, publisher, repository, the Domain it belongs to (`null` for a Platform plug-in) and its versions, in the same shape | a person; empty until the plug-in runtime ships |
 | `tested` | one entry per Platform commit and Domain commit that passed the gates together, with both versions, the time and the CI run | CI, through the `catalogue` branch; a person may also record a set by hand on `main` with the run that proved it, and CI merges those with its own |
 
+Newly published Domain and Extension version records include `committed_at`, the tagged commit’s committer timestamp from GitHub. Older records may omit it.
+
 A `platform` requirement is comparators joined by commas: `>=0.1.0, <0.2.0`. The operators are `>=`, `<=`, `>`, `<` and `=`. `python3 scripts/catalogue.py --check` refuses a catalogue that is not well formed, and CI runs it on every change, so a typo never reaches the published copy.
 
 ## How releases reach the catalogue

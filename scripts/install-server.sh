@@ -1149,6 +1149,7 @@ admit_release() {
     dir=$(instance_dir "$instance")
     read_installation_mode || return 1
     with_env "$instance" "$dir/releases/$n/bilibi-web" status | python3 -c '
+import re
 import sys
 mode = sys.argv[1]
 status = sys.stdin.read()
@@ -1161,16 +1162,17 @@ if extensions.strip() == "none mounted":
     sys.exit(0)
 if not extensions.startswith("\n") or not extensions.strip():
     sys.exit("Invalid Extension composition")
+declaration = re.compile(
+    r"  (?P<id>[a-z][a-z0-9]*(?:_[a-z0-9]+)*) (?:unpinned|(?P<version>[^,\x00-\x20\x7F:]+), commit (?P<commit>[A-Za-z0-9]+))(?:, code: (?P<code>reviewed|customer))?, modules: [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*(?:, [a-z][a-z0-9]*(?:_[a-z0-9]+)*/[a-z][a-z0-9]*(?:_[a-z0-9]+)*)*"
+)
 for line in extensions.splitlines():
     if not line:
         continue
-    declaration, modules, _ = line.partition(", modules:")
-    identity, code_marker, code = declaration.rpartition(", code: ")
-    if not line.startswith("  ") or not modules or not code_marker or " " not in identity.strip():
-        sys.exit("Invalid or missing Extension code declaration")
-    name = identity.strip().split(" ", 1)[0]
-    if code not in {"reviewed", "customer"}:
-        sys.exit(f"Extension {name} must declare reviewed or customer code")
+    match = declaration.fullmatch(line)
+    if not match:
+        sys.exit("Invalid Extension declaration")
+    name = match["id"]
+    code = match["code"] or "customer"
     if code == "customer" and mode == "shared":
         sys.exit(f"Extension {name} requires an isolated installation; use an isolated installation, or prepare a code-free release")
 ' "$installation_mode"
@@ -1530,6 +1532,10 @@ PYJSON
     rm -f -- "$output"
     return "$result"
 }
+
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+    return
+fi
 
 if [[ ${1:-} == --json ]]; then
     shift

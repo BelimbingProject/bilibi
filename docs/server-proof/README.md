@@ -121,7 +121,7 @@ The driver works around an AXI limit: it fills the real file input through brows
 
 Use the same disposable application release. A hand-created release asset has no valid build provenance and must fail before unpacking. GitHub allows only 60 unauthenticated calls an hour per address, and the lab shares the host's address, so refresh sparingly.
 
-Name the repository and accept it on Software › Releases, choose **Show pre-releases**, then drive the same reviewed install the page offers:
+Name the repository and accept it on Software › Releases. Open **Choose a release file**. For a stable source, choose **Show pre-releases** if the test release is marked as a GitHub pre-release. Then drive the same reviewed install the page offers:
 
 ```sh
 docs/server-proof/drive.py github-install <asset-id> wrong-digest      # refused at the plan

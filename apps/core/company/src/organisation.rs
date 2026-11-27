@@ -294,11 +294,17 @@ pub async fn reachable(
     scope: &Scope,
     id: OrganisationId,
 ) -> Result<bool> {
+    let mode = client
+        .query_opt("SHOW transaction_read_only", &[])
+        .await?
+        .ok_or(Error::Internal)?;
+    let sql = if mode.get::<_, &str>(0) == "on" {
+        "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL"
+    } else {
+        "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR KEY SHARE"
+    };
     let live = client
-        .query_opt(
-            "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR KEY SHARE",
-            &[&scope.tenant(), &id.get()],
-        )
+        .query_opt(sql, &[&scope.tenant(), &id.get()])
         .await?
         .is_some();
     if !live {

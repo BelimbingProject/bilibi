@@ -86,22 +86,20 @@ impl Software {
             })
             .collect::<Vec<_>>();
         let installed = self.installed_asset(&**client, scope).await?;
-        let (trust, mut github) = match self.paths.as_ref() {
-            Some(paths) => {
-                let policy = release_proof::Policy::load(paths).map_err(Error::refused)?;
-                let trust = release_proof::facts(paths).map_err(Error::refused)?;
-                let github = self
-                    .github_listing(&**client, Some(scope), force, prerelease, &policy)
-                    .await?;
-                (trust, github)
+        let (policy, trust) = self
+            .paths
+            .as_ref()
+            .map(release_proof::read_facts)
+            .unwrap_or_default();
+        let mut github = match policy {
+            Some(policy) => {
+                self.github_listing(&**client, Some(scope), force, prerelease, &policy)
+                    .await?
             }
-            None => (
-                Value::Null,
-                json!({
-                    "available": false,
-                    "message": "This program is not running from an installed instance, so it has no release trust record.",
-                }),
-            ),
+            None => json!({
+                "available": false,
+                "message": trust["message"].as_str().unwrap_or("This server has no release folder."),
+            }),
         };
         let repository_id = github["repository_id"].clone();
         if let Some(releases) = github["releases"].as_array_mut() {
@@ -111,9 +109,16 @@ impl Software {
                     json!(crate::github::same_asset(release, &installed["github"]));
             }
         }
-        let update = crate::update::discover(self.paths.as_ref(), &github);
+        let mut update = crate::update::discover(self.paths.as_ref(), &github);
+        if update["current"].is_null() {
+            update["current"] = json!(format!(
+                "Bilibi v{} (release tag not recorded)",
+                self.composition.version
+            ));
+        }
         if let Some(fields) = github.as_object_mut() {
             fields.remove("latest");
+            fields.remove("latest_notes");
             fields.remove("complete");
         }
         Ok(

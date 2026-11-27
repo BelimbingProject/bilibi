@@ -11,6 +11,7 @@ struct PinnedContainer {
     /// The `vX.Y.Z` tag at that commit, without the `v`; `None` when untagged.
     version: Option<&'static str>,
     branch: Option<&'static str>,
+    committed_at: Option<&'static str>,
 }
 /// The pin as `build.rs` read it.
 #[derive(Clone, Copy, Debug)]
@@ -60,6 +61,7 @@ pub(super) fn composition() -> Composition {
                         commit: None,
                         version: None,
                         branch: None,
+                        committed_at: None,
                         extension_code: (layer == Layer::Extensions).then(|| {
                             bilibi_extensions::CODE
                                 .iter()
@@ -91,6 +93,7 @@ pub(super) fn composition() -> Composition {
                 container.commit = Some(built.commit);
                 container.version = built.version;
                 container.branch = built.branch;
+                container.committed_at = built.committed_at;
             }
         }
         return Composition {
@@ -140,6 +143,7 @@ pub(super) fn composition() -> Composition {
             container.commit = Some(pinned.commit);
             container.version = pinned.version;
             container.branch = pinned.branch;
+            container.committed_at = pinned.committed_at;
         }
     }
     Composition {

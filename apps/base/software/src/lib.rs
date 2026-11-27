@@ -219,7 +219,7 @@ impl Software {
         }
         Ok(json!({
             "instance": review::instance_json(&instance),
-            "release_trust": self.paths.as_ref().map(release_proof::facts).transpose().map_err(Error::refused)?,
+            "release_trust": self.paths.as_ref().map(|paths| release_proof::read_facts(paths).1),
             "installed": review::installed_json(&self.composition),
             "installed_asset": self.installed_asset(&**client, scope).await?,
             "plugins": jobs::plugins_json(&**client, tenant).await?,
