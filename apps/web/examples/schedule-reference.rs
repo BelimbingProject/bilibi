@@ -24,7 +24,7 @@
 use bilibi_authz::{
     authorize_key, CapabilityDefinition, RoleDefinition, VocabularyContribution, VOCABULARY,
 };
-use bilibi_base::datetime::{Clock, DisplayPolicy};
+use bilibi_base::datetime::{Clock, DisplayPolicy, Format, Precision};
 use bilibi_database::{Db, Error, Result};
 use bilibi_module_registry::{
     contributions::{Access, CompanyScope, Contribution, Method, Route, ROUTES},
@@ -38,6 +38,7 @@ use bilibi_ui::{
         MAX_ITEMS,
     },
     choices,
+    flex_table::{Instant, InstantView},
     list_state::FILTERS_FORM,
     page::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
@@ -391,7 +392,7 @@ struct CalendarPage {
     schedule: Arc<Schedule>,
     query: HashMap<String, String>,
     browser_zone: Option<String>,
-    moving: Option<String>,
+    moving: Option<(String, String)>,
     move_errors: Vec<String>,
     notice: Option<(StatusKind, String)>,
 }
@@ -461,8 +462,14 @@ impl CalendarPage {
                 }
             })
             .collect();
-        calendar.notice = self.notice.clone();
-        calendar.moving = self.moving.clone().filter(|_| can_update);
+        calendar.notice = self
+            .notice
+            .as_ref()
+            .map(|(kind, message)| (*kind, bilibi_ui::Html::text(message)));
+        if let Some((id, zone)) = self.moving.as_ref().filter(|_| can_update) {
+            calendar.moving = Some(id.clone());
+            calendar.move_timezone = Some(zone.clone());
+        }
         calendar.move_errors = self.move_errors.clone();
         let mut html = Html::render(&Header {
             title: Html::text("Schedule"),
@@ -506,7 +513,9 @@ impl CalendarPage {
             Some(calendar::MOVE_OPEN) => {
                 let client = self.db.get().await?;
                 if authorize_key(&**client, scope, UPDATE).await.is_ok() {
-                    self.moving = calendar::item_id(event).map(str::to_owned);
+                    drop(client);
+                    let zone = self.zone(scope).await?;
+                    self.moving = calendar::item_id(event).map(|id| (id.to_owned(), zone));
                     self.move_errors.clear();
                     self.notice = None;
                 } else {
@@ -521,8 +530,18 @@ impl CalendarPage {
                 self.move_errors.clear();
             }
             Some(name @ (calendar::MOVE | calendar::MOVE_SUBMIT)) => {
-                let zone = self.zone(scope).await?;
-                match CalendarMove::from_event(event, &zone) {
+                let zone = if name == calendar::MOVE_SUBMIT {
+                    self.moving.as_ref().map(|(_, zone)| zone.clone())
+                } else {
+                    let zone = self.zone(scope).await?;
+                    (get("timezone") == Some(zone.as_str())).then_some(zone)
+                };
+                let change = zone
+                    .ok_or_else(|| {
+                        "The calendar time zone changed. Start the move again.".to_owned()
+                    })
+                    .and_then(|zone| CalendarMove::from_event(event, &zone));
+                match change {
                     Err(sentence) if name == calendar::MOVE_SUBMIT => {
                         self.move_errors = vec![sentence];
                     }
@@ -607,12 +626,25 @@ impl BoardPage {
             for record in records {
                 let (when, date) = match &record.when {
                     CalendarWhen::Timed { start, .. } => {
-                        let start = start.to_zoned(zone.clone());
-                        (start.strftime("%a %-d %b %H:%M").to_string(), start.date())
+                        let time = display.render(*start, Format::DateTime, Precision::Minute);
+                        let instant = Instant::new(
+                            &time.iso,
+                            &time.text,
+                            &time.company,
+                            &time.utc,
+                            time.mode.as_str(),
+                        );
+                        let when = Html::render(&InstantView {
+                            id: &format!("schedule-board-{}-start", record.id),
+                            instant: &instant,
+                        })
+                        .map_err(|_| Error::Internal)?;
+                        (when, start.to_zoned(zone.clone()).date())
                     }
-                    CalendarWhen::AllDay { first, .. } => {
-                        (format!("All day, {}", first.strftime("%a %-d %b")), *first)
-                    }
+                    CalendarWhen::AllDay { first, .. } => (
+                        Html::text(&format!("All day, {}", first.strftime("%a %-d %b"))),
+                        *first,
+                    ),
                 };
                 let lane_label = LANES
                     .iter()
@@ -621,7 +653,7 @@ impl BoardPage {
                     .unwrap_or(record.lane);
                 let card = BoardCard::new(&record.id, key, record.title.clone())
                     .fact(format!("{} · {lane_label}", record.kind))
-                    .fact(when)
+                    .fact_html(when)
                     .href(format!("{PATH}?date={date}&view=week"));
                 cards.push(if can_update {
                     card.movable(record.version.to_string(), edges.iter().copied())

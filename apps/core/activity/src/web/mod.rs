@@ -98,18 +98,24 @@ impl Pages {
 }
 
 /// The reader's clock: how instants are shown, and the zone a date-time
-/// field is read in. Until the browser reports its zone, a reader in the
-/// browser-local mode reads and enters times in the company's zone.
+/// field is read in.
 #[derive(Clone)]
 pub(crate) struct Clock {
     pub display: DisplayContext,
     pub zone: String,
+    ready: bool,
 }
 impl Clock {
     pub async fn new(pages: &Pages, scope: &Scope, browser: Option<&str>) -> Result<Self> {
         let display = pages.display(scope).await?;
         let zone = display.clock(browser, Timestamp::now()).timezone;
-        Ok(Self { display, zone })
+        let ready =
+            display.mode != Mode::Local || browser.is_some_and(bilibi_datetime::valid_timezone);
+        Ok(Self {
+            display,
+            zone,
+            ready,
+        })
     }
     fn tz(&self) -> TimeZone {
         TimeZone::get(&self.zone).unwrap_or(TimeZone::UTC)
@@ -127,34 +133,26 @@ impl Clock {
             i: self.instant(at),
         })
     }
-    /// An instant as text for an inline time fact, in the Platform's format
-    /// and in the zone its editor reads and enters times in.
-    pub fn text(&self, at: Timestamp) -> String {
-        DisplayContext {
-            mode: Mode::Company,
-            timezone: self.zone.clone(),
-            ..self.display.clone()
-        }
-        .render(at, Format::DateTime, Precision::Minute)
-        .text
-    }
     /// The value of a `datetime-local` field.
     pub fn local(&self, at: Option<Timestamp>) -> String {
         at.map(|t| t.to_zoned(self.tz()).strftime("%Y-%m-%dT%H:%M").to_string())
             .unwrap_or_default()
     }
-    /// A `datetime-local` value read in the reader's zone; `Ok(None)` when
-    /// blank.
     pub fn parse(&self, value: &str) -> std::result::Result<Option<Timestamp>, ()> {
+        Self::parse_in_zone(&self.zone, value)
+    }
+
+    fn parse_in_zone(zone: &str, value: &str) -> std::result::Result<Option<Timestamp>, ()> {
         let value = value.trim();
         if value.is_empty() {
             return Ok(None);
         }
+        let zone = TimeZone::get(zone).map_err(|_| ())?;
         let civil = civil::DateTime::strptime("%Y-%m-%dT%H:%M", value)
             .or_else(|_| civil::DateTime::strptime("%Y-%m-%dT%H:%M:%S", value))
             .map_err(|_| ())?;
         civil
-            .to_zoned(self.tz())
+            .to_zoned(zone)
             .map(|z| Some(z.timestamp()))
             .map_err(|_| ())
     }
@@ -178,13 +176,10 @@ impl BrowserZone {
     }
     /// The `browser_timezone` event's zone, when valid.
     pub fn accept(&mut self, value: &Value) {
-        self.zone = Some(
-            value["timezone"]
-                .as_str()
-                .filter(|zone| zone.len() <= 64 && bilibi_datetime::valid_timezone(zone))
-                .unwrap_or("Etc/UTC")
-                .to_owned(),
-        );
+        self.zone = value["timezone"]
+            .as_str()
+            .filter(|zone| bilibi_datetime::valid_timezone(zone))
+            .map(str::to_owned);
     }
     /// The request id the hook reports for, empty once it has.
     pub fn request(&self) -> &str {

@@ -6,13 +6,13 @@
 use super::Index;
 use crate::web::{refusal, render, sentences, urgency, Clock, Refusal};
 use crate::{Activity, Filter, Kind, Sort, State, Status};
+use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
     board::{Board, BoardCard, BoardColumn, BoardMove},
     calendar::{CalendarSlot, CalendarWhen},
-    choices, Alert, Button, ButtonVariant, Field, Form, Html, InputKind, Modal, ModalWidth,
-    StatusKind,
+    choices, Alert, Button, ButtonVariant, Field, Form, Html, InputKind, StatusKind,
 };
 use std::collections::HashMap;
 
@@ -26,10 +26,21 @@ const BOARD_CLOSED: i64 = 100;
 /// lasts an hour.
 const SLOT_HOUR: i64 = 9;
 
+#[derive(Template)]
+#[template(
+    source = r#"{% import "dialog.html" as ui %}{% call ui::modal(id="activities-slot-modal", title="Add at this time", cancel_event="cancel_slot", width=bilibi_ui::ModalWidth::Compact, description_html=summary) %}{{ form }}{% endcall %}"#,
+    ext = "html"
+)]
+struct SlotDialog {
+    summary: Html,
+    form: Html,
+}
+
 /// A free calendar slot waiting for its kind: its start and end, and whose
 /// lane of the shared view it was chosen on (their account and name), when
 /// that is not the reader's own.
 pub(super) struct Slot {
+    pub(super) clock: Clock,
     pub start: jiff::Timestamp,
     pub end: jiff::Timestamp,
     pub assignee: Option<(i64, String)>,
@@ -47,11 +58,7 @@ pub(super) struct Slot {
 impl Slot {
     /// Reads the compact draft's fields: its title, kind, all-day box and its
     /// start and end (a date in a zone, or the date the all-day box keeps).
-    pub(super) fn read(
-        &mut self,
-        form: &std::collections::HashMap<String, String>,
-        zone: &super::BrowserZone,
-    ) -> Result<()> {
+    pub(super) fn read(&mut self, form: &std::collections::HashMap<String, String>) -> Result<()> {
         self.errors.clear();
         self.notice.clear();
         if let Some(title) = form.get("title") {
@@ -60,13 +67,11 @@ impl Slot {
         if let Some(kind) = form.get("kind").and_then(|kind| Kind::parse(kind)) {
             self.kind = kind;
         }
-        // Only the zone is read here, to parse a typed time.
-        let clock = Clock {
-            display: bilibi_datetime::DisplayContext::anonymous(),
-            zone: zone.zone.clone().unwrap_or_else(|| "UTC".to_owned()),
-        };
         let mut time = |key: &str| -> Result<Option<jiff::Timestamp>> {
-            match clock.parse(form.get(key).map(String::as_str).unwrap_or_default()) {
+            match self
+                .clock
+                .parse(form.get(key).map(String::as_str).unwrap_or_default())
+            {
                 Ok(at) => Ok(at),
                 Err(()) => {
                     self.errors
@@ -255,7 +260,9 @@ impl Index {
                 .href(format!("/activities/{}", a.id))
                 .urgency(urgency(a, now, soon));
             if let Some(due) = a.due_at {
-                card = card.fact(format!("Due {}", clock.text(due)));
+                let mut fact = Html::text("Due ");
+                fact.push(&clock.time(&format!("activities-board-{}-due", a.id), due)?);
+                card = card.fact_html(fact);
             }
             card = card.fact(format!(
                 "Assigned to {}",
@@ -297,12 +304,13 @@ impl Index {
     /// interval, saved straight through the kind's own create contract.
     /// More options carries every typed value into the full form instead.
     pub(super) fn slot_dialog(&self, clock: &Clock, slot: &Slot) -> Result<Html> {
-        let start = clock.text(slot.start);
-        let end = clock.text(slot.end);
-        let description = match &slot.assignee {
-            Some((_, name)) => format!("{start} to {end}, assigned to {name}."),
-            None => format!("{start} to {end}."),
-        };
+        let mut summary = clock.time("activities-slot-summary-start", slot.start)?;
+        summary.push(&Html::text(" to "));
+        summary.push(&clock.time("activities-slot-summary-end", slot.end)?);
+        if let Some((_, name)) = &slot.assignee {
+            summary.push(&Html::text(&format!(", assigned to {name}")));
+        }
+        summary.push(&Html::text("."));
         let mut body = Html::EMPTY;
         if !slot.notice.is_empty() {
             body.push(&render(Alert {
@@ -339,15 +347,15 @@ impl Index {
                 .id("activities-slot-start")
                 .label("Starts")
                 .kind(InputKind::DatetimeLocal)
-                .value(clock.local(Some(slot.start)))
-                .hint(clock.hint()),
+                .value(slot.clock.local(Some(slot.start)))
+                .hint(slot.clock.hint()),
         )?);
         body.push(&render(
             Field::in_form("slot", "end")
                 .id("activities-slot-end")
                 .label("Ends")
                 .kind(InputKind::DatetimeLocal)
-                .value(clock.local(Some(slot.end)))
+                .value(slot.clock.local(Some(slot.end)))
                 .errors(slot.errors.get("end").cloned().unwrap_or_default()),
         )?);
         let mut actions = render(Button {
@@ -381,14 +389,6 @@ impl Index {
             actions,
             ..Form::default()
         })?;
-        render(Modal {
-            id: "activities-slot-modal",
-            title: "Add at this time",
-            cancel_event: "cancel_slot",
-            width: ModalWidth::Compact,
-            description: &description,
-            body: form,
-            ..Modal::default()
-        })
+        render(SlotDialog { summary, form })
     }
 }

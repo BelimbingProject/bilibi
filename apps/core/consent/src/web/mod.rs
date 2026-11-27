@@ -85,9 +85,15 @@ impl Pages {
     }
 }
 
-/// An instant as text in the reader's display mode.
-pub(crate) fn when(display: &DisplayContext, at: jiff::Timestamp) -> String {
-    display.render(at, Format::DateTime, Precision::Minute).text
+/// An instant that follows the reader's display mode.
+pub(crate) fn when(display: &DisplayContext, id: &str, at: jiff::Timestamp) -> Result<Html> {
+    let r = display.render(at, Format::DateTime, Precision::Minute);
+    let instant =
+        bilibi_ui::flex_table::Instant::new(&r.iso, &r.text, &r.company, &r.utc, r.mode.as_str());
+    render(bilibi_ui::flex_table::InstantView {
+        id,
+        instant: &instant,
+    })
 }
 
 pub(crate) fn render(template: impl Template) -> Result<Html> {

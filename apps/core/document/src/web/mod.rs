@@ -190,8 +190,11 @@ impl Clock {
     pub fn date(&self, date: Date) -> String {
         self.0.render_date(date)
     }
-    pub fn text(&self, at: Timestamp) -> String {
-        self.0.render(at, Format::DateTime, Precision::Minute).text
+    pub fn html(&self, id: &str, at: Timestamp) -> Result<Html> {
+        render(bilibi_ui::flex_table::InstantView {
+            id,
+            instant: &self.instant(at),
+        })
     }
     /// The shared typed instant for a table cell.
     pub fn instant(&self, at: Timestamp) -> bilibi_ui::flex_table::Instant {

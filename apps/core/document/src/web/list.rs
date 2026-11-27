@@ -461,12 +461,10 @@ impl Index {
             )
             .slot(
                 "retention",
-                Html::text(
-                    &retention_due_at
-                        .and_then(|at| Timestamp::try_from(at).ok())
-                        .map(|at| clock.text(at))
-                        .unwrap_or_default(),
-                ),
+                match retention_due_at.and_then(|at| Timestamp::try_from(at).ok()) {
+                    Some(at) => clock.html(&format!("documents-{id}-retention"), at)?,
+                    None => Html::EMPTY,
+                },
             )
             .slot("revision", Html::text(&d.revision.to_string()))
             .slot("publish_date", Html::text(&clock.date(d.publish_date)));

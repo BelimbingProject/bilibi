@@ -687,6 +687,8 @@ Strict separation is the default. A case may explicitly permit an operator to al
 
 Cover has an inclusive start, exclusive end, scope, reason and revocation history. It is one hop only. A delegate needs its own business permission and company reach, and the grantor must remain eligible. Expiry and revocation affect future decisions; completed decisions retain who covered for whom.
 
+On **Approval cover**, enter **From** and **Until** in the zone shown on those fields. The page takes that zone from the top-bar setting when the form first becomes available and keeps it while you stay on the page. In Local mode, the form appears once the browser reports its zone.
+
 Recall is available only while waiting, to the initiating person when the owner permits it. It calls the owner's close handler in the same transaction. Correct a completed effect through the owner's reversal or cancellation operation.
 
 ### Waiting list and exceptions

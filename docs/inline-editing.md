@@ -32,9 +32,9 @@ long text and choice values are sent as entered.
 A commit raises the field's `save_event` (default `save_field`) through the
 queued transport with `{id, field, value, fact, original}`. While its own reply is
 outstanding the fact is `aria-busy` and shows "Saving…"; an unrelated patch
-never ends that state. The displayed value is always the server's
-`data-value`: the hook never paints typed text, so a refused save leaves the
-stored value on screen.
+never ends that state. The server renders the read value, and the hook never replaces it with typed text, so a refused save leaves the stored value on screen.
+
+For a date-time field, set `InlineField::timezone` to the zone used for the edit value and use `display_html` for the shared timestamp markup. The hook shows the zone captured when the draft opens and sends it as `timezone` with the commit. Interpret the input in that zone even if the reader changes the top-bar setting during the edit.
 
 ## Owner responsibilities
 
@@ -44,10 +44,10 @@ never treated as stored.
 1. Render each fact with a stable `id` and its stored edit value. If the
    owner needs a record version for its write contract, supply it through
    `InlineField::version`. The live endpoint reads the current fact and
-   compares its edit value with the editor's original value before passing
+   compares its `comparison_value` (or edit value when absent) with the editor's `original` before passing
    the current record version to the owner. A stale write triggers a fresh
    field check before another attempt. The server makes at most three write
-   attempts.
+   attempts. For date-time fields, set `comparison_value` to the exact stored instant so two occurrences of the same clock time during a daylight-saving change still count as different.
 2. Re-check the capability on every save. A forbidden write is the whole
    outcome: call `CommitStates::clear_saved`,
    re-render the facts the actor can no longer edit with `readonly()` (which

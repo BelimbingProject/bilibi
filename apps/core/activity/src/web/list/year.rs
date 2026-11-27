@@ -117,7 +117,7 @@ impl Index {
         drawn.day_marks = self.day_marks(scope, &dates).await?;
         drawn.follows_browser_zone = clock.display.mode == bilibi_datetime::Mode::Local;
         drawn.creatable = self.pages.activities.may_create(scope).await?;
-        drawn.notice = self.notice.clone();
+        drawn.notice = self.calendar_notice(clock)?;
         let html = drawn.render().map_err(|_| Error::Internal)?;
         query.extend(state.to_params());
         Ok((html, query, held))

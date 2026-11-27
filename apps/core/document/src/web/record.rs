@@ -1293,15 +1293,11 @@ impl Detail {
                 editable && d.related_document_id.is_some(),
             )?,
         ));
-        items.push((
-            "Revision",
-            "revision",
-            Html::text(&format!(
-                "{} · {}",
-                d.revision,
-                clock.text(d.last_revision_at)
-            )),
-        ));
+        items.push(("Revision", "revision", {
+            let mut value = Html::text(&format!("{} · ", d.revision));
+            value.push(&clock.html("document-last-revision-at", d.last_revision_at)?);
+            value
+        }));
         if let Some(url) = &d.external_url {
             items.push((
                 "Link",
@@ -1314,15 +1310,11 @@ impl Detail {
                 })?,
             ));
         }
-        items.push((
-            "Created by",
-            "created-by",
-            Html::text(&format!(
-                "{} · {}",
-                name(d.created_by),
-                clock.text(d.created_at)
-            )),
-        ));
+        items.push(("Created by", "created-by", {
+            let mut value = Html::text(&format!("{} · ", name(d.created_by)));
+            value.push(&clock.html("document-created-at", d.created_at)?);
+            value
+        }));
         let ids: Vec<String> = items
             .iter()
             .map(|(_, key, _)| format!("document-fact-{key}"))
@@ -1397,29 +1389,31 @@ impl Detail {
                 })?,
                 _ => Html::text("—"),
             };
-            let retained = retention
-                .get(&r.revision)
-                .map(|state| {
-                    let until = state
-                        .retain_until
-                        .and_then(|at| jiff::Timestamp::try_from(at).ok())
-                        .map(|at| clock.text(at))
-                        .unwrap_or_else(|| "—".into());
-                    if state.legal_hold {
-                        if state.retain_until.is_some() {
-                            format!("Legal hold · retention date {until}")
-                        } else {
-                            "Legal hold".into()
-                        }
-                    } else if state.due {
-                        format!("Due since {until}")
-                    } else if state.retain_until.is_some() {
-                        format!("Keep until {until}")
+            let retained = if let Some(state) = retention.get(&r.revision) {
+                let at = state
+                    .retain_until
+                    .and_then(|at| jiff::Timestamp::try_from(at).ok());
+                let label = if state.legal_hold {
+                    if at.is_some() {
+                        "Legal hold · retention date "
                     } else {
-                        "No tenant retention".into()
+                        "Legal hold"
                     }
-                })
-                .unwrap_or_default();
+                } else if state.due {
+                    "Due since "
+                } else if at.is_some() {
+                    "Keep until "
+                } else {
+                    "No tenant retention"
+                };
+                let mut value = Html::text(label);
+                if let Some(at) = at {
+                    value.push(&clock.html(&format!("document-revision-{number}-retention"), at)?);
+                }
+                value
+            } else {
+                Html::EMPTY
+            };
             let mut row = FlexRow::new(&number)
                 .slot("revision", Html::text(&number))
                 .slot("label", Html::text(r.label.as_deref().unwrap_or("")))
@@ -1438,7 +1432,7 @@ impl Detail {
                     Html::text(&r.byte_size.map(size).unwrap_or_default()),
                 )
                 .slot("change_log", Html::text(&r.change_log))
-                .slot("retention", Html::text(&retained))
+                .slot("retention", retained)
                 .slot(
                     "by",
                     Html::text(names.get(&r.created_by).map_or("—", String::as_str)),
@@ -1597,19 +1591,15 @@ impl Detail {
             if grant.can_share {
                 permissions.push("Share");
             }
-            let mut text = permissions.join(" · ");
+            let mut value = Html::text(&permissions.join(" · "));
             if let Some(until) = grant.expires_at {
-                text.push_str(&format!(
-                    " · {} {}",
-                    if until <= jiff::Timestamp::now() {
-                        "Ended"
-                    } else {
-                        "Until"
-                    },
-                    clock.text(until)
-                ));
+                value.push(&Html::text(if until <= jiff::Timestamp::now() {
+                    " · Ended "
+                } else {
+                    " · Until "
+                }));
+                value.push(&clock.html(&format!("document-access-{}-until", grant.id), until)?);
             }
-            let mut value = Html::text(&text);
             if grant.user_id != scope.user() {
                 value.push(&render(Button {
                     id: &format!("document-access-{}-remove", grant.id),
