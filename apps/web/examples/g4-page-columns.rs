@@ -15,10 +15,13 @@
 //! back without an address and the page opens as it was left; paste an address
 //! into another account's browser and it shows the sender's view without
 //! changing that account's memory. Reset returns the page's own columns and
-//! forgets what was kept. The restriction control restricts `unit_cost` for the roles
-//! the signed-in account holds, which prunes that column from the table, the
-//! address and the suggestions until the restriction is lifted. Sign in as the
-//! fixture manager (grid.reference.view) after the example reconciles roles.
+//! forgets what was kept. A calculation table projects Factor cost from
+//! `reference_items.unit_cost` through `Source::derives`. The restriction
+//! control restricts that source field for the roles the signed-in account
+//! holds, which prunes both Unit cost and Calculation › Factor cost from the
+//! table, the address and the suggestions until the restriction is lifted.
+//! Sign in as the fixture manager (grid.reference.view) after the example
+//! reconciles roles.
 use bilibi_base::{
     authz::grants::Grants,
     datetime::{DisplayContext, Mode},
@@ -50,6 +53,43 @@ bilibi_walkthrough_fixture::walkthrough_module_roles!();
 const ROOT: &str = "reference_items";
 const TABLE_ID: &str = "g4-items";
 const PAGE_SIZES: [u64; 2] = [10, 25];
+
+static DERIVED_GRID: grid::GridContribution = grid::GridContribution {
+    record_fields: &[],
+    tables: &[grid::TableDecl::new(
+        "g4_calculations",
+        "Calculations",
+        "grid.reference.view",
+        grid::Source::tenant(
+            "SELECT id,unit_cost AS factor_cost FROM base_grid_ref_items WHERE tenant_id=$1",
+        )
+        .reads(&["reference_items"])
+        .derives(&[grid::DerivedColumn::new(
+            "factor_cost",
+            "reference_items",
+            "unit_cost",
+        )]),
+        "id",
+        &[
+            grid::Field::new("id", "ID", grid::FieldType::Integer).protected(),
+            grid::Field::new("factor_cost", "Factor cost", grid::FieldType::Decimal),
+        ],
+    )],
+    links: &[grid::LinkDecl::on(
+        "calculation",
+        "Calculation",
+        grid::LinkKind::One,
+        ROOT,
+        "id",
+        "g4_calculations",
+        "id",
+    )],
+};
+bilibi_grid::contribute!(
+    "extensions/g4_page_columns",
+    "g4_page_columns.derived_grid",
+    &DERIVED_GRID
+);
 
 static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
     ListSpec {
