@@ -5,16 +5,19 @@
 //! actor holds. Every later call takes the catalog, not the scope: a path is
 //! resolved against it, so a table or field it left out cannot be reached by any
 //! spelling. Build it again wherever the page refreshes its own capabilities.
+mod source_description;
+
+use self::source_description::describe_source;
 use crate::column::{self, Agg, Column, ColumnError, MAX_SPEC};
-use crate::{Field, FieldType, Installed, Join, LinkKind, Source, Table};
+use crate::{Field, FieldType, Installed, Join, LinkKind, Table};
 use bilibi_database::Error;
 use bilibi_tenancy::Scope;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     fmt,
-    sync::{Arc, Mutex, OnceLock},
+    sync::Arc,
 };
-use tokio_postgres::{types::Type, GenericClient};
+use tokio_postgres::GenericClient;
 
 pub const MAX_COLUMNS: usize = 32;
 pub const MAX_SUGGESTIONS: usize = 50;
@@ -60,65 +63,6 @@ impl From<CatalogError> for Error {
             }
         }
     }
-}
-
-/// Static source descriptions contain selected keys and arity, never scope data.
-#[derive(Debug)]
-struct SourceDescription {
-    keys: Vec<String>,
-    parameters: usize,
-}
-type Description = Arc<SourceDescription>;
-type Descriptions = HashMap<(&'static str, bool, bool), Description>;
-fn descriptions() -> &'static Mutex<Descriptions> {
-    static CACHE: OnceLock<Mutex<Descriptions>> = OnceLock::new();
-    CACHE.get_or_init(Default::default)
-}
-
-/// A static statement's shape, read from the server's description of it
-/// (nothing runs) and kept for the process: static SQL has a fixed shape. Every placeholder must be a bigint the grid can bind.
-async fn describe_source(
-    client: &impl GenericClient,
-    what: &str,
-    source: &Source,
-) -> Result<Description, CatalogError> {
-    let cache_key = (source.sql, source.tenant_scoped, source.company_scoped);
-    if let Some(keys) = descriptions()
-        .lock()
-        .ok()
-        .and_then(|c| c.get(&cache_key).cloned())
-    {
-        return Ok(keys);
-    }
-    let statement = client.prepare(source.sql).await.map_err(|error| {
-        CatalogError::Misdeclared(format!("{what}: the server refused the source: {error}"))
-    })?;
-    let expected = if source.company_scoped {
-        3..=3
-    } else if source.tenant_scoped {
-        1..=2
-    } else {
-        0..=0
-    };
-    if !expected.contains(&statement.params().len())
-        || statement.params().iter().any(|ty| *ty != Type::INT8)
-    {
-        return Err(CatalogError::Misdeclared(format!(
-            "{what}: a tenant source takes bigint $1 (tenant) and optionally $2 (user), a company source takes $1 (tenant), $2 (user) and $3 (company), and a global source takes none"
-        )));
-    }
-    let keys = Arc::new(SourceDescription {
-        keys: statement
-            .columns()
-            .iter()
-            .map(|column| column.name().to_string())
-            .collect(),
-        parameters: statement.params().len(),
-    });
-    if let Ok(mut cache) = descriptions().lock() {
-        cache.insert(cache_key, keys.clone());
-    }
-    Ok(keys)
 }
 
 /// What one account may read: the visible tables with restricted fields removed.
