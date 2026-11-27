@@ -83,6 +83,9 @@ impl UserService {
             }
         }
         let before = scope.current_company().map(OrganisationId::get);
+        if company == before {
+            return Ok(Switched { company });
+        }
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("user.company.switch"))

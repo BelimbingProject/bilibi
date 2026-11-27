@@ -478,6 +478,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &RequestInfo::default(),
         )
         .await?;
+    let audit_before: i64 = sql
+        .query_one(
+            "SELECT count(*) FROM base_audit_actions WHERE tenant_id=$1",
+            &[&1_i64],
+        )
+        .await?
+        .get(0);
+    let session_before = sql
+        .query_one(
+            "SELECT company_id, held_company_id FROM sessions WHERE id=$1",
+            &[&bilibi_session::session_id(&archived_desk_login.token)],
+        )
+        .await?;
+    for _ in 0..2 {
+        let selected = users
+            .choose_company(
+                &archived_desk_login.token,
+                &archived_desk_login.csrf,
+                Some(2),
+                &RequestInfo::default(),
+            )
+            .await?;
+        if selected.company != Some(2) {
+            return Err("Reselecting the current desk returned the wrong company".into());
+        }
+    }
+    let session_after = sql
+        .query_one(
+            "SELECT company_id, held_company_id FROM sessions WHERE id=$1",
+            &[&bilibi_session::session_id(&archived_desk_login.token)],
+        )
+        .await?;
+    let audit_after: i64 = sql
+        .query_one(
+            "SELECT count(*) FROM base_audit_actions WHERE tenant_id=$1",
+            &[&1_i64],
+        )
+        .await?
+        .get(0);
+    if session_before.get::<_, Option<i64>>(0) != session_after.get::<_, Option<i64>>(0)
+        || session_before.get::<_, Option<i64>>(1) != session_after.get::<_, Option<i64>>(1)
+        || audit_before != audit_after
+    {
+        return Err("Reselecting the current desk changed the session choice or audit".into());
+    }
+    if !matches!(
+        users
+            .choose_company(
+                &archived_desk_login.token,
+                &archived_desk_login.csrf,
+                Some(100),
+                &RequestInfo::default()
+            )
+            .await,
+        Err(bilibi_user::ChoiceRefusal::Unavailable)
+    ) {
+        return Err("Selecting an unavailable desk was not refused".into());
+    }
+    println!(
+        "Reselecting the current desk twice was a no-op; an unavailable desk was refused: true"
+    );
     let impersonation_login = users
         .login("admin@example.test", bilibi_walkthrough_fixture::PASSWORD)
         .await
