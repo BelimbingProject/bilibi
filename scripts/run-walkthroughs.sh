@@ -194,6 +194,7 @@ WALKTHROUGHS=(
   'core|tenant-suspension|apps/core/tenant|tenant-suspension-walkthrough|none|BILIBI_TENANT_DEMO=disposable|-'
   'core|user-company-accounts|apps/core/user|company-accounts-walkthrough|migrate|BILIBI_COMPANY_ACCOUNTS_DEMO=disposable|-'
   'core|user-company-pickers|apps/core/user|company-picker-bounds-proof|migrate|BILIBI_USER_DEMO=disposable|-'
+  'core|user-company-reselect|apps/core/user|company-reselect-proof|migrate|BILIBI_USER_DEMO=disposable|-'
   'core|user-credentials|apps/core/user|credentials-walkthrough|migrate|BILIBI_DISPOSABLE_CREDENTIALS_DEMO=yes|-'
   'core|user-database-queries|apps/core/user|database-queries-walkthrough|migrate|BILIBI_DISPOSABLE_QUERY_DEMO=yes|-'
   'core|user-identity|apps/core/user|identity-walkthrough|migrate|BILIBI_IDENTITY_DEMO=disposable|-'
