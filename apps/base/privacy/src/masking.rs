@@ -105,12 +105,11 @@ impl Privacy {
         } else {
             self.db.get().await?
         };
-        let tx = client.transaction().await?;
         // Rechecked in the recording transaction: a capability removed since
         // the read returns nothing.
-        bilibi_authz::authorize_key(&*tx, scope, FIELD_REVEAL).await?;
+        let tx = recheck(&mut client, scope).await?;
         record_action(
-            &*tx,
+            &tx,
             scope,
             "privacy.field.revealed",
             json!({"table": table, "field": field, "record": record, "reason": reason}),
@@ -159,11 +158,29 @@ impl Privacy {
         scope: &Scope,
         reveal: Value,
     ) -> Result<()> {
-        let tx = client.transaction().await?;
-        bilibi_authz::authorize_key(&tx, scope, FIELD_REVEAL).await?;
+        let tx = recheck(client, scope).await?;
         record_action(&tx, scope, "privacy.export.revealed", reveal).await?;
         tx.commit().await?;
         Ok(())
+    }
+}
+
+/// Opens a recording transaction that first rechecks `privacy.field.reveal`.
+/// A refusal commits it, as it holds only the decision-log row, so the denial
+/// stays in the decision log instead of rolling back with the unrecorded
+/// reveal; any other error rolls back.
+async fn recheck<'a>(
+    client: &'a mut tokio_postgres::Client,
+    scope: &Scope,
+) -> Result<tokio_postgres::Transaction<'a>> {
+    let tx = client.transaction().await?;
+    match bilibi_authz::authorize_key(&tx, scope, FIELD_REVEAL).await {
+        Ok(()) => Ok(tx),
+        Err(Error::Forbidden) => {
+            tx.commit().await?;
+            Err(Error::Forbidden)
+        }
+        Err(error) => Err(error),
     }
 }
 

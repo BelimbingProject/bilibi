@@ -607,6 +607,84 @@ async fn main() -> Result<()> {
         .get(0);
     println!("reveal records for them: {recorded}");
 
+    println!("== a reveal whose grant is removed before it is recorded keeps the denial");
+    // The contacts table is held while the reveal reads it, after its first
+    // check; the grant is removed meanwhile, so only the recording
+    // transaction's recheck refuses, and its denial must stay logged.
+    const DECISIONS: &str = "SELECT count(*) FILTER (WHERE allowed), count(*) FILTER (WHERE NOT allowed) FROM authz_decision_log WHERE tenant_id=1 AND user_id=$1 AND capability='privacy.field.reveal'";
+    let decided = client.query_one(DECISIONS, &[&viewer.user()]).await?;
+    let (allows, denials): (i64, i64) = (decided.get(0), decided.get(1));
+    let mut holder = db.get().await?;
+    let hold = holder.transaction().await?;
+    hold.batch_execute("LOCK TABLE persons IN ACCESS EXCLUSIVE MODE")
+        .await?;
+    let reveal = tokio::spawn({
+        let (privacy, viewer) = (privacy.clone(), viewer.clone());
+        async move {
+            privacy
+                .reveal_field(&viewer, "persons", "email", &json!(1), "Ticket REVOKED")
+                .await
+        }
+    });
+    let mut waiting = false;
+    for _ in 0..200 {
+        let allowed: i64 = client.query_one(DECISIONS, &[&viewer.user()]).await?.get(0);
+        let blocked: i64 = client
+            .query_one(
+                "SELECT count(*) FROM pg_locks WHERE NOT granted AND relation='persons'::regclass",
+                &[],
+            )
+            .await?
+            .get(0);
+        if allowed == allows + 1 && blocked > 0 {
+            waiting = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    hold.execute(
+        "DELETE FROM role_capabilities WHERE tenant_id=1 AND role_id=2 AND capability='privacy.field.reveal'",
+        &[],
+    )
+    .await?;
+    hold.commit().await?;
+    drop(holder);
+    let outcome = reveal.await?;
+    let decided = client.query_one(DECISIONS, &[&viewer.user()]).await?;
+    let recorded: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_audit_actions WHERE event='privacy.field.revealed' AND payload->>'reason'='Ticket REVOKED'",
+            &[],
+        )
+        .await?
+        .get(0);
+    println!(
+        "waited in its read after the first check: {waiting}; reveal: {:?}; decisions since: {} allowed, {} denied; reveal records: {recorded}",
+        outcome.as_ref().map(|_| "value returned"),
+        decided.get::<_, i64>(0) - allows,
+        decided.get::<_, i64>(1) - denials
+    );
+    client
+        .execute(
+            "INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(1,2,'privacy.field.reveal')",
+            &[],
+        )
+        .await?;
+    assert!(
+        waiting,
+        "the reveal did not pass its first check and wait in its read"
+    );
+    assert!(matches!(outcome, Err(Error::Forbidden)));
+    assert_eq!(
+        (
+            decided.get::<_, i64>(0) - allows,
+            decided.get::<_, i64>(1) - denials,
+            recorded
+        ),
+        (1, 1, 0),
+        "the recording recheck's denial must stay in the decision log, and nothing is recorded as revealed"
+    );
+
     println!("== restrictions page lists the modes");
     for summary in restrictions.list(&admin).await? {
         println!(

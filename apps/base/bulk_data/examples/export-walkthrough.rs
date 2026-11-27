@@ -720,6 +720,54 @@ async fn main() -> Result<(), Failure> {
     .await?;
     check("granted again").await;
 
+    println!("\n== a read refused after the Imports pages closed keeps its denial");
+    // The page's route check passed before the revoke; each read decides
+    // again in its own snapshot, and its denial must stay in the decision log.
+    let denials = || {
+        let (sql, user) = (&sql, manager.scope.user());
+        async move {
+            sql.query_one(
+                "SELECT count(*) FROM authz_decision_log WHERE tenant_id=1 AND user_id=$1 AND capability='admin.import.view' AND NOT allowed AND reason='denied_missing_capability'",
+                &[&user],
+            )
+            .await
+            .map(|row| row.get::<_, i64>(0))
+        }
+    };
+    sql.execute(
+        "DELETE FROM role_capabilities WHERE tenant_id=1 AND role_id=1 AND capability='admin.import.view'",
+        &[],
+    )
+    .await?;
+    let before = denials().await?;
+    let read = manager.export(made).await.err();
+    let one = denials().await?;
+    let listed = {
+        let mut client = db.get().await?;
+        bulk.exports(&mut client, &manager.scope, 20).await.err()
+    };
+    let list = denials().await?;
+    let file = bulk.export_file(&manager.scope, made).await.err();
+    let download = denials().await?;
+    println!(
+        "export {made} read: {read:?}, denials recorded {}; exports list: {listed:?}, {}; download: {file:?}, {}",
+        one - before,
+        list - one,
+        download - list
+    );
+    sql.execute(
+        "INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(1,1,'admin.import.view')",
+        &[],
+    )
+    .await?;
+    let refused = |error: &Option<Error>| matches!(error, Some(Error::Forbidden));
+    if !(refused(&read) && refused(&listed) && refused(&file))
+        || (one - before, list - one, download - list) != (1, 1, 1)
+    {
+        return Err("a refused export read did not leave exactly one denial each".into());
+    }
+    check("Imports pages open again").await;
+
     println!("\n== expired files are purged before the next export");
     let stored = sql
         .query_one(

@@ -537,9 +537,8 @@ impl BulkData {
             .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
             .start()
             .await?;
-        let run = self.export_in(&tx, scope, id).await?;
-        tx.commit().await?;
-        Ok(run)
+        let run = self.export_in(&tx, scope, id).await;
+        end_read(tx, run).await
     }
 
     async fn export_in(
@@ -1191,21 +1190,34 @@ impl BulkData {
             .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
             .start()
             .await?;
-        bilibi_authz::authorize_key(&tx, scope, VIEW).await?;
-        let company = scope.current_company().ok_or(Error::Forbidden)?.get();
-        let mut runs = tx
-            .query(
-                &format!("SELECT {COLUMNS} FROM base_bulk_data_exports WHERE tenant_id=$1 AND started_by=$2 AND company_id=$3 ORDER BY id DESC LIMIT $4"),
-                &[&scope.tenant(), &scope.user(), &company, &limit.clamp(1, 100)],
-            )
-            .await?
-            .iter()
-            .map(ExportRun::from_row)
-            .collect::<Result<Vec<_>>>()?;
-        self.mark(&tx, scope, &mut runs).await?;
-        tx.commit().await?;
-        Ok(runs)
+        let runs = async {
+            bilibi_authz::authorize_key(&tx, scope, VIEW).await?;
+            let company = scope.current_company().ok_or(Error::Forbidden)?.get();
+            let mut runs = tx
+                .query(
+                    &format!("SELECT {COLUMNS} FROM base_bulk_data_exports WHERE tenant_id=$1 AND started_by=$2 AND company_id=$3 ORDER BY id DESC LIMIT $4"),
+                    &[&scope.tenant(), &scope.user(), &company, &limit.clamp(1, 100)],
+                )
+                .await?
+                .iter()
+                .map(ExportRun::from_row)
+                .collect::<Result<Vec<_>>>()?;
+            self.mark(&tx, scope, &mut runs).await?;
+            Ok(runs)
+        }
+        .await;
+        end_read(tx, runs).await
     }
+}
+
+/// Ends a checked read's snapshot. The read writes only decision-log rows,
+/// so a refusal commits too: its denial stays in the decision log instead of
+/// rolling back with the read. Any other error rolls back.
+async fn end_read<T>(tx: tokio_postgres::Transaction<'_>, read: Result<T>) -> Result<T> {
+    if matches!(read, Ok(_) | Err(Error::Forbidden)) {
+        tx.commit().await?;
+    }
+    read
 }
 
 /// Grid tables whose fields can contribute to these columns: the root,
