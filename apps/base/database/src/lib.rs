@@ -137,6 +137,15 @@ impl Error {
             Self::Pool(traced) if matches!(traced.error, PoolError::Timeout(TimeoutType::Wait))
         )
     }
+
+    pub fn is_serialization_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Database(traced)
+                if traced.error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+        )
+    }
+
     /// Whether PostgreSQL aborted a bounded lock wait or detected a deadlock,
     /// so the outer operation can roll back and offer a retry.
     pub fn is_retryable_lock_contention(&self) -> bool {

@@ -1049,12 +1049,62 @@ impl<O: Owner> Owned<'_, O> {
     /// before returning any bytes. Never cache this result for another caller.
     pub async fn read(&self, client: &mut Client, id: &str) -> Result<Document> {
         let tx = self.begin(client, "artifacts.read").await?;
+        self.read_in(tx, id, &(), |_, _| Box::pin(async { Ok(()) }))
+            .await
+    }
+
+    pub async fn read_checked<C: Sync>(
+        &self,
+        client: &mut Client,
+        id: &str,
+        context: &C,
+        check: for<'a> fn(
+            &'a C,
+            &'a tokio_postgres::Transaction<'_>,
+        ) -> bilibi_tenancy::ProofFuture<'a, ()>,
+    ) -> Result<Document> {
+        let mut retries_left = 2;
+        loop {
+            let result = async {
+                let tx = self.begin(client, "artifacts.read").await?;
+                tx.sql()
+                    .batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    .await?;
+                self.read_in(tx, id, context, check).await
+            }
+            .await;
+            let serialization_failure = match &result {
+                Err(Error::Database(error)) => error.is_serialization_failure(),
+                Err(Error::Sql(error)) => {
+                    error.code()
+                        == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+                }
+                _ => false,
+            };
+            if !serialization_failure || retries_left == 0 {
+                return result;
+            }
+            retries_left -= 1;
+        }
+    }
+
+    async fn read_in<C: Sync>(
+        &self,
+        tx: MutationTransaction<'_>,
+        id: &str,
+        context: &C,
+        check: for<'a> fn(
+            &'a C,
+            &'a tokio_postgres::Transaction<'_>,
+        ) -> bilibi_tenancy::ProofFuture<'a, ()>,
+    ) -> Result<Document> {
         let row = self.fetch(&tx, id).await?;
         self.authorize(tx.sql(), Operation::Read, Some(&row.metadata.reference))
             .await?;
         if !row.ready || row.deleted || row.expired {
             return Err(Error::NotFound);
         }
+        check(context, tx.sql()).await?;
         let bytes = storage::io(|| storage::read(&row.root, id, row.metadata.byte_size as usize))?;
         if digest(&bytes) != row.metadata.sha256 {
             return Err(Error::Integrity);

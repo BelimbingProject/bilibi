@@ -9,6 +9,13 @@ use tokio_postgres::GenericClient;
 
 pub const SYSTEM_KEY: &str = "platform-orchestrator";
 
+pub(crate) const CONTACT_SEARCH_PATHS: &[&str] = &[
+    "work.work_email:list",
+    "work.work_phone:list",
+    "work.title:list",
+    "work.company.name:list",
+];
+
 async fn fields(client: &impl GenericClient, scope: &Scope) -> Result<Restrictions> {
     Ok(Restrictions {
         fields: restrictions_for(client, scope, "persons").await?,
@@ -85,18 +92,9 @@ pub async fn search(
         // Work data follows owner-contributed Grid paths so Person never
         // reads affiliation/company tables or bypasses their masking. Its
         // statement binds $1 tenant, $2 actor, $3 selected company and $4 the term.
-        let work = bilibi_grid::query::text_search_sql(
-            client,
-            scope,
-            "persons",
-            &[
-                "work.work_email:list",
-                "work.work_phone:list",
-                "work.title:list",
-                "work.company.name:list",
-            ],
-        )
-        .await?;
+        let work =
+            bilibi_grid::query::text_search_sql(client, scope, "persons", CONTACT_SEARCH_PATHS)
+                .await?;
         let pattern = format!(
             "%{}%",
             needle

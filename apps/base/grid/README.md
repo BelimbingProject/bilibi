@@ -43,7 +43,9 @@ Depend on `base/grid`, submit one `GridContribution` to `TABLES`
   wraps it in a subquery, so every hop of a path carries its owner's boundary and
   Grid never adds a tenant predicate. It must be one `SELECT`/`WITH` statement
   that references every parameter its scope requires. A request never supplies
-  the company parameter.
+  the company parameter. When projected values use fields from another Grid
+  table, declare that table with `.reads(&["table_id"])`. The default is none.
+  The same declaration applies to link edge sources when their joins depend on fields from another Grid table. Discovery refuses unknown extra tables in both table and edge sources. See [Bulk Data export access](../bulk_data/README.md#an-export) for how exports use this declaration.
 - `Field`s: `Field::new`/`choice`; `column` names the source key when it differs
   from the id; `hidden` fields exist only for joins; `protected` keeps a field
   out of operator restriction (the key, label, time, hidden and join fields are
@@ -237,6 +239,8 @@ cost rejection, timeout and a successful projection after failure. It removes it
 reference rows on success. No unit tests or test runner are involved.
 
 ## Reads inside an existing transaction
+
+Use `project_on` to project rows on the transaction you already hold. Use repeatable read to share a snapshot with an earlier authorization check. Grid sets its local query bounds on that transaction.
 
 Use `validate_projection_on`, `validate_page_on` and `validate_summary_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction. Report pages and summaries use repeatable read and allow authorization decision logs.
 

@@ -279,12 +279,30 @@ impl JobContracts {
         key: &str,
         input: &Value,
     ) -> Result<Value> {
-        let scope = match execution.scope() {
-            Some(scope) if scope.principal().is_none() => scope.clone().in_job(),
-            _ => return Err(bilibi_database::Error::Forbidden.into()),
-        };
+        let scope = Self::read_scope(execution)?;
         self.readable(key)?;
         self.registry.call(client, &scope, key, input).await
+    }
+
+    pub async fn read_in(
+        &self,
+        tx: tokio_postgres::Transaction<'_>,
+        execution: &Execution,
+        key: &str,
+        input: &Value,
+    ) -> Result<Value> {
+        let scope = Self::read_scope(execution)?;
+        self.readable(key)?;
+        let output = self.registry.call_in(&tx, &scope, key, input).await;
+        crate::finish_read_transaction(tx, &output).await?;
+        output
+    }
+
+    fn read_scope(execution: &Execution) -> Result<Scope> {
+        match execution.scope() {
+            Some(scope) if scope.principal().is_none() => Ok(scope.clone().in_job()),
+            _ => Err(bilibi_database::Error::Forbidden.into()),
+        }
     }
 
     async fn check(

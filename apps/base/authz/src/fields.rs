@@ -24,6 +24,43 @@ pub async fn restricted(
     };
     Ok(restriction_rows(rows))
 }
+pub async fn restriction_modes(
+    client: &impl GenericClient,
+    scope: &Scope,
+) -> Result<BTreeMap<String, BTreeMap<String, &'static str>>> {
+    let tenant = scope.tenant();
+    let rows = if scope.principal().is_some() {
+        client
+            .query(
+                "SELECT table_id,field_id,bool_and(mode='mask') FROM field_restrictions WHERE tenant_id=$1 GROUP BY table_id,field_id",
+                &[&tenant],
+            )
+            .await?
+    } else {
+        let mut users = vec![scope.user()];
+        users.extend(scope.impersonator().map(|operator| operator.user()));
+        client
+            .query(
+                "SELECT f.table_id,f.field_id,bool_and(f.mode='mask') FROM field_restrictions f JOIN effective_principal_roles p ON p.tenant_id=f.tenant_id AND p.role_id=f.role_id WHERE f.tenant_id=$1 AND p.user_id=ANY($2) GROUP BY f.table_id,f.field_id",
+                &[&tenant, &users],
+            )
+            .await?
+    };
+    let mut result = BTreeMap::<String, BTreeMap<String, &'static str>>::new();
+    for row in rows {
+        let mode = if row.get(2) {
+            crate::restrictions::Mode::Mask
+        } else {
+            crate::restrictions::Mode::Withhold
+        };
+        result
+            .entry(row.get(0))
+            .or_default()
+            .insert(row.get(1), mode.as_str());
+    }
+    Ok(result)
+}
+
 /// The same live restrictions on a reviewed operation's read connection.
 /// Queries stay on the caller's connection, including an uncommitted transaction.
 pub async fn restricted_read(

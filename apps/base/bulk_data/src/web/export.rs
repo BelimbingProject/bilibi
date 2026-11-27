@@ -41,8 +41,8 @@ impl ExportPage {
     }
 
     pub(super) async fn render(&mut self, scope: &Scope) -> Result<String> {
-        let client = self.pages.db.get().await?;
-        let run = self.pages.bulk.export(&**client, scope, self.id).await?;
+        let mut client = self.pages.db.get().await?;
+        let run = self.pages.bulk.export(&mut client, scope, self.id).await?;
         let display = self.pages.display(&client, scope).await?;
         let label = self.pages.bulk.label(&run.record_type).to_owned();
         let mut parts = vec![render(Header {

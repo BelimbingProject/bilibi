@@ -1,6 +1,6 @@
 //! Manual walkthrough of CSV export (issue 133), of a list's filters and of
 //! ticked records, against an explicitly supplied disposable DB. No test
-//! harness or assertions; it prints outcomes to inspect. Exports start
+//! harness. It prints outcomes and checks the saved CSV access rules. Exports start
 //! through the reviewed-plan service as an agent (or the Contacts page)
 //! starts them, and a real Queue executor in this process makes the files.
 use bilibi_agent_api::{
@@ -9,6 +9,8 @@ use bilibi_agent_api::{
 };
 use bilibi_bulk_data::{BulkData, ExportRun, ExportState, SERVICE};
 use bilibi_database::{pool, Db, Error};
+use bilibi_grid::{Field, FieldType, GridContribution, Source, TableDecl};
+use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_queue::{Config, Executor};
 use bilibi_tenancy::{ProofFuture, Scope};
 use serde_json::{json, Value};
@@ -17,6 +19,56 @@ use tokio::{sync::watch, task::JoinHandle};
 use tokio_postgres::Transaction;
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
+
+const JOINED_CONTACTS: &str = "core/person.walkthrough_joined_contacts";
+
+static JOINED_GRID: GridContribution = GridContribution {
+    record_fields: &[],
+    tables: &[TableDecl::new(
+        "walkthrough_joined_contacts",
+        "Contacts with work email",
+        "admin.person.list",
+        Source::tenant(
+            "SELECT p.id, (SELECT max(a.work_email) FROM person_affiliations a WHERE a.tenant_id=p.tenant_id AND a.person_id=p.id) AS work_email FROM persons p WHERE p.tenant_id=$1",
+        )
+        .reads(&["person_affiliations", "person_affiliations"]),
+        "id",
+        &[
+            Field::new("id", "ID", FieldType::Integer).protected(),
+            Field::new("work_email", "Work email", FieldType::String),
+        ],
+    )],
+    links: &[],
+};
+bilibi_grid::contribute!(
+    "core/person",
+    "person.walkthrough_joined_grid",
+    &JOINED_GRID
+);
+inventory::submit! {
+    Contribution::new(
+        bilibi_bulk_data::RECORD_TYPES,
+        JOINED_CONTACTS,
+        Provenance { module: "core/person", source: file!(), line: line!() },
+        &bilibi_bulk_data::RecordType {
+            label: "Contacts with work email",
+            table: "walkthrough_joined_contacts",
+            path: None,
+            import: bilibi_bulk_data::Import {
+                capability: "admin.person.import",
+                create: "core.person.create",
+                id: "id",
+                duplicates: None,
+                references: &[],
+            },
+            export: Some(bilibi_bulk_data::Export {
+                capability: "admin.person.export",
+                list: "core.person.list",
+            }),
+            bulk_update: None,
+        },
+    )
+}
 
 type Failure = Box<dyn std::error::Error>;
 
@@ -77,8 +129,8 @@ impl Person<'_> {
             .map_err(|error| error.to_string())
     }
     async fn export(&self, id: i64) -> Result<ExportRun, Error> {
-        let client = self.db.get().await?;
-        self.bulk.export(&**client, &self.scope, id).await
+        let mut client = self.db.get().await?;
+        self.bulk.export(&mut client, &self.scope, id).await
     }
     /// Waits until the export's job has finished it.
     async fn settle(&self, id: i64) -> ExportRun {
@@ -228,8 +280,8 @@ async fn main() -> Result<(), Failure> {
            (1,'exp_agent','Exp Agent','agent',NULL,NULL),
            (2,'exp_other_tenant','Exp Other Tenant','human','other@exp.test',NULL);
          INSERT INTO persons(tenant_id,code,name,kind,email,retired_at) VALUES(1,'exp_retired','Exp Retired','human','retired@exp.test',now());
-         INSERT INTO person_affiliations(tenant_id,person_id,organisation_id)
-           SELECT 1,id,1 FROM persons WHERE tenant_id=1 AND name='Exp Alice';",
+         INSERT INTO person_affiliations(tenant_id,person_id,organisation_id,work_email)
+           SELECT 1,id,1,'alice@work.exp.test' FROM persons WHERE tenant_id=1 AND name='Exp Alice';",
     )
     .await?;
     let (stop, worker) = start(&app)?;
@@ -256,6 +308,151 @@ async fn main() -> Result<(), Failure> {
             &["name", "work.company.name:list"],
         )
         .await;
+
+    println!("\n== a field restriction invalidates linked and declared source files");
+    let linked = manager
+        .exports(
+            "name and linked work email",
+            json!({"search": "Exp Alice"}),
+            &["name", "work.work_email:list"],
+        )
+        .await
+        .ok_or("linked export was not started")?;
+    let alice: String = sql
+        .query_one(
+            "SELECT id::text FROM persons WHERE tenant_id=1 AND name='Exp Alice'",
+            &[],
+        )
+        .await?
+        .get(0);
+    let declared_input = json!({
+        "record_type": JOINED_CONTACTS,
+        "ids": [alice],
+        "columns": ["work_email"]
+    });
+    let declared = manager
+        .write("base.bulk_data.export.start", declared_input.clone())
+        .await?["id"]
+        .as_i64()
+        .ok_or("declared source export was not started")?;
+    manager.settle(declared).await;
+    for id in [linked, declared] {
+        let (_, bytes) = bulk.export_file(&manager.scope, id).await?;
+        if !std::str::from_utf8(&bytes)?.contains("alice@work.exp.test") {
+            return Err(format!("export {id} did not contain Alice's work email").into());
+        }
+    }
+    sql.execute(
+        "INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES(1,1,'person_affiliations','work_email','mask')",
+        &[],
+    )
+    .await?;
+    for id in [linked, declared] {
+        let run = manager.export(id).await?;
+        let file = bulk.export_file(&manager.scope, id).await;
+        if run.downloadable || !matches!(file, Err(Error::Forbidden)) {
+            return Err(
+                format!("the work email restriction did not invalidate export {id}").into(),
+            );
+        }
+        println!("work email restriction invalidated export {id}");
+    }
+    let masked = manager
+        .write("base.bulk_data.export.start", declared_input)
+        .await?["id"]
+        .as_i64()
+        .ok_or("declared source export under mask was not started")?;
+    manager.settle(masked).await;
+    bulk.export_file(&manager.scope, masked).await?;
+    sql.execute(
+        "UPDATE field_restrictions SET mode='withhold' WHERE tenant_id=1 AND role_id=1 AND table_id='person_affiliations' AND field_id='work_email'",
+        &[],
+    )
+    .await?;
+    if manager.export(masked).await?.downloadable
+        || !matches!(
+            bulk.export_file(&manager.scope, masked).await,
+            Err(Error::Forbidden)
+        )
+    {
+        return Err(
+            "changing work email from mask to withhold did not invalidate the export".into(),
+        );
+    }
+    let replacement = manager
+        .exports(
+            "new export after the linked work email restriction",
+            json!({"search": "Exp Alice"}),
+            &["name", "work.work_email:list"],
+        )
+        .await
+        .ok_or("replacement linked export was not started")?;
+    let (_, bytes) = bulk.export_file(&manager.scope, replacement).await?;
+    let csv = std::str::from_utf8(&bytes)?;
+    if !csv.lines().any(|line| line == "Exp Alice,") || csv.contains("alice@work.exp.test") {
+        return Err("the replacement did not retain Alice with a blank work email".into());
+    }
+    sql.execute(
+        "DELETE FROM field_restrictions WHERE tenant_id=1 AND role_id=1 AND table_id='person_affiliations' AND field_id='work_email'",
+        &[],
+    )
+    .await?;
+    bulk.export_file(&manager.scope, declared).await?;
+    sql.execute(
+        "INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES(1,1,'persons','work_email','withhold')",
+        &[],
+    )
+    .await?;
+    if manager.export(declared).await?.downloadable
+        || !matches!(
+            bulk.export_file(&manager.scope, declared).await,
+            Err(Error::Forbidden)
+        )
+    {
+        return Err(
+            "the Contacts work email restriction did not invalidate the declared source export"
+                .into(),
+        );
+    }
+    sql.execute(
+        "DELETE FROM field_restrictions WHERE tenant_id=1 AND role_id=1 AND table_id='persons' AND field_id='work_email'",
+        &[],
+    )
+    .await?;
+
+    let searched = manager
+        .exports(
+            "name selected by work email",
+            json!({"search": "alice@work.exp.test"}),
+            &["name"],
+        )
+        .await
+        .ok_or("work email search export was not started")?;
+    let (_, bytes) = bulk.export_file(&manager.scope, searched).await?;
+    if !std::str::from_utf8(&bytes)?
+        .lines()
+        .any(|line| line == "Exp Alice")
+    {
+        return Err("the work email search did not select Alice".into());
+    }
+    sql.execute(
+        "INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES(1,1,'person_affiliations','work_email','withhold')",
+        &[],
+    )
+    .await?;
+    if manager.export(searched).await?.downloadable
+        || !matches!(
+            bulk.export_file(&manager.scope, searched).await,
+            Err(Error::Forbidden)
+        )
+    {
+        return Err("the search field restriction did not invalidate the name-only export".into());
+    }
+    sql.execute(
+        "DELETE FROM field_restrictions WHERE tenant_id=1 AND role_id=1 AND table_id='person_affiliations' AND field_id='work_email'",
+        &[],
+    )
+    .await?;
 
     println!("\n== ticked records only");
     let ticked: Vec<String> = sql
@@ -500,11 +697,11 @@ async fn main() -> Result<(), Failure> {
         path.exists()
     );
     check("export of the expired file").await;
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
     let listed = bulk
-        .exports(&**client, &manager.scope, 50)
+        .exports(&mut client, &manager.scope, 50)
         .await?
         .into_iter()
         .find(|run| run.id == made)

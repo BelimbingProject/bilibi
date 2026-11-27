@@ -206,40 +206,22 @@ impl Catalog {
             BTreeMap::new();
         let mut contributed_masks: BTreeMap<&'static str, BTreeMap<String, &'static str>> =
             BTreeMap::new();
-        for (root_id, root) in installed.map() {
-            let denied: BTreeSet<&str> = restricted
-                .get(*root_id)
-                .into_iter()
-                .flatten()
-                .map(String::as_str)
-                .collect();
-            let root_masks = masked.get(*root_id);
-            for record_field in root
-                .record_fields()
-                .iter()
-                .filter(|field| denied.contains(field.id))
-            {
-                let Some(path) = record_field.column else {
-                    continue;
-                };
-                let Ok(column) = column::resolve(path, root, &|id| installed.table(id)) else {
-                    continue;
-                };
-                if let Some(field) = column.field {
-                    match root_masks.and_then(|m| m.get(record_field.id)) {
-                        Some(kind) => {
-                            contributed_masks
-                                .entry(column.table)
-                                .or_default()
-                                .insert(field.id.to_owned(), kind);
-                        }
-                        None => {
-                            contributed_hidden
-                                .entry(column.table)
-                                .or_default()
-                                .insert(field.id);
-                        }
-                    }
+        for (root, record_field, table, field) in
+            installed.restricted_record_field_columns(|table, field| {
+                restricted
+                    .get(table)
+                    .is_some_and(|fields| fields.contains(field))
+            })
+        {
+            match masked.get(root).and_then(|m| m.get(record_field)) {
+                Some(kind) => {
+                    contributed_masks
+                        .entry(table)
+                        .or_default()
+                        .insert(field.to_owned(), kind);
+                }
+                None => {
+                    contributed_hidden.entry(table).or_default().insert(field);
                 }
             }
         }

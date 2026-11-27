@@ -27,6 +27,9 @@ pub struct Source {
     pub sql: &'static str,
     pub tenant_scoped: bool,
     pub company_scoped: bool,
+    /// Other Grid tables whose fields supply projected values. Consumers
+    /// that cache results use these table ids to pin their field restrictions.
+    pub extra_tables: &'static [&'static str],
 }
 impl Source {
     pub const fn tenant(sql: &'static str) -> Self {
@@ -34,6 +37,7 @@ impl Source {
             sql,
             tenant_scoped: true,
             company_scoped: false,
+            extra_tables: &[],
         }
     }
     /// Rows of the selected company. `$1`, `$2` and `$3` are the tenant,
@@ -43,6 +47,7 @@ impl Source {
             sql,
             tenant_scoped: true,
             company_scoped: true,
+            extra_tables: &[],
         }
     }
     pub const fn global(sql: &'static str) -> Self {
@@ -50,6 +55,14 @@ impl Source {
             sql,
             tenant_scoped: false,
             company_scoped: false,
+            extra_tables: &[],
+        }
+    }
+    /// Declares the extra table IDs that consumers can use to track field restrictions.
+    pub const fn reads(self, tables: &'static [&'static str]) -> Self {
+        Self {
+            extra_tables: tables,
+            ..self
         }
     }
 }
@@ -575,6 +588,25 @@ impl Installed {
         for (link, provenance) in pending {
             link_into(&mut tables, link, &provenance)?;
         }
+        for table in tables.values() {
+            let edges = table
+                .links()
+                .iter()
+                .filter_map(|link| match link.decl.join {
+                    Join::Edge(source) => Some((link.id(), source)),
+                    Join::On { .. } => None,
+                });
+            for (id, source) in std::iter::once((table.id(), table.source())).chain(edges) {
+                for extra in source.extra_tables {
+                    if !tables.contains_key(extra) {
+                        return Err(invalid(format!(
+                            "grid source {id} on table {} names unknown extra source table {extra}",
+                            table.id()
+                        )));
+                    }
+                }
+            }
+        }
         for entry in entries {
             let contribution = entry.get::<GridContribution>()?;
             for schema in contribution.record_fields {
@@ -678,6 +710,23 @@ impl Installed {
     pub fn tables(&self) -> impl Iterator<Item = &Table> {
         self.tables.values()
     }
+
+    pub fn restricted_record_field_columns<'a>(
+        &'a self,
+        restricted: impl Fn(&str, &str) -> bool + 'a,
+    ) -> impl Iterator<Item = (&'static str, &'static str, &'static str, &'static str)> + 'a {
+        self.tables()
+            .flat_map(|root| root.record_fields().iter().map(move |field| (root, field)))
+            .filter_map(move |(root, field)| {
+                if !restricted(root.id(), field.id) {
+                    return None;
+                }
+                let column =
+                    crate::column::resolve(field.column?, root, &|id| self.table(id)).ok()?;
+                Some((root.id(), field.id, column.table, column.field?.id))
+            })
+    }
+
     pub fn table(&self, id: &str) -> Option<&Table> {
         self.tables.get(id)
     }
