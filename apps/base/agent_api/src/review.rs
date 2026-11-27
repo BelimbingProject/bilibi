@@ -123,12 +123,17 @@ impl Reviews {
         }
     }
 
+    /// Store a new review and, in the same transaction, end the pending
+    /// review it `replaces` (same account and AI connection), so only the
+    /// newer one stays actionable. A replaced review that already ended, or
+    /// belongs to someone else, is left alone.
     async fn create(
         &self,
         scope: &bilibi_tenancy::Scope,
         id: &str,
         card: &Value,
         operations: &Value,
+        replaces: Option<&str>,
     ) -> Result<()> {
         let agent = scope.agent().ok_or(Error::Forbidden)?;
         let session = agent
@@ -136,11 +141,26 @@ impl Reviews {
             .ok_or(Error::Forbidden)?;
         let report = agent.self_report().map(|value| value.as_str());
         let client_identity = agent.client_identity().map(|value| value.as_str());
-        let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
-        client.execute(
+        let mut client = self.db.get().await.map_err(bilibi_database::Error::from)?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(bilibi_database::Error::from)?;
+        tx.execute(
             "INSERT INTO base_agent_api_reviews(id,tenant_id,user_id,connection_id,browser_session_hash,card,original_operations,agent_self_report,client_identity) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             &[&id, &scope.tenant(), &scope.user(), &agent.connection(), &session, card, operations, &report, &client_identity],
         ).await.map_err(bilibi_database::Error::from)?;
+        let replaced = match replaces {
+            Some(old) => tx.execute(
+                "UPDATE base_agent_api_reviews SET status='replaced',outcome=jsonb_build_object('reason','A newer review replaced this one.','replaced_by',$5::text),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND connection_id=$4 AND id<>$5 AND status IN ('open','refused')",
+                &[&old, &scope.tenant(), &scope.user(), &agent.connection(), &id],
+            ).await.map_err(bilibi_database::Error::from)? == 1,
+            None => false,
+        };
+        tx.commit().await.map_err(bilibi_database::Error::from)?;
+        if let (true, Some(old)) = (replaced, replaces) {
+            let _ = self.changed.send(old.to_owned());
+        }
         Ok(())
     }
 
@@ -370,6 +390,7 @@ pub(crate) fn input_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "key":{"type":"string","maxLength":255,"description":"Discovered reviewed write key for entries. Omit when supplying operations."},
         "entries":{"type":"array","minItems":1,"maxItems":MAX_REVIEW_ENTRIES,"items":{"type":"object"},"description":"Draft inputs for one key. Supply either key and entries, or ordered operations."},
+        "replaces":{"type":"string","pattern":"^[0-9a-f]{32}$","description":"The review_id of an earlier review this one corrects or supersedes. That review ends as replaced, so only this one can be approved."},
         "operations":{"type":"array","minItems":1,"items":{"type":"object","required":["key","input"],"additionalProperties":false,"properties":{"key":{"type":"string","description":"Exact write key from search, such as core.company.create."},"input":{"type":"object","description":"The fields of that write, as one object. A field that takes the ID of a record an earlier step creates holds {\"$ref\":\"N.id\"}, N being that step's one-based number."}}},"description":"Ordered writes with different keys, one step per record, for example [{\"key\":\"core.company.create\",\"input\":{\"name\":\"Acme\",\"code\":\"Acme\"}},{\"key\":\"core.affiliation.contact.create\",\"input\":{\"name\":\"Ann Lee\",\"organisation_id\":{\"$ref\":\"1.id\"}}}]. Reviewed and approved as one atomic plan; never split across plans."}
     },"oneOf":[{"required":["key","entries"]},{"required":["operations"]}]})
 }
@@ -426,6 +447,7 @@ fn draft(input: Value) -> Result<(Vec<crate::plans::PlannedOperation>, bool)> {
     let Value::Object(mut object) = input else {
         return Err(crate::invalid("arguments", USAGE));
     };
+    object.remove("replaces");
     if let Some(unknown) = object
         .keys()
         .find(|key| !matches!(key.as_str(), "key" | "entries" | "operations"))
@@ -522,6 +544,20 @@ pub(crate) async fn open(
             "The review is larger than 1 MiB. Split it into smaller reviews.",
         ));
     }
+    let replaces = match input.get("replaces") {
+        None => None,
+        Some(Value::String(id))
+            if id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+        {
+            Some(id.clone())
+        }
+        Some(_) => {
+            return Err(crate::invalid(
+                "replaces",
+                "Give the review_id (32 lower-case hexadecimal characters) of the earlier review this one replaces, or leave it out.",
+            ))
+        }
+    };
     let (operations, linked) = draft(input)?;
     if operations.len() > review_max_entries {
         return Err(too_many("operations"));
@@ -589,6 +625,9 @@ pub(crate) async fn open(
             descriptions.push(description);
         }
     }
+    if linked {
+        preflight_links(registry, &operations)?;
+    }
     let methods: Vec<_> = session.step_up.enrolled_methods(session.scope).await?
         .iter().map(|method| json!({"id":method.id,"label":method.label,"length":method.code_length,"numeric":method.numeric})).collect();
     // Drafts may be invalid: editing and the ordinary plan tool supply field
@@ -610,23 +649,72 @@ pub(crate) async fn open(
         "{origin}/ai/reviews/{}",
         card["review_id"].as_str().unwrap_or_default()
     ));
+    if let Some(replaces) = &replaces {
+        card["replaces"] = json!(replaces);
+    }
     redact_review(&mut card, &mut operations_json);
     session
         .reviews
-        .create(session.scope, &review_id, &card, &operations_json)
+        .create(
+            session.scope,
+            &review_id,
+            &card,
+            &operations_json,
+            replaces.as_deref(),
+        )
         .await?;
     Ok(card)
+}
+
+/// Before a linked review opens, every `{"$ref":"N.id"}` must be well formed
+/// and taken by its step's owner, so the person never gets a card that can
+/// only fail at approval. The refusal names the step's field and the fix.
+fn preflight_links(
+    registry: &Registry,
+    operations: &[crate::plans::PlannedOperation],
+) -> Result<()> {
+    for (index, op) in operations.iter().enumerate() {
+        let at = format!("operations[{}].input", index + 1);
+        let references =
+            crate::plan_references::collect(registry, operations, index).map_err(|error| {
+                match error {
+                    Error::InvalidInput(fields) => Error::InvalidInput(
+                        fields
+                            .into_iter()
+                            .map(|(field, messages)| {
+                                let path = if field.is_empty() {
+                                    at.clone()
+                                } else {
+                                    format!("{at}.{field}")
+                                };
+                                (path, messages)
+                            })
+                            .collect(),
+                    ),
+                    other => other,
+                }
+            })?;
+        if references.is_empty() {
+            continue;
+        }
+        if let crate::Handler::SafeWrite(owner) =
+            registry.operations[op.key.as_str()].definition.handler
+        {
+            crate::plan_references::supported(owner, &op.key, &references, &at)?;
+        }
+    }
+    Ok(())
 }
 
 inventory::submit! { Contribution::new(APPS, "agent-api.review", Provenance {module:"base/agent_api",source:file!(),line:line!()}, &App {
     uri: "ui://bilibi/review-entries-v1.html",
     tool: "review_entries",
     title: "Review entries",
-    description: "Open an editable review the person can change and approve. One write with several records: {\"key\",\"entries\"}. Ordered or linked writes with different keys: {\"operations\":[{\"key\",\"input\"},...]}, one step per record; a field holding the ID of a record an earlier step creates is {\"$ref\":\"N.id\"} (N is that step's number). Send only those arguments and the optional agent_self_report. Linked steps stay in one atomic write. One entry is a form; repeated entries a spreadsheet. The person edits, runs the dry-run check and approves the reviewed operations in the card. Do not plan or commit separately while this card is open. Opening changes no business data.",
+    description: "Open an editable review the person can change and approve. One write with several records: {\"key\",\"entries\"}. Ordered or linked writes with different keys: {\"operations\":[{\"key\",\"input\"},...]}, one step per record; a field holding the ID of a record an earlier step creates is {\"$ref\":\"N.id\"} (N is that step's number). Send only those arguments and the optional agent_self_report. Linked steps stay in one atomic write. One entry is a form; repeated entries a spreadsheet. The person edits (the card checks each edit) and approves the checked operations in the card. Pass `replaces` with the review_id of an earlier review this one supersedes. Do not plan or commit separately while this card is open. Opening changes no business data.",
     source: AppSource::ReviewEntries,
     html: include_str!("../card/review-entries-v1.html"),
     connect_domains: &[], resource_domains: &[],
-    skill: "# Review entries\n\nDiscover and describe the write, then call review_entries. Use this shared card for both one record and a batch; never generate a separate write form or an HTML page of your own. A host with MCP Apps opens the card inline. Otherwise show the compact review and browser link returned by the tool, then call review_status with its review id until the person finishes. The same signed-in account must open the link while the originating AI connection remains switched on.\n\nOne write key, one or more records: `{\"key\":\"core.company.create\",\"entries\":[{...},{...}]}`. A review holds at most 1,000 entries; if it refuses a larger review, split at the exact size in the refusal.\n\nSeveral keys or records that depend on each other: `{\"operations\":[{\"key\":\"core.company.create\",\"input\":{\"name\":\"Acme\",\"code\":\"Acme\"}},{\"key\":\"core.affiliation.contact.create\",\"input\":{\"name\":\"Ann Lee\",\"organisation_id\":{\"$ref\":\"1.id\"}}}]}`. Each step is exactly `key` and `input`, one step per record. `{\"$ref\":\"N.id\"}` stands for the record step N creates (one-based, earlier steps only; describe shows what a key creates). One person at two organisations: create the contact once with `core.affiliation.contact.create`, then add a `core.affiliation.create` step whose `person_id` is `{\"$ref\":\"<that step>.id\"}`. Send `operations` alone, never with `key` or `entries`. All steps stay in one atomic write and one approval; do not split a task to obtain IDs.\n\nSend only these arguments and the optional `agent_self_report`; a refusal names the field and the fix, so correct that and call again. The person can edit values, paste spreadsheet rows, update or stop the dry-run check, explicitly exclude refused rows and approve the reviewed operations. A schema-marked secret is never stored for the browser hand-off, so the person enters it in the card. Keep the instance visible. Do not call commit yourself while the card owns the review. The card reports committed, refused, cancelled and uncertain outcomes through model context and review_status. A refused review stays open: the person corrects it and approves again, and review_status then reports the latest state (refused, later saved). Only saved, cancelled and uncertain end it; when the card is not shown, show the entry digest from the tool text; read records to verify an uncertain outcome, never automatically retry it.\n",
+    skill: "# Review entries\n\nDiscover and describe the write, then call review_entries. Use this shared card for both one record and a batch; never generate a separate write form or an HTML page of your own. A host with MCP Apps opens the card inline. Otherwise show the compact review and browser link returned by the tool, then call review_status with its review id until the person finishes. The same signed-in account must open the link while the originating AI connection remains switched on.\n\nOne write key, one or more records: `{\"key\":\"core.company.create\",\"entries\":[{...},{...}]}`. A review holds at most 1,000 entries; if it refuses a larger review, split at the exact size in the refusal.\n\nSeveral keys or records that depend on each other: `{\"operations\":[{\"key\":\"core.company.create\",\"input\":{\"name\":\"Acme\",\"code\":\"Acme\"}},{\"key\":\"core.affiliation.contact.create\",\"input\":{\"name\":\"Ann Lee\",\"organisation_id\":{\"$ref\":\"1.id\"}}}]}`. Each step is exactly `key` and `input`, one step per record. `{\"$ref\":\"N.id\"}` stands for the record step N creates (one-based, earlier steps only; describe shows what a key creates). One person at two organisations: create the contact once with `core.affiliation.contact.create`, then add a `core.affiliation.create` step whose `person_id` is `{\"$ref\":\"<that step>.id\"}`. Send `operations` alone, never with `key` or `entries`. All steps stay in one atomic write and one approval; do not split a task to obtain IDs.\n\nSend only these arguments and the optional `agent_self_report`; a refusal names the field and the fix, so correct that and call again. The person can edit values (each edit is checked automatically), paste spreadsheet rows, stop a long check, explicitly exclude refused rows and approve the checked operations. When a new review corrects or supersedes one you opened earlier, pass that review's id as `replaces`, so only the new one can be approved. A schema-marked secret is never stored for the browser hand-off, so the person enters it in the card. Keep the instance visible. Do not call commit yourself while the card owns the review. The card reports committed, refused, cancelled and uncertain outcomes through model context and review_status. A refused review stays open: the person corrects it and approves again, and review_status then reports the latest state (refused, later saved). A review ends when it is saved, cancelled, uncertain, or replaced by a newer review opened with `replaces`; when the card is not shown, show the entry digest from the tool text; read records to verify an uncertain outcome, never automatically retry it.\n",
 }) }
 
 inventory::submit! { Contribution::new(bilibi_ui::PUBLIC_ASSETS, "agent-api.review-card", Provenance {module:"base/agent_api",source:file!(),line:line!()}, &bilibi_ui::PublicAsset {

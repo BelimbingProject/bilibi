@@ -320,6 +320,13 @@ impl WriteHandler for Write {
             _ => None,
         }
     }
+    fn accepts_references(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Create => &[("organisation_id", "company"), ("person_id", "person")],
+            Self::Contact => &[("organisation_id", "company")],
+            _ => &[],
+        }
+    }
     fn preview_dependent<'a>(
         &'a self,
         client: &'a dyn OperationClient,
@@ -328,10 +335,7 @@ impl WriteHandler for Write {
         references: &'a bilibi_agent_api::PlanReferences,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            if !matches!(self, Self::Create | Self::Contact) {
-                return Err(Error::Invalid.into());
-            }
-            references.require(&[("organisation_id", "company"), ("person_id", "person")])?;
+            references.require(self.accepts_references())?;
             let client = client.transaction().ok_or(Error::Internal)?;
             let (title, email, phone) = crate::model::normalize_work(
                 &bilibi_agent_api::optional_text_field(input, "title"),

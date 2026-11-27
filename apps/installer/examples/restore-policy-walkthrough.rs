@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     for (dir, extensions) in [
         (
             &customer,
-            "Extensions:\n  local unpinned, code: customer, modules: custom",
+            "Extensions:\n  local unpinned, code: customer, modules: local/custom",
         ),
         (&reviewed, "Extensions: none mounted"),
     ] {

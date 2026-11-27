@@ -29,7 +29,18 @@
     chip's × resets. -#}
 {% macro toolbar_control(control) %}
 {% if control.is_search() %}<div class="min-w-52 flex-1 basis-64">{% call toolbar_label(id=control.id, label=control.label_text()) %}{% endcall %}<div class="relative">{% call ui::icon(name="search", class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-ink-faint") %}{% endcall %}{% call forms::input(field=control.field) %}{% endcall %}</div>{% if !control.hint.is_empty() %}<p class="mt-1.5 text-xs text-ink-subtle">{{ control.hint }}</p>{% endif %}</div>
-{% elif let Some(multi) = control.multi() %}<div data-filter-control="{{ control.id }}" class="w-full min-w-0 sm:w-auto sm:min-w-36">{% call forms::multi_select(control=multi) %}{% endcall %}</div>
+{% elif let Some(multi) = control.multi() %}<div data-filter-control="{{ control.id }}" class="w-full min-w-0 sm:w-auto sm:min-w-36"><div id="{{ multi.id }}-wrapper" data-hook="MultiSelect" data-filter-multi data-placeholder="{{ multi.placeholder }}" data-selection-label="{{ multi.selection_label }}" class="relative floating-scope mb-0">
+<input type="hidden" name="{{ multi.name }}" value=""{% if multi.disabled() %} disabled{% endif %} />
+<div data-live-expanded class="ui-multi-field ui-field floating-anchor relative rounded-md border border-line bg-surface text-ink shadow-xs">
+<span id="{{ multi.id }}-label" class="sr-only">{{ multi.display_label() }}</span>
+<button id="{{ multi.id }}" type="button" aria-labelledby="{{ multi.id }}-label {{ multi.id }}-summary" aria-expanded="false" aria-controls="{{ multi.id }}-options"{% if multi.disabled() %} disabled{% endif %} class="ui-multi-trigger"></button>
+<span id="{{ multi.id }}-summary" data-filter-summary class="pointer-events-none absolute inset-y-0 left-3 right-9 flex items-center truncate text-sm">{{ multi.filter_summary() }}</span>
+<span class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2" aria-hidden="true">{% call ui::icon(name="chevron-down", class="size-4 text-ink-muted") %}{% endcall %}</span>
+</div>
+<div id="{{ multi.id }}-options" tabindex="-1" class="ui-multi-options floating-list z-30 mt-1 max-h-60 min-w-56 overflow-y-auto rounded-xl border border-line bg-surface p-1.5 shadow-lg space-y-0.5 focus:outline-none">
+{% for option in multi.options %}<label for="{{ multi.id }}-option-{{ option.value }}" class="flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm text-ink hover:bg-surface-sunken select-none transition"><input type="checkbox" id="{{ multi.id }}-option-{{ option.value }}" name="{{ multi.name }}" value="{{ option.value }}"{% if multi.is_selected(option.value) %} checked{% endif %}{% if multi.disabled() %} disabled{% endif %} class="size-4 shrink-0 rounded border-line text-action accent-action focus:ring-2 focus:ring-brand-strong/30" /><span class="truncate font-normal">{{ option.label }}</span></label>{% endfor %}
+{% if multi.options.is_empty() %}<div class="px-2.5 py-2 text-sm text-ink-muted">No options available.</div>{% endif %}
+</div></div></div>
 {% elif control.is_date() %}<div data-filter-control="{{ control.id }}" class="w-full min-w-0 sm:w-auto">{% call toolbar_label(id=control.id, label=control.label_text()) %}{% endcall %}{% call forms::input(field=control.field) %}{% endcall %}</div>
 {% else %}<div data-filter-control="{{ control.id }}" class="w-full min-w-0 sm:w-auto sm:min-w-36">{% call toolbar_label(id=control.id, label=control.label_text()) %}{% endcall %}{% call forms::input(field=control.field) %}{% endcall %}</div>
 {% endif %}

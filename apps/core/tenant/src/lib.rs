@@ -1,6 +1,5 @@
 //! Tenant provisioning and its page, composing Base Tenancy and
 //! `Core.Company.PrimaryCompanyManager` above the operation registry.
-mod detail;
 mod operations;
 mod oversight;
 mod oversight_web;
@@ -28,7 +27,6 @@ const PAGES: &str = "core/tenant.pages";
 
 /// The composition facade. No caller supplies a tenant or actor to act as.
 pub struct TenantService {
-    db: Db,
     tenants: Arc<Tenants>,
     sessions: Arc<Sessions>,
     companies: Arc<CompanyService>,
@@ -66,7 +64,7 @@ fn draft(input: &Value) -> Result<(NewTenant, Vec<String>)> {
     ))
 }
 fn tenant_json(tenant: &bilibi_tenancy::TenantIdentity) -> Value {
-    json!({"id":tenant.id,"parent_id":tenant.parent_id,"name":tenant.name,"status":tenant.status.as_str(),"is_platform_operator":tenant.is_platform_operator,
+    json!({"id":tenant.id,"parent_id":tenant.parent_id,"name":tenant.name,"name_version":tenant.name_version,"status":tenant.status.as_str(),"is_platform_operator":tenant.is_platform_operator,
         "suspension":tenant.suspension.as_ref().map(|suspension| json!({"at":suspension.at,"reason":suspension.reason}))})
 }
 /// The move named by a suspend or reactivate operation key.
@@ -167,25 +165,29 @@ impl TenantService {
         };
         Ok(json!({"tenant":tenant_json(&moved),"sessions_ended":ended}))
     }
-    async fn review(&self, scope: &Scope, input: &Value) -> Result<Value> {
-        let client = self.db.get().await.map_err(Error::from)?;
-        let proof =
-            bilibi_authz::authorize_operator(&**client, scope, bilibi_tenancy::CREATE).await?;
+    async fn review(
+        &self,
+        client: &dyn bilibi_agent_api::OperationClient,
+        scope: &Scope,
+        input: &Value,
+    ) -> Result<Value> {
+        let sql = client.sql_client().await?;
+        let proof = bilibi_authz::authorize_operator(sql, scope, bilibi_tenancy::CREATE).await?;
         let (tenant, names) = draft(input)?;
         let tenant = self
             .tenants
-            .preview(&proof, &tenant)
+            .preview_on(client, &proof, &tenant)
             .await?
             .map_err(tenant_errors)?;
         let companies = self
             .companies
-            .preview_tenant_companies(&**client, scope, &names)
+            .preview_tenant_companies(sql, scope, &names)
             .await?
             .map_err(ContractError::InvalidInput)?;
         let parent = match tenant.parent_id {
             Some(id) => self
                 .tenants
-                .fetch(&proof, id)
+                .fetch_on(client, &proof, id)
                 .await?
                 .map(|tenant| tenant_json(&tenant)),
             None => None,
@@ -244,7 +246,6 @@ inventory::submit! {
         services:&[
             bilibi_module_registry::Service { id:SERVICE, factory:|services| {
                 let facade = Arc::new(TenantService {
-                    db:services.get::<Db>("base/database.pool")?.as_ref().clone(),
                     tenants:services.get("base/tenancy.tenants")?, sessions:services.get("base/session.sessions")?, companies:services.get(bilibi_company::SERVICE)?,
                     step_up:services.get(bilibi_step_up::SERVICE)?,
                     oversight:services.get(bilibi_tenancy::OVERSIGHT)?,
@@ -270,9 +271,6 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
     service:PAGES, contracts:&[("save_field",RENAME),("create",CREATE),("confirm_suspend",SUSPEND),("confirm_reactivate",REACTIVATE)], pending:bilibi_module_registry::contributions::Pending::None,
 }) }
 
-inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::ROUTES, "core/tenant.detail", bilibi_module_registry::Provenance { module:"core/tenant", source:file!(), line:line!() }, &bilibi_module_registry::contributions::Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
-    method:bilibi_module_registry::contributions::Method::Get, path:"/tenancy/tenants/{id}", service:PAGES, operation:"detail", access:bilibi_module_registry::contributions::Access::SignedIn, framed:true,
-}) }
 bilibi_menu::contribute!(
     "core/tenant",
     bilibi_menu::MenuItem::container("admin.tenancy", "Tenancy")

@@ -111,7 +111,16 @@ impl Pages {
     }
     async fn allowed(&self, scope: &Scope, capability: &str) -> Result<bool> {
         let client = self.db.get().await?;
-        Ok(effective_capabilities(&**client, scope)
+        self.allowed_on(&**client, scope, capability).await
+    }
+    /// `allowed` on the caller's held connection.
+    async fn allowed_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        capability: &str,
+    ) -> Result<bool> {
+        Ok(effective_capabilities(client, scope)
             .await?
             .contains(capability))
     }
