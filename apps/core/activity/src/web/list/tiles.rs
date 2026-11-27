@@ -6,13 +6,13 @@
 use super::Index;
 use crate::web::{refusal, render, sentences, urgency, Clock, Refusal};
 use crate::{Activity, Filter, Kind, Sort, State, Status};
+use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
     board::{Board, BoardCard, BoardColumn, BoardMove},
     calendar::{CalendarSlot, CalendarWhen},
-    choices, Alert, Button, ButtonVariant, Field, Form, Html, InputKind, Modal, ModalWidth,
-    StatusKind,
+    choices, Alert, Button, ButtonVariant, Field, Form, Html, InputKind, StatusKind,
 };
 use std::collections::HashMap;
 
@@ -25,6 +25,16 @@ const BOARD_CLOSED: i64 = 100;
 /// A slot chosen on the calendar with no end of its own starts at 09:00 and
 /// lasts an hour.
 const SLOT_HOUR: i64 = 9;
+
+#[derive(Template)]
+#[template(
+    source = r#"{% import "dialog.html" as ui %}{% call ui::modal(id="activities-slot-modal", title="Add at this time", cancel_event="cancel_slot", width=bilibi_ui::ModalWidth::Compact, description_html=summary) %}{{ form|safe }}{% endcall %}"#,
+    ext = "html"
+)]
+struct SlotDialog {
+    summary: Html,
+    form: Html,
+}
 
 /// A free calendar slot waiting for its kind: its start and end, and whose
 /// lane of the shared view it was chosen on (their account and name), when
@@ -294,13 +304,13 @@ impl Index {
     /// interval, saved straight through the kind's own create contract.
     /// More options carries every typed value into the full form instead.
     pub(super) fn slot_dialog(&self, clock: &Clock, slot: &Slot) -> Result<Html> {
-        let mut description = clock.time("activities-slot-summary-start", slot.start)?;
-        description.push(&Html::text(" to "));
-        description.push(&clock.time("activities-slot-summary-end", slot.end)?);
+        let mut summary = clock.time("activities-slot-summary-start", slot.start)?;
+        summary.push(&Html::text(" to "));
+        summary.push(&clock.time("activities-slot-summary-end", slot.end)?);
         if let Some((_, name)) = &slot.assignee {
-            description.push(&Html::text(&format!(", assigned to {name}")));
+            summary.push(&Html::text(&format!(", assigned to {name}")));
         }
-        description.push(&Html::text("."));
+        summary.push(&Html::text("."));
         let mut body = Html::EMPTY;
         if !slot.notice.is_empty() {
             body.push(&render(Alert {
@@ -379,14 +389,6 @@ impl Index {
             actions,
             ..Form::default()
         })?;
-        render(Modal {
-            id: "activities-slot-modal",
-            title: "Add at this time",
-            description_html: description,
-            cancel_event: "cancel_slot",
-            width: ModalWidth::Compact,
-            body: form,
-            ..Modal::default()
-        })
+        render(SlotDialog { summary, form })
     }
 }
