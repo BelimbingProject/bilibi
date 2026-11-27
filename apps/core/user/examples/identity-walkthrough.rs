@@ -477,16 +477,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     let request = RequestInfo::default();
-    let select_archived = || {
-        users.choose_company(
-            &archived_desk_login.token,
-            &archived_desk_login.csrf,
-            Some(2),
-            &request,
-        )
+    let spawn_selection = || {
+        let users = users.clone();
+        let token = archived_desk_login.token.clone();
+        let csrf = archived_desk_login.csrf.clone();
+        tokio::spawn(async move {
+            users
+                .choose_company(&token, &csrf, Some(2), &RequestInfo::default())
+                .await
+        })
     };
-    let (first, repeat) = tokio::join!(select_archived(), select_archived());
-    if first?.company != Some(2) || repeat?.company != Some(2) {
+    let (first, repeat) = tokio::join!(spawn_selection(), spawn_selection());
+    if first??.company != Some(2) || repeat??.company != Some(2) {
         return Err("Overlapping desk selections did not both return desk 2".into());
     }
     let independent = app.security.guard(&independent_login.token).await?;
