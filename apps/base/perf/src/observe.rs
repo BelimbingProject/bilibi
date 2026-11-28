@@ -73,29 +73,37 @@ impl Recorder {
     /// `bilibi_database::timing`) to `identity`. A missing or non-conforming
     /// identity (an unmatched route, a name with a query string) runs the work
     /// unobserved: nothing unbounded or identifying is ever recorded.
-    pub async fn observe<T>(
-        &self,
+    ///
+    /// `work` is boxed before the async block: an `async` wrapper that owns a
+    /// future keeps it twice (the capture and the awaited value), and on the
+    /// live path those copies overflowed an unoptimised build's worker stack
+    /// (#965).
+    pub fn observe<'a, T: 'a>(
+        &'a self,
         kind: Kind,
-        identity: Option<&str>,
-        work: impl Future<Output = T>,
-        finish: impl FnOnce(&T) -> Finish,
-    ) -> T {
-        let Some(identity) =
-            identity.filter(|identity| kind != Kind::Runtime && valid_identity(kind, identity))
-        else {
-            return work.await;
-        };
-        let counters = Arc::new(Counters::default());
-        let mut pending = Pending {
-            recorder: self,
-            kind,
-            identity,
-            started: Instant::now(),
-            counters: counters.clone(),
-            finished: false,
-        };
-        let result = timing::scope(counters, work).await;
-        pending.record(finish(&result));
-        result
+        identity: Option<&'a str>,
+        work: impl Future<Output = T> + 'a,
+        finish: impl FnOnce(&T) -> Finish + 'a,
+    ) -> impl Future<Output = T> + 'a {
+        let work = Box::pin(work);
+        async move {
+            let Some(identity) =
+                identity.filter(|identity| kind != Kind::Runtime && valid_identity(kind, identity))
+            else {
+                return work.await;
+            };
+            let counters = Arc::new(Counters::default());
+            let mut pending = Pending {
+                recorder: self,
+                kind,
+                identity,
+                started: Instant::now(),
+                counters: counters.clone(),
+                finished: false,
+            };
+            let result = timing::scope(counters, work).await;
+            pending.record(finish(&result));
+            result
+        }
     }
 }

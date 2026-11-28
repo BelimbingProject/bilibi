@@ -131,6 +131,8 @@ A module contributes one in code with `bilibi_reports::builtin!` (key, name, des
 
 `apps/web/examples/report-subjects.rs` on an empty disposable database (`BILIBI_REPORT_SUBJECTS=disposable`): a merged pair counted once under its survivor with the total unchanged, the drill-down behind it, a reader whose reach leaves one subject out of the lines, the total, the list and a filter by its id, a reader with no grant on the subject's table, wider reach, and another tenant's merge.
 
+`apps/web/examples/report-create-walkthrough.rs` on a migrated disposable database (walkthrough `report-create`): the staff router on Tokio's default worker stack, `/reports` mounted over the live socket, New report opened and a Companies list created. The create redirects to the new report's definition, the row is saved and the builder answers, so an unoptimised build no longer overflows the worker stack on that create (#965).
+
 ## Not yet
 
 Computed columns, XLSX, mail attachments, a read replica and owner summary tables are later issues (#128, "Out of scope" and "Reporting store").

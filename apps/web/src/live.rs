@@ -19,6 +19,7 @@ use bilibi_ui::page::{
 use bilibi_ui::params;
 use bilibi_ui::upload::{ClientEntry, Registration, UploadError, CHUNK_SIZE, MAX_ENTRIES};
 use bilibi_ui::{LIVE_EVENT_LIMIT, LIVE_EVENT_TOO_LARGE};
+use futures_util::future::Either;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -504,13 +505,14 @@ fn page_event(
         name,
     }))
 }
-async fn permitted<T>(
+/// A plain function, not an `async fn`, so `update` is held once (#965).
+fn permitted<F: std::future::Future>(
     event: Option<page_write::Event>,
-    update: impl std::future::Future<Output = T>,
-) -> T {
+    update: F,
+) -> impl std::future::Future<Output = F::Output> {
     match event {
-        Some(event) => page_write::during(event, update).await,
-        None => update.await,
+        Some(event) => Either::Left(page_write::during(event, update)),
+        None => Either::Right(update),
     }
 }
 
