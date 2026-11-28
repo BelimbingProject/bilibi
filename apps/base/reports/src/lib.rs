@@ -393,6 +393,17 @@ fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Reco
     let d = &report.definition;
     let mut references = std::collections::BTreeSet::new();
     let mut live_subjects = root.subject().is_some();
+    // Record reach narrows the rows read (ADR 30), so a changed reach on the
+    // root or any table a column crosses changes what the reader sees. Only
+    // reach narrower than all is recorded, so keys over tables without reach
+    // stay as they were.
+    let mut reach = std::collections::BTreeMap::new();
+    let mut include_reach = |table: &bilibi_grid::Table| {
+        if let Some(effective) = table.reach() {
+            reach.insert(table.id(), effective.code());
+        }
+    };
+    include_reach(root);
     let seen: String = d
         .columns
         .iter()
@@ -404,16 +415,16 @@ fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Reco
         // masking it changes what the reader sees (ADR 05).
         .map(|spec| match catalog.resolve(root, spec) {
             Ok(column) => {
-                live_subjects |= column
+                for table in column
                     .hops
                     .iter()
                     .chain(&column.many)
                     .chain(&column.tail)
-                    .any(|link| {
-                        catalog
-                            .table(link.to())
-                            .is_some_and(|table| table.subject().is_some())
-                    });
+                    .filter_map(|link| catalog.table(link.to()))
+                {
+                    live_subjects |= table.subject().is_some();
+                    include_reach(table);
+                }
                 if let Some(kind) = column.reference {
                     let readable = records
                         .kind(kind)
@@ -432,11 +443,15 @@ fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Reco
     if live_subjects {
         return format!("{}:subject:live", report.version);
     }
-    format!(
+    let mut key = format!(
         "{}:{seen}:{}",
         report.version,
         references.into_iter().collect::<Vec<_>>().join(":")
-    )
+    );
+    for (table, code) in reach {
+        key.push_str(&format!(":reach:{table}={code}"));
+    }
+    key
 }
 
 impl Reports {
@@ -921,11 +936,13 @@ impl Reports {
     }
 
     /// What this reader may see of a report now, as a key that changes when
-    /// it does: its version and, per column, whether their catalog resolves
-    /// it, and whether they see it masked.
+    /// it does: its version, per column whether their catalog resolves it
+    /// and whether they see it masked, and their record reach on the tables
+    /// the columns cross.
     /// A cached drawing is reused only while this key holds, so a field
-    /// restriction or a lost share shows at the next refresh, not the next
-    /// run. Cheaper than a run: no Grid read. Needs `reports.view`.
+    /// restriction, a narrowed reach or a lost share shows at the next
+    /// refresh, not the next run. Cheaper than a run: no Grid read. Needs
+    /// `reports.view`.
     pub async fn access(&self, scope: &Scope, id: i64) -> Outcome<String> {
         self.access_report(scope, id)
             .await

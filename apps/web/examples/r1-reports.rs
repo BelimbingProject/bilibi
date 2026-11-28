@@ -1261,6 +1261,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     masked.map(|f| f.rows).map_err(|e| e.to_string())
                 ),
             );
+            // Narrowing the requester's record reach retires it too (#950):
+            // the key records reach, so the stored file and a dashboard's
+            // cached drawing are not reused under a narrower grant.
+            client.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES($1,$2,$3,true,'all') ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=true, reach='all'", &[&manager.tenant(), &manager.user(), &grid::reference::TASKS]).await?;
+            let tasks = Draft {
+                name: "Every task".into(),
+                description: String::new(),
+                record_type: "reference_tasks".into(),
+                kind: Kind::Rows,
+                definition: Definition {
+                    columns: vec!["name".into(), "hours".into()],
+                    ..Definition::default()
+                },
+            };
+            let tasks_id = write(&boundary, &db, &manager, "reports.create", async |tx| {
+                reports.create(tx, &manager, &tasks).await
+            })
+            .await?;
+            let made = reports.access(&manager, tasks_id).await?;
+            client
+                .execute(
+                    "UPDATE base_report_exports SET report_id=$2, access=$3 WHERE id=$1",
+                    &[export, &tasks_id, &made],
+                )
+                .await?;
+            let same = reports.access(&manager, tasks_id).await?;
+            let unchanged = reports.exported(&manager, *export).await;
+            client.execute("UPDATE principal_capabilities SET reach='own' WHERE tenant_id=$1 AND user_id=$2 AND capability=$3", &[&manager.tenant(), &manager.user(), &grid::reference::TASKS]).await?;
+            let now = reports.access(&manager, tasks_id).await?;
+            let narrowed = reports.exported(&manager, *export).await;
+            client.execute("DELETE FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3", &[&manager.tenant(), &manager.user(), &grid::reference::TASKS]).await?;
+            checks.check(
+                "an unchanged reach keeps the key a file or a dashboard drawing is reused under",
+                made == same,
+                format!("{made} -> {same}"),
+            );
+            checks.check(
+                "narrowing reach changes what its requester may see",
+                made != now && now.contains(":reach:reference_tasks=own"),
+                format!("{made} -> {now}"),
+            );
+            checks.check(
+                "a file made under reach all is refused after reach narrows to own",
+                !matches!(&unchanged, Err(ReportError::Refused(_)))
+                    && matches!(&narrowed, Err(ReportError::Refused(m)) if m.contains("What you may see of this report has changed")),
+                format!(
+                    "before {:?}, after {:?}",
+                    unchanged.map(|f| f.rows).map_err(|e| e.to_string()),
+                    narrowed.map(|f| f.rows).map_err(|e| e.to_string())
+                ),
+            );
             // One person's waiting exports are few (#551): the default is
             // three, and the next is refused with a sentence to wait.
             let already: i64 = client.query_one("SELECT count(*) FROM base_report_exports WHERE tenant_id=1 AND requester_id=1 AND state='queued'", &[]).await?.get(0);
