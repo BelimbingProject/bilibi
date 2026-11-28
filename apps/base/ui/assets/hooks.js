@@ -1356,20 +1356,29 @@
     return MONTHS.findIndex((month) => key.startsWith(month.toLowerCase())) + 1
   }
   const pad = (n) => String(n).padStart(2, "0")
+  // A year typed with two digits is this century's ("26" is 2026); one typed
+  // with four is taken as written, so "0000" or "0026" is never moved into
+  // this century behind the person's back.
+  const yearOf = (digits) => (digits.length === 2 ? 2000 + +digits : +digits)
+  // The ISO date, or null when the day does not exist or the year is outside
+  // what a date box can hold (0001 to 9999): null posts the text as typed, so
+  // the owner refuses it and the field shows its error.
   const isoDate = (y, m, d) => {
-    if (y < 100) y += 2000
-    const date = new Date(Date.UTC(y, m - 1, d))
+    if (y < 1 || y > 9999) return null
+    // Date.UTC reads a year below 100 as 19xx; setUTCFullYear does not.
+    const date = new Date(0)
+    date.setUTCFullYear(y, m - 1, d)
     if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return null
-    return `${y}-${pad(m)}-${pad(d)}`
+    return `${String(y).padStart(4, "0")}-${pad(m)}-${pad(d)}`
   }
   const parseDate = (text) => {
     const value = text.trim()
     let match
     if ((match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(value))) return isoDate(+match[1], +match[2], +match[3])
-    if ((match = /^(\d{1,2})[/.\-\s](\d{1,2})[/.\-\s](\d{2}|\d{4})$/.exec(value))) return isoDate(+match[3], +match[2], +match[1])
+    if ((match = /^(\d{1,2})[/.\-\s](\d{1,2})[/.\-\s](\d{2}|\d{4})$/.exec(value))) return isoDate(yearOf(match[3]), +match[2], +match[1])
     const words = value.replace(/,/g, " ").split(/[\s/.\-]+/).filter(Boolean)
     if (words.length !== 3 || !/^\d{2}(\d{2})?$/.test(words[2])) return null
-    const year = +words[2]
+    const year = yearOf(words[2])
     if (/^\d{1,2}$/.test(words[0]) && monthOf(words[1])) return isoDate(year, monthOf(words[1]), +words[0])
     if (monthOf(words[0]) && /^\d{1,2}$/.test(words[1])) return isoDate(year, monthOf(words[0]), +words[1])
     return null
