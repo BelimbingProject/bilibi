@@ -9,6 +9,7 @@ use bilibi_tenancy::{ChildGrant, Oversight, OversightScope, Scope};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
+    pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -532,13 +533,19 @@ impl OversightQueries {
         rows: bool,
     ) -> Result<Catalog, QueryError> {
         let deadline = self.deadline_on(tx).await?;
-        budgeted(tx, deadline, TOTAL_TIMEOUT, None, async {
-            let proof = self.tenancy.prove(tx, scope).await?;
-            if proof.children().len() > self.setting_on(tx, "max_children").await? as usize {
-                return Err(QueryError::Limit("too many consenting children"));
-            }
-            Ok(Catalog::oversight_builder(tx, &proof, rows).await?)
-        })
+        budgeted(
+            tx,
+            deadline,
+            TOTAL_TIMEOUT,
+            None,
+            Box::pin(async {
+                let proof = self.tenancy.prove(tx, scope).await?;
+                if proof.children().len() > self.setting_on(tx, "max_children").await? as usize {
+                    return Err(QueryError::Limit("too many consenting children"));
+                }
+                Ok(Catalog::oversight_builder(tx, &proof, rows).await?)
+            }),
+        )
         .await?
     }
     /// Validate a saved question on the caller's transaction. Each child read
@@ -553,13 +560,19 @@ impl OversightQueries {
     ) -> Result<bool, QueryError> {
         self.check_source(root)?;
         let deadline = self.deadline_on(tx).await?;
-        let (scope, child_ms) = budgeted(tx, deadline, TOTAL_TIMEOUT, None, async {
-            let scope = self.tenancy.prove(tx, scope).await?;
-            if scope.children().len() > self.setting_on(tx, "max_children").await? as usize {
-                return Err(QueryError::Limit("too many consenting children"));
-            }
-            Ok((scope, self.setting_on(tx, "child_timeout_ms").await?))
-        })
+        let (scope, child_ms) = budgeted(
+            tx,
+            deadline,
+            TOTAL_TIMEOUT,
+            None,
+            Box::pin(async {
+                let scope = self.tenancy.prove(tx, scope).await?;
+                if scope.children().len() > self.setting_on(tx, "max_children").await? as usize {
+                    return Err(QueryError::Limit("too many consenting children"));
+                }
+                Ok((scope, self.setting_on(tx, "child_timeout_ms").await?))
+            }),
+        )
         .await??;
         let mut audit = Some(
             timeout_at(deadline, self.db.try_get_detached("oversight audit"))
@@ -592,14 +605,14 @@ impl OversightQueries {
                 child_deadline,
                 CHILD_TIMEOUT,
                 Some(spec.bounds()),
-                async {
+                Box::pin(async {
                     let catalog = Catalog::for_oversight(tx, &scope, grant, spec.rows()).await?;
                     executing_query = true;
                     let data = read_catalog(tx, &catalog, grant, root, &spec).await?;
                     executing_query = false;
                     recheck_policy(tx, &scope, grant, &spec, &format!("{catalog:?}")).await?;
                     Ok(data)
-                },
+                }),
             )
             .await;
             let outcome = match result {
@@ -716,7 +729,7 @@ impl OversightQueries {
             start + POLICY_TIMEOUT,
             "oversight policy lookup timed out",
             None,
-            self.setting_on(tx, "total_timeout_ms"),
+            Box::pin(self.setting_on(tx, "total_timeout_ms")),
         )
         .await??;
         let deadline = start + Duration::from_millis(u64::from(millis));
@@ -759,12 +772,13 @@ fn child_refusal(error: &QueryError) -> &'static str {
     }
 }
 
+/// `work` comes boxed, as for `at_probe_savepoint`.
 async fn budgeted<T>(
     tx: &tokio_postgres::Transaction<'_>,
     deadline: Instant,
     time_error: &'static str,
     bounds: Option<Bounds>,
-    work: impl std::future::Future<Output = Result<T, QueryError>>,
+    work: Pin<Box<impl std::future::Future<Output = Result<T, QueryError>>>>,
 ) -> Result<Result<T, QueryError>, Error> {
     if Instant::now() >= deadline {
         return Ok(Err(QueryError::TooHeavy(time_error)));
@@ -772,56 +786,65 @@ async fn budgeted<T>(
     if let Some(Err(error)) = bounds.map(|bounds| bounds.check()) {
         return Ok(Err(error));
     }
-    at_probe_savepoint(tx, deadline, bounds.is_none(), async {
-        match timeout_at(deadline, async {
-            let previous = if bounds.is_none() {
-                Some(
-                    tx.query_one("SHOW statement_timeout", &[])
-                        .await?
-                        .get::<_, String>(0),
-                )
-            } else {
-                None
-            };
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(QueryError::TooHeavy(time_error));
-            }
-            let millis = (remaining.as_millis() + 1) as u32;
-            let sql = match bounds {
-                Some(mut bounds) => {
-                    bounds.statement_ms = bounds.statement_ms.min(millis);
-                    bounds.sql()
+    at_probe_savepoint(
+        tx,
+        deadline,
+        bounds.is_none(),
+        Box::pin(async {
+            match timeout_at(deadline, async {
+                let previous = if bounds.is_none() {
+                    Some(
+                        tx.query_one("SHOW statement_timeout", &[])
+                            .await?
+                            .get::<_, String>(0),
+                    )
+                } else {
+                    None
+                };
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(QueryError::TooHeavy(time_error));
                 }
-                None => format!("SET LOCAL statement_timeout = '{millis}ms'"),
-            };
-            tx.batch_execute(&sql).await?;
-            let value = work.await?;
-            if let Some(previous) = previous {
-                tx.query_one(
-                    "SELECT set_config('statement_timeout', $1, true)",
-                    &[&previous],
-                )
-                .await?;
+                let millis = (remaining.as_millis() + 1) as u32;
+                let sql = match bounds {
+                    Some(mut bounds) => {
+                        bounds.statement_ms = bounds.statement_ms.min(millis);
+                        bounds.sql()
+                    }
+                    None => format!("SET LOCAL statement_timeout = '{millis}ms'"),
+                };
+                tx.batch_execute(&sql).await?;
+                let value = work.await?;
+                if let Some(previous) = previous {
+                    tx.query_one(
+                        "SELECT set_config('statement_timeout', $1, true)",
+                        &[&previous],
+                    )
+                    .await?;
+                }
+                Ok(value)
+            })
+            .await
+            {
+                Ok(Err(error)) if sql_cancelled(&error) => Err(QueryError::TooHeavy(time_error)),
+                Ok(Err(error)) => Err(error),
+                Ok(Ok(value)) if Instant::now() < deadline => Ok(value),
+                Ok(Ok(_)) | Err(_) => Err(QueryError::TooHeavy(time_error)),
             }
-            Ok(value)
-        })
-        .await
-        {
-            Ok(Err(error)) if sql_cancelled(&error) => Err(QueryError::TooHeavy(time_error)),
-            Ok(Err(error)) => Err(error),
-            Ok(Ok(value)) if Instant::now() < deadline => Ok(value),
-            Ok(Ok(_)) | Err(_) => Err(QueryError::TooHeavy(time_error)),
-        }
-    })
+        }),
+    )
     .await
 }
 
+/// `work` comes boxed: an `async fn` keeps an owned future twice (the
+/// argument and the awaited value), and through these two helpers every
+/// report draft check carried a 33 KB future, which helped overflow an
+/// unoptimised build's worker stack (#965).
 async fn at_probe_savepoint<T>(
     tx: &tokio_postgres::Transaction<'_>,
     deadline: Instant,
     keep_success: bool,
-    work: impl std::future::Future<Output = Result<T, QueryError>>,
+    work: Pin<Box<impl std::future::Future<Output = Result<T, QueryError>>>>,
 ) -> Result<Result<T, QueryError>, Error> {
     if !matches!(
         timeout_at(deadline, tx.batch_execute("SAVEPOINT grid_oversight_probe")).await,
@@ -895,11 +918,17 @@ async fn audit_transaction(
     let tx = timeout_at(deadline, client.transaction())
         .await
         .map_err(|_| QueryError::TooHeavy(time_error))??;
-    let result = budgeted(&tx, deadline, time_error, None, async {
-        work(&tx).await?;
-        tx.batch_execute("SET CONSTRAINTS ALL IMMEDIATE").await?;
-        Ok(())
-    })
+    let result = budgeted(
+        &tx,
+        deadline,
+        time_error,
+        None,
+        Box::pin(async {
+            work(&tx).await?;
+            tx.batch_execute("SET CONSTRAINTS ALL IMMEDIATE").await?;
+            Ok(())
+        }),
+    )
     .await
     .map_err(Error::refused)?;
     if result.is_ok() && Instant::now() < deadline {

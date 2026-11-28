@@ -235,6 +235,7 @@ WALKTHROUGHS=(
   'web|live-upload|apps/web|live-upload-walkthrough|none|BILIBI_DISPOSABLE_LIVE_UPLOAD_DEMO=yes|-'
   'web|live-wake|apps/web|live-wake-walkthrough|none|BILIBI_DISPOSABLE_LIVE_WAKE_DEMO=yes|-'
   'web|reports|apps/web|r1-reports|migrate|BILIBI_GRID_DEMO=disposable|-'
+  'web|report-create|apps/web|report-create-walkthrough|migrate||-'
   'web|seams|apps/web|p1-seams|migrate||-'
   'web|locale-datetime|apps/web|p4-locale-datetime|migrate|BILIBI_DISPOSABLE_P4_DEMO=yes|-'
   'web|authz|apps/web|p6-authz|seed|BILIBI_AUTHZ_DEMO=disposable|-'

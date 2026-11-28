@@ -8,8 +8,10 @@ tokio::task_local! {
 pub struct FieldLabels(pub BTreeMap<String, String>);
 
 impl FieldLabels {
-    pub async fn during<T>(&self, render: impl Future<Output = T>) -> T {
-        WORDS.scope(self.clone(), render).await
+    /// Runs `render` with these labels. A plain function, not an `async fn`,
+    /// so `render` is held once rather than twice (#965).
+    pub fn during<F: Future>(&self, render: F) -> impl Future<Output = F::Output> {
+        WORDS.scope(self.clone(), render)
     }
 }
 

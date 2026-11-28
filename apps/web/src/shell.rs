@@ -484,16 +484,20 @@ pub struct ShellEmbed {
 
 pub(crate) const DIAGNOSTICS_TARGET: &str = "app-diagnostics";
 
-pub(crate) async fn read_shell_embed<T>(
+/// A plain function, not an `async fn`, so `read` (a whole panel update on
+/// the live path) is held once rather than twice (#965).
+pub(crate) fn read_shell_embed<T, F: std::future::Future<Output = Result<T>>>(
     id: &str,
-    read: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
+    read: F,
+) -> impl std::future::Future<Output = Result<T>> {
+    use futures_util::{future::Either, FutureExt};
     if id == DIAGNOSTICS_TARGET {
-        tokio::time::timeout(std::time::Duration::from_secs(2), read)
-            .await
-            .map_err(|_| Error::Internal)?
+        Either::Left(
+            tokio::time::timeout(std::time::Duration::from_secs(2), read)
+                .map(|result| result.unwrap_or(Err(Error::Internal))),
+        )
     } else {
-        read.await
+        Either::Right(read)
     }
 }
 

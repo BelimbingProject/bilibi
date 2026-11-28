@@ -131,14 +131,18 @@ impl InlineRead {
             .unwrap_or(false)
     }
 
-    pub async fn during<T>(self, render: impl Future<Output = T>) -> (T, Self) {
-        INLINE_READ
-            .scope(RefCell::new(self), async {
-                let output = render.await;
-                let read = INLINE_READ.with(RefCell::take);
-                (output, read)
-            })
-            .await
+    /// Runs `render` with this read in scope, returning what it recorded.
+    /// `render` is boxed before the scope is built: an `async` wrapper that
+    /// owns a future keeps it twice (the capture and the awaited value), and
+    /// on the live path those copies overflowed an unoptimised build's
+    /// worker stack (#965).
+    pub fn during<F: Future>(self, render: F) -> impl Future<Output = (F::Output, Self)> {
+        let render = Box::pin(render);
+        INLINE_READ.scope(RefCell::new(self), async {
+            let output = render.await;
+            let read = INLINE_READ.with(RefCell::take);
+            (output, read)
+        })
     }
 }
 

@@ -30,13 +30,19 @@ pub enum Permit {
 }
 
 /// Runs a page's handling of one event under its permit.
-pub async fn during<F: Future>(event: Event, future: F) -> F::Output {
-    EVENT.scope(event, future).await
+///
+/// A plain function, not an `async fn`: an `async fn` would keep `future`
+/// twice in its state (the argument and the awaited scope), and the copies
+/// add up through every wrapper on the live path until an unoptimised build
+/// overflows a worker thread's stack (#965).
+pub fn during<F: Future>(event: Event, future: F) -> impl Future<Output = F::Output> {
+    EVENT.scope(event, future)
 }
 
-/// Runs one contract's transaction (Agent API's page caller).
-pub async fn contract<F: Future>(key: &'static str, future: F) -> F::Output {
-    CONTRACT.scope(key, future).await
+/// Runs one contract's transaction (Agent API's page caller). A plain
+/// function for the reason `during` gives.
+pub fn contract<F: Future>(key: &'static str, future: F) -> impl Future<Output = F::Output> {
+    CONTRACT.scope(key, future)
 }
 
 /// Refuses a business transaction a page event opens without its contract.
